@@ -22,3 +22,10 @@ export interface EsouiAddonInfo {
   title: string;
   downloadUrl: string;
 }
+
+export interface InstallResult {
+  installedFolders: string[];
+  installedDeps: string[];
+  failedDeps: string[];
+  skippedDeps: string[];
+}

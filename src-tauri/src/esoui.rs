@@ -109,6 +109,65 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
     })
 }
 
+/// Search ESOUI for an addon by name, return the best-matching ESOUI ID.
+/// Searches the ESOUI search page and matches results by title.
+pub fn search_addon_by_name(name: &str) -> Result<Option<u32>, String> {
+    let client = http_client();
+    let url = format!(
+        "https://www.esoui.com/downloads/search.php?search={}&se_search=files",
+        name
+    );
+    let body = fetch_page(&client, &url)?;
+    let document = Html::parse_document(&body);
+
+    // Search results have links like: <a href="fileinfo.php?s=...&id=7">LibAddonMenu-2.0</a>
+    let a_sel = Selector::parse("a[href]").unwrap();
+    let re_id = Regex::new(r"[?&]id=(\d+)").unwrap();
+
+    let name_lower = name.to_lowercase();
+
+    for element in document.select(&a_sel) {
+        let href = match element.value().attr("href") {
+            Some(h) if h.contains("fileinfo.php") => h,
+            _ => continue,
+        };
+
+        let link_text = element.text().collect::<String>();
+        let link_text_lower = link_text.trim().to_lowercase();
+
+        // Exact match on the link text
+        if link_text_lower == name_lower {
+            if let Some(caps) = re_id.captures(href) {
+                if let Ok(id) = caps[1].parse::<u32>() {
+                    return Ok(Some(id));
+                }
+            }
+        }
+    }
+
+    // No exact match found — try a looser match (link text contains the name)
+    let document2 = Html::parse_document(&body);
+    for element in document2.select(&a_sel) {
+        let href = match element.value().attr("href") {
+            Some(h) if h.contains("fileinfo.php") => h,
+            _ => continue,
+        };
+
+        let link_text = element.text().collect::<String>();
+        let link_text_lower = link_text.trim().to_lowercase();
+
+        if link_text_lower.contains(&name_lower) || name_lower.contains(&link_text_lower) {
+            if let Some(caps) = re_id.captures(href) {
+                if let Ok(id) = caps[1].parse::<u32>() {
+                    return Ok(Some(id));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
     let client = http_client();
 

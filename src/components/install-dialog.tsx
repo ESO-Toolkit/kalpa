@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { EsouiAddonInfo } from "../types";
+import type { EsouiAddonInfo, InstallResult } from "../types";
 
 type InstallState =
   | "idle"
@@ -25,7 +25,7 @@ export function InstallDialog({
   const [state, setState] = useState<InstallState>("idle");
   const [addonInfo, setAddonInfo] = useState<EsouiAddonInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [installedFolders, setInstalledFolders] = useState<string[]>([]);
+  const [result, setResult] = useState<InstallResult | null>(null);
 
   const handleResolve = async () => {
     if (!input.trim()) return;
@@ -48,11 +48,11 @@ export function InstallDialog({
     setState("installing");
     setError(null);
     try {
-      const folders = await invoke<string[]>("install_addon", {
+      const installResult = await invoke<InstallResult>("install_addon", {
         addonsPath,
         downloadUrl: addonInfo.downloadUrl,
       });
-      setInstalledFolders(folders);
+      setResult(installResult);
       setState("installed");
       onInstalled();
     } catch (e) {
@@ -88,6 +88,7 @@ export function InstallDialog({
               if (state !== "idle" && state !== "error") {
                 setState("idle");
                 setAddonInfo(null);
+                setResult(null);
               }
             }}
             placeholder="https://www.esoui.com/downloads/info123 or 123"
@@ -99,19 +100,29 @@ export function InstallDialog({
         {addonInfo && state === "resolved" && (
           <div className="install-preview">
             <div className="install-preview-title">{addonInfo.title}</div>
-            <div className="install-preview-meta">
-              ESOUI #{addonInfo.id}
-            </div>
+            <div className="install-preview-meta">ESOUI #{addonInfo.id}</div>
           </div>
         )}
 
-        {state === "installed" && (
-          <div className="install-success">
-            Installed successfully
-            {installedFolders.length > 0 && (
-              <span className="install-folders">
-                : {installedFolders.join(", ")}
-              </span>
+        {state === "installed" && result && (
+          <div className="install-results">
+            <div className="install-success">
+              Installed: {result.installedFolders.join(", ")}
+            </div>
+            {result.installedDeps.length > 0 && (
+              <div className="install-success">
+                Auto-installed dependencies: {result.installedDeps.join(", ")}
+              </div>
+            )}
+            {result.failedDeps.length > 0 && (
+              <div className="install-error">
+                Failed to install: {result.failedDeps.join(", ")}
+              </div>
+            )}
+            {result.skippedDeps.length > 0 && (
+              <div className="install-warning">
+                Not found on ESOUI: {result.skippedDeps.join(", ")}
+              </div>
             )}
           </div>
         )}
@@ -147,7 +158,7 @@ export function InstallDialog({
 
           {state === "installing" && (
             <button className="btn" disabled>
-              Installing...
+              Installing &amp; resolving deps...
             </button>
           )}
         </div>
