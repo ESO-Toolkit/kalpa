@@ -1,0 +1,26 @@
+{
+  "productName": "ESO Addon Manager",
+  "version": "0.1.0",
+  "identifier": "com.eso-addon-manager.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ESO Addon Manager",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 800,
+        "minHeight": 500
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}
