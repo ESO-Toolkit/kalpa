@@ -2,6 +2,7 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use serde::Serialize;
 use std::io::Write;
+use std::sync::OnceLock;
 use tempfile::NamedTempFile;
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,7 +23,8 @@ pub fn parse_esoui_input(input: &str) -> Result<u32, String> {
     }
 
     // URL with info{id} pattern: /downloads/info123 or /downloads/info123-Name.html
-    let re_info = Regex::new(r"info(\d+)").unwrap();
+    static RE_INFO: OnceLock<Regex> = OnceLock::new();
+    let re_info = RE_INFO.get_or_init(|| Regex::new(r"info(\d+)").unwrap());
     if let Some(caps) = re_info.captures(input) {
         if let Ok(id) = caps[1].parse::<u32>() {
             return Ok(id);
@@ -30,7 +32,8 @@ pub fn parse_esoui_input(input: &str) -> Result<u32, String> {
     }
 
     // URL with id= query parameter: fileinfo.php?id=123
-    let re_id = Regex::new(r"[?&]id=(\d+)").unwrap();
+    static RE_ID: OnceLock<Regex> = OnceLock::new();
+    let re_id = RE_ID.get_or_init(|| Regex::new(r"[?&]id=(\d+)").unwrap());
     if let Some(caps) = re_id.captures(input) {
         if let Ok(id) = caps[1].parse::<u32>() {
             return Ok(id);
@@ -43,15 +46,47 @@ pub fn parse_esoui_input(input: &str) -> Result<u32, String> {
     ))
 }
 
-fn http_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) ESOAddonManager/0.1.0")
-        .build()
-        .expect("failed to build HTTP client")
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) ESOAddonManager/0.1.0")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client")
+    })
 }
 
 fn fetch_page(client: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
     let response = client.get(url).send().map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            "Could not connect to ESOUI. Check your internet connection.".to_string()
+        } else {
+            format!("Network error: {}", e)
+        }
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            404 => "Addon not found on ESOUI. It may have been removed.".to_string(),
+            429 => "Too many requests to ESOUI. Please wait a moment and try again.".to_string(),
+            500..=599 => "ESOUI is currently unavailable. Try again later.".to_string(),
+            _ => format!("ESOUI returned an error (HTTP {})", status),
+        });
+    }
+
+    response
+        .text()
+        .map_err(|e| format!("Failed to read response: {}", e))
+}
+
+fn fetch_page_with_query(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    query: &[(&str, &str)],
+) -> Result<String, String> {
+    let response = client.get(url).query(query).send().map_err(|e| {
         if e.is_connect() || e.is_timeout() {
             "Could not connect to ESOUI. Check your internet connection.".to_string()
         } else {
@@ -79,7 +114,7 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
 
     // Step 1: Fetch the addon info page to get the title
     let info_url = format!("https://www.esoui.com/downloads/info{}", id);
-    let body = fetch_page(&client, &info_url)?;
+    let body = fetch_page(client, &info_url)?;
     let document = Html::parse_document(&body);
 
     // Extract title from <meta property="og:title" content="...">
@@ -112,7 +147,7 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
         "https://www.esoui.com/downloads/landing.php?fileid={}",
         id
     );
-    let landing_body = fetch_page(&client, &landing_url)?;
+    let landing_body = fetch_page(client, &landing_url)?;
     let landing_doc = Html::parse_document(&landing_body);
 
     // The landing page has a direct CDN link like:
@@ -160,7 +195,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
     let client = http_client();
 
     let info_url = format!("https://www.esoui.com/downloads/info{}", id);
-    let body = fetch_page(&client, &info_url)?;
+    let body = fetch_page(client, &info_url)?;
     let document = Html::parse_document(&body);
 
     // Title from og:title meta
@@ -287,7 +322,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
         "https://www.esoui.com/downloads/landing.php?fileid={}",
         id
     );
-    let landing_body = fetch_page(&client, &landing_url)?;
+    let landing_body = fetch_page(client, &landing_url)?;
     let landing_doc = Html::parse_document(&landing_body);
 
     let a_sel = Selector::parse("a[href]").unwrap();
@@ -330,14 +365,15 @@ pub struct EsouiSearchResult {
 /// Search ESOUI and return rich results with metadata.
 pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     let client = http_client();
-    let url = format!(
-        "https://www.esoui.com/downloads/search.php?search={}&se_search=files",
-        query
-    );
-    let body = fetch_page(&client, &url)?;
+    let body = fetch_page_with_query(
+        client,
+        "https://www.esoui.com/downloads/search.php",
+        &[("search", query), ("se_search", "files")],
+    )?;
     let document = Html::parse_document(&body);
 
-    let re_id = Regex::new(r"[?&]id=(\d+)").unwrap();
+    static RE_SEARCH_ID: OnceLock<Regex> = OnceLock::new();
+    let re_id = RE_SEARCH_ID.get_or_init(|| Regex::new(r"[?&]id=(\d+)").unwrap());
     let row_sel = Selector::parse("tr").unwrap();
     let td_sel = Selector::parse("td").unwrap();
     let a_sel = Selector::parse("a[href]").unwrap();
@@ -415,16 +451,17 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
 /// Searches the ESOUI search page and matches results by title.
 pub fn search_addon_by_name(name: &str) -> Result<Option<u32>, String> {
     let client = http_client();
-    let url = format!(
-        "https://www.esoui.com/downloads/search.php?search={}&se_search=files",
-        name
-    );
-    let body = fetch_page(&client, &url)?;
+    let body = fetch_page_with_query(
+        client,
+        "https://www.esoui.com/downloads/search.php",
+        &[("search", name), ("se_search", "files")],
+    )?;
     let document = Html::parse_document(&body);
 
     // Search results have links like: <a href="fileinfo.php?s=...&id=7">LibAddonMenu-2.0</a>
     let a_sel = Selector::parse("a[href]").unwrap();
-    let re_id = Regex::new(r"[?&]id=(\d+)").unwrap();
+    static RE_NAME_ID: OnceLock<Regex> = OnceLock::new();
+    let re_id = RE_NAME_ID.get_or_init(|| Regex::new(r"[?&]id=(\d+)").unwrap());
 
     let name_lower = name.to_lowercase();
 
@@ -475,7 +512,7 @@ use crate::commands::EsouiCategory;
 /// Fetch the full category list from ESOUI search page.
 pub fn fetch_categories() -> Result<Vec<EsouiCategory>, String> {
     let client = http_client();
-    let body = fetch_page(&client, "https://www.esoui.com/downloads/search.php")?;
+    let body = fetch_page(client, "https://www.esoui.com/downloads/search.php")?;
     let document = Html::parse_document(&body);
 
     let option_sel = Selector::parse("option[value]").unwrap();
@@ -528,10 +565,11 @@ pub fn browse_category(category_id: u32, page: u32, sort_by: &str) -> Result<Vec
         category_id, sb, page
     );
 
-    let body = fetch_page(&client, &url)?;
+    let body = fetch_page(client, &url)?;
     let document = Html::parse_document(&body);
 
-    let re_id = Regex::new(r"info(\d+)").unwrap();
+    static RE_BROWSE_ID: OnceLock<Regex> = OnceLock::new();
+    let re_id = RE_BROWSE_ID.get_or_init(|| Regex::new(r"info(\d+)").unwrap());
     let a_sel = Selector::parse("a.addonLink").unwrap();
     let cat_sel = Selector::parse("li.category").unwrap();
 

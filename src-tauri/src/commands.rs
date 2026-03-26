@@ -7,6 +7,17 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
+/// Validate a user-supplied name (backup name, etc.) to prevent path traversal.
+fn validate_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Name cannot be empty.".to_string());
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err("Name contains invalid characters.".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallResult {
@@ -179,6 +190,13 @@ pub fn install_addon(
     download_url: String,
     esoui_id: u32,
 ) -> Result<InstallResult, String> {
+    // Validate download URL to only allow known ESOUI domains
+    if !download_url.starts_with("https://cdn.esoui.com/")
+        && !download_url.starts_with("https://www.esoui.com/")
+    {
+        return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
+    }
+
     let addons_dir = PathBuf::from(&addons_path);
     if !addons_dir.is_dir() {
         return Err(format!("AddOns folder not found: {}", addons_path));
@@ -272,7 +290,7 @@ pub fn install_addon(
     }
 
     // Save metadata
-    let _ = metadata::save_metadata(&addons_dir, &store);
+    metadata::save_metadata(&addons_dir, &store)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -290,7 +308,7 @@ pub fn remove_addon(addons_path: String, folder_name: String) -> Result<(), Stri
     // Clean up metadata
     let mut store = metadata::load_metadata(&addons_dir);
     metadata::remove_entry(&mut store, &folder_name);
-    let _ = metadata::save_metadata(&addons_dir, &store);
+    metadata::save_metadata(&addons_dir, &store)?;
 
     Ok(())
 }
@@ -356,7 +374,7 @@ pub fn update_addon(addons_path: String, esoui_id: u32) -> Result<InstallResult,
             .unwrap_or_default();
         metadata::record_install(&mut store, folder, esoui_id, &version, &info.download_url);
     }
-    let _ = metadata::save_metadata(&addons_dir, &store);
+    metadata::save_metadata(&addons_dir, &store)?;
 
     Ok(InstallResult {
         installed_folders,
@@ -491,7 +509,7 @@ pub fn auto_link_addons(addons_path: String) -> Result<AutoLinkResult, String> {
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 
-    let _ = metadata::save_metadata(&addons_dir, &store);
+    metadata::save_metadata(&addons_dir, &store)?;
 
     Ok(AutoLinkResult { linked, not_found })
 }
@@ -513,7 +531,7 @@ pub fn batch_remove_addons(
         }
     }
 
-    let _ = metadata::save_metadata(&addons_dir, &store);
+    metadata::save_metadata(&addons_dir, &store)?;
     Ok(removed)
 }
 
@@ -570,7 +588,7 @@ pub fn import_addon_list(addons_path: String, json_data: String) -> Result<Impor
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 
-    let _ = metadata::save_metadata(&addons_dir, &store);
+    metadata::save_metadata(&addons_dir, &store)?;
 
     Ok(ImportResult {
         installed,
@@ -768,6 +786,7 @@ pub fn list_backups(addons_path: String) -> Result<Vec<BackupInfo>, String> {
 
 #[tauri::command]
 pub fn create_backup(addons_path: String, backup_name: String) -> Result<BackupInfo, String> {
+    validate_name(&backup_name)?;
     let addons_dir = PathBuf::from(&addons_path);
     let sv_dir = saved_variables_dir(&addons_dir);
     if !sv_dir.is_dir() {
@@ -822,6 +841,7 @@ pub fn create_backup(addons_path: String, backup_name: String) -> Result<BackupI
 
 #[tauri::command]
 pub fn restore_backup(addons_path: String, backup_name: String) -> Result<u32, String> {
+    validate_name(&backup_name)?;
     let addons_dir = PathBuf::from(&addons_path);
     let sv_dir = saved_variables_dir(&addons_dir);
     let backup_path = backups_dir(&addons_dir).join(&backup_name);
@@ -854,6 +874,7 @@ pub fn restore_backup(addons_path: String, backup_name: String) -> Result<u32, S
 
 #[tauri::command]
 pub fn delete_backup(addons_path: String, backup_name: String) -> Result<(), String> {
+    validate_name(&backup_name)?;
     let addons_dir = PathBuf::from(&addons_path);
     let backup_path = backups_dir(&addons_dir).join(&backup_name);
 
@@ -1081,6 +1102,7 @@ pub fn backup_character_settings(
     character_name: String,
     backup_name: String,
 ) -> Result<u32, String> {
+    validate_name(&backup_name)?;
     let addons_dir = PathBuf::from(&addons_path);
     let sv_dir = saved_variables_dir(&addons_dir);
     if !sv_dir.is_dir() {
@@ -1235,7 +1257,7 @@ pub fn migrate_from_minion(addons_path: String) -> Result<MinionMigrationResult,
         }
     }
 
-    let _ = metadata::save_metadata(&addons_dir, &store);
+    metadata::save_metadata(&addons_dir, &store)?;
 
     Ok(MinionMigrationResult {
         found: true,
