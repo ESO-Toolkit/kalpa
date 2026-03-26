@@ -403,3 +403,106 @@ body {
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
+
+/* Button variants */
+.btn-accent {
+  background: rgba(196, 164, 74, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-accent:hover {
+  background: rgba(196, 164, 74, 0.25);
+}
+
+.btn-accent:disabled {
+  opacity: 0.5;
+}
+
+.btn-danger {
+  background: rgba(231, 76, 60, 0.1);
+  border-color: rgba(231, 76, 60, 0.4);
+  color: var(--danger);
+}
+
+.btn-danger:hover {
+  background: rgba(231, 76, 60, 0.2);
+  border-color: var(--danger);
+}
+
+/* Detail actions */
+.detail-actions {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+/* Remove confirmation */
+.confirm-remove {
+  background: rgba(231, 76, 60, 0.05);
+  border: 1px solid rgba(231, 76, 60, 0.2);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.confirm-text {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.confirm-warning {
+  font-size: 13px;
+  color: var(--warning);
+  margin-bottom: 8px;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Install dialog extras */
+.install-preview {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.install-preview-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.install-preview-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.install-success {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  background: rgba(46, 204, 113, 0.1);
+  border: 1px solid rgba(46, 204, 113, 0.3);
+  border-radius: 4px;
+  color: var(--success);
+  font-size: 13px;
+}
+
+.install-folders {
+  color: var(--text-secondary);
+}
+
+.install-error {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: rgba(231, 76, 60, 0.1);
+  border: 1px solid rgba(231, 76, 60, 0.3);
+  border-radius: 4px;
+  color: var(--danger);
+  font-size: 13px;
+}

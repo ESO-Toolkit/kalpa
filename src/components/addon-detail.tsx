@@ -1,11 +1,24 @@
+import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { AddonManifest } from "../types";
 
 interface AddonDetailProps {
   addon: AddonManifest | null;
   installedAddons: AddonManifest[];
+  addonsPath: string;
+  onRemove: () => void;
 }
 
-export function AddonDetail({ addon, installedAddons }: AddonDetailProps) {
+export function AddonDetail({
+  addon,
+  installedAddons,
+  addonsPath,
+  onRemove,
+}: AddonDetailProps) {
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
   if (!addon) {
     return (
       <div className="detail-panel">
@@ -15,6 +28,27 @@ export function AddonDetail({ addon, installedAddons }: AddonDetailProps) {
   }
 
   const installedSet = new Set(installedAddons.map((a) => a.folderName));
+
+  // Find addons that depend on this one
+  const dependents = installedAddons.filter((a) =>
+    a.dependsOn.some((dep) => dep.name === addon.folderName),
+  );
+
+  const handleRemove = async () => {
+    setRemoving(true);
+    setRemoveError(null);
+    try {
+      await invoke("remove_addon", {
+        addonsPath,
+        folderName: addon.folderName,
+      });
+      setConfirmingRemove(false);
+      onRemove();
+    } catch (e) {
+      setRemoveError(String(e));
+      setRemoving(false);
+    }
+  };
 
   return (
     <div className="detail-panel">
@@ -96,6 +130,49 @@ export function AddonDetail({ addon, installedAddons }: AddonDetailProps) {
           </ul>
         </div>
       )}
+
+      <div className="detail-actions">
+        {!confirmingRemove ? (
+          <button
+            className="btn btn-danger"
+            onClick={() => {
+              setConfirmingRemove(true);
+              setRemoveError(null);
+            }}
+          >
+            Remove Addon
+          </button>
+        ) : (
+          <div className="confirm-remove">
+            <p className="confirm-text">
+              Remove <strong>{addon.title}</strong>?
+            </p>
+            {dependents.length > 0 && (
+              <p className="confirm-warning">
+                Warning: {dependents.map((d) => d.title).join(", ")}{" "}
+                {dependents.length === 1 ? "depends" : "depend"} on this addon.
+              </p>
+            )}
+            {removeError && <p className="install-error">{removeError}</p>}
+            <div className="confirm-actions">
+              <button
+                className="btn"
+                onClick={() => setConfirmingRemove(false)}
+                disabled={removing}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={handleRemove}
+                disabled={removing}
+              >
+                {removing ? "Removing..." : "Confirm Remove"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

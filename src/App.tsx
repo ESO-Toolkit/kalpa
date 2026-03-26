@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AddonList } from "./components/addon-list";
 import { AddonDetail } from "./components/addon-detail";
+import { InstallDialog } from "./components/install-dialog";
 import { Settings } from "./components/settings";
 import type { AddonManifest } from "./types";
 
@@ -14,6 +15,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showInstall, setShowInstall] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
   const scanAddons = useCallback(
@@ -94,6 +96,12 @@ function App() {
             {addons.length} addons
             {missingDepCount > 0 && ` · ${missingDepCount} with issues`}
           </span>
+          <button
+            className="btn btn-accent"
+            onClick={() => setShowInstall(true)}
+          >
+            Install
+          </button>
           <button className="btn" onClick={handleRefresh} disabled={loading}>
             {loading ? "Scanning..." : "Refresh"}
           </button>
@@ -114,8 +122,24 @@ function App() {
           onSearchChange={setSearchQuery}
           loading={loading}
         />
-        <AddonDetail addon={selectedAddon} installedAddons={addons} />
+        <AddonDetail
+          addon={selectedAddon}
+          installedAddons={addons}
+          addonsPath={addonsPath}
+          onRemove={() => {
+            setSelectedAddon(null);
+            handleRefresh();
+          }}
+        />
       </div>
+
+      {showInstall && (
+        <InstallDialog
+          addonsPath={addonsPath}
+          onInstalled={handleRefresh}
+          onClose={() => setShowInstall(false)}
+        />
+      )}
 
       {showSettings && (
         <Settings

@@ -1,3 +1,5 @@
+use crate::esoui::{self, EsouiAddonInfo};
+use crate::installer;
 use crate::manifest::{self, AddonManifest};
 use std::collections::HashSet;
 use std::fs;
@@ -72,4 +74,29 @@ pub fn scan_installed_addons(addons_path: String) -> Result<Vec<AddonManifest>, 
     addons.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
 
     Ok(addons)
+}
+
+#[tauri::command]
+pub fn resolve_esoui_addon(input: String) -> Result<EsouiAddonInfo, String> {
+    let id = esoui::parse_esoui_input(&input)?;
+    esoui::fetch_addon_info(id)
+}
+
+#[tauri::command]
+pub fn install_addon(addons_path: String, download_url: String) -> Result<Vec<String>, String> {
+    let addons_dir = PathBuf::from(&addons_path);
+    if !addons_dir.is_dir() {
+        return Err(format!("AddOns folder not found: {}", addons_path));
+    }
+
+    let tmp_file = esoui::download_addon(&download_url)?;
+    let folders = installer::extract_addon_zip(tmp_file.path(), &addons_dir)?;
+
+    Ok(folders)
+}
+
+#[tauri::command]
+pub fn remove_addon(addons_path: String, folder_name: String) -> Result<(), String> {
+    let addons_dir = PathBuf::from(&addons_path);
+    installer::remove_addon(&addons_dir, &folder_name)
 }

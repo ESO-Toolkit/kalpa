@@ -16,3 +16,9 @@ export interface AddonManifest {
   optionalDependsOn: Dependency[];
   missingDependencies: string[];
 }
+
+export interface EsouiAddonInfo {
+  id: number;
+  title: string;
+  downloadUrl: string;
+}
