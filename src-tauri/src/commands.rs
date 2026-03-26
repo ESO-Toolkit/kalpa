@@ -27,6 +27,19 @@ pub struct UpdateCheckResult {
     pub has_update: bool,
 }
 
+fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<PathBuf> {
+    let dir = addons_dir.join(folder_name);
+    let txt = dir.join(format!("{}.txt", folder_name));
+    if txt.exists() {
+        return Some(txt);
+    }
+    let addon = dir.join(format!("{}.addon", folder_name));
+    if addon.exists() {
+        return Some(addon);
+    }
+    None
+}
+
 fn default_addons_path() -> Option<PathBuf> {
     let docs = dirs::document_dir()?;
     let addons = docs
@@ -70,10 +83,10 @@ pub fn scan_installed_addons(addons_path: String) -> Result<Vec<AddonManifest>, 
             None => continue,
         };
 
-        let manifest_path = path.join(format!("{}.txt", &folder_name));
-        if !manifest_path.exists() {
-            continue;
-        }
+        let manifest_path = match find_manifest(&addons_dir, &folder_name) {
+            Some(p) => p,
+            None => continue,
+        };
 
         if let Some(addon) = manifest::parse_manifest(&folder_name, &manifest_path) {
             addons.push(addon);
@@ -131,8 +144,8 @@ pub fn install_addon(
 
     // Record metadata for each installed folder
     for folder in &installed_folders {
-        let manifest_path = addons_dir.join(folder).join(format!("{}.txt", folder));
-        let version = manifest::parse_manifest(folder, &manifest_path)
+        let version = find_manifest(&addons_dir, folder)
+            .and_then(|p| manifest::parse_manifest(folder, &p))
             .map(|m| m.version)
             .unwrap_or_default();
         metadata::record_install(&mut store, folder, esoui_id, &version, &download_url);
@@ -153,8 +166,9 @@ pub fn install_addon(
     // Parse manifests of newly installed addons to find dependencies
     let mut missing_deps: Vec<String> = Vec::new();
     for folder in &installed_folders {
-        let manifest_path = addons_dir.join(folder).join(format!("{}.txt", folder));
-        if let Some(addon) = manifest::parse_manifest(folder, &manifest_path) {
+        let addon = find_manifest(&addons_dir, folder)
+            .and_then(|p| manifest::parse_manifest(folder, &p));
+        if let Some(addon) = addon {
             for dep in &addon.depends_on {
                 if !all_installed.contains(&dep.name) && !missing_deps.contains(&dep.name) {
                     missing_deps.push(dep.name.clone());
@@ -287,8 +301,8 @@ pub fn update_addon(addons_path: String, esoui_id: u32) -> Result<InstallResult,
     // Update metadata
     let mut store = metadata::load_metadata(&addons_dir);
     for folder in &installed_folders {
-        let manifest_path = addons_dir.join(folder).join(format!("{}.txt", folder));
-        let version = manifest::parse_manifest(folder, &manifest_path)
+        let version = find_manifest(&addons_dir, folder)
+            .and_then(|p| manifest::parse_manifest(folder, &p))
             .map(|m| m.version)
             .unwrap_or_default();
         metadata::record_install(&mut store, folder, esoui_id, &version, &info.download_url);
