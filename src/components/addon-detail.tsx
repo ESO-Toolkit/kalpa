@@ -62,7 +62,7 @@ export function AddonDetail({
   const installedSet = new Set(installedAddons.map((a) => a.folderName));
 
   const dependents = installedAddons.filter((a) =>
-    a.dependsOn.some((dep) => dep.name === addon.folderName),
+    a.dependsOn.some((dep) => dep.name === addon.folderName)
   );
 
   const handleRemove = async () => {
@@ -107,7 +107,8 @@ export function AddonDetail({
         {addon.folderName}/
         {addon.esouiId && (
           <span>
-            {" "}&middot;{" "}
+            {" "}
+            &middot;{" "}
             <a
               className="text-primary hover:underline"
               href={`https://www.esoui.com/downloads/info${addon.esouiId}`}
@@ -123,8 +124,7 @@ export function AddonDetail({
       {updateResult?.hasUpdate && (
         <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3">
           <span className="text-sm text-blue-400">
-            Update available: {updateResult.currentVersion} &rarr;{" "}
-            {updateResult.remoteVersion}
+            Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
           </span>
           <Button onClick={handleUpdate} disabled={updating} size="sm">
             {updating ? "Updating..." : "Update"}
@@ -133,7 +133,9 @@ export function AddonDetail({
       )}
 
       {updateError && (
-        <Alert variant="destructive" className="mb-4">{updateError}</Alert>
+        <Alert variant="destructive" className="mb-4">
+          {updateError}
+        </Alert>
       )}
 
       <dl className="mb-6 grid grid-cols-[120px_1fr] gap-x-4 gap-y-2 text-sm">
@@ -154,7 +156,10 @@ export function AddonDetail({
         <dt className="text-muted-foreground">Type</dt>
         <dd>
           {addon.isLibrary ? (
-            <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
+            <Badge
+              variant="outline"
+              className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+            >
               Library
             </Badge>
           ) : (
@@ -187,9 +192,7 @@ export function AddonDetail({
                   </span>
                   <span>{dep.name}</span>
                   {dep.min_version !== null && (
-                    <span className="text-xs text-muted-foreground">
-                      &gt;={dep.min_version}
-                    </span>
+                    <span className="text-xs text-muted-foreground">&gt;={dep.min_version}</span>
                   )}
                 </li>
               );
@@ -211,7 +214,7 @@ export function AddonDetail({
                   key={dep.name}
                   className={cn(
                     "flex items-center gap-2 text-sm",
-                    !installed && "italic text-muted-foreground",
+                    !installed && "italic text-muted-foreground"
                   )}
                 >
                   <span className={installed ? "text-emerald-400" : ""}>
@@ -219,9 +222,7 @@ export function AddonDetail({
                   </span>
                   <span>{dep.name}</span>
                   {dep.min_version !== null && (
-                    <span className="text-xs text-muted-foreground">
-                      &gt;={dep.min_version}
-                    </span>
+                    <span className="text-xs text-muted-foreground">&gt;={dep.min_version}</span>
                   )}
                 </li>
               );
@@ -255,7 +256,9 @@ export function AddonDetail({
               </p>
             )}
             {removeError && (
-              <Alert variant="destructive" className="mb-2">{removeError}</Alert>
+              <Alert variant="destructive" className="mb-2">
+                {removeError}
+              </Alert>
             )}
             <div className="flex justify-end gap-2">
               <Button
@@ -266,12 +269,7 @@ export function AddonDetail({
               >
                 Cancel
               </Button>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={handleRemove}
-                disabled={removing}
-              >
+              <Button variant="destructive" size="sm" onClick={handleRemove} disabled={removing}>
                 {removing ? "Removing..." : "Confirm Remove"}
               </Button>
             </div>

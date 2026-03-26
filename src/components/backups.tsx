@@ -58,9 +58,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
         addonsPath,
         backupName: newName.trim(),
       });
-      toast.success(
-        `Backup created: ${info.fileCount} files (${formatBytes(info.totalSize)})`,
-      );
+      toast.success(`Backup created: ${info.fileCount} files (${formatBytes(info.totalSize)})`);
       loadBackups();
     } catch (e) {
       toast.error(String(e));
@@ -102,8 +100,8 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
         </DialogHeader>
 
         <p className="text-sm text-muted-foreground">
-          Back up your addon settings (SavedVariables). Restore after
-          reinstalling ESO or switching PCs.
+          Back up your addon settings (SavedVariables). Restore after reinstalling ESO or switching
+          PCs.
         </p>
 
         <div className="flex gap-2">
@@ -114,11 +112,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
             onKeyDown={(e) => e.key === "Enter" && handleCreate()}
             autoFocus
           />
-          <Button
-            onClick={handleCreate}
-            disabled={creating || !newName.trim()}
-            size="sm"
-          >
+          <Button onClick={handleCreate} disabled={creating || !newName.trim()} size="sm">
             {creating ? "Backing up..." : "Create Backup"}
           </Button>
         </div>
@@ -127,9 +121,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
 
         <div className="max-h-[300px] overflow-y-auto space-y-2">
           {backups.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-4">
-              No backups yet.
-            </p>
+            <p className="text-sm text-muted-foreground text-center py-4">No backups yet.</p>
           ) : (
             backups.map((b) => (
               <div
@@ -139,8 +131,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
                 <div>
                   <div className="font-medium text-sm">{b.name}</div>
                   <div className="text-xs text-muted-foreground mt-0.5">
-                    {b.fileCount} files &middot; {formatBytes(b.totalSize)}{" "}
-                    &middot; {b.createdAt}
+                    {b.fileCount} files &middot; {formatBytes(b.totalSize)} &middot; {b.createdAt}
                   </div>
                 </div>
                 <div className="flex gap-1">
@@ -160,11 +151,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
                       >
                         {restoring === b.name ? "Restoring..." : "Yes, Restore"}
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setConfirmRestore(null)}
-                      >
+                      <Button size="sm" variant="outline" onClick={() => setConfirmRestore(null)}>
                         Cancel
                       </Button>
                     </div>
@@ -179,9 +166,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
                   )}
                   {confirmDelete === b.name ? (
                     <div className="flex items-center gap-1">
-                      <span className="text-xs text-amber-400 mr-1">
-                        Delete this backup?
-                      </span>
+                      <span className="text-xs text-amber-400 mr-1">Delete this backup?</span>
                       <Button
                         size="sm"
                         variant="destructive"
@@ -192,11 +177,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
                       >
                         Yes, Delete
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setConfirmDelete(null)}
-                      >
+                      <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>
                         Cancel
                       </Button>
                     </div>

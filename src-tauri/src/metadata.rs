@@ -95,10 +95,7 @@ pub fn load_metadata(addons_path: &Path) -> MetadataStore {
         Ok(content) => match serde_json::from_str(&content) {
             Ok(store) => store,
             Err(e) => {
-                eprintln!(
-                    "Warning: metadata file corrupted ({}), trying backup...",
-                    e
-                );
+                eprintln!("Warning: metadata file corrupted ({}), trying backup...", e);
                 let bak = path.with_extension("json.bak");
                 match fs::read_to_string(&bak) {
                     Ok(bak_content) => match serde_json::from_str(&bak_content) {

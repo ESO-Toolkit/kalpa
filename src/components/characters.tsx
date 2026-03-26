@@ -50,9 +50,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
         characterName: char.name,
         backupName: name,
       });
-      toast.success(
-        `Backed up ${count} SavedVariables files for ${char.name}`,
-      );
+      toast.success(`Backed up ${count} SavedVariables files for ${char.name}`);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -67,7 +65,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
       acc[char.server].push(char);
       return acc;
     },
-    {} as Record<string, CharacterInfo[]>,
+    {} as Record<string, CharacterInfo[]>
   );
 
   return (
@@ -78,14 +76,12 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
         </DialogHeader>
 
         <p className="text-sm text-muted-foreground">
-          Your ESO characters. Back up SavedVariables for a specific character
-          to preserve their addon settings.
+          Your ESO characters. Back up SavedVariables for a specific character to preserve their
+          addon settings.
         </p>
 
         <div>
-          <label className="text-xs text-muted-foreground">
-            Backup name (optional)
-          </label>
+          <label className="text-xs text-muted-foreground">Backup name (optional)</label>
           <Input
             placeholder="Leave blank for auto-name"
             value={backupName}
@@ -102,8 +98,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
             </div>
           ) : Object.keys(byServer).length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-4">
-              No characters found. Launch ESO at least once to generate
-              character data.
+              No characters found. Launch ESO at least once to generate character data.
             </p>
           ) : (
             Object.entries(byServer).map(([server, chars]) => (
@@ -127,9 +122,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
                         onClick={() => handleBackup(char)}
                         disabled={backingUp !== null}
                       >
-                        {backingUp === char.name
-                          ? "Backing up..."
-                          : "Backup Settings"}
+                        {backingUp === char.name ? "Backing up..." : "Backup Settings"}
                       </Button>
                     </div>
                   ))}

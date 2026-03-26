@@ -49,10 +49,7 @@ pub fn parse_esoui_input(input: &str) -> Result<u32, String> {
         }
     }
 
-    Err(format!(
-        "Could not parse ESOUI addon ID from: {}",
-        input
-    ))
+    Err(format!("Could not parse ESOUI addon ID from: {}", input))
 }
 
 fn http_client() -> &'static reqwest::blocking::Client {
@@ -158,10 +155,7 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
         .unwrap_or_default();
 
     // Step 2: Fetch the landing page which contains the actual CDN download link
-    let landing_url = format!(
-        "https://www.esoui.com/downloads/landing.php?fileid={}",
-        id
-    );
+    let landing_url = format!("https://www.esoui.com/downloads/landing.php?fileid={}", id);
     let landing_body = fetch_page(client, &landing_url)?;
     let landing_doc = Html::parse_document(&landing_body);
 
@@ -275,7 +269,8 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
         .map(|el| {
             // Get text content, replacing <br> with newlines
             let html = el.inner_html();
-            let stripped = html.replace("<br>", "\n")
+            let stripped = html
+                .replace("<br>", "\n")
                 .replace("<br/>", "\n")
                 .replace("<br />", "\n")
                 .replace("&nbsp;", " ")
@@ -346,10 +341,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
         .collect();
 
     // Download URL from landing page
-    let landing_url = format!(
-        "https://www.esoui.com/downloads/landing.php?fileid={}",
-        id
-    );
+    let landing_url = format!("https://www.esoui.com/downloads/landing.php?fileid={}", id);
     let landing_body = fetch_page(client, &landing_url)?;
     let landing_doc = Html::parse_document(&landing_body);
 
@@ -595,7 +587,11 @@ pub fn fetch_categories() -> Result<Vec<EsouiCategory>, String> {
 }
 
 /// Browse addons in a specific ESOUI category.
-pub fn browse_category(category_id: u32, page: u32, sort_by: &str) -> Result<Vec<EsouiSearchResult>, String> {
+pub fn browse_category(
+    category_id: u32,
+    page: u32,
+    sort_by: &str,
+) -> Result<Vec<EsouiSearchResult>, String> {
     let client = http_client();
 
     let sb = match sort_by {

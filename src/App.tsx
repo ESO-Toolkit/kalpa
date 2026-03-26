@@ -35,9 +35,7 @@ function useClickOutside(ref: RefObject<HTMLElement | null>, onClose: () => void
 function App() {
   const [addonsPath, setAddonsPath] = useState<string>("");
   const [addons, setAddons] = useState<AddonManifest[]>([]);
-  const [selectedAddon, setSelectedAddon] = useState<AddonManifest | null>(
-    null,
-  );
+  const [selectedAddon, setSelectedAddon] = useState<AddonManifest | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
@@ -117,60 +115,57 @@ function App() {
     }
   }, []);
 
-  const scanAddons = useCallback(
-    async (path: string) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const result = await invoke<AddonManifest[]>("scan_installed_addons", {
-          addonsPath: path,
-        });
-        setAddons(result);
-        if (selectedAddonRef.current) {
-          const updated = result.find(
-            (a) => a.folderName === selectedAddonRef.current!.folderName,
-          );
-          setSelectedAddon(updated ?? null);
-        }
-      } catch (e) {
-        setError(String(e));
-        setAddons([]);
-      } finally {
-        setLoading(false);
+  const scanAddons = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await invoke<AddonManifest[]>("scan_installed_addons", {
+        addonsPath: path,
+      });
+      setAddons(result);
+      if (selectedAddonRef.current) {
+        const updated = result.find((a) => a.folderName === selectedAddonRef.current!.folderName);
+        setSelectedAddon(updated ?? null);
       }
-    },
-    [],
-  );
+    } catch (e) {
+      setError(String(e));
+      setAddons([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   const scanAndCheck = useCallback(
     async (path: string) => {
       await scanAddons(path);
       checkForUpdates(path);
     },
-    [scanAddons, checkForUpdates],
+    [scanAddons, checkForUpdates]
   );
 
   // Auto-link untracked addons on first load
   const autoLinkRan = useRef(false);
-  const runAutoLink = useCallback(async (path: string) => {
-    if (autoLinkRan.current) return;
-    autoLinkRan.current = true;
-    try {
-      const result = await invoke<{ linked: string[]; notFound: string[] }>(
-        "auto_link_addons",
-        { addonsPath: path },
-      );
-      if (result.linked.length > 0) {
-        toast.success(
-          `Auto-linked ${result.linked.length} addon${result.linked.length > 1 ? "s" : ""} to ESOUI`,
-        );
-        // Re-scan to pick up new ESOUI IDs
-        scanAndCheck(path);
+  const runAutoLink = useCallback(
+    async (path: string) => {
+      if (autoLinkRan.current) return;
+      autoLinkRan.current = true;
+      try {
+        const result = await invoke<{ linked: string[]; notFound: string[] }>("auto_link_addons", {
+          addonsPath: path,
+        });
+        if (result.linked.length > 0) {
+          toast.success(
+            `Auto-linked ${result.linked.length} addon${result.linked.length > 1 ? "s" : ""} to ESOUI`
+          );
+          // Re-scan to pick up new ESOUI IDs
+          scanAndCheck(path);
+        }
+      } catch {
+        // Non-critical
       }
-    } catch {
-      // Non-critical
-    }
-  }, [scanAndCheck]);
+    },
+    [scanAndCheck]
+  );
 
   useEffect(() => {
     async function init() {
@@ -193,9 +188,7 @@ function App() {
         // Auto-link after initial scan
         runAutoLink(path);
       } catch {
-        setError(
-          "Could not detect ESO AddOns folder. Please set it in Settings.",
-        );
+        setError("Could not detect ESO AddOns folder. Please set it in Settings.");
         setLoading(false);
       }
     }
@@ -253,10 +246,7 @@ function App() {
     setSetting("filterMode", mode);
   };
 
-  const updatesAvailable = useMemo(
-    () => updateResults.filter((r) => r.hasUpdate),
-    [updateResults],
-  );
+  const updatesAvailable = useMemo(() => updateResults.filter((r) => r.hasUpdate), [updateResults]);
 
   const handleUpdateAll = async () => {
     setUpdatingAll(true);
@@ -310,9 +300,7 @@ function App() {
   };
 
   const handleBatchUpdate = async () => {
-    const toUpdate = updatesAvailable.filter((u) =>
-      selectedFolders.has(u.folderName),
-    );
+    const toUpdate = updatesAvailable.filter((u) => selectedFolders.has(u.folderName));
     if (toUpdate.length === 0) {
       toast.info("No selected addons have updates available");
       return;
@@ -337,56 +325,54 @@ function App() {
   };
 
   const updatesSet = useMemo(
-    () => new Set(
-      updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName),
-    ),
-    [updateResults],
+    () => new Set(updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName)),
+    [updateResults]
   );
 
   const filteredAddons = useMemo(
-    () => addons
-      .filter((addon) => {
-        if (searchQuery) {
-          const q = searchQuery.toLowerCase();
-          const matchesSearch =
-            addon.title.toLowerCase().includes(q) ||
-            addon.folderName.toLowerCase().includes(q) ||
-            addon.author.toLowerCase().includes(q);
-          if (!matchesSearch) return false;
-        }
-        switch (filterMode) {
-          case "addons":
-            return !addon.isLibrary;
-          case "libraries":
-            return addon.isLibrary;
-          case "outdated":
-            return updatesSet.has(addon.folderName);
-          case "missing-deps":
-            return addon.missingDependencies.length > 0;
-          default:
-            return true;
-        }
-      })
-      .sort((a, b) => {
-        switch (sortMode) {
-          case "author":
-            return a.author.toLowerCase().localeCompare(b.author.toLowerCase());
-          case "name":
-          default:
-            return a.title.toLowerCase().localeCompare(b.title.toLowerCase());
-        }
-      }),
-    [addons, searchQuery, filterMode, sortMode, updatesSet],
+    () =>
+      addons
+        .filter((addon) => {
+          if (searchQuery) {
+            const q = searchQuery.toLowerCase();
+            const matchesSearch =
+              addon.title.toLowerCase().includes(q) ||
+              addon.folderName.toLowerCase().includes(q) ||
+              addon.author.toLowerCase().includes(q);
+            if (!matchesSearch) return false;
+          }
+          switch (filterMode) {
+            case "addons":
+              return !addon.isLibrary;
+            case "libraries":
+              return addon.isLibrary;
+            case "outdated":
+              return updatesSet.has(addon.folderName);
+            case "missing-deps":
+              return addon.missingDependencies.length > 0;
+            default:
+              return true;
+          }
+        })
+        .sort((a, b) => {
+          switch (sortMode) {
+            case "author":
+              return a.author.toLowerCase().localeCompare(b.author.toLowerCase());
+            case "name":
+            default:
+              return a.title.toLowerCase().localeCompare(b.title.toLowerCase());
+          }
+        }),
+    [addons, searchQuery, filterMode, sortMode, updatesSet]
   );
 
   const missingDepCount = useMemo(
     () => addons.filter((a) => a.missingDependencies.length > 0).length,
-    [addons],
+    [addons]
   );
 
   const selectedUpdateResult = selectedAddon
-    ? updateResults.find((r) => r.folderName === selectedAddon.folderName) ??
-      null
+    ? (updateResults.find((r) => r.folderName === selectedAddon.folderName) ?? null)
     : null;
 
   const batchMode = selectedFolders.size > 0;
@@ -394,9 +380,7 @@ function App() {
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-border bg-card px-5 py-3 select-none">
-        <h1 className="text-lg font-semibold tracking-wide text-primary">
-          ESO Addon Manager
-        </h1>
+        <h1 className="text-lg font-semibold tracking-wide text-primary">ESO Addon Manager</h1>
         <div className="flex items-center gap-2">
           {batchMode ? (
             <>
@@ -419,17 +403,17 @@ function App() {
               >
                 {batchRemoving ? "Removing..." : "Remove Selected"}
               </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setSelectedFolders(new Set())}
-              >
+              <Button size="sm" variant="outline" onClick={() => setSelectedFolders(new Set())}>
                 Cancel
               </Button>
             </>
           ) : (
             <>
-              <span className="mr-2 text-xs text-muted-foreground" aria-live="polite" aria-atomic="true">
+              <span
+                className="mr-2 text-xs text-muted-foreground"
+                aria-live="polite"
+                aria-atomic="true"
+              >
                 {addons.length} addons
                 {missingDepCount > 0 && ` \u00b7 ${missingDepCount} with issues`}
                 {checkingUpdates && (
@@ -441,32 +425,17 @@ function App() {
                 )}
               </span>
               {updatesAvailable.length > 0 && (
-                <Button
-                  onClick={handleUpdateAll}
-                  disabled={updatingAll}
-                  size="sm"
-                >
-                  {updatingAll
-                    ? "Updating..."
-                    : `Update All (${updatesAvailable.length})`}
+                <Button onClick={handleUpdateAll} disabled={updatingAll} size="sm">
+                  {updatingAll ? "Updating..." : `Update All (${updatesAvailable.length})`}
                 </Button>
               )}
               <Button size="sm" onClick={() => setShowBrowse(true)}>
                 Search
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowCategories(true)}
-              >
+              <Button variant="outline" size="sm" onClick={() => setShowCategories(true)}>
                 Categories
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRefresh}
-                disabled={loading}
-              >
+              <Button variant="outline" size="sm" onClick={handleRefresh} disabled={loading}>
                 {loading ? "Scanning..." : "Refresh"}
               </Button>
               <div className="relative" ref={moreMenuRef}>
@@ -481,25 +450,37 @@ function App() {
                   More&hellip;
                 </Button>
                 {showMoreMenu && (
-                  <div role="menu" className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border border-border bg-popover p-1 shadow-md">
+                  <div
+                    role="menu"
+                    className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border border-border bg-popover p-1 shadow-md"
+                  >
                     <button
                       role="menuitem"
                       className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
-                      onClick={() => { setShowMoreMenu(false); setShowInstall(true); }}
+                      onClick={() => {
+                        setShowMoreMenu(false);
+                        setShowInstall(true);
+                      }}
                     >
                       Install from URL
                     </button>
                     <button
                       role="menuitem"
                       className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
-                      onClick={() => { setShowMoreMenu(false); setShowProfiles(true); }}
+                      onClick={() => {
+                        setShowMoreMenu(false);
+                        setShowProfiles(true);
+                      }}
                     >
                       Profiles
                     </button>
                     <button
                       role="menuitem"
                       className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
-                      onClick={() => { setShowMoreMenu(false); setShowSettings(true); }}
+                      onClick={() => {
+                        setShowMoreMenu(false);
+                        setShowSettings(true);
+                      }}
                     >
                       Settings
                     </button>
@@ -512,10 +493,7 @@ function App() {
       </header>
 
       {error && (
-        <Alert
-          variant="destructive"
-          className="rounded-none border-x-0 border-t-0"
-        >
+        <Alert variant="destructive" className="rounded-none border-x-0 border-t-0">
           {error}
         </Alert>
       )}
@@ -589,25 +567,14 @@ function App() {
         />
       )}
 
-      {showBackups && (
-        <Backups
-          addonsPath={addonsPath}
-          onClose={() => setShowBackups(false)}
-        />
-      )}
+      {showBackups && <Backups addonsPath={addonsPath} onClose={() => setShowBackups(false)} />}
 
       {showApiCompat && (
-        <ApiCompat
-          addonsPath={addonsPath}
-          onClose={() => setShowApiCompat(false)}
-        />
+        <ApiCompat addonsPath={addonsPath} onClose={() => setShowApiCompat(false)} />
       )}
 
       {showCharacters && (
-        <Characters
-          addonsPath={addonsPath}
-          onClose={() => setShowCharacters(false)}
-        />
+        <Characters addonsPath={addonsPath} onClose={() => setShowCharacters(false)} />
       )}
 
       {showSettings && (

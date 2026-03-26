@@ -31,10 +31,9 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
 
   const loadProfiles = async () => {
     try {
-      const [profs, active] = await invoke<[AddonProfile[], string | null]>(
-        "list_profiles",
-        { addonsPath },
-      );
+      const [profs, active] = await invoke<[AddonProfile[], string | null]>("list_profiles", {
+        addonsPath,
+      });
       setProfiles(profs);
       setActiveProfile(active);
     } catch (e) {
@@ -74,16 +73,14 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
         failed: string[];
       }>("activate_profile", { addonsPath, profileName: name });
       const parts: string[] = [];
-      if (result.enabled.length > 0)
-        parts.push(`${result.enabled.length} enabled`);
-      if (result.disabled.length > 0)
-        parts.push(`${result.disabled.length} disabled`);
+      if (result.enabled.length > 0) parts.push(`${result.enabled.length} enabled`);
+      if (result.disabled.length > 0) parts.push(`${result.disabled.length} disabled`);
       toast.success(
-        `Profile "${name}" activated${parts.length > 0 ? `: ${parts.join(", ")}` : ""}`,
+        `Profile "${name}" activated${parts.length > 0 ? `: ${parts.join(", ")}` : ""}`
       );
       if (result.failed.length > 0) {
         toast.error(
-          `Failed to rename ${result.failed.length} addon(s): ${result.failed.join(", ")}`,
+          `Failed to rename ${result.failed.length} addon(s): ${result.failed.join(", ")}`
         );
       }
       setActiveProfile(name);
@@ -113,8 +110,8 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
         </DialogHeader>
 
         <p className="text-sm text-muted-foreground">
-          Save and switch between addon configurations. Activating a profile
-          enables/disables addons by renaming folders.
+          Save and switch between addon configurations. Activating a profile enables/disables addons
+          by renaming folders.
         </p>
 
         <div className="flex gap-2">
@@ -125,11 +122,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
             onKeyDown={(e) => e.key === "Enter" && handleCreate()}
             autoFocus
           />
-          <Button
-            onClick={handleCreate}
-            disabled={creating || !newName.trim()}
-            size="sm"
-          >
+          <Button onClick={handleCreate} disabled={creating || !newName.trim()} size="sm">
             {creating ? "Creating..." : "Save Current"}
           </Button>
         </div>
@@ -147,15 +140,13 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
                 key={p.name}
                 className={cn(
                   "flex items-center justify-between rounded-lg border border-border p-3",
-                  activeProfile === p.name && "border-primary/50 bg-primary/5",
+                  activeProfile === p.name && "border-primary/50 bg-primary/5"
                 )}
               >
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-sm">{p.name}</span>
-                    {activeProfile === p.name && (
-                      <Badge>Active</Badge>
-                    )}
+                    {activeProfile === p.name && <Badge>Active</Badge>}
                   </div>
                   <div className="text-xs text-muted-foreground mt-0.5">
                     {p.enabledAddons.length} addons &middot; {p.createdAt}
@@ -172,9 +163,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
                   </Button>
                   {confirmDelete === p.name ? (
                     <div className="flex items-center gap-1">
-                      <span className="text-xs text-amber-400 mr-1">
-                        Delete this profile?
-                      </span>
+                      <span className="text-xs text-amber-400 mr-1">Delete this profile?</span>
                       <Button
                         size="sm"
                         variant="destructive"
@@ -185,11 +174,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
                       >
                         Yes, Delete
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setConfirmDelete(null)}
-                      >
+                      <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>
                         Cancel
                       </Button>
                     </div>

@@ -1,18 +1,8 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import type {
-  EsouiCategory,
-  EsouiSearchResult,
-  EsouiAddonDetail,
-  InstallResult,
-} from "../types";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import type { EsouiCategory, EsouiSearchResult, EsouiAddonDetail, InstallResult } from "../types";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -29,11 +19,7 @@ interface CategoryBrowserProps {
   onClose: () => void;
 }
 
-export function CategoryBrowser({
-  addonsPath,
-  onInstalled,
-  onClose,
-}: CategoryBrowserProps) {
+export function CategoryBrowser({ addonsPath, onInstalled, onClose }: CategoryBrowserProps) {
   const [categories, setCategories] = useState<EsouiCategory[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<number | null>(null);
   const [sortBy, setSortBy] = useState("downloads");
@@ -167,9 +153,7 @@ export function CategoryBrowser({
                 <SelectContent>
                   {categories.map((cat) => (
                     <SelectItem key={cat.id} value={String(cat.id)}>
-                      {cat.depth > 0
-                        ? `${"  ".repeat(cat.depth)}${cat.name}`
-                        : cat.name}
+                      {cat.depth > 0 ? `${"  ".repeat(cat.depth)}${cat.name}` : cat.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -194,9 +178,7 @@ export function CategoryBrowser({
                 </div>
               ) : results.length === 0 ? (
                 <div className="py-8 text-center text-muted-foreground">
-                  {selectedCategory
-                    ? "No addons in this category"
-                    : "Select a category to browse"}
+                  {selectedCategory ? "No addons in this category" : "Select a category to browse"}
                 </div>
               ) : (
                 <div className="space-y-1">
@@ -207,14 +189,9 @@ export function CategoryBrowser({
                         onClick={() => handleLoadDetail(r.id)}
                       >
                         <div className="flex-1 min-w-0">
-                          <span className="font-medium text-sm">
-                            {r.title}
-                          </span>
+                          <span className="font-medium text-sm">{r.title}</span>
                           {r.category && (
-                            <Badge
-                              variant="secondary"
-                              className="ml-2 text-[10px]"
-                            >
+                            <Badge variant="secondary" className="ml-2 text-[10px]">
                               {r.category}
                             </Badge>
                           )}
@@ -247,15 +224,12 @@ export function CategoryBrowser({
                   onClick={() => {
                     const p = page - 1;
                     setPage(p);
-                    if (selectedCategory)
-                      loadCategory(selectedCategory, p, sortBy);
+                    if (selectedCategory) loadCategory(selectedCategory, p, sortBy);
                   }}
                 >
                   Previous
                 </Button>
-                <span className="text-xs text-muted-foreground">
-                  Page {page + 1}
-                </span>
+                <span className="text-xs text-muted-foreground">Page {page + 1}</span>
                 <Button
                   variant="outline"
                   size="sm"
@@ -263,8 +237,7 @@ export function CategoryBrowser({
                   onClick={() => {
                     const p = page + 1;
                     setPage(p);
-                    if (selectedCategory)
-                      loadCategory(selectedCategory, p, sortBy);
+                    if (selectedCategory) loadCategory(selectedCategory, p, sortBy);
                   }}
                 >
                   Next
@@ -289,17 +262,11 @@ export function CategoryBrowser({
               <>
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h3 className="text-lg font-semibold text-primary">
-                      {detail.title}
-                    </h3>
-                    <div className="mt-1 text-sm text-muted-foreground">
-                      by {detail.author}
-                    </div>
+                    <h3 className="text-lg font-semibold text-primary">{detail.title}</h3>
+                    <div className="mt-1 text-sm text-muted-foreground">by {detail.author}</div>
                   </div>
                   <Button
-                    onClick={() =>
-                      handleInstall(detail.id, detail.downloadUrl)
-                    }
+                    onClick={() => handleInstall(detail.id, detail.downloadUrl)}
                     disabled={installingId !== null}
                   >
                     {installingId === detail.id ? "Installing..." : "Install"}
@@ -313,15 +280,11 @@ export function CategoryBrowser({
                   </div>
                   <div>
                     <span className="text-muted-foreground">Compatibility</span>
-                    <div className="font-medium">
-                      {detail.compatibility || "—"}
-                    </div>
+                    <div className="font-medium">{detail.compatibility || "—"}</div>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Downloads</span>
-                    <div className="font-medium">
-                      {detail.totalDownloads || "—"}
-                    </div>
+                    <div className="font-medium">{detail.totalDownloads || "—"}</div>
                   </div>
                 </div>
 
