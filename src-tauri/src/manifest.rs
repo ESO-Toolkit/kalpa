@@ -1,6 +1,21 @@
+use regex::Regex;
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// Regex that matches ESO rich-text formatting codes:
+///   |cXXXXXX  — color start (6 or 8 hex digits)
+///   |r        — color reset
+///   |t        — tab
+///   |u..:|u   — hyperlink markup
+static ESO_FORMAT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\|c[0-9a-f]{6}|\|r|\|t|\|u[^|]*:\|u").unwrap());
+
+/// Strip ESO rich-text formatting codes from a string.
+fn strip_eso_codes(s: &str) -> String {
+    ESO_FORMAT_RE.replace_all(s, "").trim().to_string()
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Dependency {
@@ -129,6 +144,10 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
 
     let depends_on = parse_dependencies(&depends_on_raw);
     let optional_depends_on = parse_dependencies(&optional_depends_on_raw);
+
+    title = strip_eso_codes(&title);
+    author = strip_eso_codes(&author);
+    description = strip_eso_codes(&description);
 
     if title.is_empty() {
         title = folder_name.to_string();
