@@ -75,7 +75,7 @@ export function InstallDialog({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && state === "idle") handleResolve();
+    if (e.key === "Enter" && (state === "idle" || state === "error")) handleResolve();
   };
 
   const busy = state === "resolving" || state === "installing";

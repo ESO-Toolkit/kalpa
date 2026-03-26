@@ -32,8 +32,8 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
           addonsPath,
         });
         setCharacters(chars);
-      } catch {
-        // ignore
+      } catch (e) {
+        toast.error(`Failed to load characters: ${e}`);
       } finally {
         setLoading(false);
       }

@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   EsouiSearchResult,
@@ -53,6 +53,13 @@ export function BrowseEsoui({
   } | null>(null);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchIdRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   const handleSearch = async (searchQuery: string) => {
     if (!searchQuery.trim()) {
@@ -63,15 +70,22 @@ export function BrowseEsoui({
     setSearchError(null);
     setSelectedResult(null);
     setDetail(null);
+    const id = ++searchIdRef.current;
     try {
       const r = await invoke<EsouiSearchResult[]>("search_esoui_addons", {
         query: searchQuery.trim(),
       });
-      setResults(r);
+      if (searchIdRef.current === id) {
+        setResults(r);
+      }
     } catch (e) {
-      setSearchError(String(e));
+      if (searchIdRef.current === id) {
+        setSearchError(String(e));
+      }
     } finally {
-      setSearching(false);
+      if (searchIdRef.current === id) {
+        setSearching(false);
+      }
     }
   };
 
@@ -294,6 +308,7 @@ function DetailView({
   onClose: () => void;
 }) {
   const [screenshotIdx, setScreenshotIdx] = useState(0);
+  const safeIdx = detail ? Math.min(screenshotIdx, detail.screenshots.length - 1) : 0;
   const justInstalled = installResult?.id === result.id;
   const justFailed = installError?.id === result.id;
 
@@ -403,8 +418,8 @@ function DetailView({
           </h4>
           <div className="relative overflow-hidden rounded-lg border border-border bg-background">
             <img
-              src={detail.screenshots[screenshotIdx]}
-              alt={`Screenshot ${screenshotIdx + 1}`}
+              src={detail.screenshots[safeIdx]}
+              alt={`Screenshot ${safeIdx + 1}`}
               className="w-full max-h-[300px] object-contain"
             />
             {detail.screenshots.length > 1 && (
@@ -414,7 +429,7 @@ function DetailView({
                     key={i}
                     className={cn(
                       "size-2 rounded-full transition-colors",
-                      i === screenshotIdx
+                      i === safeIdx
                         ? "bg-primary"
                         : "bg-muted-foreground/40 hover:bg-muted-foreground",
                     )}
@@ -432,7 +447,7 @@ function DetailView({
                   onClick={() => setScreenshotIdx(i)}
                   className={cn(
                     "shrink-0 overflow-hidden rounded border transition-colors",
-                    i === screenshotIdx
+                    i === safeIdx
                       ? "border-primary"
                       : "border-border hover:border-muted-foreground",
                   )}

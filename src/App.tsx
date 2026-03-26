@@ -46,6 +46,10 @@ function App() {
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
   const [batchRemoving, setBatchRemoving] = useState(false);
 
+  // Ref for stable closure in scanAddons
+  const selectedAddonRef = useRef(selectedAddon);
+  selectedAddonRef.current = selectedAddon;
+
   const checkForUpdates = useCallback(async (path: string, autoUpdate = false) => {
     setCheckingUpdates(true);
     try {
@@ -91,9 +95,9 @@ function App() {
           addonsPath: path,
         });
         setAddons(result);
-        if (selectedAddon) {
+        if (selectedAddonRef.current) {
           const updated = result.find(
-            (a) => a.folderName === selectedAddon.folderName,
+            (a) => a.folderName === selectedAddonRef.current!.folderName,
           );
           setSelectedAddon(updated ?? null);
         }
@@ -104,7 +108,7 @@ function App() {
         setLoading(false);
       }
     },
-    [selectedAddon],
+    [],
   );
 
   const scanAndCheck = useCallback(
@@ -476,6 +480,7 @@ function App() {
           onToggleSelect={handleToggleSelect}
         />
         <AddonDetail
+          key={selectedAddon?.folderName ?? "none"}
           addon={selectedAddon}
           installedAddons={addons}
           addonsPath={addonsPath}

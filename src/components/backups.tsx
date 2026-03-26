@@ -34,8 +34,8 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
     try {
       const result = await invoke<BackupInfo[]>("list_backups", { addonsPath });
       setBackups(result);
-    } catch {
-      // ignore
+    } catch (e) {
+      toast.error(`Failed to load backups: ${e}`);
     }
   };
 

@@ -99,8 +99,8 @@ export function CategoryBrowser({
         esouiId: id,
       });
       setDetail(d);
-    } catch {
-      // ignore
+    } catch (e) {
+      toast.error(`Failed to load addon details: ${e}`);
     } finally {
       setLoadingDetail(false);
     }

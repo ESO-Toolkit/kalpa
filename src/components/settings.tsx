@@ -57,13 +57,17 @@ export function Settings({
   };
 
   const handleBrowse = async () => {
-    const selected = await open({
-      directory: true,
-      title: "Select ESO AddOns Folder",
-      defaultPath: path || undefined,
-    });
-    if (selected) {
-      setPath(selected);
+    try {
+      const selected = await open({
+        directory: true,
+        title: "Select ESO AddOns Folder",
+        defaultPath: path || undefined,
+      });
+      if (selected) {
+        setPath(selected);
+      }
+    } catch (e) {
+      toast.error(`Failed to open folder picker: ${e}`);
     }
   };
 

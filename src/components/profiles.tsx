@@ -36,8 +36,8 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
       );
       setProfiles(profs);
       setActiveProfile(active);
-    } catch {
-      // ignore
+    } catch (e) {
+      toast.error(`Failed to load profiles: ${e}`);
     }
   };
 
