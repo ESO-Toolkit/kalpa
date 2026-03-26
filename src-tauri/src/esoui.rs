@@ -5,6 +5,15 @@ use std::io;
 use std::sync::OnceLock;
 use tempfile::NamedTempFile;
 
+/// Decode common HTML entities for cleaner display text.
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EsouiAddonInfo {
@@ -266,7 +275,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
         .map(|el| {
             // Get text content, replacing <br> with newlines
             let html = el.inner_html();
-            html.replace("<br>", "\n")
+            let stripped = html.replace("<br>", "\n")
                 .replace("<br/>", "\n")
                 .replace("<br />", "\n")
                 .replace("&nbsp;", " ")
@@ -280,9 +289,8 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
                         part.splitn(2, '>').nth(1).unwrap_or("").to_string()
                     }
                 })
-                .collect::<String>()
-                .trim()
-                .to_string()
+                .collect::<String>();
+            decode_html_entities(stripped.trim())
         })
         .unwrap_or_default();
 

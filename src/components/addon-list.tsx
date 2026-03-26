@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import type { AddonManifest, UpdateCheckResult } from "../types";
 import type { SortMode, FilterMode } from "../App";
 import { Input } from "@/components/ui/input";
@@ -54,22 +54,32 @@ export function AddonList({
   selectedFolders,
   onToggleSelect,
 }: AddonListProps) {
-  const updatesMap = new Map(
-    updateResults
-      .filter((r) => r.hasUpdate)
-      .map((r) => [r.folderName, r]),
+  const updatesMap = useMemo(
+    () => new Map(
+      updateResults
+        .filter((r) => r.hasUpdate)
+        .map((r) => [r.folderName, r] as const),
+    ),
+    [updateResults],
   );
 
-  const updatesSet = new Set(
-    updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName),
+  const updatesSet = useMemo(
+    () => new Set(
+      updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName),
+    ),
+    [updateResults],
   );
-  const filterCounts: Record<FilterMode, number> = {
-    all: allAddons.length,
-    addons: allAddons.filter((a) => !a.isLibrary).length,
-    libraries: allAddons.filter((a) => a.isLibrary).length,
-    outdated: allAddons.filter((a) => updatesSet.has(a.folderName)).length,
-    "missing-deps": allAddons.filter((a) => a.missingDependencies.length > 0).length,
-  };
+
+  const filterCounts = useMemo<Record<FilterMode, number>>(
+    () => ({
+      all: allAddons.length,
+      addons: allAddons.filter((a) => !a.isLibrary).length,
+      libraries: allAddons.filter((a) => a.isLibrary).length,
+      outdated: allAddons.filter((a) => updatesSet.has(a.folderName)).length,
+      "missing-deps": allAddons.filter((a) => a.missingDependencies.length > 0).length,
+    }),
+    [allAddons, updatesSet],
+  );
 
   const batchMode = selectedFolders.size > 0;
 

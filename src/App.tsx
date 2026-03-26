@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, type RefObject } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { AddonList } from "./components/addon-list";
@@ -16,7 +16,7 @@ import { Alert } from "@/components/ui/alert";
 import { getSetting, setSetting } from "@/lib/store";
 import type { AddonManifest, UpdateCheckResult, InstallResult } from "./types";
 
-export type SortMode = "name" | "author" | "recent";
+export type SortMode = "name" | "author";
 export type FilterMode = "all" | "addons" | "libraries" | "outdated" | "missing-deps";
 
 /** Hook to close a dropdown when clicking outside */
@@ -253,7 +253,10 @@ function App() {
     setSetting("filterMode", mode);
   };
 
-  const updatesAvailable = updateResults.filter((r) => r.hasUpdate);
+  const updatesAvailable = useMemo(
+    () => updateResults.filter((r) => r.hasUpdate),
+    [updateResults],
+  );
 
   const handleUpdateAll = async () => {
     setUpdatingAll(true);
@@ -333,46 +336,53 @@ function App() {
     scanAndCheck(addonsPath);
   };
 
-  const updatesSet = new Set(
-    updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName),
+  const updatesSet = useMemo(
+    () => new Set(
+      updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName),
+    ),
+    [updateResults],
   );
 
-  const filteredAddons = addons
-    .filter((addon) => {
-      if (searchQuery) {
-        const q = searchQuery.toLowerCase();
-        const matchesSearch =
-          addon.title.toLowerCase().includes(q) ||
-          addon.folderName.toLowerCase().includes(q) ||
-          addon.author.toLowerCase().includes(q);
-        if (!matchesSearch) return false;
-      }
-      switch (filterMode) {
-        case "addons":
-          return !addon.isLibrary;
-        case "libraries":
-          return addon.isLibrary;
-        case "outdated":
-          return updatesSet.has(addon.folderName);
-        case "missing-deps":
-          return addon.missingDependencies.length > 0;
-        default:
-          return true;
-      }
-    })
-    .sort((a, b) => {
-      switch (sortMode) {
-        case "author":
-          return a.author.toLowerCase().localeCompare(b.author.toLowerCase());
-        case "name":
-        default:
-          return a.title.toLowerCase().localeCompare(b.title.toLowerCase());
-      }
-    });
+  const filteredAddons = useMemo(
+    () => addons
+      .filter((addon) => {
+        if (searchQuery) {
+          const q = searchQuery.toLowerCase();
+          const matchesSearch =
+            addon.title.toLowerCase().includes(q) ||
+            addon.folderName.toLowerCase().includes(q) ||
+            addon.author.toLowerCase().includes(q);
+          if (!matchesSearch) return false;
+        }
+        switch (filterMode) {
+          case "addons":
+            return !addon.isLibrary;
+          case "libraries":
+            return addon.isLibrary;
+          case "outdated":
+            return updatesSet.has(addon.folderName);
+          case "missing-deps":
+            return addon.missingDependencies.length > 0;
+          default:
+            return true;
+        }
+      })
+      .sort((a, b) => {
+        switch (sortMode) {
+          case "author":
+            return a.author.toLowerCase().localeCompare(b.author.toLowerCase());
+          case "name":
+          default:
+            return a.title.toLowerCase().localeCompare(b.title.toLowerCase());
+        }
+      }),
+    [addons, searchQuery, filterMode, sortMode, updatesSet],
+  );
 
-  const missingDepCount = addons.filter(
-    (a) => a.missingDependencies.length > 0,
-  ).length;
+  const missingDepCount = useMemo(
+    () => addons.filter((a) => a.missingDependencies.length > 0).length,
+    [addons],
+  );
 
   const selectedUpdateResult = selectedAddon
     ? updateResults.find((r) => r.folderName === selectedAddon.folderName) ??
