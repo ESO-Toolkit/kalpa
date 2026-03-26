@@ -40,6 +40,7 @@ function App() {
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [showSettings, setShowSettings] = useState(false);
   const [showInstall, setShowInstall] = useState(false);
   const [showBrowse, setShowBrowse] = useState(false);
@@ -54,6 +55,18 @@ function App() {
   const [updatingAll, setUpdatingAll] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
+
+  // Online/offline detection
+  useEffect(() => {
+    const goOffline = () => setIsOffline(true);
+    const goOnline = () => setIsOffline(false);
+    window.addEventListener("offline", goOffline);
+    window.addEventListener("online", goOnline);
+    return () => {
+      window.removeEventListener("offline", goOffline);
+      window.removeEventListener("online", goOnline);
+    };
+  }, []);
 
   // Header overflow menu
   const [showMoreMenu, setShowMoreMenu] = useState(false);
@@ -406,7 +419,7 @@ function App() {
             </>
           ) : (
             <>
-              <span className="mr-2 text-xs text-muted-foreground">
+              <span className="mr-2 text-xs text-muted-foreground" aria-live="polite" aria-atomic="true">
                 {addons.length} addons
                 {missingDepCount > 0 && ` \u00b7 ${missingDepCount} with issues`}
                 {checkingUpdates && (
@@ -451,24 +464,30 @@ function App() {
                   variant="outline"
                   size="sm"
                   onClick={() => setShowMoreMenu((v) => !v)}
+                  aria-label="More actions"
+                  aria-expanded={showMoreMenu}
+                  aria-haspopup="true"
                 >
                   More&hellip;
                 </Button>
                 {showMoreMenu && (
-                  <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border border-border bg-popover p-1 shadow-md">
+                  <div role="menu" className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border border-border bg-popover p-1 shadow-md">
                     <button
+                      role="menuitem"
                       className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
                       onClick={() => { setShowMoreMenu(false); setShowInstall(true); }}
                     >
                       Install from URL
                     </button>
                     <button
+                      role="menuitem"
                       className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
                       onClick={() => { setShowMoreMenu(false); setShowProfiles(true); }}
                     >
                       Profiles
                     </button>
                     <button
+                      role="menuitem"
                       className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
                       onClick={() => { setShowMoreMenu(false); setShowSettings(true); }}
                     >
@@ -491,9 +510,16 @@ function App() {
         </Alert>
       )}
 
+      {isOffline && (
+        <Alert className="rounded-none border-x-0 border-t-0 bg-muted/50 text-muted-foreground">
+          You're offline — some features may be unavailable
+        </Alert>
+      )}
+
       <div className="flex flex-1 overflow-hidden">
         <AddonList
           addons={filteredAddons}
+          allAddons={addons}
           selectedAddon={selectedAddon}
           onSelect={setSelectedAddon}
           searchQuery={searchQuery}

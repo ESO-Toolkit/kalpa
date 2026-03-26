@@ -1,3 +1,4 @@
+import { useCallback, useRef } from "react";
 import type { AddonManifest, UpdateCheckResult } from "../types";
 import type { SortMode, FilterMode } from "../App";
 import { Input } from "@/components/ui/input";
@@ -14,6 +15,7 @@ import { cn } from "@/lib/utils";
 
 interface AddonListProps {
   addons: AddonManifest[];
+  allAddons: AddonManifest[];
   selectedAddon: AddonManifest | null;
   onSelect: (addon: AddonManifest) => void;
   searchQuery: string;
@@ -38,6 +40,7 @@ const FILTERS: [FilterMode, string][] = [
 
 export function AddonList({
   addons,
+  allAddons,
   selectedAddon,
   onSelect,
   searchQuery,
@@ -57,7 +60,65 @@ export function AddonList({
       .map((r) => [r.folderName, r]),
   );
 
+  const updatesSet = new Set(
+    updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName),
+  );
+  const filterCounts: Record<FilterMode, number> = {
+    all: allAddons.length,
+    addons: allAddons.filter((a) => !a.isLibrary).length,
+    libraries: allAddons.filter((a) => a.isLibrary).length,
+    outdated: allAddons.filter((a) => updatesSet.has(a.folderName)).length,
+    "missing-deps": allAddons.filter((a) => a.missingDependencies.length > 0).length,
+  };
+
   const batchMode = selectedFolders.size > 0;
+
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const handleListKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (addons.length === 0) return;
+
+      const currentIndex = selectedAddon
+        ? addons.findIndex((a) => a.folderName === selectedAddon.folderName)
+        : -1;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        const nextIndex = currentIndex < addons.length - 1 ? currentIndex + 1 : 0;
+        onSelect(addons[nextIndex]);
+        // Scroll the focused item into view
+        const items = listRef.current?.querySelectorAll('[role="option"]');
+        items?.[nextIndex]?.scrollIntoView({ block: "nearest" });
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        const prevIndex = currentIndex > 0 ? currentIndex - 1 : addons.length - 1;
+        onSelect(addons[prevIndex]);
+        const items = listRef.current?.querySelectorAll('[role="option"]');
+        items?.[prevIndex]?.scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        if (currentIndex >= 0) {
+          if (batchMode) {
+            onToggleSelect(addons[currentIndex].folderName);
+          } else {
+            onSelect(addons[currentIndex]);
+          }
+        }
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        onSelect(addons[0]);
+        const items = listRef.current?.querySelectorAll('[role="option"]');
+        items?.[0]?.scrollIntoView({ block: "nearest" });
+      } else if (e.key === "End") {
+        e.preventDefault();
+        onSelect(addons[addons.length - 1]);
+        const items = listRef.current?.querySelectorAll('[role="option"]');
+        items?.[addons.length - 1]?.scrollIntoView({ block: "nearest" });
+      }
+    },
+    [addons, selectedAddon, onSelect, batchMode, onToggleSelect],
+  );
 
   return (
     <div className="flex w-[380px] min-w-[300px] flex-col border-r border-border bg-card">
@@ -71,10 +132,13 @@ export function AddonList({
         />
       </div>
       <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
-        <div className="flex gap-0.5">
+        <div className="flex gap-0.5" role="tablist" aria-label="Filter addons">
           {FILTERS.map(([mode, label]) => (
             <button
               key={mode}
+              role="tab"
+              aria-selected={filterMode === mode}
+              aria-label={`Filter by ${label}`}
               className={cn(
                 "rounded px-2 py-1 text-xs transition-colors",
                 filterMode === mode
@@ -84,6 +148,9 @@ export function AddonList({
               onClick={() => onFilterChange(mode)}
             >
               {label}
+              {((mode !== "outdated" && mode !== "missing-deps") || filterCounts[mode] > 0) && (
+                <span className="ml-1 opacity-60">({filterCounts[mode]})</span>
+              )}
             </button>
           ))}
         </div>
@@ -91,7 +158,7 @@ export function AddonList({
           value={sortMode}
           onValueChange={(v) => onSortChange(v as SortMode)}
         >
-          <SelectTrigger size="sm" className="h-6 text-xs">
+          <SelectTrigger size="sm" className="h-6 text-xs" aria-label="Sort by">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -113,7 +180,14 @@ export function AddonList({
           </span>
         )}
       </div>
-      <div className="flex-1 overflow-y-auto">
+      <div
+        ref={listRef}
+        role="listbox"
+        aria-label="Installed addons"
+        tabIndex={0}
+        onKeyDown={handleListKeyDown}
+        className="flex-1 overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
+      >
         {loading ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
             <div className="size-5 animate-spin rounded-full border-2 border-border border-t-primary" />
@@ -125,12 +199,15 @@ export function AddonList({
         ) : (
           addons.map((addon) => {
             const isSelected = selectedFolders.has(addon.folderName);
+            const isCurrent = selectedAddon?.folderName === addon.folderName;
             return (
               <div
                 key={addon.folderName}
+                role="option"
+                aria-selected={batchMode ? isSelected : isCurrent}
                 className={cn(
                   "cursor-pointer border-l-3 border-transparent px-4 py-2.5 transition-colors hover:bg-background group",
-                  selectedAddon?.folderName === addon.folderName &&
+                  isCurrent &&
                     !batchMode &&
                     "border-l-primary bg-background",
                   isSelected && "bg-primary/5 border-l-primary",

@@ -27,6 +27,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [activating, setActivating] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const loadProfiles = async () => {
     try {
@@ -122,6 +123,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+            autoFocus
           />
           <Button
             onClick={handleCreate}
@@ -168,13 +170,38 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
                   >
                     {activating === p.name ? "Activating..." : "Activate"}
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => handleDelete(p.name)}
-                  >
-                    Delete
-                  </Button>
+                  {confirmDelete === p.name ? (
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-amber-400 mr-1">
+                        Delete this profile?
+                      </span>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => {
+                          setConfirmDelete(null);
+                          handleDelete(p.name);
+                        }}
+                      >
+                        Yes, Delete
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setConfirmDelete(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => setConfirmDelete(p.name)}
+                    >
+                      Delete
+                    </Button>
+                  )}
                 </div>
               </div>
             ))
