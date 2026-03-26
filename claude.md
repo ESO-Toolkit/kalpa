@@ -19,6 +19,12 @@ An open-source ESO addon manager desktop app. Current state: **functional alpha*
 - Do not implement hourly background scraping — use on-open refresh + manual Refresh button
 - Optimize for maintainability and simplicity over cleverness
 
+## Code Quality
+
+- **After editing Rust code, always run both `cargo fmt` and `cargo clippy`** — clippy fixes can break formatting, so fmt must run after clippy, not before
+- Frontend checks: `npm run check` (runs tsc + eslint + prettier)
+- CI enforces all of these on every PR
+
 ## Architecture
 
 ```
