@@ -1,6 +1,7 @@
 use crate::esoui::{self, EsouiAddonInfo};
 use crate::installer;
 use crate::manifest::{self, AddonManifest};
+use crate::metadata;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
@@ -13,6 +14,17 @@ pub struct InstallResult {
     pub installed_deps: Vec<String>,
     pub failed_deps: Vec<String>,
     pub skipped_deps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    pub folder_name: String,
+    pub esoui_id: u32,
+    pub current_version: String,
+    pub remote_version: String,
+    pub download_url: String,
+    pub has_update: bool,
 }
 
 fn default_addons_path() -> Option<PathBuf> {
@@ -71,7 +83,10 @@ pub fn scan_installed_addons(addons_path: String) -> Result<Vec<AddonManifest>, 
     // Build set of installed folder names for dependency checking
     let installed: HashSet<String> = addons.iter().map(|a| a.folder_name.clone()).collect();
 
-    // Check for missing dependencies
+    // Load metadata to enrich addons with ESOUI IDs
+    let store = metadata::load_metadata(&addons_dir);
+
+    // Check for missing dependencies and enrich with ESOUI ID
     for addon in &mut addons {
         addon.missing_dependencies = addon
             .depends_on
@@ -79,6 +94,10 @@ pub fn scan_installed_addons(addons_path: String) -> Result<Vec<AddonManifest>, 
             .filter(|dep| !installed.contains(&dep.name))
             .map(|dep| dep.name.clone())
             .collect();
+
+        if let Some(meta) = store.addons.get(&addon.folder_name) {
+            addon.esoui_id = Some(meta.esoui_id);
+        }
     }
 
     addons.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
@@ -93,7 +112,11 @@ pub fn resolve_esoui_addon(input: String) -> Result<EsouiAddonInfo, String> {
 }
 
 #[tauri::command]
-pub fn install_addon(addons_path: String, download_url: String) -> Result<InstallResult, String> {
+pub fn install_addon(
+    addons_path: String,
+    download_url: String,
+    esoui_id: u32,
+) -> Result<InstallResult, String> {
     let addons_dir = PathBuf::from(&addons_path);
     if !addons_dir.is_dir() {
         return Err(format!("AddOns folder not found: {}", addons_path));
@@ -102,6 +125,18 @@ pub fn install_addon(addons_path: String, download_url: String) -> Result<Instal
     // Download and extract the main addon
     let tmp_file = esoui::download_addon(&download_url)?;
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), &addons_dir)?;
+
+    // Load metadata store and record the install
+    let mut store = metadata::load_metadata(&addons_dir);
+
+    // Record metadata for each installed folder
+    for folder in &installed_folders {
+        let manifest_path = addons_dir.join(folder).join(format!("{}.txt", folder));
+        let version = manifest::parse_manifest(folder, &manifest_path)
+            .map(|m| m.version)
+            .unwrap_or_default();
+        metadata::record_install(&mut store, folder, esoui_id, &version, &download_url);
+    }
 
     // Collect all installed folder names (existing + newly installed)
     let mut all_installed: HashSet<String> = HashSet::new();
@@ -134,16 +169,28 @@ pub fn install_addon(addons_path: String, download_url: String) -> Result<Instal
     let mut skipped_deps: Vec<String> = Vec::new();
 
     for dep_name in &missing_deps {
-        // Search ESOUI for the dependency
         match esoui::search_addon_by_name(dep_name) {
             Ok(Some(dep_id)) => {
-                // Found it — fetch info and install
                 match esoui::fetch_addon_info(dep_id) {
                     Ok(dep_info) => match esoui::download_addon(&dep_info.download_url) {
                         Ok(dep_tmp) => {
                             match installer::extract_addon_zip(dep_tmp.path(), &addons_dir) {
                                 Ok(dep_folders) => {
+                                    // Record metadata for auto-installed deps
                                     for f in &dep_folders {
+                                        let dep_manifest_path =
+                                            addons_dir.join(f).join(format!("{}.txt", f));
+                                        let dep_version =
+                                            manifest::parse_manifest(f, &dep_manifest_path)
+                                                .map(|m| m.version)
+                                                .unwrap_or_default();
+                                        metadata::record_install(
+                                            &mut store,
+                                            f,
+                                            dep_id,
+                                            &dep_version,
+                                            &dep_info.download_url,
+                                        );
                                         all_installed.insert(f.clone());
                                     }
                                     installed_deps.push(dep_name.clone());
@@ -161,6 +208,9 @@ pub fn install_addon(addons_path: String, download_url: String) -> Result<Instal
         }
     }
 
+    // Save metadata
+    let _ = metadata::save_metadata(&addons_dir, &store);
+
     Ok(InstallResult {
         installed_folders,
         installed_deps,
@@ -172,5 +222,83 @@ pub fn install_addon(addons_path: String, download_url: String) -> Result<Instal
 #[tauri::command]
 pub fn remove_addon(addons_path: String, folder_name: String) -> Result<(), String> {
     let addons_dir = PathBuf::from(&addons_path);
-    installer::remove_addon(&addons_dir, &folder_name)
+    installer::remove_addon(&addons_dir, &folder_name)?;
+
+    // Clean up metadata
+    let mut store = metadata::load_metadata(&addons_dir);
+    metadata::remove_entry(&mut store, &folder_name);
+    let _ = metadata::save_metadata(&addons_dir, &store);
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn check_for_updates(addons_path: String) -> Result<Vec<UpdateCheckResult>, String> {
+    let addons_dir = PathBuf::from(&addons_path);
+    let store = metadata::load_metadata(&addons_dir);
+
+    let mut results: Vec<UpdateCheckResult> = Vec::new();
+
+    for (folder_name, meta) in &store.addons {
+        // Only check addons that still exist on disk
+        if !addons_dir.join(folder_name).is_dir() {
+            continue;
+        }
+
+        match esoui::fetch_addon_info(meta.esoui_id) {
+            Ok(info) => {
+                let has_update = !info.version.is_empty()
+                    && !meta.installed_version.is_empty()
+                    && info.version != meta.installed_version;
+
+                results.push(UpdateCheckResult {
+                    folder_name: folder_name.clone(),
+                    esoui_id: meta.esoui_id,
+                    current_version: meta.installed_version.clone(),
+                    remote_version: info.version,
+                    download_url: info.download_url,
+                    has_update,
+                });
+            }
+            Err(_) => {
+                // Skip addons we can't check — don't block the whole batch
+                continue;
+            }
+        }
+
+        // Small delay between requests to be respectful to ESOUI
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn update_addon(addons_path: String, esoui_id: u32) -> Result<InstallResult, String> {
+    let addons_dir = PathBuf::from(&addons_path);
+
+    // Fetch latest info from ESOUI
+    let info = esoui::fetch_addon_info(esoui_id)?;
+
+    // Download and extract
+    let tmp_file = esoui::download_addon(&info.download_url)?;
+    let installed_folders = installer::extract_addon_zip(tmp_file.path(), &addons_dir)?;
+
+    // Update metadata
+    let mut store = metadata::load_metadata(&addons_dir);
+    for folder in &installed_folders {
+        let manifest_path = addons_dir.join(folder).join(format!("{}.txt", folder));
+        let version = manifest::parse_manifest(folder, &manifest_path)
+            .map(|m| m.version)
+            .unwrap_or_default();
+        metadata::record_install(&mut store, folder, esoui_id, &version, &info.download_url);
+    }
+    let _ = metadata::save_metadata(&addons_dir, &store);
+
+    Ok(InstallResult {
+        installed_folders,
+        installed_deps: Vec::new(),
+        failed_deps: Vec::new(),
+        skipped_deps: Vec::new(),
+    })
 }

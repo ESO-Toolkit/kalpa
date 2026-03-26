@@ -2,6 +2,7 @@ mod commands;
 mod esoui;
 mod installer;
 mod manifest;
+mod metadata;
 
 pub fn run() {
     tauri::Builder::default()
@@ -11,6 +12,8 @@ pub fn run() {
             commands::resolve_esoui_addon,
             commands::install_addon,
             commands::remove_addon,
+            commands::check_for_updates,
+            commands::update_addon,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

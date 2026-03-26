@@ -9,6 +9,7 @@ use tempfile::NamedTempFile;
 pub struct EsouiAddonInfo {
     pub id: u32,
     pub title: String,
+    pub version: String,
     pub download_url: String,
 }
 
@@ -81,6 +82,22 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("Addon #{}", id));
 
+    // Extract version from <div id="version">Version: X.Y.Z</div>
+    let version_sel = Selector::parse("#version").unwrap();
+    let version = document
+        .select(&version_sel)
+        .next()
+        .map(|el| {
+            let text = el.text().collect::<String>();
+            text.trim()
+                .strip_prefix("Version:")
+                .or_else(|| text.trim().strip_prefix("Version"))
+                .unwrap_or(text.trim())
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default();
+
     // Step 2: Fetch the landing page which contains the actual CDN download link
     let landing_url = format!(
         "https://www.esoui.com/downloads/landing.php?fileid={}",
@@ -105,6 +122,7 @@ pub fn fetch_addon_info(id: u32) -> Result<EsouiAddonInfo, String> {
     Ok(EsouiAddonInfo {
         id,
         title,
+        version,
         download_url,
     })
 }

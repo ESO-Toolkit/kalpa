@@ -4,7 +4,7 @@ import { AddonList } from "./components/addon-list";
 import { AddonDetail } from "./components/addon-detail";
 import { InstallDialog } from "./components/install-dialog";
 import { Settings } from "./components/settings";
-import type { AddonManifest } from "./types";
+import type { AddonManifest, UpdateCheckResult, InstallResult } from "./types";
 
 function App() {
   const [addonsPath, setAddonsPath] = useState<string>("");
@@ -17,6 +17,23 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showInstall, setShowInstall] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [updateResults, setUpdateResults] = useState<UpdateCheckResult[]>([]);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [updatingAll, setUpdatingAll] = useState(false);
+
+  const checkForUpdates = useCallback(async (path: string) => {
+    setCheckingUpdates(true);
+    try {
+      const results = await invoke<UpdateCheckResult[]>("check_for_updates", {
+        addonsPath: path,
+      });
+      setUpdateResults(results);
+    } catch {
+      // Silently fail — update checks are non-critical
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }, []);
 
   const scanAddons = useCallback(
     async (path: string) => {
@@ -27,7 +44,6 @@ function App() {
           addonsPath: path,
         });
         setAddons(result);
-        // Update selected addon if it still exists
         if (selectedAddon) {
           const updated = result.find(
             (a) => a.folderName === selectedAddon.folderName,
@@ -44,12 +60,21 @@ function App() {
     [selectedAddon],
   );
 
+  const scanAndCheck = useCallback(
+    async (path: string) => {
+      await scanAddons(path);
+      checkForUpdates(path);
+    },
+    [scanAddons, checkForUpdates],
+  );
+
   useEffect(() => {
     async function init() {
       try {
         const path = await invoke<string>("detect_addons_folder");
         setAddonsPath(path);
         await scanAddons(path);
+        checkForUpdates(path);
       } catch {
         setError(
           "Could not detect ESO AddOns folder. Please set it in Settings.",
@@ -63,14 +88,33 @@ function App() {
 
   const handleRefresh = () => {
     if (addonsPath) {
-      scanAddons(addonsPath);
+      scanAndCheck(addonsPath);
     }
   };
 
   const handlePathChange = (newPath: string) => {
     setAddonsPath(newPath);
     setSelectedAddon(null);
-    scanAddons(newPath);
+    setUpdateResults([]);
+    scanAndCheck(newPath);
+  };
+
+  const updatesAvailable = updateResults.filter((r) => r.hasUpdate);
+
+  const handleUpdateAll = async () => {
+    setUpdatingAll(true);
+    for (const update of updatesAvailable) {
+      try {
+        await invoke<InstallResult>("update_addon", {
+          addonsPath,
+          esouiId: update.esouiId,
+        });
+      } catch {
+        // Continue updating others even if one fails
+      }
+    }
+    setUpdatingAll(false);
+    scanAndCheck(addonsPath);
   };
 
   const filteredAddons = addons.filter((addon) => {
@@ -87,6 +131,11 @@ function App() {
     (a) => a.missingDependencies.length > 0,
   ).length;
 
+  const selectedUpdateResult = selectedAddon
+    ? updateResults.find((r) => r.folderName === selectedAddon.folderName) ??
+      null
+    : null;
+
   return (
     <div className="app">
       <header className="header">
@@ -94,8 +143,25 @@ function App() {
         <div className="header-actions">
           <span className="addon-count">
             {addons.length} addons
-            {missingDepCount > 0 && ` · ${missingDepCount} with issues`}
+            {missingDepCount > 0 && ` \u00b7 ${missingDepCount} with issues`}
+            {checkingUpdates && (
+              <span className="checking-updates">
+                {" "}
+                \u00b7 <span className="spinner-small" /> Checking updates...
+              </span>
+            )}
           </span>
+          {updatesAvailable.length > 0 && (
+            <button
+              className="btn btn-accent"
+              onClick={handleUpdateAll}
+              disabled={updatingAll}
+            >
+              {updatingAll
+                ? "Updating..."
+                : `Update All (${updatesAvailable.length})`}
+            </button>
+          )}
           <button
             className="btn btn-accent"
             onClick={() => setShowInstall(true)}
@@ -121,6 +187,7 @@ function App() {
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           loading={loading}
+          updateResults={updateResults}
         />
         <AddonDetail
           addon={selectedAddon}
@@ -130,6 +197,8 @@ function App() {
             setSelectedAddon(null);
             handleRefresh();
           }}
+          updateResult={selectedUpdateResult}
+          onUpdated={handleRefresh}
         />
       </div>
 

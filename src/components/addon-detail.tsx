@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AddonManifest } from "../types";
+import type { AddonManifest, UpdateCheckResult, InstallResult } from "../types";
 
 interface AddonDetailProps {
   addon: AddonManifest | null;
   installedAddons: AddonManifest[];
   addonsPath: string;
   onRemove: () => void;
+  updateResult: UpdateCheckResult | null;
+  onUpdated: () => void;
 }
 
 export function AddonDetail({
@@ -14,10 +16,14 @@ export function AddonDetail({
   installedAddons,
   addonsPath,
   onRemove,
+  updateResult,
+  onUpdated,
 }: AddonDetailProps) {
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const [updating, setUpdating] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   if (!addon) {
     return (
@@ -29,7 +35,6 @@ export function AddonDetail({
 
   const installedSet = new Set(installedAddons.map((a) => a.folderName));
 
-  // Find addons that depend on this one
   const dependents = installedAddons.filter((a) =>
     a.dependsOn.some((dep) => dep.name === addon.folderName),
   );
@@ -50,10 +55,50 @@ export function AddonDetail({
     }
   };
 
+  const handleUpdate = async () => {
+    if (!updateResult) return;
+    setUpdating(true);
+    setUpdateError(null);
+    try {
+      await invoke<InstallResult>("update_addon", {
+        addonsPath,
+        esouiId: updateResult.esouiId,
+      });
+      onUpdated();
+    } catch (e) {
+      setUpdateError(String(e));
+    } finally {
+      setUpdating(false);
+    }
+  };
+
   return (
     <div className="detail-panel">
       <h2 className="detail-title">{addon.title}</h2>
-      <div className="detail-folder">{addon.folderName}/</div>
+      <div className="detail-folder">
+        {addon.folderName}/
+        {addon.esouiId && (
+          <span className="detail-esoui-id"> &middot; ESOUI #{addon.esouiId}</span>
+        )}
+      </div>
+
+      {updateResult?.hasUpdate && (
+        <div className="update-available">
+          <div className="update-version-info">
+            Update available: {updateResult.currentVersion} &rarr;{" "}
+            {updateResult.remoteVersion}
+          </div>
+          <button
+            className="btn btn-accent"
+            onClick={handleUpdate}
+            disabled={updating}
+          >
+            {updating ? "Updating..." : "Update"}
+          </button>
+        </div>
+      )}
+
+      {updateError && <div className="install-error">{updateError}</div>}
 
       <dl className="detail-meta">
         {addon.author && (

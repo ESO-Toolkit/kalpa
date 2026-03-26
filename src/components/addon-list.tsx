@@ -1,4 +1,4 @@
-import type { AddonManifest } from "../types";
+import type { AddonManifest, UpdateCheckResult } from "../types";
 
 interface AddonListProps {
   addons: AddonManifest[];
@@ -7,6 +7,7 @@ interface AddonListProps {
   searchQuery: string;
   onSearchChange: (query: string) => void;
   loading: boolean;
+  updateResults: UpdateCheckResult[];
 }
 
 export function AddonList({
@@ -16,7 +17,14 @@ export function AddonList({
   searchQuery,
   onSearchChange,
   loading,
+  updateResults,
 }: AddonListProps) {
+  const updatesMap = new Map(
+    updateResults
+      .filter((r) => r.hasUpdate)
+      .map((r) => [r.folderName, r]),
+  );
+
   return (
     <div className="addon-list-panel">
       <div className="search-bar">
@@ -45,6 +53,9 @@ export function AddonList({
             >
               <div className="addon-item-header">
                 <span className="addon-item-title">{addon.title}</span>
+                {updatesMap.has(addon.folderName) && (
+                  <span className="badge badge-update">Update</span>
+                )}
                 {addon.isLibrary && (
                   <span className="badge badge-lib">LIB</span>
                 )}

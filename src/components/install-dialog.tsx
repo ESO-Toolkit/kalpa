@@ -51,6 +51,7 @@ export function InstallDialog({
       const installResult = await invoke<InstallResult>("install_addon", {
         addonsPath,
         downloadUrl: addonInfo.downloadUrl,
+        esouiId: addonInfo.id,
       });
       setResult(installResult);
       setState("installed");
