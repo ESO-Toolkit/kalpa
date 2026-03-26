@@ -51,13 +51,22 @@ fn http_client() -> reqwest::blocking::Client {
 }
 
 fn fetch_page(client: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("Failed to fetch {}: {}", url, e))?;
+    let response = client.get(url).send().map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            "Could not connect to ESOUI. Check your internet connection.".to_string()
+        } else {
+            format!("Network error: {}", e)
+        }
+    })?;
 
-    if !response.status().is_success() {
-        return Err(format!("HTTP {} for {}", response.status(), url));
+    let status = response.status();
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            404 => "Addon not found on ESOUI. It may have been removed.".to_string(),
+            429 => "Too many requests to ESOUI. Please wait a moment and try again.".to_string(),
+            500..=599 => "ESOUI is currently unavailable. Try again later.".to_string(),
+            _ => format!("ESOUI returned an error (HTTP {})", status),
+        });
     }
 
     response
@@ -189,13 +198,19 @@ pub fn search_addon_by_name(name: &str) -> Result<Option<u32>, String> {
 pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
     let client = http_client();
 
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("Failed to download addon: {}", e))?;
+    let response = client.get(url).send().map_err(|e| {
+        if e.is_connect() || e.is_timeout() {
+            "Download failed — check your internet connection.".to_string()
+        } else {
+            format!("Download failed: {}", e)
+        }
+    })?;
 
     if !response.status().is_success() {
-        return Err(format!("Download failed with status {}", response.status()));
+        return Err(format!(
+            "Download failed (HTTP {}). The file may have been removed from ESOUI.",
+            response.status()
+        ));
     }
 
     let bytes = response

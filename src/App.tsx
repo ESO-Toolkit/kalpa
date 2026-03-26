@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AddonList } from "./components/addon-list";
 import { AddonDetail } from "./components/addon-detail";
@@ -90,6 +90,25 @@ function App() {
     init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Keyboard shortcuts
+  const addonsPathRef = useRef(addonsPath);
+  addonsPathRef.current = addonsPath;
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === "r") {
+        e.preventDefault();
+        if (addonsPathRef.current) scanAndCheck(addonsPathRef.current);
+      }
+      if (e.ctrlKey && e.key === "i") {
+        e.preventDefault();
+        setShowInstall(true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [scanAndCheck]);
 
   const handleRefresh = () => {
     if (addonsPath) {
