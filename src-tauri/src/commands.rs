@@ -328,9 +328,22 @@ pub fn check_for_updates(addons_path: String) -> Result<Vec<UpdateCheckResult>, 
 
         match esoui::fetch_addon_info(meta.esoui_id) {
             Ok(info) => {
-                let has_update = !info.version.is_empty()
-                    && !meta.installed_version.is_empty()
-                    && info.version != meta.installed_version;
+                // Normalize versions: strip leading "v"/"V" and trim whitespace
+                let local_ver = meta
+                    .installed_version
+                    .trim()
+                    .strip_prefix('v')
+                    .or_else(|| meta.installed_version.trim().strip_prefix('V'))
+                    .unwrap_or(meta.installed_version.trim());
+                let remote_ver = info
+                    .version
+                    .trim()
+                    .strip_prefix('v')
+                    .or_else(|| info.version.trim().strip_prefix('V'))
+                    .unwrap_or(info.version.trim());
+
+                let has_update =
+                    !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
 
                 results.push(UpdateCheckResult {
                     folder_name: folder_name.clone(),
@@ -909,7 +922,32 @@ fn profiles_path(addons_dir: &std::path::Path) -> PathBuf {
 fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
     let path = profiles_path(addons_dir);
     match fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!(
+                    "Warning: profiles file corrupted ({}), trying backup...",
+                    e
+                );
+                let bak = path.with_extension("json.bak");
+                match fs::read_to_string(&bak) {
+                    Ok(bak_content) => match serde_json::from_str(&bak_content) {
+                        Ok(store) => {
+                            eprintln!("Recovered profiles from backup file.");
+                            store
+                        }
+                        Err(e2) => {
+                            eprintln!("Profiles backup also corrupted ({}), using defaults.", e2);
+                            ProfileStore::default()
+                        }
+                    },
+                    Err(_) => {
+                        eprintln!("No profiles backup file found, using defaults.");
+                        ProfileStore::default()
+                    }
+                }
+            }
+        },
         Err(_) => ProfileStore::default(),
     }
 }
@@ -918,7 +956,19 @@ fn save_profiles(addons_dir: &std::path::Path, store: &ProfileStore) -> Result<(
     let path = profiles_path(addons_dir);
     let json = serde_json::to_string_pretty(store)
         .map_err(|e| format!("Failed to serialize profiles: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write profiles: {}", e))
+
+    // Create backup of existing file before writing
+    if path.exists() {
+        let bak = path.with_extension("json.bak");
+        let _ = fs::copy(&path, &bak);
+    }
+
+    // Write to temp file first, then atomically rename
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &json)
+        .map_err(|e| format!("Failed to write profiles temp file: {}", e))?;
+    fs::rename(&tmp, &path)
+        .map_err(|e| format!("Failed to finalize profiles write: {}", e))
 }
 
 #[tauri::command]
@@ -974,8 +1024,16 @@ pub fn create_profile(addons_path: String, profile_name: String) -> Result<Addon
     Ok(profile)
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivateProfileResult {
+    pub enabled: Vec<String>,
+    pub disabled: Vec<String>,
+    pub failed: Vec<String>,
+}
+
 #[tauri::command]
-pub fn activate_profile(addons_path: String, profile_name: String) -> Result<(Vec<String>, Vec<String>), String> {
+pub fn activate_profile(addons_path: String, profile_name: String) -> Result<ActivateProfileResult, String> {
     let addons_dir = PathBuf::from(&addons_path);
     let mut store = load_profiles(&addons_dir);
 
@@ -988,6 +1046,7 @@ pub fn activate_profile(addons_path: String, profile_name: String) -> Result<(Ve
 
     let mut disabled: Vec<String> = Vec::new();
     let mut enabled: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(&addons_dir) {
         for entry in entries.flatten() {
@@ -1012,16 +1071,24 @@ pub fn activate_profile(addons_path: String, profile_name: String) -> Result<(Ve
                 // Should be enabled
                 if is_disabled {
                     let new_path = addons_dir.join(&base_name);
-                    if fs::rename(&path, &new_path).is_ok() {
-                        enabled.push(base_name);
+                    match fs::rename(&path, &new_path) {
+                        Ok(_) => enabled.push(base_name),
+                        Err(e) => {
+                            eprintln!("Failed to enable {}: {}", base_name, e);
+                            failed.push(format!("{} (enable: {})", base_name, e));
+                        }
                     }
                 }
             } else {
                 // Should be disabled
                 if !is_disabled && find_manifest(&addons_dir, &folder_name).is_some() {
                     let new_path = addons_dir.join(format!("{}.disabled", folder_name));
-                    if fs::rename(&path, &new_path).is_ok() {
-                        disabled.push(folder_name);
+                    match fs::rename(&path, &new_path) {
+                        Ok(_) => disabled.push(folder_name),
+                        Err(e) => {
+                            eprintln!("Failed to disable {}: {}", folder_name, e);
+                            failed.push(format!("{} (disable: {})", folder_name, e));
+                        }
                     }
                 }
             }
@@ -1031,7 +1098,7 @@ pub fn activate_profile(addons_path: String, profile_name: String) -> Result<(Ve
     store.active_profile = Some(profile_name);
     save_profiles(&addons_dir, &store)?;
 
-    Ok((enabled, disabled))
+    Ok(ActivateProfileResult { enabled, disabled, failed })
 }
 
 #[tauri::command]

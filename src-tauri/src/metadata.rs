@@ -92,7 +92,32 @@ pub fn format_timestamp(secs: u64) -> String {
 pub fn load_metadata(addons_path: &Path) -> MetadataStore {
     let path = metadata_path(addons_path);
     match fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(store) => store,
+            Err(e) => {
+                eprintln!(
+                    "Warning: metadata file corrupted ({}), trying backup...",
+                    e
+                );
+                let bak = path.with_extension("json.bak");
+                match fs::read_to_string(&bak) {
+                    Ok(bak_content) => match serde_json::from_str(&bak_content) {
+                        Ok(store) => {
+                            eprintln!("Recovered metadata from backup file.");
+                            store
+                        }
+                        Err(e2) => {
+                            eprintln!("Backup also corrupted ({}), using defaults.", e2);
+                            MetadataStore::default()
+                        }
+                    },
+                    Err(_) => {
+                        eprintln!("No backup file found, using defaults.");
+                        MetadataStore::default()
+                    }
+                }
+            }
+        },
         Err(_) => MetadataStore::default(),
     }
 }
@@ -101,7 +126,17 @@ pub fn save_metadata(addons_path: &Path, store: &MetadataStore) -> Result<(), St
     let path = metadata_path(addons_path);
     let json =
         serde_json::to_string_pretty(store).map_err(|e| format!("Failed to serialize: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write metadata: {}", e))
+
+    // Create backup of existing file before writing
+    if path.exists() {
+        let bak = path.with_extension("json.bak");
+        let _ = fs::copy(&path, &bak);
+    }
+
+    // Write to temp file first, then atomically rename
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &json).map_err(|e| format!("Failed to write metadata temp file: {}", e))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("Failed to finalize metadata write: {}", e))
 }
 
 pub fn record_install(

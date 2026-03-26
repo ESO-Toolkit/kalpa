@@ -67,16 +67,24 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   const handleActivate = async (name: string) => {
     setActivating(name);
     try {
-      const [enabled, disabled] = await invoke<[string[], string[]]>(
-        "activate_profile",
-        { addonsPath, profileName: name },
-      );
+      const result = await invoke<{
+        enabled: string[];
+        disabled: string[];
+        failed: string[];
+      }>("activate_profile", { addonsPath, profileName: name });
       const parts: string[] = [];
-      if (enabled.length > 0) parts.push(`${enabled.length} enabled`);
-      if (disabled.length > 0) parts.push(`${disabled.length} disabled`);
+      if (result.enabled.length > 0)
+        parts.push(`${result.enabled.length} enabled`);
+      if (result.disabled.length > 0)
+        parts.push(`${result.disabled.length} disabled`);
       toast.success(
         `Profile "${name}" activated${parts.length > 0 ? `: ${parts.join(", ")}` : ""}`,
       );
+      if (result.failed.length > 0) {
+        toast.error(
+          `Failed to rename ${result.failed.length} addon(s): ${result.failed.join(", ")}`,
+        );
+      }
       setActiveProfile(name);
       onRefresh();
     } catch (e) {
