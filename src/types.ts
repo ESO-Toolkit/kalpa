@@ -97,3 +97,15 @@ export interface AddonProfile {
   enabledAddons: string[];
   createdAt: string;
 }
+
+export interface CharacterInfo {
+  server: string;
+  name: string;
+}
+
+export interface MinionMigrationResult {
+  found: boolean;
+  addonCount: number;
+  imported: number;
+  alreadyTracked: number;
+}

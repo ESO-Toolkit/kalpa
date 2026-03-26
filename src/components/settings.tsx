@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { toast } from "sonner";
 import { getSetting, setSetting } from "@/lib/store";
 import type { ImportResult } from "../types";
 import {
@@ -22,6 +23,7 @@ interface SettingsProps {
   onRefresh: () => void;
   onShowBackups: () => void;
   onShowApiCompat: () => void;
+  onShowCharacters: () => void;
 }
 
 export function Settings({
@@ -31,6 +33,7 @@ export function Settings({
   onRefresh,
   onShowBackups,
   onShowApiCompat,
+  onShowCharacters,
 }: SettingsProps) {
   const [path, setPath] = useState(addonsPath);
   const [importing, setImporting] = useState(false);
@@ -38,9 +41,12 @@ export function Settings({
   const [importError, setImportError] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [autoUpdate, setAutoUpdate] = useState(false);
+  const [minionDetected, setMinionDetected] = useState(false);
+  const [migrating, setMigrating] = useState(false);
 
   useEffect(() => {
     getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
+    invoke<boolean>("detect_minion").then(setMinionDetected).catch(() => {});
   }, []);
 
   const handleSave = () => {
@@ -153,14 +159,56 @@ export function Settings({
 
           <div>
             <h3 className="mb-1 text-sm font-medium">Tools</h3>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" onClick={onShowBackups}>
                 SavedVariables Backup
+              </Button>
+              <Button variant="outline" size="sm" onClick={onShowCharacters}>
+                Characters
               </Button>
               <Button variant="outline" size="sm" onClick={onShowApiCompat}>
                 API Compatibility
               </Button>
             </div>
+            {minionDetected && (
+              <div className="mt-3">
+                <h3 className="mb-1 text-sm font-medium">Minion Migration</h3>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  Minion detected. Import addon tracking data to enable update checking.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={migrating}
+                  onClick={async () => {
+                    setMigrating(true);
+                    try {
+                      const result = await invoke<{
+                        found: boolean;
+                        addonCount: number;
+                        imported: number;
+                        alreadyTracked: number;
+                      }>("migrate_from_minion", { addonsPath });
+                      const { imported, alreadyTracked } = result;
+                      if (imported > 0) {
+                        toast.success(
+                          `Imported ${imported} addon${imported !== 1 ? "s" : ""} from Minion${alreadyTracked > 0 ? ` (${alreadyTracked} already tracked)` : ""}`,
+                        );
+                        onRefresh();
+                      } else {
+                        toast.info("All Minion addons are already tracked.");
+                      }
+                    } catch (e) {
+                      toast.error(String(e));
+                    } finally {
+                      setMigrating(false);
+                    }
+                  }}
+                >
+                  {migrating ? "Migrating..." : "Import from Minion"}
+                </Button>
+              </div>
+            )}
           </div>
 
           <Separator />

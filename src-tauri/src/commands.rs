@@ -1025,3 +1025,222 @@ pub fn delete_profile(addons_path: String, profile_name: String) -> Result<(), S
 
     save_profiles(&addons_dir, &store)
 }
+
+// ─── Multi-Character SavedVariables ──────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterInfo {
+    pub server: String,
+    pub name: String,
+}
+
+#[tauri::command]
+pub fn list_characters(addons_path: String) -> Result<Vec<CharacterInfo>, String> {
+    let addons_dir = PathBuf::from(&addons_path);
+    let settings_path = addons_dir.parent()
+        .map(|p| p.join("AddOnSettings.txt"))
+        .ok_or("Could not find AddOnSettings.txt")?;
+
+    if !settings_path.exists() {
+        return Err("AddOnSettings.txt not found.".to_string());
+    }
+
+    let content = fs::read_to_string(&settings_path)
+        .map_err(|e| format!("Failed to read AddOnSettings.txt: {}", e))?;
+
+    let mut characters: Vec<CharacterInfo> = Vec::new();
+    let skip_prefixes = ["#Version", "#Acknowledged", "#AddOnsEnabled"];
+
+    for line in content.lines() {
+        if !line.starts_with('#') {
+            continue;
+        }
+        let line = &line[1..]; // Strip #
+        if skip_prefixes.iter().any(|p| format!("#{}", line).starts_with(p)) {
+            continue;
+        }
+        if let Some(pos) = line.find('-') {
+            let server = line[..pos].trim().to_string();
+            let name = line[pos + 1..].trim().to_string();
+            if !server.is_empty() && !name.is_empty() {
+                // Deduplicate
+                if !characters.iter().any(|c| c.server == server && c.name == name) {
+                    characters.push(CharacterInfo { server, name });
+                }
+            }
+        }
+    }
+
+    Ok(characters)
+}
+
+#[tauri::command]
+pub fn backup_character_settings(
+    addons_path: String,
+    character_name: String,
+    backup_name: String,
+) -> Result<u32, String> {
+    let addons_dir = PathBuf::from(&addons_path);
+    let sv_dir = saved_variables_dir(&addons_dir);
+    if !sv_dir.is_dir() {
+        return Err("SavedVariables folder not found.".to_string());
+    }
+
+    let backups = backups_dir(&addons_dir).join(format!("char-{}", backup_name));
+    fs::create_dir_all(&backups)
+        .map_err(|e| format!("Failed to create backup folder: {}", e))?;
+
+    // Copy all SavedVariables files that contain this character's data
+    let mut count: u32 = 0;
+    if let Ok(entries) = fs::read_dir(&sv_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                // Check if file mentions this character
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if content.contains(&character_name) {
+                        if let Some(name) = path.file_name() {
+                            let dest = backups.join(name);
+                            if fs::copy(&path, &dest).is_ok() {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+// ─── Minion Migration ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MinionAddon {
+    pub uid: u32,
+    pub version: String,
+    pub folders: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MinionMigrationResult {
+    pub found: bool,
+    pub addon_count: u32,
+    pub imported: u32,
+    pub already_tracked: u32,
+}
+
+fn find_minion_xml() -> Option<PathBuf> {
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".minion").join("minion.xml");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
+    let mut addons: Vec<MinionAddon> = Vec::new();
+    let re_addon = regex::Regex::new(r#"<addon[^>]*uid="(\d+)"[^>]*ui-version="([^"]*)"[^>]*>"#).unwrap();
+    let re_dir = regex::Regex::new(r"<dir>([^<]+)</dir>").unwrap();
+
+    // Simple state machine parser for Minion XML
+    let mut current_uid: Option<u32> = None;
+    let mut current_version = String::new();
+    let mut current_dirs: Vec<String> = Vec::new();
+
+    for line in xml_content.lines() {
+        let line = line.trim();
+        if let Some(caps) = re_addon.captures(line) {
+            // Save previous addon if any
+            if let Some(uid) = current_uid {
+                if !current_dirs.is_empty() {
+                    addons.push(MinionAddon {
+                        uid,
+                        version: current_version.clone(),
+                        folders: current_dirs.clone(),
+                    });
+                }
+            }
+            current_uid = caps[1].parse::<u32>().ok();
+            current_version = caps[2].to_string();
+            current_dirs = Vec::new();
+        } else if let Some(caps) = re_dir.captures(line) {
+            current_dirs.push(caps[1].to_string());
+        } else if line.contains("</addon>") {
+            if let Some(uid) = current_uid {
+                if !current_dirs.is_empty() {
+                    addons.push(MinionAddon {
+                        uid,
+                        version: current_version.clone(),
+                        folders: current_dirs.clone(),
+                    });
+                }
+            }
+            current_uid = None;
+            current_dirs = Vec::new();
+        }
+    }
+
+    addons
+}
+
+#[tauri::command]
+pub fn detect_minion() -> Result<bool, String> {
+    Ok(find_minion_xml().is_some())
+}
+
+#[tauri::command]
+pub fn migrate_from_minion(addons_path: String) -> Result<MinionMigrationResult, String> {
+    let xml_path = find_minion_xml()
+        .ok_or("Minion installation not found.")?;
+
+    let content = fs::read_to_string(&xml_path)
+        .map_err(|e| format!("Failed to read Minion data: {}", e))?;
+
+    let minion_addons = parse_minion_addons(&content);
+    let addon_count = minion_addons.len() as u32;
+
+    let addons_dir = PathBuf::from(&addons_path);
+    let mut store = metadata::load_metadata(&addons_dir);
+
+    let mut imported: u32 = 0;
+    let mut already_tracked: u32 = 0;
+
+    for addon in &minion_addons {
+        for folder in &addon.folders {
+            if store.addons.contains_key(folder) {
+                already_tracked += 1;
+                continue;
+            }
+            // Only import if the folder actually exists on disk
+            if addons_dir.join(folder).is_dir() {
+                metadata::record_install(
+                    &mut store,
+                    folder,
+                    addon.uid,
+                    &addon.version,
+                    &format!(
+                        "https://www.esoui.com/downloads/landing.php?fileid={}",
+                        addon.uid
+                    ),
+                );
+                imported += 1;
+            }
+        }
+    }
+
+    let _ = metadata::save_metadata(&addons_dir, &store);
+
+    Ok(MinionMigrationResult {
+        found: true,
+        addon_count,
+        imported,
+        already_tracked,
+    })
+}

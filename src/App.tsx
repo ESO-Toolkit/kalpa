@@ -9,6 +9,7 @@ import { CategoryBrowser } from "./components/category-browser";
 import { Profiles } from "./components/profiles";
 import { Backups } from "./components/backups";
 import { ApiCompat } from "./components/api-compat";
+import { Characters } from "./components/characters";
 import { Settings } from "./components/settings";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
@@ -33,6 +34,7 @@ function App() {
   const [showProfiles, setShowProfiles] = useState(false);
   const [showBackups, setShowBackups] = useState(false);
   const [showApiCompat, setShowApiCompat] = useState(false);
+  const [showCharacters, setShowCharacters] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [updateResults, setUpdateResults] = useState<UpdateCheckResult[]>([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -532,6 +534,13 @@ function App() {
         />
       )}
 
+      {showCharacters && (
+        <Characters
+          addonsPath={addonsPath}
+          onClose={() => setShowCharacters(false)}
+        />
+      )}
+
       {showSettings && (
         <Settings
           addonsPath={addonsPath}
@@ -545,6 +554,10 @@ function App() {
           onShowApiCompat={() => {
             setShowSettings(false);
             setShowApiCompat(true);
+          }}
+          onShowCharacters={() => {
+            setShowSettings(false);
+            setShowCharacters(true);
           }}
         />
       )}
