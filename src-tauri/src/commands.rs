@@ -419,6 +419,104 @@ pub struct ImportResult {
     pub skipped: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoLinkResult {
+    pub linked: Vec<String>,
+    pub not_found: Vec<String>,
+}
+
+/// Try to auto-link untracked addons to their ESOUI IDs by searching ESOUI.
+#[tauri::command]
+pub fn auto_link_addons(addons_path: String) -> Result<AutoLinkResult, String> {
+    let addons_dir = PathBuf::from(&addons_path);
+    if !addons_dir.is_dir() {
+        return Err(format!("AddOns folder not found: {}", addons_path));
+    }
+
+    let mut store = metadata::load_metadata(&addons_dir);
+
+    // Find addons that exist on disk but aren't tracked
+    let entries = fs::read_dir(&addons_dir)
+        .map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
+
+    let mut untracked: Vec<(String, String)> = Vec::new(); // (folder_name, version)
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let folder_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        if store.addons.contains_key(&folder_name) {
+            continue;
+        }
+        // Must have a manifest to be a real addon
+        let manifest = find_manifest(&addons_dir, &folder_name)
+            .and_then(|p| manifest::parse_manifest(&folder_name, &p));
+        if let Some(m) = manifest {
+            // Skip libraries — they're usually bundled
+            if !m.is_library {
+                untracked.push((folder_name, m.version));
+            }
+        }
+    }
+
+    let mut linked: Vec<String> = Vec::new();
+    let mut not_found: Vec<String> = Vec::new();
+
+    for (folder_name, version) in &untracked {
+        match esoui::search_addon_by_name(folder_name) {
+            Ok(Some(esoui_id)) => {
+                // Verify by fetching info — title should roughly match
+                if let Ok(info) = esoui::fetch_addon_info(esoui_id) {
+                    metadata::record_install(
+                        &mut store,
+                        folder_name,
+                        esoui_id,
+                        version,
+                        &info.download_url,
+                    );
+                    linked.push(folder_name.clone());
+                } else {
+                    not_found.push(folder_name.clone());
+                }
+            }
+            Ok(None) => not_found.push(folder_name.clone()),
+            Err(_) => not_found.push(folder_name.clone()),
+        }
+        // Be respectful to ESOUI
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    let _ = metadata::save_metadata(&addons_dir, &store);
+
+    Ok(AutoLinkResult { linked, not_found })
+}
+
+/// Batch remove multiple addons.
+#[tauri::command]
+pub fn batch_remove_addons(
+    addons_path: String,
+    folder_names: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let addons_dir = PathBuf::from(&addons_path);
+    let mut store = metadata::load_metadata(&addons_dir);
+    let mut removed: Vec<String> = Vec::new();
+
+    for name in &folder_names {
+        if installer::remove_addon(&addons_dir, name).is_ok() {
+            metadata::remove_entry(&mut store, name);
+            removed.push(name.clone());
+        }
+    }
+
+    let _ = metadata::save_metadata(&addons_dir, &store);
+    Ok(removed)
+}
+
 #[tauri::command]
 pub fn import_addon_list(addons_path: String, json_data: String) -> Result<ImportResult, String> {
     let export: ExportData =

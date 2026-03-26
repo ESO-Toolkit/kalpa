@@ -20,6 +20,8 @@ pub fn run() {
             commands::update_addon,
             commands::export_addon_list,
             commands::import_addon_list,
+            commands::auto_link_addons,
+            commands::batch_remove_addons,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

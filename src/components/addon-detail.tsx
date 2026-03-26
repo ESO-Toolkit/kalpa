@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import type { AddonManifest, UpdateCheckResult, InstallResult } from "../types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -53,6 +54,7 @@ export function AddonDetail({
         folderName: addon.folderName,
       });
       setConfirmingRemove(false);
+      toast.success(`Removed ${addon.title}`);
       onRemove();
     } catch (e) {
       setRemoveError(String(e));
@@ -69,6 +71,7 @@ export function AddonDetail({
         addonsPath,
         esouiId: updateResult.esouiId,
       });
+      toast.success(`Updated ${addon.title}`);
       onUpdated();
     } catch (e) {
       setUpdateError(String(e));

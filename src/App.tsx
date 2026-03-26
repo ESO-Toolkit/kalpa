@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { AddonList } from "./components/addon-list";
 import { AddonDetail } from "./components/addon-detail";
 import { InstallDialog } from "./components/install-dialog";
@@ -31,6 +32,10 @@ function App() {
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
 
+  // Batch selection
+  const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
+  const [batchRemoving, setBatchRemoving] = useState(false);
+
   const checkForUpdates = useCallback(async (path: string) => {
     setCheckingUpdates(true);
     try {
@@ -38,6 +43,10 @@ function App() {
         addonsPath: path,
       });
       setUpdateResults(results);
+      const updates = results.filter((r) => r.hasUpdate);
+      if (updates.length > 0) {
+        toast.info(`${updates.length} update${updates.length > 1 ? "s" : ""} available`);
+      }
     } catch {
       // Silently fail — update checks are non-critical
     } finally {
@@ -78,15 +87,35 @@ function App() {
     [scanAddons, checkForUpdates],
   );
 
+  // Auto-link untracked addons on first load
+  const autoLinkRan = useRef(false);
+  const runAutoLink = useCallback(async (path: string) => {
+    if (autoLinkRan.current) return;
+    autoLinkRan.current = true;
+    try {
+      const result = await invoke<{ linked: string[]; notFound: string[] }>(
+        "auto_link_addons",
+        { addonsPath: path },
+      );
+      if (result.linked.length > 0) {
+        toast.success(
+          `Auto-linked ${result.linked.length} addon${result.linked.length > 1 ? "s" : ""} to ESOUI`,
+        );
+        // Re-scan to pick up new ESOUI IDs
+        scanAndCheck(path);
+      }
+    } catch {
+      // Non-critical
+    }
+  }, [scanAndCheck]);
+
   useEffect(() => {
     async function init() {
-      // Load persisted preferences
       const savedSort = await getSetting<SortMode>("sortMode", "name");
       const savedFilter = await getSetting<FilterMode>("filterMode", "all");
       setSortMode(savedSort);
       setFilterMode(savedFilter);
 
-      // Try saved path first, then auto-detect
       const savedPath = await getSetting<string>("addonsPath", "");
       try {
         let path = savedPath;
@@ -97,6 +126,8 @@ function App() {
         await setSetting("addonsPath", path);
         await scanAddons(path);
         checkForUpdates(path);
+        // Auto-link after initial scan
+        runAutoLink(path);
       } catch {
         setError(
           "Could not detect ESO AddOns folder. Please set it in Settings.",
@@ -125,6 +156,9 @@ function App() {
       if (e.ctrlKey && e.key === "b") {
         e.preventDefault();
         setShowBrowse(true);
+      }
+      if (e.key === "Escape") {
+        setSelectedFolders(new Set());
       }
     };
     window.addEventListener("keydown", handler);
@@ -159,17 +193,79 @@ function App() {
 
   const handleUpdateAll = async () => {
     setUpdatingAll(true);
+    let updated = 0;
     for (const update of updatesAvailable) {
       try {
         await invoke<InstallResult>("update_addon", {
           addonsPath,
           esouiId: update.esouiId,
         });
+        updated++;
       } catch {
         // Continue updating others even if one fails
       }
     }
     setUpdatingAll(false);
+    toast.success(`Updated ${updated} addon${updated !== 1 ? "s" : ""}`);
+    scanAndCheck(addonsPath);
+  };
+
+  // Batch operations
+  const handleToggleSelect = (folderName: string) => {
+    setSelectedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderName)) {
+        next.delete(folderName);
+      } else {
+        next.add(folderName);
+      }
+      return next;
+    });
+  };
+
+  const handleBatchRemove = async () => {
+    if (selectedFolders.size === 0) return;
+    setBatchRemoving(true);
+    try {
+      const removed = await invoke<string[]>("batch_remove_addons", {
+        addonsPath,
+        folderNames: Array.from(selectedFolders),
+      });
+      toast.success(`Removed ${removed.length} addon${removed.length !== 1 ? "s" : ""}`);
+      setSelectedFolders(new Set());
+      setSelectedAddon(null);
+      handleRefresh();
+    } catch (e) {
+      toast.error(`Batch remove failed: ${e}`);
+    } finally {
+      setBatchRemoving(false);
+    }
+  };
+
+  const handleBatchUpdate = async () => {
+    const toUpdate = updatesAvailable.filter((u) =>
+      selectedFolders.has(u.folderName),
+    );
+    if (toUpdate.length === 0) {
+      toast.info("No selected addons have updates available");
+      return;
+    }
+    setUpdatingAll(true);
+    let updated = 0;
+    for (const update of toUpdate) {
+      try {
+        await invoke<InstallResult>("update_addon", {
+          addonsPath,
+          esouiId: update.esouiId,
+        });
+        updated++;
+      } catch {
+        // Continue
+      }
+    }
+    setUpdatingAll(false);
+    toast.success(`Updated ${updated} addon${updated !== 1 ? "s" : ""}`);
+    setSelectedFolders(new Set());
     scanAndCheck(addonsPath);
   };
 
@@ -219,6 +315,8 @@ function App() {
       null
     : null;
 
+  const batchMode = selectedFolders.size > 0;
+
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-border bg-card px-5 py-3 select-none">
@@ -226,54 +324,94 @@ function App() {
           ESO Addon Manager
         </h1>
         <div className="flex items-center gap-2">
-          <span className="mr-2 text-xs text-muted-foreground">
-            {addons.length} addons
-            {missingDepCount > 0 && ` \u00b7 ${missingDepCount} with issues`}
-            {checkingUpdates && (
-              <span className="ml-1 inline-flex items-center gap-1">
-                \u00b7{" "}
-                <span className="inline-block size-3 animate-spin rounded-full border-2 border-border border-t-primary" />{" "}
-                Checking updates...
+          {batchMode ? (
+            <>
+              <span className="mr-2 text-xs text-primary font-medium">
+                {selectedFolders.size} selected
               </span>
-            )}
-          </span>
-          {updatesAvailable.length > 0 && (
-            <Button
-              onClick={handleUpdateAll}
-              disabled={updatingAll}
-              size="sm"
-            >
-              {updatingAll
-                ? "Updating..."
-                : `Update All (${updatesAvailable.length})`}
-            </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleBatchUpdate}
+                disabled={updatingAll}
+              >
+                {updatingAll ? "Updating..." : "Update Selected"}
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={handleBatchRemove}
+                disabled={batchRemoving}
+              >
+                {batchRemoving ? "Removing..." : "Remove Selected"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setSelectedFolders(new Set())}
+              >
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <>
+              <span className="mr-2 text-xs text-muted-foreground">
+                {addons.length} addons
+                {missingDepCount > 0 && ` \u00b7 ${missingDepCount} with issues`}
+                {checkingUpdates && (
+                  <span className="ml-1 inline-flex items-center gap-1">
+                    \u00b7{" "}
+                    <span className="inline-block size-3 animate-spin rounded-full border-2 border-border border-t-primary" />{" "}
+                    Checking updates...
+                  </span>
+                )}
+              </span>
+              {updatesAvailable.length > 0 && (
+                <Button
+                  onClick={handleUpdateAll}
+                  disabled={updatingAll}
+                  size="sm"
+                >
+                  {updatingAll
+                    ? "Updating..."
+                    : `Update All (${updatesAvailable.length})`}
+                </Button>
+              )}
+              <Button size="sm" onClick={() => setShowBrowse(true)}>
+                Browse
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowInstall(true)}
+              >
+                Install by URL
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRefresh}
+                disabled={loading}
+              >
+                {loading ? "Scanning..." : "Refresh"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowSettings(true)}
+              >
+                Settings
+              </Button>
+            </>
           )}
-          <Button size="sm" onClick={() => setShowBrowse(true)}>
-            Browse
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => setShowInstall(true)}>
-            Install by URL
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleRefresh}
-            disabled={loading}
-          >
-            {loading ? "Scanning..." : "Refresh"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setShowSettings(true)}
-          >
-            Settings
-          </Button>
         </div>
       </header>
 
       {error && (
-        <Alert variant="destructive" className="rounded-none border-x-0 border-t-0">
+        <Alert
+          variant="destructive"
+          className="rounded-none border-x-0 border-t-0"
+        >
           {error}
         </Alert>
       )}
@@ -291,6 +429,8 @@ function App() {
           onSortChange={handleSortChange}
           filterMode={filterMode}
           onFilterChange={handleFilterChange}
+          selectedFolders={selectedFolders}
+          onToggleSelect={handleToggleSelect}
         />
         <AddonDetail
           addon={selectedAddon}

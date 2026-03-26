@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import type { EsouiAddonInfo, InstallResult } from "../types";
 import {
   Dialog,
@@ -65,6 +66,7 @@ export function InstallDialog({
       });
       setResult(installResult);
       setState("installed");
+      toast.success(`Installed ${installResult.installedFolders.join(", ")}`);
       onInstalled();
     } catch (e) {
       setError(String(e));

@@ -2,6 +2,7 @@ import type { AddonManifest, UpdateCheckResult } from "../types";
 import type { SortMode, FilterMode } from "../App";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -23,6 +24,8 @@ interface AddonListProps {
   onSortChange: (mode: SortMode) => void;
   filterMode: FilterMode;
   onFilterChange: (mode: FilterMode) => void;
+  selectedFolders: Set<string>;
+  onToggleSelect: (folderName: string) => void;
 }
 
 const FILTERS: [FilterMode, string][] = [
@@ -45,12 +48,16 @@ export function AddonList({
   onSortChange,
   filterMode,
   onFilterChange,
+  selectedFolders,
+  onToggleSelect,
 }: AddonListProps) {
   const updatesMap = new Map(
     updateResults
       .filter((r) => r.hasUpdate)
       .map((r) => [r.folderName, r]),
   );
+
+  const batchMode = selectedFolders.size > 0;
 
   return (
     <div className="flex w-[380px] min-w-[300px] flex-col border-r border-border bg-card">
@@ -80,7 +87,10 @@ export function AddonList({
             </button>
           ))}
         </div>
-        <Select value={sortMode} onValueChange={(v) => onSortChange(v as SortMode)}>
+        <Select
+          value={sortMode}
+          onValueChange={(v) => onSortChange(v as SortMode)}
+        >
           <SelectTrigger size="sm" className="h-6 text-xs">
             <SelectValue />
           </SelectTrigger>
@@ -92,6 +102,16 @@ export function AddonList({
       </div>
       <div className="border-b border-border px-4 py-1 text-[11px] text-muted-foreground">
         {addons.length} {addons.length === 1 ? "addon" : "addons"}
+        {batchMode && (
+          <span className="text-primary font-medium">
+            {" "}&middot; {selectedFolders.size} selected
+          </span>
+        )}
+        {!batchMode && (
+          <span className="float-right opacity-50">
+            Right-click to select
+          </span>
+        )}
       </div>
       <div className="flex-1 overflow-y-auto">
         {loading ? (
@@ -103,46 +123,75 @@ export function AddonList({
             No addons found
           </div>
         ) : (
-          addons.map((addon) => (
-            <div
-              key={addon.folderName}
-              className={cn(
-                "cursor-pointer border-l-3 border-transparent px-4 py-2.5 transition-colors hover:bg-background",
-                selectedAddon?.folderName === addon.folderName &&
-                  "border-l-primary bg-background",
-              )}
-              onClick={() => onSelect(addon)}
-            >
-              <div className="flex items-center gap-2">
-                <span className="flex-1 truncate text-sm font-medium">
-                  {addon.title}
-                </span>
-                {updatesMap.has(addon.folderName) && (
-                  <Badge variant="outline" className="border-blue-500/30 bg-blue-500/10 text-blue-400">
-                    Update
-                  </Badge>
+          addons.map((addon) => {
+            const isSelected = selectedFolders.has(addon.folderName);
+            return (
+              <div
+                key={addon.folderName}
+                className={cn(
+                  "cursor-pointer border-l-3 border-transparent px-4 py-2.5 transition-colors hover:bg-background group",
+                  selectedAddon?.folderName === addon.folderName &&
+                    !batchMode &&
+                    "border-l-primary bg-background",
+                  isSelected && "bg-primary/5 border-l-primary",
                 )}
-                {addon.isLibrary && (
-                  <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
-                    LIB
-                  </Badge>
-                )}
-                {addon.missingDependencies.length > 0 && (
-                  <Badge variant="destructive">
-                    {addon.missingDependencies.length} missing
-                  </Badge>
-                )}
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  {addon.version || `v${addon.addonVersion ?? "?"}`}
-                </span>
-              </div>
-              {addon.author && (
-                <div className="mt-0.5 text-xs text-muted-foreground">
-                  by {addon.author}
+                onClick={() => {
+                  if (batchMode) {
+                    onToggleSelect(addon.folderName);
+                  } else {
+                    onSelect(addon);
+                  }
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onToggleSelect(addon.folderName);
+                }}
+              >
+                <div className="flex items-center gap-2">
+                  {batchMode && (
+                    <Checkbox
+                      checked={isSelected}
+                      onCheckedChange={() => onToggleSelect(addon.folderName)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="shrink-0"
+                    />
+                  )}
+                  <span className="flex-1 truncate text-sm font-medium">
+                    {addon.title}
+                  </span>
+                  {updatesMap.has(addon.folderName) && (
+                    <Badge
+                      variant="outline"
+                      className="border-blue-500/30 bg-blue-500/10 text-blue-400"
+                    >
+                      Update
+                    </Badge>
+                  )}
+                  {addon.isLibrary && (
+                    <Badge
+                      variant="outline"
+                      className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                    >
+                      LIB
+                    </Badge>
+                  )}
+                  {addon.missingDependencies.length > 0 && (
+                    <Badge variant="destructive">
+                      {addon.missingDependencies.length} missing
+                    </Badge>
+                  )}
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {addon.version || `v${addon.addonVersion ?? "?"}`}
+                  </span>
                 </div>
-              )}
-            </div>
-          ))
+                {addon.author && (
+                  <div className={cn("mt-0.5 text-xs text-muted-foreground", batchMode && "ml-7")}>
+                    by {addon.author}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
     </div>
