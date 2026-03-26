@@ -54,41 +54,68 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
     let mut api_version: Vec<u32> = Vec::new();
     let mut description = String::new();
     let mut is_library = false;
-    let mut depends_on: Vec<Dependency> = Vec::new();
-    let mut optional_depends_on: Vec<Dependency> = Vec::new();
+    let mut depends_on_raw = String::new();
+    let mut optional_depends_on_raw = String::new();
+
+    // Track which multi-line field we're continuing (DependsOn can span lines)
+    let mut continuation: Option<&str> = None;
 
     for line in content.lines() {
         let line = line.trim();
-        if !line.starts_with("## ") {
-            continue;
-        }
 
-        let line = &line[3..];
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
+        if line.starts_with("## ") {
+            continuation = None;
+            let line = &line[3..];
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
 
-        let key = key.trim();
-        let value = value.trim();
+            let key = key.trim();
+            let value = value.trim();
 
-        match key {
-            "Title" => title = value.to_string(),
-            "Author" => author = value.to_string(),
-            "Version" => version = value.to_string(),
-            "AddOnVersion" => addon_version = value.parse().ok(),
-            "APIVersion" => {
-                api_version = value
-                    .split_whitespace()
-                    .filter_map(|v| v.parse().ok())
-                    .collect();
+            match key {
+                "Title" => title = value.to_string(),
+                "Author" => author = value.to_string(),
+                "Version" => version = value.to_string(),
+                "AddOnVersion" => addon_version = value.parse().ok(),
+                "APIVersion" => {
+                    api_version = value
+                        .split_whitespace()
+                        .filter_map(|v| v.parse().ok())
+                        .collect();
+                }
+                "Description" => description = value.to_string(),
+                "IsLibrary" => is_library = value.eq_ignore_ascii_case("true"),
+                "DependsOn" => {
+                    depends_on_raw = value.to_string();
+                    continuation = Some("DependsOn");
+                }
+                "OptionalDependsOn" => {
+                    optional_depends_on_raw = value.to_string();
+                    continuation = Some("OptionalDependsOn");
+                }
+                _ => {}
             }
-            "Description" => description = value.to_string(),
-            "IsLibrary" => is_library = value.eq_ignore_ascii_case("true"),
-            "DependsOn" => depends_on = parse_dependencies(value),
-            "OptionalDependsOn" => optional_depends_on = parse_dependencies(value),
-            _ => {}
+        } else if !line.is_empty() && !line.starts_with('#') {
+            // Continuation line for multi-line DependsOn
+            match continuation {
+                Some("DependsOn") => {
+                    depends_on_raw.push(' ');
+                    depends_on_raw.push_str(line);
+                }
+                Some("OptionalDependsOn") => {
+                    optional_depends_on_raw.push(' ');
+                    optional_depends_on_raw.push_str(line);
+                }
+                _ => {
+                    continuation = None;
+                }
+            }
         }
     }
+
+    let depends_on = parse_dependencies(&depends_on_raw);
+    let optional_depends_on = parse_dependencies(&optional_depends_on_raw);
 
     if title.is_empty() {
         title = folder_name.to_string();

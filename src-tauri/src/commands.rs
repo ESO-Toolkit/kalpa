@@ -93,8 +93,44 @@ pub fn scan_installed_addons(addons_path: String) -> Result<Vec<AddonManifest>, 
         }
     }
 
-    // Build set of installed folder names for dependency checking
-    let installed: HashSet<String> = addons.iter().map(|a| a.folder_name.clone()).collect();
+    // Build set of ALL directory names in AddOns folder for dependency checking.
+    // This includes folders without manifests (data folders) and catches everything
+    // ESO would recognize. ESO also searches subfolders up to 3 levels deep for
+    // embedded libraries, so we scan those too.
+    let mut installed: HashSet<String> = HashSet::new();
+    if let Ok(top_entries) = fs::read_dir(&addons_dir) {
+        for entry in top_entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                installed.insert(name.to_string());
+            }
+            // Scan subfolders (1-2 levels deep) for embedded libraries
+            if let Ok(sub_entries) = fs::read_dir(&path) {
+                for sub in sub_entries.flatten() {
+                    if sub.path().is_dir() {
+                        if let Some(name) = sub.path().file_name().and_then(|n| n.to_str()) {
+                            installed.insert(name.to_string());
+                        }
+                        // One more level (libs/LibFoo/)
+                        if let Ok(sub2_entries) = fs::read_dir(sub.path()) {
+                            for sub2 in sub2_entries.flatten() {
+                                if sub2.path().is_dir() {
+                                    if let Some(name) =
+                                        sub2.path().file_name().and_then(|n| n.to_str())
+                                    {
+                                        installed.insert(name.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Load metadata to enrich addons with ESOUI IDs
     let store = metadata::load_metadata(&addons_dir);
