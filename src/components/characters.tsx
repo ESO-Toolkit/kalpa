@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import type { CharacterInfo } from "../types";
@@ -57,14 +57,17 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
     }
   };
 
-  // Group characters by server
-  const byServer = characters.reduce(
-    (acc, char) => {
-      if (!acc[char.server]) acc[char.server] = [];
-      acc[char.server].push(char);
-      return acc;
-    },
-    {} as Record<string, CharacterInfo[]>
+  const byServer = useMemo(
+    () =>
+      characters.reduce(
+        (acc, char) => {
+          if (!acc[char.server]) acc[char.server] = [];
+          acc[char.server].push(char);
+          return acc;
+        },
+        {} as Record<string, CharacterInfo[]>
+      ),
+    [characters]
   );
 
   return (
@@ -80,8 +83,11 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
         </p>
 
         <div>
-          <label className="text-xs text-muted-foreground">Backup name (optional)</label>
+          <label htmlFor="backup-name" className="text-xs text-muted-foreground">
+            Backup name (optional)
+          </label>
           <Input
+            id="backup-name"
             placeholder="Leave blank for auto-name"
             value={backupName}
             onChange={(e) => setBackupName(e.target.value)}

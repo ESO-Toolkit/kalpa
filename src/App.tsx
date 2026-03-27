@@ -14,12 +14,16 @@ import { Alert } from "@/components/ui/alert";
 import { getSetting, setSetting } from "@/lib/store";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { RefreshCwIcon, SettingsIcon, MinusIcon, SquareIcon, XIcon } from "lucide-react";
-import type { AddonManifest, UpdateCheckResult, InstallResult, EsouiSearchResult } from "./types";
-
-export type SortMode = "name" | "author";
-export type FilterMode = "all" | "addons" | "libraries" | "outdated" | "missing-deps";
-export type ViewMode = "installed" | "discover";
-export type DiscoverTab = "search" | "categories" | "url";
+import type {
+  AddonManifest,
+  UpdateCheckResult,
+  InstallResult,
+  EsouiSearchResult,
+  SortMode,
+  FilterMode,
+  ViewMode,
+  DiscoverTab,
+} from "./types";
 
 function App() {
   const [addonsPath, setAddonsPath] = useState<string>("");
@@ -28,11 +32,9 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showProfiles, setShowProfiles] = useState(false);
-  const [showBackups, setShowBackups] = useState(false);
-  const [showApiCompat, setShowApiCompat] = useState(false);
-  const [showCharacters, setShowCharacters] = useState(false);
+  const [activeDialog, setActiveDialog] = useState<
+    "settings" | "profiles" | "backups" | "api-compat" | "characters" | null
+  >(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [updateResults, setUpdateResults] = useState<UpdateCheckResult[]>([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -169,6 +171,7 @@ function App() {
           path = await invoke<string>("detect_addons_folder");
         }
         setAddonsPath(path);
+        await invoke("set_addons_path", { addonsPath: path });
         await setSetting("addonsPath", path);
         await scanAddons(path);
         const autoUpdate = await getSetting<boolean>("autoUpdate", false);
@@ -184,9 +187,11 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts — use refs to avoid re-registering the listener on state changes
   const addonsPathRef = useRef(addonsPath);
   addonsPathRef.current = addonsPath;
+  const viewModeRef = useRef(viewMode);
+  viewModeRef.current = viewMode;
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -205,7 +210,7 @@ function App() {
         setDiscoverTab("search");
       }
       if (e.key === "Escape") {
-        if (viewMode === "discover") {
+        if (viewModeRef.current === "discover") {
           setViewMode("installed");
         }
         setSelectedFolders(new Set());
@@ -213,7 +218,7 @@ function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [scanAndCheck, viewMode]);
+  }, [scanAndCheck]);
 
   const handleRefresh = () => {
     if (addonsPath) {
@@ -234,10 +239,11 @@ function App() {
     [addonsPath, scanAddons]
   );
 
-  const handlePathChange = (newPath: string) => {
+  const handlePathChange = async (newPath: string) => {
     setAddonsPath(newPath);
     setSelectedAddon(null);
     setUpdateResults([]);
+    await invoke("set_addons_path", { addonsPath: newPath });
     setSetting("addonsPath", newPath);
     scanAndCheck(newPath);
   };
@@ -378,9 +384,13 @@ function App() {
     [addons, searchQuery, filterMode, sortMode, updatesSet]
   );
 
-  const selectedUpdateResult = selectedAddon
-    ? (updateResults.find((r) => r.folderName === selectedAddon.folderName) ?? null)
-    : null;
+  const selectedUpdateResult = useMemo(
+    () =>
+      selectedAddon
+        ? (updateResults.find((r) => r.folderName === selectedAddon.folderName) ?? null)
+        : null,
+    [updateResults, selectedAddon]
+  );
 
   const batchMode = selectedFolders.size > 0;
 
@@ -457,7 +467,7 @@ function App() {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                onClick={() => setShowSettings(true)}
+                onClick={() => setActiveDialog("settings")}
                 aria-label="Settings"
                 title="Settings"
               >
@@ -564,42 +574,35 @@ function App() {
         )}
       </div>
 
-      {showProfiles && (
+      {activeDialog === "profiles" && (
         <Profiles
           addonsPath={addonsPath}
-          onClose={() => setShowProfiles(false)}
+          onClose={() => setActiveDialog(null)}
           onRefresh={handleRefresh}
         />
       )}
 
-      {showBackups && <Backups addonsPath={addonsPath} onClose={() => setShowBackups(false)} />}
-
-      {showApiCompat && (
-        <ApiCompat addonsPath={addonsPath} onClose={() => setShowApiCompat(false)} />
+      {activeDialog === "backups" && (
+        <Backups addonsPath={addonsPath} onClose={() => setActiveDialog(null)} />
       )}
 
-      {showCharacters && (
-        <Characters addonsPath={addonsPath} onClose={() => setShowCharacters(false)} />
+      {activeDialog === "api-compat" && (
+        <ApiCompat addonsPath={addonsPath} onClose={() => setActiveDialog(null)} />
       )}
 
-      {showSettings && (
+      {activeDialog === "characters" && (
+        <Characters addonsPath={addonsPath} onClose={() => setActiveDialog(null)} />
+      )}
+
+      {activeDialog === "settings" && (
         <Settings
           addonsPath={addonsPath}
           onPathChange={handlePathChange}
-          onClose={() => setShowSettings(false)}
+          onClose={() => setActiveDialog(null)}
           onRefresh={handleRefresh}
-          onShowBackups={() => {
-            setShowSettings(false);
-            setShowBackups(true);
-          }}
-          onShowApiCompat={() => {
-            setShowSettings(false);
-            setShowApiCompat(true);
-          }}
-          onShowCharacters={() => {
-            setShowSettings(false);
-            setShowCharacters(true);
-          }}
+          onShowBackups={() => setActiveDialog("backups")}
+          onShowApiCompat={() => setActiveDialog("api-compat")}
+          onShowCharacters={() => setActiveDialog("characters")}
         />
       )}
     </div>

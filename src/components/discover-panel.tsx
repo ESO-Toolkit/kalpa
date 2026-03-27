@@ -1,8 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import type { DiscoverTab } from "../App";
-import type { EsouiSearchResult, EsouiCategory, EsouiAddonInfo, InstallResult } from "../types";
+import type {
+  DiscoverTab,
+  EsouiSearchResult,
+  EsouiCategory,
+  EsouiAddonInfo,
+  InstallResult,
+} from "../types";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
@@ -22,6 +27,80 @@ interface DiscoverPanelProps {
   onInstalled: () => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   selectedResultId: number | null;
+}
+
+function useAddonInstall(addonsPath: string, onInstalled: () => void) {
+  const [installingId, setInstallingId] = useState<number | null>(null);
+
+  const install = useCallback(
+    async (id: number) => {
+      setInstallingId(id);
+      try {
+        const info = await invoke<EsouiAddonInfo>("resolve_esoui_addon", {
+          input: String(id),
+        });
+        const res = await invoke<InstallResult>("install_addon", {
+          addonsPath,
+          downloadUrl: info.downloadUrl,
+          esouiId: id,
+          esouiTitle: info.title,
+          esouiVersion: info.version,
+        });
+        toast.success(`Installed ${res.installedFolders.join(", ")}`);
+        onInstalled();
+      } catch (e) {
+        toast.error(String(e));
+      } finally {
+        setInstallingId(null);
+      }
+    },
+    [addonsPath, onInstalled]
+  );
+
+  return { installingId, install };
+}
+
+function DiscoverResultRow({
+  result,
+  selected,
+  installingId,
+  onSelect,
+  onInstall,
+  subtitle,
+}: {
+  result: EsouiSearchResult;
+  selected: boolean;
+  installingId: number | null;
+  onSelect: () => void;
+  onInstall: () => void;
+  subtitle: React.ReactNode;
+}) {
+  return (
+    <div
+      className={cn(
+        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-white/[0.04] group",
+        selected &&
+          "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]"
+      )}
+      onClick={onSelect}
+    >
+      <div className="flex items-center gap-2">
+        <span className="flex-1 truncate text-sm font-medium">{result.title}</span>
+        <Button
+          size="xs"
+          onClick={(e) => {
+            e.stopPropagation();
+            onInstall();
+          }}
+          disabled={installingId !== null}
+          className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+        >
+          {installingId === result.id ? "..." : "Install"}
+        </Button>
+      </div>
+      {subtitle}
+    </div>
+  );
 }
 
 const DISCOVER_TABS: [DiscoverTab, string][] = [
@@ -101,7 +180,7 @@ function SearchContent({
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<EsouiSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
-  const [installingId, setInstallingId] = useState<number | null>(null);
+  const { installingId, install: handleInstall } = useAddonInstall(addonsPath, onInstalled);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchIdRef = useRef(0);
 
@@ -136,31 +215,12 @@ function SearchContent({
     debounceRef.current = setTimeout(() => handleSearch(value), 500);
   };
 
-  const handleInstall = async (id: number) => {
-    setInstallingId(id);
-    try {
-      const info = await invoke<{ id: number; downloadUrl: string }>("resolve_esoui_addon", {
-        input: String(id),
-      });
-      const res = await invoke<InstallResult>("install_addon", {
-        addonsPath,
-        downloadUrl: info.downloadUrl,
-        esouiId: id,
-      });
-      toast.success(`Installed ${res.installedFolders.join(", ")}`);
-      onInstalled();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setInstallingId(null);
-    }
-  };
-
   return (
     <>
       <div className="px-3 pb-2">
         <Input
           placeholder="Search ESOUI addons..."
+          aria-label="Search ESOUI addons"
           value={query}
           onChange={(e) => handleInputChange(e.target.value)}
           onKeyDown={(e) => {
@@ -183,34 +243,20 @@ function SearchContent({
           </div>
         ) : (
           results.map((r) => (
-            <div
+            <DiscoverResultRow
               key={r.id}
-              className={cn(
-                "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-white/[0.04] group",
-                selectedResultId === r.id &&
-                  "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]"
-              )}
-              onClick={() => onSelectResult(r)}
-            >
-              <div className="flex items-center gap-2">
-                <span className="flex-1 truncate text-sm font-medium">{r.title}</span>
-                <Button
-                  size="xs"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleInstall(r.id);
-                  }}
-                  disabled={installingId !== null}
-                  className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  {installingId === r.id ? "..." : "Install"}
-                </Button>
-              </div>
-              <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/60">
-                <span>by {r.author}</span>
-                {r.category && <InfoPill color="muted">{r.category}</InfoPill>}
-              </div>
-            </div>
+              result={r}
+              selected={selectedResultId === r.id}
+              installingId={installingId}
+              onSelect={() => onSelectResult(r)}
+              onInstall={() => handleInstall(r.id)}
+              subtitle={
+                <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground/60">
+                  <span>by {r.author}</span>
+                  {r.category && <InfoPill color="muted">{r.category}</InfoPill>}
+                </div>
+              }
+            />
           ))
         )}
       </div>
@@ -237,7 +283,7 @@ function CategoryContent({
   const [results, setResults] = useState<EsouiSearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(0);
-  const [installingId, setInstallingId] = useState<number | null>(null);
+  const { installingId, install: handleInstall } = useAddonInstall(addonsPath, onInstalled);
 
   useEffect(() => {
     invoke<EsouiCategory[]>("get_esoui_categories")
@@ -276,26 +322,6 @@ function CategoryContent({
     if (selectedCategory) {
       setPage(0);
       loadCategory(selectedCategory, 0, sort);
-    }
-  };
-
-  const handleInstall = async (id: number) => {
-    setInstallingId(id);
-    try {
-      const info = await invoke<{ id: number; downloadUrl: string }>("resolve_esoui_addon", {
-        input: String(id),
-      });
-      const res = await invoke<InstallResult>("install_addon", {
-        addonsPath,
-        downloadUrl: info.downloadUrl,
-        esouiId: id,
-      });
-      toast.success(`Installed ${res.installedFolders.join(", ")}`);
-      onInstalled();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setInstallingId(null);
     }
   };
 
@@ -338,33 +364,19 @@ function CategoryContent({
           </div>
         ) : (
           results.map((r) => (
-            <div
+            <DiscoverResultRow
               key={r.id}
-              className={cn(
-                "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 hover:bg-white/[0.04] group",
-                selectedResultId === r.id &&
-                  "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]"
-              )}
-              onClick={() => onSelectResult(r)}
-            >
-              <div className="flex items-center gap-2">
-                <span className="flex-1 truncate text-sm font-medium">{r.title}</span>
-                <Button
-                  size="xs"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleInstall(r.id);
-                  }}
-                  disabled={installingId !== null}
-                  className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  {installingId === r.id ? "..." : "Install"}
-                </Button>
-              </div>
-              {r.category && (
-                <div className="mt-0.5 text-xs text-muted-foreground/60">{r.category}</div>
-              )}
-            </div>
+              result={r}
+              selected={selectedResultId === r.id}
+              installingId={installingId}
+              onSelect={() => onSelectResult(r)}
+              onInstall={() => handleInstall(r.id)}
+              subtitle={
+                r.category ? (
+                  <div className="mt-0.5 text-xs text-muted-foreground/60">{r.category}</div>
+                ) : null
+              }
+            />
           ))
         )}
       </div>
@@ -438,6 +450,8 @@ function UrlContent({ addonsPath, onInstalled }: { addonsPath: string; onInstall
         addonsPath,
         downloadUrl: addonInfo.downloadUrl,
         esouiId: addonInfo.id,
+        esouiTitle: addonInfo.title,
+        esouiVersion: addonInfo.version,
       });
       setResult(installResult);
       setState("installed");
@@ -454,8 +468,11 @@ function UrlContent({ addonsPath, onInstalled }: { addonsPath: string; onInstall
   return (
     <div className="flex-1 overflow-y-auto px-3 space-y-3">
       <div>
-        <label className="mb-1 block text-xs text-muted-foreground/60">ESOUI URL or Addon ID</label>
+        <label htmlFor="esoui-input" className="mb-1 block text-xs text-muted-foreground/60">
+          ESOUI URL or Addon ID
+        </label>
         <Input
+          id="esoui-input"
           value={input}
           onChange={(e) => {
             setInput(e.target.value);

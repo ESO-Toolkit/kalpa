@@ -1,6 +1,13 @@
 import { useCallback, useMemo, useRef } from "react";
-import type { AddonManifest, UpdateCheckResult, EsouiSearchResult } from "../types";
-import type { SortMode, FilterMode, ViewMode, DiscoverTab } from "../App";
+import type {
+  AddonManifest,
+  UpdateCheckResult,
+  EsouiSearchResult,
+  SortMode,
+  FilterMode,
+  ViewMode,
+  DiscoverTab,
+} from "../types";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -77,20 +84,15 @@ export function AddonList({
     [updateResults]
   );
 
-  const updatesSet = useMemo(
-    () => new Set(updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName)),
-    [updateResults]
-  );
-
   const filterCounts = useMemo<Record<FilterMode, number>>(
     () => ({
       all: allAddons.length,
       addons: allAddons.filter((a) => !a.isLibrary).length,
       libraries: allAddons.filter((a) => a.isLibrary).length,
-      outdated: allAddons.filter((a) => updatesSet.has(a.folderName)).length,
+      outdated: allAddons.filter((a) => updatesMap.has(a.folderName)).length,
       "missing-deps": allAddons.filter((a) => a.missingDependencies.length > 0).length,
     }),
-    [allAddons, updatesSet]
+    [allAddons, updatesMap]
   );
 
   const batchMode = selectedFolders.size > 0;
@@ -163,8 +165,9 @@ export function AddonList({
           {/* Search */}
           <div className="px-3 pb-2">
             <Input
-              type="text"
+              type="search"
               placeholder="Search addons..."
+              aria-label="Search addons"
               value={searchQuery}
               onChange={(e) => onSearchChange(e.target.value)}
             />
@@ -227,6 +230,7 @@ export function AddonList({
             ref={listRef}
             role="listbox"
             aria-label="Installed addons"
+            aria-activedescendant={selectedAddon ? `addon-${selectedAddon.folderName}` : undefined}
             tabIndex={0}
             onKeyDown={handleListKeyDown}
             className="flex-1 overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
@@ -246,6 +250,7 @@ export function AddonList({
                 return (
                   <div
                     key={addon.folderName}
+                    id={`addon-${addon.folderName}`}
                     role="option"
                     aria-selected={batchMode ? isSelected : isCurrent}
                     className={cn(

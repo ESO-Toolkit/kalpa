@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import type { AddonManifest, UpdateCheckResult, InstallResult } from "../types";
@@ -31,6 +31,19 @@ export function AddonDetail({
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const installedSet = useMemo(
+    () => new Set(installedAddons.map((a) => a.folderName)),
+    [installedAddons]
+  );
+
+  const dependents = useMemo(
+    () =>
+      addon
+        ? installedAddons.filter((a) => a.dependsOn.some((dep) => dep.name === addon.folderName))
+        : [],
+    [installedAddons, addon]
+  );
 
   if (!addon) {
     return (
@@ -66,12 +79,6 @@ export function AddonDetail({
       </div>
     );
   }
-
-  const installedSet = new Set(installedAddons.map((a) => a.folderName));
-
-  const dependents = installedAddons.filter((a) =>
-    a.dependsOn.some((dep) => dep.name === addon.folderName)
-  );
 
   const handleRemove = async () => {
     setRemoving(true);

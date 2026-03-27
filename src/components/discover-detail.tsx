@@ -76,16 +76,25 @@ export function DiscoverDetail({ result, addonsPath, onInstalled }: DiscoverDeta
     setInstallSuccess(null);
     try {
       let url = downloadUrl;
+      let title = detail?.title ?? result.title;
+      let version = detail?.version ?? "";
       if (!url) {
-        const info = await invoke<{ id: number; downloadUrl: string }>("resolve_esoui_addon", {
-          input: String(result.id),
-        });
+        const info = await invoke<{
+          id: number;
+          title: string;
+          version: string;
+          downloadUrl: string;
+        }>("resolve_esoui_addon", { input: String(result.id) });
         url = info.downloadUrl;
+        title = info.title;
+        version = info.version;
       }
       const res = await invoke<InstallResult>("install_addon", {
         addonsPath,
         downloadUrl: url,
         esouiId: result.id,
+        esouiTitle: title,
+        esouiVersion: version,
       });
       setInstallSuccess(res);
       toast.success(`Installed ${res.installedFolders.join(", ")}`);
@@ -185,6 +194,7 @@ export function DiscoverDetail({ result, addonsPath, onInstalled }: DiscoverDeta
                       i === safeIdx ? "bg-[#c4a44a]" : "bg-white/20 hover:bg-white/40"
                     )}
                     onClick={() => setScreenshotIdx(i)}
+                    aria-label={`Screenshot ${i + 1}`}
                   />
                 ))}
               </div>
