@@ -13,13 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert } from "@/components/ui/alert";
 
-type InstallState =
-  | "idle"
-  | "resolving"
-  | "resolved"
-  | "installing"
-  | "installed"
-  | "error";
+type InstallState = "idle" | "resolving" | "resolved" | "installing" | "installed" | "error";
 
 interface InstallDialogProps {
   addonsPath: string;
@@ -27,11 +21,7 @@ interface InstallDialogProps {
   onClose: () => void;
 }
 
-export function InstallDialog({
-  addonsPath,
-  onInstalled,
-  onClose,
-}: InstallDialogProps) {
+export function InstallDialog({ addonsPath, onInstalled, onClose }: InstallDialogProps) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<InstallState>("idle");
   const [addonInfo, setAddonInfo] = useState<EsouiAddonInfo | null>(null);
@@ -82,20 +72,14 @@ export function InstallDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent
-        className="sm:max-w-md"
-        onKeyDown={handleKeyDown}
-      >
+      <DialogContent className="sm:max-w-md" onKeyDown={handleKeyDown}>
         <DialogHeader>
           <DialogTitle>Install Addon</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4">
           <div>
-            <label
-              htmlFor="esoui-input"
-              className="mb-1 block text-sm text-muted-foreground"
-            >
+            <label htmlFor="esoui-input" className="mb-1 block text-sm text-muted-foreground">
               ESOUI URL or Addon ID
             </label>
             <Input
@@ -162,17 +146,11 @@ export function InstallDialog({
             </Button>
           )}
 
-          {state === "resolving" && (
-            <Button disabled>Resolving...</Button>
-          )}
+          {state === "resolving" && <Button disabled>Resolving...</Button>}
 
-          {state === "resolved" && (
-            <Button onClick={handleInstall}>Install</Button>
-          )}
+          {state === "resolved" && <Button onClick={handleInstall}>Install</Button>}
 
-          {state === "installing" && (
-            <Button disabled>Installing &amp; resolving deps...</Button>
-          )}
+          {state === "installing" && <Button disabled>Installing &amp; resolving deps...</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

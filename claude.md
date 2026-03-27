@@ -1,88 +1,98 @@
-\# ESO Addon Manager
-
-
+# ESO Addon Manager
 
 You are Claude Code working in this repo.
 
+## Project Overview
 
+An open-source ESO addon manager desktop app. Current state: **functional alpha** with addon scanning, installation, updates, dependency resolution, backups, profiles, character management, API compatibility checks, and Minion migration.
 
-Goal: build a proper open-source ESO addon manager with:
+### Stack
+- **Desktop client**: Tauri v2 + React 19 + TypeScript + Tailwind v4 + shadcn-ui
+- **Backend** (planned): Cloudflare Workers + KV, metadata caching only
+- **CI/CD**: GitHub Actions — tag-triggered release builds (Windows NSIS/MSI)
 
-\- A desktop client that installs directly into the ESO AddOns folder
+## Important Rules
 
-\- Automatic dependency resolution from addon manifests
+- Do not use private APIs or hacks
+- Prefer public ESOUI pages and direct public download URLs
+- Keep scraping centralized and cached (all in `esoui.rs`)
+- Do not implement hourly background scraping — use on-open refresh + manual Refresh button
+- Optimize for maintainability and simplicity over cleverness
 
-\- Update checks from public ESOUI pages
+## Code Quality
 
-\- A minimal metadata-only backend if needed
+- **After editing Rust code, always run both `cargo fmt` and `cargo clippy`** — clippy fixes can break formatting, so fmt must run after clippy, not before
+- Frontend checks: `npm run check` (runs tsc + eslint + prettier)
+- CI enforces all of these on every PR
 
-\- Near-zero recurring cost
+## Architecture
 
-\- A maintainable architecture that can scale to hundreds or thousands of users
+```
+src/                    # React frontend
+  components/           # Feature components (addon-list, settings, etc.)
+  components/ui/        # shadcn-ui primitives
+  lib/                  # Utilities (store, utils)
+  types.ts              # Shared TypeScript interfaces
+src-tauri/src/          # Rust backend
+  commands.rs           # All Tauri command handlers
+  esoui.rs              # ESOUI HTTP client & HTML scraping
+  manifest.rs           # Addon manifest (.txt) parsing
+  installer.rs          # ZIP extraction & addon installation
+  metadata.rs           # Metadata caching & management
+  lib.rs                # Module defs & Tauri app setup
+```
 
+## Git Workflow
 
+Use **GitHub Flow**:
+1. `master` is always releasable
+2. Create short-lived branches: `feat/feature-name`, `fix/bug-name`
+3. Open a PR, let CI pass, merge to `master`
+4. Tag releases from `master` (e.g., `v0.2.0`) — triggers release CI
 
-\## Important rules
+### Commits
+- Conventional Commits: `type(scope): description`
+- Types: feat, fix, docs, style, refactor, test, chore
+- Imperative mood, <50 chars, no period
 
+### Releases
+- Bump version in 3 files: `tauri.conf.json`, `Cargo.toml`, `package.json`
+- Push tag `v*` to trigger `.github/workflows/release.yml`
+- Release CI builds Windows NSIS/MSI installers and uploads to GitHub Releases
 
+## Design System
 
-\- Do not use private APIs or hacks.
+The UI follows the ESO Log Aggregator visual language adapted for shadcn + Tailwind v4.
+Before building or modifying any UI, read these context files:
 
-\- Prefer public ESOUI pages and direct public download URLs.
+1. `context/40-design-system.md` — Design principles, colors, glass morphism, typography, animations
+2. `context/41-component-patterns.md` — Concrete shadcn component recipes
+3. `context/42-theme-tokens.md` — CSS variables, @theme inline mappings, Tailwind utilities
 
-\- Keep scraping centralized and cached.
+Key rules:
+- Glass morphism panels (three tiers: primary, default, subtle)
+- Space Grotesk for headings, Geist for body text
+- 3px colored left-border on cards for addon status
+- Animation scale: fast (150ms), normal (250ms), slow (400ms)
+- ESO gold (#c4a44a) as primary accent, sky-blue (#38bdf8) for interactive/focus
 
-\- Do not implement hourly background scraping.
+## How to Work
 
-\- Prefer on-open refresh plus a manual Refresh button.
+1. Read relevant context files before starting work
+2. Read `context/40-design-system.md` before any UI work
+3. Make small, reviewable changes
+4. Keep the repo buildable after each change
+5. Ask before making large architecture changes
 
-\- Optimize for maintainability and simplicity over cleverness.
+## Available Tools
 
+- `gh` for GitHub operations (PRs, issues, releases)
+- `wrangler` for Cloudflare Worker deployment (when backend phase begins)
+- Local Rust/Node toolchain (`npm run tauri dev` for development)
 
+## Context Files
 
-\## Preferred stack
-
-
-
-\- Desktop client: Tauri + React + TypeScript
-
-\- Backend: Cloudflare Workers + KV, metadata only
-
-
-
-\## Available tools
-
-
-
-\- You may use `gh` to create and push the repo.
-
-\- You may use `wrangler` to create and deploy the Cloudflare Worker.
-
-\- You may use the local Rust/Node toolchain as needed.
-
-
-
-\## How to work
-
-
-
-1\. Read `context/00-overview.md`
-
-2\. Read the task file relevant to the current phase
-
-3\. Make small, reviewable changes
-
-4\. Keep the repo buildable after each phase
-
-5\. Ask before making large architecture changes
-
-
-
-\## First task
-
-
-
-Start by scaffolding the repo structure and implementing the MVP plan in `context/30-mvp-plan.md`.
-
-
-
+- `context/00-overview.md` — Core vision and principles
+- `context/10-desktop-client.md` — Desktop client architecture
+- `context/20-metadata-worker.md` — Backend worker design
+- `context/30-mvp-plan.md` — Original phase roadmap (phases 1-3 complete)

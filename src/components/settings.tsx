@@ -46,7 +46,9 @@ export function Settings({
 
   useEffect(() => {
     getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
-    invoke<boolean>("detect_minion").then(setMinionDetected).catch(() => {});
+    invoke<boolean>("detect_minion")
+      .then(setMinionDetected)
+      .catch(() => {});
   }, []);
 
   const handleSave = () => {
@@ -116,10 +118,7 @@ export function Settings({
 
         <div className="space-y-4">
           <div>
-            <label
-              htmlFor="addons-path"
-              className="mb-1 block text-sm text-muted-foreground"
-            >
+            <label htmlFor="addons-path" className="mb-1 block text-sm text-muted-foreground">
               ESO AddOns Folder Path
             </label>
             <div className="flex gap-2">
@@ -153,9 +152,7 @@ export function Settings({
                 }}
                 className="accent-[var(--primary)]"
               />
-              <span className="text-sm">
-                Automatically update all addons on launch
-              </span>
+              <span className="text-sm">Automatically update all addons on launch</span>
             </label>
           </div>
 
@@ -196,7 +193,7 @@ export function Settings({
                       const { imported, alreadyTracked } = result;
                       if (imported > 0) {
                         toast.success(
-                          `Imported ${imported} addon${imported !== 1 ? "s" : ""} from Minion${alreadyTracked > 0 ? ` (${alreadyTracked} already tracked)` : ""}`,
+                          `Imported ${imported} addon${imported !== 1 ? "s" : ""} from Minion${alreadyTracked > 0 ? ` (${alreadyTracked} already tracked)` : ""}`
                         );
                         onRefresh();
                       } else {
@@ -220,27 +217,18 @@ export function Settings({
           <div>
             <h3 className="mb-1 text-sm font-medium">Addon List Backup</h3>
             <p className="mb-3 text-xs text-muted-foreground">
-              Export your tracked addon list to clipboard, or import from a
-              previously exported list.
+              Export your tracked addon list to clipboard, or import from a previously exported
+              list.
             </p>
             <div className="flex gap-2">
               <Button variant="outline" size="sm" onClick={handleExport}>
                 Export to Clipboard
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleImport}
-                disabled={importing}
-              >
+              <Button variant="outline" size="sm" onClick={handleImport} disabled={importing}>
                 {importing ? "Importing..." : "Import from Clipboard"}
               </Button>
             </div>
-            {exportStatus && (
-              <p className="mt-2 text-sm text-muted-foreground">
-                {exportStatus}
-              </p>
-            )}
+            {exportStatus && <p className="mt-2 text-sm text-muted-foreground">{exportStatus}</p>}
             {importError && (
               <Alert variant="destructive" className="mt-2">
                 {importError}
@@ -259,9 +247,7 @@ export function Settings({
                   </p>
                 )}
                 {importResult.failed.length > 0 && (
-                  <Alert variant="destructive">
-                    Failed: {importResult.failed.join(", ")}
-                  </Alert>
+                  <Alert variant="destructive">Failed: {importResult.failed.join(", ")}</Alert>
                 )}
               </div>
             )}

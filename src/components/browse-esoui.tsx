@@ -1,16 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type {
-  EsouiSearchResult,
-  EsouiAddonDetail,
-  InstallResult,
-} from "../types";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import type { EsouiSearchResult, EsouiAddonDetail, InstallResult } from "../types";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -24,19 +15,14 @@ interface BrowseEsouiProps {
   onClose: () => void;
 }
 
-export function BrowseEsoui({
-  addonsPath,
-  onInstalled,
-  onClose,
-}: BrowseEsouiProps) {
+export function BrowseEsoui({ addonsPath, onInstalled, onClose }: BrowseEsouiProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<EsouiSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
   // Detail view
-  const [selectedResult, setSelectedResult] =
-    useState<EsouiSearchResult | null>(null);
+  const [selectedResult, setSelectedResult] = useState<EsouiSearchResult | null>(null);
   const [detail, setDetail] = useState<EsouiAddonDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -181,9 +167,7 @@ export function BrowseEsoui({
               />
             </div>
 
-            {searchError && (
-              <Alert variant="destructive">{searchError}</Alert>
-            )}
+            {searchError && <Alert variant="destructive">{searchError}</Alert>}
 
             <div className="flex-1 overflow-y-auto -mx-4 px-4">
               {searching ? (
@@ -192,9 +176,7 @@ export function BrowseEsoui({
                   <span className="ml-2">Searching ESOUI...</span>
                 </div>
               ) : results.length === 0 && query.trim() ? (
-                <div className="py-8 text-center text-muted-foreground">
-                  No results found
-                </div>
+                <div className="py-8 text-center text-muted-foreground">No results found</div>
               ) : (
                 <div className="space-y-1">
                   {results.map((r) => {
@@ -209,13 +191,8 @@ export function BrowseEsoui({
                         >
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
-                              <span className="font-medium truncate">
-                                {r.title}
-                              </span>
-                              <Badge
-                                variant="secondary"
-                                className="shrink-0 text-[10px]"
-                              >
+                              <span className="font-medium truncate">{r.title}</span>
+                              <Badge variant="secondary" className="shrink-0 text-[10px]">
                                 {r.category}
                               </Badge>
                             </div>
@@ -226,10 +203,7 @@ export function BrowseEsoui({
                             </div>
                             {justInstalled && (
                               <div className="mt-2 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-400">
-                                Installed:{" "}
-                                {installResult.result.installedFolders.join(
-                                  ", ",
-                                )}
+                                Installed: {installResult.result.installedFolders.join(", ")}
                               </div>
                             )}
                             {justFailed && (
@@ -316,9 +290,7 @@ function DetailView({
     return (
       <div className="flex flex-1 items-center justify-center py-12">
         <span className="inline-block size-6 animate-spin rounded-full border-2 border-border border-t-primary" />
-        <span className="ml-3 text-muted-foreground">
-          Loading addon details...
-        </span>
+        <span className="ml-3 text-muted-foreground">Loading addon details...</span>
       </div>
     );
   }
@@ -339,19 +311,13 @@ function DetailView({
       <div className="flex items-start justify-between gap-4">
         <div>
           <h3 className="text-lg font-semibold text-primary">{detail.title}</h3>
-          <div className="mt-1 text-sm text-muted-foreground">
-            by {detail.author}
-          </div>
+          <div className="mt-1 text-sm text-muted-foreground">by {detail.author}</div>
         </div>
         <Button
           onClick={() => onInstall(detail.id, detail.downloadUrl)}
           disabled={installingId !== null}
         >
-          {installingId === detail.id
-            ? "Installing..."
-            : justInstalled
-              ? "Reinstall"
-              : "Install"}
+          {installingId === detail.id ? "Installing..." : justInstalled ? "Reinstall" : "Install"}
         </Button>
       </div>
 
@@ -362,9 +328,7 @@ function DetailView({
             ` + deps: ${installResult.result.installedDeps.join(", ")}`}
         </div>
       )}
-      {justFailed && (
-        <Alert variant="destructive">{installError.error}</Alert>
-      )}
+      {justFailed && <Alert variant="destructive">{installError.error}</Alert>}
 
       {/* Metadata grid */}
       <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
@@ -432,7 +396,7 @@ function DetailView({
                       "size-2 rounded-full transition-colors",
                       i === safeIdx
                         ? "bg-primary"
-                        : "bg-muted-foreground/40 hover:bg-muted-foreground",
+                        : "bg-muted-foreground/40 hover:bg-muted-foreground"
                     )}
                     onClick={() => setScreenshotIdx(i)}
                   />
@@ -448,9 +412,7 @@ function DetailView({
                   onClick={() => setScreenshotIdx(i)}
                   className={cn(
                     "shrink-0 overflow-hidden rounded border transition-colors",
-                    i === safeIdx
-                      ? "border-primary"
-                      : "border-border hover:border-muted-foreground",
+                    i === safeIdx ? "border-primary" : "border-border hover:border-muted-foreground"
                   )}
                 >
                   <img
@@ -469,9 +431,7 @@ function DetailView({
       {/* Description */}
       {detail.description && (
         <div>
-          <h4 className="mb-2 text-sm font-medium text-muted-foreground">
-            Description
-          </h4>
+          <h4 className="mb-2 text-sm font-medium text-muted-foreground">Description</h4>
           <div className="whitespace-pre-line rounded-lg border border-border bg-background p-4 text-sm leading-relaxed">
             {detail.description}
           </div>

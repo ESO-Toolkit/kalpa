@@ -49,18 +49,14 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
         {loading ? (
           <div className="flex items-center justify-center py-8">
             <span className="inline-block size-5 animate-spin rounded-full border-2 border-border border-t-primary" />
-            <span className="ml-2 text-muted-foreground">
-              Checking compatibility...
-            </span>
+            <span className="ml-2 text-muted-foreground">Checking compatibility...</span>
           </div>
         ) : error ? (
           <Alert variant="destructive">{error}</Alert>
         ) : info ? (
           <div className="flex-1 overflow-y-auto space-y-4">
             <div className="flex items-center gap-3">
-              <span className="text-sm text-muted-foreground">
-                Game API Version:
-              </span>
+              <span className="text-sm text-muted-foreground">Game API Version:</span>
               <Badge variant="outline" className="font-mono">
                 {info.gameApiVersion}
               </Badge>
@@ -90,8 +86,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
               </div>
             )}
 
-            {info.outdatedAddons.length > 0 &&
-              info.upToDateAddons.length > 0 && <Separator />}
+            {info.outdatedAddons.length > 0 && info.upToDateAddons.length > 0 && <Separator />}
 
             {info.upToDateAddons.length > 0 && (
               <div>

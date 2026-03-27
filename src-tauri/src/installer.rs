@@ -7,8 +7,7 @@ use std::path::Path;
 const MAX_EXTRACT_SIZE: u64 = 500 * 1024 * 1024;
 
 pub fn extract_addon_zip(zip_path: &Path, addons_dir: &Path) -> Result<Vec<String>, String> {
-    let file =
-        fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {}", e))?;
+    let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {}", e))?;
 
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {}", e))?;

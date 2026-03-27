@@ -55,19 +55,13 @@ export function AddonList({
   onToggleSelect,
 }: AddonListProps) {
   const updatesMap = useMemo(
-    () => new Map(
-      updateResults
-        .filter((r) => r.hasUpdate)
-        .map((r) => [r.folderName, r] as const),
-    ),
-    [updateResults],
+    () => new Map(updateResults.filter((r) => r.hasUpdate).map((r) => [r.folderName, r] as const)),
+    [updateResults]
   );
 
   const updatesSet = useMemo(
-    () => new Set(
-      updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName),
-    ),
-    [updateResults],
+    () => new Set(updateResults.filter((r) => r.hasUpdate).map((r) => r.folderName)),
+    [updateResults]
   );
 
   const filterCounts = useMemo<Record<FilterMode, number>>(
@@ -78,7 +72,7 @@ export function AddonList({
       outdated: allAddons.filter((a) => updatesSet.has(a.folderName)).length,
       "missing-deps": allAddons.filter((a) => a.missingDependencies.length > 0).length,
     }),
-    [allAddons, updatesSet],
+    [allAddons, updatesSet]
   );
 
   const batchMode = selectedFolders.size > 0;
@@ -127,7 +121,7 @@ export function AddonList({
         items?.[addons.length - 1]?.scrollIntoView({ block: "nearest" });
       }
     },
-    [addons, selectedAddon, onSelect, batchMode, onToggleSelect],
+    [addons, selectedAddon, onSelect, batchMode, onToggleSelect]
   );
 
   return (
@@ -153,7 +147,7 @@ export function AddonList({
                 "rounded px-2 py-1 text-xs transition-colors",
                 filterMode === mode
                   ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted",
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
               )}
               onClick={() => onFilterChange(mode)}
             >
@@ -164,10 +158,7 @@ export function AddonList({
             </button>
           ))}
         </div>
-        <Select
-          value={sortMode}
-          onValueChange={(v) => onSortChange(v as SortMode)}
-        >
+        <Select value={sortMode} onValueChange={(v) => onSortChange(v as SortMode)}>
           <SelectTrigger size="sm" className="h-6 text-xs" aria-label="Sort by">
             <SelectValue />
           </SelectTrigger>
@@ -181,14 +172,11 @@ export function AddonList({
         {addons.length} {addons.length === 1 ? "addon" : "addons"}
         {batchMode && (
           <span className="text-primary font-medium">
-            {" "}&middot; {selectedFolders.size} selected
+            {" "}
+            &middot; {selectedFolders.size} selected
           </span>
         )}
-        {!batchMode && (
-          <span className="float-right opacity-50">
-            Right-click to select
-          </span>
-        )}
+        {!batchMode && <span className="float-right opacity-50">Right-click to select</span>}
       </div>
       <div
         ref={listRef}
@@ -217,10 +205,8 @@ export function AddonList({
                 aria-selected={batchMode ? isSelected : isCurrent}
                 className={cn(
                   "cursor-pointer border-l-3 border-transparent px-4 py-2.5 transition-colors hover:bg-background group",
-                  isCurrent &&
-                    !batchMode &&
-                    "border-l-primary bg-background",
-                  isSelected && "bg-primary/5 border-l-primary",
+                  isCurrent && !batchMode && "border-l-primary bg-background",
+                  isSelected && "bg-primary/5 border-l-primary"
                 )}
                 onClick={() => {
                   if (batchMode) {
@@ -243,9 +229,7 @@ export function AddonList({
                       className="shrink-0"
                     />
                   )}
-                  <span className="flex-1 truncate text-sm font-medium">
-                    {addon.title}
-                  </span>
+                  <span className="flex-1 truncate text-sm font-medium">{addon.title}</span>
                   {updatesMap.has(addon.folderName) && (
                     <Badge
                       variant="outline"
@@ -263,9 +247,7 @@ export function AddonList({
                     </Badge>
                   )}
                   {addon.missingDependencies.length > 0 && (
-                    <Badge variant="destructive">
-                      {addon.missingDependencies.length} missing
-                    </Badge>
+                    <Badge variant="destructive">{addon.missingDependencies.length} missing</Badge>
                   )}
                   <span className="shrink-0 text-xs text-muted-foreground">
                     {addon.version || `v${addon.addonVersion ?? "?"}`}
