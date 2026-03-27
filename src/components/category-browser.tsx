@@ -169,7 +169,7 @@ export function CategoryBrowser({ addonsPath, onInstalled, onClose }: CategoryBr
               </Select>
             </div>
 
-            <div className="flex-1 overflow-y-auto -mx-4 px-4">
+            <div className="flex-1 overflow-y-auto -mx-5 px-5">
               {loading ? (
                 <div className="flex items-center justify-center py-8 text-muted-foreground">
                   <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
@@ -249,7 +249,7 @@ export function CategoryBrowser({ addonsPath, onInstalled, onClose }: CategoryBr
             </div>
           </>
         ) : (
-          <div className="flex-1 overflow-y-auto -mx-4 px-4 space-y-4">
+          <div className="flex-1 overflow-y-auto -mx-5 px-5 space-y-4">
             {loadingDetail ? (
               <div className="flex items-center justify-center py-12">
                 <span className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
