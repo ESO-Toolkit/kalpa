@@ -378,8 +378,17 @@ function App() {
   const batchMode = selectedFolders.size > 0;
 
   return (
-    <div className="flex h-screen flex-col bg-background">
-      <header className="flex items-center justify-between border-b border-white/[0.06] bg-[rgba(15,23,42,0.84)] backdrop-blur-lg px-5 py-3 select-none">
+    <div className="relative flex h-screen flex-col">
+      {/* Ambient background orbs — gives glass morphism something to distort */}
+      <div className="fixed inset-0 -z-10 overflow-hidden bg-[#060c18]">
+        <div className="absolute -top-[15%] -left-[10%] h-[600px] w-[600px] rounded-full bg-[#c4a44a]/20 blur-[120px] animate-[orb-drift_25s_ease-in-out_infinite]" />
+        <div className="absolute -bottom-[20%] -right-[10%] h-[500px] w-[500px] rounded-full bg-sky-500/15 blur-[120px] animate-[orb-drift_20s_ease-in-out_infinite_reverse]" />
+        <div className="absolute top-[30%] left-[40%] h-[400px] w-[400px] rounded-full bg-indigo-500/10 blur-[100px] animate-[orb-drift_30s_ease-in-out_infinite]" />
+      </div>
+
+      <header className="relative flex items-center justify-between border-b border-white/[0.06] bg-[rgba(10,18,36,0.85)] backdrop-blur-xl backdrop-saturate-[1.2] px-5 py-3.5 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)]">
+        {/* Bottom glow line */}
+        <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#c4a44a]/30 to-transparent" />
         <h1 className="font-heading text-lg font-semibold tracking-wide bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
           ESO Addon Manager
         </h1>

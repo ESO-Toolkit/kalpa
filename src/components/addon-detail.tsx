@@ -34,19 +34,21 @@ export function AddonDetail({
 
   if (!addon) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground px-8">
-        <div className="rounded-xl bg-white/[0.03] p-4">
+      <div className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8">
+        {/* Ambient glow behind icon */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-[#c4a44a]/[0.04] blur-[60px]" />
+        <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
           <svg
             xmlns="http://www.w3.org/2000/svg"
-            width="32"
-            height="32"
+            width="40"
+            height="40"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
-            strokeWidth="1.5"
+            strokeWidth="1.2"
             strokeLinecap="round"
             strokeLinejoin="round"
-            className="text-muted-foreground/40"
+            className="text-muted-foreground/30"
           >
             <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
             <polyline points="14 2 14 8 20 8" />
@@ -55,9 +57,9 @@ export function AddonDetail({
             <line x1="10" y1="9" x2="8" y2="9" />
           </svg>
         </div>
-        <div className="text-center">
-          <p className="font-heading text-sm font-medium text-foreground/80">No addon selected</p>
-          <p className="text-xs text-muted-foreground/60">
+        <div className="relative text-center">
+          <p className="font-heading text-sm font-medium text-foreground/70">No addon selected</p>
+          <p className="mt-1 text-xs text-muted-foreground/40">
             Select an addon from the list to view details
           </p>
         </div>

@@ -125,8 +125,9 @@ export function AddonList({
   );
 
   return (
-    <div className="flex w-[380px] min-w-[300px] flex-col border-r border-white/[0.06] bg-[rgba(15,23,42,0.66)]">
-      <div className="border-b border-white/[0.06] p-3">
+    <div className="flex w-[380px] min-w-[300px] flex-col border-r border-white/[0.06] bg-[rgba(10,18,36,0.6)] backdrop-blur-xl backdrop-saturate-[1.2] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      {/* Search */}
+      <div className="px-3 pt-3 pb-2">
         <Input
           type="text"
           placeholder="Search addons..."
@@ -134,31 +135,48 @@ export function AddonList({
           onChange={(e) => onSearchChange(e.target.value)}
         />
       </div>
-      <div className="flex items-center justify-between gap-2 border-b border-white/[0.06] px-3 py-2">
-        <div className="flex gap-0.5" role="tablist" aria-label="Filter addons">
-          {FILTERS.map(([mode, label]) => (
-            <button
-              key={mode}
-              role="tab"
-              aria-selected={filterMode === mode}
-              aria-label={`Filter by ${label}`}
-              className={cn(
-                "rounded-lg px-2 py-1 text-xs font-medium transition-all duration-150",
-                filterMode === mode
-                  ? "bg-[#c4a44a]/10 text-[#c4a44a] border border-[#c4a44a]/20"
-                  : "text-muted-foreground hover:text-foreground hover:bg-white/[0.04] border border-transparent"
-              )}
-              onClick={() => onFilterChange(mode)}
-            >
-              {label}
-              {((mode !== "outdated" && mode !== "missing-deps") || filterCounts[mode] > 0) && (
-                <span className="ml-1 opacity-60">({filterCounts[mode]})</span>
-              )}
-            </button>
-          ))}
-        </div>
+
+      {/* Filter tabs */}
+      <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Filter addons">
+        {FILTERS.map(([mode, label]) => (
+          <button
+            key={mode}
+            role="tab"
+            aria-selected={filterMode === mode}
+            aria-label={`Filter by ${label}`}
+            className={cn(
+              "rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150",
+              filterMode === mode
+                ? "bg-[#c4a44a]/15 text-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.05)] border border-[#c4a44a]/25"
+                : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
+            )}
+            onClick={() => onFilterChange(mode)}
+          >
+            {label}
+            {((mode !== "outdated" && mode !== "missing-deps") || filterCounts[mode] > 0) && (
+              <span className="ml-1 opacity-50">({filterCounts[mode]})</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Sort + count bar */}
+      <div className="flex items-center justify-between border-y border-white/[0.06] px-3 py-1.5">
+        <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/50">
+          {addons.length} {addons.length === 1 ? "addon" : "addons"}
+          {batchMode && (
+            <span className="text-[#c4a44a] font-medium normal-case tracking-normal">
+              {" "}
+              &middot; {selectedFolders.size} selected
+            </span>
+          )}
+        </span>
         <Select value={sortMode} onValueChange={(v) => onSortChange(v as SortMode)}>
-          <SelectTrigger size="sm" className="h-6 text-xs" aria-label="Sort by">
+          <SelectTrigger
+            size="sm"
+            className="h-6 w-auto gap-1 border-0 bg-transparent text-[11px] text-muted-foreground/50 hover:text-muted-foreground px-1.5"
+            aria-label="Sort by"
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -166,16 +184,6 @@ export function AddonList({
             <SelectItem value="author">Author</SelectItem>
           </SelectContent>
         </Select>
-      </div>
-      <div className="border-b border-white/[0.06] px-4 py-1 text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/60">
-        {addons.length} {addons.length === 1 ? "addon" : "addons"}
-        {batchMode && (
-          <span className="text-primary font-medium">
-            {" "}
-            &middot; {selectedFolders.size} selected
-          </span>
-        )}
-        {!batchMode && <span className="float-right opacity-50">Right-click to select</span>}
       </div>
       <div
         ref={listRef}
@@ -203,17 +211,17 @@ export function AddonList({
                 role="option"
                 aria-selected={batchMode ? isSelected : isCurrent}
                 className={cn(
-                  "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.03] group",
+                  "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] group",
                   addon.missingDependencies.length > 0
-                    ? "border-l-red-500"
+                    ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_rgba(239,68,68,0.1)]"
                     : addon.isLibrary
-                      ? "border-l-emerald-400"
+                      ? "border-l-emerald-400 shadow-[inset_4px_0_12px_-4px_rgba(52,211,153,0.08)]"
                       : updatesMap.has(addon.folderName)
-                        ? "border-l-amber-500"
+                        ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
                         : "border-l-transparent",
                   isCurrent &&
                     !batchMode &&
-                    "bg-white/[0.06] border-l-[#c4a44a]! shadow-[inset_0_0_0_1px_rgba(196,164,74,0.1)]",
+                    "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]",
                   isSelected && "bg-[#c4a44a]/[0.04] border-l-[#c4a44a]!"
                 )}
                 onClick={() => {
