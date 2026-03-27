@@ -1,6 +1,6 @@
 # ESO Addon Manager
 
-A fast, open-source addon manager for The Elder Scrolls Online. Built with Tauri, React, and Rust.
+A open-source addon manager for The Elder Scrolls Online. Built with Tauri, React, and Rust.
 
 ## Features
 
