@@ -207,7 +207,7 @@ export function AddonList({
                   addon.missingDependencies.length > 0
                     ? "border-l-red-500"
                     : addon.isLibrary
-                      ? "border-l-violet-400"
+                      ? "border-l-emerald-400"
                       : updatesMap.has(addon.folderName)
                         ? "border-l-amber-500"
                         : "border-l-transparent",
@@ -249,7 +249,7 @@ export function AddonList({
                   {addon.isLibrary && (
                     <Badge
                       variant="outline"
-                      className="border-violet-400/20 bg-violet-400/[0.04] text-violet-400 text-[10px]"
+                      className="border-emerald-400/20 bg-emerald-400/[0.04] text-emerald-400 text-[10px]"
                     >
                       LIB
                     </Badge>

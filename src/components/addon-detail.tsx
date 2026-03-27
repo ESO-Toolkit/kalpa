@@ -177,7 +177,7 @@ export function AddonDetail({
           </dt>
           <dd>
             {addon.isLibrary ? (
-              <InfoPill color="violet">Library</InfoPill>
+              <InfoPill color="emerald">Library</InfoPill>
             ) : (
               <InfoPill color="gold">Addon</InfoPill>
             )}
