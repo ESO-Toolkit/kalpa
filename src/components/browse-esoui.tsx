@@ -4,9 +4,9 @@ import type { EsouiSearchResult, EsouiAddonDetail, InstallResult } from "../type
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Alert } from "@/components/ui/alert";
-import { Separator } from "@/components/ui/separator";
+import { InfoPill } from "@/components/ui/info-pill";
+import { SectionHeader } from "@/components/ui/section-header";
 import { cn } from "@/lib/utils";
 
 interface BrowseEsouiProps {
@@ -172,63 +172,61 @@ export function BrowseEsoui({ addonsPath, onInstalled, onClose }: BrowseEsouiPro
             <div className="flex-1 overflow-y-auto -mx-4 px-4">
               {searching ? (
                 <div className="flex items-center justify-center py-8 text-muted-foreground">
-                  <span className="inline-block size-5 animate-spin rounded-full border-2 border-border border-t-primary" />
+                  <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
                   <span className="ml-2">Searching ESOUI...</span>
                 </div>
               ) : results.length === 0 && query.trim() ? (
                 <div className="py-8 text-center text-muted-foreground">No results found</div>
               ) : (
-                <div className="space-y-1">
+                <div className="space-y-2">
                   {results.map((r) => {
                     const justInstalled = installResult?.id === r.id;
                     const justFailed = installError?.id === r.id;
 
                     return (
-                      <div key={r.id}>
-                        <div
-                          className="flex items-start gap-3 rounded-lg p-3 hover:bg-muted/50 transition-colors cursor-pointer"
-                          onClick={() => handleSelectResult(r)}
-                        >
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="font-medium truncate">{r.title}</span>
-                              <Badge variant="secondary" className="shrink-0 text-[10px]">
-                                {r.category}
-                              </Badge>
-                            </div>
-                            <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-                              <span>by {r.author}</span>
-                              <span>{r.downloads} downloads</span>
-                              <span>Updated {r.updated}</span>
-                            </div>
-                            {justInstalled && (
-                              <div className="mt-2 rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-400">
-                                Installed: {installResult.result.installedFolders.join(", ")}
-                              </div>
-                            )}
-                            {justFailed && (
-                              <div className="mt-2 rounded border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive">
-                                {installError.error}
-                              </div>
-                            )}
+                      <div
+                        key={r.id}
+                        className="flex items-start gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 hover:bg-white/[0.04] hover:border-white/[0.1] transition-all duration-200 cursor-pointer"
+                        onClick={() => handleSelectResult(r)}
+                      >
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium truncate">{r.title}</span>
+                            <InfoPill color="muted" className="shrink-0">
+                              {r.category}
+                            </InfoPill>
                           </div>
-                          <Button
-                            size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleInstall(r.id);
-                            }}
-                            disabled={installingId !== null}
-                            className="shrink-0"
-                          >
-                            {installingId === r.id
-                              ? "Installing..."
-                              : justInstalled
-                                ? "Reinstall"
-                                : "Install"}
-                          </Button>
+                          <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground/60">
+                            <span>by {r.author}</span>
+                            <span>{r.downloads} downloads</span>
+                            <span>Updated {r.updated}</span>
+                          </div>
+                          {justInstalled && (
+                            <div className="mt-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] px-2 py-1 text-xs text-emerald-400">
+                              Installed: {installResult.result.installedFolders.join(", ")}
+                            </div>
+                          )}
+                          {justFailed && (
+                            <div className="mt-2 rounded-lg border border-red-400/20 bg-red-400/[0.04] px-2 py-1 text-xs text-red-400">
+                              {installError.error}
+                            </div>
+                          )}
                         </div>
-                        <Separator />
+                        <Button
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleInstall(r.id);
+                          }}
+                          disabled={installingId !== null}
+                          className="shrink-0"
+                        >
+                          {installingId === r.id
+                            ? "Installing..."
+                            : justInstalled
+                              ? "Reinstall"
+                              : "Install"}
+                        </Button>
                       </div>
                     );
                   })}
@@ -289,7 +287,7 @@ function DetailView({
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center py-12">
-        <span className="inline-block size-6 animate-spin rounded-full border-2 border-border border-t-primary" />
+        <span className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
         <span className="ml-3 text-muted-foreground">Loading addon details...</span>
       </div>
     );
@@ -310,8 +308,10 @@ function DetailView({
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="text-lg font-semibold text-primary">{detail.title}</h3>
-          <div className="mt-1 text-sm text-muted-foreground">by {detail.author}</div>
+          <h3 className="font-heading text-lg font-semibold bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
+            {detail.title}
+          </h3>
+          <div className="mt-1 text-sm text-muted-foreground/60">by {detail.author}</div>
         </div>
         <Button
           onClick={() => onInstall(detail.id, detail.downloadUrl)}
@@ -322,7 +322,7 @@ function DetailView({
       </div>
 
       {justInstalled && (
-        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-400">
+        <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-sm text-emerald-400">
           Installed: {installResult.result.installedFolders.join(", ")}
           {installResult.result.installedDeps.length > 0 &&
             ` + deps: ${installResult.result.installedDeps.join(", ")}`}
@@ -331,56 +331,70 @@ function DetailView({
       {justFailed && <Alert variant="destructive">{installError.error}</Alert>}
 
       {/* Metadata grid */}
-      <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3 rounded-xl border border-white/[0.04] bg-white/[0.02] p-3">
         <div>
-          <span className="text-muted-foreground">Version</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            Version
+          </span>
           <div className="font-medium">{detail.version || "—"}</div>
         </div>
         <div>
-          <span className="text-muted-foreground">Compatibility</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            Compatibility
+          </span>
           <div className="font-medium">{detail.compatibility || "—"}</div>
         </div>
         <div>
-          <span className="text-muted-foreground">File Size</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            File Size
+          </span>
           <div className="font-medium">{detail.fileSize || "—"}</div>
         </div>
         <div>
-          <span className="text-muted-foreground">Total Downloads</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            Total Downloads
+          </span>
           <div className="font-medium">{detail.totalDownloads || "—"}</div>
         </div>
         <div>
-          <span className="text-muted-foreground">Monthly Downloads</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            Monthly Downloads
+          </span>
           <div className="font-medium">{detail.monthlyDownloads || "—"}</div>
         </div>
         <div>
-          <span className="text-muted-foreground">Favorites</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            Favorites
+          </span>
           <div className="font-medium">{detail.favorites || "—"}</div>
         </div>
         <div>
-          <span className="text-muted-foreground">Updated</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            Updated
+          </span>
           <div className="font-medium">{detail.updated || "—"}</div>
         </div>
         <div>
-          <span className="text-muted-foreground">Created</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            Created
+          </span>
           <div className="font-medium">{detail.created || "—"}</div>
         </div>
         <div>
-          <span className="text-muted-foreground">Category</span>
+          <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+            Category
+          </span>
           <div>
-            <Badge variant="secondary">{result.category}</Badge>
+            <InfoPill color="muted">{result.category}</InfoPill>
           </div>
         </div>
       </div>
 
-      <Separator />
-
       {/* Screenshots */}
       {detail.screenshots.length > 0 && (
         <div>
-          <h4 className="mb-2 text-sm font-medium text-muted-foreground">
-            Screenshots ({detail.screenshots.length})
-          </h4>
-          <div className="relative overflow-hidden rounded-lg border border-border bg-background">
+          <SectionHeader className="mb-2">Screenshots ({detail.screenshots.length})</SectionHeader>
+          <div className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02]">
             <img
               src={detail.screenshots[safeIdx]}
               alt={`Screenshot ${safeIdx + 1}`}
@@ -393,10 +407,8 @@ function DetailView({
                   <button
                     key={i}
                     className={cn(
-                      "size-2 rounded-full transition-colors",
-                      i === safeIdx
-                        ? "bg-primary"
-                        : "bg-muted-foreground/40 hover:bg-muted-foreground"
+                      "size-2 rounded-full transition-all duration-150",
+                      i === safeIdx ? "bg-[#c4a44a]" : "bg-white/20 hover:bg-white/40"
                     )}
                     onClick={() => setScreenshotIdx(i)}
                   />
@@ -411,8 +423,10 @@ function DetailView({
                   key={i}
                   onClick={() => setScreenshotIdx(i)}
                   className={cn(
-                    "shrink-0 overflow-hidden rounded border transition-colors",
-                    i === safeIdx ? "border-primary" : "border-border hover:border-muted-foreground"
+                    "shrink-0 overflow-hidden rounded-lg border transition-all duration-150",
+                    i === safeIdx
+                      ? "border-[#c4a44a]"
+                      : "border-white/[0.06] hover:border-white/[0.15]"
                   )}
                 >
                   <img
@@ -431,8 +445,8 @@ function DetailView({
       {/* Description */}
       {detail.description && (
         <div>
-          <h4 className="mb-2 text-sm font-medium text-muted-foreground">Description</h4>
-          <div className="whitespace-pre-line rounded-lg border border-border bg-background p-4 text-sm leading-relaxed">
+          <SectionHeader className="mb-2">Description</SectionHeader>
+          <div className="whitespace-pre-line rounded-xl border border-white/[0.04] bg-white/[0.02] p-4 text-sm leading-relaxed">
             {detail.description}
           </div>
         </div>

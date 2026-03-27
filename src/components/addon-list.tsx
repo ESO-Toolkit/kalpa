@@ -125,17 +125,16 @@ export function AddonList({
   );
 
   return (
-    <div className="flex w-[380px] min-w-[300px] flex-col border-r border-border bg-card">
-      <div className="border-b border-border p-3">
+    <div className="flex w-[380px] min-w-[300px] flex-col border-r border-white/[0.06] bg-[rgba(15,23,42,0.66)]">
+      <div className="border-b border-white/[0.06] p-3">
         <Input
           type="text"
           placeholder="Search addons..."
           value={searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
-          className="bg-background"
         />
       </div>
-      <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+      <div className="flex items-center justify-between gap-2 border-b border-white/[0.06] px-3 py-2">
         <div className="flex gap-0.5" role="tablist" aria-label="Filter addons">
           {FILTERS.map(([mode, label]) => (
             <button
@@ -144,10 +143,10 @@ export function AddonList({
               aria-selected={filterMode === mode}
               aria-label={`Filter by ${label}`}
               className={cn(
-                "rounded px-2 py-1 text-xs transition-colors",
+                "rounded-lg px-2 py-1 text-xs font-medium transition-all duration-150",
                 filterMode === mode
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                  ? "bg-[#c4a44a]/10 text-[#c4a44a] border border-[#c4a44a]/20"
+                  : "text-muted-foreground hover:text-foreground hover:bg-white/[0.04] border border-transparent"
               )}
               onClick={() => onFilterChange(mode)}
             >
@@ -168,7 +167,7 @@ export function AddonList({
           </SelectContent>
         </Select>
       </div>
-      <div className="border-b border-border px-4 py-1 text-[11px] text-muted-foreground">
+      <div className="border-b border-white/[0.06] px-4 py-1 text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/60">
         {addons.length} {addons.length === 1 ? "addon" : "addons"}
         {batchMode && (
           <span className="text-primary font-medium">
@@ -188,7 +187,7 @@ export function AddonList({
       >
         {loading ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
-            <div className="size-5 animate-spin rounded-full border-2 border-border border-t-primary" />
+            <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
           </div>
         ) : addons.length === 0 ? (
           <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -204,9 +203,18 @@ export function AddonList({
                 role="option"
                 aria-selected={batchMode ? isSelected : isCurrent}
                 className={cn(
-                  "cursor-pointer border-l-3 border-transparent px-4 py-2.5 transition-colors hover:bg-background group",
-                  isCurrent && !batchMode && "border-l-primary bg-background",
-                  isSelected && "bg-primary/5 border-l-primary"
+                  "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.03] group",
+                  addon.missingDependencies.length > 0
+                    ? "border-l-red-500"
+                    : addon.isLibrary
+                      ? "border-l-violet-400"
+                      : updatesMap.has(addon.folderName)
+                        ? "border-l-amber-500"
+                        : "border-l-transparent",
+                  isCurrent &&
+                    !batchMode &&
+                    "bg-white/[0.06] border-l-[#c4a44a]! shadow-[inset_0_0_0_1px_rgba(196,164,74,0.1)]",
+                  isSelected && "bg-[#c4a44a]/[0.04] border-l-[#c4a44a]!"
                 )}
                 onClick={() => {
                   if (batchMode) {
@@ -233,7 +241,7 @@ export function AddonList({
                   {updatesMap.has(addon.folderName) && (
                     <Badge
                       variant="outline"
-                      className="border-blue-500/30 bg-blue-500/10 text-blue-400"
+                      className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
                     >
                       Update
                     </Badge>
@@ -241,13 +249,18 @@ export function AddonList({
                   {addon.isLibrary && (
                     <Badge
                       variant="outline"
-                      className="border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                      className="border-violet-400/20 bg-violet-400/[0.04] text-violet-400 text-[10px]"
                     >
                       LIB
                     </Badge>
                   )}
                   {addon.missingDependencies.length > 0 && (
-                    <Badge variant="destructive">{addon.missingDependencies.length} missing</Badge>
+                    <Badge
+                      variant="outline"
+                      className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
+                    >
+                      {addon.missingDependencies.length} missing
+                    </Badge>
                   )}
                   <span className="shrink-0 text-xs text-muted-foreground">
                     {addon.version || `v${addon.addonVersion ?? "?"}`}

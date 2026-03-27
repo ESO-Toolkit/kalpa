@@ -4,8 +4,7 @@ import { toast } from "sonner";
 import type { EsouiCategory, EsouiSearchResult, EsouiAddonDetail, InstallResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
+import { InfoPill } from "@/components/ui/info-pill";
 import {
   Select,
   SelectContent,
@@ -173,7 +172,7 @@ export function CategoryBrowser({ addonsPath, onInstalled, onClose }: CategoryBr
             <div className="flex-1 overflow-y-auto -mx-4 px-4">
               {loading ? (
                 <div className="flex items-center justify-center py-8 text-muted-foreground">
-                  <span className="inline-block size-5 animate-spin rounded-full border-2 border-border border-t-primary" />
+                  <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
                   <span className="ml-2">Loading...</span>
                 </div>
               ) : results.length === 0 ? (
@@ -181,34 +180,32 @@ export function CategoryBrowser({ addonsPath, onInstalled, onClose }: CategoryBr
                   {selectedCategory ? "No addons in this category" : "Select a category to browse"}
                 </div>
               ) : (
-                <div className="space-y-1">
+                <div className="space-y-2">
                   {results.map((r) => (
-                    <div key={r.id}>
-                      <div
-                        className="flex items-center gap-3 rounded-lg p-3 hover:bg-muted/50 transition-colors cursor-pointer"
-                        onClick={() => handleLoadDetail(r.id)}
-                      >
-                        <div className="flex-1 min-w-0">
-                          <span className="font-medium text-sm">{r.title}</span>
-                          {r.category && (
-                            <Badge variant="secondary" className="ml-2 text-[10px]">
-                              {r.category}
-                            </Badge>
-                          )}
-                        </div>
-                        <Button
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleInstall(r.id);
-                          }}
-                          disabled={installingId !== null}
-                          className="shrink-0"
-                        >
-                          {installingId === r.id ? "Installing..." : "Install"}
-                        </Button>
+                    <div
+                      key={r.id}
+                      className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 hover:bg-white/[0.04] hover:border-white/[0.1] transition-all duration-200 cursor-pointer"
+                      onClick={() => handleLoadDetail(r.id)}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <span className="font-medium text-sm">{r.title}</span>
+                        {r.category && (
+                          <InfoPill color="muted" className="ml-2">
+                            {r.category}
+                          </InfoPill>
+                        )}
                       </div>
-                      <Separator />
+                      <Button
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleInstall(r.id);
+                        }}
+                        disabled={installingId !== null}
+                        className="shrink-0"
+                      >
+                        {installingId === r.id ? "Installing..." : "Install"}
+                      </Button>
                     </div>
                   ))}
                 </div>
@@ -255,15 +252,17 @@ export function CategoryBrowser({ addonsPath, onInstalled, onClose }: CategoryBr
           <div className="flex-1 overflow-y-auto -mx-4 px-4 space-y-4">
             {loadingDetail ? (
               <div className="flex items-center justify-center py-12">
-                <span className="inline-block size-6 animate-spin rounded-full border-2 border-border border-t-primary" />
+                <span className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
                 <span className="ml-3 text-muted-foreground">Loading...</span>
               </div>
             ) : detail ? (
               <>
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h3 className="text-lg font-semibold text-primary">{detail.title}</h3>
-                    <div className="mt-1 text-sm text-muted-foreground">by {detail.author}</div>
+                    <h3 className="font-heading text-lg font-semibold bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
+                      {detail.title}
+                    </h3>
+                    <div className="mt-1 text-sm text-muted-foreground/60">by {detail.author}</div>
                   </div>
                   <Button
                     onClick={() => handleInstall(detail.id, detail.downloadUrl)}
@@ -273,23 +272,29 @@ export function CategoryBrowser({ addonsPath, onInstalled, onClose }: CategoryBr
                   </Button>
                 </div>
 
-                <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-sm">
+                <div className="grid grid-cols-3 gap-x-6 gap-y-2 text-sm rounded-xl border border-white/[0.04] bg-white/[0.02] p-3">
                   <div>
-                    <span className="text-muted-foreground">Version</span>
+                    <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+                      Version
+                    </span>
                     <div className="font-medium">{detail.version || "—"}</div>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">Compatibility</span>
+                    <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+                      Compatibility
+                    </span>
                     <div className="font-medium">{detail.compatibility || "—"}</div>
                   </div>
                   <div>
-                    <span className="text-muted-foreground">Downloads</span>
+                    <span className="text-muted-foreground/60 font-heading text-[10px] uppercase tracking-wider">
+                      Downloads
+                    </span>
                     <div className="font-medium">{detail.totalDownloads || "—"}</div>
                   </div>
                 </div>
 
                 {detail.screenshots.length > 0 && (
-                  <div className="overflow-hidden rounded-lg border border-border">
+                  <div className="overflow-hidden rounded-xl border border-white/[0.06]">
                     <img
                       src={detail.screenshots[0]}
                       alt="Screenshot"
@@ -299,7 +304,7 @@ export function CategoryBrowser({ addonsPath, onInstalled, onClose }: CategoryBr
                 )}
 
                 {detail.description && (
-                  <div className="whitespace-pre-line rounded-lg border border-border bg-background p-4 text-sm leading-relaxed max-h-[200px] overflow-y-auto">
+                  <div className="whitespace-pre-line rounded-xl border border-white/[0.04] bg-white/[0.02] p-4 text-sm leading-relaxed max-h-[200px] overflow-y-auto">
                     {detail.description}
                   </div>
                 )}

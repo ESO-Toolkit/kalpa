@@ -378,9 +378,11 @@ function App() {
   const batchMode = selectedFolders.size > 0;
 
   return (
-    <div className="flex h-screen flex-col">
-      <header className="flex items-center justify-between border-b border-border bg-card px-5 py-3 select-none">
-        <h1 className="text-lg font-semibold tracking-wide text-primary">ESO Addon Manager</h1>
+    <div className="flex h-screen flex-col bg-background">
+      <header className="flex items-center justify-between border-b border-white/[0.06] bg-[rgba(15,23,42,0.84)] backdrop-blur-lg px-5 py-3 select-none">
+        <h1 className="font-heading text-lg font-semibold tracking-wide bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
+          ESO Addon Manager
+        </h1>
         <div className="flex items-center gap-2">
           {batchMode ? (
             <>
@@ -419,7 +421,7 @@ function App() {
                 {checkingUpdates && (
                   <span className="ml-1 inline-flex items-center gap-1">
                     \u00b7{" "}
-                    <span className="inline-block size-3 animate-spin rounded-full border-2 border-border border-t-primary" />{" "}
+                    <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />{" "}
                     Checking updates...
                   </span>
                 )}
@@ -452,11 +454,11 @@ function App() {
                 {showMoreMenu && (
                   <div
                     role="menu"
-                    className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border border-border bg-popover p-1 shadow-md"
+                    className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-white/[0.09] bg-[rgba(15,23,42,0.95)] backdrop-blur-xl p-1 shadow-[0_8px_30px_rgba(0,0,0,0.25)]"
                   >
                     <button
                       role="menuitem"
-                      className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
+                      className="flex w-full items-center rounded-lg px-3 py-2 text-sm hover:bg-white/[0.06] transition-all duration-150 text-left"
                       onClick={() => {
                         setShowMoreMenu(false);
                         setShowInstall(true);
@@ -466,7 +468,7 @@ function App() {
                     </button>
                     <button
                       role="menuitem"
-                      className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
+                      className="flex w-full items-center rounded-lg px-3 py-2 text-sm hover:bg-white/[0.06] transition-all duration-150 text-left"
                       onClick={() => {
                         setShowMoreMenu(false);
                         setShowProfiles(true);
@@ -476,7 +478,7 @@ function App() {
                     </button>
                     <button
                       role="menuitem"
-                      className="flex w-full items-center rounded-sm px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
+                      className="flex w-full items-center rounded-lg px-3 py-2 text-sm hover:bg-white/[0.06] transition-all duration-150 text-left"
                       onClick={() => {
                         setShowMoreMenu(false);
                         setShowSettings(true);

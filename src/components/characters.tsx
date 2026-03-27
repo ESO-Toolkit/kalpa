@@ -11,8 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
-import { Badge } from "@/components/ui/badge";
+import { InfoPill } from "@/components/ui/info-pill";
 
 interface CharactersProps {
   addonsPath: string;
@@ -89,12 +88,12 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
           />
         </div>
 
-        <Separator />
+        <div className="border-t border-white/[0.06]" />
 
         <div className="max-h-[350px] overflow-y-auto space-y-4">
           {loading ? (
             <div className="flex items-center justify-center py-8">
-              <span className="inline-block size-5 animate-spin rounded-full border-2 border-border border-t-primary" />
+              <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
             </div>
           ) : Object.keys(byServer).length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-4">
@@ -104,7 +103,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
             Object.entries(byServer).map(([server, chars]) => (
               <div key={server}>
                 <div className="flex items-center gap-2 mb-2">
-                  <Badge variant="outline">{server}</Badge>
+                  <InfoPill color="sky">{server}</InfoPill>
                   <span className="text-xs text-muted-foreground">
                     {chars.length} character{chars.length !== 1 ? "s" : ""}
                   </span>
@@ -113,7 +112,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
                   {chars.map((char) => (
                     <div
                       key={`${char.server}-${char.name}`}
-                      className="flex items-center justify-between rounded-lg border border-border p-3"
+                      className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]"
                     >
                       <span className="text-sm font-medium">{char.name}</span>
                       <Button
