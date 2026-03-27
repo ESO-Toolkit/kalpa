@@ -268,21 +268,48 @@ pub fn install_addon(
     // Load metadata store and record the install
     let mut store = metadata::load_metadata(&addons_dir);
 
-    // Record metadata — use ESOUI version when available so
-    // check_for_updates compares like-for-like.
-    let esoui_version = esoui::fetch_addon_info(esoui_id)
-        .map(|info| info.version)
+    // Record metadata — only the primary folder gets the esoui_id so
+    // that check_for_updates can compare versions correctly. Bundled
+    // secondary folders (libs, patches) get esoui_id 0 so they aren't
+    // individually update-checked against the wrong ESOUI page.
+    let esoui_info = esoui::fetch_addon_info(esoui_id).ok();
+    let esoui_version = esoui_info
+        .as_ref()
+        .map(|i| i.version.clone())
         .unwrap_or_default();
+    let esoui_title = esoui_info
+        .as_ref()
+        .map(|i| i.title.clone())
+        .unwrap_or_default();
+
+    // Determine which folder is the "primary" one for this esoui_id.
+    // Prefer a folder whose name appears in the ESOUI title, otherwise
+    // use the first folder.
+    let primary_folder = installed_folders
+        .iter()
+        .find(|f| esoui_title.contains(f.as_str()))
+        .or(installed_folders.first())
+        .cloned()
+        .unwrap_or_default();
+
     for folder in &installed_folders {
-        let version = if esoui_version.is_empty() {
+        let is_primary = *folder == primary_folder;
+        let folder_version = if is_primary && !esoui_version.is_empty() {
+            esoui_version.clone()
+        } else {
             find_manifest(&addons_dir, folder)
                 .and_then(|p| manifest::parse_manifest(folder, &p))
                 .map(|m| m.version)
                 .unwrap_or_default()
-        } else {
-            esoui_version.clone()
         };
-        metadata::record_install(&mut store, folder, esoui_id, &version, &download_url);
+        let folder_esoui_id = if is_primary { esoui_id } else { 0 };
+        metadata::record_install(
+            &mut store,
+            folder,
+            folder_esoui_id,
+            &folder_version,
+            &download_url,
+        );
     }
 
     // Collect all installed folder names (existing + newly installed)
@@ -408,6 +435,12 @@ fn check_for_updates_blocking(addons_path: &str) -> Result<Vec<UpdateCheckResult
             None => continue,
         };
 
+        // Skip bundled secondary folders (esoui_id 0) — they don't have
+        // their own ESOUI page and shouldn't be update-checked.
+        if meta.esoui_id == 0 {
+            continue;
+        }
+
         match esoui::fetch_addon_info(meta.esoui_id) {
             Ok(info) => {
                 // Normalize versions: strip leading "v"/"V" and trim whitespace
@@ -492,12 +525,29 @@ pub fn update_addon(addons_path: String, esoui_id: u32) -> Result<InstallResult,
             metadata::remove_entry(&mut store, old);
         }
     }
+    // Only the primary folder gets the esoui_id; secondary folders
+    // (bundled libs/patches) get esoui_id 0 to avoid false updates.
+    let primary_folder = installed_folders
+        .iter()
+        .find(|f| info.title.contains(f.as_str()))
+        .or(installed_folders.first())
+        .cloned()
+        .unwrap_or_default();
     for folder in &installed_folders {
+        let is_primary = *folder == primary_folder;
+        let folder_version = if is_primary {
+            info.version.clone()
+        } else {
+            find_manifest(&addons_dir, folder)
+                .and_then(|p| manifest::parse_manifest(folder, &p))
+                .map(|m| m.version)
+                .unwrap_or_default()
+        };
         metadata::record_install(
             &mut store,
             folder,
-            esoui_id,
-            &info.version,
+            if is_primary { esoui_id } else { 0 },
+            &folder_version,
             &info.download_url,
         );
     }
