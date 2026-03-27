@@ -225,20 +225,26 @@
   background-size: 256px 256px;
 }
 
-/* === Button Glow Effects === */
+/* === Button Base Transitions === */
 [data-slot="button"] {
   transition:
-    box-shadow 0.25s ease,
+    box-shadow 0.15s ease,
     transform 0.15s ease,
     background-color 0.15s ease,
-    border-color 0.15s ease;
+    border-color 0.15s ease,
+    background-image 0.15s ease;
 }
 
-/* Primary button glow */
-[data-slot="button"]:not([disabled]):hover {
-  box-shadow:
-    0 0 6px rgba(196, 164, 74, 0.2),
-    0 0 20px rgba(196, 164, 74, 0.1);
+/* === Slide Down (update banner) === */
+@keyframes slide-down {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
 }
 
 /* === Focus Glow Pulse === */
