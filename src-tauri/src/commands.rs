@@ -1677,6 +1677,16 @@ fn pack_hub_url() -> &'static str {
     })
 }
 
+/// Validate a pack ID to prevent path traversal in URL interpolation.
+fn validate_pack_id(id: &str) -> Result<(), String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^[a-zA-Z0-9_-]+$").unwrap());
+    if id.is_empty() || id.len() > 100 || !re.is_match(id) {
+        return Err("Invalid pack ID.".to_string());
+    }
+    Ok(())
+}
+
 fn pack_hub_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -1735,6 +1745,7 @@ pub struct Pack {
     pub author_name: String,
     pub is_anonymous: bool,
     pub vote_count: i64,
+    pub user_voted: bool,
     pub tags: Vec<String>,
     pub addons: Vec<PackAddonEntry>,
     pub created_at: String,
@@ -1779,6 +1790,7 @@ impl Pack {
             },
             is_anonymous: hub.is_anonymous,
             vote_count: hub.vote_count,
+            user_voted: hub.user_voted.unwrap_or(false),
             tags: hub.tags,
             addons,
             created_at: hub.created_at,
@@ -1809,12 +1821,15 @@ pub struct PackPage {
 
 #[tauri::command]
 pub async fn list_packs(
+    state: tauri::State<'_, AuthState>,
     pack_type: Option<String>,
     tag: Option<String>,
     query: Option<String>,
     sort: Option<String>,
     page: Option<i64>,
 ) -> Result<PackPage, String> {
+    let access_token = get_current_token(&state);
+
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
@@ -1837,7 +1852,12 @@ pub async fn list_packs(
             query_params.push(("page", p.to_string()));
         }
 
-        let response = client.get(&url).query(&query_params).send().map_err(|e| {
+        let mut req = client.get(&url).query(&query_params);
+        if let Some(token) = &access_token {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let response = req.send().map_err(|e| {
             if e.is_connect() || e.is_timeout() {
                 "Could not connect to Pack Hub. Check your internet connection.".to_string()
             } else {
@@ -1863,13 +1883,21 @@ pub async fn list_packs(
 }
 
 #[tauri::command]
-pub async fn get_pack(id: String) -> Result<Pack, String> {
+pub async fn get_pack(state: tauri::State<'_, AuthState>, id: String) -> Result<Pack, String> {
+    validate_pack_id(&id)?;
+    let access_token = get_current_token(&state);
+
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
         let url = format!("{}/packs/{}", base, id);
 
-        let response = client.get(&url).send().map_err(|e| {
+        let mut req = client.get(&url);
+        if let Some(token) = &access_token {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let response = req.send().map_err(|e| {
             if e.is_connect() || e.is_timeout() {
                 "Could not connect to Pack Hub. Check your internet connection.".to_string()
             } else {
@@ -1888,6 +1916,110 @@ pub async fn get_pack(id: String) -> Result<Pack, String> {
             .map_err(|e| format!("Failed to parse pack response: {}", e))?;
 
         Ok(Pack::from_hub(body.pack))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// Extract the current access token from auth state (if signed in).
+fn get_current_token(state: &tauri::State<'_, AuthState>) -> Option<String> {
+    state
+        .0
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|t| t.access_token.clone()))
+}
+
+// ── Vote response from the hub API ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoteResponse {
+    pub voted: bool,
+    pub vote_count: i64,
+}
+
+#[tauri::command]
+pub async fn vote_pack(
+    state: tauri::State<'_, AuthState>,
+    app: tauri::AppHandle,
+    pack_id: String,
+) -> Result<VoteResponse, String> {
+    validate_pack_id(&pack_id)?;
+    // Get current access token (refresh if needed)
+    let access_token = {
+        let tokens = {
+            let guard = state
+                .0
+                .lock()
+                .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+            guard.clone()
+        };
+
+        let Some(tokens) = tokens else {
+            return Err("Sign in to vote on packs.".to_string());
+        };
+
+        match tokio::task::spawn_blocking({
+            let tokens = tokens.clone();
+            move || auth::ensure_valid_token(&tokens)
+        })
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+        {
+            Ok(Some(new_tokens)) => {
+                let token = new_tokens.access_token.clone();
+                save_auth_tokens(&app, &new_tokens);
+                *state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                token
+            }
+            Ok(None) => tokens.access_token.clone(),
+            Err(e) => {
+                *state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                return Err(e);
+            }
+        }
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let client = pack_hub_client();
+        let base = pack_hub_url();
+        let url = format!("{}/packs/{}/vote", base, pack_id);
+
+        let response = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    "Could not connect to Pack Hub. Check your internet connection.".to_string()
+                } else {
+                    format!("Network error: {}", e)
+                }
+            })?;
+
+        match response.status().as_u16() {
+            200 => {}
+            401 => return Err("Session expired. Please sign in again.".to_string()),
+            404 => return Err("Pack not found.".to_string()),
+            429 => return Err("Too many votes. Please wait a moment.".to_string()),
+            status => {
+                let body = response.text().unwrap_or_default();
+                return Err(format!("Pack Hub returned HTTP {} — {}", status, body));
+            }
+        }
+
+        let body: VoteResponse = response
+            .json()
+            .map_err(|e| format!("Failed to parse vote response: {}", e))?;
+
+        Ok(body)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
