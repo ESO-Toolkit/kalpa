@@ -13,24 +13,36 @@ use std::sync::OnceLock;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
 /// Prevents a compromised webview from targeting arbitrary filesystem locations.
-fn require_allowed_path(
-    state: &tauri::State<'_, AllowedAddonsPath>,
-    addons_path: &str,
-) -> Result<PathBuf, String> {
+fn canonicalize_addons_path(addons_path: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(addons_path);
     if !path.is_dir() {
         return Err(format!("AddOns folder not found: {}", addons_path));
     }
-    let guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
-    if let Some(allowed_canonical) = &*guard {
-        let canonical = path
-            .canonicalize()
-            .map_err(|e| format!("Invalid path: {}", e))?;
-        if canonical != *allowed_canonical {
-            return Err("Addons path does not match the configured path.".to_string());
-        }
+
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Invalid path: {}", e))?;
+
+    if canonical.file_name().and_then(|n| n.to_str()) != Some("AddOns") {
+        return Err("Selected directory must be the ESO AddOns folder.".to_string());
     }
-    Ok(path)
+
+    Ok(canonical)
+}
+
+fn require_allowed_path(
+    state: &tauri::State<'_, AllowedAddonsPath>,
+    addons_path: &str,
+) -> Result<PathBuf, String> {
+    let canonical = canonicalize_addons_path(addons_path)?;
+    let guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
+    let Some(allowed_canonical) = &*guard else {
+        return Err("Addons path has not been initialized.".to_string());
+    };
+    if canonical != *allowed_canonical {
+        return Err("Addons path does not match the configured path.".to_string());
+    }
+    Ok(canonical)
 }
 
 /// Called by the frontend to register the approved addons directory.
@@ -40,13 +52,7 @@ pub fn set_addons_path(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<(), String> {
-    let path = PathBuf::from(&addons_path);
-    if !path.is_dir() {
-        return Err(format!("Directory not found: {}", addons_path));
-    }
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("Invalid path: {}", e))?;
+    let canonical = canonicalize_addons_path(&addons_path)?;
     let mut guard = state.0.lock().map_err(|_| "Internal error.".to_string())?;
     *guard = Some(canonical);
     Ok(())
@@ -234,20 +240,19 @@ pub fn detect_addons_folder() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn scan_installed_addons(addons_path: String) -> Result<Vec<AddonManifest>, String> {
-    tokio::task::spawn_blocking(move || scan_installed_addons_blocking(&addons_path))
+pub async fn scan_installed_addons(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<AddonManifest>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || scan_installed_addons_blocking(&addons_dir))
         .await
         .map_err(|e| format!("Task failed: {}", e))?
 }
 
-fn scan_installed_addons_blocking(addons_path: &str) -> Result<Vec<AddonManifest>, String> {
-    let addons_dir = PathBuf::from(&addons_path);
-    if !addons_dir.is_dir() {
-        return Err(format!("AddOns folder not found: {}", addons_path));
-    }
-
+fn scan_installed_addons_blocking(addons_dir: &Path) -> Result<Vec<AddonManifest>, String> {
     let entries =
-        fs::read_dir(&addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
+        fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
 
     let mut addons: Vec<AddonManifest> = Vec::new();
 
@@ -262,7 +267,7 @@ fn scan_installed_addons_blocking(addons_path: &str) -> Result<Vec<AddonManifest
             None => continue,
         };
 
-        let manifest_path = match find_manifest(&addons_dir, &folder_name) {
+        let manifest_path = match find_manifest(addons_dir, &folder_name) {
             Some(p) => p,
             None => continue,
         };
@@ -277,7 +282,7 @@ fn scan_installed_addons_blocking(addons_path: &str) -> Result<Vec<AddonManifest
     // ESO would recognize. ESO also searches subfolders up to 3 levels deep for
     // embedded libraries, so we scan those too.
     let mut installed: HashSet<String> = HashSet::new();
-    if let Ok(top_entries) = fs::read_dir(&addons_dir) {
+    if let Ok(top_entries) = fs::read_dir(addons_dir) {
         for entry in top_entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -314,7 +319,7 @@ fn scan_installed_addons_blocking(addons_path: &str) -> Result<Vec<AddonManifest
     // Load metadata and clean up stale entries:
     // - Remove entries for addon folders that no longer exist on disk
     // - Deduplicate entries with the same esoui_id (keep the one that exists)
-    let mut store = metadata::load_metadata(&addons_dir);
+    let mut store = metadata::load_metadata(addons_dir);
     let stale: Vec<String> = store
         .addons
         .keys()
@@ -325,7 +330,7 @@ fn scan_installed_addons_blocking(addons_path: &str) -> Result<Vec<AddonManifest
         for name in &stale {
             metadata::remove_entry(&mut store, name);
         }
-        let _ = metadata::save_metadata(&addons_dir, &store);
+        let _ = metadata::save_metadata(addons_dir, &store);
     }
 
     // Check for missing dependencies and enrich with ESOUI ID
@@ -351,12 +356,14 @@ fn scan_installed_addons_blocking(addons_path: &str) -> Result<Vec<AddonManifest
 
 #[tauri::command]
 pub async fn set_addon_tags(
+    state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     folder_name: String,
     tags: Vec<String>,
 ) -> Result<(), String> {
+    validate_name(&folder_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        let addons_dir = PathBuf::from(&addons_path);
         let mut store = metadata::load_metadata(&addons_dir);
         match store.addons.get_mut(&folder_name) {
             Some(meta) => meta.tags = tags,
@@ -560,15 +567,18 @@ fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<Inst
 }
 
 #[tauri::command]
-pub async fn check_for_updates(addons_path: String) -> Result<Vec<UpdateCheckResult>, String> {
-    tokio::task::spawn_blocking(move || check_for_updates_blocking(&addons_path))
+pub async fn check_for_updates(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<UpdateCheckResult>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || check_for_updates_blocking(&addons_dir))
         .await
         .map_err(|e| format!("Task failed: {}", e))?
 }
 
-fn check_for_updates_blocking(addons_path: &str) -> Result<Vec<UpdateCheckResult>, String> {
-    let addons_dir = PathBuf::from(&addons_path);
-    let mut store = metadata::load_metadata(&addons_dir);
+fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult>, String> {
+    let mut store = metadata::load_metadata(addons_dir);
     let mut metadata_changed = false;
 
     // Fetch the full ESOUI filelist in a single API call
@@ -649,7 +659,7 @@ fn check_for_updates_blocking(addons_path: &str) -> Result<Vec<UpdateCheckResult
     }
 
     if metadata_changed {
-        let _ = metadata::save_metadata(&addons_dir, &store);
+        let _ = metadata::save_metadata(addons_dir, &store);
     }
 
     Ok(results)
@@ -738,8 +748,11 @@ pub struct ExportData {
 }
 
 #[tauri::command]
-pub fn export_addon_list(addons_path: String) -> Result<String, String> {
-    let addons_dir = PathBuf::from(&addons_path);
+pub fn export_addon_list(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<String, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let store = metadata::load_metadata(&addons_dir);
 
     let mut entries: Vec<ExportEntry> = store
@@ -785,25 +798,24 @@ pub struct AutoLinkResult {
 
 /// Try to auto-link untracked addons to their ESOUI IDs by searching ESOUI.
 #[tauri::command]
-pub async fn auto_link_addons(addons_path: String) -> Result<AutoLinkResult, String> {
-    tokio::task::spawn_blocking(move || auto_link_addons_blocking(&addons_path))
+pub async fn auto_link_addons(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<AutoLinkResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || auto_link_addons_blocking(&addons_dir))
         .await
         .map_err(|e| format!("Task failed: {}", e))?
 }
 
-fn auto_link_addons_blocking(addons_path: &str) -> Result<AutoLinkResult, String> {
-    let addons_dir = PathBuf::from(&addons_path);
-    if !addons_dir.is_dir() {
-        return Err(format!("AddOns folder not found: {}", addons_path));
-    }
-
+fn auto_link_addons_blocking(addons_dir: &Path) -> Result<AutoLinkResult, String> {
     // Fetch the full ESOUI filelist in a single API call (~4000 addons).
     let api_lookup = esoui::fetch_filelist_lookup()?;
 
-    let mut store = metadata::load_metadata(&addons_dir);
+    let mut store = metadata::load_metadata(addons_dir);
 
     let entries =
-        fs::read_dir(&addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
+        fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
 
     let mut linked: Vec<String> = Vec::new();
     let mut not_found: Vec<String> = Vec::new();
@@ -819,7 +831,7 @@ fn auto_link_addons_blocking(addons_path: &str) -> Result<AutoLinkResult, String
         };
 
         // Must have a manifest to be a real addon
-        if find_manifest(&addons_dir, &folder_name).is_none() {
+        if find_manifest(addons_dir, &folder_name).is_none() {
             continue;
         }
 
@@ -855,7 +867,7 @@ fn auto_link_addons_blocking(addons_path: &str) -> Result<AutoLinkResult, String
             if needs_update {
                 let version = already_tracked
                     .map(|m| m.installed_version.clone())
-                    .unwrap_or_else(|| read_local_version(&addons_dir, &folder_name));
+                    .unwrap_or_else(|| read_local_version(addons_dir, &folder_name));
                 let download_url = already_tracked
                     .map(|m| m.download_url.clone())
                     .unwrap_or_else(|| api_entry.file_info_uri.clone());
@@ -874,7 +886,7 @@ fn auto_link_addons_blocking(addons_path: &str) -> Result<AutoLinkResult, String
         }
     }
 
-    metadata::save_metadata(&addons_dir, &store)?;
+    metadata::save_metadata(addons_dir, &store)?;
 
     Ok(AutoLinkResult { linked, not_found })
 }
@@ -1001,12 +1013,11 @@ pub struct ApiCompatInfo {
 }
 
 #[tauri::command]
-pub fn check_api_compatibility(addons_path: String) -> Result<ApiCompatInfo, String> {
-    let addons_dir = PathBuf::from(&addons_path);
-    if !addons_dir.is_dir() {
-        return Err(format!("AddOns folder not found: {}", addons_path));
-    }
-
+pub fn check_api_compatibility(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<ApiCompatInfo, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     // Read the game's current API version from AddOnSettings.txt
     let settings_path = addons_dir
         .parent()
@@ -1102,8 +1113,11 @@ fn saved_variables_dir(addons_dir: &std::path::Path) -> PathBuf {
 }
 
 #[tauri::command]
-pub fn list_backups(addons_path: String) -> Result<Vec<BackupInfo>, String> {
-    let addons_dir = PathBuf::from(&addons_path);
+pub fn list_backups(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<BackupInfo>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let backups = backups_dir(&addons_dir);
     if !backups.is_dir() {
         return Ok(Vec::new());
@@ -1161,9 +1175,13 @@ pub fn list_backups(addons_path: String) -> Result<Vec<BackupInfo>, String> {
 }
 
 #[tauri::command]
-pub fn create_backup(addons_path: String, backup_name: String) -> Result<BackupInfo, String> {
+pub fn create_backup(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    backup_name: String,
+) -> Result<BackupInfo, String> {
     validate_name(&backup_name)?;
-    let addons_dir = PathBuf::from(&addons_path);
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let sv_dir = saved_variables_dir(&addons_dir);
     if !sv_dir.is_dir() {
         return Err("SavedVariables folder not found.".to_string());
@@ -1251,9 +1269,13 @@ pub fn restore_backup(
 }
 
 #[tauri::command]
-pub fn delete_backup(addons_path: String, backup_name: String) -> Result<(), String> {
+pub fn delete_backup(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    backup_name: String,
+) -> Result<(), String> {
     validate_name(&backup_name)?;
-    let addons_dir = PathBuf::from(&addons_path);
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let backup_path = backups_dir(&addons_dir).join(&backup_name);
 
     if !backup_path.is_dir() {
@@ -1292,15 +1314,23 @@ fn save_profiles(addons_dir: &std::path::Path, store: &ProfileStore) -> Result<(
 }
 
 #[tauri::command]
-pub fn list_profiles(addons_path: String) -> Result<(Vec<AddonProfile>, Option<String>), String> {
-    let addons_dir = PathBuf::from(&addons_path);
+pub fn list_profiles(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<(Vec<AddonProfile>, Option<String>), String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let store = load_profiles(&addons_dir);
     Ok((store.profiles, store.active_profile))
 }
 
 #[tauri::command]
-pub fn create_profile(addons_path: String, profile_name: String) -> Result<AddonProfile, String> {
-    let addons_dir = PathBuf::from(&addons_path);
+pub fn create_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    profile_name: String,
+) -> Result<AddonProfile, String> {
+    validate_name(&profile_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let mut store = load_profiles(&addons_dir);
 
     if store.profiles.iter().any(|p| p.name == profile_name) {
@@ -1358,6 +1388,7 @@ pub fn activate_profile(
     addons_path: String,
     profile_name: String,
 ) -> Result<ActivateProfileResult, String> {
+    validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let mut store = load_profiles(&addons_dir);
 
@@ -1429,8 +1460,13 @@ pub fn activate_profile(
 }
 
 #[tauri::command]
-pub fn delete_profile(addons_path: String, profile_name: String) -> Result<(), String> {
-    let addons_dir = PathBuf::from(&addons_path);
+pub fn delete_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    profile_name: String,
+) -> Result<(), String> {
+    validate_name(&profile_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let mut store = load_profiles(&addons_dir);
 
     store.profiles.retain(|p| p.name != profile_name);
@@ -1451,8 +1487,11 @@ pub struct CharacterInfo {
 }
 
 #[tauri::command]
-pub fn list_characters(addons_path: String) -> Result<Vec<CharacterInfo>, String> {
-    let addons_dir = PathBuf::from(&addons_path);
+pub fn list_characters(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<CharacterInfo>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let settings_path = addons_dir
         .parent()
         .map(|p| p.join("AddOnSettings.txt"))
@@ -1495,12 +1534,16 @@ pub fn list_characters(addons_path: String) -> Result<Vec<CharacterInfo>, String
 
 #[tauri::command]
 pub fn backup_character_settings(
+    state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     character_name: String,
     backup_name: String,
 ) -> Result<u32, String> {
+    if character_name.trim().is_empty() {
+        return Err("Character name cannot be empty.".to_string());
+    }
     validate_name(&backup_name)?;
-    let addons_dir = PathBuf::from(&addons_path);
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let sv_dir = saved_variables_dir(&addons_dir);
     if !sv_dir.is_dir() {
         return Err("SavedVariables folder not found.".to_string());
@@ -1618,7 +1661,10 @@ pub fn detect_minion() -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub fn migrate_from_minion(addons_path: String) -> Result<MinionMigrationResult, String> {
+pub fn migrate_from_minion(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<MinionMigrationResult, String> {
     let xml_path = find_minion_xml().ok_or("Minion installation not found.")?;
 
     let content =
@@ -1627,7 +1673,7 @@ pub fn migrate_from_minion(addons_path: String) -> Result<MinionMigrationResult,
     let minion_addons = parse_minion_addons(&content);
     let addon_count = minion_addons.len() as u32;
 
-    let addons_dir = PathBuf::from(&addons_path);
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
     let mut store = metadata::load_metadata(&addons_dir);
 
     let mut imported: u32 = 0;
@@ -1719,6 +1765,7 @@ fn default_true() -> bool {
 #[serde(rename_all = "snake_case")]
 pub struct HubPack {
     pub id: String,
+    #[serde(default)]
     pub author_id: String,
     pub author_name: String,
     pub is_anonymous: bool,
@@ -1739,6 +1786,7 @@ pub struct HubPack {
 #[serde(rename_all = "camelCase")]
 pub struct Pack {
     pub id: String,
+    pub author_id: String,
     pub title: String,
     pub description: String,
     pub pack_type: String,
@@ -1780,6 +1828,7 @@ impl Pack {
         };
         Self {
             id: hub.id,
+            author_id: hub.author_id,
             title: hub.title,
             description: hub.description,
             pack_type: hub.pack_type,
@@ -2159,6 +2208,18 @@ pub struct CreatePackPayload {
     pub is_anonymous: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePackPayload {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub pack_type: String,
+    pub addons: Vec<PackAddonEntry>,
+    pub tags: Vec<String>,
+    pub is_anonymous: bool,
+}
+
 #[tauri::command]
 pub async fn create_pack(
     state: tauri::State<'_, AuthState>,
@@ -2244,6 +2305,103 @@ pub async fn create_pack(
             status => {
                 let body = response.text().unwrap_or_default();
                 return Err(format!("Pack Hub returned HTTP {} — {}", status, body));
+            }
+        }
+
+        let body: PackSingleResponse = response
+            .json()
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        Ok(Pack::from_hub(body.pack))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn update_pack(
+    state: tauri::State<'_, AuthState>,
+    app: tauri::AppHandle,
+    payload: UpdatePackPayload,
+) -> Result<Pack, String> {
+    validate_pack_id(&payload.id)?;
+
+    let access_token = {
+        let tokens = {
+            let guard = state
+                .0
+                .lock()
+                .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+            guard.clone()
+        };
+
+        let Some(tokens) = tokens else {
+            return Err("Not signed in. Please sign in first.".to_string());
+        };
+
+        match tokio::task::spawn_blocking({
+            let tokens = tokens.clone();
+            move || auth::ensure_valid_token(&tokens)
+        })
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+        {
+            Ok(Some(new_tokens)) => {
+                let token = new_tokens.access_token.clone();
+                save_auth_tokens(&app, &new_tokens);
+                *state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                token
+            }
+            Ok(None) => tokens.access_token.clone(),
+            Err(e) => {
+                *state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                return Err(e);
+            }
+        }
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let client = pack_hub_client();
+        let base = pack_hub_url();
+        let url = format!("{}/packs/{}", base, payload.id);
+
+        let body = serde_json::json!({
+            "title": payload.title,
+            "description": payload.description,
+            "pack_type": payload.pack_type,
+            "addons": payload.addons,
+            "tags": payload.tags,
+            "is_anonymous": payload.is_anonymous,
+        });
+
+        let response = client
+            .put(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    "Could not connect to Pack Hub. Check your internet connection.".to_string()
+                } else {
+                    format!("Network error: {}", e)
+                }
+            })?;
+
+        match response.status().as_u16() {
+            200 => {}
+            401 => return Err("Session expired. Please sign in again.".to_string()),
+            403 => return Err("You can only edit packs you created.".to_string()),
+            404 => return Err("Pack not found.".to_string()),
+            status => {
+                let body = response.text().unwrap_or_default();
+                return Err(format!("Pack Hub returned HTTP {} - {}", status, body));
             }
         }
 
