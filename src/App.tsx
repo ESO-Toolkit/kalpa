@@ -33,6 +33,11 @@ type ActiveDialog =
   | "characters"
   | null;
 
+interface PendingDeepLinkPayload {
+  packId: string | null;
+  shareCode: string | null;
+}
+
 function App() {
   const [addonsPath, setAddonsPath] = useState("");
   const [addons, setAddons] = useState<AddonManifest[]>([]);
@@ -54,6 +59,7 @@ function App() {
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [deepLinkPackId, setDeepLinkPackId] = useState<string | null>(null);
+  const [deepLinkShareCode, setDeepLinkShareCode] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("installed");
   const [discoverTab, setDiscoverTab] = useState<DiscoverTab>("search");
   const [selectedDiscoverResult, setSelectedDiscoverResult] = useState<EsouiSearchResult | null>(
@@ -95,7 +101,7 @@ function App() {
 
   useEffect(() => {
     let disposed = false;
-    let cleanup: (() => void) | null = null;
+    const cleanups: (() => void)[] = [];
 
     void listen<string>("deep-link-pack", (event) => {
       setDeepLinkPackId(event.payload);
@@ -106,15 +112,45 @@ function App() {
           unlisten();
           return;
         }
-        cleanup = unlisten;
+        cleanups.push(unlisten);
       })
       .catch((listenError) => {
         console.error("[tauri:deep-link-pack]", listenError);
       });
 
+    void listen<string>("deep-link-share", (event) => {
+      setDeepLinkShareCode(event.payload);
+      setActiveDialog("packs");
+    })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        cleanups.push(unlisten);
+      })
+      .catch((listenError) => {
+        console.error("[tauri:deep-link-share]", listenError);
+      });
+
+    void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
+      .then((payload) => {
+        if (disposed) return;
+        if (payload.packId) {
+          setDeepLinkPackId(payload.packId);
+          setActiveDialog("packs");
+        } else if (payload.shareCode) {
+          setDeepLinkShareCode(payload.shareCode);
+          setActiveDialog("packs");
+        }
+      })
+      .catch((invokeError) => {
+        console.error("[tauri:consume_initial_deep_link]", invokeError);
+      });
+
     return () => {
       disposed = true;
-      cleanup?.();
+      for (const fn of cleanups) fn();
     };
   }, []);
 
@@ -555,6 +591,7 @@ function App() {
   const handleCloseDialog = useCallback(() => {
     setActiveDialog(null);
     setDeepLinkPackId(null);
+    setDeepLinkShareCode(null);
   }, []);
 
   return (
@@ -650,6 +687,7 @@ function App() {
         addonsPath={addonsPath}
         authUser={authUser}
         deepLinkPackId={deepLinkPackId}
+        deepLinkShareCode={deepLinkShareCode}
         onAuthChange={setAuthUser}
         onCheckForAppUpdate={() => void checkForAppUpdate(false)}
         onCloseDialog={handleCloseDialog}
