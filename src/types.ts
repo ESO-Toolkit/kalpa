@@ -118,7 +118,7 @@ export type SortMode = "name" | "author";
 export type FilterMode = "all" | "addons" | "libraries" | "outdated" | "missing-deps" | "favorites";
 
 // Predefined tags users can apply to addons
-export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "cosmetic"] as const;
+export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "raid"] as const;
 export type PresetTag = (typeof PRESET_TAGS)[number];
 export type ViewMode = "installed" | "discover";
 export type DiscoverTab = "search" | "categories" | "url";

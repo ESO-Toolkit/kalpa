@@ -38,6 +38,19 @@ interface PendingDeepLinkPayload {
   shareCode: string | null;
 }
 
+const VALID_FILTER_MODES: readonly FilterMode[] = [
+  "all",
+  "addons",
+  "libraries",
+  "outdated",
+  "missing-deps",
+  "favorites",
+];
+
+function isFilterMode(value: string): value is FilterMode {
+  return (VALID_FILTER_MODES as readonly string[]).includes(value);
+}
+
 function App() {
   const [addonsPath, setAddonsPath] = useState("");
   const [addons, setAddons] = useState<AddonManifest[]>([]);
@@ -297,9 +310,13 @@ function App() {
 
   const initializeApp = useCallback(async () => {
     const savedSort = await getSetting<SortMode>("sortMode", "name");
-    const savedFilter = await getSetting<FilterMode>("filterMode", "all");
+    const savedFilter = await getSetting<string>("filterMode", "all");
+    const normalizedFilter = isFilterMode(savedFilter) ? savedFilter : "all";
     setSortMode(savedSort);
-    setFilterMode(savedFilter);
+    setFilterMode(normalizedFilter);
+    if (normalizedFilter !== savedFilter) {
+      void setSetting("filterMode", normalizedFilter);
+    }
 
     const authResult = await invokeResult<AuthUser | null>("auth_get_user");
     if (authResult.ok) {
@@ -365,6 +382,14 @@ function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [scanAndCheck]);
+
+  useEffect(() => {
+    if (!activeTagFilter) return;
+    const tagStillExists = addons.some((addon) => addon.tags.includes(activeTagFilter));
+    if (!tagStillExists) {
+      setActiveTagFilter(null);
+    }
+  }, [activeTagFilter, addons]);
 
   const handleRefresh = useCallback(() => {
     if (addonsPathRef.current) {
