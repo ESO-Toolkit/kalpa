@@ -2,15 +2,18 @@ use crate::auth::{self, AuthState, AuthTokens, AuthUser};
 use crate::esoui::{self, EsouiAddonDetail, EsouiAddonInfo, EsouiCategory, EsouiSearchResult};
 use crate::installer;
 use crate::manifest::{self, AddonManifest};
+use crate::manifest_cache;
 use crate::metadata;
 use crate::AllowedAddonsPath;
 use crate::{PendingDeepLink, PendingDeepLinkPayload};
+use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use tauri::Manager;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
 /// Prevents a compromised webview from targeting arbitrary filesystem locations.
@@ -479,72 +482,110 @@ pub fn detect_addons_folder() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn scan_installed_addons(
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<Vec<AddonManifest>, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || scan_installed_addons_blocking(&addons_dir))
+    let cache_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+    tokio::task::spawn_blocking(move || scan_installed_addons_blocking(&addons_dir, &cache_dir))
         .await
         .map_err(|e| format!("Task failed: {}", e))?
 }
 
-fn scan_installed_addons_blocking(addons_dir: &Path) -> Result<Vec<AddonManifest>, String> {
+fn scan_installed_addons_blocking(
+    addons_dir: &Path,
+    cache_dir: &Path,
+) -> Result<Vec<AddonManifest>, String> {
     let entries =
         fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
 
-    let mut addons: Vec<AddonManifest> = Vec::new();
+    // Collect top-level directories first so we can process them in parallel.
+    let top_dirs: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?.to_string();
+            Some((name, path))
+        })
+        .collect();
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
+    // Open SQLite manifest cache in the app data dir (not the AddOns folder,
+    // which ESO scans recursively and could cause odd behavior with a .db file).
+    let folder_names: Vec<&str> = top_dirs.iter().map(|(name, _)| name.as_str()).collect();
+    let mut cache_conn = manifest_cache::open_and_prune(cache_dir, &folder_names);
 
-        let folder_name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name.to_string(),
-            None => continue,
-        };
+    // Two-pass strategy:
+    // 1. Check the cache for each folder (sequential — SQLite is single-threaded)
+    // 2. Parse uncached manifests in parallel with rayon, then store results back
+    let mut addons: Vec<AddonManifest> = Vec::with_capacity(top_dirs.len());
+    let mut uncached: Vec<(String, PathBuf)> = Vec::new();
 
-        let manifest_path = match find_manifest(addons_dir, &folder_name) {
+    for (folder_name, _path) in &top_dirs {
+        let manifest_path = match find_manifest(addons_dir, folder_name) {
             Some(p) => p,
             None => continue,
         };
+        if let Some(ref conn) = cache_conn {
+            if let Some(cached) =
+                manifest_cache::parse_manifest_cached(conn, folder_name, &manifest_path)
+            {
+                addons.push(cached);
+                continue;
+            }
+        }
+        uncached.push((folder_name.clone(), manifest_path));
+    }
 
-        if let Some(addon) = manifest::parse_manifest(&folder_name, &manifest_path) {
-            addons.push(addon);
+    // Parse uncached manifests in parallel
+    let newly_parsed: Vec<(PathBuf, AddonManifest)> = uncached
+        .par_iter()
+        .filter_map(|(folder_name, manifest_path)| {
+            let m = manifest::parse_manifest(folder_name, manifest_path)?;
+            Some((manifest_path.clone(), m))
+        })
+        .collect();
+
+    // Store newly parsed manifests in a single transaction for performance.
+    // Without this, each INSERT is its own implicit transaction with a WAL flush.
+    if let Some(ref mut conn) = cache_conn {
+        if let Ok(tx) = conn.transaction() {
+            for (manifest_path, m) in &newly_parsed {
+                manifest_cache::store_parsed(&tx, &m.folder_name, manifest_path, m);
+            }
+            let _ = tx.commit();
         }
     }
+    addons.extend(newly_parsed.into_iter().map(|(_, m)| m));
 
     // Build set of ALL directory names in AddOns folder for dependency checking.
     // This includes folders without manifests (data folders) and catches everything
     // ESO would recognize. ESO also searches subfolders up to 3 levels deep for
     // embedded libraries, so we scan those too.
-    let mut installed: HashSet<String> = HashSet::new();
-    if let Ok(top_entries) = fs::read_dir(addons_dir) {
-        for entry in top_entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                installed.insert(name.to_string());
-            }
-            // Scan subfolders (1-2 levels deep) for embedded libraries
-            if let Ok(sub_entries) = fs::read_dir(&path) {
-                for sub in sub_entries.flatten() {
-                    if sub.path().is_dir() {
-                        if let Some(name) = sub.path().file_name().and_then(|n| n.to_str()) {
-                            installed.insert(name.to_string());
-                        }
-                        // One more level (libs/LibFoo/)
-                        if let Ok(sub2_entries) = fs::read_dir(sub.path()) {
-                            for sub2 in sub2_entries.flatten() {
-                                if sub2.path().is_dir() {
-                                    if let Some(name) =
-                                        sub2.path().file_name().and_then(|n| n.to_str())
-                                    {
-                                        installed.insert(name.to_string());
-                                    }
+    let mut installed: HashSet<String> = HashSet::with_capacity(top_dirs.len() * 2);
+    for (name, path) in &top_dirs {
+        installed.insert(name.clone());
+        // Scan subfolders (1-2 levels deep) for embedded libraries
+        if let Ok(sub_entries) = fs::read_dir(path) {
+            for sub in sub_entries.flatten() {
+                if sub.path().is_dir() {
+                    if let Some(sub_name) = sub.path().file_name().and_then(|n| n.to_str()) {
+                        installed.insert(sub_name.to_string());
+                    }
+                    // One more level (libs/LibFoo/)
+                    if let Ok(sub2_entries) = fs::read_dir(sub.path()) {
+                        for sub2 in sub2_entries.flatten() {
+                            if sub2.path().is_dir() {
+                                if let Some(sub2_name) =
+                                    sub2.path().file_name().and_then(|n| n.to_str())
+                                {
+                                    installed.insert(sub2_name.to_string());
                                 }
                             }
                         }

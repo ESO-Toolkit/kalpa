@@ -33,3 +33,13 @@ tauri-plugin-window-state = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2.5.3"
+rayon = "1.11"
+# "bundled" statically compiles SQLite (~1-2MB binary size increase) to avoid
+# depending on a system SQLite installation. Worth it for portable releases.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true # Only effective on Linux/macOS (no-op on Windows)
+panic = "abort"

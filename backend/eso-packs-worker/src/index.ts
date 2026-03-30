@@ -5,14 +5,21 @@ import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare } from "./shares";
 
-function json(request: Request, data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders(request),
-    },
-  });
+function json(
+  request: Request,
+  data: unknown,
+  status = 200,
+  cacheMaxAge = 0,
+  cacheScope: "public" | "private" = "public",
+): Response {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...corsHeaders(request),
+  };
+  if (cacheMaxAge > 0) {
+    headers["Cache-Control"] = `${cacheScope}, max-age=${cacheMaxAge}`;
+  }
+  return new Response(JSON.stringify(data), { status, headers });
 }
 
 function notFound(request: Request, message = "Not found"): Response {
@@ -32,11 +39,33 @@ function requireAuth(request: Request, env: Env): boolean {
   return key === env.ADMIN_API_KEY;
 }
 
+/** Purge the CDN-cached pack list after a mutation.
+ *
+ * Only unfiltered `GET /packs` responses are cached (see `handleListPacks`).
+ * The cache key must match the exact URL used for `cache.put`, which is the
+ * bare `/packs` path with no query params. If `handleListPacks` is ever
+ * changed to cache filtered requests, this function must be updated to
+ * purge those keys as well.
+ */
+async function invalidatePackListCache(url: URL): Promise<void> {
+  const cacheKey = new URL("/packs", url.origin);
+  await caches.default.delete(new Request(cacheKey));
+}
+
 // ── GET /packs ─────────────────────────────────────────────────────
 async function handleListPacks(request: Request, env: Env, url: URL): Promise<Response> {
+  // Try the Cache API first for the full pack index (unfiltered requests only)
+  const hasFilters = url.searchParams.has("type") || url.searchParams.has("tag") || url.searchParams.has("q");
+  const cache = caches.default;
+
+  if (!hasFilters) {
+    const cached = await cache.match(request);
+    if (cached) return cached;
+  }
+
   const index = await getPackIndex(env);
   if (!index) {
-    return json(request, { items: [] });
+    return json(request, { items: [] }, 200, 30);
   }
 
   let items = index.items;
@@ -60,7 +89,16 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     );
   }
 
-  return json(request, { items });
+  const response = json(request, { items }, 200, 30);
+
+  // Fire-and-forget: cache unfiltered responses at the CDN edge for 30s.
+  // If the put fails (quota, transient error) the response still reaches the
+  // caller — subsequent requests will just miss the cache and re-fetch from KV.
+  if (!hasFilters && request.method === "GET") {
+    cache.put(request, response.clone()).catch(console.error);
+  }
+
+  return response;
 }
 
 // ── GET /packs/:id ─────────────────────────────────────────────────
@@ -69,11 +107,12 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
   if (!pack) {
     return notFound(request, `Pack "${id}" not found`);
   }
-  return json(request, pack);
+  // Pack data is not user-specific — use public so CDN/shared caches can serve it.
+  return json(request, pack, 200, 300, "public");
 }
 
 // ── POST /packs — create a new pack ────────────────────────────────
-async function handleCreatePack(request: Request, env: Env): Promise<Response> {
+async function handleCreatePack(request: Request, env: Env, url: URL): Promise<Response> {
   if (!requireAuth(request, env)) {
     return unauthorized(request);
   }
@@ -110,6 +149,9 @@ async function handleCreatePack(request: Request, env: Env): Promise<Response> {
   index.items.push(packToIndexItem(pack));
   await putPackIndex(env, index);
 
+  // Invalidate CDN cache for the pack listing
+  await invalidatePackListCache(url);
+
   return json(request, pack, 201);
 }
 
@@ -118,6 +160,7 @@ async function handleUpdatePack(
   request: Request,
   env: Env,
   id: string,
+  url: URL,
 ): Promise<Response> {
   if (!requireAuth(request, env)) {
     return unauthorized(request);
@@ -159,6 +202,8 @@ async function handleUpdatePack(
   }
   await putPackIndex(env, index);
 
+  await invalidatePackListCache(url);
+
   return json(request, pack);
 }
 
@@ -167,6 +212,7 @@ async function handleDeletePack(
   request: Request,
   env: Env,
   id: string,
+  url: URL,
 ): Promise<Response> {
   if (!requireAuth(request, env)) {
     return unauthorized(request);
@@ -183,6 +229,8 @@ async function handleDeletePack(
   const index = (await getPackIndex(env)) ?? { items: [] };
   index.items = index.items.filter((item) => item.id !== id);
   await putPackIndex(env, index);
+
+  await invalidatePackListCache(url);
 
   return json(request, { ok: true });
 }
@@ -218,6 +266,7 @@ async function handleVotePack(
   request: Request,
   env: Env,
   id: string,
+  url: URL,
 ): Promise<Response> {
   if (!requireAuth(request, env)) {
     return unauthorized(request);
@@ -257,6 +306,8 @@ async function handleVotePack(
   }
   await putPackIndex(env, index);
 
+  await invalidatePackListCache(url);
+
   const response: VoteResponse = { voted, voteCount: pack.voteCount };
   return json(request, response);
 }
@@ -280,13 +331,13 @@ export default {
 
     // POST /packs — create
     if (method === "POST" && pathname === "/packs") {
-      return handleCreatePack(request, env);
+      return handleCreatePack(request, env, url);
     }
 
     // /packs/:id/vote route
     const voteMatch = pathname.match(/^\/packs\/([a-z0-9-]+)\/vote$/);
     if (voteMatch && method === "POST") {
-      return handleVotePack(request, env, voteMatch[1]);
+      return handleVotePack(request, env, voteMatch[1], url);
     }
 
     // /packs/:id routes
@@ -297,8 +348,8 @@ export default {
       }
 
       if (method === "GET") return handleGetPack(request, env, id);
-      if (method === "PUT") return handleUpdatePack(request, env, id);
-      if (method === "DELETE") return handleDeletePack(request, env, id);
+      if (method === "PUT") return handleUpdatePack(request, env, id, url);
+      if (method === "DELETE") return handleDeletePack(request, env, id, url);
     }
 
     // ── Share code routes ──────────────────────────────────────────
