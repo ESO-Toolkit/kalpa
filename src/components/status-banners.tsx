@@ -36,7 +36,8 @@ export function StatusBanners({
 
       {isOffline && (
         <Alert className="rounded-none border-x-0 border-t-0 bg-muted/50 text-muted-foreground">
-          You&apos;re offline — updates, installs, and discovery are unavailable until you reconnect.
+          You&apos;re offline — updates, installs, and discovery are unavailable until you
+          reconnect.
         </Alert>
       )}
 

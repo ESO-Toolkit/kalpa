@@ -369,9 +369,7 @@ function App() {
           await checkForUpdates(path, autoUpdate, false);
           void runAutoLink(path);
         } catch (initError) {
-          setError(
-            `Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`
-          );
+          setError(`Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`);
           setErrorShowSettings(true);
           setLoading(false);
         }
