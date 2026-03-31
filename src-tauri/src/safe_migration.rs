@@ -1,7 +1,6 @@
 use crate::metadata;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -360,9 +359,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 pub fn check_preconditions(addons_dir: &Path) -> PreconditionResult {
     let parent = addons_dir.parent().unwrap_or(addons_dir);
     let eso_running = is_process_running("eso64.exe") || is_process_running("eso.exe");
-    let minion_running = is_process_running("Minion.exe")
-        || is_process_running("minion")
-        || is_process_running("java");
+    let minion_running = is_process_running("Minion.exe") || is_process_running("minion");
     let minion_found = crate::commands::find_minion_xml().is_some();
     let addons_path_valid = addons_dir.is_dir();
     let saved_variables_exists = parent.join("SavedVariables").is_dir();
@@ -763,10 +760,12 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
                 let _ = fs::create_dir_all(parent_dir);
             }
             // Atomic write: write to .tmp then rename
-            let tmp_dest = dest.with_extension(format!(
-                "{}.restore-tmp",
-                dest.extension().and_then(|e| e.to_str()).unwrap_or("dat")
-            ));
+            let mut tmp_name = dest
+                .file_name()
+                .unwrap_or_default()
+                .to_os_string();
+            tmp_name.push(".restore-tmp");
+            let tmp_dest = dest.with_file_name(tmp_name);
             let mut out = fs::File::create(&tmp_dest)
                 .map_err(|e| format!("Failed to create restore file: {}", e))?;
             std::io::copy(&mut entry, &mut out)

@@ -87,11 +87,11 @@ export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWiz
         `Snapshot created: ${snap.fileCount} files (${formatBytes(snap.totalSize)})`
       );
       setPhase("dry-run");
-      // Automatically run dry-run
+      setLoading(false);
+      // Automatically run dry-run as a separate step
       await runDryRun();
     } catch (e) {
       setError(getTauriErrorMessage(e));
-    } finally {
       setLoading(false);
     }
   };
