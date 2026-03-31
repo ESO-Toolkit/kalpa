@@ -440,6 +440,7 @@ function App() {
         await setSetting("addonsPath", path);
         setAddonsPath(path);
         setSetupDetection(null);
+        setErrorShowSettings(false);
         setLoading(true);
         await scanAddons(path);
         const autoUpdate = await getSetting<boolean>("autoUpdate", false);

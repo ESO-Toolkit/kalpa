@@ -7,16 +7,40 @@ export type TauriResult<T> = { ok: true; data: T } | { ok: false; error: string 
  * Maps common backend error patterns to friendlier user-facing messages with context.
  */
 const ERROR_HINTS: [RegExp, string][] = [
-  [/zip extraction aborted.*zip bomb/i, "The archive is too large or may be corrupt. Try re-downloading it."],
-  [/zip archive contained no addon folders/i, "This file doesn't look like a valid ESO addon archive."],
-  [/failed to open zip file/i, "Could not open the downloaded file. It may be corrupt or incomplete — try again."],
-  [/failed to read zip archive/i, "The downloaded file is not a valid ZIP. It may be corrupt — try re-downloading."],
-  [/addons folder not found/i, "Your AddOns folder could not be found. It may have been moved or the drive disconnected."],
-  [/could not reach esoui/i, "ESOUI could not be reached. Check your internet connection and try again."],
+  [
+    /zip extraction aborted.*zip bomb/i,
+    "The archive is too large or may be corrupt. Try re-downloading it.",
+  ],
+  [
+    /zip archive contained no addon folders/i,
+    "This file doesn't look like a valid ESO addon archive.",
+  ],
+  [
+    /failed to open zip file/i,
+    "Could not open the downloaded file. It may be corrupt or incomplete — try again.",
+  ],
+  [
+    /failed to read zip archive/i,
+    "The downloaded file is not a valid ZIP. It may be corrupt — try re-downloading.",
+  ],
+  [
+    /addons folder not found/i,
+    "Your AddOns folder could not be found. It may have been moved or the drive disconnected.",
+  ],
+  [
+    /could not reach esoui/i,
+    "ESOUI could not be reached. Check your internet connection and try again.",
+  ],
   [/too many requests to esoui/i, "ESOUI rate limit reached. Wait a moment and try again."],
   [/esoui is currently unavailable/i, "ESOUI appears to be down. Try again in a few minutes."],
-  [/addon not found on esoui/i, "This addon was not found on ESOUI — it may have been removed by its author."],
-  [/permission denied \(os error 13\)|access is denied/i, "Permission denied — antivirus or another program may be blocking the file."],
+  [
+    /addon not found on esoui/i,
+    "This addon was not found on ESOUI — it may have been removed by its author.",
+  ],
+  [
+    /permission denied \(os error 13\)|access is denied/i,
+    "Permission denied — antivirus or another program may be blocking the file.",
+  ],
 ];
 
 export function getTauriErrorMessage(error: unknown): string {

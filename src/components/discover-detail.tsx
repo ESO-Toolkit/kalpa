@@ -28,7 +28,12 @@ interface DiscoverDetailProps {
   isOffline?: boolean;
 }
 
-export function DiscoverDetail({ result, addonsPath, onInstalled, isOffline }: DiscoverDetailProps) {
+export function DiscoverDetail({
+  result,
+  addonsPath,
+  onInstalled,
+  isOffline,
+}: DiscoverDetailProps) {
   const [detail, setDetail] = useState<EsouiAddonDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
