@@ -40,6 +40,10 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install."
+          releaseBody: |
+            See [CHANGELOG.md](https://github.com/ESO-Toolkit/kalpa/blob/main/CHANGELOG.md) for details.
+
+            ## Install
+            Download the `.exe` (NSIS) or `.msi` installer below.
           releaseDraft: false
           prerelease: false

@@ -1,6 +1,6 @@
 {
   "productName": "Kalpa",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "com.kalpa.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
