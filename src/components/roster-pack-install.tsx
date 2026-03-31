@@ -12,7 +12,7 @@ import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
-import { cn } from "@/lib/utils";
+import { cn, decodeHtml } from "@/lib/utils";
 import {
   DownloadIcon,
   Loader2Icon,
@@ -20,6 +20,7 @@ import {
   AlertCircleIcon,
   PackageIcon,
   XIcon,
+  RefreshCwIcon,
 } from "lucide-react";
 import type {
   RosterPack,
@@ -64,49 +65,44 @@ export function RosterPackInstall({
   } | null>(null);
 
   const cancelledRef = useRef(false);
+  const fetchSeqRef = useRef(0);
 
   const installedEsouiIds = useMemo(
     () => new Set(installedAddons.filter((a) => a.esouiId).map((a) => a.esouiId!)),
     [installedAddons]
   );
 
-  // Fix #1: depend only on packId — installedEsouiIds is read via closure at render time
-  // Fix #3: reset installing/installProgress when packId changes
-  useEffect(() => {
-    let fetchCancelled = false;
-
-    async function fetchPack() {
-      setLoading(true);
-      setError(null);
-      setInstalling(false);
-      setInstallProgress(null);
-      try {
-        const result = await invokeOrThrow<RosterPack>("fetch_roster_pack", {
-          packId,
-        });
-        if (fetchCancelled) return;
-        setPack(result);
-        setAddonStates(
-          result.addons.map((addon) => ({
-            addon,
-            status: installedEsouiIds.has(addon.esouiId) ? "installed" : "pending",
-            selected: addon.required || !installedEsouiIds.has(addon.esouiId),
-          }))
-        );
-      } catch (err) {
-        if (fetchCancelled) return;
-        setError(getTauriErrorMessage(err));
-      } finally {
-        if (!fetchCancelled) setLoading(false);
-      }
+  const fetchPack = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
+    setLoading(true);
+    setError(null);
+    setInstalling(false);
+    setInstallProgress(null);
+    try {
+      const result = await invokeOrThrow<RosterPack>("fetch_roster_pack", {
+        packId,
+      });
+      if (seq !== fetchSeqRef.current) return;
+      setPack(result);
+      setAddonStates(
+        result.addons.map((addon) => ({
+          addon,
+          status: installedEsouiIds.has(addon.esouiId) ? "installed" : "pending",
+          selected: addon.required || !installedEsouiIds.has(addon.esouiId),
+        }))
+      );
+    } catch (err) {
+      if (seq !== fetchSeqRef.current) return;
+      setError(getTauriErrorMessage(err));
+    } finally {
+      if (seq === fetchSeqRef.current) setLoading(false);
     }
-
-    void fetchPack();
-    return () => {
-      fetchCancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [packId]);
+
+  useEffect(() => {
+    void fetchPack();
+  }, [fetchPack]);
 
   const toggleAddon = useCallback(
     (esouiId: number) => {
@@ -128,7 +124,6 @@ export function RosterPackInstall({
     [addonStates]
   );
 
-  // Fix #2: gate state updates behind cancelledRef to prevent updates on unmounted component
   const handleInstall = useCallback(async () => {
     if (addonsToInstall.length === 0) {
       toast.info("All selected addons are already installed.");
@@ -207,7 +202,6 @@ export function RosterPackInstall({
     }
   }, [addonsToInstall, addonsPath, onRefresh]);
 
-  // Set cancelledRef on unmount so in-flight installs stop updating state
   useEffect(() => {
     return () => {
       cancelledRef.current = true;
@@ -217,7 +211,6 @@ export function RosterPackInstall({
   const allInstalled = addonStates.length > 0 && addonStates.every((s) => s.status === "installed");
 
   return (
-    // Fix #5: prevent dialog dismissal while installing
     <Dialog
       open
       onOpenChange={(open) => {
@@ -228,12 +221,11 @@ export function RosterPackInstall({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <PackageIcon className="h-5 w-5 text-[#c4a44a]" />
-            {loading ? "Loading Pack..." : pack ? pack.title : "Roster Pack"}
+            {loading ? "Loading Pack..." : pack ? decodeHtml(pack.title) : "Roster Pack"}
           </DialogTitle>
         </DialogHeader>
 
         <div className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1">
-          {/* Fix #8: remove dead border CSS from SVG icon */}
           {loading && (
             <div className="flex items-center justify-center py-8">
               <Loader2Icon className="h-6 w-6 animate-spin text-[#c4a44a]" />
@@ -241,9 +233,20 @@ export function RosterPackInstall({
           )}
 
           {error && (
-            <GlassPanel variant="subtle" className="flex items-center gap-2 p-3 text-red-400">
-              <AlertCircleIcon className="h-4 w-4 shrink-0" />
-              <span className="text-sm">{error}</span>
+            <GlassPanel variant="subtle" className="flex flex-col gap-2 p-3">
+              <div className="flex items-center gap-2 text-red-400">
+                <AlertCircleIcon className="h-4 w-4 shrink-0" />
+                <span className="text-sm">{error}</span>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="self-start"
+                onClick={() => void fetchPack()}
+              >
+                <RefreshCwIcon className="mr-1.5 h-3.5 w-3.5" />
+                Retry
+              </Button>
             </GlassPanel>
           )}
 
@@ -311,7 +314,6 @@ export function RosterPackInstall({
                 ))}
               </div>
 
-              {/* Fix #6: only count completed (not failed) in bar fill */}
               {installProgress && (
                 <div className="mt-1">
                   <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
