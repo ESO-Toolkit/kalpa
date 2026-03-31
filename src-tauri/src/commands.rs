@@ -2056,6 +2056,7 @@ pub fn restore_snapshot(
     addons_path: String,
     snapshot_id: String,
 ) -> Result<u32, String> {
+    validate_name(&snapshot_id)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     safe_migration::restore_snapshot(&addons_dir, &snapshot_id)
 }
@@ -2066,6 +2067,7 @@ pub fn delete_snapshot(
     addons_path: String,
     snapshot_id: String,
 ) -> Result<(), String> {
+    validate_name(&snapshot_id)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     safe_migration::delete_snapshot(&addons_dir, &snapshot_id)
 }
@@ -2076,6 +2078,7 @@ pub fn create_pre_operation_snapshot(
     addons_path: String,
     operation_label: String,
 ) -> Result<safe_migration::SnapshotManifest, String> {
+    validate_name(&operation_label)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     safe_migration::create_pre_operation_snapshot(&addons_dir, &operation_label)
 }
