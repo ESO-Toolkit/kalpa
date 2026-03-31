@@ -21,6 +21,7 @@ import {
   PackageIcon,
   XIcon,
   RefreshCwIcon,
+  StopCircleIcon,
 } from "lucide-react";
 import type {
   RosterPack,
@@ -72,6 +73,7 @@ export function RosterPackInstall({
     [installedAddons]
   );
 
+  // Fetch pack data — depends only on packId, does NOT initialize addonStates
   const fetchPack = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
     cancelledRef.current = true; // abort any in-flight install loop
@@ -79,31 +81,37 @@ export function RosterPackInstall({
     setError(null);
     setInstalling(false);
     setInstallProgress(null);
+    setAddonStates([]);
     try {
       const result = await invokeOrThrow<RosterPack>("fetch_roster_pack", {
         packId,
       });
       if (seq !== fetchSeqRef.current) return;
       setPack(result);
-      setAddonStates(
-        result.addons.map((addon) => ({
-          addon,
-          status: installedEsouiIds.has(addon.esouiId) ? "installed" : "pending",
-          selected: addon.required || !installedEsouiIds.has(addon.esouiId),
-        }))
-      );
     } catch (err) {
       if (seq !== fetchSeqRef.current) return;
       setError(getTauriErrorMessage(err));
     } finally {
       if (seq === fetchSeqRef.current) setLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [packId]);
 
   useEffect(() => {
     void fetchPack();
   }, [fetchPack]);
+
+  // Recompute addonStates when pack loads or installedEsouiIds changes,
+  // but only when not mid-install (install loop manages its own status)
+  useEffect(() => {
+    if (!pack || installing) return;
+    setAddonStates(
+      pack.addons.map((addon) => ({
+        addon,
+        status: installedEsouiIds.has(addon.esouiId) ? "installed" : "pending",
+        selected: addon.required || !installedEsouiIds.has(addon.esouiId),
+      }))
+    );
+  }, [pack, installedEsouiIds, installing]);
 
   const toggleAddon = useCallback(
     (esouiId: number) => {
@@ -203,6 +211,17 @@ export function RosterPackInstall({
     }
   }, [addonsToInstall, addonsPath, onRefresh]);
 
+  const handleCancel = useCallback(() => {
+    if (installing) {
+      cancelledRef.current = true;
+      setInstalling(false);
+      setInstallProgress(null);
+      toast.info("Install cancelled.");
+    } else {
+      onClose();
+    }
+  }, [installing, onClose]);
+
   useEffect(() => {
     return () => {
       cancelledRef.current = true;
@@ -291,10 +310,12 @@ export function RosterPackInstall({
                     {/* Addon info */}
                     <div className="flex min-w-0 flex-1 flex-col">
                       <span className="truncate text-sm font-medium text-white/90">
-                        {addon.name}
+                        {decodeHtml(addon.name)}
                       </span>
                       {addon.note && (
-                        <span className="truncate text-xs text-white/40">{addon.note}</span>
+                        <span className="truncate text-xs text-white/40">
+                          {decodeHtml(addon.note)}
+                        </span>
                       )}
                     </div>
 
@@ -338,8 +359,17 @@ export function RosterPackInstall({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={installing}>
-            {allInstalled ? "Done" : "Cancel"}
+          <Button variant="outline" onClick={handleCancel}>
+            {installing ? (
+              <>
+                <StopCircleIcon className="mr-1.5 h-4 w-4" />
+                Stop
+              </>
+            ) : allInstalled ? (
+              "Done"
+            ) : (
+              "Cancel"
+            )}
           </Button>
           {pack && !allInstalled && (
             <Button

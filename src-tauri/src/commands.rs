@@ -3029,3 +3029,45 @@ pub async fn fetch_roster_pack(pack_id: String) -> Result<RosterPack, String> {
     .await
     .map_err(|e| format!("Task failed: {}", e))?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_pack_id_accepts_valid_ids() {
+        assert!(validate_pack_id("trial-essentials").is_ok());
+        assert!(validate_pack_id("my_pack_123").is_ok());
+        assert!(validate_pack_id("abc").is_ok());
+        assert!(validate_pack_id("A-Z_0-9").is_ok());
+    }
+
+    #[test]
+    fn validate_pack_id_rejects_path_traversal() {
+        assert!(validate_pack_id("../admin").is_err());
+        assert!(validate_pack_id("..%2Fadmin").is_err());
+        assert!(validate_pack_id("foo/bar").is_err());
+        assert!(validate_pack_id("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn validate_pack_id_rejects_empty() {
+        assert!(validate_pack_id("").is_err());
+    }
+
+    #[test]
+    fn validate_pack_id_rejects_special_chars() {
+        assert!(validate_pack_id("id with spaces").is_err());
+        assert!(validate_pack_id("id&param=1").is_err());
+        assert!(validate_pack_id("<script>").is_err());
+        assert!(validate_pack_id("id%20encoded").is_err());
+    }
+
+    #[test]
+    fn validate_pack_id_rejects_over_100_chars() {
+        let long_id = "a".repeat(101);
+        assert!(validate_pack_id(&long_id).is_err());
+        let max_id = "a".repeat(100);
+        assert!(validate_pack_id(&max_id).is_ok());
+    }
+}
