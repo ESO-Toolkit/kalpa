@@ -36,7 +36,12 @@ export function UpdateBanner({
             {availableCount} update{availableCount > 1 ? "s" : ""} available
           </span>
         )}
-        <Button onClick={onUpdateAll} size="sm" disabled={updatingAll || isOffline} title={isOffline ? "Updates require an internet connection" : undefined}>
+        <Button
+          onClick={onUpdateAll}
+          size="sm"
+          disabled={updatingAll || isOffline}
+          title={isOffline ? "Updates require an internet connection" : undefined}
+        >
           {updatingAll ? "Updating..." : "Update All"}
         </Button>
       </div>

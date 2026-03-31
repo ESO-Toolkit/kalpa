@@ -19,7 +19,17 @@ import {
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import { Download, Clock, TrendingUp, Search, FolderOpen, Link, Flame, Check, WifiOff } from "lucide-react";
+import {
+  Download,
+  Clock,
+  TrendingUp,
+  Search,
+  FolderOpen,
+  Link,
+  Flame,
+  Check,
+  WifiOff,
+} from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
 
 const PAGE_SIZE = 25;
@@ -178,7 +188,7 @@ export function DiscoverPanel({
             <button
               key={tab}
               role="tab"
-              aria-selected={activeTab === tab}
+              aria-selected={false}
               disabled
               className="flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground/30 border border-transparent cursor-not-allowed"
             >

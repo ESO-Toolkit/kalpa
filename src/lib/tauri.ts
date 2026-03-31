@@ -16,7 +16,7 @@ const ERROR_HINTS: [RegExp, string][] = [
   [/too many requests to esoui/i, "ESOUI rate limit reached. Wait a moment and try again."],
   [/esoui is currently unavailable/i, "ESOUI appears to be down. Try again in a few minutes."],
   [/addon not found on esoui/i, "This addon was not found on ESOUI — it may have been removed by its author."],
-  [/permission denied|access.*denied/i, "Permission denied. Another program may be using the file, or antivirus may be blocking access."],
+  [/permission denied \(os error 13\)|access is denied/i, "Permission denied — antivirus or another program may be blocking the file."],
 ];
 
 export function getTauriErrorMessage(error: unknown): string {

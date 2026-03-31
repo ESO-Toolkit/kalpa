@@ -449,7 +449,6 @@ function App() {
         const message = getTauriErrorMessage(pathError);
         setError(`Could not set addons folder: ${message}`);
         setErrorShowSettings(true);
-        toast.error(`Failed to set addons folder: ${message}`);
       }
     },
     [checkForUpdates, runAutoLink, scanAddons]
@@ -504,7 +503,6 @@ function App() {
         const message = getTauriErrorMessage(pathError);
         setError(`Could not set addons folder: ${message}`);
         setErrorShowSettings(true);
-        toast.error(`Failed to update addons folder: ${message}`);
       }
     },
     [scanAndCheck]

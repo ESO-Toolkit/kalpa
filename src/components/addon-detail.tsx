@@ -189,7 +189,12 @@ export function AddonDetail({
           <span className="text-sm text-amber-400">
             Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
           </span>
-          <Button onClick={handleUpdate} disabled={updating || isOffline} size="sm" title={isOffline ? "Updates require an internet connection" : undefined}>
+          <Button
+            onClick={handleUpdate}
+            disabled={updating || isOffline}
+            size="sm"
+            title={isOffline ? "Updates require an internet connection" : undefined}
+          >
             {updating ? "Updating..." : "Update"}
           </Button>
         </GlassPanel>

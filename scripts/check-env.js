@@ -77,6 +77,10 @@ check("Tauri CLI", () => {
   const cargoVersion = run("cargo tauri --version");
   if (cargoVersion) return { ok: true, detail: cargoVersion };
 
+  // Fallback: npx with --no (never auto-install) to avoid interactive prompts
+  const npxVersion = run("npx --no tauri --version");
+  if (npxVersion) return { ok: true, detail: `${npxVersion} (npx)` };
+
   return { ok: false, detail: "not found — run: npm install" };
 });
 
