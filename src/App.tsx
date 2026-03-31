@@ -10,6 +10,7 @@ import { AppHeader } from "./components/app-header";
 import { DiscoverDetail } from "./components/discover-detail";
 import { SetupWizard } from "./components/setup-wizard";
 import { StatusBanners } from "./components/status-banners";
+import { RosterPackInstall } from "./components/roster-pack-install";
 import { UpdateBanner } from "./components/update-banner";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
@@ -38,6 +39,7 @@ type ActiveDialog =
 interface PendingDeepLinkPayload {
   packId: string | null;
   shareCode: string | null;
+  installPackId: string | null;
 }
 
 const VALID_FILTER_MODES: readonly FilterMode[] = [
@@ -75,6 +77,7 @@ function App() {
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [deepLinkPackId, setDeepLinkPackId] = useState<string | null>(null);
   const [deepLinkShareCode, setDeepLinkShareCode] = useState<string | null>(null);
+  const [rosterPackInstallId, setRosterPackInstallId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("installed");
   const [discoverTab, setDiscoverTab] = useState<DiscoverTab>("search");
   const [selectedDiscoverResult, setSelectedDiscoverResult] = useState<EsouiSearchResult | null>(
@@ -134,6 +137,21 @@ function App() {
         console.error("[tauri:deep-link-pack]", listenError);
       });
 
+    void listen<string>("roster-pack-install", (event) => {
+      setRosterPackInstallId(event.payload);
+      setActiveDialog(null); // close packs dialog if open to avoid stacking
+    })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        cleanups.push(unlisten);
+      })
+      .catch((listenError) => {
+        console.error("[tauri:roster-pack-install]", listenError);
+      });
+
     void listen<string>("deep-link-share", (event) => {
       setDeepLinkShareCode(event.payload);
       setActiveDialog("packs");
@@ -152,7 +170,9 @@ function App() {
     void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
       .then((payload) => {
         if (disposed) return;
-        if (payload.packId) {
+        if (payload.installPackId) {
+          setRosterPackInstallId(payload.installPackId);
+        } else if (payload.packId) {
           setDeepLinkPackId(payload.packId);
           setActiveDialog("packs");
         } else if (payload.shareCode) {
@@ -416,6 +436,17 @@ function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [scanAndCheck]);
+
+  // Notify the user if a deep link is pending while the setup wizard is shown
+  const pendingDeepLinkToastShown = useRef(false);
+  useEffect(() => {
+    if (!setupDetection) return;
+    if (pendingDeepLinkToastShown.current) return;
+    if (rosterPackInstallId || deepLinkPackId || deepLinkShareCode) {
+      pendingDeepLinkToastShown.current = true;
+      toast.info("Finish setup to continue with the incoming link.");
+    }
+  }, [setupDetection, rosterPackInstallId, deepLinkPackId, deepLinkShareCode]);
 
   useEffect(() => {
     if (!activeTagFilter) return;
@@ -769,6 +800,16 @@ function App() {
           />
         )}
       </div>
+
+      {rosterPackInstallId && addonsPath && (
+        <RosterPackInstall
+          packId={rosterPackInstallId}
+          addonsPath={addonsPath}
+          installedAddons={addons}
+          onClose={() => setRosterPackInstallId(null)}
+          onRefresh={handleRefresh}
+        />
+      )}
 
       <AppDialogs
         activeDialog={activeDialog}
