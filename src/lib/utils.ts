@@ -31,6 +31,7 @@ export function formatRelativeExpiry(iso: string): string {
   const seconds = Math.floor((then - now) / 1000);
   if (seconds <= 0) return "expired";
   const minutes = Math.floor(seconds / 60);
+  if (minutes === 0) return "Expires in less than a minute";
   if (minutes < 60) return `Expires in ~${minutes} minute${minutes !== 1 ? "s" : ""}`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `Expires in ~${hours} hour${hours !== 1 ? "s" : ""}`;

@@ -1384,6 +1384,14 @@ function PackDetailView({
   const [shareMode, setShareMode] = useState<ShareMode>("private-link");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  // Reset local UI state when a different pack is shown
+  const packIdRef = useRef(pack?.id);
+  if (pack && pack.id !== packIdRef.current) {
+    packIdRef.current = pack.id;
+    if (showDeleteConfirm) setShowDeleteConfirm(false);
+    if (shareMode !== "private-link") setShareMode("private-link");
+  }
+
   if (loading || !pack) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -1735,16 +1743,25 @@ function AddonRow({
   onToggle: () => void;
 }) {
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={locked ? -1 : 0}
       onClick={onToggle}
-      disabled={locked}
+      onKeyDown={(e) => {
+        if (!locked && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          onToggle();
+        }
+      }}
       className={cn(
         "group w-full text-left rounded-lg transition-all duration-150",
         !locked && "cursor-pointer",
+        locked && "pointer-events-auto",
         // Unchecked optional: prominent interactive appearance
         !locked && !checked && "hover:bg-sky-400/[0.06] hover:ring-1 hover:ring-sky-400/20",
         // Checked: gold tint
-        !locked && checked && "hover:bg-[#c4a44a]/[0.06]"
+        !locked && checked && "hover:bg-[#c4a44a]/[0.06]",
+        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
       )}
     >
       <GlassPanel
@@ -1810,29 +1827,20 @@ function AddonRow({
         </div>
         <span className="flex items-center gap-1 text-xs text-muted-foreground/40 tabular-nums shrink-0">
           #{addon.esouiId}
-          <a
-            href="#"
+          <button
+            type="button"
             onClick={(e) => {
-              e.preventDefault();
               e.stopPropagation();
               openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}.html`);
             }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                e.stopPropagation();
-                openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}.html`);
-              }
-            }}
             aria-label={`Open ${addon.name} on ESOUI`}
-            tabIndex={0}
             className="text-muted-foreground/30 hover:text-[#c4a44a] transition-colors"
           >
             <ExternalLinkIcon className="size-3" />
-          </a>
+          </button>
         </span>
       </GlassPanel>
-    </button>
+    </div>
   );
 }
 
