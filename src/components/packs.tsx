@@ -231,6 +231,9 @@ export function Packs({
     }
   }, [selectedPack]);
 
+  const searchQueryRef = useRef(searchQuery);
+  searchQueryRef.current = searchQuery;
+
   const loadPacksSeqRef = useRef(0);
   const loadPacks = useCallback(
     async (q: string, page: number = 1) => {
@@ -319,9 +322,13 @@ export function Packs({
 
   // ── My Packs loader ──────────────────────────────────────────────
   const loadMyPacksSeqRef = useRef(0);
+  const authUserRef = useRef(authUser);
+  authUserRef.current = authUser;
+
   const loadMyPacks = useCallback(
     async (page: number = 1) => {
-      if (!authUser) return;
+      const currentUser = authUserRef.current;
+      if (!currentUser) return;
       const seq = ++loadMyPacksSeqRef.current;
       if (page === 1) {
         setMyPacksLoading(true);
@@ -339,7 +346,7 @@ export function Packs({
           page,
         });
         if (seq !== loadMyPacksSeqRef.current) return;
-        const mine = result.packs.filter((p) => p.authorId === authUser.userId);
+        const mine = result.packs.filter((p) => p.authorId === currentUser.userId);
         if (page === 1) {
           setMyPacks(mine);
         } else {
@@ -347,7 +354,9 @@ export function Packs({
         }
         setMyPacksPage(result.page);
         const PAGE_SIZE = 10;
-        setMyPacksHasMore(result.packs.length >= PAGE_SIZE);
+        // Use raw page length to determine if more server pages exist — NOT filtered count,
+        // but also stop if no user packs were found in this page (prevents infinite loops)
+        setMyPacksHasMore(result.packs.length >= PAGE_SIZE && mine.length > 0);
       } catch (e) {
         if (seq !== loadMyPacksSeqRef.current) return;
         toast.error(`Failed to load your packs: ${getTauriErrorMessage(e)}`);
@@ -358,15 +367,15 @@ export function Packs({
         }
       }
     },
-    [authUser]
+    [] // stable — reads authUser from ref
   );
 
-  // Load my packs when tab is switched to "my-packs"
+  // Load my packs when tab is switched to "my-packs" or user signs in
   useEffect(() => {
     if (tab === "my-packs" && authUser) {
       loadMyPacks(1);
     }
-  }, [tab, authUser, loadMyPacks]);
+  }, [tab, authUser, loadMyPacks]); // loadMyPacks is stable; authUser triggers reload on sign-in
 
   // ── Delete pack handler ──────────────────────────────────────────
   const handleDeletePack = async (packId: string) => {
@@ -391,8 +400,8 @@ export function Packs({
         setShowShareSection(false);
         setShareResult(null);
       }
-      // Refresh browse list
-      loadPacks(searchQuery, 1);
+      // Refresh browse list — use ref to avoid stale closure
+      loadPacks(searchQueryRef.current, 1);
     } catch (e) {
       toast.error(`Failed to delete pack: ${getTauriErrorMessage(e)}`);
     } finally {
@@ -828,13 +837,13 @@ export function Packs({
               import: "Import",
             };
             return (
-              <div className="relative flex gap-1 mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+              <div className="relative flex mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
                 {/* Sliding pill background */}
                 <div
                   className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
                   style={{
-                    left: tabIndex === 0 ? "2px" : `calc(${(tabIndex / tabCount) * 100}% + 0px)`,
-                    width: `calc(${100 / tabCount}% - 2px)`,
+                    left: `calc(${(tabIndex / tabCount) * 100}% + 2px)`,
+                    width: `calc(${100 / tabCount}% - 4px)`,
                   }}
                 />
                 {tabs.map((t) => (
@@ -842,10 +851,10 @@ export function Packs({
                     key={t}
                     onClick={() => {
                       if (t === "my-packs" && !authUser) {
-                        toast.error("Sign in to view your packs.");
                         return;
                       }
                       setTab(t);
+                      if (duplicatingPackId) setDuplicatingPackId(null);
                     }}
                     className={cn(
                       "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
@@ -1000,7 +1009,7 @@ export function Packs({
               setCreateStep("details");
               setEditingPackId(null);
               setTab("create");
-              setTimeout(() => setDuplicatingPackId(null), 500);
+              setDuplicatingPackId(null);
             }}
             onDelete={handleDeletePack}
             onCreatePack={() => {
@@ -1385,12 +1394,11 @@ function PackDetailView({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Reset local UI state when a different pack is shown
-  const packIdRef = useRef(pack?.id);
-  if (pack && pack.id !== packIdRef.current) {
-    packIdRef.current = pack.id;
-    if (showDeleteConfirm) setShowDeleteConfirm(false);
-    if (shareMode !== "private-link") setShareMode("private-link");
-  }
+  const packId = pack?.id;
+  useEffect(() => {
+    setShowDeleteConfirm(false);
+    setShareMode("private-link");
+  }, [packId]);
 
   if (loading || !pack) {
     return (
@@ -1420,15 +1428,16 @@ function PackDetailView({
           <span className="text-xs text-muted-foreground/50">by {decodeHtml(pack.authorName)}</span>
         )}
         {/* Relative dates */}
-        {pack.updatedAt && pack.updatedAt !== pack.createdAt ? (
-          <span className="text-[10px] text-muted-foreground/40" title={pack.updatedAt}>
-            Updated {formatRelativeDate(pack.updatedAt)}
-          </span>
-        ) : pack.createdAt ? (
-          <span className="text-[10px] text-muted-foreground/40" title={pack.createdAt}>
-            Created {formatRelativeDate(pack.createdAt)}
-          </span>
-        ) : null}
+        {(() => {
+          const dateIso = pack.updatedAt && pack.updatedAt !== pack.createdAt ? pack.updatedAt : pack.createdAt;
+          const label = pack.updatedAt && pack.updatedAt !== pack.createdAt ? "Updated" : "Created";
+          const relative = dateIso ? formatRelativeDate(dateIso) : "";
+          return relative ? (
+            <span className="text-[10px] text-muted-foreground/40" title={dateIso}>
+              {label} {relative}
+            </span>
+          ) : null;
+        })()}
         <div className="flex items-center gap-1.5 ml-auto">
           {canEdit && (
             <Button variant="outline" size="sm" onClick={onEdit}>
@@ -1518,12 +1527,12 @@ function PackDetailView({
       {showShareSection && (
         <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-3">
           {/* Segmented control: Private Link vs Export File */}
-          <div className="relative flex gap-1 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+          <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
             <div
               className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
               style={{
-                left: shareMode === "private-link" ? "2px" : "calc(50% + 0px)",
-                width: "calc(50% - 2px)",
+                left: shareMode === "private-link" ? "2px" : "calc(50% + 2px)",
+                width: "calc(50% - 4px)",
               }}
             />
             {(["private-link", "export-file"] as ShareMode[]).map((mode) => (
@@ -1744,9 +1753,9 @@ function AddonRow({
 }) {
   return (
     <div
-      role="button"
-      tabIndex={locked ? -1 : 0}
-      onClick={onToggle}
+      role={locked ? undefined : "button"}
+      tabIndex={locked ? undefined : 0}
+      onClick={() => { if (!locked) onToggle(); }}
       onKeyDown={(e) => {
         if (!locked && (e.key === "Enter" || e.key === " ")) {
           e.preventDefault();
@@ -1756,12 +1765,11 @@ function AddonRow({
       className={cn(
         "group w-full text-left rounded-lg transition-all duration-150",
         !locked && "cursor-pointer",
-        locked && "pointer-events-auto",
         // Unchecked optional: prominent interactive appearance
         !locked && !checked && "hover:bg-sky-400/[0.06] hover:ring-1 hover:ring-sky-400/20",
         // Checked: gold tint
         !locked && checked && "hover:bg-[#c4a44a]/[0.06]",
-        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
+        !locked && "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
       )}
     >
       <GlassPanel
@@ -2314,12 +2322,12 @@ function PackCreateView({
           </div>
 
           {/* Source toggle with animated pill */}
-          <div className="relative flex gap-1 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+          <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
             <div
               className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
               style={{
-                left: addonSource === "search" ? "2px" : "calc(50% + 0px)",
-                width: "calc(50% - 2px)",
+                left: addonSource === "search" ? "2px" : "calc(50% + 2px)",
+                width: "calc(50% - 4px)",
               }}
             />
             {(["search", "installed"] as AddonSource[]).map((src) => (
@@ -2623,6 +2631,15 @@ function PackImportView({
 }) {
   const [importMode, setImportMode] = useState<ImportMode>("enter-code");
 
+  // Reset import mode when cleared (importedPack goes null)
+  const prevImportedPackRef = useRef(importedPack);
+  useEffect(() => {
+    if (prevImportedPackRef.current && !importedPack) {
+      setImportMode("enter-code");
+    }
+    prevImportedPackRef.current = importedPack;
+  }, [importedPack]);
+
   if (importedPack) {
     const requiredAddons = importedPack.addons.filter((a) => a.required);
     const optionalAddons = importedPack.addons.filter((a) => !a.required);
@@ -2661,7 +2678,7 @@ function PackImportView({
               shared by {importedPack.sharedBy}
             </span>
           )}
-          {importedPack.sharedAt && (
+          {importedPack.sharedAt && formatRelativeDate(importedPack.sharedAt) && (
             <span className="text-[10px] text-muted-foreground/30">
               {formatRelativeDate(importedPack.sharedAt)}
             </span>
@@ -2775,12 +2792,12 @@ function PackImportView({
       </div>
 
       {/* Import mode toggle */}
-      <div className="relative flex gap-1 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+      <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
         <div
           className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
           style={{
-            left: importMode === "enter-code" ? "2px" : "calc(50% + 0px)",
-            width: "calc(50% - 2px)",
+            left: importMode === "enter-code" ? "2px" : "calc(50% + 2px)",
+            width: "calc(50% - 4px)",
           }}
         />
         {(["enter-code", "import-file"] as ImportMode[]).map((mode) => (
@@ -3055,7 +3072,7 @@ function MyPacksView({
                       <PackageIcon className="size-3" />
                       {pack.addons.length} addon{pack.addons.length !== 1 ? "s" : ""}
                     </span>
-                    {pack.updatedAt && (
+                    {pack.updatedAt && formatRelativeDate(pack.updatedAt) && (
                       <span className="text-[10px] text-muted-foreground/30 ml-auto">
                         Updated {formatRelativeDate(pack.updatedAt)}
                       </span>
