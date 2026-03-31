@@ -39,7 +39,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
-import { cn, decodeHtml } from "@/lib/utils";
+import { cn, decodeHtml, formatRelativeDate, formatRelativeExpiry } from "@/lib/utils";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   PackageIcon,
   DownloadIcon,
@@ -60,6 +61,8 @@ import {
   FileDownIcon,
   FileUpIcon,
   ClockIcon,
+  TrashIcon,
+  ExternalLinkIcon,
 } from "lucide-react";
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -77,7 +80,7 @@ interface PacksProps {
 
 type PackTypeFilter = "all" | "addon-pack" | "build-pack" | "roster-pack";
 type SortOption = "votes" | "newest" | "updated";
-type TabMode = "browse" | "create" | "import";
+type TabMode = "browse" | "create" | "import" | "my-packs";
 
 const TYPE_LABELS: Record<string, string> = {
   "addon-pack": "Addon Pack",
@@ -131,6 +134,15 @@ const PACK_TYPE_PILL_COLOR: Record<string, "gold" | "sky" | "violet" | "muted"> 
 };
 
 const PRESET_TAGS = ["trial", "pvp", "beginner", "healer", "tank", "dps", "utility"] as const;
+
+const PACK_TYPE_DESCRIPTIONS: Record<string, string> = {
+  "addon-pack": "A collection of addons",
+  "build-pack": "A skill build or loadout",
+  "roster-pack": "A group or raid roster",
+};
+
+type ShareMode = "private-link" | "export-file";
+type ImportMode = "enter-code" | "import-file";
 
 // ── Main Packs Component ──────────────────────────────────────────────────
 
@@ -195,6 +207,20 @@ export function Packs({
     total: number;
   } | null>(null);
   const [selectedAddons, setSelectedAddons] = useState<Set<number>>(new Set());
+
+  // My Packs state
+  const [myPacks, setMyPacks] = useState<Pack[]>([]);
+  const [myPacksLoading, setMyPacksLoading] = useState(false);
+  const [myPacksLoadingMore, setMyPacksLoadingMore] = useState(false);
+  const [myPacksPage, setMyPacksPage] = useState(1);
+  const [myPacksHasMore, setMyPacksHasMore] = useState(false);
+  const [duplicatingPackId, setDuplicatingPackId] = useState<string | null>(null);
+
+  // Delete state
+  const [deletingPack, setDeletingPack] = useState(false);
+
+  // Install success flash state
+  const [installSucceeded, setInstallSucceeded] = useState(false);
 
   // When a pack is selected, pre-select all required addons
   useEffect(() => {
@@ -290,6 +316,79 @@ export function Packs({
       }
     }
   }, []);
+
+  // ── My Packs loader ──────────────────────────────────────────────
+  const loadMyPacksSeqRef = useRef(0);
+  const loadMyPacks = useCallback(
+    async (page: number = 1) => {
+      if (!authUser) return;
+      const seq = ++loadMyPacksSeqRef.current;
+      if (page === 1) {
+        setMyPacksLoading(true);
+      } else {
+        setMyPacksLoadingMore(true);
+      }
+      try {
+        // TODO: Replace with dedicated `list_my_packs` invoke once backend supports it.
+        // Fallback: fetch all packs and filter client-side by authorId.
+        const result = await invokeOrThrow<PackPage>("list_packs", {
+          packType: null,
+          tag: null,
+          query: null,
+          sort: "newest",
+          page,
+        });
+        if (seq !== loadMyPacksSeqRef.current) return;
+        const mine = result.packs.filter((p) => p.authorId === authUser.userId);
+        if (page === 1) {
+          setMyPacks(mine);
+        } else {
+          setMyPacks((prev) => [...prev, ...mine]);
+        }
+        setMyPacksPage(result.page);
+        const PAGE_SIZE = 10;
+        setMyPacksHasMore(result.packs.length >= PAGE_SIZE);
+      } catch (e) {
+        if (seq !== loadMyPacksSeqRef.current) return;
+        toast.error(`Failed to load your packs: ${getTauriErrorMessage(e)}`);
+      } finally {
+        if (seq === loadMyPacksSeqRef.current) {
+          setMyPacksLoading(false);
+          setMyPacksLoadingMore(false);
+        }
+      }
+    },
+    [authUser]
+  );
+
+  // Load my packs when tab is switched to "my-packs"
+  useEffect(() => {
+    if (tab === "my-packs" && authUser) {
+      loadMyPacks(1);
+    }
+  }, [tab, authUser, loadMyPacks]);
+
+  // ── Delete pack handler ──────────────────────────────────────────
+  const handleDeletePack = async (packId: string) => {
+    setDeletingPack(true);
+    try {
+      await invokeOrThrow("delete_pack", { id: packId });
+      toast.success("Pack deleted");
+      // Remove from local state
+      setPacks((prev) => prev.filter((p) => p.id !== packId));
+      setMyPacks((prev) => prev.filter((p) => p.id !== packId));
+      // If we're in detail view, go back
+      if (selectedPack?.id === packId) {
+        handleBack();
+      }
+      // Refresh browse list
+      loadPacks(searchQuery, 1);
+    } catch (e) {
+      toast.error(`Failed to delete pack: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setDeletingPack(false);
+    }
+  };
 
   // Auto-open a specific pack when triggered via deep link
   useEffect(() => {
@@ -495,6 +594,18 @@ export function Packs({
     }
   };
 
+  // Flash green on successful install completion (Task D)
+  const prevInstallingRef = useRef(false);
+  useEffect(() => {
+    if (prevInstallingRef.current && !installing && installProgress === null) {
+      // Install just finished — check if there were no failures by looking at the last known state
+      setInstallSucceeded(true);
+      const timer = setTimeout(() => setInstallSucceeded(false), 1500);
+      return () => clearTimeout(timer);
+    }
+    prevInstallingRef.current = installing;
+  }, [installing, installProgress]);
+
   const handleStartEditing = useCallback((pack: Pack) => {
     setCreateTitle(decodeHtml(pack.title));
     setCreateDescription(decodeHtml(pack.description));
@@ -688,43 +799,50 @@ export function Packs({
           </DialogTitle>
 
           {/* Tab bar with animated pill indicator */}
-          {!selectedPack && (
-            <div className="relative flex gap-1 mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-              {/* Sliding pill background */}
-              <div
-                className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
-                style={{
-                  left:
-                    tab === "browse"
-                      ? "2px"
-                      : tab === "create"
-                        ? "calc(33.333% + 0px)"
-                        : "calc(66.666% - 2px)",
-                  width: "calc(33.333% - 2px)",
-                }}
-              />
-              {(["browse", "create", "import"] as TabMode[]).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  className={cn(
-                    "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
-                    tab === t
-                      ? "text-foreground"
-                      : "text-muted-foreground/60 hover:text-muted-foreground"
-                  )}
-                >
-                  {t === "browse"
-                    ? "Browse"
-                    : t === "create"
-                      ? editingPackId
-                        ? "Edit Pack"
-                        : "Create"
-                      : "Import"}
-                </button>
-              ))}
-            </div>
-          )}
+          {!selectedPack && (() => {
+            const tabs: TabMode[] = ["browse", "my-packs", "create", "import"];
+            const tabCount = tabs.length;
+            const tabIndex = tabs.indexOf(tab);
+            const tabLabels: Record<TabMode, string> = {
+              browse: "Browse",
+              "my-packs": "My Packs",
+              create: editingPackId ? "Edit Pack" : "Create",
+              import: "Import",
+            };
+            return (
+              <div className="relative flex gap-1 mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+                {/* Sliding pill background */}
+                <div
+                  className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+                  style={{
+                    left: tabIndex === 0 ? "2px" : `calc(${(tabIndex / tabCount) * 100}% + 0px)`,
+                    width: `calc(${100 / tabCount}% - 2px)`,
+                  }}
+                />
+                {tabs.map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => {
+                      if (t === "my-packs" && !authUser) {
+                        toast.error("Sign in to view your packs.");
+                        return;
+                      }
+                      setTab(t);
+                    }}
+                    className={cn(
+                      "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
+                      tab === t
+                        ? "text-foreground"
+                        : "text-muted-foreground/60 hover:text-muted-foreground",
+                      t === "my-packs" && !authUser && "opacity-40 cursor-not-allowed"
+                    )}
+                  >
+                    {tabLabels[t]}
+                  </button>
+                ))}
+              </div>
+            );
+          })()}
         </DialogHeader>
 
         {selectedPack ? (
@@ -733,6 +851,7 @@ export function Packs({
             loading={loadingDetail}
             installing={installing}
             installProgress={installProgress}
+            installSucceeded={installSucceeded}
             selectedAddons={selectedAddons}
             installedEsouiIds={installedEsouiIds}
             votingPacks={votingPacks}
@@ -754,6 +873,8 @@ export function Packs({
             authUser={authUser}
             canEdit={canEditSelectedPack}
             onEdit={() => selectedPack && handleStartEditing(selectedPack)}
+            onDelete={() => selectedPack && handleDeletePack(selectedPack.id)}
+            deletingPack={deletingPack}
             showShareSection={showShareSection}
             onToggleShare={() => {
               setShowShareSection((prev) => !prev);
@@ -764,6 +885,10 @@ export function Packs({
             generatingShare={generatingShare}
             copiedField={copiedField}
             onGenerateShareCode={() => selectedPack && handleGenerateShareCode(selectedPack)}
+            onRegenerateShareCode={() => {
+              setShareResult(null);
+              if (selectedPack) handleGenerateShareCode(selectedPack);
+            }}
             onCopyToClipboard={handleCopyToClipboard}
             onExportFile={() => selectedPack && handleExportPackFile(selectedPack)}
           />
@@ -812,6 +937,7 @@ export function Packs({
               setSelectedPack(pack);
               setTab("browse");
               loadPacks(searchQuery, 1);
+              if (authUser) loadMyPacks(1);
             }}
             onCancelEdit={
               editingPackId
@@ -819,11 +945,53 @@ export function Packs({
                     resetCreateForm();
                     setTab("browse");
                     loadPacks(searchQuery, 1);
+                    if (authUser) loadMyPacks(1);
                   }
                 : undefined
             }
           />
-        ) : (
+        ) : tab === "my-packs" ? (
+          <MyPacksView
+            packs={myPacks}
+            loading={myPacksLoading}
+            loadingMore={myPacksLoadingMore}
+            hasMore={myPacksHasMore}
+            authUser={authUser}
+            onAuthChange={onAuthChange}
+            onSelectPack={handleSelectPack}
+            onLoadMore={() => loadMyPacks(myPacksPage + 1)}
+            onEdit={(pack) => {
+              handleStartEditing(pack);
+              setTab("create");
+            }}
+            onDuplicate={(pack) => {
+              if (duplicatingPackId) return;
+              setDuplicatingPackId(pack.id);
+              setCreateTitle(`Copy of ${decodeHtml(pack.title)}`);
+              setCreateDescription(decodeHtml(pack.description));
+              setCreatePackType(pack.packType);
+              setCreateTags([...pack.tags]);
+              setCreateAddons(
+                pack.addons.map((a) => ({
+                  esouiId: a.esouiId,
+                  name: decodeHtml(a.name),
+                  required: a.required,
+                  note: a.note ? decodeHtml(a.note) : undefined,
+                }))
+              );
+              setCreateAnonymous(pack.isAnonymous);
+              setCreateStep("details");
+              setEditingPackId(null);
+              setTab("create");
+              setTimeout(() => setDuplicatingPackId(null), 500);
+            }}
+            onDelete={handleDeletePack}
+            onCreatePack={() => {
+              resetCreateForm();
+              setTab("create");
+            }}
+          />
+        ) : tab === "import" ? (
           <PackImportView
             shareCodeInput={shareCodeInput}
             onShareCodeInputChange={setShareCodeInput}
@@ -843,7 +1011,7 @@ export function Packs({
               setShareCodeInput("");
             }}
           />
-        )}
+        ) : null}
 
         <DialogFooter>
           {selectedPack ? (
@@ -1148,6 +1316,7 @@ function PackDetailView({
   loading,
   installing,
   installProgress,
+  installSucceeded,
   selectedAddons,
   installedEsouiIds,
   votingPacks,
@@ -1157,12 +1326,15 @@ function PackDetailView({
   authUser,
   canEdit,
   onEdit,
+  onDelete,
+  deletingPack,
   showShareSection,
   onToggleShare,
   shareResult,
   generatingShare,
   copiedField,
   onGenerateShareCode,
+  onRegenerateShareCode,
   onCopyToClipboard,
   onExportFile,
 }: {
@@ -1170,6 +1342,7 @@ function PackDetailView({
   loading: boolean;
   installing: boolean;
   installProgress: { completed: number; failed: number; total: number } | null;
+  installSucceeded: boolean;
   selectedAddons: Set<number>;
   installedEsouiIds: Set<number>;
   votingPacks: Set<string>;
@@ -1179,15 +1352,21 @@ function PackDetailView({
   authUser: AuthUser | null;
   canEdit: boolean;
   onEdit: () => void;
+  onDelete: () => void;
+  deletingPack: boolean;
   showShareSection: boolean;
   onToggleShare: () => void;
   shareResult: ShareCodeResponse | null;
   generatingShare: boolean;
   copiedField: "code" | "link" | null;
   onGenerateShareCode: () => void;
+  onRegenerateShareCode: () => void;
   onCopyToClipboard: (text: string, field: "code" | "link") => Promise<void>;
   onExportFile: () => void;
 }) {
+  const [shareMode, setShareMode] = useState<ShareMode>("private-link");
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
   if (loading || !pack) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -1215,12 +1394,66 @@ function PackDetailView({
         {!pack.isAnonymous && (
           <span className="text-xs text-muted-foreground/50">by {decodeHtml(pack.authorName)}</span>
         )}
+        {/* Relative dates */}
+        {pack.updatedAt && (
+          <span className="text-[10px] text-muted-foreground/40" title={pack.updatedAt}>
+            Updated {formatRelativeDate(pack.updatedAt)}
+          </span>
+        )}
+        {pack.createdAt && !pack.updatedAt && (
+          <span className="text-[10px] text-muted-foreground/40" title={pack.createdAt}>
+            Created {formatRelativeDate(pack.createdAt)}
+          </span>
+        )}
         <div className="flex items-center gap-1.5 ml-auto">
           {canEdit && (
             <Button variant="outline" size="sm" onClick={onEdit}>
               <PencilIcon className="size-3.5 mr-1.5" />
               Edit
             </Button>
+          )}
+          {canEdit && (
+            <>
+              {showDeleteConfirm ? (
+                <div className="flex items-center gap-1.5 rounded-lg border border-red-500/20 bg-red-500/[0.06] px-2.5 py-1">
+                  <span className="text-[11px] text-red-400 font-medium">Delete this pack?</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowDeleteConfirm(false)}
+                    className="h-6 px-2 text-[10px]"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setShowDeleteConfirm(false);
+                      onDelete();
+                    }}
+                    disabled={deletingPack}
+                    className="h-6 px-2 text-[10px] border-red-500/30 text-red-400 hover:bg-red-500/10"
+                  >
+                    {deletingPack ? (
+                      <Loader2Icon className="size-3 animate-spin" />
+                    ) : (
+                      "Delete"
+                    )}
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="text-red-400/60 hover:text-red-400 hover:border-red-500/30"
+                >
+                  <TrashIcon className="size-3.5 mr-1.5" />
+                  Delete
+                </Button>
+              )}
+            </>
           )}
           <Button
             variant="outline"
@@ -1257,69 +1490,115 @@ function PackDetailView({
         </button>
       </div>
 
-      {/* Share section */}
+      {/* Share section — Task C: two-mode toggle */}
       {showShareSection && (
         <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-3">
-          <SectionHeader>Share Privately</SectionHeader>
+          {/* Segmented control: Private Link vs Export File */}
+          <div className="relative flex gap-1 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+            <div
+              className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+              style={{
+                left: shareMode === "private-link" ? "2px" : "calc(50% + 0px)",
+                width: "calc(50% - 2px)",
+              }}
+            />
+            {(["private-link", "export-file"] as ShareMode[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setShareMode(mode)}
+                className={cn(
+                  "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
+                  shareMode === mode
+                    ? "text-foreground"
+                    : "text-muted-foreground/60 hover:text-muted-foreground"
+                )}
+              >
+                {mode === "private-link" ? "Private Link" : "Export File"}
+              </button>
+            ))}
+          </div>
 
-          {shareResult ? (
+          {shareMode === "private-link" ? (
             <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <code className="flex-1 rounded-md bg-white/[0.05] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-[#c4a44a]">
-                  {shareResult.code}
-                </code>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onCopyToClipboard(shareResult.code, "code")}
-                >
-                  {copiedField === "code" ? (
-                    <CheckIcon className="size-3.5 text-emerald-400" />
-                  ) : (
-                    <CopyIcon className="size-3.5" />
-                  )}
-                </Button>
-              </div>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground/60">
-                  {shareResult.deepLink}
-                </code>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onCopyToClipboard(shareResult.deepLink, "link")}
-                >
-                  {copiedField === "link" ? (
-                    <CheckIcon className="size-3.5 text-emerald-400" />
-                  ) : (
-                    <CopyIcon className="size-3.5" />
-                  )}
-                </Button>
-              </div>
-              <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground/40">
-                <ClockIcon className="size-3" />
-                Expires in 7 days
+              <p className="text-[11px] text-muted-foreground/50">
+                Share privately — only people with this code can import this pack.
               </p>
+              {shareResult ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 rounded-md bg-white/[0.05] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-[#c4a44a]">
+                      {shareResult.code}
+                    </code>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onCopyToClipboard(shareResult.code, "code")}
+                      title="Copy share code"
+                    >
+                      {copiedField === "code" ? (
+                        <CheckIcon className="size-3.5 text-emerald-400" />
+                      ) : (
+                        <CopyIcon className="size-3.5" />
+                      )}
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground/60">
+                      {shareResult.deepLink}
+                    </code>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onCopyToClipboard(shareResult.deepLink, "link")}
+                      title="Copy deep link"
+                    >
+                      {copiedField === "link" ? (
+                        <CheckIcon className="size-3.5 text-emerald-400" />
+                      ) : (
+                        <CopyIcon className="size-3.5" />
+                      )}
+                    </Button>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground/40">
+                      <ClockIcon className="size-3" />
+                      {shareResult.expiresAt
+                        ? formatRelativeExpiry(shareResult.expiresAt)
+                        : "Expires in ~7 days"}
+                    </p>
+                    <button
+                      onClick={onRegenerateShareCode}
+                      className="text-[10px] text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+                    >
+                      Regenerate
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={onGenerateShareCode}
+                  disabled={generatingShare}
+                  className="w-full"
+                >
+                  {generatingShare ? (
+                    <Loader2Icon className="size-3.5 animate-spin mr-1.5" />
+                  ) : (
+                    <ShareIcon className="size-3.5 mr-1.5" />
+                  )}
+                  Generate Code
+                </Button>
+              )}
             </div>
           ) : (
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onGenerateShareCode}
-                disabled={generatingShare}
-                className="flex-1"
-              >
-                {generatingShare ? (
-                  <Loader2Icon className="size-3.5 animate-spin mr-1.5" />
-                ) : (
-                  <ShareIcon className="size-3.5 mr-1.5" />
-                )}
-                Generate Code
-              </Button>
-              <Button variant="outline" size="sm" onClick={onExportFile} className="flex-1">
+            <div className="space-y-2">
+              <p className="text-[11px] text-muted-foreground/50">
+                Save as a .esopack file to share on Discord, forums, or privately.
+              </p>
+              <Button variant="outline" size="sm" onClick={onExportFile} className="w-full">
                 <FileDownIcon className="size-3.5 mr-1.5" />
-                Export File
+                Export .esopack File
               </Button>
             </div>
           )}
@@ -1327,27 +1606,47 @@ function PackDetailView({
       )}
 
       {/* Install progress bar */}
-      {installing && installProgress && (
-        <div className="rounded-lg border border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] p-3">
-          <div className="flex items-center justify-between text-sm mb-2">
-            <span className="text-[#c4a44a] font-medium">
-              Installing {installProgress.completed + installProgress.failed}/
-              {installProgress.total}
-            </span>
-            {installProgress.failed > 0 && (
-              <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
-            )}
-          </div>
+      {(installing && installProgress) || installSucceeded ? (
+        <div className={cn(
+          "rounded-lg border p-3",
+          installSucceeded
+            ? "border-emerald-400/20 bg-emerald-400/[0.04]"
+            : "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04]"
+        )}>
+          {installProgress && (
+            <div className="flex items-center justify-between text-sm mb-2">
+              <span className="text-[#c4a44a] font-medium">
+                Installing {installProgress.completed + installProgress.failed}/
+                {installProgress.total}
+              </span>
+              {installProgress.failed > 0 && (
+                <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
+              )}
+            </div>
+          )}
+          {installSucceeded && !installProgress && (
+            <div className="flex items-center gap-2 text-sm mb-2">
+              <CheckIcon className="size-4 text-emerald-400" />
+              <span className="text-emerald-400 font-medium">Installed successfully</span>
+            </div>
+          )}
           <div className="h-1 rounded-full bg-white/[0.06]">
             <div
-              className="h-full rounded-full bg-[#c4a44a] transition-all duration-300 ease-out"
+              className={cn(
+                "h-full rounded-full transition-all duration-300 ease-out",
+                installSucceeded ? "bg-emerald-400" : "bg-[#c4a44a]"
+              )}
               style={{
-                width: `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`,
+                width: installSucceeded
+                  ? "100%"
+                  : installProgress
+                    ? `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`
+                    : "0%",
               }}
             />
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* Required addons — always installed */}
       {requiredAddons.length > 0 && (
@@ -1493,8 +1792,28 @@ function AddonRow({
             <p className="mt-0.5 text-xs text-muted-foreground/60 truncate">{addon.note}</p>
           )}
         </div>
-        <span className="text-xs text-muted-foreground/40 tabular-nums shrink-0">
+        <span className="flex items-center gap-1 text-xs text-muted-foreground/40 tabular-nums shrink-0">
           #{addon.esouiId}
+          <a
+            href="#"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}.html`);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}.html`);
+              }
+            }}
+            aria-label={`Open ${addon.name} on ESOUI`}
+            tabIndex={0}
+            className="text-muted-foreground/30 hover:text-[#c4a44a] transition-colors"
+          >
+            <ExternalLinkIcon className="size-3" />
+          </a>
         </span>
       </GlassPanel>
     </button>
@@ -1772,6 +2091,46 @@ function PackCreateView({
         </div>
       </div>
 
+      {/* Step indicator */}
+      <div className="flex items-center gap-2">
+        {[
+          { num: 1, label: "Details", key: "details" as const },
+          { num: 2, label: "Addons", key: "addons" as const },
+        ].map((s, i) => (
+          <button
+            key={s.key}
+            onClick={() => {
+              if (s.key === "addons" && !canProceed) return;
+              setStep(s.key);
+            }}
+            disabled={s.key === "addons" && !canProceed}
+            className={cn(
+              "flex items-center gap-1.5 text-xs font-semibold transition-all duration-200",
+              step === s.key
+                ? "text-[#c4a44a]"
+                : s.key === "addons" && !canProceed
+                  ? "text-muted-foreground/30 cursor-not-allowed"
+                  : "text-muted-foreground/50 hover:text-muted-foreground cursor-pointer"
+            )}
+          >
+            <span
+              className={cn(
+                "inline-flex items-center justify-center size-5 rounded-full text-[10px] font-bold leading-none transition-all duration-200",
+                step === s.key
+                  ? "bg-[#c4a44a]/20 text-[#c4a44a] border border-[#c4a44a]/40"
+                  : "bg-white/[0.04] text-muted-foreground/40 border border-white/[0.08]"
+              )}
+            >
+              {s.num}
+            </span>
+            {s.label}
+            {i === 0 && (
+              <span className="text-muted-foreground/20 mx-1">›</span>
+            )}
+          </button>
+        ))}
+      </div>
+
       {step === "details" ? (
         /* ── Step 1: Pack Details ── */
         <div className="flex flex-col gap-3 overflow-y-auto max-h-[420px] px-3 -mx-3 pr-1">
@@ -1832,21 +2191,38 @@ function PackCreateView({
             </div>
           </div>
 
-          {/* Pack type */}
+          {/* Pack type — clickable cards */}
           <div>
-            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1 block">
+            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground/60 mb-1.5 block">
               Pack Type
             </label>
-            <Select value={packType} onValueChange={(v) => v && setPackType(v)}>
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="addon-pack">Addon Pack</SelectItem>
-                <SelectItem value="build-pack">Build Pack</SelectItem>
-                <SelectItem value="roster-pack">Roster Pack</SelectItem>
-              </SelectContent>
-            </Select>
+            <div className="grid grid-cols-3 gap-2">
+              {(["addon-pack", "build-pack", "roster-pack"] as const).map((pt) => {
+                const accent = PACK_TYPE_ACCENT[pt];
+                const pillColor = PACK_TYPE_PILL_COLOR[pt] ?? "muted";
+                const isSelected = packType === pt;
+                return (
+                  <button
+                    key={pt}
+                    onClick={() => setPackType(pt)}
+                    className={cn(
+                      "flex flex-col items-start gap-1 rounded-lg border p-2.5 text-left transition-all duration-200",
+                      isSelected
+                        ? `${accent.border} border-l-[3px] ${accent.bg} border-white/[0.12]`
+                        : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.1] hover:bg-white/[0.04]",
+                      "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
+                    )}
+                  >
+                    <InfoPill color={pillColor}>
+                      {TYPE_LABELS[pt]}
+                    </InfoPill>
+                    <span className="text-[10px] text-muted-foreground/50 leading-tight">
+                      {PACK_TYPE_DESCRIPTIONS[pt]}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Tags */}
@@ -1941,7 +2317,7 @@ function PackCreateView({
                 ) : (
                   <>
                     <PackageIcon className="size-3 inline mr-1" />
-                    My Addons
+                    My Installed
                   </>
                 )}
               </button>
@@ -2087,9 +2463,13 @@ function PackCreateView({
                 Selected ({addons.length})
               </SectionHeader>
               {addons.length === 0 ? (
-                <div className="text-center py-6">
-                  <PackageIcon className="size-5 mx-auto text-muted-foreground/20 mb-1.5" />
-                  <p className="text-[11px] text-muted-foreground/40">Add addons from the left</p>
+                <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
+                  <div className="rounded-xl bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.1] p-3">
+                    <SparklesIcon className="size-5 text-[#c4a44a]/40" />
+                  </div>
+                  <p className="text-[11px] text-muted-foreground/50 max-w-[160px] leading-relaxed">
+                    No addons yet — search or pick from your installed addons above.
+                  </p>
                 </div>
               ) : (
                 <div className="space-y-1.5">
@@ -2217,9 +2597,12 @@ function PackImportView({
   onInstall: () => void;
   onClear: () => void;
 }) {
+  const [importMode, setImportMode] = useState<ImportMode>("enter-code");
+
   if (importedPack) {
     const requiredAddons = importedPack.addons.filter((a) => a.required);
     const optionalAddons = importedPack.addons.filter((a) => !a.required);
+    const allInstalled = importedPackAddonsToInstall.length === 0;
 
     return (
       <div className="flex flex-col gap-3 overflow-y-auto max-h-[400px]">
@@ -2235,8 +2618,9 @@ function PackImportView({
           <p className="text-sm text-muted-foreground">{importedPack.description}</p>
         )}
 
+        {/* Preview metadata */}
         <div className="flex items-center gap-2 flex-wrap">
-          <InfoPill color="muted">
+          <InfoPill color={PACK_TYPE_PILL_COLOR[importedPack.packType] ?? "muted"}>
             {TYPE_LABELS[importedPack.packType] ?? importedPack.packType}
           </InfoPill>
           {importedPack.tags.map((tag) => (
@@ -2244,12 +2628,29 @@ function PackImportView({
               {tag}
             </InfoPill>
           ))}
+          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
+            <PackageIcon className="size-3" />
+            {importedPack.addons.length} addon{importedPack.addons.length !== 1 ? "s" : ""}
+          </span>
           {importedPack.sharedBy && (
-            <span className="text-xs text-muted-foreground/50">
+            <span className="text-[11px] text-muted-foreground/40">
               shared by {importedPack.sharedBy}
             </span>
           )}
+          {importedPack.sharedAt && (
+            <span className="text-[10px] text-muted-foreground/30">
+              {formatRelativeDate(importedPack.sharedAt)}
+            </span>
+          )}
         </div>
+
+        {/* All installed state */}
+        {allInstalled && !installing && (
+          <div className="flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] p-3">
+            <CheckIcon className="size-4 text-emerald-400" />
+            <span className="text-sm text-emerald-400 font-medium">All addons already installed</span>
+          </div>
+        )}
 
         {/* Install progress */}
         {installing && installProgress && (
@@ -2317,7 +2718,7 @@ function PackImportView({
 
         <Button
           onClick={onInstall}
-          disabled={installing || importedPackAddonsToInstall.length === 0}
+          disabled={installing || allInstalled}
           className="w-full"
         >
           {installing ? (
@@ -2325,7 +2726,7 @@ function PackImportView({
               <Loader2Icon className="size-4 animate-spin mr-1.5" />
               Installing...
             </>
-          ) : importedPackAddonsToInstall.length === 0 ? (
+          ) : allInstalled ? (
             <>
               <CheckIcon className="size-4 mr-1.5" />
               All Installed
@@ -2349,29 +2750,70 @@ function PackImportView({
         <p className="text-sm text-muted-foreground">Import a pack shared by a friend</p>
       </div>
 
-      {/* Share code input */}
-      <div className="space-y-2">
-        <SectionHeader>Share Code</SectionHeader>
-        <div className="flex gap-2">
-          <Input
-            placeholder="e.g. HK7M3P"
-            value={shareCodeInput}
-            onChange={(e) => onShareCodeInputChange(e.target.value.toUpperCase())}
-            maxLength={6}
-            className="font-mono tracking-widest text-center uppercase"
-          />
-          <Button
-            onClick={() => onResolveCode(shareCodeInput)}
-            disabled={resolvingCode || shareCodeInput.trim().length < 6}
-          >
-            {resolvingCode ? (
-              <Loader2Icon className="size-4 animate-spin" />
-            ) : (
-              <SearchIcon className="size-4" />
+      {/* Import mode toggle */}
+      <div className="relative flex gap-1 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+        <div
+          className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+          style={{
+            left: importMode === "enter-code" ? "2px" : "calc(50% + 0px)",
+            width: "calc(50% - 2px)",
+          }}
+        />
+        {(["enter-code", "import-file"] as ImportMode[]).map((mode) => (
+          <button
+            key={mode}
+            onClick={() => setImportMode(mode)}
+            className={cn(
+              "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
+              importMode === mode
+                ? "text-foreground"
+                : "text-muted-foreground/60 hover:text-muted-foreground"
             )}
+          >
+            {mode === "enter-code" ? "Enter Code" : "Import File"}
+          </button>
+        ))}
+      </div>
+
+      {importMode === "enter-code" ? (
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            <Input
+              placeholder="e.g. HK7M3P"
+              value={shareCodeInput}
+              onChange={(e) => onShareCodeInputChange(e.target.value.toUpperCase())}
+              maxLength={6}
+              className="font-mono tracking-widest text-center uppercase"
+              autoFocus
+            />
+            <Button
+              onClick={() => onResolveCode(shareCodeInput)}
+              disabled={resolvingCode || shareCodeInput.trim().length < 6}
+            >
+              {resolvingCode ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <SearchIcon className="size-4" />
+              )}
+            </Button>
+          </div>
+          {resolvingCode && (
+            <div className="flex items-center justify-center py-4">
+              <div className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <p className="text-[11px] text-muted-foreground/50">
+            Open a .esopack file shared with you on Discord, forums, or elsewhere.
+          </p>
+          <Button variant="outline" onClick={onImportFile} className="w-full">
+            <FileUpIcon className="size-4 mr-1.5" />
+            Open .esopack File
           </Button>
         </div>
-      </div>
+      )}
 
       {importError && (
         <div className="flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.04] p-3">
@@ -2379,16 +2821,274 @@ function PackImportView({
           <p className="text-sm text-red-300">{importError}</p>
         </div>
       )}
+    </div>
+  );
+}
 
-      <div className="border-t border-white/[0.06]" />
+// ── My Packs View ──────────────────────────────────────────────────────
 
-      {/* File import */}
-      <div className="space-y-2">
-        <SectionHeader>Import from File</SectionHeader>
-        <Button variant="outline" onClick={onImportFile} className="w-full">
-          <FileUpIcon className="size-4 mr-1.5" />
-          Open .esopack File
+function MyPacksView({
+  packs,
+  loading,
+  loadingMore,
+  hasMore,
+  authUser,
+  onAuthChange,
+  onSelectPack,
+  onLoadMore,
+  onEdit,
+  onDuplicate,
+  onDelete,
+  onCreatePack,
+}: {
+  packs: Pack[];
+  loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
+  authUser: AuthUser | null;
+  onAuthChange: (user: AuthUser | null) => void;
+  onSelectPack: (id: string) => void;
+  onLoadMore: () => void;
+  onEdit: (pack: Pack) => void;
+  onDuplicate: (pack: Pack) => void;
+  onDelete: (packId: string) => void;
+  onCreatePack: () => void;
+}) {
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  const handleLogin = async () => {
+    setLoggingIn(true);
+    try {
+      const user = await invokeOrThrow<AuthUser>("auth_login");
+      onAuthChange(user);
+      toast.success(`Signed in as ${user.userName}`);
+    } catch (e) {
+      toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
+  // Auth gate
+  if (!authUser) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+        <div className="rounded-xl bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.1] p-5">
+          <PackageIcon className="size-10 text-[#c4a44a]/50" />
+        </div>
+        <div>
+          <p className="font-heading text-sm font-semibold">Sign in to manage your packs</p>
+          <p className="mt-1 text-xs text-muted-foreground/60 max-w-[260px]">
+            Sign in with your ESO Logs account to view, edit, and manage your published packs.
+          </p>
+        </div>
+        <Button onClick={handleLogin} disabled={loggingIn} className="mt-1">
+          {loggingIn ? (
+            <>
+              <Loader2Icon className="size-4 animate-spin mr-1.5" />
+              Signing in...
+            </>
+          ) : (
+            "Sign in with ESO Logs"
+          )}
         </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3 min-h-0">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted-foreground/60">
+          Your packs as <span className="text-[#c4a44a] font-semibold">{authUser.userName}</span>
+        </span>
+        <Button variant="outline" size="sm" onClick={onCreatePack}>
+          <PlusIcon className="size-3.5 mr-1.5" />
+          Create Pack
+        </Button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto space-y-2 min-h-0 max-h-[400px] px-1 -mx-1 py-1 -my-1">
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <div className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+          </div>
+        ) : packs.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+            <div className="rounded-xl bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.1] p-4">
+              <SparklesIcon className="size-8 text-[#c4a44a]/50" />
+            </div>
+            <p className="font-heading text-sm font-medium">No packs yet</p>
+            <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+              You haven&apos;t created any packs yet. Share your favourite addon collections with the community!
+            </p>
+            <Button size="sm" onClick={onCreatePack} className="mt-1">
+              <PlusIcon className="size-3.5 mr-1.5" />
+              Create your first pack
+            </Button>
+          </div>
+        ) : (
+          packs.map((pack) => {
+            const accent = PACK_TYPE_ACCENT[pack.packType] ?? PACK_TYPE_ACCENT["addon-pack"];
+            const pillColor = PACK_TYPE_PILL_COLOR[pack.packType] ?? "muted";
+            const isConfirmingDelete = confirmDeleteId === pack.id;
+            return (
+              <div key={pack.id} className="relative">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onSelectPack(pack.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelectPack(pack.id);
+                    }
+                  }}
+                  className={cn(
+                    "group w-full text-left rounded-xl border border-white/[0.06] p-3",
+                    "border-l-[3px] transition-all duration-200 cursor-pointer",
+                    accent.border,
+                    accent.bg,
+                    accent.hoverBg,
+                    "hover:border-white/[0.12] hover:-translate-y-[1px] hover:shadow-[0_4px_16px_rgba(0,0,0,0.2)]",
+                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
+                  )}
+                >
+                  {/* Top row: title + quick actions */}
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-heading text-sm font-semibold truncate group-hover:text-[#c4a44a] transition-colors duration-200">
+                          {decodeHtml(pack.title)}
+                        </span>
+                        <InfoPill color={pillColor}>
+                          {TYPE_LABELS[pack.packType] ?? pack.packType}
+                        </InfoPill>
+                      </div>
+                    </div>
+                    {/* Quick actions */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onEdit(pack);
+                        }}
+                        title="Edit"
+                        className="rounded-md p-1.5 text-muted-foreground/40 hover:text-[#c4a44a] hover:bg-[#c4a44a]/[0.08] transition-all duration-150"
+                      >
+                        <PencilIcon className="size-3.5" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDuplicate(pack);
+                        }}
+                        title="Duplicate"
+                        className="rounded-md p-1.5 text-muted-foreground/40 hover:text-sky-400 hover:bg-sky-400/[0.08] transition-all duration-150"
+                      >
+                        <CopyIcon className="size-3.5" />
+                      </button>
+                      {pack.authorId === authUser.userId && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmDeleteId(isConfirmingDelete ? null : pack.id);
+                          }}
+                          title="Delete"
+                          className={cn(
+                            "rounded-md p-1.5 transition-all duration-150",
+                            isConfirmingDelete
+                              ? "text-red-400 bg-red-400/[0.1]"
+                              : "text-muted-foreground/40 hover:text-red-400 hover:bg-red-400/[0.08]"
+                          )}
+                        >
+                          <TrashIcon className="size-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Description */}
+                  {pack.description && (
+                    <p className="mt-1.5 text-xs text-muted-foreground/70 line-clamp-2 leading-relaxed">
+                      {decodeHtml(pack.description)}
+                    </p>
+                  )}
+
+                  {/* Bottom row: tags + meta */}
+                  <div className="mt-2.5 flex items-center gap-1.5 flex-wrap">
+                    {pack.tags.map((tag) => (
+                      <InfoPill key={tag} color={TAG_COLORS[tag] ?? "muted"}>
+                        {tag}
+                      </InfoPill>
+                    ))}
+                    {pack.tags.length > 0 && pack.addons.length > 0 && (
+                      <span className="text-muted-foreground/20 mx-0.5">·</span>
+                    )}
+                    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
+                      <PackageIcon className="size-3" />
+                      {pack.addons.length} addon{pack.addons.length !== 1 ? "s" : ""}
+                    </span>
+                    {pack.updatedAt && (
+                      <span className="text-[10px] text-muted-foreground/30 ml-auto">
+                        Updated {formatRelativeDate(pack.updatedAt)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Inline delete confirmation */}
+                {isConfirmingDelete && (
+                  <div
+                    className="mt-1 flex items-center justify-between rounded-lg border border-red-500/20 bg-red-500/[0.06] px-3 py-2 overflow-hidden transition-all duration-200"
+                  >
+                    <span className="text-xs text-red-400 font-medium">Delete this pack?</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors px-2 py-0.5"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => {
+                          setConfirmDeleteId(null);
+                          onDelete(pack.id);
+                        }}
+                        className="text-xs font-semibold text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 rounded-md px-2.5 py-0.5 transition-all duration-150"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+        {!loading && hasMore && (
+          <button
+            onClick={onLoadMore}
+            disabled={loadingMore}
+            className={cn(
+              "w-full py-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] text-xs font-semibold",
+              "transition-all duration-200 hover:bg-white/[0.04] hover:border-white/[0.1]",
+              "text-muted-foreground/60 hover:text-muted-foreground",
+              loadingMore && "opacity-60 cursor-wait"
+            )}
+          >
+            {loadingMore ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+                Loading...
+              </span>
+            ) : (
+              "Load More"
+            )}
+          </button>
+        )}
       </div>
     </div>
   );
