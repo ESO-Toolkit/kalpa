@@ -9,6 +9,7 @@ interface UpdateBannerProps {
     total: number;
   } | null;
   onUpdateAll: () => void;
+  isOffline?: boolean;
 }
 
 export function UpdateBanner({
@@ -16,6 +17,7 @@ export function UpdateBanner({
   updatingAll,
   updateProgress,
   onUpdateAll,
+  isOffline,
 }: UpdateBannerProps) {
   if (availableCount === 0 && !updatingAll) return null;
 
@@ -34,7 +36,7 @@ export function UpdateBanner({
             {availableCount} update{availableCount > 1 ? "s" : ""} available
           </span>
         )}
-        <Button onClick={onUpdateAll} size="sm" disabled={updatingAll}>
+        <Button onClick={onUpdateAll} size="sm" disabled={updatingAll || isOffline} title={isOffline ? "Updates require an internet connection" : undefined}>
           {updatingAll ? "Updating..." : "Update All"}
         </Button>
       </div>

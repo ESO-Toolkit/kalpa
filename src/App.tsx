@@ -341,7 +341,7 @@ function App() {
         void runAutoLink(savedPath);
       } catch (initError) {
         setError(
-          `Could not use saved AddOns folder. Please update it in Settings. ${getTauriErrorMessage(initError)}`
+          `Could not access saved AddOns folder — it may have been moved or deleted. ${getTauriErrorMessage(initError)}`
         );
         setLoading(false);
       }
@@ -366,7 +366,7 @@ function App() {
           void runAutoLink(path);
         } catch (initError) {
           setError(
-            `Could not use detected AddOns folder. Please set it in Settings. ${getTauriErrorMessage(initError)}`
+            `Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`
           );
           setLoading(false);
         }
@@ -695,6 +695,7 @@ function App() {
         loading={loading}
         selectedCount={selectedFolders.size}
         updatingAll={updatingAll}
+        isOffline={isOffline}
         onBatchCancel={() => setSelectedFolders(new Set())}
         onBatchRemove={() => void handleBatchRemove()}
         onBatchUpdate={() => void handleBatchUpdate()}
@@ -709,6 +710,7 @@ function App() {
         appUpdateState={appUpdateState}
         onDownload={downloadAndInstall}
         onRestart={restartApp}
+        onOpenSettings={() => setActiveDialog("settings")}
       />
 
       <UpdateBanner
@@ -716,6 +718,7 @@ function App() {
         updatingAll={updatingAll}
         updateProgress={updateProgress}
         onUpdateAll={handleUpdateAll}
+        isOffline={isOffline}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -744,6 +747,7 @@ function App() {
           onInstalled={handleRefresh}
           onSelectDiscoverResult={setSelectedDiscoverResult}
           selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
+          isOffline={isOffline}
         />
 
         {viewMode === "installed" ? (
@@ -759,6 +763,7 @@ function App() {
             updateResult={selectedUpdateResult}
             onAddonUpdated={handleAddonUpdated}
             onTagsChange={handleTagsChange}
+            isOffline={isOffline}
           />
         ) : (
           <DiscoverDetail
@@ -766,6 +771,7 @@ function App() {
             result={selectedDiscoverResult}
             addonsPath={addonsPath}
             onInstalled={handleRefresh}
+            isOffline={isOffline}
           />
         )}
       </div>

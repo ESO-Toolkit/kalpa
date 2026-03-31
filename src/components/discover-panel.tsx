@@ -31,6 +31,7 @@ interface DiscoverPanelProps {
   onInstalled: () => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   selectedResultId: number | null;
+  isOffline?: boolean;
 }
 
 function useAddonInstall(addonsPath: string, onInstalled: () => void) {
@@ -166,7 +167,45 @@ export function DiscoverPanel({
   onInstalled,
   onSelectResult,
   selectedResultId,
+  isOffline,
 }: DiscoverPanelProps) {
+  if (isOffline) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* Sub-tab selector (disabled) */}
+        <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
+          {DISCOVER_TABS.map(([tab, label, Icon]) => (
+            <button
+              key={tab}
+              role="tab"
+              aria-selected={activeTab === tab}
+              disabled
+              className="flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground/30 border border-transparent cursor-not-allowed"
+            >
+              <Icon className="size-3 shrink-0" />
+              <span className="truncate">{label}</span>
+            </button>
+          ))}
+        </div>
+        <EmptyState
+          icon={
+            <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground/20">
+              <line x1="1" y1="1" x2="23" y2="23" />
+              <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55" />
+              <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39" />
+              <path d="M10.71 5.05A16 16 0 0 1 22.56 9" />
+              <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" />
+              <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+              <line x1="12" y1="20" x2="12.01" y2="20" />
+            </svg>
+          }
+          title="You're offline"
+          subtitle="Discovery, search, and installs require an internet connection. Reconnect to browse addons."
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Sub-tab selector */}

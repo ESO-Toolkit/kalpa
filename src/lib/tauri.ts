@@ -3,10 +3,38 @@ import { toast } from "sonner";
 
 export type TauriResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
+/**
+ * Maps common backend error patterns to friendlier user-facing messages with context.
+ */
+const ERROR_HINTS: [RegExp, string][] = [
+  [/zip extraction aborted.*zip bomb/i, "The archive is too large or may be corrupt. Try re-downloading it."],
+  [/zip archive contained no addon folders/i, "This file doesn't look like a valid ESO addon archive."],
+  [/failed to open zip file/i, "Could not open the downloaded file. It may be corrupt or incomplete — try again."],
+  [/failed to read zip archive/i, "The downloaded file is not a valid ZIP. It may be corrupt — try re-downloading."],
+  [/addons folder not found/i, "Your AddOns folder could not be found. It may have been moved or the drive disconnected."],
+  [/could not reach esoui/i, "ESOUI could not be reached. Check your internet connection and try again."],
+  [/too many requests to esoui/i, "ESOUI rate limit reached. Wait a moment and try again."],
+  [/esoui is currently unavailable/i, "ESOUI appears to be down. Try again in a few minutes."],
+  [/addon not found on esoui/i, "This addon was not found on ESOUI — it may have been removed by its author."],
+  [/permission denied|access.*denied/i, "Permission denied. Another program may be using the file, or antivirus may be blocking access."],
+];
+
 export function getTauriErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === "string" && error.trim()) return error;
-  return "Something went wrong";
+  let raw: string;
+  if (error instanceof Error && error.message) {
+    raw = error.message;
+  } else if (typeof error === "string" && error.trim()) {
+    raw = error;
+  } else {
+    return "Something went wrong";
+  }
+
+  // Return a friendlier message if we match a known pattern
+  for (const [pattern, hint] of ERROR_HINTS) {
+    if (pattern.test(raw)) return hint;
+  }
+
+  return raw;
 }
 
 export async function invokeResult<T>(

@@ -25,9 +25,10 @@ interface DiscoverDetailProps {
   result: EsouiSearchResult | null;
   addonsPath: string;
   onInstalled: () => void;
+  isOffline?: boolean;
 }
 
-export function DiscoverDetail({ result, addonsPath, onInstalled }: DiscoverDetailProps) {
+export function DiscoverDetail({ result, addonsPath, onInstalled, isOffline }: DiscoverDetailProps) {
   const [detail, setDetail] = useState<EsouiAddonDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -205,7 +206,8 @@ export function DiscoverDetail({ result, addonsPath, onInstalled }: DiscoverDeta
         <div className="flex flex-col gap-1.5 items-end shrink-0">
           <Button
             onClick={() => handleInstall(detail.downloadUrl)}
-            disabled={installingId !== null}
+            disabled={installingId !== null || isOffline}
+            title={isOffline ? "Installs require an internet connection" : undefined}
             className="min-w-[100px]"
           >
             {installingId === detail.id ? (
