@@ -19,7 +19,8 @@ You should receive a response within 48 hours. We will work with you to understa
 
 | Version | Supported |
 |---------|-----------|
-| 0.3.x   | Yes       |
+| 0.4.x   | Yes       |
+| 0.3.x   | No        |
 
 ## Scope
 

@@ -162,9 +162,7 @@ context/                    # Architecture and design documentation
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-Please open an issue first to discuss what you'd like to change.
+Contributions are welcome! Please read our [Code of Conduct](CODE_OF_CONDUCT.md) and [Contributing Guide](CONTRIBUTING.md) before opening a PR.
 
 ## Security
 

@@ -1,7 +1,15 @@
 {
   "name": "kalpa",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ESO-Toolkit/kalpa.git"
+  },
+  "homepage": "https://github.com/ESO-Toolkit/kalpa",
+  "bugs": {
+    "url": "https://github.com/ESO-Toolkit/kalpa/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
