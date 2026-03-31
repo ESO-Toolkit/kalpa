@@ -259,6 +259,12 @@ pub fn run() {
             commands::resolve_share_code,
             commands::export_pack_file,
             commands::import_pack_file,
+            commands::get_saved_variables_path,
+            commands::list_saved_variables,
+            commands::read_saved_variable,
+            commands::write_saved_variable,
+            commands::copy_sv_profile,
+            commands::is_eso_running,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

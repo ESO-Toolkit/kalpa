@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  FileSliders,
   MinusIcon,
   PackageIcon,
   RefreshCwIcon,
@@ -22,6 +23,7 @@ interface AppHeaderProps {
   onBatchRemove: () => void;
   onBatchUpdate: () => void;
   onOpenPacks: () => void;
+  onOpenSavedVars: () => void;
   onOpenSettings: () => void;
   onRefresh: () => void;
 }
@@ -38,6 +40,7 @@ export function AppHeader({
   onBatchRemove,
   onBatchUpdate,
   onOpenPacks,
+  onOpenSavedVars,
   onOpenSettings,
   onRefresh,
 }: AppHeaderProps) {
@@ -106,6 +109,15 @@ export function AppHeader({
               title="Addon Packs"
             >
               <PackageIcon />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onOpenSavedVars}
+              aria-label="Saved Vars"
+              title="SavedVariables Manager"
+            >
+              <FileSliders />
             </Button>
             <Button
               variant="ghost"

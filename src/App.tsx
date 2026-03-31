@@ -33,6 +33,7 @@ type ActiveDialog =
   | "backups"
   | "api-compat"
   | "characters"
+  | "saved-variables"
   | null;
 
 interface PendingDeepLinkPayload {
@@ -699,6 +700,7 @@ function App() {
         onBatchRemove={() => void handleBatchRemove()}
         onBatchUpdate={() => void handleBatchUpdate()}
         onOpenPacks={() => setActiveDialog("packs")}
+        onOpenSavedVars={() => setActiveDialog("saved-variables")}
         onOpenSettings={() => setActiveDialog("settings")}
         onRefresh={handleRefresh}
       />

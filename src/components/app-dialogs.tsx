@@ -7,6 +7,9 @@ const Backups = lazy(() => import("./backups").then((m) => ({ default: m.Backups
 const ApiCompat = lazy(() => import("./api-compat").then((m) => ({ default: m.ApiCompat })));
 const Characters = lazy(() => import("./characters").then((m) => ({ default: m.Characters })));
 const Settings = lazy(() => import("./settings").then((m) => ({ default: m.Settings })));
+const SavedVariables = lazy(() =>
+  import("./saved-variables").then((m) => ({ default: m.SavedVariables }))
+);
 
 type ActiveDialog =
   | "settings"
@@ -15,6 +18,7 @@ type ActiveDialog =
   | "backups"
   | "api-compat"
   | "characters"
+  | "saved-variables"
   | null;
 
 interface AppDialogsProps {
@@ -75,6 +79,10 @@ export function AppDialogs({
 
       {activeDialog === "characters" && (
         <Characters addonsPath={addonsPath} onClose={onCloseDialog} />
+      )}
+
+      {activeDialog === "saved-variables" && (
+        <SavedVariables addonsPath={addonsPath} onClose={onCloseDialog} />
       )}
 
       {activeDialog === "settings" && (

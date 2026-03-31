@@ -127,6 +127,27 @@ export interface AddonsDetectionResult {
   warnings: string[];
 }
 
+// ── SavedVariables Manager types ─────────────────────────────────────────
+export interface SavedVariableFile {
+  fileName: string;
+  addonName: string;
+  lastModified: string;
+  sizeBytes: number;
+  characterKeys: string[];
+}
+
+export interface SvTreeNode {
+  key: string;
+  valueType: "string" | "number" | "boolean" | "nil" | "table";
+  value?: string | number | boolean | null;
+  children?: SvTreeNode[];
+}
+
+export interface SvCharacterProfile {
+  file: string;
+  charKey: string;
+}
+
 // App-level UI state types
 export type SortMode = "name" | "author";
 export type FilterMode = "all" | "addons" | "libraries" | "outdated" | "missing-deps" | "favorites";

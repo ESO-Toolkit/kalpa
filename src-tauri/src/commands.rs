@@ -2981,3 +2981,636 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
 
     Ok(pack)
 }
+
+// ─── SavedVariables Manager ─────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedVariableFile {
+    pub file_name: String,
+    pub addon_name: String,
+    pub last_modified: String,
+    pub size_bytes: u64,
+    pub character_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvTreeNode {
+    pub key: String,
+    pub value_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub children: Option<Vec<SvTreeNode>>,
+}
+
+#[tauri::command]
+pub fn get_saved_variables_path(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<String, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let sv_dir = saved_variables_dir(&addons_dir);
+    if !sv_dir.is_dir() {
+        return Err("SavedVariables folder not found.".to_string());
+    }
+    Ok(sv_dir.to_string_lossy().to_string())
+}
+
+/// Extract character keys from a SavedVariables .lua file by matching
+/// second-level `["key"]` patterns inside the top-level table.
+fn extract_character_keys(content: &str) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // Match lines like:   ["CharName^NA"] = {
+        // These appear at the second nesting level (indented once inside the top-level table)
+        Regex::new(r#"(?m)^\s+\["([^"]+)"\]\s*=\s*\{"#).unwrap()
+    });
+
+    let mut keys: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // We need to find keys at the SECOND nesting level (inside ["Default"] = { ... })
+    // The structure is:
+    //   TopVar = {
+    //       ["Default"] = {           <- depth 1
+    //           ["$AccountWide"] = {  <- depth 2 (these are character keys)
+    //           ["CharName^NA"] = {   <- depth 2
+    // So we track brace depth and extract keys at depth 2
+    let mut depth: i32 = 0;
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Count braces on this line (simple: just count { and } outside strings)
+        // For our purposes, a simple count works since ESO SV files are well-structured
+        if depth == 2 {
+            // At depth 2, look for ["key"] = {
+            static RE_KEY: OnceLock<Regex> = OnceLock::new();
+            let re_key = RE_KEY.get_or_init(|| {
+                Regex::new(r#"^\["([^"]+)"\]\s*="#).unwrap()
+            });
+            if let Some(cap) = re_key.captures(trimmed) {
+                let key = cap[1].to_string();
+                if seen.insert(key.clone()) {
+                    keys.push(key);
+                }
+            }
+        }
+
+        for ch in line.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+
+    // Fallback: if depth tracking didn't find anything, try regex approach
+    if keys.is_empty() {
+        for cap in re.captures_iter(content) {
+            let key = cap[1].to_string();
+            if seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+    }
+
+    keys
+}
+
+#[tauri::command]
+pub fn list_saved_variables(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<SavedVariableFile>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let sv_dir = saved_variables_dir(&addons_dir);
+    if !sv_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let entries =
+        fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {}", e))?;
+
+    let mut files: Vec<SavedVariableFile> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if !file_name.ends_with(".lua") {
+            continue;
+        }
+
+        let addon_name = file_name.strip_suffix(".lua").unwrap_or(&file_name).to_string();
+
+        let meta = fs::metadata(&path).ok();
+        let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let last_modified = meta
+            .and_then(|m| m.modified().ok())
+            .map(|t| {
+                let secs = t
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                metadata::format_timestamp(secs)
+            })
+            .unwrap_or_default();
+
+        let character_keys = match fs::read_to_string(&path) {
+            Ok(content) => extract_character_keys(&content),
+            Err(_) => Vec::new(),
+        };
+
+        files.push(SavedVariableFile {
+            file_name,
+            addon_name,
+            last_modified,
+            size_bytes,
+            character_keys,
+        });
+    }
+
+    files.sort_by(|a, b| a.addon_name.to_lowercase().cmp(&b.addon_name.to_lowercase()));
+    Ok(files)
+}
+
+/// Simple recursive descent parser for ESO SavedVariables Lua files.
+/// Only handles the subset of Lua that ESO actually generates.
+fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    skip_whitespace_and_comments(chars, pos);
+
+    if *pos >= chars.len() {
+        return Err("Unexpected end of input".to_string());
+    }
+
+    match chars[*pos] {
+        b'{' => parse_lua_table(chars, pos),
+        b'"' => parse_lua_string(chars, pos),
+        b'\'' => parse_lua_string_single(chars, pos),
+        b't' if chars[*pos..].starts_with(b"true") => {
+            *pos += 4;
+            Ok(SvTreeNode {
+                key: String::new(),
+                value_type: "boolean".to_string(),
+                value: Some(serde_json::Value::Bool(true)),
+                children: None,
+            })
+        }
+        b'f' if chars[*pos..].starts_with(b"false") => {
+            *pos += 5;
+            Ok(SvTreeNode {
+                key: String::new(),
+                value_type: "boolean".to_string(),
+                value: Some(serde_json::Value::Bool(false)),
+                children: None,
+            })
+        }
+        b'n' if chars[*pos..].starts_with(b"nil") => {
+            *pos += 3;
+            Ok(SvTreeNode {
+                key: String::new(),
+                value_type: "nil".to_string(),
+                value: Some(serde_json::Value::Null),
+                children: None,
+            })
+        }
+        b'-' | b'0'..=b'9' | b'.' => parse_lua_number(chars, pos),
+        _ => Err(format!(
+            "Unexpected character '{}' at position {}",
+            chars[*pos] as char, *pos
+        )),
+    }
+}
+
+fn skip_whitespace_and_comments(chars: &[u8], pos: &mut usize) {
+    while *pos < chars.len() {
+        match chars[*pos] {
+            b' ' | b'\t' | b'\r' | b'\n' => *pos += 1,
+            b'-' if *pos + 1 < chars.len() && chars[*pos + 1] == b'-' => {
+                // Skip line comment
+                *pos += 2;
+                while *pos < chars.len() && chars[*pos] != b'\n' {
+                    *pos += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+}
+
+fn parse_lua_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    *pos += 1; // skip opening "
+    let start = *pos;
+    while *pos < chars.len() && chars[*pos] != b'"' {
+        if chars[*pos] == b'\\' {
+            *pos += 1; // skip escaped char
+        }
+        *pos += 1;
+    }
+    if *pos >= chars.len() {
+        return Err("Unterminated string".to_string());
+    }
+    let s = String::from_utf8_lossy(&chars[start..*pos]).to_string();
+    *pos += 1; // skip closing "
+    Ok(SvTreeNode {
+        key: String::new(),
+        value_type: "string".to_string(),
+        value: Some(serde_json::Value::String(s)),
+        children: None,
+    })
+}
+
+fn parse_lua_string_single(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    *pos += 1; // skip opening '
+    let start = *pos;
+    while *pos < chars.len() && chars[*pos] != b'\'' {
+        if chars[*pos] == b'\\' {
+            *pos += 1;
+        }
+        *pos += 1;
+    }
+    if *pos >= chars.len() {
+        return Err("Unterminated string".to_string());
+    }
+    let s = String::from_utf8_lossy(&chars[start..*pos]).to_string();
+    *pos += 1;
+    Ok(SvTreeNode {
+        key: String::new(),
+        value_type: "string".to_string(),
+        value: Some(serde_json::Value::String(s)),
+        children: None,
+    })
+}
+
+fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    let start = *pos;
+    if *pos < chars.len() && chars[*pos] == b'-' {
+        *pos += 1;
+    }
+    while *pos < chars.len() && (chars[*pos].is_ascii_digit() || chars[*pos] == b'.' || chars[*pos] == b'e' || chars[*pos] == b'E' || chars[*pos] == b'+' || chars[*pos] == b'-') {
+        // Avoid consuming a '-' that isn't part of scientific notation
+        if (chars[*pos] == b'+' || chars[*pos] == b'-') && *pos > start + 1 {
+            let prev = chars[*pos - 1];
+            if prev != b'e' && prev != b'E' {
+                break;
+            }
+        }
+        *pos += 1;
+    }
+    let num_str = String::from_utf8_lossy(&chars[start..*pos]).to_string();
+    let value = if let Ok(n) = num_str.parse::<f64>() {
+        serde_json::Number::from_f64(n)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        return Err(format!("Invalid number: {}", num_str));
+    };
+    Ok(SvTreeNode {
+        key: String::new(),
+        value_type: "number".to_string(),
+        value: Some(value),
+        children: None,
+    })
+}
+
+fn parse_lua_table(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    *pos += 1; // skip {
+    let mut children: Vec<SvTreeNode> = Vec::new();
+    let mut index = 1u32;
+
+    loop {
+        skip_whitespace_and_comments(chars, pos);
+        if *pos >= chars.len() {
+            return Err("Unterminated table".to_string());
+        }
+        if chars[*pos] == b'}' {
+            *pos += 1;
+            break;
+        }
+
+        // Try to parse key = value or ["key"] = value
+        let key = parse_table_key(chars, pos)?;
+
+        let mut child = parse_lua_value(chars, pos)?;
+        child.key = key.unwrap_or_else(|| {
+            let k = index.to_string();
+            index += 1;
+            k
+        });
+
+        children.push(child);
+
+        // Skip optional comma
+        skip_whitespace_and_comments(chars, pos);
+        if *pos < chars.len() && chars[*pos] == b',' {
+            *pos += 1;
+        }
+    }
+
+    Ok(SvTreeNode {
+        key: String::new(),
+        value_type: "table".to_string(),
+        value: None,
+        children: Some(children),
+    })
+}
+
+/// Parse table key: `["string"]` or `[number]` or `identifier` followed by `=`
+/// Returns None for array entries (no key).
+fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, String> {
+    skip_whitespace_and_comments(chars, pos);
+
+    if *pos >= chars.len() {
+        return Ok(None);
+    }
+
+    let saved = *pos;
+
+    if chars[*pos] == b'[' {
+        *pos += 1;
+        skip_whitespace_and_comments(chars, pos);
+        if *pos >= chars.len() {
+            *pos = saved;
+            return Ok(None);
+        }
+
+        let key = if chars[*pos] == b'"' {
+            *pos += 1;
+            let start = *pos;
+            while *pos < chars.len() && chars[*pos] != b'"' {
+                if chars[*pos] == b'\\' {
+                    *pos += 1;
+                }
+                *pos += 1;
+            }
+            if *pos >= chars.len() {
+                *pos = saved;
+                return Ok(None);
+            }
+            let k = String::from_utf8_lossy(&chars[start..*pos]).to_string();
+            *pos += 1; // skip "
+            k
+        } else if chars[*pos].is_ascii_digit() || chars[*pos] == b'-' {
+            let start = *pos;
+            if chars[*pos] == b'-' { *pos += 1; }
+            while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+                *pos += 1;
+            }
+            String::from_utf8_lossy(&chars[start..*pos]).to_string()
+        } else {
+            *pos = saved;
+            return Ok(None);
+        };
+
+        skip_whitespace_and_comments(chars, pos);
+        if *pos < chars.len() && chars[*pos] == b']' {
+            *pos += 1;
+        } else {
+            *pos = saved;
+            return Ok(None);
+        }
+
+        skip_whitespace_and_comments(chars, pos);
+        if *pos < chars.len() && chars[*pos] == b'=' {
+            *pos += 1;
+            return Ok(Some(key));
+        }
+
+        *pos = saved;
+        return Ok(None);
+    }
+
+    // Try identifier = value
+    if chars[*pos].is_ascii_alphabetic() || chars[*pos] == b'_' {
+        let start = *pos;
+        while *pos < chars.len() && (chars[*pos].is_ascii_alphanumeric() || chars[*pos] == b'_') {
+            *pos += 1;
+        }
+        let ident = String::from_utf8_lossy(&chars[start..*pos]).to_string();
+        skip_whitespace_and_comments(chars, pos);
+        if *pos < chars.len() && chars[*pos] == b'=' {
+            *pos += 1;
+            return Ok(Some(ident));
+        }
+        // Not a key=value, backtrack
+        *pos = saved;
+        return Ok(None);
+    }
+
+    Ok(None)
+}
+
+#[tauri::command]
+pub fn read_saved_variable(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+) -> Result<SvTreeNode, String> {
+    validate_name(&file_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let sv_dir = saved_variables_dir(&addons_dir);
+    let file_path = sv_dir.join(&file_name);
+
+    if !file_path.is_file() {
+        return Err(format!("File not found: {}", file_name));
+    }
+
+    let content =
+        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
+
+    // The file may contain multiple top-level assignments like:
+    //   VarName = { ... }
+    // Parse each as a child of a virtual root node.
+    let bytes = content.as_bytes();
+    let mut pos = 0;
+    let mut children: Vec<SvTreeNode> = Vec::new();
+
+    while pos < bytes.len() {
+        skip_whitespace_and_comments(bytes, &mut pos);
+        if pos >= bytes.len() {
+            break;
+        }
+
+        // Expect: identifier = { ... }
+        if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' {
+            let start = pos;
+            while pos < bytes.len()
+                && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
+            {
+                pos += 1;
+            }
+            let var_name = String::from_utf8_lossy(&bytes[start..pos]).to_string();
+
+            skip_whitespace_and_comments(bytes, &mut pos);
+            if pos < bytes.len() && bytes[pos] == b'=' {
+                pos += 1;
+                match parse_lua_value(bytes, &mut pos) {
+                    Ok(mut node) => {
+                        node.key = var_name;
+                        children.push(node);
+                    }
+                    Err(e) => {
+                        return Err(format!("Parse error in {}: {}", file_name, e));
+                    }
+                }
+            } else {
+                // Skip unknown content
+                pos += 1;
+            }
+        } else {
+            pos += 1;
+        }
+    }
+
+    Ok(SvTreeNode {
+        key: file_name,
+        value_type: "table".to_string(),
+        value: None,
+        children: Some(children),
+    })
+}
+
+#[tauri::command]
+pub fn write_saved_variable(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+    content: String,
+) -> Result<(), String> {
+    validate_name(&file_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let sv_dir = saved_variables_dir(&addons_dir);
+    let file_path = sv_dir.join(&file_name);
+    let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
+
+    fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to finalize write: {}", e))
+}
+
+#[tauri::command]
+pub fn copy_sv_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+    from_key: String,
+    to_key: String,
+) -> Result<(), String> {
+    validate_name(&file_name)?;
+    if from_key.is_empty() || to_key.is_empty() {
+        return Err("Source and destination keys cannot be empty.".to_string());
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let sv_dir = saved_variables_dir(&addons_dir);
+    let file_path = sv_dir.join(&file_name);
+
+    if !file_path.is_file() {
+        return Err(format!("File not found: {}", file_name));
+    }
+
+    let content =
+        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
+
+    // Find the block for from_key: ["from_key"] = { ... }
+    // We need to find it at depth 2 (inside the ["Default"] table)
+    let search_pattern = format!(r#"["{}"]"#, from_key);
+    let Some(key_start) = content.find(&search_pattern) else {
+        return Err(format!("Source key \"{}\" not found in file.", from_key));
+    };
+
+    // Find the `= {` after the key
+    let after_key = &content[key_start + search_pattern.len()..];
+    let Some(eq_pos) = after_key.find('=') else {
+        return Err("Malformed Lua structure.".to_string());
+    };
+    let block_start = key_start + search_pattern.len() + eq_pos;
+
+    // Find the matching closing brace
+    let after_eq = &content[block_start + 1..];
+    let Some(open_brace) = after_eq.find('{') else {
+        return Err("Could not find opening brace for source key.".to_string());
+    };
+    let brace_start = block_start + 1 + open_brace;
+
+    let mut depth = 0i32;
+    let mut brace_end = brace_start;
+    for (i, ch) in content[brace_start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    brace_end = brace_start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if depth != 0 {
+        return Err("Unbalanced braces in source block.".to_string());
+    }
+
+    // Extract the value block including braces
+    let value_block = &content[brace_start..=brace_end];
+
+    // Find where to insert the new block (find the end of the source key's line context)
+    // We'll insert after the source block's closing },
+    let insert_pos = brace_end + 1;
+    // Skip trailing comma and whitespace on the same line
+    let mut actual_insert = insert_pos;
+    let rest = content[actual_insert..].as_bytes();
+    for &b in rest {
+        if b == b',' || b == b' ' || b == b'\t' {
+            actual_insert += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Determine indentation from the source key line
+    let line_start = content[..key_start].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let indent = &content[line_start..key_start];
+
+    let new_block = format!(
+        "\n{}[\"{}\"] =\n{}{},",
+        indent, to_key, indent, value_block
+    );
+
+    let mut result = String::with_capacity(content.len() + new_block.len());
+    result.push_str(&content[..actual_insert]);
+    result.push_str(&new_block);
+    result.push_str(&content[actual_insert..]);
+
+    // Write atomically
+    let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
+    fs::write(&tmp_path, &result).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to finalize write: {}", e))
+}
+
+#[tauri::command]
+pub fn is_eso_running() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let output = std::process::Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .output()
+            .map_err(|e| format!("Failed to run tasklist: {}", e))?;
+        let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        Ok(text.contains("eso64.exe") || text.contains("eso.exe"))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // ESO only runs on Windows; on other platforms always return false
+        Ok(false)
+    }
+}
