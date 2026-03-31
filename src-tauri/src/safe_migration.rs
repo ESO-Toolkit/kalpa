@@ -118,13 +118,13 @@ fn save_snapshot_store(addons_dir: &Path, store: &SnapshotStore) -> Result<(), S
     metadata::save_json_with_backup(&snapshot_store_path(addons_dir), store)
 }
 
-/// Generate a timestamp-based snapshot ID.
+/// Generate a timestamp-based snapshot ID with millisecond precision to avoid collisions.
 fn snapshot_id(label_hint: &str) -> String {
-    let secs = SystemTime::now()
+    let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let ts = metadata::format_timestamp(secs);
+        .unwrap_or_default();
+    let ts = metadata::format_timestamp(dur.as_secs());
+    let millis = dur.as_millis() % 1000;
     let safe_label: String = label_hint
         .chars()
         .map(|c| {
@@ -136,7 +136,7 @@ fn snapshot_id(label_hint: &str) -> String {
         })
         .take(40)
         .collect();
-    format!("{}-{}", ts.replace(':', "-"), safe_label)
+    format!("{}-{:03}-{}", ts.replace(':', "-"), millis, safe_label)
 }
 
 // ─── Transaction log helpers ────────────────────────────────────────────────
@@ -198,14 +198,14 @@ fn is_process_running(name: &str) -> bool {
 // ─── Core snapshot implementation ───────────────────────────────────────────
 
 /// Create a ZIP snapshot of the specified directories and files.
-/// Returns (archive_path, file_count, total_size, sha256).
+/// Returns the snapshot manifest.
 fn create_zip_snapshot(
     label: &str,
     addons_dir: &Path,
     include_addons: bool,
     include_saved_vars: bool,
     include_settings: bool,
-) -> Result<(PathBuf, u32, u64, String), String> {
+) -> Result<SnapshotManifest, String> {
     let root = snapshots_root(addons_dir);
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {}", e))?;
 
@@ -273,19 +273,20 @@ fn create_zip_snapshot(
         .map_err(|e| format!("Failed to finalize snapshot: {}", e))?;
 
     // Record in snapshot store
-    let mut store = load_snapshot_store(addons_dir);
-    store.snapshots.push(SnapshotManifest {
-        id: id.clone(),
+    let manifest = SnapshotManifest {
+        id,
         label: label.to_string(),
         created_at: now_timestamp(),
         source_paths,
         file_count,
         total_size,
-        archive_sha256: sha256.clone(),
-    });
+        archive_sha256: sha256,
+    };
+    let mut store = load_snapshot_store(addons_dir);
+    store.snapshots.push(manifest.clone());
     save_snapshot_store(addons_dir, &store)?;
 
-    Ok((archive_path, file_count, total_size, sha256))
+    Ok(manifest)
 }
 
 /// Recursively add a directory to a ZIP archive.
@@ -396,15 +397,7 @@ pub fn create_pre_migration_snapshot(
     let start = now_timestamp();
     let label = "Pre-migration";
 
-    let (_, file_count, total_size, sha256) =
-        create_zip_snapshot(label, addons_dir, include_addons, true, true)?;
-
-    let store = load_snapshot_store(addons_dir);
-    let manifest = store
-        .snapshots
-        .last()
-        .cloned()
-        .ok_or("Failed to retrieve snapshot manifest.")?;
+    let manifest = create_zip_snapshot(label, addons_dir, include_addons, true, true)?;
 
     // Log the operation
     let _ = append_op_log(
@@ -419,7 +412,7 @@ pub fn create_pre_migration_snapshot(
             files_modified: vec![],
             details: format!(
                 "Snapshot {} files, {} bytes, SHA-256: {}",
-                file_count, total_size, sha256
+                manifest.file_count, manifest.total_size, manifest.archive_sha256
             ),
         },
     );
@@ -597,15 +590,7 @@ pub fn create_pre_operation_snapshot(
     let label = format!("Pre-{}", operation_label);
 
     // Only snapshot SavedVariables and settings for routine operations (much faster)
-    let (_, file_count, total_size, sha256) =
-        create_zip_snapshot(&label, addons_dir, false, true, true)?;
-
-    let store = load_snapshot_store(addons_dir);
-    let manifest = store
-        .snapshots
-        .last()
-        .cloned()
-        .ok_or("Failed to retrieve snapshot manifest.")?;
+    let manifest = create_zip_snapshot(&label, addons_dir, false, true, true)?;
 
     let _ = append_op_log(
         addons_dir,
@@ -619,7 +604,7 @@ pub fn create_pre_operation_snapshot(
             files_modified: vec![],
             details: format!(
                 "Pre-operation snapshot: {} files, {} bytes, SHA-256: {}",
-                file_count, total_size, sha256
+                manifest.file_count, manifest.total_size, manifest.archive_sha256
             ),
         },
     );
@@ -752,6 +737,11 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
         };
 
         let dest = parent.join(&entry_path);
+
+        // Defense-in-depth: ensure extracted path stays within the target directory
+        if !dest.starts_with(parent) {
+            continue;
+        }
 
         if entry.is_dir() {
             let _ = fs::create_dir_all(&dest);

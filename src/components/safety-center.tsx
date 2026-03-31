@@ -10,13 +10,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { formatBytes } from "@/lib/utils";
 import type { SnapshotManifest, IntegrityResult, OpLogEntry } from "@/types";
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 interface SafetyCenterProps {
   addonsPath: string;

@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
 import { SectionHeader } from "@/components/ui/section-header";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { formatBytes } from "@/lib/utils";
 import type {
   PreconditionResult,
   SnapshotManifest,
@@ -30,12 +31,6 @@ interface MigrationWizardProps {
   addonsPath: string;
   onClose: () => void;
   onRefresh: () => void;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWizardProps) {
