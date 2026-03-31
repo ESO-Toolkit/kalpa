@@ -203,17 +203,10 @@ export interface EsoPackData {
 }
 
 // ── Roster pack install types (deep link: kalpa://install-pack/{id}) ─────
-export interface RosterPackAddon {
-  esouiId: number;
-  name: string;
-  required: boolean;
-  note?: string;
-}
-
 export interface RosterPack {
   id: string;
   title: string;
-  addons: RosterPackAddon[];
+  addons: PackAddonEntry[];
 }
 
 // ── Auth types ────────────────────────────────────────────────────────────

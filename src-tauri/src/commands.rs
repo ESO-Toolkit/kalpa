@@ -2986,20 +2986,10 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RosterPackAddon {
-    pub esoui_id: u32,
-    pub name: String,
-    pub required: bool,
-    #[serde(default)]
-    pub note: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RosterPack {
     pub id: String,
     pub title: String,
-    pub addons: Vec<RosterPackAddon>,
+    pub addons: Vec<PackAddonEntry>,
 }
 
 #[tauri::command]
@@ -3033,16 +3023,7 @@ pub async fn fetch_roster_pack(pack_id: String) -> Result<RosterPack, String> {
         Ok(RosterPack {
             id: pack.id,
             title: pack.title,
-            addons: pack
-                .addons
-                .into_iter()
-                .map(|a| RosterPackAddon {
-                    esoui_id: a.esoui_id,
-                    name: a.name,
-                    required: a.required,
-                    note: a.note,
-                })
-                .collect(),
+            addons: pack.addons,
         })
     })
     .await

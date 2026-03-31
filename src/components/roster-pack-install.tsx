@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import type {
   RosterPack,
-  RosterPackAddon,
+  PackAddonEntry,
   EsouiAddonInfo,
   InstallResult,
   AddonManifest,
@@ -40,7 +40,7 @@ interface RosterPackInstallProps {
 type AddonStatus = "pending" | "installing" | "installed" | "failed";
 
 interface AddonInstallState {
-  addon: RosterPackAddon;
+  addon: PackAddonEntry;
   status: AddonStatus;
   selected: boolean;
 }
@@ -247,7 +247,11 @@ export function RosterPackInstall({
             </GlassPanel>
           )}
 
-          {pack && !loading && (
+          {pack && !loading && addonStates.length === 0 && (
+            <p className="py-4 text-center text-sm text-white/40">This pack has no addons.</p>
+          )}
+
+          {pack && !loading && addonStates.length > 0 && (
             <>
               <SectionHeader>Addons ({addonStates.length})</SectionHeader>
 

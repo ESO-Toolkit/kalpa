@@ -436,6 +436,17 @@ function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [scanAndCheck]);
 
+  // Notify the user if a deep link is pending while the setup wizard is shown
+  const pendingDeepLinkToastShown = useRef(false);
+  useEffect(() => {
+    if (!setupDetection) return;
+    if (pendingDeepLinkToastShown.current) return;
+    if (rosterPackInstallId || deepLinkPackId || deepLinkShareCode) {
+      pendingDeepLinkToastShown.current = true;
+      toast.info("Finish setup to continue with the incoming link.");
+    }
+  }, [setupDetection, rosterPackInstallId, deepLinkPackId, deepLinkShareCode]);
+
   useEffect(() => {
     if (!activeTagFilter) return;
     const tagStillExists = addons.some((addon) => addon.tags.includes(activeTagFilter));
