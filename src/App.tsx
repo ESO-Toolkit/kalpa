@@ -61,6 +61,7 @@ function App() {
   const [selectedAddon, setSelectedAddon] = useState<AddonManifest | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [errorShowSettings, setErrorShowSettings] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -194,6 +195,7 @@ function App() {
     const seq = ++scanSeqRef.current;
     setLoading(true);
     setError(null);
+    setErrorShowSettings(false);
 
     try {
       const result = await invokeOrThrow<AddonManifest[]>("scan_installed_addons", {
@@ -361,8 +363,9 @@ function App() {
         void runAutoLink(savedPath);
       } catch (initError) {
         setError(
-          `Could not use saved AddOns folder. Please update it in Settings. ${getTauriErrorMessage(initError)}`
+          `Could not access saved AddOns folder — it may have been moved or deleted. ${getTauriErrorMessage(initError)}`
         );
+        setErrorShowSettings(true);
         setLoading(false);
       }
     } else {
@@ -385,9 +388,8 @@ function App() {
           await checkForUpdates(path, autoUpdate, false);
           void runAutoLink(path);
         } catch (initError) {
-          setError(
-            `Could not use detected AddOns folder. Please set it in Settings. ${getTauriErrorMessage(initError)}`
-          );
+          setError(`Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`);
+          setErrorShowSettings(true);
           setLoading(false);
         }
       } else {
@@ -466,6 +468,7 @@ function App() {
         await setSetting("addonsPath", path);
         setAddonsPath(path);
         setSetupDetection(null);
+        setErrorShowSettings(false);
         setLoading(true);
         await scanAddons(path);
         const autoUpdate = await getSetting<boolean>("autoUpdate", false);
@@ -474,7 +477,7 @@ function App() {
       } catch (pathError) {
         const message = getTauriErrorMessage(pathError);
         setError(`Could not set addons folder: ${message}`);
-        toast.error(`Failed to set addons folder: ${message}`);
+        setErrorShowSettings(true);
       }
     },
     [checkForUpdates, runAutoLink, scanAddons]
@@ -523,11 +526,12 @@ function App() {
         setSelectedAddon(null);
         setUpdateResults([]);
         setError(null);
+        setErrorShowSettings(false);
         await scanAndCheck(nextPath, true);
       } catch (pathError) {
         const message = getTauriErrorMessage(pathError);
         setError(`Could not set addons folder: ${message}`);
-        toast.error(`Failed to update addons folder: ${message}`);
+        setErrorShowSettings(true);
       }
     },
     [scanAndCheck]
@@ -726,6 +730,7 @@ function App() {
         loading={loading}
         selectedCount={selectedFolders.size}
         updatingAll={updatingAll}
+        isOffline={isOffline}
         onBatchCancel={() => setSelectedFolders(new Set())}
         onBatchRemove={() => void handleBatchRemove()}
         onBatchUpdate={() => void handleBatchUpdate()}
@@ -740,6 +745,7 @@ function App() {
         appUpdateState={appUpdateState}
         onDownload={downloadAndInstall}
         onRestart={restartApp}
+        onOpenSettings={errorShowSettings ? () => setActiveDialog("settings") : undefined}
       />
 
       <UpdateBanner
@@ -747,6 +753,7 @@ function App() {
         updatingAll={updatingAll}
         updateProgress={updateProgress}
         onUpdateAll={handleUpdateAll}
+        isOffline={isOffline}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -775,6 +782,7 @@ function App() {
           onInstalled={handleRefresh}
           onSelectDiscoverResult={setSelectedDiscoverResult}
           selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
+          isOffline={isOffline}
         />
 
         {viewMode === "installed" ? (
@@ -790,6 +798,7 @@ function App() {
             updateResult={selectedUpdateResult}
             onAddonUpdated={handleAddonUpdated}
             onTagsChange={handleTagsChange}
+            isOffline={isOffline}
           />
         ) : (
           <DiscoverDetail
@@ -797,6 +806,7 @@ function App() {
             result={selectedDiscoverResult}
             addonsPath={addonsPath}
             onInstalled={handleRefresh}
+            isOffline={isOffline}
           />
         )}
       </div>
