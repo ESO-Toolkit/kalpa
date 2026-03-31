@@ -139,6 +139,7 @@ function App() {
 
     void listen<string>("roster-pack-install", (event) => {
       setRosterPackInstallId(event.payload);
+      setActiveDialog(null); // close packs dialog if open to avoid stacking
     })
       .then((unlisten) => {
         if (disposed) {

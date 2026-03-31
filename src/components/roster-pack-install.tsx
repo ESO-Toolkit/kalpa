@@ -74,6 +74,7 @@ export function RosterPackInstall({
 
   const fetchPack = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
+    cancelledRef.current = true; // abort any in-flight install loop
     setLoading(true);
     setError(null);
     setInstalling(false);
