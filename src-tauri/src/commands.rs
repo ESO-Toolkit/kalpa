@@ -2981,3 +2981,70 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
 
     Ok(pack)
 }
+
+// ── Roster Pack Install (deep link: kalpa://install-pack/{id}) ────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RosterPackAddon {
+    pub esoui_id: u32,
+    pub name: String,
+    pub required: bool,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RosterPack {
+    pub id: String,
+    pub title: String,
+    pub addons: Vec<RosterPackAddon>,
+}
+
+#[tauri::command]
+pub async fn fetch_roster_pack(pack_id: String) -> Result<RosterPack, String> {
+    validate_pack_id(&pack_id)?;
+
+    tokio::task::spawn_blocking(move || {
+        let client = pack_hub_client();
+        let base = pack_hub_url();
+        let url = format!("{}/packs/{}", base, pack_id);
+
+        let response = client.get(&url).send().map_err(|e| {
+            if e.is_connect() || e.is_timeout() {
+                "Could not connect to Pack Hub. Check your internet connection.".to_string()
+            } else {
+                format!("Network error: {}", e)
+            }
+        })?;
+
+        match response.status().as_u16() {
+            200 => {}
+            404 => return Err(format!("Pack \"{}\" not found.", pack_id)),
+            status => return Err(format!("Pack Hub returned HTTP {}", status)),
+        }
+
+        let body: PackSingleResponse = response
+            .json()
+            .map_err(|e| format!("Failed to parse pack response: {}", e))?;
+
+        let pack = Pack::from_hub(body.pack);
+        Ok(RosterPack {
+            id: pack.id,
+            title: pack.title,
+            addons: pack
+                .addons
+                .into_iter()
+                .map(|a| RosterPackAddon {
+                    esoui_id: a.esoui_id,
+                    name: a.name,
+                    required: a.required,
+                    note: a.note,
+                })
+                .collect(),
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
