@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -63,22 +63,28 @@ export function RosterPackInstall({
     total: number;
   } | null>(null);
 
+  const cancelledRef = useRef(false);
+
   const installedEsouiIds = useMemo(
     () => new Set(installedAddons.filter((a) => a.esouiId).map((a) => a.esouiId!)),
     [installedAddons]
   );
 
+  // Fix #1: depend only on packId — installedEsouiIds is read via closure at render time
+  // Fix #3: reset installing/installProgress when packId changes
   useEffect(() => {
-    let cancelled = false;
+    let fetchCancelled = false;
 
     async function fetchPack() {
       setLoading(true);
       setError(null);
+      setInstalling(false);
+      setInstallProgress(null);
       try {
         const result = await invokeOrThrow<RosterPack>("fetch_roster_pack", {
           packId,
         });
-        if (cancelled) return;
+        if (fetchCancelled) return;
         setPack(result);
         setAddonStates(
           result.addons.map((addon) => ({
@@ -88,18 +94,19 @@ export function RosterPackInstall({
           }))
         );
       } catch (err) {
-        if (cancelled) return;
+        if (fetchCancelled) return;
         setError(getTauriErrorMessage(err));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!fetchCancelled) setLoading(false);
       }
     }
 
     void fetchPack();
     return () => {
-      cancelled = true;
+      fetchCancelled = true;
     };
-  }, [packId, installedEsouiIds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [packId]);
 
   const toggleAddon = useCallback(
     (esouiId: number) => {
@@ -121,12 +128,14 @@ export function RosterPackInstall({
     [addonStates]
   );
 
+  // Fix #2: gate state updates behind cancelledRef to prevent updates on unmounted component
   const handleInstall = useCallback(async () => {
     if (addonsToInstall.length === 0) {
       toast.info("All selected addons are already installed.");
       return;
     }
 
+    cancelledRef.current = false;
     setInstalling(true);
     setInstallProgress({ completed: 0, failed: 0, total: addonsToInstall.length });
 
@@ -134,6 +143,8 @@ export function RosterPackInstall({
     let failed = 0;
 
     for (const item of addonsToInstall) {
+      if (cancelledRef.current) break;
+
       setAddonStates((prev) =>
         prev.map((s) =>
           s.addon.esouiId === item.addon.esouiId ? { ...s, status: "installing" } : s
@@ -143,6 +154,8 @@ export function RosterPackInstall({
       const info = await invokeResult<EsouiAddonInfo>("resolve_esoui_addon", {
         input: String(item.addon.esouiId),
       });
+
+      if (cancelledRef.current) break;
 
       if (!info.ok) {
         failed++;
@@ -161,6 +174,8 @@ export function RosterPackInstall({
         esouiVersion: info.data.version,
       });
 
+      if (cancelledRef.current) break;
+
       if (result.ok) {
         completed++;
         setAddonStates((prev) =>
@@ -178,6 +193,8 @@ export function RosterPackInstall({
       setInstallProgress({ completed, failed, total: addonsToInstall.length });
     }
 
+    if (cancelledRef.current) return;
+
     setInstalling(false);
     setInstallProgress(null);
 
@@ -190,10 +207,23 @@ export function RosterPackInstall({
     }
   }, [addonsToInstall, addonsPath, onRefresh]);
 
+  // Set cancelledRef on unmount so in-flight installs stop updating state
+  useEffect(() => {
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, []);
+
   const allInstalled = addonStates.length > 0 && addonStates.every((s) => s.status === "installed");
 
   return (
-    <Dialog open onOpenChange={() => onClose()}>
+    // Fix #5: prevent dialog dismissal while installing
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open && !installing) onClose();
+      }}
+    >
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -203,9 +233,10 @@ export function RosterPackInstall({
         </DialogHeader>
 
         <div className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1">
+          {/* Fix #8: remove dead border CSS from SVG icon */}
           {loading && (
             <div className="flex items-center justify-center py-8">
-              <Loader2Icon className="h-6 w-6 animate-spin border-white/[0.1] border-t-[#c4a44a]" />
+              <Loader2Icon className="h-6 w-6 animate-spin text-[#c4a44a]" />
             </div>
           )}
 
@@ -276,13 +307,14 @@ export function RosterPackInstall({
                 ))}
               </div>
 
+              {/* Fix #6: only count completed (not failed) in bar fill */}
               {installProgress && (
                 <div className="mt-1">
                   <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
                     <div
                       className="h-full rounded-full bg-sky-400 transition-all duration-300"
                       style={{
-                        width: `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`,
+                        width: `${(installProgress.completed / installProgress.total) * 100}%`,
                       }}
                     />
                   </div>
@@ -299,7 +331,7 @@ export function RosterPackInstall({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={onClose} disabled={installing}>
             {allInstalled ? "Done" : "Cancel"}
           </Button>
           {pack && !allInstalled && (
