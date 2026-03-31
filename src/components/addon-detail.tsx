@@ -422,7 +422,11 @@ export function AddonDetail({
                       className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
                       onClick={() => handleInstallDep(dep.name)}
                       disabled={installingDep === dep.name || isOffline}
-                      title={`Install ${dep.name}`}
+                      title={
+                        isOffline
+                          ? "Installs require an internet connection"
+                          : `Install ${dep.name}`
+                      }
                     >
                       {installingDep === dep.name ? (
                         <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
@@ -499,7 +503,11 @@ export function AddonDetail({
                       className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
                       onClick={() => handleInstallDep(dep.name)}
                       disabled={installingDep === dep.name || isOffline}
-                      title={`Install ${dep.name}`}
+                      title={
+                        isOffline
+                          ? "Installs require an internet connection"
+                          : `Install ${dep.name}`
+                      }
                     >
                       {installingDep === dep.name ? (
                         <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />

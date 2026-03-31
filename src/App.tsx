@@ -193,7 +193,6 @@ function App() {
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
-      setErrorShowSettings(false);
       setAddons([]);
     } finally {
       if (seq === scanSeqRef.current) {

@@ -99,18 +99,21 @@ if (isWindows) {
 
   check("WebView2", () => {
     // Check via registry — WebView2 Evergreen or Fixed installs write here
-    const reg = run(
-      'reg query "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv 2>nul'
-    );
-    if (reg) {
-      const match = reg.match(/pv\s+REG_SZ\s+(.+)/);
-      return { ok: true, detail: match ? `v${match[1].trim()}` : "installed" };
+    const regKeys = [
+      // x64 / WoW64
+      'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+      // ARM64 and native x64
+      'HKLM\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+      // User-level install
+      'HKCU\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+    ];
+    for (const key of regKeys) {
+      const reg = run(`reg query "${key}" /v pv 2>nul`);
+      if (reg) {
+        const match = reg.match(/pv\s+REG_SZ\s+(.+)/);
+        return { ok: true, detail: match ? `v${match[1].trim()}` : "installed" };
+      }
     }
-    // Fallback: check user-level key
-    const regUser = run(
-      'reg query "HKCU\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv 2>nul'
-    );
-    if (regUser) return { ok: true, detail: "installed (user-level)" };
     return {
       ok: false,
       detail:

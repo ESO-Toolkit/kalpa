@@ -38,7 +38,7 @@ const ERROR_HINTS: [RegExp, string][] = [
     "This addon was not found on ESOUI — it may have been removed by its author.",
   ],
   [
-    /permission denied \(os error 13\)|access is denied/i,
+    /permission denied \(os error 13\)|access is denied|os error 5/i,
     "Permission denied — antivirus or another program may be blocking the file.",
   ],
 ];
