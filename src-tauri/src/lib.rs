@@ -5,6 +5,7 @@ mod installer;
 mod manifest;
 mod manifest_cache;
 mod metadata;
+mod safe_migration;
 
 use serde::Serialize;
 use std::path::PathBuf;
@@ -246,6 +247,17 @@ pub fn run() {
             commands::backup_character_settings,
             commands::detect_minion,
             commands::migrate_from_minion,
+            commands::migration_check_preconditions,
+            commands::migration_create_snapshot,
+            commands::migration_dry_run,
+            commands::migration_execute,
+            commands::migration_check_integrity,
+            commands::list_snapshots,
+            commands::restore_snapshot,
+            commands::delete_snapshot,
+            commands::create_pre_operation_snapshot,
+            commands::read_ops_log,
+            commands::backup_minion_config,
             commands::list_packs,
             commands::get_pack,
             commands::auth_login,

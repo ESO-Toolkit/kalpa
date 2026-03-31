@@ -1874,7 +1874,7 @@ pub struct MinionMigrationResult {
     pub already_tracked: u32,
 }
 
-fn find_minion_xml() -> Option<PathBuf> {
+pub fn find_minion_xml() -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".minion").join("minion.xml");
         if path.exists() {
@@ -1884,7 +1884,7 @@ fn find_minion_xml() -> Option<PathBuf> {
     None
 }
 
-fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
+pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
     let mut addons: Vec<MinionAddon> = Vec::new();
     static RE_ADDON: OnceLock<Regex> = OnceLock::new();
     let re_addon = RE_ADDON.get_or_init(|| {
@@ -1989,6 +1989,113 @@ pub fn migrate_from_minion(
         imported,
         already_tracked,
     })
+}
+
+// ─── Safe Migration Commands ────────────────────────────────────────
+
+use crate::safe_migration;
+
+#[tauri::command]
+pub fn migration_check_preconditions(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<safe_migration::PreconditionResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    Ok(safe_migration::check_preconditions(&addons_dir))
+}
+
+#[tauri::command]
+pub fn migration_create_snapshot(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    include_addons: bool,
+) -> Result<safe_migration::SnapshotManifest, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    safe_migration::create_pre_migration_snapshot(&addons_dir, include_addons)
+}
+
+#[tauri::command]
+pub fn migration_dry_run(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<safe_migration::DryRunResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    safe_migration::dry_run_migration(&addons_dir)
+}
+
+#[tauri::command]
+pub fn migration_execute(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<safe_migration::MigrationResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    safe_migration::execute_migration(&addons_dir)
+}
+
+#[tauri::command]
+pub fn migration_check_integrity(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<safe_migration::IntegrityResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    Ok(safe_migration::check_integrity(&addons_dir))
+}
+
+#[tauri::command]
+pub fn list_snapshots(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<safe_migration::SnapshotManifest>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    Ok(safe_migration::list_snapshots(&addons_dir))
+}
+
+#[tauri::command]
+pub fn restore_snapshot(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    snapshot_id: String,
+) -> Result<u32, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    safe_migration::restore_snapshot(&addons_dir, &snapshot_id)
+}
+
+#[tauri::command]
+pub fn delete_snapshot(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    snapshot_id: String,
+) -> Result<(), String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    safe_migration::delete_snapshot(&addons_dir, &snapshot_id)
+}
+
+#[tauri::command]
+pub fn create_pre_operation_snapshot(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    operation_label: String,
+) -> Result<safe_migration::SnapshotManifest, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    safe_migration::create_pre_operation_snapshot(&addons_dir, &operation_label)
+}
+
+#[tauri::command]
+pub fn read_ops_log(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<safe_migration::OpLogEntry>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    Ok(safe_migration::read_ops_log(&addons_dir))
+}
+
+#[tauri::command]
+pub fn backup_minion_config(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<u32, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    safe_migration::backup_minion_config(&addons_dir)
 }
 
 // ── Pack Hub API (roster-hub-api) ──────────────────────────────────────────
