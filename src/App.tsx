@@ -59,6 +59,7 @@ function App() {
   const [selectedAddon, setSelectedAddon] = useState<AddonManifest | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [errorShowSettings, setErrorShowSettings] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -174,6 +175,7 @@ function App() {
     const seq = ++scanSeqRef.current;
     setLoading(true);
     setError(null);
+    setErrorShowSettings(false);
 
     try {
       const result = await invokeOrThrow<AddonManifest[]>("scan_installed_addons", {
@@ -191,6 +193,7 @@ function App() {
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
+      setErrorShowSettings(false);
       setAddons([]);
     } finally {
       if (seq === scanSeqRef.current) {
@@ -343,6 +346,7 @@ function App() {
         setError(
           `Could not access saved AddOns folder — it may have been moved or deleted. ${getTauriErrorMessage(initError)}`
         );
+        setErrorShowSettings(true);
         setLoading(false);
       }
     } else {
@@ -368,6 +372,7 @@ function App() {
           setError(
             `Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`
           );
+          setErrorShowSettings(true);
           setLoading(false);
         }
       } else {
@@ -443,6 +448,7 @@ function App() {
       } catch (pathError) {
         const message = getTauriErrorMessage(pathError);
         setError(`Could not set addons folder: ${message}`);
+        setErrorShowSettings(true);
         toast.error(`Failed to set addons folder: ${message}`);
       }
     },
@@ -492,10 +498,12 @@ function App() {
         setSelectedAddon(null);
         setUpdateResults([]);
         setError(null);
+        setErrorShowSettings(false);
         await scanAndCheck(nextPath, true);
       } catch (pathError) {
         const message = getTauriErrorMessage(pathError);
         setError(`Could not set addons folder: ${message}`);
+        setErrorShowSettings(true);
         toast.error(`Failed to update addons folder: ${message}`);
       }
     },
@@ -710,7 +718,7 @@ function App() {
         appUpdateState={appUpdateState}
         onDownload={downloadAndInstall}
         onRestart={restartApp}
-        onOpenSettings={() => setActiveDialog("settings")}
+        onOpenSettings={errorShowSettings ? () => setActiveDialog("settings") : undefined}
       />
 
       <UpdateBanner

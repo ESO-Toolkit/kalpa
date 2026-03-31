@@ -45,7 +45,13 @@ export async function invokeResult<T>(
     return { ok: true, data: await invoke<T>(command, args) };
   } catch (error) {
     const message = getTauriErrorMessage(error);
-    console.error(`[tauri:${command}]`, error);
+    // Always log the original error for debugging; note when the user sees a mapped message
+    const raw = error instanceof Error ? error.message : String(error);
+    if (message !== raw) {
+      console.error(`[tauri:${command}]`, raw, `(shown to user: "${message}")`);
+    } else {
+      console.error(`[tauri:${command}]`, error);
+    }
     return { ok: false, error: message };
   }
 }

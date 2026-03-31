@@ -67,12 +67,17 @@ check("Cargo", () => {
 
 // Tauri CLI
 check("Tauri CLI", () => {
-  const raw =
-    run("npx tauri --version") ??
-    run("cargo tauri --version") ??
-    run("node -e \"require('@tauri-apps/cli/package.json').version\"");
-  if (!raw) return { ok: false, detail: "not found — run: npm install" };
-  return { ok: true, detail: raw };
+  // Check if @tauri-apps/cli is installed locally in node_modules
+  const localVersion = run(
+    'node -e "process.stdout.write(JSON.parse(require(\'fs\').readFileSync(\'node_modules/@tauri-apps/cli/package.json\',\'utf-8\')).version)"'
+  );
+  if (localVersion) return { ok: true, detail: `v${localVersion} (local)` };
+
+  // Check for global cargo-tauri
+  const cargoVersion = run("cargo tauri --version");
+  if (cargoVersion) return { ok: true, detail: cargoVersion };
+
+  return { ok: false, detail: "not found — run: npm install" };
 });
 
 // Windows-specific checks
