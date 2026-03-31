@@ -39,7 +39,7 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCRjNENzk1NzBDMjJGNEYKUldSUEw4SndsZGZ6cXdYZlZVYTNqVnlHNWI1cDdvL0NsK0xWZnllVmRWR1cybFF3WGlzdVVUbFQK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQwREQwQURDNkNGRjA1RkEKUldUNkJmOXMzQXJkUUVZa2FUb29oRVNOK29McUdra2VVbGR6TE9LelliVDc2NTM3QmZYcVRuSlgK",
       "endpoints": [
         "https://github.com/ESO-Toolkit/kalpa/releases/latest/download/latest.json"
       ]
