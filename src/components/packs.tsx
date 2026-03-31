@@ -377,9 +377,19 @@ export function Packs({
       // Remove from local state
       setPacks((prev) => prev.filter((p) => p.id !== packId));
       setMyPacks((prev) => prev.filter((p) => p.id !== packId));
-      // If we're in detail view, go back
-      if (selectedPack?.id === packId) {
-        handleBack();
+      // If we're in detail view for the deleted pack, go back.
+      // We read from a functional updater to avoid stale closure.
+      let wasViewing = false;
+      setSelectedPack((prev) => {
+        wasViewing = prev?.id === packId;
+        return wasViewing ? null : prev;
+      });
+      if (wasViewing) {
+        setConfirmInstall(false);
+        setInstalling(false);
+        setInstallProgress(null);
+        setShowShareSection(false);
+        setShareResult(null);
       }
       // Refresh browse list
       loadPacks(searchQuery, 1);
@@ -596,12 +606,20 @@ export function Packs({
 
   // Flash green on successful install completion (Task D)
   const prevInstallingRef = useRef(false);
+  const lastInstallFailedRef = useRef(0);
   useEffect(() => {
+    // Track failure count while installing
+    if (installing && installProgress) {
+      lastInstallFailedRef.current = installProgress.failed;
+    }
     if (prevInstallingRef.current && !installing && installProgress === null) {
-      // Install just finished — check if there were no failures by looking at the last known state
-      setInstallSucceeded(true);
-      const timer = setTimeout(() => setInstallSucceeded(false), 1500);
-      return () => clearTimeout(timer);
+      // Install just finished — only flash green if no failures
+      if (lastInstallFailedRef.current === 0) {
+        setInstallSucceeded(true);
+        const timer = setTimeout(() => setInstallSucceeded(false), 1500);
+        return () => clearTimeout(timer);
+      }
+      lastInstallFailedRef.current = 0;
     }
     prevInstallingRef.current = installing;
   }, [installing, installProgress]);
@@ -962,7 +980,6 @@ export function Packs({
             onLoadMore={() => loadMyPacks(myPacksPage + 1)}
             onEdit={(pack) => {
               handleStartEditing(pack);
-              setTab("create");
             }}
             onDuplicate={(pack) => {
               if (duplicatingPackId) return;
@@ -1395,16 +1412,15 @@ function PackDetailView({
           <span className="text-xs text-muted-foreground/50">by {decodeHtml(pack.authorName)}</span>
         )}
         {/* Relative dates */}
-        {pack.updatedAt && (
+        {pack.updatedAt && pack.updatedAt !== pack.createdAt ? (
           <span className="text-[10px] text-muted-foreground/40" title={pack.updatedAt}>
             Updated {formatRelativeDate(pack.updatedAt)}
           </span>
-        )}
-        {pack.createdAt && !pack.updatedAt && (
+        ) : pack.createdAt ? (
           <span className="text-[10px] text-muted-foreground/40" title={pack.createdAt}>
             Created {formatRelativeDate(pack.createdAt)}
           </span>
-        )}
+        ) : null}
         <div className="flex items-center gap-1.5 ml-auto">
           {canEdit && (
             <Button variant="outline" size="sm" onClick={onEdit}>
