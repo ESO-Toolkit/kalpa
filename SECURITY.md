@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in Kalpa, please report it responsibly.
 
-**Do not open a public issue.** Instead, email your report to the maintainers or use [GitHub's private vulnerability reporting](https://github.com/ESO-Toolkit/kalpa/security/advisories/new).
+**Do not open a public issue.** Instead, use [GitHub's private vulnerability reporting](https://github.com/ESO-Toolkit/kalpa/security/advisories/new) to submit your report.
 
 Please include:
 

@@ -88,6 +88,8 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 
 ## Install
 
+> **Windows only** — Kalpa requires Windows 10 (version 1803+) or Windows 11. WebView2 is required at runtime and is pre-installed on Windows 11; on Windows 10, the installer will bootstrap it automatically.
+
 ### Pre-built (recommended)
 
 Download the latest Windows installer from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. Available as both `.exe` (NSIS) and `.msi` installers.
@@ -95,19 +97,32 @@ Download the latest Windows installer from the [Releases](https://github.com/ESO
 ### Build from source
 
 **Prerequisites:**
-- [Rust](https://rustup.rs/) (stable, MSVC toolchain on Windows)
+- [Rust](https://rustup.rs/) (stable, **MSVC** toolchain)
 - [Node.js](https://nodejs.org/) 18+
-- Visual Studio Build Tools with "Desktop development with C++"
+- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **"Desktop development with C++"** workload
+- [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (pre-installed on Windows 11)
 
 ```bash
 git clone https://github.com/ESO-Toolkit/kalpa.git
 cd kalpa
 npm install
+npm run check:env       # verify prerequisites
 npm run tauri dev       # development mode
 npm run tauri build     # production build
 ```
 
 The production build outputs installers to `src-tauri/target/release/bundle/`.
+
+### Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| **"MSVC toolchain not found"** | Run `rustup default stable-x86_64-pc-windows-msvc` to switch toolchains |
+| **Build fails with linker errors** | Install Visual Studio Build Tools with the "Desktop development with C++" workload |
+| **WebView2 not found at runtime** | Download the [Evergreen Bootstrapper](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) and run it |
+| **App blocked by antivirus** | Add an exception for `kalpa.exe` or the install directory in your antivirus software |
+| **npm run tauri dev fails** | Run `npm run check:env` to identify which prerequisite is missing |
+| **White screen on launch** | Ensure WebView2 is installed and up to date; try reinstalling it |
 
 ---
 

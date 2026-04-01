@@ -3101,3 +3101,93 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
 
     Ok(pack)
 }
+
+// ── Roster Pack Install (deep link: kalpa://install-pack/{id}) ────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RosterPack {
+    pub id: String,
+    pub title: String,
+    pub addons: Vec<PackAddonEntry>,
+}
+
+#[tauri::command]
+pub async fn fetch_roster_pack(pack_id: String) -> Result<RosterPack, String> {
+    validate_pack_id(&pack_id)?;
+
+    tokio::task::spawn_blocking(move || {
+        let client = pack_hub_client();
+        let base = pack_hub_url();
+        let url = format!("{}/packs/{}", base, pack_id);
+
+        let response = client.get(&url).send().map_err(|e| {
+            if e.is_connect() || e.is_timeout() {
+                "Could not connect to Pack Hub. Check your internet connection.".to_string()
+            } else {
+                format!("Network error: {}", e)
+            }
+        })?;
+
+        match response.status().as_u16() {
+            200 => {}
+            404 => return Err(format!("Pack \"{}\" not found.", pack_id)),
+            status => return Err(format!("Pack Hub returned HTTP {}", status)),
+        }
+
+        let body: PackSingleResponse = response
+            .json()
+            .map_err(|e| format!("Failed to parse pack response: {}", e))?;
+
+        let pack = Pack::from_hub(body.pack);
+        Ok(RosterPack {
+            id: pack.id,
+            title: pack.title,
+            addons: pack.addons,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_pack_id_accepts_valid_ids() {
+        assert!(validate_pack_id("trial-essentials").is_ok());
+        assert!(validate_pack_id("my_pack_123").is_ok());
+        assert!(validate_pack_id("abc").is_ok());
+        assert!(validate_pack_id("A-Z_0-9").is_ok());
+    }
+
+    #[test]
+    fn validate_pack_id_rejects_path_traversal() {
+        assert!(validate_pack_id("../admin").is_err());
+        assert!(validate_pack_id("..%2Fadmin").is_err());
+        assert!(validate_pack_id("foo/bar").is_err());
+        assert!(validate_pack_id("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn validate_pack_id_rejects_empty() {
+        assert!(validate_pack_id("").is_err());
+    }
+
+    #[test]
+    fn validate_pack_id_rejects_special_chars() {
+        assert!(validate_pack_id("id with spaces").is_err());
+        assert!(validate_pack_id("id&param=1").is_err());
+        assert!(validate_pack_id("<script>").is_err());
+        assert!(validate_pack_id("id%20encoded").is_err());
+    }
+
+    #[test]
+    fn validate_pack_id_rejects_over_100_chars() {
+        let long_id = "a".repeat(101);
+        assert!(validate_pack_id(&long_id).is_err());
+        let max_id = "a".repeat(100);
+        assert!(validate_pack_id(&max_id).is_ok());
+    }
+}

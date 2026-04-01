@@ -48,6 +48,7 @@ interface AddonListProps {
   onInstalled: () => void;
   onSelectDiscoverResult: (result: EsouiSearchResult | null) => void;
   selectedDiscoverResultId: number | null;
+  isOffline?: boolean;
 }
 
 interface AddonListItemProps {
@@ -202,6 +203,7 @@ export function AddonList({
   onInstalled,
   onSelectDiscoverResult,
   selectedDiscoverResultId,
+  isOffline,
 }: AddonListProps) {
   const updatesMap = useMemo(
     () => new Map(updateResults.filter((r) => r.hasUpdate).map((r) => [r.folderName, r] as const)),
@@ -468,6 +470,7 @@ export function AddonList({
           onInstalled={onInstalled}
           onSelectResult={onSelectDiscoverResult}
           selectedResultId={selectedDiscoverResultId}
+          isOffline={isOffline}
         />
       )}
     </div>

@@ -33,6 +33,8 @@ enum DeepLinkAction {
     Pack(String),
     /// Import a shared pack by code: `kalpa://share/{code}`
     Share(String),
+    /// Install a roster pack by ID: `kalpa://install-pack/{id}`
+    InstallPack(String),
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -40,6 +42,7 @@ enum DeepLinkAction {
 pub struct PendingDeepLinkPayload {
     pub pack_id: Option<String>,
     pub share_code: Option<String>,
+    pub install_pack_id: Option<String>,
 }
 
 pub struct PendingDeepLink(pub Mutex<PendingDeepLinkPayload>);
@@ -53,6 +56,14 @@ fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
         let code = rest.split(['/', '?', '#']).next()?.trim();
         if !code.is_empty() {
             return Some(DeepLinkAction::Share(code.to_string()));
+        }
+    }
+
+    // Roster pack install: kalpa://install-pack/{id}
+    if let Some(rest) = url.strip_prefix("kalpa://install-pack/") {
+        let id = rest.split(['/', '?', '#']).next()?.trim();
+        if !id.is_empty() {
+            return Some(DeepLinkAction::InstallPack(id.to_string()));
         }
     }
 
@@ -81,6 +92,9 @@ fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
         DeepLinkAction::Share(code) => {
             let _ = app.emit("deep-link-share", code.as_str());
         }
+        DeepLinkAction::InstallPack(id) => {
+            let _ = app.emit("roster-pack-install", id.as_str());
+        }
     }
 }
 
@@ -88,11 +102,15 @@ fn pending_deep_link_payload(action: &DeepLinkAction) -> PendingDeepLinkPayload 
     match action {
         DeepLinkAction::Pack(id) => PendingDeepLinkPayload {
             pack_id: Some(id.clone()),
-            share_code: None,
+            ..Default::default()
         },
         DeepLinkAction::Share(code) => PendingDeepLinkPayload {
-            pack_id: None,
             share_code: Some(code.clone()),
+            ..Default::default()
+        },
+        DeepLinkAction::InstallPack(id) => PendingDeepLinkPayload {
+            install_pack_id: Some(id.clone()),
+            ..Default::default()
         },
     }
 }
@@ -261,7 +279,90 @@ pub fn run() {
             commands::resolve_share_code,
             commands::export_pack_file,
             commands::import_pack_file,
+            commands::fetch_roster_pack,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_install_pack() {
+        match parse_deep_link("kalpa://install-pack/trial-essentials") {
+            Some(DeepLinkAction::InstallPack(id)) => assert_eq!(id, "trial-essentials"),
+            other => panic!("expected InstallPack, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parse_install_pack_strips_query_and_fragment() {
+        match parse_deep_link("kalpa://install-pack/my-pack?ref=web#top") {
+            Some(DeepLinkAction::InstallPack(id)) => assert_eq!(id, "my-pack"),
+            other => panic!("expected InstallPack, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parse_install_pack_strips_trailing_slash() {
+        match parse_deep_link("kalpa://install-pack/my-pack/") {
+            Some(DeepLinkAction::InstallPack(id)) => assert_eq!(id, "my-pack"),
+            other => panic!("expected InstallPack, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parse_install_pack_rejects_empty_id() {
+        assert!(parse_deep_link("kalpa://install-pack/").is_none());
+    }
+
+    #[test]
+    fn parse_pack() {
+        match parse_deep_link("kalpa://pack/some-id") {
+            Some(DeepLinkAction::Pack(id)) => assert_eq!(id, "some-id"),
+            other => panic!("expected Pack, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parse_packs_alias() {
+        match parse_deep_link("kalpa://packs/some-id") {
+            Some(DeepLinkAction::Pack(id)) => assert_eq!(id, "some-id"),
+            other => panic!("expected Pack, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parse_share() {
+        match parse_deep_link("kalpa://share/abc123") {
+            Some(DeepLinkAction::Share(code)) => assert_eq!(code, "abc123"),
+            other => panic!("expected Share, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_scheme_returns_none() {
+        assert!(parse_deep_link("kalpa://unknown/foo").is_none());
+        assert!(parse_deep_link("https://example.com").is_none());
+        assert!(parse_deep_link("").is_none());
+    }
+
+    #[test]
+    fn parse_trims_whitespace() {
+        match parse_deep_link("  kalpa://install-pack/my-pack  ") {
+            Some(DeepLinkAction::InstallPack(id)) => assert_eq!(id, "my-pack"),
+            other => panic!("expected InstallPack, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn install_pack_does_not_match_pack_prefix() {
+        // "kalpa://install-pack/x" must NOT match the "kalpa://pack/" branch
+        match parse_deep_link("kalpa://install-pack/x") {
+            Some(DeepLinkAction::InstallPack(_)) => {}
+            other => panic!("expected InstallPack, got {:?}", other.is_some()),
+        }
+    }
 }
