@@ -31,13 +31,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { cn, decodeHtml } from "@/lib/utils";
-import {
-  PackageIcon,
-  DownloadIcon,
-  ArrowLeftIcon,
-  Loader2Icon,
-  ImportIcon,
-} from "lucide-react";
+import { PackageIcon, DownloadIcon, ArrowLeftIcon, Loader2Icon, ImportIcon } from "lucide-react";
 
 // Sub-components
 import { PackListView } from "./pack-browse";
@@ -767,49 +761,51 @@ export function Packs({
           </DialogTitle>
 
           {/* Tab bar with animated pill indicator */}
-          {!selectedPack && (() => {
-            const tabs: TabMode[] = ["browse", "my-packs", "create"];
-            const tabCount = tabs.length;
-            const tabIndex = tabs.indexOf(tab);
-            const tabLabels: Record<TabMode, string> = {
-              browse: "Browse",
-              "my-packs": "My Packs",
-              create: editingPackId ? "Edit Pack" : "Create",
-            };
-            return (
-              <div className="relative flex mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-                {/* Sliding pill background */}
-                <div
-                  className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
-                  style={{
-                    left: `calc(${(tabIndex / tabCount) * 100}% + 2px)`,
-                    width: `calc(${100 / tabCount}% - 4px)`,
-                  }}
-                />
-                {tabs.map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => {
-                      setTab(t);
-                      if (duplicatingPackId) setDuplicatingPackId(null);
+          {!selectedPack &&
+            (() => {
+              const tabs: TabMode[] = ["browse", "my-packs", "create"];
+              const tabCount = tabs.length;
+              const tabIndex = tabs.indexOf(tab);
+              const tabLabels: Record<TabMode, string> = {
+                browse: "Browse",
+                "my-packs": "My Packs",
+                create: editingPackId ? "Edit Pack" : "Create",
+              };
+              return (
+                <div className="relative flex mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+                  {/* Sliding pill background */}
+                  <div
+                    className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+                    style={{
+                      left: `calc(${(tabIndex / tabCount) * 100}% + 2px)`,
+                      width: `calc(${100 / tabCount}% - 4px)`,
                     }}
-                    className={cn(
-                      "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
-                      tab === t
-                        ? "text-foreground"
-                        : "text-muted-foreground/60 hover:text-muted-foreground",
-                    )}
-                  >
-                    {tabLabels[t]}
-                  </button>
-                ))}
-              </div>
-            );
-          })()}
+                  />
+                  {tabs.map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => {
+                        setTab(t);
+                        if (duplicatingPackId) setDuplicatingPackId(null);
+                      }}
+                      className={cn(
+                        "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
+                        tab === t
+                          ? "text-foreground"
+                          : "text-muted-foreground/60 hover:text-muted-foreground"
+                      )}
+                    >
+                      {tabLabels[t]}
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
         </DialogHeader>
 
         {selectedPack ? (
           <PackDetailView
+            key={selectedPack.id}
             pack={selectedPack}
             loading={loadingDetail}
             installing={installing}
@@ -878,6 +874,7 @@ export function Packs({
             {showImportPanel && (
               <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
                 <PackImportView
+                  key={importedPack ? "resolved" : "empty"}
                   shareCodeInput={shareCodeInput}
                   onShareCodeInputChange={setShareCodeInput}
                   resolvingCode={resolvingCode}

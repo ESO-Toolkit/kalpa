@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import type { Pack, PackAddonEntry, AuthUser, ShareCodeResponse } from "../types";
 import { ShareMode, TYPE_LABELS, TAG_COLORS } from "./pack-constants";
 import { Button } from "@/components/ui/button";
@@ -79,13 +79,6 @@ export function PackDetailView({
   const [shareMode, setShareMode] = useState<ShareMode>("private-link");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
-  // Reset local UI state when a different pack is shown
-  const packId = pack?.id;
-  useEffect(() => {
-    setShowDeleteConfirm(false);
-    setShareMode("private-link");
-  }, [packId]);
-
   if (loading || !pack) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -115,7 +108,8 @@ export function PackDetailView({
         )}
         {/* Relative dates */}
         {(() => {
-          const dateIso = pack.updatedAt && pack.updatedAt !== pack.createdAt ? pack.updatedAt : pack.createdAt;
+          const dateIso =
+            pack.updatedAt && pack.updatedAt !== pack.createdAt ? pack.updatedAt : pack.createdAt;
           const label = pack.updatedAt && pack.updatedAt !== pack.createdAt ? "Updated" : "Created";
           const relative = dateIso ? formatRelativeDate(dateIso) : "";
           return relative ? (
@@ -154,11 +148,7 @@ export function PackDetailView({
                     disabled={deletingPack}
                     className="h-6 px-2 text-[10px] border-red-500/30 text-red-400 hover:bg-red-500/10"
                   >
-                    {deletingPack ? (
-                      <Loader2Icon className="size-3 animate-spin" />
-                    ) : (
-                      "Delete"
-                    )}
+                    {deletingPack ? <Loader2Icon className="size-3 animate-spin" /> : "Delete"}
                   </Button>
                 </div>
               ) : (
@@ -326,12 +316,14 @@ export function PackDetailView({
 
       {/* Install progress bar */}
       {(installing && installProgress) || installSucceeded ? (
-        <div className={cn(
-          "rounded-lg border p-3",
-          installSucceeded
-            ? "border-emerald-400/20 bg-emerald-400/[0.04]"
-            : "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04]"
-        )}>
+        <div
+          className={cn(
+            "rounded-lg border p-3",
+            installSucceeded
+              ? "border-emerald-400/20 bg-emerald-400/[0.04]"
+              : "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04]"
+          )}
+        >
           {installProgress && (
             <div className="flex items-center justify-between text-sm mb-2">
               <span className="text-[#c4a44a] font-medium">
@@ -441,7 +433,9 @@ function AddonRow({
     <div
       role={locked ? undefined : "button"}
       tabIndex={locked ? undefined : 0}
-      onClick={() => { if (!locked) onToggle(); }}
+      onClick={() => {
+        if (!locked) onToggle();
+      }}
       onKeyDown={(e) => {
         if (!locked && (e.key === "Enter" || e.key === " ")) {
           e.preventDefault();

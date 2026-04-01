@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState } from "react";
 import type { PackAddonEntry, SharedPack } from "../types";
 import { ImportMode, TYPE_LABELS, TAG_COLORS, PACK_TYPE_PILL_COLOR } from "./pack-constants";
 import { Button } from "@/components/ui/button";
@@ -49,15 +49,6 @@ export function PackImportView({
 }) {
   const [importMode, setImportMode] = useState<ImportMode>("enter-code");
 
-  // Reset import mode when cleared (importedPack goes null)
-  const prevImportedPackRef = useRef(importedPack);
-  useEffect(() => {
-    if (prevImportedPackRef.current && !importedPack) {
-      setImportMode("enter-code");
-    }
-    prevImportedPackRef.current = importedPack;
-  }, [importedPack]);
-
   if (importedPack) {
     const requiredAddons = importedPack.addons.filter((a) => a.required);
     const optionalAddons = importedPack.addons.filter((a) => !a.required);
@@ -107,7 +98,9 @@ export function PackImportView({
         {allInstalled && !installing && (
           <div className="flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] p-3">
             <CheckIcon className="size-4 text-emerald-400" />
-            <span className="text-sm text-emerald-400 font-medium">All addons already installed</span>
+            <span className="text-sm text-emerald-400 font-medium">
+              All addons already installed
+            </span>
           </div>
         )}
 
@@ -175,11 +168,7 @@ export function PackImportView({
           </div>
         )}
 
-        <Button
-          onClick={onInstall}
-          disabled={installing || allInstalled}
-          className="w-full"
-        >
+        <Button onClick={onInstall} disabled={installing || allInstalled} className="w-full">
           {installing ? (
             <>
               <Loader2Icon className="size-4 animate-spin mr-1.5" />
