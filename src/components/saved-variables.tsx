@@ -461,9 +461,11 @@ function EditorTab({
 function CopyProfileTab({
   files,
   addonsPath,
+  onRefresh,
 }: {
   files: SavedVariableFile[];
   addonsPath: string;
+  onRefresh: () => void;
 }) {
   const [selectedFile, setSelectedFile] = useState<string>("");
   const [sourceKey, setSourceKey] = useState<string>("");
@@ -496,6 +498,7 @@ function CopyProfileTab({
         toKey: actualDest,
       });
       toast.success(`Copied "${sourceKey}" to "${actualDest}" in ${currentFile?.addonName}`);
+      onRefresh();
       setSourceKey("");
       setDestKey("");
       setCustomDest("");
@@ -621,14 +624,14 @@ function serializeTreeToLua(root: SvTreeNode): string {
   if (root.children) {
     for (const child of root.children) {
       lines.push(`${child.key} =`);
-      lines.push(serializeNode(child, 0));
+      lines.push(serializeNode(child, 0, true));
       lines.push("");
     }
   }
   return lines.join("\n");
 }
 
-function serializeNode(node: SvTreeNode, depth: number): string {
+function serializeNode(node: SvTreeNode, depth: number, isTopLevel = false): string {
   const indent = "\t".repeat(depth);
 
   if (node.valueType === "table" && node.children) {
@@ -645,7 +648,8 @@ function serializeNode(node: SvTreeNode, depth: number): string {
         lines.push(`${indent}\t${keyPart} = ${serializeLeaf(child)},`);
       }
     }
-    lines.push(`${indent}},`);
+    // Top-level assignments must not have a trailing comma (Lua syntax error)
+    lines.push(isTopLevel ? `${indent}}` : `${indent}},`);
     return lines.join("\n");
   }
 
@@ -739,7 +743,7 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
           </TabsContent>
 
           <TabsContent value="copy">
-            <CopyProfileTab files={files} addonsPath={addonsPath} />
+            <CopyProfileTab files={files} addonsPath={addonsPath} onRefresh={() => void loadFiles()} />
           </TabsContent>
         </Tabs>
 

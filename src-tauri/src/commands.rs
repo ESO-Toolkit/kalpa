@@ -3502,7 +3502,7 @@ fn read_saved_variable_blocking(
 }
 
 #[tauri::command]
-pub fn write_saved_variable(
+pub async fn write_saved_variable(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     file_name: String,
@@ -3513,16 +3513,20 @@ pub fn write_saved_variable(
         return Err("Only .lua files can be written.".to_string());
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let sv_dir = saved_variables_dir(&addons_dir);
-    let file_path = sv_dir.join(&file_name);
-    let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = saved_variables_dir(&addons_dir);
+        let file_path = sv_dir.join(&file_name);
+        let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
 
-    fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {}", e))?;
-    fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to finalize write: {}", e))
+        fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {}", e))?;
+        fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to finalize write: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[tauri::command]
-pub fn copy_sv_profile(
+pub async fn copy_sv_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     file_name: String,
@@ -3541,8 +3545,21 @@ pub fn copy_sv_profile(
         return Err("Character keys must not contain double quotes.".to_string());
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let sv_dir = saved_variables_dir(&addons_dir);
-    let file_path = sv_dir.join(&file_name);
+    tokio::task::spawn_blocking(move || {
+        copy_sv_profile_blocking(&addons_dir, &file_name, &from_key, &to_key)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+fn copy_sv_profile_blocking(
+    addons_dir: &Path,
+    file_name: &str,
+    from_key: &str,
+    to_key: &str,
+) -> Result<(), String> {
+    let sv_dir = saved_variables_dir(addons_dir);
+    let file_path = sv_dir.join(file_name);
 
     if !file_path.is_file() {
         return Err(format!("File not found: {}", file_name));
@@ -3552,8 +3569,6 @@ pub fn copy_sv_profile(
         fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
 
     // Find the block for from_key: ["from_key"] = { ... }
-    // Search for the pattern only when it appears as an actual key assignment
-    // (i.e. followed by `] =`) to avoid matching inside string values.
     let search_pattern = format!("[\"{}\"]\u{0020}=", from_key);
     let key_start = find_key_outside_strings(&content, &search_pattern)
         .ok_or_else(|| format!("Source key \"{}\" not found in file.", from_key))?;
