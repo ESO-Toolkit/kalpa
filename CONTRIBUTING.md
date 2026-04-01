@@ -47,6 +47,14 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
    - `docs: update documentation`
 5. Open a pull request against `main`
 
+## Pull Requests
+
+- Keep PRs focused — one feature or fix per PR
+- Ensure all CI checks pass before requesting review
+- Fill out the PR template (What / Why / How / Testing)
+- Expect a review within a few days; maintainers may request changes
+- Squash-merge is preferred for a clean history
+
 ## Code Style
 
 - **TypeScript**: Strict mode, no `any` types, Prettier formatting

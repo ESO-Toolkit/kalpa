@@ -2,6 +2,8 @@
 
 All notable changes to Kalpa are documented here. This project uses [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [Unreleased]
+
 ## [0.4.0] — 2026-03-30
 
 First release under the **Kalpa** name on [ESO-Toolkit/kalpa](https://github.com/ESO-Toolkit/kalpa).
