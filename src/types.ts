@@ -143,11 +143,6 @@ export interface SvTreeNode {
   children?: SvTreeNode[];
 }
 
-export interface SvCharacterProfile {
-  file: string;
-  charKey: string;
-}
-
 // App-level UI state types
 export type SortMode = "name" | "author";
 export type FilterMode = "all" | "addons" | "libraries" | "outdated" | "missing-deps" | "favorites";

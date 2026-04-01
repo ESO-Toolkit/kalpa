@@ -3006,16 +3006,20 @@ pub struct SvTreeNode {
 }
 
 #[tauri::command]
-pub fn get_saved_variables_path(
+pub async fn get_saved_variables_path(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<String, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let sv_dir = saved_variables_dir(&addons_dir);
-    if !sv_dir.is_dir() {
-        return Err("SavedVariables folder not found.".to_string());
-    }
-    Ok(sv_dir.to_string_lossy().to_string())
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = saved_variables_dir(&addons_dir);
+        if !sv_dir.is_dir() {
+            return Err("SavedVariables folder not found.".to_string());
+        }
+        Ok(sv_dir.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 /// Extract character keys from a SavedVariables .lua file.
@@ -3023,9 +3027,7 @@ pub fn get_saved_variables_path(
 /// braces inside string values don't corrupt the depth counter.
 fn extract_character_keys(content: &str) -> Vec<String> {
     static RE_KEY: OnceLock<Regex> = OnceLock::new();
-    let re_key = RE_KEY.get_or_init(|| {
-        Regex::new(r#"^\["([^"]+)"\]\s*=\s*\{"#).unwrap()
-    });
+    let re_key = RE_KEY.get_or_init(|| Regex::new(r#"^\["([^"]+)"\]\s*=\s*\{"#).unwrap());
 
     let mut keys: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -3120,7 +3122,10 @@ fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVariableF
             continue;
         }
 
-        let addon_name = file_name.strip_suffix(".lua").unwrap_or(&file_name).to_string();
+        let addon_name = file_name
+            .strip_suffix(".lua")
+            .unwrap_or(&file_name)
+            .to_string();
 
         let meta = fs::metadata(&path).ok();
         let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -3135,8 +3140,19 @@ fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVariableF
             })
             .unwrap_or_default();
 
-        let character_keys = match fs::read_to_string(&path) {
-            Ok(content) => extract_character_keys(&content),
+        // Only read first 32KB to extract top-level character keys — they
+        // always appear near the start of the file, so reading the full
+        // multi-MB file is wasteful.
+        let character_keys = match fs::File::open(&path) {
+            Ok(mut f) => {
+                use std::io::Read;
+                let read_limit = 32 * 1024;
+                let mut buf = vec![0u8; read_limit.min(size_bytes as usize)];
+                let n = f.read(&mut buf).unwrap_or(0);
+                buf.truncate(n);
+                let content = String::from_utf8_lossy(&buf);
+                extract_character_keys(&content)
+            }
             Err(_) => Vec::new(),
         };
 
@@ -3149,7 +3165,11 @@ fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVariableF
         });
     }
 
-    files.sort_by(|a, b| a.addon_name.to_lowercase().cmp(&b.addon_name.to_lowercase()));
+    files.sort_by(|a, b| {
+        a.addon_name
+            .to_lowercase()
+            .cmp(&b.addon_name.to_lowercase())
+    });
     Ok(files)
 }
 
@@ -3166,6 +3186,9 @@ fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> 
         b'{' => parse_lua_table(chars, pos),
         b'"' => parse_lua_string(chars, pos),
         b'\'' => parse_lua_string_single(chars, pos),
+        b'[' if *pos + 1 < chars.len() && (chars[*pos + 1] == b'[' || chars[*pos + 1] == b'=') => {
+            parse_lua_long_string(chars, pos)
+        }
         b't' if chars[*pos..].starts_with(b"true") => {
             *pos += 4;
             Ok(SvTreeNode {
@@ -3261,23 +3284,94 @@ fn parse_lua_string_single(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, 
     })
 }
 
+/// Parse Lua long bracket strings: `[[...]]`, `[=[...]=]`, `[==[...]==]`, etc.
+fn parse_lua_long_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    // Count the `=` signs in the opening bracket
+    let start = *pos;
+    *pos += 1; // skip first [
+    let mut level = 0usize;
+    while *pos < chars.len() && chars[*pos] == b'=' {
+        level += 1;
+        *pos += 1;
+    }
+    if *pos >= chars.len() || chars[*pos] != b'[' {
+        *pos = start;
+        return Err(format!("Invalid long bracket string at position {}", start));
+    }
+    *pos += 1; // skip second [
+
+    // Build the closing pattern: `]` + `=` * level + `]`
+    let mut close_pattern = vec![b']'];
+    close_pattern.extend(std::iter::repeat_n(b'=', level));
+    close_pattern.push(b']');
+
+    let content_start = *pos;
+    // Search for closing pattern
+    while *pos + close_pattern.len() <= chars.len() {
+        if &chars[*pos..*pos + close_pattern.len()] == close_pattern.as_slice() {
+            let s = String::from_utf8_lossy(&chars[content_start..*pos]).to_string();
+            *pos += close_pattern.len();
+            return Ok(SvTreeNode {
+                key: String::new(),
+                value_type: "string".to_string(),
+                value: Some(serde_json::Value::String(s)),
+                children: None,
+            });
+        }
+        *pos += 1;
+    }
+    Err(format!(
+        "Unterminated long bracket string starting at position {}",
+        start
+    ))
+}
+
 fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
     let start = *pos;
     if *pos < chars.len() && chars[*pos] == b'-' {
         *pos += 1;
     }
-    while *pos < chars.len() && (chars[*pos].is_ascii_digit() || chars[*pos] == b'.' || chars[*pos] == b'e' || chars[*pos] == b'E' || chars[*pos] == b'+' || chars[*pos] == b'-') {
-        // Avoid consuming a '-' that isn't part of scientific notation
-        if (chars[*pos] == b'+' || chars[*pos] == b'-') && *pos > start + 1 {
-            let prev = chars[*pos - 1];
-            if prev != b'e' && prev != b'E' {
-                break;
-            }
+    // Handle hex literals: 0x or 0X
+    if *pos + 1 < chars.len()
+        && chars[*pos] == b'0'
+        && (chars[*pos + 1] == b'x' || chars[*pos + 1] == b'X')
+    {
+        *pos += 2; // skip 0x
+        while *pos < chars.len() && chars[*pos].is_ascii_hexdigit() {
+            *pos += 1;
         }
-        *pos += 1;
+    } else {
+        while *pos < chars.len()
+            && (chars[*pos].is_ascii_digit()
+                || chars[*pos] == b'.'
+                || chars[*pos] == b'e'
+                || chars[*pos] == b'E'
+                || chars[*pos] == b'+'
+                || chars[*pos] == b'-')
+        {
+            // Avoid consuming a '-' that isn't part of scientific notation
+            if (chars[*pos] == b'+' || chars[*pos] == b'-') && *pos > start + 1 {
+                let prev = chars[*pos - 1];
+                if prev != b'e' && prev != b'E' {
+                    break;
+                }
+            }
+            *pos += 1;
+        }
     }
     let num_str = String::from_utf8_lossy(&chars[start..*pos]).to_string();
-    let value = if let Ok(n) = num_str.parse::<f64>() {
+    let value = if num_str.contains('x') || num_str.contains('X') {
+        // Parse hex: strip optional leading '-' and '0x' prefix
+        let (negative, hex_part) = if num_str.starts_with('-') {
+            (true, &num_str[3..]) // skip -0x
+        } else {
+            (false, &num_str[2..]) // skip 0x
+        };
+        let n = i64::from_str_radix(hex_part, 16)
+            .map(|v| if negative { -v } else { v })
+            .map_err(|_| format!("Invalid hex number: {}", num_str))?;
+        serde_json::Value::Number(serde_json::Number::from(n))
+    } else if let Ok(n) = num_str.parse::<f64>() {
         serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null)
@@ -3371,7 +3465,9 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
             k
         } else if chars[*pos].is_ascii_digit() || chars[*pos] == b'-' {
             let start = *pos;
-            if chars[*pos] == b'-' { *pos += 1; }
+            if chars[*pos] == b'-' {
+                *pos += 1;
+            }
             while *pos < chars.len() && chars[*pos].is_ascii_digit() {
                 *pos += 1;
             }
@@ -3435,10 +3531,7 @@ pub async fn read_saved_variable(
         .map_err(|e| format!("Task failed: {}", e))?
 }
 
-fn read_saved_variable_blocking(
-    addons_dir: &Path,
-    file_name: &str,
-) -> Result<SvTreeNode, String> {
+fn read_saved_variable_blocking(addons_dir: &Path, file_name: &str) -> Result<SvTreeNode, String> {
     let sv_dir = saved_variables_dir(addons_dir);
     let file_path = sv_dir.join(file_name);
 
@@ -3465,9 +3558,7 @@ fn read_saved_variable_blocking(
         // Expect: identifier = { ... }
         if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' {
             let start = pos;
-            while pos < bytes.len()
-                && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_')
-            {
+            while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
                 pos += 1;
             }
             let var_name = String::from_utf8_lossy(&bytes[start..pos]).to_string();
@@ -3519,7 +3610,10 @@ pub async fn write_saved_variable(
         let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
 
         fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {}", e))?;
-        fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to finalize write: {}", e))
+        fs::rename(&tmp_path, &file_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("Failed to finalize write: {}", e)
+        })
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
@@ -3588,9 +3682,15 @@ pub async fn copy_sv_profile(
     if from_key.is_empty() || to_key.is_empty() {
         return Err("Source and destination keys cannot be empty.".to_string());
     }
-    // Reject keys with quotes to prevent Lua injection
-    if from_key.contains('"') || to_key.contains('"') {
-        return Err("Character keys must not contain double quotes.".to_string());
+    // Reject keys with quotes or backslashes to prevent Lua injection
+    if from_key.contains('"')
+        || to_key.contains('"')
+        || from_key.contains('\'')
+        || to_key.contains('\'')
+        || from_key.contains('\\')
+        || to_key.contains('\\')
+    {
+        return Err("Character keys must not contain quotes or backslashes.".to_string());
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
@@ -3627,8 +3727,8 @@ fn copy_sv_profile_blocking(
         .ok_or("Could not find opening brace for source key.")?;
 
     // Find the matching closing brace using string-aware scanning
-    let brace_end = find_matching_brace(&content, brace_start)
-        .ok_or("Unbalanced braces in source block.")?;
+    let brace_end =
+        find_matching_brace(&content, brace_start).ok_or("Unbalanced braces in source block.")?;
 
     // Extract the value block including braces
     let value_block = &content[brace_start..=brace_end];
@@ -3637,7 +3737,7 @@ fn copy_sv_profile_blocking(
     let insert_pos = brace_end + 1;
     // Skip trailing comma and whitespace on the same line
     let mut actual_insert = insert_pos;
-    let rest = content[actual_insert..].as_bytes();
+    let rest = &content.as_bytes()[actual_insert..];
     for &b in rest {
         if b == b',' || b == b' ' || b == b'\t' {
             actual_insert += 1;
@@ -3653,10 +3753,7 @@ fn copy_sv_profile_blocking(
         .take_while(|c| c.is_whitespace())
         .collect();
 
-    let new_block = format!(
-        "\n{}[\"{}\"] = {},",
-        indent, to_key, value_block
-    );
+    let new_block = format!("\n{}[\"{}\"] = {},", indent, to_key, value_block);
 
     let mut result = String::with_capacity(content.len() + new_block.len());
     result.push_str(&content[..actual_insert]);
@@ -3666,7 +3763,10 @@ fn copy_sv_profile_blocking(
     // Write atomically
     let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
     fs::write(&tmp_path, &result).map_err(|e| format!("Failed to write temp file: {}", e))?;
-    fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to finalize write: {}", e))
+    fs::rename(&tmp_path, &file_path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        format!("Failed to finalize write: {}", e)
+    })
 }
 
 /// Find a substring in content, but only when it appears outside of string literals.

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, memo } from "react";
 import { toast } from "sonner";
 import type { SavedVariableFile, SvTreeNode } from "../types";
 import {
@@ -78,7 +78,7 @@ interface TreeNodeProps {
   path: string[];
 }
 
-function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
+const TreeNode = memo(function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(depth < 2);
   const [editingValue, setEditingValue] = useState<string | null>(null);
 
@@ -194,10 +194,7 @@ function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
           className="cursor-pointer truncate text-left text-foreground/60 hover:text-foreground"
           onClick={() => {
             if (node.valueType !== "nil") {
-              const raw =
-                node.value === null || node.value === undefined
-                  ? ""
-                  : String(node.value);
+              const raw = node.value === null || node.value === undefined ? "" : String(node.value);
               setEditingValue(raw);
             }
           }}
@@ -209,7 +206,7 @@ function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
       )}
     </div>
   );
-}
+});
 
 // ─── Tree update helper ──────────────────────────────────────
 
@@ -217,29 +214,23 @@ function updateTreeNode(
   tree: SvTreeNode,
   path: string[],
   value: string | number | boolean | null,
+  depth = 0
 ): SvTreeNode {
-  const copy = structuredClone(tree);
-  let node = copy;
-  // Walk to parent of the target node
-  for (const key of path.slice(0, -1)) {
-    const child = node.children?.find((c) => c.key === key);
-    if (!child) return copy;
-    node = child;
-  }
-  const lastKey = path[path.length - 1];
-  const target = node.children?.find((c) => c.key === lastKey);
-  if (target) {
-    if (typeof value === "string") {
-      target.value = value;
-    } else if (typeof value === "number") {
-      target.value = value;
-    } else if (typeof value === "boolean") {
-      target.value = value;
-    } else {
-      target.value = null;
-    }
-  }
-  return copy;
+  if (depth >= path.length || !tree.children) return tree;
+
+  const targetKey = path[depth];
+  const isLeaf = depth === path.length - 1;
+
+  return {
+    ...tree,
+    children: tree.children.map((child) => {
+      if (child.key !== targetKey) return child;
+      if (isLeaf) {
+        return { ...child, value: value };
+      }
+      return updateTreeNode(child, path, value, depth + 1);
+    }),
+  };
 }
 
 // ─── Browse Tab ──────────────────────────────────────────────
@@ -271,12 +262,10 @@ function BrowseTab({
         {files.length === 0 ? (
           <div className="py-8 text-center">
             <FileTextIcon className="mx-auto mb-2 size-8 text-muted-foreground/30" />
-            <p className="text-sm text-muted-foreground">
-              No SavedVariables files found.
-            </p>
+            <p className="text-sm text-muted-foreground">No SavedVariables files found.</p>
             <p className="mt-1 text-xs text-muted-foreground/60">
-              Make sure your ESO AddOns path is set correctly and you have launched the
-              game at least once.
+              Make sure your ESO AddOns path is set correctly and you have launched the game at
+              least once.
             </p>
           </div>
         ) : (
@@ -395,8 +384,8 @@ function EditorTab({
       {esoRunning && (
         <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-400">
           <AlertTriangleIcon className="size-4 shrink-0" />
-          ESO is currently running. Changes to SavedVariables may be overwritten when you
-          exit the game.
+          ESO is currently running. Changes to SavedVariables may be overwritten when you exit the
+          game.
         </div>
       )}
 
@@ -478,12 +467,9 @@ function CopyProfileTab({
     [files, selectedFile]
   );
 
-  const charKeys = currentFile?.characterKeys ?? [];
+  const charKeys = useMemo(() => currentFile?.characterKeys ?? [], [currentFile]);
 
-  const destOptions = useMemo(
-    () => charKeys.filter((k) => k !== sourceKey),
-    [charKeys, sourceKey]
-  );
+  const destOptions = useMemo(() => charKeys.filter((k) => k !== sourceKey), [charKeys, sourceKey]);
 
   const actualDest = destKey === "__custom__" ? customDest : destKey;
 
@@ -512,8 +498,7 @@ function CopyProfileTab({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Copy addon settings from one character to another within the same
-        SavedVariables file.
+        Copy addon settings from one character to another within the same SavedVariables file.
       </p>
 
       {/* Step 1: File */}
@@ -623,8 +608,7 @@ function serializeTreeToLua(root: SvTreeNode): string {
   const lines: string[] = [];
   if (root.children) {
     for (const child of root.children) {
-      lines.push(`${child.key} =`);
-      lines.push(serializeNode(child, 0, true));
+      lines.push(`${child.key} = ${serializeNode(child, 0, true)}`);
       lines.push("");
     }
   }
@@ -638,12 +622,9 @@ function serializeNode(node: SvTreeNode, depth: number, isTopLevel = false): str
     const lines: string[] = [];
     lines.push(`${indent}{`);
     for (const child of node.children) {
-      const keyPart = isNumericKey(child.key)
-        ? `[${child.key}]`
-        : `["${escLua(child.key)}"]`;
+      const keyPart = isNumericKey(child.key) ? `[${child.key}]` : `["${escLua(child.key)}"]`;
       if (child.valueType === "table") {
-        lines.push(`${indent}\t${keyPart} =`);
-        lines.push(serializeNode(child, depth + 1));
+        lines.push(`${indent}\t${keyPart} = ${serializeNode(child, depth + 1)}`);
       } else {
         lines.push(`${indent}\t${keyPart} = ${serializeLeaf(child)},`);
       }
@@ -743,7 +724,11 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
           </TabsContent>
 
           <TabsContent value="copy">
-            <CopyProfileTab files={files} addonsPath={addonsPath} onRefresh={() => void loadFiles()} />
+            <CopyProfileTab
+              files={files}
+              addonsPath={addonsPath}
+              onRefresh={() => void loadFiles()}
+            />
           </TabsContent>
         </Tabs>
 
