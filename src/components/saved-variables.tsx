@@ -6,12 +6,20 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import {
   RefreshCwIcon,
@@ -541,6 +549,7 @@ function CleanupTab({
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const orphaned = useMemo(
     () => files.filter((f) => classifyFile(f, installedFolders) === "orphaned"),
@@ -569,15 +578,7 @@ function CleanupTab({
     }
   };
 
-  const handleDelete = async () => {
-    if (selected.size === 0) return;
-    const fileNames = [...selected];
-
-    const confirmed = window.confirm(
-      `Delete ${fileNames.length} orphaned file${fileNames.length !== 1 ? "s" : ""} (${formatBytes(selectedSize)})?\n\nA backup will be created automatically before deletion.`
-    );
-    if (!confirmed) return;
-
+  const doDelete = async (fileNames: string[], size: number) => {
     setDeleting(true);
     try {
       const deleted = await invokeOrThrow<number>("delete_saved_variables", {
@@ -585,7 +586,7 @@ function CleanupTab({
         fileNames,
       });
       toast.success(
-        `Cleaned up ${deleted} file${deleted !== 1 ? "s" : ""} (${formatBytes(selectedSize)}). Backup saved.`
+        `Cleaned up ${deleted} file${deleted !== 1 ? "s" : ""} (${formatBytes(size)}). Backup saved.`
       );
       setSelected(new Set());
       onRefresh();
@@ -594,6 +595,18 @@ function CleanupTab({
     } finally {
       setDeleting(false);
     }
+  };
+
+  const handleDelete = () => {
+    if (selected.size === 0) return;
+    const fileNames = [...selected];
+    const size = selectedSize;
+    setConfirmState({
+      title: "Delete orphaned files?",
+      description: `Delete ${fileNames.length} orphaned file${fileNames.length !== 1 ? "s" : ""} (${formatBytes(size)})? A backup will be created automatically before deletion.`,
+      confirmLabel: "Delete",
+      onConfirm: () => void doDelete(fileNames, size),
+    });
   };
 
   const largeFiles = useMemo(
@@ -742,6 +755,8 @@ function CleanupTab({
           </p>
         </div>
       )}
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
@@ -765,6 +780,7 @@ function EditorTab({
   const [tree, setTree] = useState<SvTreeNode | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   // Notify parent of dirty state changes
   useEffect(() => {
@@ -841,22 +857,33 @@ function EditorTab({
       )}
 
       <div className="flex items-center gap-2">
-        <select
-          className="flex-1 rounded-lg border border-white/[0.1] bg-[#1a1a2e] px-2 py-1.5 text-sm"
+        <Select
           value={selectedFile}
-          onChange={(e) => {
-            if (dirty && !window.confirm("You have unsaved changes. Discard them?")) return;
-            setSelectedFile(e.target.value);
+          onValueChange={(v) => {
+            if (!v) return;
+            if (dirty) {
+              setConfirmState({
+                title: "Unsaved changes",
+                description: "You have unsaved changes. Discard them?",
+                confirmLabel: "Discard",
+                onConfirm: () => setSelectedFile(v),
+              });
+            } else {
+              setSelectedFile(v);
+            }
           }}
-          aria-label="Select SavedVariables file"
         >
-          <option value="">Select a file...</option>
-          {files.map((f) => (
-            <option key={f.fileName} value={f.fileName}>
-              {f.addonName}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger className="flex-1">
+            <SelectValue placeholder="Select a file..." />
+          </SelectTrigger>
+          <SelectContent>
+            {files.map((f) => (
+              <SelectItem key={f.fileName} value={f.fileName}>
+                {f.addonName}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Button size="sm" onClick={() => void handleSave()} disabled={!dirty}>
           Save Changes
         </Button>
@@ -871,6 +898,8 @@ function EditorTab({
           Discard
         </Button>
       </div>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
       <div className="max-h-[350px] overflow-y-auto rounded-lg border border-white/[0.06] bg-white/[0.02] p-2">
         {loading ? (
@@ -958,47 +987,53 @@ function CopyProfileTab({
       {/* Step 1: File */}
       <div>
         <label className="text-xs text-muted-foreground">1. Select SavedVariables file</label>
-        <select
-          className="mt-1 w-full rounded-lg border border-white/[0.1] bg-[#1a1a2e] px-2 py-1.5 text-sm"
-          value={selectedFile}
-          onChange={(e) => {
-            setSelectedFile(e.target.value);
+        <Select
+          value={selectedFile || undefined}
+          onValueChange={(v) => {
+            if (!v) return;
+            setSelectedFile(v);
             setSourceKey("");
             setDestKey("");
           }}
-          aria-label="Select SavedVariables file"
         >
-          <option value="">Choose a file...</option>
-          {files
-            .filter((f) => f.characterKeys.length > 0)
-            .map((f) => (
-              <option key={f.fileName} value={f.fileName}>
-                {f.addonName} ({f.characterKeys.length} profiles)
-              </option>
-            ))}
-        </select>
+          <SelectTrigger className="mt-1 w-full">
+            <SelectValue placeholder="Choose a file..." />
+          </SelectTrigger>
+          <SelectContent>
+            {files
+              .filter((f) => f.characterKeys.length > 0)
+              .map((f) => (
+                <SelectItem key={f.fileName} value={f.fileName}>
+                  {f.addonName} ({f.characterKeys.length} profiles)
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Step 2: Source */}
       {selectedFile && (
         <div>
           <label className="text-xs text-muted-foreground">2. Source character</label>
-          <select
-            className="mt-1 w-full rounded-lg border border-white/[0.1] bg-[#1a1a2e] px-2 py-1.5 text-sm"
-            value={sourceKey}
-            onChange={(e) => {
-              setSourceKey(e.target.value);
+          <Select
+            value={sourceKey || undefined}
+            onValueChange={(v) => {
+              if (!v) return;
+              setSourceKey(v);
               setDestKey("");
             }}
-            aria-label="Source character"
           >
-            <option value="">Choose source...</option>
-            {charKeys.map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger className="mt-1 w-full">
+              <SelectValue placeholder="Choose source..." />
+            </SelectTrigger>
+            <SelectContent>
+              {charKeys.map((k) => (
+                <SelectItem key={k} value={k}>
+                  {k}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       )}
 
@@ -1006,20 +1041,19 @@ function CopyProfileTab({
       {sourceKey && (
         <div>
           <label className="text-xs text-muted-foreground">3. Destination character</label>
-          <select
-            className="mt-1 w-full rounded-lg border border-white/[0.1] bg-[#1a1a2e] px-2 py-1.5 text-sm"
-            value={destKey}
-            onChange={(e) => setDestKey(e.target.value)}
-            aria-label="Destination character"
-          >
-            <option value="">Choose destination...</option>
-            {destOptions.map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-            <option value="__custom__">+ New character key...</option>
-          </select>
+          <Select value={destKey || undefined} onValueChange={(v) => v && setDestKey(v)}>
+            <SelectTrigger className="mt-1 w-full">
+              <SelectValue placeholder="Choose destination..." />
+            </SelectTrigger>
+            <SelectContent>
+              {destOptions.map((k) => (
+                <SelectItem key={k} value={k}>
+                  {k}
+                </SelectItem>
+              ))}
+              <SelectItem value="__custom__">+ New character key...</SelectItem>
+            </SelectContent>
+          </Select>
           {destKey === "__custom__" && (
             <Input
               className="mt-2"
@@ -1134,6 +1168,42 @@ function isNumericKey(key: string): boolean {
   return /^-?\d+$/.test(key);
 }
 
+// ─── Confirm Dialog ─────────────────────────────────────────
+
+interface ConfirmState {
+  title: string;
+  description: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+}
+
+function ConfirmDialog({ state, onClose }: { state: ConfirmState | null; onClose: () => void }) {
+  if (!state) return null;
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-sm" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{state.title}</DialogTitle>
+          <DialogDescription>{state.description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => {
+              state.onConfirm();
+              onClose();
+            }}
+          >
+            {state.confirmLabel ?? "Confirm"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Main Component ──────────────────────────────────────────
 
 export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVariablesProps) {
@@ -1142,6 +1212,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   const [activeTab, setActiveTab] = useState<string>("overview");
   const [editorFile, setEditorFile] = useState<string>("");
   const [esoRunning, setEsoRunning] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const editorDirtyRef = useRef(false);
 
   const installedFolders = useMemo(
@@ -1183,7 +1254,13 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   }, []);
 
   const handleClose = useCallback(() => {
-    if (editorDirtyRef.current && !window.confirm("You have unsaved changes. Discard them?")) {
+    if (editorDirtyRef.current) {
+      setConfirmState({
+        title: "Unsaved changes",
+        description: "You have unsaved changes. Discard them?",
+        confirmLabel: "Discard",
+        onConfirm: () => onClose(),
+      });
       return;
     }
     onClose();
@@ -1249,6 +1326,8 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
           </Button>
         </DialogFooter>
       </DialogContent>
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </Dialog>
   );
 }

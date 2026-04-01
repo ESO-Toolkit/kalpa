@@ -4029,12 +4029,7 @@ pub async fn is_eso_running() -> Result<bool, String> {
     tokio::task::spawn_blocking(|| {
         #[cfg(target_os = "windows")]
         {
-            let output = std::process::Command::new("tasklist")
-                .args(["/FO", "CSV", "/NH"])
-                .output()
-                .map_err(|e| format!("Failed to run tasklist: {}", e))?;
-            let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-            Ok(text.contains("eso64.exe") || text.contains("eso.exe"))
+            is_eso_running_windows()
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -4044,6 +4039,69 @@ pub async fn is_eso_running() -> Result<bool, String> {
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// Check for eso64.exe / eso.exe using the Windows Toolhelp32 snapshot API.
+/// This avoids spawning a `tasklist` subprocess (which lists every process as CSV).
+#[cfg(target_os = "windows")]
+fn is_eso_running_windows() -> Result<bool, String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct PROCESSENTRY32W {
+        dwSize: u32,
+        cntUsage: u32,
+        th32ProcessID: u32,
+        th32DefaultHeapID: usize,
+        th32ModuleID: u32,
+        cntThreads: u32,
+        th32ParentProcessID: u32,
+        pcPriClassBase: i32,
+        dwFlags: u32,
+        szExeFile: [u16; 260],
+    }
+
+    const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> isize;
+        fn Process32FirstW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
+        fn Process32NextW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
+        fn CloseHandle(hObject: isize) -> i32;
+    }
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return Err("Failed to create process snapshot".to_string());
+        }
+
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut found = false;
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
+                let name = OsString::from_wide(&entry.szExeFile[..len])
+                    .to_string_lossy()
+                    .to_lowercase();
+                if name == "eso64.exe" || name == "eso.exe" {
+                    found = true;
+                    break;
+                }
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+
+        CloseHandle(snap);
+        Ok(found)
+    }
 }
 
 /// Delete selected SavedVariables files after creating an automatic backup.
@@ -4149,5 +4207,285 @@ mod tests {
         assert!(validate_pack_id(&long_id).is_err());
         let max_id = "a".repeat(100);
         assert!(validate_pack_id(&max_id).is_ok());
+    }
+
+    // ── Lua parser tests ────────────────────────────────────────
+
+    /// Helper: parse a Lua value string and return the resulting node.
+    fn parse_value(input: &str) -> Result<SvTreeNode, String> {
+        let bytes = input.as_bytes();
+        let mut pos = 0;
+        parse_lua_value(bytes, &mut pos)
+    }
+
+    #[test]
+    fn lua_parse_string_simple() {
+        let node = parse_value(r#""hello world""#).unwrap();
+        assert_eq!(node.value_type, "string");
+        assert_eq!(node.value, Some(serde_json::json!("hello world")));
+    }
+
+    #[test]
+    fn lua_parse_string_escapes() {
+        let node = parse_value(r#""line\nbreak\ttab\\slash""#).unwrap();
+        assert_eq!(
+            node.value,
+            Some(serde_json::json!("line\nbreak\ttab\\slash"))
+        );
+    }
+
+    #[test]
+    fn lua_parse_string_decimal_escape() {
+        let node = parse_value(r#""\72\101\108""#).unwrap();
+        // \72=H, \101=e, \108=l
+        assert_eq!(node.value, Some(serde_json::json!("Hel")));
+    }
+
+    #[test]
+    fn lua_parse_string_single_quotes() {
+        let node = parse_value("'single'").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!("single")));
+    }
+
+    #[test]
+    fn lua_parse_long_string() {
+        let node = parse_value("[[long string content]]").unwrap();
+        assert_eq!(node.value_type, "string");
+        assert_eq!(node.value, Some(serde_json::json!("long string content")));
+    }
+
+    #[test]
+    fn lua_parse_long_string_with_equals() {
+        let node = parse_value("[=[contains ]] brackets]=]").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!("contains ]] brackets")));
+    }
+
+    #[test]
+    fn lua_parse_integer() {
+        let node = parse_value("42").unwrap();
+        assert_eq!(node.value_type, "number");
+        assert_eq!(node.value, Some(serde_json::json!(42.0)));
+    }
+
+    #[test]
+    fn lua_parse_negative_integer() {
+        let node = parse_value("-7").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(-7.0)));
+    }
+
+    #[test]
+    fn lua_parse_float() {
+        let node = parse_value("3.14").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(3.14)));
+    }
+
+    #[test]
+    fn lua_parse_scientific_notation() {
+        let node = parse_value("1.5e3").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(1500.0)));
+    }
+
+    #[test]
+    fn lua_parse_hex_number() {
+        let node = parse_value("0xFF").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(255)));
+    }
+
+    #[test]
+    fn lua_parse_negative_hex() {
+        let node = parse_value("-0x10").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(-16)));
+    }
+
+    #[test]
+    fn lua_parse_true() {
+        let node = parse_value("true").unwrap();
+        assert_eq!(node.value_type, "boolean");
+        assert_eq!(node.value, Some(serde_json::json!(true)));
+    }
+
+    #[test]
+    fn lua_parse_false() {
+        let node = parse_value("false").unwrap();
+        assert_eq!(node.value_type, "boolean");
+        assert_eq!(node.value, Some(serde_json::json!(false)));
+    }
+
+    #[test]
+    fn lua_parse_nil() {
+        let node = parse_value("nil").unwrap();
+        assert_eq!(node.value_type, "nil");
+        assert_eq!(node.value, Some(serde_json::Value::Null));
+    }
+
+    #[test]
+    fn lua_parse_empty_table() {
+        let node = parse_value("{}").unwrap();
+        assert_eq!(node.value_type, "table");
+        assert!(node.children.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lua_parse_table_with_string_keys() {
+        let node = parse_value(r#"{ ["name"] = "test", ["count"] = 5 }"#).unwrap();
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].key, "name");
+        assert_eq!(children[0].value, Some(serde_json::json!("test")));
+        assert_eq!(children[1].key, "count");
+        assert_eq!(children[1].value, Some(serde_json::json!(5.0)));
+    }
+
+    #[test]
+    fn lua_parse_table_with_identifier_keys() {
+        let node = parse_value("{ enabled = true, level = 10 }").unwrap();
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].key, "enabled");
+        assert_eq!(children[0].value, Some(serde_json::json!(true)));
+        assert_eq!(children[1].key, "level");
+        assert_eq!(children[1].value, Some(serde_json::json!(10.0)));
+    }
+
+    #[test]
+    fn lua_parse_table_with_numeric_keys() {
+        let node = parse_value("{ [1] = \"a\", [2] = \"b\" }").unwrap();
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].key, "1");
+        assert_eq!(children[1].key, "2");
+    }
+
+    #[test]
+    fn lua_parse_array_style_table() {
+        // Array entries with no explicit key get auto-indexed starting from 1
+        let node = parse_value("{ \"first\", \"second\", \"third\" }").unwrap();
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0].key, "1");
+        assert_eq!(children[1].key, "2");
+        assert_eq!(children[2].key, "3");
+    }
+
+    #[test]
+    fn lua_parse_nested_tables() {
+        let input = r#"{ ["outer"] = { ["inner"] = 42 } }"#;
+        let node = parse_value(input).unwrap();
+        let outer = &node.children.as_ref().unwrap()[0];
+        assert_eq!(outer.key, "outer");
+        assert_eq!(outer.value_type, "table");
+        let inner = &outer.children.as_ref().unwrap()[0];
+        assert_eq!(inner.key, "inner");
+        assert_eq!(inner.value, Some(serde_json::json!(42.0)));
+    }
+
+    #[test]
+    fn lua_parse_with_line_comments() {
+        let input = "-- this is a comment\n42";
+        let node = parse_value(input).unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(42.0)));
+    }
+
+    #[test]
+    fn lua_parse_with_block_comments() {
+        let input = "--[[ block comment ]] 42";
+        let node = parse_value(input).unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(42.0)));
+    }
+
+    #[test]
+    fn lua_parse_unterminated_string_errors() {
+        assert!(parse_value("\"unterminated").is_err());
+    }
+
+    #[test]
+    fn lua_parse_unterminated_table_errors() {
+        assert!(parse_value("{ \"a\", \"b\"").is_err());
+    }
+
+    #[test]
+    fn lua_parse_empty_input_errors() {
+        assert!(parse_value("").is_err());
+    }
+
+    #[test]
+    fn lua_parse_eso_style_savedvar() {
+        // Simulates a real ESO SavedVariables top-level table assignment fragment
+        let input = r#"{
+	["Default"] =
+	{
+		["@AccountName"] =
+		{
+			["CharName^NA Megaserver"] =
+			{
+				["enabled"] = true,
+				["version"] = 3,
+				["name"] = "My Character",
+			},
+		},
+	},
+}"#;
+        let node = parse_value(input).unwrap();
+        let default = &node.children.as_ref().unwrap()[0];
+        assert_eq!(default.key, "Default");
+        let account = &default.children.as_ref().unwrap()[0];
+        assert_eq!(account.key, "@AccountName");
+        let char = &account.children.as_ref().unwrap()[0];
+        assert_eq!(char.key, "CharName^NA Megaserver");
+        let children = char.children.as_ref().unwrap();
+        assert_eq!(children[0].key, "enabled");
+        assert_eq!(children[0].value, Some(serde_json::json!(true)));
+        assert_eq!(children[1].key, "version");
+        assert_eq!(children[1].value, Some(serde_json::json!(3.0)));
+        assert_eq!(children[2].key, "name");
+        assert_eq!(children[2].value, Some(serde_json::json!("My Character")));
+    }
+
+    #[test]
+    fn lua_parse_leading_dot_number() {
+        let node = parse_value(".5").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(0.5)));
+    }
+
+    #[test]
+    fn lua_parse_string_with_bell_escape() {
+        let node = parse_value(r#""\a""#).unwrap();
+        // \a = bell character (0x07)
+        let s = node.value.unwrap();
+        assert_eq!(s.as_str().unwrap().as_bytes()[0], 0x07);
+    }
+
+    // ── find_key_at_depth tests ─────────────────────────────────
+
+    #[test]
+    fn find_key_at_depth_finds_depth_2_key() {
+        let content = r#"MyAddon_SV =
+{
+    ["Default"] =
+    {
+        ["@User"] =
+        {
+            ["CharName^NA"] =
+            {
+            },
+        },
+    },
+}"#;
+        assert!(find_key_at_depth(content, "[\"@User\"]", 2).is_some());
+    }
+
+    #[test]
+    fn find_key_at_depth_ignores_wrong_depth() {
+        let content = r#"MyAddon_SV =
+{
+    ["Default"] =
+    {
+        ["@User"] =
+        {
+        },
+    },
+}"#;
+        // "@User" is at depth 2, not depth 1
+        assert!(find_key_at_depth(content, "[\"@User\"]", 1).is_none());
     }
 }
