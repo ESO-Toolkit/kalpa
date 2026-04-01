@@ -112,6 +112,8 @@ function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
           onClick={() => setExpanded(!expanded)}
           className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left text-xs hover:bg-white/[0.04]"
           style={{ paddingLeft: `${depth * 12 + 4}px` }}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${node.key}`}
         >
           {expanded ? (
             <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
@@ -128,7 +130,7 @@ function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
           <div>
             {node.children?.map((child, i) => (
               <TreeNode
-                key={child.key || i}
+                key={`${child.key}-${i}`}
                 node={child}
                 depth={depth + 1}
                 onEdit={onEdit}
@@ -165,6 +167,7 @@ function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
               value={editingValue}
               onChange={(e) => setEditingValue(e.target.value)}
               onBlur={handleSave}
+              aria-label={`Edit ${node.key}`}
               autoFocus
             >
               <option value="true">true</option>
@@ -181,13 +184,14 @@ function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
                 if (e.key === "Escape") setEditingValue(null);
               }}
               onBlur={handleSave}
+              aria-label={`Edit ${node.key}`}
               autoFocus
             />
           )}
         </span>
       ) : (
-        <span
-          className="cursor-pointer truncate text-foreground/60 hover:text-foreground"
+        <button
+          className="cursor-pointer truncate text-left text-foreground/60 hover:text-foreground"
           onClick={() => {
             if (node.valueType !== "nil") {
               const raw =
@@ -198,12 +202,44 @@ function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
             }
           }}
           title="Click to edit"
+          aria-label={`Edit ${node.key}, current value: ${displayValue}`}
         >
           {displayValue}
-        </span>
+        </button>
       )}
     </div>
   );
+}
+
+// ─── Tree update helper ──────────────────────────────────────
+
+function updateTreeNode(
+  tree: SvTreeNode,
+  path: string[],
+  value: string | number | boolean | null,
+): SvTreeNode {
+  const copy = structuredClone(tree);
+  let node = copy;
+  // Walk to parent of the target node
+  for (const key of path.slice(0, -1)) {
+    const child = node.children?.find((c) => c.key === key);
+    if (!child) return copy;
+    node = child;
+  }
+  const lastKey = path[path.length - 1];
+  const target = node.children?.find((c) => c.key === lastKey);
+  if (target) {
+    if (typeof value === "string") {
+      target.value = value;
+    } else if (typeof value === "number") {
+      target.value = value;
+    } else if (typeof value === "boolean") {
+      target.value = value;
+    } else {
+      target.value = null;
+    }
+  }
+  return copy;
 }
 
 // ─── Browse Tab ──────────────────────────────────────────────
@@ -277,15 +313,24 @@ function BrowseTab({
 function EditorTab({
   files,
   addonsPath,
+  initialFile,
 }: {
   files: SavedVariableFile[];
   addonsPath: string;
+  initialFile: string;
 }) {
-  const [selectedFile, setSelectedFile] = useState<string>("");
+  const [selectedFile, setSelectedFile] = useState<string>(initialFile);
   const [tree, setTree] = useState<SvTreeNode | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [esoRunning, setEsoRunning] = useState(false);
+
+  // Sync when parent changes the initial file
+  useEffect(() => {
+    if (initialFile) {
+      setSelectedFile(initialFile);
+    }
+  }, [initialFile]);
 
   useEffect(() => {
     invokeOrThrow<boolean>("is_eso_running")
@@ -320,16 +365,17 @@ function EditorTab({
     }
   }, [selectedFile, loadFile]);
 
-  const handleEdit = useCallback((_path: string[], _value: string | number | boolean | null) => {
+  const handleEdit = useCallback((path: string[], value: string | number | boolean | null) => {
     setDirty(true);
-    // In-memory edits are reflected by updating the tree; for a full implementation
-    // you'd walk the tree and update the node. For now, mark dirty to enable save.
+    setTree((prev) => {
+      if (!prev) return prev;
+      return updateTreeNode(prev, path, value);
+    });
   }, []);
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (!tree || !selectedFile) return;
 
-    // Serialize tree back to Lua
     const lua = serializeTreeToLua(tree);
     try {
       await invokeOrThrow("write_saved_variable", {
@@ -342,7 +388,7 @@ function EditorTab({
     } catch (e) {
       toast.error(`Failed to save: ${getTauriErrorMessage(e)}`);
     }
-  };
+  }, [tree, selectedFile, addonsPath]);
 
   return (
     <div className="space-y-3">
@@ -359,6 +405,7 @@ function EditorTab({
           className="flex-1 rounded-lg border border-white/[0.1] bg-transparent px-2 py-1.5 text-sm"
           value={selectedFile}
           onChange={(e) => setSelectedFile(e.target.value)}
+          aria-label="Select SavedVariables file"
         >
           <option value="">Select a file...</option>
           {files.map((f) => (
@@ -367,7 +414,7 @@ function EditorTab({
             </option>
           ))}
         </select>
-        <Button size="sm" onClick={handleSave} disabled={!dirty}>
+        <Button size="sm" onClick={() => void handleSave()} disabled={!dirty}>
           Save Changes
         </Button>
         <Button
@@ -395,7 +442,7 @@ function EditorTab({
           <div className="font-mono">
             {tree.children?.map((child, i) => (
               <TreeNode
-                key={child.key || i}
+                key={`${child.key}-${i}`}
                 node={child}
                 depth={0}
                 onEdit={handleEdit}
@@ -477,6 +524,7 @@ function CopyProfileTab({
             setSourceKey("");
             setDestKey("");
           }}
+          aria-label="Select SavedVariables file"
         >
           <option value="">Choose a file...</option>
           {files
@@ -500,6 +548,7 @@ function CopyProfileTab({
               setSourceKey(e.target.value);
               setDestKey("");
             }}
+            aria-label="Source character"
           >
             <option value="">Choose source...</option>
             {charKeys.map((k) => (
@@ -519,6 +568,7 @@ function CopyProfileTab({
             className="mt-1 w-full rounded-lg border border-white/[0.1] bg-transparent px-2 py-1.5 text-sm"
             value={destKey}
             onChange={(e) => setDestKey(e.target.value)}
+            aria-label="Destination character"
           >
             <option value="">Choose destination...</option>
             {destOptions.map((k) => (
@@ -552,7 +602,7 @@ function CopyProfileTab({
           <Button
             className="mt-2"
             size="sm"
-            onClick={handleCopy}
+            onClick={() => void handleCopy()}
             disabled={copying || !actualDest.trim()}
           >
             <CopyIcon className="mr-1 size-3" />
@@ -618,7 +668,12 @@ function serializeLeaf(node: SvTreeNode): string {
 }
 
 function escLua(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
 }
 
 function isNumericKey(key: string): boolean {
@@ -631,6 +686,7 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
   const [files, setFiles] = useState<SavedVariableFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string>("browse");
+  const [editorFile, setEditorFile] = useState<string>("");
 
   const loadFiles = useCallback(async () => {
     setLoading(true);
@@ -650,20 +706,10 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
     void loadFiles();
   }, [loadFiles]);
 
-  const handleSelectFile = (f: SavedVariableFile) => {
+  const handleSelectFile = useCallback((f: SavedVariableFile) => {
+    setEditorFile(f.fileName);
     setActiveTab("editor");
-    // The editor tab will need to pick up the selected file
-    // We use a small delay so the tab switch renders first
-    setTimeout(() => {
-      const select = document.querySelector<HTMLSelectElement>(
-        '[data-sv-editor-select]'
-      );
-      if (select) {
-        select.value = f.fileName;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    }, 50);
-  };
+  }, []);
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -672,7 +718,7 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
           <DialogTitle>SavedVariables Manager</DialogTitle>
         </DialogHeader>
 
-        <Tabs value={activeTab} onValueChange={(val) => setActiveTab(val as string)}>
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsList variant="line">
             <TabsTrigger value="browse">Browse</TabsTrigger>
             <TabsTrigger value="editor">Editor</TabsTrigger>
@@ -689,7 +735,7 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
           </TabsContent>
 
           <TabsContent value="editor">
-            <EditorTab files={files} addonsPath={addonsPath} />
+            <EditorTab files={files} addonsPath={addonsPath} initialFile={editorFile} />
           </TabsContent>
 
           <TabsContent value="copy">

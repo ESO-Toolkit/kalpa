@@ -3018,38 +3018,30 @@ pub fn get_saved_variables_path(
     Ok(sv_dir.to_string_lossy().to_string())
 }
 
-/// Extract character keys from a SavedVariables .lua file by matching
-/// second-level `["key"]` patterns inside the top-level table.
+/// Extract character keys from a SavedVariables .lua file.
+/// Tracks brace depth while respecting string literals so that
+/// braces inside string values don't corrupt the depth counter.
 fn extract_character_keys(content: &str) -> Vec<String> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        // Match lines like:   ["CharName^NA"] = {
-        // These appear at the second nesting level (indented once inside the top-level table)
-        Regex::new(r#"(?m)^\s+\["([^"]+)"\]\s*=\s*\{"#).unwrap()
+    static RE_KEY: OnceLock<Regex> = OnceLock::new();
+    let re_key = RE_KEY.get_or_init(|| {
+        Regex::new(r#"^\["([^"]+)"\]\s*=\s*\{"#).unwrap()
     });
 
     let mut keys: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    // We need to find keys at the SECOND nesting level (inside ["Default"] = { ... })
-    // The structure is:
-    //   TopVar = {
-    //       ["Default"] = {           <- depth 1
-    //           ["$AccountWide"] = {  <- depth 2 (these are character keys)
-    //           ["CharName^NA"] = {   <- depth 2
-    // So we track brace depth and extract keys at depth 2
+    // Track brace depth while skipping string contents.
+    // Character keys live at depth 2 in ESO SavedVariables:
+    //   TopVar = {                       depth 0→1
+    //       ["Default"] = {              depth 1→2
+    //           ["$AccountWide"] = {     depth 2→3  ← these are character keys
+    //           ["CharName^NA"] = {      depth 2→3
     let mut depth: i32 = 0;
+
     for line in content.lines() {
         let trimmed = line.trim();
 
-        // Count braces on this line (simple: just count { and } outside strings)
-        // For our purposes, a simple count works since ESO SV files are well-structured
         if depth == 2 {
-            // At depth 2, look for ["key"] = {
-            static RE_KEY: OnceLock<Regex> = OnceLock::new();
-            let re_key = RE_KEY.get_or_init(|| {
-                Regex::new(r#"^\["([^"]+)"\]\s*="#).unwrap()
-            });
             if let Some(cap) = re_key.captures(trimmed) {
                 let key = cap[1].to_string();
                 if seen.insert(key.clone()) {
@@ -3058,21 +3050,34 @@ fn extract_character_keys(content: &str) -> Vec<String> {
             }
         }
 
-        for ch in line.chars() {
-            match ch {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
-            }
-        }
-    }
-
-    // Fallback: if depth tracking didn't find anything, try regex approach
-    if keys.is_empty() {
-        for cap in re.captures_iter(content) {
-            let key = cap[1].to_string();
-            if seen.insert(key.clone()) {
-                keys.push(key);
+        // Count braces on this line while skipping string contents
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' | b'\'' => {
+                    let quote = bytes[i];
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote {
+                        if bytes[i] == b'\\' {
+                            i += 1; // skip escaped char
+                        }
+                        i += 1;
+                    }
+                    i += 1; // skip closing quote
+                }
+                b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                    break; // rest of line is a comment
+                }
+                b'{' => {
+                    depth += 1;
+                    i += 1;
+                }
+                b'}' => {
+                    depth -= 1;
+                    i += 1;
+                }
+                _ => i += 1,
             }
         }
     }
@@ -3081,12 +3086,18 @@ fn extract_character_keys(content: &str) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn list_saved_variables(
+pub async fn list_saved_variables(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<Vec<SavedVariableFile>, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let sv_dir = saved_variables_dir(&addons_dir);
+    tokio::task::spawn_blocking(move || list_saved_variables_blocking(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+}
+
+fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVariableFile>, String> {
+    let sv_dir = saved_variables_dir(addons_dir);
     if !sv_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -3409,15 +3420,27 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
 }
 
 #[tauri::command]
-pub fn read_saved_variable(
+pub async fn read_saved_variable(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     file_name: String,
 ) -> Result<SvTreeNode, String> {
     validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be read.".to_string());
+    }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let sv_dir = saved_variables_dir(&addons_dir);
-    let file_path = sv_dir.join(&file_name);
+    tokio::task::spawn_blocking(move || read_saved_variable_blocking(&addons_dir, &file_name))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+}
+
+fn read_saved_variable_blocking(
+    addons_dir: &Path,
+    file_name: &str,
+) -> Result<SvTreeNode, String> {
+    let sv_dir = saved_variables_dir(addons_dir);
+    let file_path = sv_dir.join(file_name);
 
     if !file_path.is_file() {
         return Err(format!("File not found: {}", file_name));
@@ -3471,7 +3494,7 @@ pub fn read_saved_variable(
     }
 
     Ok(SvTreeNode {
-        key: file_name,
+        key: file_name.to_string(),
         value_type: "table".to_string(),
         value: None,
         children: Some(children),
@@ -3486,6 +3509,9 @@ pub fn write_saved_variable(
     content: String,
 ) -> Result<(), String> {
     validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be written.".to_string());
+    }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let sv_dir = saved_variables_dir(&addons_dir);
     let file_path = sv_dir.join(&file_name);
@@ -3504,8 +3530,15 @@ pub fn copy_sv_profile(
     to_key: String,
 ) -> Result<(), String> {
     validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be modified.".to_string());
+    }
     if from_key.is_empty() || to_key.is_empty() {
         return Err("Source and destination keys cannot be empty.".to_string());
+    }
+    // Reject keys with quotes to prevent Lua injection
+    if from_key.contains('"') || to_key.contains('"') {
+        return Err("Character keys must not contain double quotes.".to_string());
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let sv_dir = saved_variables_dir(&addons_dir);
@@ -3519,51 +3552,25 @@ pub fn copy_sv_profile(
         fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
 
     // Find the block for from_key: ["from_key"] = { ... }
-    // We need to find it at depth 2 (inside the ["Default"] table)
-    let search_pattern = format!(r#"["{}"]"#, from_key);
-    let Some(key_start) = content.find(&search_pattern) else {
-        return Err(format!("Source key \"{}\" not found in file.", from_key));
-    };
+    // Search for the pattern only when it appears as an actual key assignment
+    // (i.e. followed by `] =`) to avoid matching inside string values.
+    let search_pattern = format!("[\"{}\"]\u{0020}=", from_key);
+    let key_start = find_key_outside_strings(&content, &search_pattern)
+        .ok_or_else(|| format!("Source key \"{}\" not found in file.", from_key))?;
 
-    // Find the `= {` after the key
-    let after_key = &content[key_start + search_pattern.len()..];
-    let Some(eq_pos) = after_key.find('=') else {
-        return Err("Malformed Lua structure.".to_string());
-    };
-    let block_start = key_start + search_pattern.len() + eq_pos;
+    // Find the opening brace after the `=`
+    let after_pattern = key_start + search_pattern.len();
+    let brace_start = find_next_outside_strings(&content, after_pattern, b'{')
+        .ok_or("Could not find opening brace for source key.")?;
 
-    // Find the matching closing brace
-    let after_eq = &content[block_start + 1..];
-    let Some(open_brace) = after_eq.find('{') else {
-        return Err("Could not find opening brace for source key.".to_string());
-    };
-    let brace_start = block_start + 1 + open_brace;
-
-    let mut depth = 0i32;
-    let mut brace_end = brace_start;
-    for (i, ch) in content[brace_start..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    brace_end = brace_start + i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if depth != 0 {
-        return Err("Unbalanced braces in source block.".to_string());
-    }
+    // Find the matching closing brace using string-aware scanning
+    let brace_end = find_matching_brace(&content, brace_start)
+        .ok_or("Unbalanced braces in source block.")?;
 
     // Extract the value block including braces
     let value_block = &content[brace_start..=brace_end];
 
-    // Find where to insert the new block (find the end of the source key's line context)
-    // We'll insert after the source block's closing },
+    // Find where to insert the new block
     let insert_pos = brace_end + 1;
     // Skip trailing comma and whitespace on the same line
     let mut actual_insert = insert_pos;
@@ -3576,13 +3583,16 @@ pub fn copy_sv_profile(
         }
     }
 
-    // Determine indentation from the source key line
+    // Determine indentation (leading whitespace only) from the source key line
     let line_start = content[..key_start].rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let indent = &content[line_start..key_start];
+    let indent: String = content[line_start..key_start]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
 
     let new_block = format!(
-        "\n{}[\"{}\"] =\n{}{},",
-        indent, to_key, indent, value_block
+        "\n{}[\"{}\"] = {},",
+        indent, to_key, value_block
     );
 
     let mut result = String::with_capacity(content.len() + new_block.len());
@@ -3594,6 +3604,114 @@ pub fn copy_sv_profile(
     let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
     fs::write(&tmp_path, &result).map_err(|e| format!("Failed to write temp file: {}", e))?;
     fs::rename(&tmp_path, &file_path).map_err(|e| format!("Failed to finalize write: {}", e))
+}
+
+/// Find a substring in content, but only when it appears outside of string literals.
+fn find_key_outside_strings(content: &str, pattern: &str) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let pat_bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                // Skip line comment
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            _ => {
+                if i + pat_bytes.len() <= bytes.len() && &bytes[i..i + pat_bytes.len()] == pat_bytes
+                {
+                    return Some(i);
+                }
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Find the next occurrence of a byte outside string literals.
+fn find_next_outside_strings(content: &str, start: usize, target: u8) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b if b == target => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Find the matching closing brace for an opening brace, respecting strings.
+fn find_matching_brace(content: &str, open_pos: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut depth = 0i32;
+    let mut i = open_pos;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 #[tauri::command]
