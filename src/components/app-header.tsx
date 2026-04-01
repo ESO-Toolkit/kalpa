@@ -19,6 +19,7 @@ interface AppHeaderProps {
   loading: boolean;
   selectedCount: number;
   updatingAll: boolean;
+  isOffline?: boolean;
   onBatchCancel: () => void;
   onBatchRemove: () => void;
   onBatchUpdate: () => void;
@@ -36,6 +37,7 @@ export function AppHeader({
   loading,
   selectedCount,
   updatingAll,
+  isOffline,
   onBatchCancel,
   onBatchRemove,
   onBatchUpdate,
@@ -61,7 +63,13 @@ export function AppHeader({
         {batchMode ? (
           <>
             <span className="mr-2 text-xs font-medium text-primary">{selectedCount} selected</span>
-            <Button size="sm" variant="outline" onClick={onBatchUpdate} disabled={updatingAll}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onBatchUpdate}
+              disabled={updatingAll || isOffline}
+              title={isOffline ? "Updates require an internet connection" : undefined}
+            >
               {updatingAll ? "Updating..." : "Update Selected"}
             </Button>
             <Button

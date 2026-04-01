@@ -19,7 +19,17 @@ import {
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import { Download, Clock, TrendingUp, Search, FolderOpen, Link, Flame, Check } from "lucide-react";
+import {
+  Download,
+  Clock,
+  TrendingUp,
+  Search,
+  FolderOpen,
+  Link,
+  Flame,
+  Check,
+  WifiOff,
+} from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
 
 const PAGE_SIZE = 25;
@@ -31,6 +41,7 @@ interface DiscoverPanelProps {
   onInstalled: () => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   selectedResultId: number | null;
+  isOffline?: boolean;
 }
 
 function useAddonInstall(addonsPath: string, onInstalled: () => void) {
@@ -166,7 +177,35 @@ export function DiscoverPanel({
   onInstalled,
   onSelectResult,
   selectedResultId,
+  isOffline,
 }: DiscoverPanelProps) {
+  if (isOffline) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* Sub-tab selector (disabled) */}
+        <div className="flex gap-1 px-3 pb-2" role="tablist" aria-label="Discover mode">
+          {DISCOVER_TABS.map(([tab, label, Icon]) => (
+            <button
+              key={tab}
+              role="tab"
+              aria-selected={false}
+              disabled
+              className="flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium flex items-center justify-center gap-1 text-muted-foreground/30 border border-transparent cursor-not-allowed"
+            >
+              <Icon className="size-3 shrink-0" />
+              <span className="truncate">{label}</span>
+            </button>
+          ))}
+        </div>
+        <EmptyState
+          icon={<WifiOff className="size-8 text-muted-foreground/20" />}
+          title="You're offline"
+          subtitle="Discovery, search, and installs require an internet connection. Reconnect to browse addons."
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Sub-tab selector */}
