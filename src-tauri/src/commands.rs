@@ -3985,6 +3985,65 @@ pub async fn is_eso_running() -> Result<bool, String> {
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
+/// Delete selected SavedVariables files after creating an automatic backup.
+#[tauri::command]
+pub async fn delete_saved_variables(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_names: Vec<String>,
+) -> Result<u32, String> {
+    if file_names.is_empty() {
+        return Err("No files selected for deletion.".to_string());
+    }
+    if file_names.len() > 200 {
+        return Err("Too many files selected (max 200).".to_string());
+    }
+    for name in &file_names {
+        validate_name(name)?;
+        if !name.ends_with(".lua") {
+            return Err(format!("Only .lua files can be deleted: {}", name));
+        }
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = saved_variables_dir(&addons_dir);
+        if !sv_dir.is_dir() {
+            return Err("SavedVariables folder not found.".to_string());
+        }
+
+        // Auto-backup: copy files to kalpa-backups/auto-cleanup-{timestamp}/
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let backup_name = format!("auto-cleanup-{}", ts);
+        let backup_dir = backups_dir(&addons_dir).join(&backup_name);
+        fs::create_dir_all(&backup_dir)
+            .map_err(|e| format!("Failed to create backup folder: {}", e))?;
+
+        for name in &file_names {
+            let src = sv_dir.join(name);
+            if src.is_file() {
+                let dest = backup_dir.join(name);
+                let _ = fs::copy(&src, &dest);
+            }
+        }
+
+        // Delete files
+        let mut deleted = 0u32;
+        for name in &file_names {
+            let path = sv_dir.join(name);
+            if path.is_file() && fs::remove_file(&path).is_ok() {
+                deleted += 1;
+            }
+        }
+
+        Ok(deleted)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

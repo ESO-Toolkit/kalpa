@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
 import { toast } from "sonner";
-import type { SavedVariableFile, SvTreeNode } from "../types";
+import type { AddonManifest, SavedVariableFile, SvTreeNode } from "../types";
 import {
   Dialog,
   DialogContent,
@@ -25,12 +25,27 @@ import {
   TypeIcon,
   BracesIcon,
   CircleSlashIcon,
+  Trash2Icon,
+  ShieldCheckIcon,
+  HardDriveIcon,
+  PackageXIcon,
+  ArrowUpDownIcon,
+  CheckIcon,
 } from "lucide-react";
 
 interface SavedVariablesProps {
   addonsPath: string;
+  installedAddons: AddonManifest[];
   onClose: () => void;
 }
+
+// ─── ESO system SV files (no addon folder, but not orphaned) ─
+const SYSTEM_SV_NAMES = new Set([
+  "ZO_Ingame",
+  "ZO_InternalIngame",
+  "ZO_Pregame",
+  "AccountSettings",
+]);
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -51,6 +66,44 @@ function formatDate(iso: string): string {
     return iso;
   }
 }
+
+/** Classify a SV file against the installed addons list. */
+function classifyFile(
+  f: SavedVariableFile,
+  installedFolders: Set<string>
+): "installed" | "system" | "orphaned" {
+  if (SYSTEM_SV_NAMES.has(f.addonName)) return "system";
+  // Exact match: "LibAddonMenu-2.0.lua" -> "LibAddonMenu-2.0" folder
+  if (installedFolders.has(f.addonName)) return "installed";
+  // Prefix match: "HarvestMapAD.lua" -> "HarvestMap" folder
+  // Also handles "CombatMetricsFightData.lua" -> "CombatMetrics" folder
+  for (const folder of installedFolders) {
+    if (f.addonName.startsWith(folder) && f.addonName.length > folder.length) {
+      return "installed";
+    }
+  }
+  return "orphaned";
+}
+
+type SizeCategory = "small" | "medium" | "large";
+
+function sizeCategory(bytes: number): SizeCategory {
+  if (bytes >= 5 * 1024 * 1024) return "large";
+  if (bytes >= 1024 * 1024) return "medium";
+  return "small";
+}
+
+const SIZE_COLORS: Record<SizeCategory, string> = {
+  small: "text-emerald-400",
+  medium: "text-amber-400",
+  large: "text-red-400",
+};
+
+const SIZE_BAR_COLORS: Record<SizeCategory, string> = {
+  small: "bg-emerald-500/40",
+  medium: "bg-amber-500/40",
+  large: "bg-red-500/40",
+};
 
 // ─── Tree Node Renderer ──────────────────────────────────────
 
@@ -235,66 +288,449 @@ function updateTreeNode(
   };
 }
 
-// ─── Browse Tab ──────────────────────────────────────────────
+// ─── Overview Tab ───────────────────────────────────────────
 
-function BrowseTab({
+type OverviewSort = "name" | "size" | "date";
+type OverviewFilter = "all" | "orphaned" | "large";
+
+function OverviewTab({
   files,
   loading,
+  installedFolders,
   onRefresh,
   onSelectFile,
+  onSwitchToCleanup,
 }: {
   files: SavedVariableFile[];
   loading: boolean;
+  installedFolders: Set<string>;
   onRefresh: () => void;
   onSelectFile: (f: SavedVariableFile) => void;
+  onSwitchToCleanup: () => void;
 }) {
+  const [sortBy, setSortBy] = useState<OverviewSort>("size");
+  const [filter, setFilter] = useState<OverviewFilter>("all");
+
+  const classified = useMemo(
+    () =>
+      files.map((f) => ({
+        file: f,
+        status: classifyFile(f, installedFolders),
+        sizeCategory: sizeCategory(f.sizeBytes),
+      })),
+    [files, installedFolders]
+  );
+
+  const totalSize = useMemo(() => files.reduce((sum, f) => sum + f.sizeBytes, 0), [files]);
+  const maxSize = useMemo(() => Math.max(...files.map((f) => f.sizeBytes), 1), [files]);
+  const orphaned = useMemo(() => classified.filter((c) => c.status === "orphaned"), [classified]);
+  const orphanedSize = useMemo(
+    () => orphaned.reduce((sum, c) => sum + c.file.sizeBytes, 0),
+    [orphaned]
+  );
+  const largeFiles = useMemo(
+    () => classified.filter((c) => c.sizeCategory === "large"),
+    [classified]
+  );
+
+  const filtered = useMemo(() => {
+    let items = classified;
+    if (filter === "orphaned") items = items.filter((c) => c.status === "orphaned");
+    if (filter === "large") items = items.filter((c) => c.sizeCategory === "large");
+    return items;
+  }, [classified, filter]);
+
+  const sorted = useMemo(() => {
+    const copy = [...filtered];
+    switch (sortBy) {
+      case "size":
+        copy.sort((a, b) => b.file.sizeBytes - a.file.sizeBytes);
+        break;
+      case "name":
+        copy.sort((a, b) =>
+          a.file.addonName.toLowerCase().localeCompare(b.file.addonName.toLowerCase())
+        );
+        break;
+      case "date":
+        copy.sort((a, b) => b.file.lastModified.localeCompare(a.file.lastModified));
+        break;
+    }
+    return copy;
+  }, [filtered, sortBy]);
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {files.length} SavedVariables file{files.length !== 1 ? "s" : ""}
-        </p>
-        <Button size="sm" variant="outline" onClick={onRefresh} disabled={loading}>
-          <RefreshCwIcon className={`mr-1 size-3 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </Button>
+      {/* Summary stats */}
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5 text-center">
+          <div className="text-lg font-heading font-semibold">{files.length}</div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Files</div>
+        </div>
+        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5 text-center">
+          <div className="text-lg font-heading font-semibold">{formatBytes(totalSize)}</div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Total Size
+          </div>
+        </div>
+        <button
+          onClick={orphaned.length > 0 ? onSwitchToCleanup : undefined}
+          className={`rounded-lg border p-2.5 text-center transition-colors ${
+            orphaned.length > 0
+              ? "border-amber-500/20 bg-amber-500/[0.05] hover:border-amber-500/30 cursor-pointer"
+              : "border-white/[0.06] bg-white/[0.02]"
+          }`}
+        >
+          <div
+            className={`text-lg font-heading font-semibold ${orphaned.length > 0 ? "text-amber-400" : ""}`}
+          >
+            {orphaned.length}
+          </div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Orphaned</div>
+        </button>
       </div>
 
-      <div className="max-h-[400px] overflow-y-auto space-y-1">
-        {files.length === 0 ? (
+      {/* Actionable insight banner */}
+      {orphaned.length > 0 && (
+        <button
+          onClick={onSwitchToCleanup}
+          className="flex w-full items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] p-2.5 text-left text-xs text-amber-300 transition-colors hover:border-amber-500/30"
+        >
+          <PackageXIcon className="size-4 shrink-0" />
+          <span>
+            <strong>{orphaned.length} orphaned files</strong> ({formatBytes(orphanedSize)}) from
+            uninstalled addons.{" "}
+            <span className="text-amber-400/80 underline underline-offset-2">Clean up &rarr;</span>
+          </span>
+        </button>
+      )}
+
+      {largeFiles.length > 0 && orphaned.length === 0 && (
+        <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5 text-xs text-muted-foreground">
+          <HardDriveIcon className="size-4 shrink-0 text-red-400" />
+          <span>
+            <strong className="text-red-400">{largeFiles.length} large files</strong> (&gt;5 MB) may
+            slow down your game loading times.
+          </span>
+        </div>
+      )}
+
+      {/* Sort & filter controls */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1">
+          {(["all", "orphaned", "large"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`rounded-md px-2 py-0.5 text-xs transition-colors ${
+                filter === f
+                  ? "bg-white/[0.1] text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {f === "all"
+                ? "All"
+                : f === "orphaned"
+                  ? `Orphaned (${orphaned.length})`
+                  : `Large (${largeFiles.length})`}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() =>
+              setSortBy((prev) => (prev === "size" ? "name" : prev === "name" ? "date" : "size"))
+            }
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <ArrowUpDownIcon className="size-3" />
+            {sortBy === "size" ? "Size" : sortBy === "name" ? "Name" : "Date"}
+          </button>
+          <Button size="sm" variant="outline" onClick={onRefresh} disabled={loading}>
+            <RefreshCwIcon className={`mr-1 size-3 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      {/* File list */}
+      <div className="max-h-[320px] overflow-y-auto space-y-1">
+        {sorted.length === 0 ? (
           <div className="py-8 text-center">
             <FileTextIcon className="mx-auto mb-2 size-8 text-muted-foreground/30" />
-            <p className="text-sm text-muted-foreground">No SavedVariables files found.</p>
-            <p className="mt-1 text-xs text-muted-foreground/60">
-              Make sure your ESO AddOns path is set correctly and you have launched the game at
-              least once.
+            <p className="text-sm text-muted-foreground">
+              {filter !== "all" ? "No files match this filter." : "No SavedVariables files found."}
             </p>
+            {filter === "all" && (
+              <p className="mt-1 text-xs text-muted-foreground/60">
+                Make sure your ESO AddOns path is set correctly and you have launched the game at
+                least once.
+              </p>
+            )}
           </div>
         ) : (
-          files.map((f) => (
+          sorted.map(({ file: f, status, sizeCategory: sc }) => (
             <button
               key={f.fileName}
               onClick={() => onSelectFile(f)}
-              className="flex w-full items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 text-left transition-all duration-200 hover:border-white/[0.1]"
+              className="flex w-full items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-2.5 text-left transition-all duration-200 hover:border-white/[0.1]"
             >
-              <div className="min-w-0 flex-1">
-                <div className="font-medium text-sm truncate">{f.addonName}</div>
-                <div className="text-xs text-muted-foreground mt-0.5">
-                  {formatBytes(f.sizeBytes)} &middot; {formatDate(f.lastModified)}
+              {/* Size bar */}
+              <div className="w-14 shrink-0">
+                <div className="h-1.5 w-full rounded-full bg-white/[0.06] overflow-hidden">
+                  <div
+                    className={`h-full rounded-full ${SIZE_BAR_COLORS[sc]}`}
+                    style={{ width: `${Math.max((f.sizeBytes / maxSize) * 100, 2)}%` }}
+                  />
+                </div>
+                <div className={`mt-0.5 text-[10px] text-center ${SIZE_COLORS[sc]}`}>
+                  {formatBytes(f.sizeBytes)}
                 </div>
               </div>
-              <div className="flex items-center gap-2 ml-2 shrink-0">
-                {f.characterKeys.length > 0 && (
-                  <InfoPill color="sky">
-                    {f.characterKeys.length} profile{f.characterKeys.length !== 1 ? "s" : ""}
-                  </InfoPill>
-                )}
-                <ChevronRightIcon className="size-4 text-muted-foreground/40" />
+
+              {/* Name & meta */}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate text-sm font-medium">{f.addonName}</span>
+                  {status === "orphaned" && <InfoPill color="amber">Orphaned</InfoPill>}
+                  {status === "system" && <InfoPill color="muted">System</InfoPill>}
+                </div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  {formatDate(f.lastModified)}
+                  {f.characterKeys.length > 0 && (
+                    <span>
+                      {" "}
+                      &middot; {f.characterKeys.length} profile
+                      {f.characterKeys.length !== 1 ? "s" : ""}
+                    </span>
+                  )}
+                </div>
               </div>
+
+              <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground/40" />
             </button>
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+// ─── Cleanup Tab ────────────────────────────────────────────
+
+function CleanupTab({
+  files,
+  installedFolders,
+  addonsPath,
+  onRefresh,
+}: {
+  files: SavedVariableFile[];
+  installedFolders: Set<string>;
+  addonsPath: string;
+  onRefresh: () => void;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+
+  const orphaned = useMemo(
+    () => files.filter((f) => classifyFile(f, installedFolders) === "orphaned"),
+    [files, installedFolders]
+  );
+
+  const selectedSize = useMemo(
+    () => orphaned.filter((f) => selected.has(f.fileName)).reduce((s, f) => s + f.sizeBytes, 0),
+    [orphaned, selected]
+  );
+
+  const toggleFile = (fileName: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(fileName)) next.delete(fileName);
+      else next.add(fileName);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    if (selected.size === orphaned.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(orphaned.map((f) => f.fileName)));
+    }
+  };
+
+  const handleDelete = async () => {
+    if (selected.size === 0) return;
+    const fileNames = [...selected];
+
+    const confirmed = window.confirm(
+      `Delete ${fileNames.length} orphaned file${fileNames.length !== 1 ? "s" : ""} (${formatBytes(selectedSize)})?\n\nA backup will be created automatically before deletion.`
+    );
+    if (!confirmed) return;
+
+    setDeleting(true);
+    try {
+      const deleted = await invokeOrThrow<number>("delete_saved_variables", {
+        addonsPath,
+        fileNames,
+      });
+      toast.success(
+        `Cleaned up ${deleted} file${deleted !== 1 ? "s" : ""} (${formatBytes(selectedSize)}). Backup saved.`
+      );
+      setSelected(new Set());
+      onRefresh();
+    } catch (e) {
+      toast.error(`Cleanup failed: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const largeFiles = useMemo(
+    () =>
+      files.filter((f) => f.sizeBytes >= 5 * 1024 * 1024).sort((a, b) => b.sizeBytes - a.sizeBytes),
+    [files]
+  );
+
+  if (orphaned.length === 0 && largeFiles.length === 0) {
+    return (
+      <div className="py-10 text-center">
+        <ShieldCheckIcon className="mx-auto mb-3 size-10 text-emerald-500/60" />
+        <p className="text-sm font-medium text-emerald-400">Your SavedVariables are clean</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          No orphaned files or oversized data detected.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Orphaned files section */}
+      {orphaned.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <PackageXIcon className="size-4 text-amber-400" />
+              <span className="text-sm font-medium">
+                Orphaned Files
+                <span className="ml-1 text-muted-foreground font-normal">
+                  ({orphaned.length} files,{" "}
+                  {formatBytes(orphaned.reduce((s, f) => s + f.sizeBytes, 0))})
+                </span>
+              </span>
+            </div>
+            <button
+              onClick={toggleAll}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              {selected.size === orphaned.length ? "Deselect all" : "Select all"}
+            </button>
+          </div>
+
+          <p className="text-xs text-muted-foreground mb-2">
+            These files belong to addons that are no longer installed. They waste disk space and
+            slow down game loading.
+          </p>
+
+          <div className="max-h-[220px] overflow-y-auto space-y-1">
+            {orphaned.map((f) => (
+              <label
+                key={f.fileName}
+                className="flex items-center gap-2.5 rounded-lg border border-white/[0.06] bg-white/[0.02] p-2 cursor-pointer transition-colors hover:border-white/[0.1]"
+              >
+                <div
+                  className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
+                    selected.has(f.fileName)
+                      ? "border-[#c4a44a] bg-[#c4a44a]"
+                      : "border-white/[0.2] bg-transparent"
+                  }`}
+                >
+                  {selected.has(f.fileName) && <CheckIcon className="size-3 text-black" />}
+                </div>
+                <input
+                  type="checkbox"
+                  className="sr-only"
+                  checked={selected.has(f.fileName)}
+                  onChange={() => toggleFile(f.fileName)}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm truncate">{f.addonName}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {formatBytes(f.sizeBytes)} &middot; {formatDate(f.lastModified)}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+
+          {/* Delete action */}
+          <div className="mt-3 flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5">
+            <div className="text-xs text-muted-foreground">
+              {selected.size > 0 ? (
+                <span>
+                  <strong className="text-foreground">{selected.size}</strong> selected &middot;{" "}
+                  <strong className="text-[#c4a44a]">{formatBytes(selectedSize)}</strong>{" "}
+                  reclaimable
+                </span>
+              ) : (
+                "Select files to clean up"
+              )}
+            </div>
+            <Button
+              size="sm"
+              onClick={() => void handleDelete()}
+              disabled={selected.size === 0 || deleting}
+            >
+              <Trash2Icon className="mr-1 size-3" />
+              {deleting
+                ? "Cleaning..."
+                : `Clean Up${selected.size > 0 ? ` (${formatBytes(selectedSize)})` : ""}`}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Large files advisory */}
+      {largeFiles.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <HardDriveIcon className="size-4 text-red-400" />
+            <span className="text-sm font-medium">
+              Large Files
+              <span className="ml-1 text-muted-foreground font-normal">
+                (&gt;5 MB, may slow loading)
+              </span>
+            </span>
+          </div>
+
+          <div className="space-y-1">
+            {largeFiles.map((f) => (
+              <div
+                key={f.fileName}
+                className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] p-2"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm truncate">{f.addonName}</div>
+                  {f.characterKeys.length > 0 && (
+                    <div className="text-[11px] text-muted-foreground">
+                      {f.characterKeys.length} profile{f.characterKeys.length !== 1 ? "s" : ""}
+                    </div>
+                  )}
+                </div>
+                <span className="text-sm font-medium text-red-400 shrink-0 ml-2">
+                  {formatBytes(f.sizeBytes)}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <p className="mt-2 text-xs text-muted-foreground">
+            Large SavedVariables are loaded into memory every time you log in. If loading feels
+            slow, consider clearing data in-game or checking if these addons have a "purge old data"
+            option.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
@@ -589,7 +1025,7 @@ function CopyProfileTab({
         <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
           <p className="text-sm">
             Copy <span className="font-medium text-[#c4a44a]">{sourceKey}</span>
-            {" → "}
+            {" \u2192 "}
             <span className="font-medium text-[#4dc2e6]">{actualDest}</span>
             {" in "}
             <span className="font-medium">{currentFile?.addonName}.lua</span>
@@ -674,13 +1110,18 @@ function isNumericKey(key: string): boolean {
 
 // ─── Main Component ──────────────────────────────────────────
 
-export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
+export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVariablesProps) {
   const [files, setFiles] = useState<SavedVariableFile[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<string>("browse");
+  const [activeTab, setActiveTab] = useState<string>("overview");
   const [editorFile, setEditorFile] = useState<string>("");
   const [esoRunning, setEsoRunning] = useState(false);
   const editorDirtyRef = useRef(false);
+
+  const installedFolders = useMemo(
+    () => new Set(installedAddons.map((a) => a.folderName)),
+    [installedAddons]
+  );
 
   const loadFiles = useCallback(async () => {
     setLoading(true);
@@ -731,17 +1172,37 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
 
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsList variant="line">
-            <TabsTrigger value="browse">Browse</TabsTrigger>
-            <TabsTrigger value="editor">Editor</TabsTrigger>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="cleanup">Cleanup</TabsTrigger>
             <TabsTrigger value="copy">Copy Profile</TabsTrigger>
+            <TabsTrigger value="editor">Editor</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="browse">
-            <BrowseTab
+          <TabsContent value="overview">
+            <OverviewTab
               files={files}
               loading={loading}
+              installedFolders={installedFolders}
               onRefresh={() => void loadFiles()}
               onSelectFile={handleSelectFile}
+              onSwitchToCleanup={() => setActiveTab("cleanup")}
+            />
+          </TabsContent>
+
+          <TabsContent value="cleanup">
+            <CleanupTab
+              files={files}
+              installedFolders={installedFolders}
+              addonsPath={addonsPath}
+              onRefresh={() => void loadFiles()}
+            />
+          </TabsContent>
+
+          <TabsContent value="copy">
+            <CopyProfileTab
+              files={files}
+              addonsPath={addonsPath}
+              onRefresh={() => void loadFiles()}
             />
           </TabsContent>
 
@@ -752,14 +1213,6 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
               initialFile={editorFile}
               esoRunning={esoRunning}
               onDirtyChange={handleDirtyChange}
-            />
-          </TabsContent>
-
-          <TabsContent value="copy">
-            <CopyProfileTab
-              files={files}
-              addonsPath={addonsPath}
-              onRefresh={() => void loadFiles()}
             />
           </TabsContent>
         </Tabs>

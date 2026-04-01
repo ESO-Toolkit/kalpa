@@ -284,6 +284,7 @@ pub fn run() {
             commands::write_saved_variable,
             commands::copy_sv_profile,
             commands::is_eso_running,
+            commands::delete_saved_variables,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

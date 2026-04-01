@@ -82,7 +82,7 @@ export function AppDialogs({
       )}
 
       {activeDialog === "saved-variables" && (
-        <SavedVariables addonsPath={addonsPath} onClose={onCloseDialog} />
+        <SavedVariables addonsPath={addonsPath} installedAddons={addons} onClose={onCloseDialog} />
       )}
 
       {activeDialog === "settings" && (
