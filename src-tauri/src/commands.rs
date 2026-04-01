@@ -3140,13 +3140,13 @@ fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVariableF
             })
             .unwrap_or_default();
 
-        // Only read first 32KB to extract top-level character keys — they
-        // always appear near the start of the file, so reading the full
-        // multi-MB file is wasteful.
+        // Read first 256KB to extract character keys at depth 2.
+        // Some addons store large data tables before the character keys,
+        // so 32KB was too small for files like HarvestMap.
         let character_keys = match fs::File::open(&path) {
             Ok(mut f) => {
                 use std::io::Read;
-                let read_limit = 32 * 1024;
+                let read_limit = 256 * 1024;
                 let mut buf = vec![0u8; read_limit.min(size_bytes as usize)];
                 let n = f.read(&mut buf).unwrap_or(0);
                 buf.truncate(n);
@@ -3685,6 +3685,12 @@ pub async fn write_saved_variable(
         let file_path = sv_dir.join(&file_name);
         let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
 
+        // Create a .bak copy before overwriting
+        if file_path.is_file() {
+            let bak_path = file_path.with_extension("lua.bak");
+            let _ = fs::copy(&file_path, &bak_path);
+        }
+
         fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {}", e))?;
         fs::rename(&tmp_path, &file_path).map_err(|e| {
             let _ = fs::remove_file(&tmp_path);
@@ -3792,10 +3798,50 @@ fn copy_sv_profile_blocking(
     let content =
         fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
 
-    // Find the block for from_key: ["from_key"] = { ... }
+    // Create a .bak copy before modifying the file
+    let bak_path = file_path.with_extension("lua.bak");
+    fs::copy(&file_path, &bak_path)
+        .map_err(|e| format!("Failed to create backup before copy: {}", e))?;
+
+    // Find the source key at depth 2 (character keys in ESO SV files).
+    // Depth 2 = inside TopVar = { ["Default"] = { HERE } }
     let search_pattern = format!("[\"{}\"]\u{0020}=", from_key);
-    let key_start = find_key_outside_strings(&content, &search_pattern)
-        .ok_or_else(|| format!("Source key \"{}\" not found in file.", from_key))?;
+    let _key_start = find_key_at_depth(&content, &search_pattern, 2)
+        .ok_or_else(|| format!("Source key \"{}\" not found at expected depth.", from_key))?;
+
+    // If to_key already exists at the same depth, remove the old block first
+    let dest_pattern = format!("[\"{}\"]\u{0020}=", to_key);
+    let mut content = content;
+    if let Some(dest_start) = find_key_at_depth(&content, &dest_pattern, 2) {
+        let after_dest = dest_start + dest_pattern.len();
+        if let Some(dest_brace_start) = find_next_outside_strings(&content, after_dest, b'{') {
+            if let Some(dest_brace_end) = find_matching_brace(&content, dest_brace_start) {
+                // Remove from start-of-line to end of block + trailing comma/whitespace
+                let line_start = content[..dest_start]
+                    .rfind('\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(dest_start);
+                let mut remove_end = dest_brace_end + 1;
+                let rest = content.as_bytes();
+                while remove_end < rest.len()
+                    && (rest[remove_end] == b','
+                        || rest[remove_end] == b' '
+                        || rest[remove_end] == b'\t')
+                {
+                    remove_end += 1;
+                }
+                // Also consume trailing newline
+                if remove_end < rest.len() && rest[remove_end] == b'\n' {
+                    remove_end += 1;
+                }
+                content = format!("{}{}", &content[..line_start], &content[remove_end..]);
+            }
+        }
+    }
+
+    // Re-search for source key after potential removal (positions may have shifted)
+    let key_start = find_key_at_depth(&content, &search_pattern, 2)
+        .ok_or_else(|| format!("Source key \"{}\" not found after cleanup.", from_key))?;
 
     // Find the opening brace after the `=`
     let after_pattern = key_start + search_pattern.len();
@@ -3892,11 +3938,16 @@ fn skip_lua_comment(bytes: &[u8], i: usize) -> usize {
     j
 }
 
-/// Find a substring in content, but only when it appears outside of string literals.
-fn find_key_outside_strings(content: &str, pattern: &str) -> Option<usize> {
+/// Find a substring at a specific brace depth, skipping string literals and comments.
+/// Character keys in ESO SavedVariables live at depth 2:
+///   TopVar = {                   depth 0→1
+///       ["Default"] = {          depth 1→2
+///           ["CharName^NA"] = {  depth 2→3  ← target_depth=2 matches here
+fn find_key_at_depth(content: &str, pattern: &str, target_depth: i32) -> Option<usize> {
     let bytes = content.as_bytes();
     let pat_bytes = pattern.as_bytes();
     let mut i = 0;
+    let mut depth: i32 = 0;
     while i < bytes.len() {
         match bytes[i] {
             b'"' | b'\'' => i = skip_lua_string(bytes, i),
@@ -3904,8 +3955,18 @@ fn find_key_outside_strings(content: &str, pattern: &str) -> Option<usize> {
                 i = skip_lua_string(bytes, i)
             }
             b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => i = skip_lua_comment(bytes, i),
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                i += 1;
+            }
             _ => {
-                if i + pat_bytes.len() <= bytes.len() && &bytes[i..i + pat_bytes.len()] == pat_bytes
+                if depth == target_depth
+                    && i + pat_bytes.len() <= bytes.len()
+                    && &bytes[i..i + pat_bytes.len()] == pat_bytes
                 {
                     return Some(i);
                 }
@@ -4025,11 +4086,16 @@ pub async fn delete_saved_variables(
             let src = sv_dir.join(name);
             if src.is_file() {
                 let dest = backup_dir.join(name);
-                let _ = fs::copy(&src, &dest);
+                fs::copy(&src, &dest).map_err(|e| {
+                    format!(
+                        "Backup failed for {}. No files were deleted. Error: {}",
+                        name, e
+                    )
+                })?;
             }
         }
 
-        // Delete files
+        // Delete files (only reached if all backups succeeded)
         let mut deleted = 0u32;
         for name in &file_names {
             let path = sv_dir.join(name);

@@ -45,6 +45,7 @@ const SYSTEM_SV_NAMES = new Set([
   "ZO_InternalIngame",
   "ZO_Pregame",
   "AccountSettings",
+  "GuildHistoryCache",
 ]);
 
 function formatBytes(bytes: number): string {
@@ -77,9 +78,19 @@ function classifyFile(
   if (installedFolders.has(f.addonName)) return "installed";
   // Prefix match: "HarvestMapAD.lua" -> "HarvestMap" folder
   // Also handles "CombatMetricsFightData.lua" -> "CombatMetrics" folder
+  // Require the folder name to be at least 4 chars to prevent short names
+  // like "Lib" from over-matching, and require the character at the boundary
+  // to be uppercase (sub-file naming convention) or non-alphanumeric.
   for (const folder of installedFolders) {
-    if (f.addonName.startsWith(folder) && f.addonName.length > folder.length) {
-      return "installed";
+    if (
+      folder.length >= 4 &&
+      f.addonName.startsWith(folder) &&
+      f.addonName.length > folder.length
+    ) {
+      const boundaryChar = f.addonName[folder.length];
+      if (!boundaryChar || /[A-Z_-]/.test(boundaryChar)) {
+        return "installed";
+      }
     }
   }
   return "orphaned";
@@ -1084,8 +1095,12 @@ function serializeLeaf(node: SvTreeNode): string {
   switch (node.valueType) {
     case "string":
       return `"${escLua(String(node.value ?? ""))}"`;
-    case "number":
-      return String(node.value ?? 0);
+    case "number": {
+      const v = node.value;
+      // Guard against NaN/Infinity that came through as null from serde_json
+      if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "0";
+      return String(v);
+    }
     case "boolean":
       return String(node.value ?? false);
     case "nil":
@@ -1096,12 +1111,23 @@ function serializeLeaf(node: SvTreeNode): string {
 }
 
 function escLua(s: string): string {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t");
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    const code = s.charCodeAt(i);
+    if (c === "\\") out += "\\\\";
+    else if (c === '"') out += '\\"';
+    else if (c === "\n") out += "\\n";
+    else if (c === "\r") out += "\\r";
+    else if (c === "\t") out += "\\t";
+    else if (code === 7) out += "\\a";
+    else if (code === 8) out += "\\b";
+    else if (code === 11) out += "\\v";
+    else if (code === 12) out += "\\f";
+    else if (code < 32 || code === 127) out += `\\${code}`;
+    else out += c;
+  }
+  return out;
 }
 
 function isNumericKey(key: string): boolean {
