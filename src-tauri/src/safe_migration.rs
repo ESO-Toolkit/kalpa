@@ -695,7 +695,7 @@ pub fn check_integrity(addons_dir: &Path) -> IntegrityResult {
 
     // Check each tracked addon in kalpa.json
     let store = metadata::load_metadata(addons_dir);
-    for (folder_name, _meta) in &store.addons {
+    for folder_name in store.addons.keys() {
         let folder = addons_dir.join(folder_name);
         if !folder.is_dir() {
             issues.push(format!(
