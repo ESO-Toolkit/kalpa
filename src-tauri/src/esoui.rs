@@ -583,6 +583,76 @@ pub fn browse_category(
     Ok(results)
 }
 
+/// Browse ESOUI's global listing sorted by popularity/newest.
+pub fn browse_popular(page: u32, sort_by: &str) -> Result<Vec<EsouiSearchResult>, String> {
+    let client = http_client();
+
+    let sb = match sort_by {
+        "downloads" => "dec_download",
+        "newest" => "lastupdate",
+        "name" => "title",
+        _ => "dec_download",
+    };
+
+    let url = format!(
+        "https://www.esoui.com/downloads/index.php?sb={}&so=desc&pt=f&dp={}",
+        sb, page
+    );
+
+    let body = fetch_page(client, &url, None)?;
+    let document = Html::parse_document(&body);
+
+    static RE_BROWSE_ID: OnceLock<Regex> = OnceLock::new();
+    let re_id = RE_BROWSE_ID.get_or_init(|| Regex::new(r"info(\d+)").unwrap());
+    let a_sel = Selector::parse("a.addonLink").unwrap();
+    let cat_sel = Selector::parse("li.category").unwrap();
+
+    let mut results: Vec<EsouiSearchResult> = Vec::new();
+    let mut categories: Vec<String> = Vec::new();
+
+    for el in document.select(&cat_sel) {
+        categories.push(el.text().collect::<String>().trim().to_string());
+    }
+
+    let mut idx = 0;
+    for el in document.select(&a_sel) {
+        let href = el.value().attr("href").unwrap_or("");
+        let title = el.text().collect::<String>().trim().to_string();
+
+        let id = match re_id.captures(href) {
+            Some(caps) => match caps[1].parse::<u32>() {
+                Ok(id) => id,
+                Err(_) => {
+                    idx += 1;
+                    continue;
+                }
+            },
+            None => {
+                idx += 1;
+                continue;
+            }
+        };
+
+        let category = categories.get(idx).cloned().unwrap_or_default();
+        idx += 1;
+
+        if results.iter().any(|r| r.id == id) {
+            continue;
+        }
+
+        results.push(EsouiSearchResult {
+            id,
+            title,
+            author: String::new(),
+            category,
+            downloads: String::new(),
+            updated: String::new(),
+        });
+    }
+
+    Ok(results)
+}
+
 pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
     let client = http_client();
 

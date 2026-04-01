@@ -252,6 +252,7 @@ pub fn run() {
             commands::batch_remove_addons,
             commands::get_esoui_categories,
             commands::browse_esoui_category,
+            commands::browse_esoui_popular,
             commands::check_api_compatibility,
             commands::list_backups,
             commands::create_backup,
