@@ -256,6 +256,7 @@ pub fn run() {
             commands::update_pack,
             commands::delete_pack,
             commands::vote_pack,
+            commands::track_pack_install,
             commands::create_share_code,
             commands::resolve_share_code,
             commands::export_pack_file,

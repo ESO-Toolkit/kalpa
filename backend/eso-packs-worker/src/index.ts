@@ -348,6 +348,35 @@ async function handleVotePack(
   return json(request, response);
 }
 
+// ── POST /packs/:id/install — increment install count ─────────────
+async function handleInstallPack(
+  request: Request,
+  env: Env,
+  id: string,
+  url: URL,
+): Promise<Response> {
+  const pack = await getPack(env, id);
+  if (!pack) {
+    return notFound(request, `Pack "${id}" not found`);
+  }
+
+  pack.installCount = (pack.installCount ?? 0) + 1;
+  await putPack(env, pack);
+
+  // Update index entry
+  const index = (await getPackIndex(env)) ?? { items: [] };
+  const idx = index.items.findIndex((item) => item.id === id);
+  const indexItem = packToIndexItem(pack);
+  if (idx >= 0) {
+    index.items[idx] = indexItem;
+  }
+  await putPackIndex(env, index);
+
+  await invalidatePackListCache(url);
+
+  return json(request, { installCount: pack.installCount });
+}
+
 // ── Router ─────────────────────────────────────────────────────────
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -374,6 +403,12 @@ export default {
     const voteMatch = pathname.match(/^\/packs\/([a-z0-9-]+)\/vote$/);
     if (voteMatch && method === "POST") {
       return handleVotePack(request, env, voteMatch[1], url);
+    }
+
+    // /packs/:id/install route
+    const installMatch = pathname.match(/^\/packs\/([a-z0-9-]+)\/install$/);
+    if (installMatch && method === "POST") {
+      return handleInstallPack(request, env, installMatch[1], url);
     }
 
     // /packs/:id routes

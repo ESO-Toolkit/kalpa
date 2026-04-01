@@ -158,6 +158,7 @@ export interface Pack {
   authorName: string;
   isAnonymous: boolean;
   voteCount: number;
+  installCount: number;
   userVoted: boolean;
   tags: string[];
   addons: PackAddonEntry[];
@@ -203,6 +204,16 @@ export interface EsoPackData {
   packType: string;
   tags: string[];
   addons: PackAddonEntry[];
+}
+
+// ── Installed pack reference (persisted locally) ─────────────────────────
+export interface InstalledPackRef {
+  packId: string;
+  title: string;
+  packType: PackType;
+  authorName: string;
+  addonCount: number;
+  installedAt: string;
 }
 
 // ── Auth types ────────────────────────────────────────────────────────────

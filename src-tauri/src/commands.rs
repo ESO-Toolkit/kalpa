@@ -2053,6 +2053,8 @@ pub struct HubPack {
     pub pack_type: String,
     pub addons: serde_json::Value, // JSON string from D1 or parsed array
     pub vote_count: i64,
+    #[serde(default)]
+    pub install_count: i64,
     pub created_at: String,
     pub updated_at: String,
     pub tags: Vec<String>,
@@ -2074,6 +2076,7 @@ pub struct Pack {
     pub author_name: String,
     pub is_anonymous: bool,
     pub vote_count: i64,
+    pub install_count: i64,
     pub user_voted: bool,
     pub tags: Vec<String>,
     pub addons: Vec<PackAddonEntry>,
@@ -2121,6 +2124,7 @@ impl Pack {
             },
             is_anonymous: hub.is_anonymous,
             vote_count: hub.vote_count,
+            install_count: hub.install_count,
             user_voted: hub.user_voted.unwrap_or(false),
             tags: hub.tags,
             addons,
@@ -2159,6 +2163,8 @@ pub async fn list_packs(
     query: Option<String>,
     sort: Option<String>,
     page: Option<i64>,
+    author: Option<String>,
+    status: Option<String>,
 ) -> Result<PackPage, String> {
     let access_token = get_current_token(&state);
 
@@ -2182,6 +2188,12 @@ pub async fn list_packs(
         }
         if let Some(p) = &page {
             query_params.push(("page", p.to_string()));
+        }
+        if let Some(a) = &author {
+            query_params.push(("author", a.clone()));
+        }
+        if let Some(st) = &status {
+            query_params.push(("status", st.clone()));
         }
 
         let mut req = client.get(&url).query(&query_params);
@@ -2352,6 +2364,26 @@ pub async fn vote_pack(
             .map_err(|e| format!("Failed to parse vote response: {}", e))?;
 
         Ok(body)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+// ── Track pack install ──────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn track_pack_install(pack_id: String) -> Result<(), String> {
+    validate_pack_id(&pack_id)?;
+
+    tokio::task::spawn_blocking(move || {
+        let client = pack_hub_client();
+        let base = pack_hub_url();
+        let url = format!("{}/packs/{}/install", base, pack_id);
+
+        // Fire-and-forget: best-effort tracking, don't block the user
+        let _ = client.post(&url).send();
+
+        Ok(())
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?

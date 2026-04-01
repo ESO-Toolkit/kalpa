@@ -45,6 +45,7 @@ export interface Pack {
   builds?: BuildReference[];
   rosters?: RosterReference[];
   voteCount: number;
+  installCount: number;
   status: PackStatus;
 }
 
@@ -59,6 +60,7 @@ export interface PackIndexItem {
   buildCount: number;
   rosterCount: number;
   voteCount: number;
+  installCount: number;
   updatedAt: string;
   status: PackStatus;
   createdBy: string;
