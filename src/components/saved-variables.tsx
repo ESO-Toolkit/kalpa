@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, memo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
 import { toast } from "sonner";
 import type { SavedVariableFile, SvTreeNode } from "../types";
 import {
@@ -71,6 +71,8 @@ function TypeIcon_({ type: t }: { type: string }) {
   }
 }
 
+const EMPTY_PATH: string[] = [];
+
 interface TreeNodeProps {
   node: SvTreeNode;
   depth: number;
@@ -83,7 +85,7 @@ const TreeNode = memo(function TreeNode({ node, depth, onEdit, path }: TreeNodeP
   const [editingValue, setEditingValue] = useState<string | null>(null);
 
   const isTable = node.valueType === "table" && node.children;
-  const currentPath = [...path, node.key];
+  const currentPath = useMemo(() => [...path, node.key], [path, node.key]);
 
   const handleSave = () => {
     if (editingValue === null) return;
@@ -303,16 +305,24 @@ function EditorTab({
   files,
   addonsPath,
   initialFile,
+  esoRunning,
+  onDirtyChange,
 }: {
   files: SavedVariableFile[];
   addonsPath: string;
   initialFile: string;
+  esoRunning: boolean;
+  onDirtyChange: (dirty: boolean) => void;
 }) {
   const [selectedFile, setSelectedFile] = useState<string>(initialFile);
   const [tree, setTree] = useState<SvTreeNode | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [esoRunning, setEsoRunning] = useState(false);
+
+  // Notify parent of dirty state changes
+  useEffect(() => {
+    onDirtyChange(dirty);
+  }, [dirty, onDirtyChange]);
 
   // Sync when parent changes the initial file
   useEffect(() => {
@@ -320,12 +330,6 @@ function EditorTab({
       setSelectedFile(initialFile);
     }
   }, [initialFile]);
-
-  useEffect(() => {
-    invokeOrThrow<boolean>("is_eso_running")
-      .then(setEsoRunning)
-      .catch(() => {});
-  }, []);
 
   const loadFile = useCallback(
     async (fileName: string) => {
@@ -391,9 +395,12 @@ function EditorTab({
 
       <div className="flex items-center gap-2">
         <select
-          className="flex-1 rounded-lg border border-white/[0.1] bg-transparent px-2 py-1.5 text-sm"
+          className="flex-1 rounded-lg border border-white/[0.1] bg-[#1a1a2e] px-2 py-1.5 text-sm"
           value={selectedFile}
-          onChange={(e) => setSelectedFile(e.target.value)}
+          onChange={(e) => {
+            if (dirty && !window.confirm("You have unsaved changes. Discard them?")) return;
+            setSelectedFile(e.target.value);
+          }}
           aria-label="Select SavedVariables file"
         >
           <option value="">Select a file...</option>
@@ -435,7 +442,7 @@ function EditorTab({
                 node={child}
                 depth={0}
                 onEdit={handleEdit}
-                path={[]}
+                path={EMPTY_PATH}
               />
             ))}
           </div>
@@ -505,7 +512,7 @@ function CopyProfileTab({
       <div>
         <label className="text-xs text-muted-foreground">1. Select SavedVariables file</label>
         <select
-          className="mt-1 w-full rounded-lg border border-white/[0.1] bg-transparent px-2 py-1.5 text-sm"
+          className="mt-1 w-full rounded-lg border border-white/[0.1] bg-[#1a1a2e] px-2 py-1.5 text-sm"
           value={selectedFile}
           onChange={(e) => {
             setSelectedFile(e.target.value);
@@ -530,7 +537,7 @@ function CopyProfileTab({
         <div>
           <label className="text-xs text-muted-foreground">2. Source character</label>
           <select
-            className="mt-1 w-full rounded-lg border border-white/[0.1] bg-transparent px-2 py-1.5 text-sm"
+            className="mt-1 w-full rounded-lg border border-white/[0.1] bg-[#1a1a2e] px-2 py-1.5 text-sm"
             value={sourceKey}
             onChange={(e) => {
               setSourceKey(e.target.value);
@@ -553,7 +560,7 @@ function CopyProfileTab({
         <div>
           <label className="text-xs text-muted-foreground">3. Destination character</label>
           <select
-            className="mt-1 w-full rounded-lg border border-white/[0.1] bg-transparent px-2 py-1.5 text-sm"
+            className="mt-1 w-full rounded-lg border border-white/[0.1] bg-[#1a1a2e] px-2 py-1.5 text-sm"
             value={destKey}
             onChange={(e) => setDestKey(e.target.value)}
             aria-label="Destination character"
@@ -672,6 +679,8 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string>("browse");
   const [editorFile, setEditorFile] = useState<string>("");
+  const [esoRunning, setEsoRunning] = useState(false);
+  const editorDirtyRef = useRef(false);
 
   const loadFiles = useCallback(async () => {
     setLoading(true);
@@ -691,13 +700,30 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
     void loadFiles();
   }, [loadFiles]);
 
+  useEffect(() => {
+    invokeOrThrow<boolean>("is_eso_running")
+      .then(setEsoRunning)
+      .catch(() => {});
+  }, []);
+
   const handleSelectFile = useCallback((f: SavedVariableFile) => {
     setEditorFile(f.fileName);
     setActiveTab("editor");
   }, []);
 
+  const handleDirtyChange = useCallback((d: boolean) => {
+    editorDirtyRef.current = d;
+  }, []);
+
+  const handleClose = useCallback(() => {
+    if (editorDirtyRef.current && !window.confirm("You have unsaved changes. Discard them?")) {
+      return;
+    }
+    onClose();
+  }, [onClose]);
+
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <Dialog open onOpenChange={(open) => !open && handleClose()}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>SavedVariables Manager</DialogTitle>
@@ -720,7 +746,13 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
           </TabsContent>
 
           <TabsContent value="editor">
-            <EditorTab files={files} addonsPath={addonsPath} initialFile={editorFile} />
+            <EditorTab
+              files={files}
+              addonsPath={addonsPath}
+              initialFile={editorFile}
+              esoRunning={esoRunning}
+              onDirtyChange={handleDirtyChange}
+            />
           </TabsContent>
 
           <TabsContent value="copy">
@@ -733,7 +765,7 @@ export function SavedVariables({ addonsPath, onClose }: SavedVariablesProps) {
         </Tabs>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={handleClose}>
             Close
           </Button>
         </DialogFooter>

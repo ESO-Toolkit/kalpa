@@ -3184,8 +3184,7 @@ fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> 
 
     match chars[*pos] {
         b'{' => parse_lua_table(chars, pos),
-        b'"' => parse_lua_string(chars, pos),
-        b'\'' => parse_lua_string_single(chars, pos),
+        b'"' | b'\'' => parse_lua_quoted_string(chars, pos),
         b'[' if *pos + 1 < chars.len() && (chars[*pos + 1] == b'[' || chars[*pos + 1] == b'=') => {
             parse_lua_long_string(chars, pos)
         }
@@ -3216,7 +3215,10 @@ fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> 
                 children: None,
             })
         }
-        b'-' | b'0'..=b'9' | b'.' => parse_lua_number(chars, pos),
+        b'-' | b'0'..=b'9' => parse_lua_number(chars, pos),
+        b'.' if *pos + 1 < chars.len() && chars[*pos + 1].is_ascii_digit() => {
+            parse_lua_number(chars, pos)
+        }
         _ => Err(format!(
             "Unexpected character '{}' at position {}",
             chars[*pos] as char, *pos
@@ -3229,8 +3231,15 @@ fn skip_whitespace_and_comments(chars: &[u8], pos: &mut usize) {
         match chars[*pos] {
             b' ' | b'\t' | b'\r' | b'\n' => *pos += 1,
             b'-' if *pos + 1 < chars.len() && chars[*pos + 1] == b'-' => {
-                // Skip line comment
                 *pos += 2;
+                // Block comment: --[[ ... ]] or --[=[ ... ]=] etc.
+                if *pos < chars.len() && chars[*pos] == b'[' {
+                    if let Some(end) = skip_long_bracket(chars, *pos) {
+                        *pos = end;
+                        continue;
+                    }
+                }
+                // Line comment: skip to end of line
                 while *pos < chars.len() && chars[*pos] != b'\n' {
                     *pos += 1;
                 }
@@ -3240,42 +3249,91 @@ fn skip_whitespace_and_comments(chars: &[u8], pos: &mut usize) {
     }
 }
 
-fn parse_lua_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
-    *pos += 1; // skip opening "
-    let start = *pos;
-    while *pos < chars.len() && chars[*pos] != b'"' {
-        if chars[*pos] == b'\\' {
-            *pos += 1; // skip escaped char
+/// Try to skip a long bracket starting at `pos` (which should point at `[`).
+/// Returns the position just past the closing bracket, or None if not a long bracket.
+fn skip_long_bracket(chars: &[u8], pos: usize) -> Option<usize> {
+    if pos >= chars.len() || chars[pos] != b'[' {
+        return None;
+    }
+    let mut i = pos + 1;
+    let mut level = 0usize;
+    while i < chars.len() && chars[i] == b'=' {
+        level += 1;
+        i += 1;
+    }
+    if i >= chars.len() || chars[i] != b'[' {
+        return None;
+    }
+    i += 1; // skip second [
+
+    // Build closing pattern: ] + =*level + ]
+    let mut close = vec![b']'];
+    close.extend(std::iter::repeat_n(b'=', level));
+    close.push(b']');
+
+    while i + close.len() <= chars.len() {
+        if &chars[i..i + close.len()] == close.as_slice() {
+            return Some(i + close.len());
         }
-        *pos += 1;
+        i += 1;
     }
-    if *pos >= chars.len() {
-        return Err("Unterminated string".to_string());
-    }
-    let s = String::from_utf8_lossy(&chars[start..*pos]).to_string();
-    *pos += 1; // skip closing "
-    Ok(SvTreeNode {
-        key: String::new(),
-        value_type: "string".to_string(),
-        value: Some(serde_json::Value::String(s)),
-        children: None,
-    })
+    None
 }
 
-fn parse_lua_string_single(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
-    *pos += 1; // skip opening '
-    let start = *pos;
-    while *pos < chars.len() && chars[*pos] != b'\'' {
+fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    let quote = chars[*pos];
+    *pos += 1; // skip opening quote
+    let mut out = Vec::new();
+    while *pos < chars.len() && chars[*pos] != quote {
         if chars[*pos] == b'\\' {
             *pos += 1;
+            if *pos >= chars.len() {
+                return Err("Unterminated escape in string".to_string());
+            }
+            match chars[*pos] {
+                b'a' => out.push(b'\x07'),
+                b'b' => out.push(b'\x08'),
+                b'f' => out.push(b'\x0C'),
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'v' => out.push(b'\x0B'),
+                b'\\' => out.push(b'\\'),
+                b'\'' => out.push(b'\''),
+                b'"' => out.push(b'"'),
+                b'\n' | b'\r' => out.push(b'\n'), // escaped newline
+                d @ b'0'..=b'9' => {
+                    // \ddd decimal escape (up to 3 digits)
+                    let mut val: u16 = (d - b'0') as u16;
+                    for _ in 0..2 {
+                        if *pos + 1 < chars.len() && chars[*pos + 1].is_ascii_digit() {
+                            *pos += 1;
+                            val = val * 10 + (chars[*pos] - b'0') as u16;
+                        } else {
+                            break;
+                        }
+                    }
+                    if val > 255 {
+                        return Err(format!("Decimal escape \\{} out of range", val));
+                    }
+                    out.push(val as u8);
+                }
+                other => {
+                    // Unknown escape: keep as-is (Lua would error, but be lenient)
+                    out.push(b'\\');
+                    out.push(other);
+                }
+            }
+        } else {
+            out.push(chars[*pos]);
         }
         *pos += 1;
     }
     if *pos >= chars.len() {
         return Err("Unterminated string".to_string());
     }
-    let s = String::from_utf8_lossy(&chars[start..*pos]).to_string();
-    *pos += 1;
+    *pos += 1; // skip closing quote
+    let s = String::from_utf8_lossy(&out).to_string();
     Ok(SvTreeNode {
         key: String::new(),
         value_type: "string".to_string(),
@@ -3539,6 +3597,17 @@ fn read_saved_variable_blocking(addons_dir: &Path, file_name: &str) -> Result<Sv
         return Err(format!("File not found: {}", file_name));
     }
 
+    const MAX_READ_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
+    let meta =
+        fs::metadata(&file_path).map_err(|e| format!("Failed to read file metadata: {}", e))?;
+    if meta.len() > MAX_READ_SIZE {
+        return Err(format!(
+            "{} is too large to edit ({:.1} MB). Maximum is 20 MB.",
+            file_name,
+            meta.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
+
     let content =
         fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
 
@@ -3602,6 +3671,13 @@ pub async fn write_saved_variable(
     validate_name(&file_name)?;
     if !file_name.ends_with(".lua") {
         return Err("Only .lua files can be written.".to_string());
+    }
+    const MAX_WRITE_SIZE: usize = 50 * 1024 * 1024; // 50 MB
+    if content.len() > MAX_WRITE_SIZE {
+        return Err(format!(
+            "Content is too large ({:.1} MB). Maximum write size is 50 MB.",
+            content.len() as f64 / (1024.0 * 1024.0)
+        ));
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
@@ -3769,6 +3845,53 @@ fn copy_sv_profile_blocking(
     })
 }
 
+/// Skip past a quoted string or long bracket string starting at position `i`.
+/// Returns the position after the closing delimiter.
+fn skip_lua_string(bytes: &[u8], i: usize) -> usize {
+    match bytes[i] {
+        b'"' | b'\'' => {
+            let quote = bytes[i];
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != quote {
+                if bytes[j] == b'\\' {
+                    j += 1;
+                }
+                j += 1;
+            }
+            if j < bytes.len() {
+                j + 1
+            } else {
+                j
+            }
+        }
+        b'[' => {
+            if let Some(end) = skip_long_bracket(bytes, i) {
+                end
+            } else {
+                i + 1
+            }
+        }
+        _ => i + 1,
+    }
+}
+
+/// Skip a comment starting at position `i` (which should point to the first `-`).
+/// Handles both line comments and block comments (--[[ ]]).
+fn skip_lua_comment(bytes: &[u8], i: usize) -> usize {
+    let mut j = i + 2; // skip --
+                       // Check for block comment
+    if j < bytes.len() && bytes[j] == b'[' {
+        if let Some(end) = skip_long_bracket(bytes, j) {
+            return end;
+        }
+    }
+    // Line comment
+    while j < bytes.len() && bytes[j] != b'\n' {
+        j += 1;
+    }
+    j
+}
+
 /// Find a substring in content, but only when it appears outside of string literals.
 fn find_key_outside_strings(content: &str, pattern: &str) -> Option<usize> {
     let bytes = content.as_bytes();
@@ -3776,26 +3899,11 @@ fn find_key_outside_strings(content: &str, pattern: &str) -> Option<usize> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'"' | b'\'' => {
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    if bytes[i] == b'\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
+            b'"' | b'\'' => i = skip_lua_string(bytes, i),
+            b'[' if i + 1 < bytes.len() && (bytes[i + 1] == b'[' || bytes[i + 1] == b'=') => {
+                i = skip_lua_string(bytes, i)
             }
-            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
-                // Skip line comment
-                i += 2;
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => i = skip_lua_comment(bytes, i),
             _ => {
                 if i + pat_bytes.len() <= bytes.len() && &bytes[i..i + pat_bytes.len()] == pat_bytes
                 {
@@ -3814,19 +3922,11 @@ fn find_next_outside_strings(content: &str, start: usize, target: u8) -> Option<
     let mut i = start;
     while i < bytes.len() {
         match bytes[i] {
-            b'"' | b'\'' => {
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    if bytes[i] == b'\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
+            b'"' | b'\'' => i = skip_lua_string(bytes, i),
+            b'[' if i + 1 < bytes.len() && (bytes[i + 1] == b'[' || bytes[i + 1] == b'=') => {
+                i = skip_lua_string(bytes, i)
             }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => i = skip_lua_comment(bytes, i),
             b if b == target => return Some(i),
             _ => i += 1,
         }
@@ -3841,25 +3941,11 @@ fn find_matching_brace(content: &str, open_pos: usize) -> Option<usize> {
     let mut i = open_pos;
     while i < bytes.len() {
         match bytes[i] {
-            b'"' | b'\'' => {
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    if bytes[i] == b'\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
+            b'"' | b'\'' => i = skip_lua_string(bytes, i),
+            b'[' if i + 1 < bytes.len() && (bytes[i + 1] == b'[' || bytes[i + 1] == b'=') => {
+                i = skip_lua_string(bytes, i)
             }
-            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
-                i += 2;
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
+            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => i = skip_lua_comment(bytes, i),
             b'{' => {
                 depth += 1;
                 i += 1;
@@ -3878,22 +3964,25 @@ fn find_matching_brace(content: &str, open_pos: usize) -> Option<usize> {
 }
 
 #[tauri::command]
-pub fn is_eso_running() -> Result<bool, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let output = std::process::Command::new("tasklist")
-            .args(["/FO", "CSV", "/NH"])
-            .output()
-            .map_err(|e| format!("Failed to run tasklist: {}", e))?;
-        let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-        Ok(text.contains("eso64.exe") || text.contains("eso.exe"))
-    }
+pub async fn is_eso_running() -> Result<bool, String> {
+    tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        {
+            let output = std::process::Command::new("tasklist")
+                .args(["/FO", "CSV", "/NH"])
+                .output()
+                .map_err(|e| format!("Failed to run tasklist: {}", e))?;
+            let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            Ok(text.contains("eso64.exe") || text.contains("eso.exe"))
+        }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        // ESO only runs on Windows; on other platforms always return false
-        Ok(false)
-    }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(false)
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[cfg(test)]
