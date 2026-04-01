@@ -145,10 +145,26 @@ fn ops_log_path(addons_dir: &Path) -> PathBuf {
     snapshots_root(addons_dir).join("kalpa-ops.jsonl")
 }
 
+/// Maximum number of entries to keep in the ops log. When exceeded, the log is
+/// trimmed to the most recent entries.
+const OPS_LOG_MAX_ENTRIES: usize = 500;
+
 pub fn append_op_log(addons_dir: &Path, entry: &OpLogEntry) -> Result<(), String> {
     let root = snapshots_root(addons_dir);
     fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {}", e))?;
     let path = ops_log_path(addons_dir);
+
+    // Rotate: if the log has grown too large, trim to the most recent entries
+    if let Ok(existing) = fs::read_to_string(&path) {
+        let lines: Vec<&str> = existing.lines().collect();
+        if lines.len() >= OPS_LOG_MAX_ENTRIES {
+            // Keep the most recent half to avoid trimming on every append
+            let keep_from = lines.len() - OPS_LOG_MAX_ENTRIES / 2;
+            let trimmed = lines[keep_from..].join("\n");
+            let _ = fs::write(&path, format!("{}\n", trimmed));
+        }
+    }
+
     let line = serde_json::to_string(entry)
         .map_err(|e| format!("Failed to serialize log entry: {}", e))?;
     let mut file = fs::OpenOptions::new()
@@ -171,9 +187,32 @@ fn now_timestamp() -> String {
 
 // ─── Process detection ──────────────────────────────────────────────────────
 
+/// Known process names that we check for. Using an enum prevents command
+/// injection if someone were to call `is_process_running` with untrusted input,
+/// since only these known-safe values are ever interpolated into shell commands.
+#[derive(Debug, Clone, Copy)]
+enum KnownProcess {
+    Eso64,
+    Eso,
+    Minion,
+    MinionUnix,
+}
+
+impl KnownProcess {
+    fn name(self) -> &'static str {
+        match self {
+            KnownProcess::Eso64 => "eso64.exe",
+            KnownProcess::Eso => "eso.exe",
+            KnownProcess::Minion => "Minion.exe",
+            KnownProcess::MinionUnix => "minion",
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
-fn is_process_running(name: &str) -> bool {
+fn is_process_running(process: KnownProcess) -> bool {
     use std::process::Command;
+    let name = process.name();
     Command::new("tasklist")
         .args(["/FI", &format!("IMAGENAME eq {}", name), "/NH"])
         .output()
@@ -185,8 +224,9 @@ fn is_process_running(name: &str) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn is_process_running(name: &str) -> bool {
+fn is_process_running(process: KnownProcess) -> bool {
     use std::process::Command;
+    let name = process.name();
     Command::new("pgrep")
         .arg("-i")
         .arg(name)
@@ -215,58 +255,79 @@ fn create_zip_snapshot(
 
     let file = fs::File::create(&tmp_path)
         .map_err(|e| format!("Failed to create snapshot archive: {}", e))?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(6));
 
-    let parent = addons_dir.parent().unwrap_or(addons_dir);
-    let mut file_count: u32 = 0;
-    let mut total_size: u64 = 0;
-    let mut source_paths: Vec<String> = Vec::new();
+    // Use a closure so we can clean up tmp_path on any failure
+    let build_zip = || -> Result<(Vec<String>, u32, u64), String> {
+        let mut zip = zip::ZipWriter::new(file);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(6));
 
-    // AddOns folder
-    if include_addons {
-        source_paths.push("AddOns".to_string());
-        let result = add_dir_to_zip(&mut zip, addons_dir, "AddOns", &options)?;
-        file_count += result.0;
-        total_size += result.1;
-    }
+        let parent = addons_dir.parent().unwrap_or(addons_dir);
+        let mut file_count: u32 = 0;
+        let mut total_size: u64 = 0;
+        let mut source_paths: Vec<String> = Vec::new();
 
-    // SavedVariables folder
-    if include_saved_vars {
-        let sv_dir = parent.join("SavedVariables");
-        if sv_dir.is_dir() {
-            source_paths.push("SavedVariables".to_string());
-            let result = add_dir_to_zip(&mut zip, &sv_dir, "SavedVariables", &options)?;
+        // AddOns folder
+        if include_addons {
+            source_paths.push("AddOns".to_string());
+            let result = add_dir_to_zip(&mut zip, addons_dir, "AddOns", &options)?;
             file_count += result.0;
             total_size += result.1;
         }
-    }
 
-    // Settings files
-    if include_settings {
-        for filename in &["UserSettings.txt", "AddOnSettings.txt"] {
-            let settings_file = parent.join(filename);
-            if settings_file.is_file() {
-                source_paths.push(filename.to_string());
-                let data = fs::read(&settings_file)
-                    .map_err(|e| format!("Failed to read {}: {}", filename, e))?;
-                zip.start_file(*filename, options)
-                    .map_err(|e| format!("Failed to add {} to archive: {}", filename, e))?;
-                zip.write_all(&data)
-                    .map_err(|e| format!("Failed to write {} to archive: {}", filename, e))?;
-                file_count += 1;
-                total_size += data.len() as u64;
+        // SavedVariables folder
+        if include_saved_vars {
+            let sv_dir = parent.join("SavedVariables");
+            if sv_dir.is_dir() {
+                source_paths.push("SavedVariables".to_string());
+                let result = add_dir_to_zip(&mut zip, &sv_dir, "SavedVariables", &options)?;
+                file_count += result.0;
+                total_size += result.1;
             }
         }
-    }
 
-    zip.finish()
-        .map_err(|e| format!("Failed to finalize snapshot archive: {}", e))?;
+        // Settings files
+        if include_settings {
+            for filename in &["UserSettings.txt", "AddOnSettings.txt"] {
+                let settings_file = parent.join(filename);
+                if settings_file.is_file() {
+                    source_paths.push(filename.to_string());
+                    let data = fs::read(&settings_file)
+                        .map_err(|e| format!("Failed to read {}: {}", filename, e))?;
+                    zip.start_file(*filename, options)
+                        .map_err(|e| format!("Failed to add {} to archive: {}", filename, e))?;
+                    zip.write_all(&data)
+                        .map_err(|e| format!("Failed to write {} to archive: {}", filename, e))?;
+                    file_count += 1;
+                    total_size += data.len() as u64;
+                }
+            }
+        }
+
+        zip.finish()
+            .map_err(|e| format!("Failed to finalize snapshot archive: {}", e))?;
+
+        Ok((source_paths, file_count, total_size))
+    };
+
+    let (source_paths, file_count, total_size) = match build_zip() {
+        Ok(result) => result,
+        Err(e) => {
+            // Clean up the .tmp file on failure
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    };
 
     // Compute SHA-256 of the archive
-    let sha256 = sha256_file(&tmp_path)?;
+    let sha256 = match sha256_file(&tmp_path) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+    };
 
     // Atomic rename
     fs::rename(&tmp_path, &archive_path)
@@ -322,14 +383,14 @@ fn add_dir_to_zip(
             } else if path.is_file() {
                 let data = match fs::read(&path) {
                     Ok(d) => d,
-                    Err(_) => continue, // Skip unreadable files
+                    Err(_) => continue, // Skip unreadable files (e.g. locked by another process)
                 };
-                if zip.start_file(&zip_path, *options).is_ok() {
-                    if zip.write_all(&data).is_ok() {
-                        file_count += 1;
-                        total_size += data.len() as u64;
-                    }
-                }
+                zip.start_file(&zip_path, *options)
+                    .map_err(|e| format!("Failed to add '{}' to archive: {}", zip_path, e))?;
+                zip.write_all(&data)
+                    .map_err(|e| format!("Failed to write '{}' to archive: {}", zip_path, e))?;
+                file_count += 1;
+                total_size += data.len() as u64;
             }
         }
     }
@@ -359,8 +420,10 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 /// Phase 0: Check preconditions before migration.
 pub fn check_preconditions(addons_dir: &Path) -> PreconditionResult {
     let parent = addons_dir.parent().unwrap_or(addons_dir);
-    let eso_running = is_process_running("eso64.exe") || is_process_running("eso.exe");
-    let minion_running = is_process_running("Minion.exe") || is_process_running("minion");
+    let eso_running =
+        is_process_running(KnownProcess::Eso64) || is_process_running(KnownProcess::Eso);
+    let minion_running =
+        is_process_running(KnownProcess::Minion) || is_process_running(KnownProcess::MinionUnix);
     let minion_found = crate::commands::find_minion_xml().is_some();
     let addons_path_valid = addons_dir.is_dir();
     let saved_variables_exists = parent.join("SavedVariables").is_dir();
@@ -695,8 +758,15 @@ pub fn list_snapshots(addons_dir: &Path) -> Vec<SnapshotManifest> {
 }
 
 /// Restore a snapshot by ID — extracts the ZIP back to the ESO live directory.
+/// Automatically creates a pre-restore snapshot of SavedVariables and settings
+/// so the user can undo the restore if it doesn't produce the desired result.
 pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, String> {
     let start = now_timestamp();
+
+    // Create an automatic pre-restore snapshot (SavedVariables + settings only, fast)
+    // so the user has a rollback point if the restore goes wrong partway through.
+    let _ = create_zip_snapshot("Pre-restore", addons_dir, false, true, true);
+
     let store = load_snapshot_store(addons_dir);
     let manifest = store
         .snapshots
@@ -750,10 +820,7 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
                 let _ = fs::create_dir_all(parent_dir);
             }
             // Atomic write: write to .tmp then rename
-            let mut tmp_name = dest
-                .file_name()
-                .unwrap_or_default()
-                .to_os_string();
+            let mut tmp_name = dest.file_name().unwrap_or_default().to_os_string();
             tmp_name.push(".restore-tmp");
             let tmp_dest = dest.with_file_name(tmp_name);
             let mut out = fs::File::create(&tmp_dest)
@@ -813,7 +880,11 @@ pub fn read_ops_log(addons_dir: &Path) -> Vec<OpLogEntry> {
 }
 
 /// Copy Minion's config as a read-only backup (never modifies Minion state).
+/// Only copies regular files in the top-level .minion/ directory (no recursion).
+/// Skips symlinks and enforces a 50 MB total size cap to avoid copying unexpected data.
 pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
+    const MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024; // 50 MB cap
+
     let home = dirs::home_dir().ok_or("Could not determine home directory.")?;
     let minion_dir = home.join(".minion");
     if !minion_dir.is_dir() {
@@ -826,13 +897,27 @@ pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
         .map_err(|e| format!("Failed to create Minion backup directory: {}", e))?;
 
     let mut copied: u32 = 0;
+    let mut total_bytes: u64 = 0;
     if let Ok(entries) = fs::read_dir(&minion_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
+            // Skip symlinks (flat-only, no following links to unexpected locations)
+            if path.read_link().is_ok() {
+                continue;
+            }
+            // Only copy regular files at the top level (no directory recursion)
             if path.is_file() {
                 if let Some(name) = path.file_name() {
+                    let meta = match fs::metadata(&path) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    if total_bytes + meta.len() > MAX_TOTAL_BYTES {
+                        break; // Stop copying if we'd exceed the size cap
+                    }
                     let target = dest.join(name);
                     if fs::copy(&path, &target).is_ok() {
+                        total_bytes += meta.len();
                         copied += 1;
                     }
                 }

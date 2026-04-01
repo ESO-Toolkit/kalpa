@@ -1939,55 +1939,20 @@ pub fn detect_minion() -> Result<bool, String> {
     Ok(find_minion_xml().is_some())
 }
 
+/// Legacy migration command — delegates to the safe_migration implementation
+/// to avoid duplicating the import logic.
 #[tauri::command]
 pub fn migrate_from_minion(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<MinionMigrationResult, String> {
-    let xml_path = find_minion_xml().ok_or("Minion installation not found.")?;
-
-    let content =
-        fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {}", e))?;
-
-    let minion_addons = parse_minion_addons(&content);
-    let addon_count = minion_addons.len() as u32;
-
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let mut store = metadata::load_metadata(&addons_dir);
-
-    let mut imported: u32 = 0;
-    let mut already_tracked: u32 = 0;
-
-    for addon in &minion_addons {
-        for folder in &addon.folders {
-            if store.addons.contains_key(folder) {
-                already_tracked += 1;
-                continue;
-            }
-            // Only import if the folder actually exists on disk
-            if addons_dir.join(folder).is_dir() {
-                metadata::record_install(
-                    &mut store,
-                    folder,
-                    addon.uid,
-                    &addon.version,
-                    &format!(
-                        "https://www.esoui.com/downloads/landing.php?fileid={}",
-                        addon.uid
-                    ),
-                );
-                imported += 1;
-            }
-        }
-    }
-
-    metadata::save_metadata(&addons_dir, &store)?;
-
+    let result = safe_migration::execute_migration(&addons_dir)?;
     Ok(MinionMigrationResult {
         found: true,
-        addon_count,
-        imported,
-        already_tracked,
+        addon_count: result.addon_count,
+        imported: result.imported,
+        already_tracked: result.already_tracked,
     })
 }
 

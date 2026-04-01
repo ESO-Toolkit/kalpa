@@ -78,8 +78,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
 
   useEffect(() => {
     loadSnapshots();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [addonsPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleRestore = async (id: string) => {
     setRestoring(id);
@@ -276,8 +275,7 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
     void invokeOrThrow<OpLogEntry[]>("read_ops_log", { addonsPath })
       .then(setEntries)
       .catch((e) => toast.error(`Failed to load log: ${getTauriErrorMessage(e)}`));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [addonsPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="space-y-3 mt-2">

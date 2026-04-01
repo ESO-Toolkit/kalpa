@@ -82,8 +82,8 @@ export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWiz
         `Snapshot created: ${snap.fileCount} files (${formatBytes(snap.totalSize)})`
       );
       setPhase("dry-run");
-      setLoading(false);
-      // Automatically run dry-run as a separate step
+      // Automatically run dry-run — don't reset loading between the two operations
+      // to prevent a brief flash where buttons could be clicked
       await runDryRun();
     } catch (e) {
       setError(getTauriErrorMessage(e));
@@ -272,9 +272,9 @@ function PreconditionsPhase({
 
       {preconditions.warnings.length > 0 && (
         <div className="space-y-1">
-          {preconditions.warnings.map((w) => (
+          {preconditions.warnings.map((w, i) => (
             <div
-              key={w}
+              key={i}
               className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-1.5 text-xs text-amber-400"
             >
               {w}
@@ -461,8 +461,8 @@ function DiffSection({
     <div className={`rounded-lg border p-2 ${classes}`}>
       <div className="text-xs font-medium mb-1">{title}</div>
       <div className="text-xs opacity-80 space-y-0.5 max-h-[80px] overflow-y-auto">
-        {items.map((item) => (
-          <div key={item}>{item}</div>
+        {items.map((item, i) => (
+          <div key={i}>{item}</div>
         ))}
       </div>
     </div>
