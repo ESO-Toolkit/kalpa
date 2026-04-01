@@ -254,6 +254,7 @@ pub fn run() {
             commands::consume_initial_deep_link,
             commands::create_pack,
             commands::update_pack,
+            commands::delete_pack,
             commands::vote_pack,
             commands::create_share_code,
             commands::resolve_share_code,

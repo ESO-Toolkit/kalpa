@@ -31,6 +31,7 @@ export interface PackMetadata {
 }
 
 export type PackType = "addon-pack" | "build-pack" | "roster-pack";
+export type PackStatus = "draft" | "published";
 
 // ── Full pack ──────────────────────────────────────────────────────
 export interface Pack {
@@ -44,6 +45,7 @@ export interface Pack {
   builds?: BuildReference[];
   rosters?: RosterReference[];
   voteCount: number;
+  status: PackStatus;
 }
 
 // ── Index (lightweight listing) ────────────────────────────────────
@@ -58,6 +60,8 @@ export interface PackIndexItem {
   rosterCount: number;
   voteCount: number;
   updatedAt: string;
+  status: PackStatus;
+  createdBy: string;
 }
 
 // ── Vote tracking ─────────────────────────────────────────────────

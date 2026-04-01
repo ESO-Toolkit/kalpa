@@ -1,6 +1,7 @@
 import type { Pack, ValidationError } from "./types";
 
 const VALID_TYPES = ["addon-pack", "build-pack", "roster-pack"];
+const VALID_STATUSES = ["draft", "published"];
 const ID_PATTERN = /^[a-z0-9-]+$/;
 const MAX_NAME_LENGTH = 100;
 const MAX_DESCRIPTION_LENGTH = 1000;
@@ -49,6 +50,13 @@ export function validatePack(pack: unknown): ValidationError[] {
     errors.push({
       field: "type",
       message: `type must be one of: ${VALID_TYPES.join(", ")}`,
+    });
+  }
+
+  if (p.status !== undefined && (typeof p.status !== "string" || !VALID_STATUSES.includes(p.status))) {
+    errors.push({
+      field: "status",
+      message: `status must be one of: ${VALID_STATUSES.join(", ")}`,
     });
   }
 

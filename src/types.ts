@@ -147,6 +147,8 @@ export interface PackAddonEntry {
 
 export type PackType = "addon-pack" | "build-pack" | "roster-pack";
 
+export type PackStatus = "draft" | "published";
+
 export interface Pack {
   id: string;
   authorId: string;
@@ -161,6 +163,7 @@ export interface Pack {
   addons: PackAddonEntry[];
   createdAt: string;
   updatedAt: string;
+  status: PackStatus;
 }
 
 export interface PackPage {

@@ -55,7 +55,12 @@ async function invalidatePackListCache(url: URL): Promise<void> {
 // ── GET /packs ─────────────────────────────────────────────────────
 async function handleListPacks(request: Request, env: Env, url: URL): Promise<Response> {
   // Try the Cache API first for the full pack index (unfiltered requests only)
-  const hasFilters = url.searchParams.has("type") || url.searchParams.has("tag") || url.searchParams.has("q");
+  const hasFilters =
+    url.searchParams.has("type") ||
+    url.searchParams.has("tag") ||
+    url.searchParams.has("q") ||
+    url.searchParams.has("status") ||
+    url.searchParams.has("author");
   const cache = caches.default;
 
   if (!hasFilters) {
@@ -69,6 +74,19 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   }
 
   let items = index.items;
+
+  // Status filter — default to "published" so browse only shows public packs.
+  // Pass ?status=all to include drafts (used by "my packs" queries).
+  const statusFilter = url.searchParams.get("status");
+  if (statusFilter !== "all") {
+    const target = statusFilter ?? "published";
+    items = items.filter((p) => (p.status ?? "published") === target);
+  }
+
+  const authorFilter = url.searchParams.get("author");
+  if (authorFilter) {
+    items = items.filter((p) => p.createdBy === authorFilter);
+  }
 
   const typeFilter = url.searchParams.get("type");
   if (typeFilter) {
@@ -131,10 +149,28 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
 
   const pack = body as Pack;
 
+  // Default status to "draft" if not provided
+  if (!pack.status) {
+    pack.status = "draft";
+  }
+
   // Check for ID conflict
   const existing = await getPack(env, pack.id);
   if (existing) {
     return json(request, { error: `Pack "${pack.id}" already exists. Use PUT to update.` }, 409);
+  }
+
+  // Per-user pack limit (25 max)
+  const MAX_PACKS_PER_USER = 25;
+  const userId = pack.metadata.createdBy;
+  const index = (await getPackIndex(env)) ?? { items: [] };
+  const userPackCount = index.items.filter((i) => i.createdBy === userId).length;
+  if (userPackCount >= MAX_PACKS_PER_USER) {
+    return json(
+      request,
+      { error: `Maximum of ${MAX_PACKS_PER_USER} packs reached. Delete some packs to create new ones.` },
+      429,
+    );
   }
 
   // Stamp metadata timestamps
@@ -144,8 +180,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
 
   await putPack(env, pack);
 
-  // Update index
-  const index = (await getPackIndex(env)) ?? { items: [] };
+  // Update index (reuse the index fetched for the limit check)
   index.items.push(packToIndexItem(pack));
   await putPackIndex(env, index);
 
@@ -185,6 +220,7 @@ async function handleUpdatePack(
 
   const pack = body as Pack;
   pack.id = id; // Enforce URL id
+  pack.status = pack.status ?? existing.status ?? "published"; // Preserve existing status unless explicitly changed
   pack.metadata.createdAt = existing.metadata.createdAt; // Preserve original
   pack.metadata.updatedAt = new Date().toISOString();
   pack.metadata.version = existing.metadata.version + 1;

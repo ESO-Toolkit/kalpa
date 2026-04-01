@@ -254,10 +254,12 @@ export function Packs({
         });
         // Discard stale response if a newer request was fired
         if (seq !== loadPacksSeqRef.current) return;
+        // Filter out drafts — browse should only show published packs
+        const published = result.packs.filter((p) => p.status !== "draft");
         if (page === 1) {
-          setPacks(result.packs);
+          setPacks(published);
         } else {
-          setPacks((prev) => [...prev, ...result.packs]);
+          setPacks((prev) => [...prev, ...published]);
         }
         setCurrentPage(result.page);
         // If the API returned fewer results than the page size, there are no more pages
@@ -1015,6 +1017,27 @@ export function Packs({
             onCreatePack={() => {
               resetCreateForm();
               setTab("create");
+            }}
+            onPublish={async (pack) => {
+              try {
+                await invokeOrThrow<Pack>("update_pack", {
+                  payload: {
+                    id: pack.id,
+                    title: pack.title,
+                    description: pack.description,
+                    packType: pack.packType,
+                    addons: pack.addons,
+                    tags: pack.tags,
+                    isAnonymous: pack.isAnonymous,
+                    status: "published",
+                  },
+                });
+                toast.success("Pack published!");
+                loadMyPacks(1);
+                loadPacks(searchQuery, 1);
+              } catch (e) {
+                toast.error(`Publish failed: ${getTauriErrorMessage(e)}`);
+              }
             }}
           />
         ) : tab === "import" ? (
@@ -1983,6 +2006,7 @@ function PackCreateView({
   };
 
   const [publishing, setPublishing] = useState(false);
+  const [savingToFile, setSavingToFile] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
 
   const handleLogin = async () => {
@@ -2008,6 +2032,58 @@ function PackCreateView({
     }
   };
 
+  const handleSaveDraft = async () => {
+    if (!title.trim()) {
+      toast.error("Pack needs a title.");
+      return;
+    }
+    if (addons.length === 0) {
+      toast.error("Add at least one addon.");
+      return;
+    }
+    setPublishing(true);
+    try {
+      const pack = editingPackId
+        ? await invokeOrThrow<Pack>("update_pack", {
+            payload: {
+              id: editingPackId,
+              title: title.trim(),
+              description: description.trim(),
+              packType,
+              addons,
+              tags: selectedTags,
+              isAnonymous,
+              status: "draft",
+            },
+          })
+        : await invokeOrThrow<Pack>("create_pack", {
+            payload: {
+              title: title.trim(),
+              description: description.trim(),
+              packType,
+              addons,
+              tags: selectedTags,
+              isAnonymous,
+              status: "draft",
+            },
+          });
+      toast.success("Pack saved as draft");
+      onPublished(pack);
+    } catch (e) {
+      const msg = getTauriErrorMessage(e);
+      if (msg.includes("expired") || msg.includes("sign in")) {
+        onAuthChange(null);
+      }
+      if (msg.includes("Maximum")) {
+        toast.error(msg);
+      } else {
+        toast.error(`Save failed: ${msg}`);
+      }
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   const handlePublish = async () => {
     if (!title.trim()) {
       toast.error("Pack needs a title.");
@@ -2029,6 +2105,7 @@ function PackCreateView({
               addons,
               tags: selectedTags,
               isAnonymous,
+              status: "published",
             },
           })
         : await invokeOrThrow<Pack>("create_pack", {
@@ -2039,6 +2116,7 @@ function PackCreateView({
               addons,
               tags: selectedTags,
               isAnonymous,
+              status: "published",
             },
           });
       toast.success(editingPackId ? "Pack updated!" : "Pack published!");
@@ -2048,9 +2126,59 @@ function PackCreateView({
       if (msg.includes("expired") || msg.includes("sign in")) {
         onAuthChange(null);
       }
-      toast.error(`Publish failed: ${msg}`);
+      if (msg.includes("Maximum")) {
+        toast.error(msg);
+      } else {
+        toast.error(`Publish failed: ${msg}`);
+      }
     } finally {
       setPublishing(false);
+    }
+  };
+
+  const handleSaveToFile = async () => {
+    if (!title.trim()) {
+      toast.error("Pack needs a title.");
+      return;
+    }
+    if (addons.length === 0) {
+      toast.error("Add at least one addon.");
+      return;
+    }
+    const safeName = title
+      .trim()
+      .replace(/[^a-zA-Z0-9-_ ]/g, "")
+      .trim()
+      .replace(/\s+/g, "-");
+    const path = await saveFileDialog({
+      defaultPath: `${safeName}.esopack`,
+      filters: [{ name: "ESO Pack", extensions: ["esopack"] }],
+    });
+    if (!path) return;
+
+    setSavingToFile(true);
+    try {
+      await invokeOrThrow("export_pack_file", {
+        pack: {
+          format: "esopack",
+          version: 1,
+          pack: {
+            title: title.trim(),
+            description: description.trim(),
+            packType,
+            tags: selectedTags,
+            addons,
+          },
+          sharedAt: new Date().toISOString(),
+          sharedBy: authUser?.userName ?? "Anonymous",
+        },
+        path,
+      });
+      toast.success("Pack saved to file");
+    } catch (e) {
+      toast.error(`Failed to save pack: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setSavingToFile(false);
     }
   };
 
@@ -2070,41 +2198,18 @@ function PackCreateView({
 
   const canProceed = !!title.trim();
 
-  // Auth gate — must be signed in to create packs
-  if (!authUser) {
-    return (
-      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-        <div className="rounded-xl bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.1] p-5">
-          <PackageIcon className="size-10 text-[#c4a44a]/50" />
-        </div>
-        <div>
-          <p className="font-heading text-sm font-semibold">Sign in to create packs</p>
-          <p className="mt-1 text-xs text-muted-foreground/60 max-w-[260px]">
-            Sign in with your ESO Logs account to publish addon packs to the community.
-          </p>
-        </div>
-        <Button onClick={handleLogin} disabled={loggingIn} className="mt-1">
-          {loggingIn ? (
-            <>
-              <Loader2Icon className="size-4 animate-spin mr-1.5" />
-              Signing in...
-            </>
-          ) : (
-            "Sign in with ESO Logs"
-          )}
-        </Button>
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-col gap-3 min-h-0">
-      {/* Signed-in header */}
+      {/* Header — shows auth state and edit controls */}
       <div className="flex items-center justify-between text-xs">
-        <span className="text-muted-foreground/60">
-          {editingPackId ? "Editing as " : "Creating as "}
-          <span className="text-[#c4a44a] font-semibold">{authUser.userName}</span>
-        </span>
+        {authUser ? (
+          <span className="text-muted-foreground/60">
+            {editingPackId ? "Editing as " : "Creating as "}
+            <span className="text-[#c4a44a] font-semibold">{authUser.userName}</span>
+          </span>
+        ) : (
+          <span className="text-muted-foreground/60">Creating a pack</span>
+        )}
         <div className="flex items-center gap-3">
           {editingPackId && onCancelEdit && (
             <button
@@ -2114,12 +2219,14 @@ function PackCreateView({
               Cancel edit
             </button>
           )}
-          <button
-            onClick={handleLogout}
-            className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-          >
-            Sign out
-          </button>
+          {authUser && (
+            <button
+              onClick={handleLogout}
+              className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+            >
+              Sign out
+            </button>
+          )}
         </div>
       </div>
 
@@ -2169,7 +2276,7 @@ function PackCreateView({
           <p className="text-sm text-muted-foreground">
             {editingPackId
               ? "Update your pack details, then review the addon list before saving."
-              : "Create an addon pack to share with the community. Search and add addons in the next step."}
+              : "Create an addon pack — save it locally for personal use, or publish it to the community."}
           </p>
 
           {/* Title */}
@@ -2238,17 +2345,28 @@ function PackCreateView({
                     key={pt}
                     onClick={() => setPackType(pt)}
                     className={cn(
-                      "flex flex-col items-start gap-1 rounded-lg border p-2.5 text-left transition-all duration-200",
+                      "relative flex flex-col items-start gap-1 rounded-lg border p-2.5 text-left transition-all duration-200",
                       isSelected
-                        ? `${accent.border} border-l-[3px] ${accent.bg} border-white/[0.12]`
+                        ? `${accent.border} border-l-[3px] bg-white/[0.08] border-white/[0.15] ring-1 ring-white/[0.08]`
                         : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.1] hover:bg-white/[0.04]",
                       "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
                     )}
                   >
+                    {isSelected && (
+                      <span className={cn(
+                        "absolute top-1.5 right-1.5 flex items-center justify-center size-4 rounded-full",
+                        "bg-white/[0.1] border border-white/[0.15]"
+                      )}>
+                        <CheckIcon className={cn("size-2.5", accent.text)} />
+                      </span>
+                    )}
                     <InfoPill color={pillColor}>
                       {TYPE_LABELS[pt]}
                     </InfoPill>
-                    <span className="text-[10px] text-muted-foreground/50 leading-tight">
+                    <span className={cn(
+                      "text-[10px] leading-tight transition-colors duration-200",
+                      isSelected ? "text-muted-foreground/70" : "text-muted-foreground/50"
+                    )}>
                       {PACK_TYPE_DESCRIPTIONS[pt]}
                     </span>
                   </button>
@@ -2564,33 +2682,95 @@ function PackCreateView({
             </div>
           </div>
 
-          {/* Anonymous toggle + Publish button */}
+          {/* Save / Publish actions */}
           <div className="flex flex-col gap-2 mt-1">
-            <label className="flex items-center gap-2 text-xs text-muted-foreground/60 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={isAnonymous}
-                onChange={(e) => setIsAnonymous(e.target.checked)}
-                className="rounded border-white/20 bg-white/[0.03] accent-[#c4a44a]"
-              />
-              Publish anonymously
-            </label>
+            {/* Save to file — always available, no auth needed */}
             <Button
-              onClick={handlePublish}
-              disabled={addons.length === 0 || publishing}
+              variant="outline"
+              onClick={handleSaveToFile}
+              disabled={addons.length === 0 || savingToFile}
               className="w-full"
             >
-              {publishing ? (
+              {savingToFile ? (
                 <>
                   <Loader2Icon className="size-4 animate-spin mr-1.5" />
-                  {editingPackId ? "Saving..." : "Publishing..."}
+                  Saving...
                 </>
-              ) : editingPackId ? (
-                "Save Changes"
               ) : (
-                "Publish Pack"
+                <>
+                  <FileDownIcon className="size-4 mr-1.5" />
+                  Save to File
+                </>
               )}
             </Button>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 border-t border-white/[0.06]" />
+              <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider">or</span>
+              <div className="flex-1 border-t border-white/[0.06]" />
+            </div>
+
+            {/* Save as Draft + Publish — both require auth */}
+            {authUser ? (
+              <>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground/60 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={isAnonymous}
+                    onChange={(e) => setIsAnonymous(e.target.checked)}
+                    className="rounded border-white/20 bg-white/[0.03] accent-[#c4a44a]"
+                  />
+                  Publish anonymously
+                </label>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={handleSaveDraft}
+                    disabled={addons.length === 0 || publishing}
+                    className="flex-1"
+                  >
+                    {publishing ? (
+                      <Loader2Icon className="size-4 animate-spin" />
+                    ) : (
+                      "Save as Draft"
+                    )}
+                  </Button>
+                  <Button
+                    onClick={handlePublish}
+                    disabled={addons.length === 0 || publishing}
+                    className="flex-1"
+                  >
+                    {publishing ? (
+                      <Loader2Icon className="size-4 animate-spin" />
+                    ) : editingPackId ? (
+                      "Save Changes"
+                    ) : (
+                      <>
+                        <ArrowUpIcon className="size-4 mr-1.5" />
+                        Publish
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <Button
+                variant="outline"
+                onClick={handleLogin}
+                disabled={loggingIn}
+                className="w-full"
+              >
+                {loggingIn ? (
+                  <>
+                    <Loader2Icon className="size-4 animate-spin mr-1.5" />
+                    Signing in...
+                  </>
+                ) : (
+                  "Sign in to save or publish"
+                )}
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -2881,6 +3061,7 @@ function MyPacksView({
   onDuplicate,
   onDelete,
   onCreatePack,
+  onPublish,
 }: {
   packs: Pack[];
   loading: boolean;
@@ -2894,6 +3075,7 @@ function MyPacksView({
   onDuplicate: (pack: Pack) => void;
   onDelete: (packId: string) => void;
   onCreatePack: () => void;
+  onPublish: (pack: Pack) => void;
 }) {
   const [loggingIn, setLoggingIn] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -2921,7 +3103,7 @@ function MyPacksView({
         <div>
           <p className="font-heading text-sm font-semibold">Sign in to manage your packs</p>
           <p className="mt-1 text-xs text-muted-foreground/60 max-w-[260px]">
-            Sign in with your ESO Logs account to view, edit, and manage your published packs.
+            Sign in with your ESO Logs account to view, edit, and manage your packs and drafts.
           </p>
         </div>
         <Button onClick={handleLogin} disabled={loggingIn} className="mt-1">
@@ -2942,10 +3124,15 @@ function MyPacksView({
     <div className="flex flex-col gap-3 min-h-0">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <span className="text-xs text-muted-foreground/60">
-          Your packs as <span className="text-[#c4a44a] font-semibold">{authUser.userName}</span>
-        </span>
-        <Button variant="outline" size="sm" onClick={onCreatePack}>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground/60">
+            Your packs as <span className="text-[#c4a44a] font-semibold">{authUser.userName}</span>
+          </span>
+          <span className="text-[10px] text-muted-foreground/40 tabular-nums">
+            {packs.length} / 25
+          </span>
+        </div>
+        <Button variant="outline" size="sm" onClick={onCreatePack} disabled={packs.length >= 25}>
           <PlusIcon className="size-3.5 mr-1.5" />
           Create Pack
         </Button>
@@ -3007,10 +3194,25 @@ function MyPacksView({
                         <InfoPill color={pillColor}>
                           {TYPE_LABELS[pack.packType] ?? pack.packType}
                         </InfoPill>
+                        {pack.status === "draft" && (
+                          <InfoPill color="muted">Draft</InfoPill>
+                        )}
                       </div>
                     </div>
                     {/* Quick actions */}
                     <div className="flex items-center gap-1 shrink-0">
+                      {pack.status === "draft" && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onPublish(pack);
+                          }}
+                          title="Publish"
+                          className="rounded-md p-1.5 text-muted-foreground/40 hover:text-emerald-400 hover:bg-emerald-400/[0.08] transition-all duration-150"
+                        >
+                          <ArrowUpIcon className="size-3.5" />
+                        </button>
+                      )}
                       <button
                         onClick={(e) => {
                           e.stopPropagation();

@@ -2058,6 +2058,8 @@ pub struct HubPack {
     pub tags: Vec<String>,
     #[serde(default)]
     pub user_voted: Option<bool>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// Frontend-friendly pack struct sent to the webview.
@@ -2077,6 +2079,7 @@ pub struct Pack {
     pub addons: Vec<PackAddonEntry>,
     pub created_at: String,
     pub updated_at: String,
+    pub status: String,
 }
 
 impl Pack {
@@ -2123,6 +2126,7 @@ impl Pack {
             addons,
             created_at: hub.created_at,
             updated_at: hub.updated_at,
+            status: hub.status.unwrap_or_else(|| "published".to_string()),
         }
     }
 }
@@ -2485,6 +2489,7 @@ pub struct CreatePackPayload {
     pub addons: Vec<PackAddonEntry>,
     pub tags: Vec<String>,
     pub is_anonymous: bool,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2497,6 +2502,7 @@ pub struct UpdatePackPayload {
     pub addons: Vec<PackAddonEntry>,
     pub tags: Vec<String>,
     pub is_anonymous: bool,
+    pub status: Option<String>,
 }
 
 #[tauri::command]
@@ -2559,6 +2565,7 @@ pub async fn create_pack(
             "addons": payload.addons,
             "tags": payload.tags,
             "is_anonymous": payload.is_anonymous,
+            "status": payload.status.unwrap_or_else(|| "draft".to_string()),
         });
 
         let response = client
@@ -2657,6 +2664,7 @@ pub async fn update_pack(
             "addons": payload.addons,
             "tags": payload.tags,
             "is_anonymous": payload.is_anonymous,
+            "status": payload.status,
         });
 
         let response = client
@@ -2689,6 +2697,86 @@ pub async fn update_pack(
             .map_err(|e| format!("Failed to parse response: {}", e))?;
 
         Ok(Pack::from_hub(body.pack))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn delete_pack(
+    state: tauri::State<'_, AuthState>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    validate_pack_id(&id)?;
+
+    let access_token = {
+        let tokens = {
+            let guard = state
+                .0
+                .lock()
+                .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+            guard.clone()
+        };
+
+        let Some(tokens) = tokens else {
+            return Err("Not signed in. Please sign in first.".to_string());
+        };
+
+        match tokio::task::spawn_blocking({
+            let tokens = tokens.clone();
+            move || auth::ensure_valid_token(&tokens)
+        })
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+        {
+            Ok(Some(new_tokens)) => {
+                let token = new_tokens.access_token.clone();
+                save_auth_tokens(&app, &new_tokens);
+                *state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                token
+            }
+            Ok(None) => tokens.access_token.clone(),
+            Err(e) => {
+                *state
+                    .0
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                return Err(e);
+            }
+        }
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let client = pack_hub_client();
+        let base = pack_hub_url();
+        let url = format!("{}/packs/{}", base, id);
+
+        let response = client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    "Could not connect to Pack Hub. Check your internet connection.".to_string()
+                } else {
+                    format!("Network error: {}", e)
+                }
+            })?;
+
+        match response.status().as_u16() {
+            200 => Ok(()),
+            401 => Err("Session expired. Please sign in again.".to_string()),
+            403 => Err("You can only delete packs you created.".to_string()),
+            404 => Err("Pack not found.".to_string()),
+            status => {
+                let body = response.text().unwrap_or_default();
+                Err(format!("Pack Hub returned HTTP {} - {}", status, body))
+            }
+        }
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?

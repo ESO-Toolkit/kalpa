@@ -13,6 +13,7 @@ export const SEED_PACKS: Pack[] = [
     type: "addon-pack",
     tags: ["trial", "pve", "essential"],
     voteCount: 0,
+    status: "published",
     metadata: {
       createdBy: "kalpa",
       createdAt: "2025-03-27T00:00:00Z",
@@ -72,6 +73,7 @@ export const SEED_PACKS: Pack[] = [
     type: "addon-pack",
     tags: ["trial", "pve", "healer"],
     voteCount: 0,
+    status: "published",
     metadata: {
       createdBy: "kalpa",
       createdAt: "2025-03-27T00:00:00Z",
@@ -139,6 +141,7 @@ export const SEED_PACKS: Pack[] = [
     type: "addon-pack",
     tags: ["trial", "pve", "dps", "beginner"],
     voteCount: 0,
+    status: "published",
     metadata: {
       createdBy: "kalpa",
       createdAt: "2025-03-27T00:00:00Z",

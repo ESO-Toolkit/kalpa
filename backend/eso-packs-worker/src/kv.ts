@@ -35,6 +35,8 @@ export function packToIndexItem(pack: Pack): PackIndexItem {
     rosterCount: pack.rosters?.length ?? 0,
     voteCount: pack.voteCount ?? 0,
     updatedAt: pack.metadata.updatedAt,
+    status: pack.status ?? "published",
+    createdBy: pack.metadata.createdBy,
   };
 }
 
