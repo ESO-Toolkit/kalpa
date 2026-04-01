@@ -11,16 +11,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { formatBytes } from "@/lib/utils";
 
 interface BackupsProps {
   addonsPath: string;
   onClose: () => void;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function Backups({ addonsPath, onClose }: BackupsProps) {

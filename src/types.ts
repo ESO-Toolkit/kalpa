@@ -202,6 +202,66 @@ export interface EsoPackData {
   addons: PackAddonEntry[];
 }
 
+// ── Safe Migration types ─────────────────────────────────────────────────
+
+export interface PreconditionResult {
+  esoRunning: boolean;
+  minionRunning: boolean;
+  minionFound: boolean;
+  addonsPathValid: boolean;
+  savedVariablesExists: boolean;
+  warnings: string[];
+}
+
+export interface SnapshotManifest {
+  id: string;
+  label: string;
+  createdAt: string;
+  sourcePaths: string[];
+  fileCount: number;
+  totalSize: number;
+  archiveSha256: string;
+}
+
+export interface DryRunAddon {
+  folderName: string;
+  esouiId: number;
+  minionVersion: string;
+  status: string;
+}
+
+export interface DryRunResult {
+  willTrack: DryRunAddon[];
+  alreadyTracked: DryRunAddon[];
+  missingOnDisk: DryRunAddon[];
+  unmanagedOnDisk: string[];
+}
+
+export interface SafeMigrationResult {
+  imported: number;
+  alreadyTracked: number;
+  skippedMissing: number;
+  addonCount: number;
+}
+
+export interface IntegrityResult {
+  addonsFolderOk: boolean;
+  savedVariablesOk: boolean;
+  addonCount: number;
+  issues: string[];
+}
+
+export interface OpLogEntry {
+  operation: string;
+  startedAt: string;
+  finishedAt: string;
+  status: string;
+  snapshotId: string | null;
+  filesCreated: string[];
+  filesModified: string[];
+  details: string;
+}
+
 // ── Roster pack install types (deep link: kalpa://install-pack/{id}) ─────
 export interface RosterPack {
   id: string;
