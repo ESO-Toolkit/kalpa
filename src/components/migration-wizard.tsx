@@ -78,9 +78,7 @@ export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWiz
         includeAddons,
       });
       setSnapshot(snap);
-      toast.success(
-        `Snapshot created: ${snap.fileCount} files (${formatBytes(snap.totalSize)})`
-      );
+      toast.success(`Snapshot created: ${snap.fileCount} files (${formatBytes(snap.totalSize)})`);
       setPhase("dry-run");
       // Automatically run dry-run — don't reset loading between the two operations
       // to prevent a brief flash where buttons could be clicked
@@ -229,9 +227,7 @@ function PhaseIndicator({ current }: { current: MigrationPhase }) {
           >
             {p.label}
           </span>
-          {i < phases.length - 1 && (
-            <div className="mx-1 h-px w-4 bg-white/[0.1]" />
-          )}
+          {i < phases.length - 1 && <div className="mx-1 h-px w-4 bg-white/[0.1]" />}
         </div>
       ))}
     </div>
@@ -298,9 +294,7 @@ function PreconditionsPhase({
 function CheckItem({ ok, label, warn }: { ok: boolean; label: string; warn?: boolean }) {
   return (
     <div className="flex items-center gap-2 text-sm">
-      <span
-        className={ok ? "text-emerald-400" : warn ? "text-amber-400" : "text-red-400"}
-      >
+      <span className={ok ? "text-emerald-400" : warn ? "text-amber-400" : "text-red-400"}>
         {ok ? "\u2713" : warn ? "!" : "\u2717"}
       </span>
       <span className={ok ? "text-white/80" : warn ? "text-amber-400" : "text-red-400"}>
@@ -376,9 +370,7 @@ function DryRunPhase({
 }) {
   if (loading || !dryRun) {
     return (
-      <div className="py-8 text-center text-sm text-muted-foreground">
-        Analyzing Minion data...
-      </div>
+      <div className="py-8 text-center text-sm text-muted-foreground">Analyzing Minion data...</div>
     );
   }
 
@@ -440,15 +432,7 @@ function DryRunPhase({
   );
 }
 
-function DiffSection({
-  title,
-  color,
-  items,
-}: {
-  title: string;
-  color: string;
-  items: string[];
-}) {
+function DiffSection({ title, color, items }: { title: string; color: string; items: string[] }) {
   const colorMap: Record<string, string> = {
     emerald: "border-emerald-400/20 bg-emerald-400/[0.04] text-emerald-400",
     sky: "border-sky-400/20 bg-sky-400/[0.04] text-sky-400",

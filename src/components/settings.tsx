@@ -215,11 +215,7 @@ export function Settings({
                   Minion detected. Use the safe migration wizard to import tracking data with a full
                   backup and dry-run preview.
                 </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={onShowMigrationWizard}
-                >
+                <Button variant="outline" size="sm" onClick={onShowMigrationWizard}>
                   Safe Migration Wizard
                 </Button>
               </div>

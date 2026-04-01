@@ -101,19 +101,11 @@ export function AppDialogs({
       )}
 
       {activeDialog === "migration-wizard" && (
-        <MigrationWizard
-          addonsPath={addonsPath}
-          onClose={onCloseDialog}
-          onRefresh={onRefresh}
-        />
+        <MigrationWizard addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
       )}
 
       {activeDialog === "safety-center" && (
-        <SafetyCenter
-          addonsPath={addonsPath}
-          onClose={onCloseDialog}
-          onRefresh={onRefresh}
-        />
+        <SafetyCenter addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
       )}
     </Suspense>
   );

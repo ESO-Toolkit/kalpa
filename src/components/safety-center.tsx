@@ -78,7 +78,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
 
   useEffect(() => {
     loadSnapshots();
-  }, [addonsPath]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [addonsPath]);
 
   const handleRestore = async (id: string) => {
     setRestoring(id);
@@ -147,11 +147,7 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                       >
                         {restoring === s.id ? "Restoring..." : "Yes"}
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setConfirmRestore(null)}
-                      >
+                      <Button size="sm" variant="outline" onClick={() => setConfirmRestore(null)}>
                         No
                       </Button>
                     </div>
@@ -166,27 +162,15 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
                   )}
                   {confirmDelete === s.id ? (
                     <div className="flex items-center gap-1">
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => handleDelete(s.id)}
-                      >
+                      <Button size="sm" variant="destructive" onClick={() => handleDelete(s.id)}>
                         Delete
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setConfirmDelete(null)}
-                      >
+                      <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>
                         Keep
                       </Button>
                     </div>
                   ) : (
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      onClick={() => setConfirmDelete(s.id)}
-                    >
+                    <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(s.id)}>
                       Delete
                     </Button>
                   )}
@@ -275,7 +259,7 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
     void invokeOrThrow<OpLogEntry[]>("read_ops_log", { addonsPath })
       .then(setEntries)
       .catch((e) => toast.error(`Failed to load log: ${getTauriErrorMessage(e)}`));
-  }, [addonsPath]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [addonsPath]);
 
   return (
     <div className="space-y-3 mt-2">
@@ -294,11 +278,7 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
             >
               <div className="flex items-center justify-between">
                 <span className="font-medium text-white/80">{entry.operation}</span>
-                <span
-                  className={
-                    entry.status === "success" ? "text-emerald-400" : "text-red-400"
-                  }
-                >
+                <span className={entry.status === "success" ? "text-emerald-400" : "text-red-400"}>
                   {entry.status}
                 </span>
               </div>
