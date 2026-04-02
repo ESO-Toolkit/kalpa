@@ -7,7 +7,7 @@ import type {
   EffectiveField,
   SvSchemaOverlay,
 } from "../types";
-import { buildNodeId, classifyContext, humanizeKey } from "./sv-nodes";
+import { classifyContext, humanizeKey } from "./sv-nodes";
 
 /**
  * Check if a table node represents an RGB(A) color (all values numbers 0–1).
@@ -84,7 +84,8 @@ export function resolveEffectiveField(
   addonName: string,
   knownCharacters: Set<string>
 ): EffectiveField {
-  const nodeId = buildNodeId(addonName, pathSegments);
+  // pathSegments already includes the addon name as the first element
+  const nodeId = pathSegments.join("/");
   const inferred = inferWidget(node);
 
   // Start with inferred values
@@ -148,27 +149,4 @@ export function resolveEffectiveField(
     value: node.value ?? null,
     children,
   };
-}
-
-/**
- * Build the full effective schema tree for a loaded SV file.
- */
-export function buildEffectiveTree(
-  root: SvTreeNode,
-  overlay: SvSchemaOverlay,
-  knownCharacters: Set<string>
-): EffectiveField[] {
-  if (!root.children) return [];
-
-  return root.children.map((addonNode) => {
-    const addonName = addonNode.key;
-    return resolveEffectiveField(
-      addonNode,
-      [addonNode.key],
-      "setting",
-      overlay,
-      addonName,
-      knownCharacters
-    );
-  });
 }

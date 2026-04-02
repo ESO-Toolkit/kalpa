@@ -30,7 +30,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Popover, PopoverTrigger, PopoverContent, PopoverTitle } from "@/components/ui/popover";
+import {
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+  PopoverClose,
+  PopoverTitle,
+} from "@/components/ui/popover";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getSetting, setSetting } from "@/lib/store";
 import { classifyContext, humanizeKey, getTableChildren, getLeafChildren } from "@/lib/sv-nodes";
@@ -623,12 +629,14 @@ function CleanupTab({
 // ─── Editor Tab v2 — Two-panel layout with smart controls ───
 
 const OVERLAY_STORE_KEY = "sv-schema-overlay";
+const EMPTY_PATH: string[] = [];
 
 // ── Nav Tree Item ────────────────────────────────────────────
 
 function NavTreeItem({
   node,
   depth,
+  parentPath,
   selectedPath,
   onSelect,
   searchQuery,
@@ -638,6 +646,7 @@ function NavTreeItem({
 }: {
   node: SvTreeNode;
   depth: number;
+  parentPath: string[];
   selectedPath: string[];
   onSelect: (path: string[], node: SvTreeNode) => void;
   searchQuery: string;
@@ -645,14 +654,16 @@ function NavTreeItem({
   expandedPaths: Set<string>;
   toggleExpanded: (pathKey: string) => void;
 }) {
-  const pathKey = [...selectedPath.slice(0, depth), node.key].join("/");
+  const currentPath = useMemo(() => [...parentPath, node.key], [parentPath, node.key]);
+  const pathKey = currentPath.join("/");
   const isExpanded = expandedPaths.has(pathKey);
   const tableChildren = getTableChildren(node);
   const entryCount = node.children?.length ?? 0;
+
+  // Compare full path for accurate selection highlighting
   const isSelected =
-    selectedPath.length > depth &&
-    selectedPath[depth] === node.key &&
-    selectedPath.length === depth + 1;
+    selectedPath.length === currentPath.length &&
+    currentPath.every((seg, i) => selectedPath[i] === seg);
 
   const context = classifyContext(node.key, depth, knownCharacters);
   const matchesSearch = !searchQuery || node.key.toLowerCase().includes(searchQuery.toLowerCase());
@@ -668,8 +679,6 @@ function NavTreeItem({
   }, [node, searchQuery]);
 
   if (!matchesSearch && !hasMatchingDescendant) return null;
-
-  const currentPath = [...selectedPath.slice(0, depth), node.key];
 
   return (
     <div>
@@ -713,6 +722,7 @@ function NavTreeItem({
             key={`${child.key}-${i}`}
             node={child}
             depth={depth + 1}
+            parentPath={currentPath}
             selectedPath={selectedPath}
             onSelect={onSelect}
             searchQuery={searchQuery}
@@ -737,11 +747,13 @@ function ToggleControl({
   const checked = field.value === true;
   return (
     <button
+      role="switch"
+      aria-checked={checked}
       onClick={() => !field.readOnly && onChange(!checked)}
       className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
         field.readOnly ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
       } ${checked ? "bg-[#c4a44a]" : "bg-white/[0.12]"}`}
-      aria-label={`${field.label}: ${checked ? "on" : "off"}`}
+      aria-label={field.label}
     >
       <span
         className={`inline-block size-3.5 rounded-full bg-white shadow transition-transform ${
@@ -774,11 +786,18 @@ function NumberControl({
   };
 
   const step = field.props.step ?? 1;
+  const { min, max } = field.props;
+
+  const clamp = (v: number) => {
+    if (min !== undefined && v < min) return min;
+    if (max !== undefined && v > max) return max;
+    return v;
+  };
 
   return (
     <div className="flex items-center gap-1">
       <button
-        onClick={() => onChange((Number(field.value) || 0) - step)}
+        onClick={() => onChange(clamp((Number(field.value) || 0) - step))}
         className="flex size-6 items-center justify-center rounded border border-white/[0.08] bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
         disabled={field.readOnly}
       >
@@ -793,11 +812,11 @@ function NumberControl({
         onKeyDown={(e) => e.key === "Enter" && commit()}
         disabled={field.readOnly}
         step={step}
-        min={field.props.min}
-        max={field.props.max}
+        min={min}
+        max={max}
       />
       <button
-        onClick={() => onChange((Number(field.value) || 0) + step)}
+        onClick={() => onChange(clamp((Number(field.value) || 0) + step))}
         className="flex size-6 items-center justify-center rounded border border-white/[0.08] bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
         disabled={field.readOnly}
       >
@@ -938,22 +957,22 @@ function DropdownControl({
   onChange: (val: string) => void;
 }) {
   const options = field.props.options ?? [];
+  const currentVal = String(field.value ?? "");
+  const allOptions = options.includes(currentVal) ? options : [currentVal, ...options];
+
   return (
-    <select
-      className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-[#38bdf8]/50"
-      value={String(field.value ?? "")}
-      onChange={(e) => onChange(e.target.value)}
-      disabled={field.readOnly}
-    >
-      {options.map((opt) => (
-        <option key={opt} value={opt}>
-          {opt}
-        </option>
-      ))}
-      {!options.includes(String(field.value ?? "")) && (
-        <option value={String(field.value ?? "")}>{String(field.value ?? "")}</option>
-      )}
-    </select>
+    <Select value={currentVal} onValueChange={(v) => v && onChange(v)} disabled={field.readOnly}>
+      <SelectTrigger className="h-7 w-40 text-xs">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {allOptions.map((opt) => (
+          <SelectItem key={opt} value={opt}>
+            {opt}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -1172,16 +1191,24 @@ function WidgetCustomizer({
       </div>
 
       <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
-        <button
-          onClick={handleReset}
-          className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
-        >
-          <RotateCcwIcon className="size-3" />
-          Reset to auto
-        </button>
-        <Button size="sm" onClick={handleSave}>
-          Apply
-        </Button>
+        <PopoverClose
+          render={
+            <button
+              onClick={handleReset}
+              className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              <RotateCcwIcon className="size-3" />
+              Reset to auto
+            </button>
+          }
+        />
+        <PopoverClose
+          render={
+            <Button size="sm" onClick={handleSave}>
+              Apply
+            </Button>
+          }
+        />
       </div>
     </div>
   );
@@ -1206,7 +1233,7 @@ function FieldRow({
 }) {
   if (field.hidden) return null;
 
-  const pathSegments = field.nodeId.split("/").slice(1); // remove addon name prefix
+  const pathSegments = field.nodeId.split("/");
 
   const handleChange = (val: string | number | boolean | null) => {
     onEdit(pathSegments, val);
@@ -1778,6 +1805,7 @@ function EditorTab({
                     key={`${child.key}-${i}`}
                     node={child}
                     depth={0}
+                    parentPath={EMPTY_PATH}
                     selectedPath={selectedPath}
                     onSelect={handleSelectPath}
                     searchQuery={searchQuery}

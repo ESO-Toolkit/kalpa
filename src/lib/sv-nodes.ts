@@ -1,19 +1,6 @@
 import type { SvTreeNode, NodeContext } from "../types";
 
 /**
- * Build a stable path ID for a node in the SV tree.
- *
- * Format: `addonName/scope/keyPath`
- *
- * Examples:
- *   LibHistoire/$AccountWide/guilds/1/lastScannedId
- *   Srendarr/@username/CharName^NA/profiles/Default/bars/bar1/enabled
- */
-export function buildNodeId(addonName: string, pathSegments: string[]): string {
-  return [addonName, ...pathSegments].join("/");
-}
-
-/**
  * Classify a second-level key into a context category.
  *
  * - `$AccountWide` (literal ESO key) → account-wide
@@ -56,19 +43,6 @@ export function humanizeKey(key: string): string {
       .replace(/\s+/g, " ")
       .trim()
   );
-}
-
-/**
- * Count leaf (non-table) children of a node recursively.
- */
-export function countEntries(node: SvTreeNode): number {
-  if (!node.children) return 0;
-  return node.children.reduce((acc, child) => {
-    if (child.valueType === "table" && child.children) {
-      return acc + countEntries(child);
-    }
-    return acc + 1;
-  }, 0);
 }
 
 /**
