@@ -147,6 +147,8 @@ export interface PackAddonEntry {
 
 export type PackType = "addon-pack" | "build-pack" | "roster-pack";
 
+export type PackStatus = "draft" | "published";
+
 export interface Pack {
   id: string;
   authorId: string;
@@ -156,11 +158,13 @@ export interface Pack {
   authorName: string;
   isAnonymous: boolean;
   voteCount: number;
+  installCount: number;
   userVoted: boolean;
   tags: string[];
   addons: PackAddonEntry[];
   createdAt: string;
   updatedAt: string;
+  status: PackStatus;
 }
 
 export interface PackPage {
@@ -200,6 +204,16 @@ export interface EsoPackData {
   packType: string;
   tags: string[];
   addons: PackAddonEntry[];
+}
+
+// ── Installed pack reference (persisted locally) ─────────────────────────
+export interface InstalledPackRef {
+  packId: string;
+  title: string;
+  packType: PackType;
+  authorName: string;
+  addonCount: number;
+  installedAt: string;
 }
 
 // ── Safe Migration types ─────────────────────────────────────────────────

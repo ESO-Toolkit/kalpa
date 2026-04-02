@@ -34,7 +34,10 @@ export function packToIndexItem(pack: Pack): PackIndexItem {
     buildCount: pack.builds?.length ?? 0,
     rosterCount: pack.rosters?.length ?? 0,
     voteCount: pack.voteCount ?? 0,
+    installCount: pack.installCount ?? 0,
     updatedAt: pack.metadata.updatedAt,
+    status: pack.status ?? "published",
+    createdBy: pack.metadata.createdBy,
   };
 }
 
