@@ -648,6 +648,7 @@ const EMPTY_PATH: string[] = [];
 function NavTreeItem({
   node,
   depth,
+  structuralDepth,
   parentPath,
   selectedPath,
   onSelect,
@@ -658,6 +659,7 @@ function NavTreeItem({
 }: {
   node: SvTreeNode;
   depth: number;
+  structuralDepth: number;
   parentPath: string[];
   selectedPath: string[];
   onSelect: (path: string[], node: SvTreeNode) => void;
@@ -677,14 +679,14 @@ function NavTreeItem({
     selectedPath.length === currentPath.length &&
     currentPath.every((seg, i) => selectedPath[i] === seg);
 
-  const context = classifyContext(node.key, depth, knownCharacters);
+  const context = classifyContext(node.key, structuralDepth, knownCharacters);
   const matchesSearch = !searchQuery || node.key.toLowerCase().includes(searchQuery.toLowerCase());
 
   // Detect context wrapper nodes that should be auto-expanded and rendered as chips.
   // These are structural containers (Default, @account, $AccountWide, server names)
   // that users rarely need to interact with — the interesting data is inside them.
   const isContextWrapper =
-    depth <= 2 &&
+    structuralDepth <= 2 &&
     tableChildren.length > 0 &&
     (node.key === "Default" ||
       node.key.startsWith("@") ||
@@ -731,6 +733,7 @@ function NavTreeItem({
             key={`${child.key}-${i}`}
             node={child}
             depth={depth}
+            structuralDepth={structuralDepth + 1}
             parentPath={currentPath}
             selectedPath={selectedPath}
             onSelect={onSelect}
@@ -786,6 +789,7 @@ function NavTreeItem({
             key={`${child.key}-${i}`}
             node={child}
             depth={depth + 1}
+            structuralDepth={structuralDepth + 1}
             parentPath={currentPath}
             selectedPath={selectedPath}
             onSelect={onSelect}
@@ -1690,6 +1694,7 @@ function EditorTab({
                     key={`${child.key}-${i}`}
                     node={child}
                     depth={0}
+                    structuralDepth={0}
                     parentPath={EMPTY_PATH}
                     selectedPath={selectedPath}
                     onSelect={handleSelectPath}
