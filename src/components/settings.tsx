@@ -25,6 +25,8 @@ interface SettingsProps {
   onShowBackups: () => void;
   onShowApiCompat: () => void;
   onShowCharacters: () => void;
+  onShowMigrationWizard: () => void;
+  onShowSafetyCenter: () => void;
   onCheckForAppUpdate: () => void;
 }
 
@@ -36,6 +38,8 @@ export function Settings({
   onShowBackups,
   onShowApiCompat,
   onShowCharacters,
+  onShowMigrationWizard,
+  onShowSafetyCenter,
   onCheckForAppUpdate,
 }: SettingsProps) {
   const [path, setPath] = useState(addonsPath);
@@ -45,7 +49,6 @@ export function Settings({
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [autoUpdate, setAutoUpdate] = useState(false);
   const [minionDetected, setMinionDetected] = useState(false);
-  const [migrating, setMigrating] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
 
   useEffect(() => {
@@ -209,41 +212,24 @@ export function Settings({
               <div className="mt-3">
                 <SectionHeader className="mb-1">Minion Migration</SectionHeader>
                 <p className="mb-2 text-xs text-muted-foreground">
-                  Minion detected. Import addon tracking data to enable update checking.
+                  Minion detected. Use the safe migration wizard to import tracking data with a full
+                  backup and dry-run preview.
                 </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={migrating}
-                  onClick={async () => {
-                    setMigrating(true);
-                    try {
-                      const result = await invokeOrThrow<{
-                        found: boolean;
-                        addonCount: number;
-                        imported: number;
-                        alreadyTracked: number;
-                      }>("migrate_from_minion", { addonsPath });
-                      const { imported, alreadyTracked } = result;
-                      if (imported > 0) {
-                        toast.success(
-                          `Imported ${imported} addon${imported !== 1 ? "s" : ""} from Minion${alreadyTracked > 0 ? ` (${alreadyTracked} already tracked)` : ""}`
-                        );
-                        onRefresh();
-                      } else {
-                        toast.info("All Minion addons are already tracked.");
-                      }
-                    } catch (e) {
-                      toast.error(getTauriErrorMessage(e));
-                    } finally {
-                      setMigrating(false);
-                    }
-                  }}
-                >
-                  {migrating ? "Migrating..." : "Import from Minion"}
+                <Button variant="outline" size="sm" onClick={onShowMigrationWizard}>
+                  Safe Migration Wizard
                 </Button>
               </div>
             )}
+
+            <div className="mt-3">
+              <SectionHeader className="mb-1">Safety Center</SectionHeader>
+              <p className="mb-2 text-xs text-muted-foreground">
+                View snapshots, run integrity checks, and review the operation log.
+              </p>
+              <Button variant="outline" size="sm" onClick={onShowSafetyCenter}>
+                Open Safety Center
+              </Button>
+            </div>
           </div>
 
           <div className="border-t border-white/[0.06]" />

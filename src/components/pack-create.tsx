@@ -414,9 +414,7 @@ export function PackCreateView({
               {s.num}
             </span>
             {s.label}
-            {i === 0 && (
-              <span className="text-muted-foreground/20 mx-1">›</span>
-            )}
+            {i === 0 && <span className="text-muted-foreground/20 mx-1">›</span>}
           </button>
         ))}
       </div>
@@ -504,20 +502,22 @@ export function PackCreateView({
                     )}
                   >
                     {isSelected && (
-                      <span className={cn(
-                        "absolute top-1.5 right-1.5 flex items-center justify-center size-4 rounded-full",
-                        "bg-white/[0.1] border border-white/[0.15]"
-                      )}>
+                      <span
+                        className={cn(
+                          "absolute top-1.5 right-1.5 flex items-center justify-center size-4 rounded-full",
+                          "bg-white/[0.1] border border-white/[0.15]"
+                        )}
+                      >
                         <CheckIcon className={cn("size-2.5", accent.text)} />
                       </span>
                     )}
-                    <InfoPill color={pillColor}>
-                      {TYPE_LABELS[pt]}
-                    </InfoPill>
-                    <span className={cn(
-                      "text-[10px] leading-tight transition-colors duration-200",
-                      isSelected ? "text-muted-foreground/70" : "text-muted-foreground/50"
-                    )}>
+                    <InfoPill color={pillColor}>{TYPE_LABELS[pt]}</InfoPill>
+                    <span
+                      className={cn(
+                        "text-[10px] leading-tight transition-colors duration-200",
+                        isSelected ? "text-muted-foreground/70" : "text-muted-foreground/50"
+                      )}
+                    >
                       {PACK_TYPE_DESCRIPTIONS[pt]}
                     </span>
                   </button>
@@ -858,7 +858,9 @@ export function PackCreateView({
             {/* Divider */}
             <div className="flex items-center gap-3">
               <div className="flex-1 border-t border-white/[0.06]" />
-              <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider">or</span>
+              <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider">
+                or
+              </span>
               <div className="flex-1 border-t border-white/[0.06]" />
             </div>
 
@@ -881,11 +883,7 @@ export function PackCreateView({
                     disabled={addons.length === 0 || publishing}
                     className="flex-1"
                   >
-                    {publishing ? (
-                      <Loader2Icon className="size-4 animate-spin" />
-                    ) : (
-                      "Save as Draft"
-                    )}
+                    {publishing ? <Loader2Icon className="size-4 animate-spin" /> : "Save as Draft"}
                   </Button>
                   <Button
                     onClick={handlePublish}

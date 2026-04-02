@@ -58,7 +58,15 @@ export const PACK_TYPE_PILL_COLOR: Record<string, "gold" | "sky" | "violet" | "m
   "roster-pack": "violet",
 };
 
-export const PRESET_TAGS = ["trial", "pvp", "beginner", "healer", "tank", "dps", "utility"] as const;
+export const PRESET_TAGS = [
+  "trial",
+  "pvp",
+  "beginner",
+  "healer",
+  "tank",
+  "dps",
+  "utility",
+] as const;
 
 export const PACK_TYPE_DESCRIPTIONS: Record<string, string> = {
   "addon-pack": "A collection of addons",
