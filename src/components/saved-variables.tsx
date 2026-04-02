@@ -1,6 +1,16 @@
-import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
-import type { AddonManifest, SavedVariableFile, SvTreeNode } from "../types";
+import type {
+  AddonManifest,
+  CharacterInfo,
+  SavedVariableFile,
+  SvTreeNode,
+  EffectiveField,
+  SvSchemaOverlay,
+  WidgetType,
+  WidgetOverride,
+  WidgetProps,
+} from "../types";
 import {
   Dialog,
   DialogContent,
@@ -20,7 +30,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Popover, PopoverTrigger, PopoverContent, PopoverTitle } from "@/components/ui/popover";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { getSetting, setSetting } from "@/lib/store";
+import { classifyContext, humanizeKey, getTableChildren, getLeafChildren } from "@/lib/sv-nodes";
+import { resolveEffectiveField } from "@/lib/sv-widgets";
 import {
   RefreshCwIcon,
   ChevronRightIcon,
@@ -28,17 +42,20 @@ import {
   FileTextIcon,
   CopyIcon,
   AlertTriangleIcon,
-  HashIcon,
-  ToggleLeftIcon,
-  TypeIcon,
   BracesIcon,
-  CircleSlashIcon,
   Trash2Icon,
   ShieldCheckIcon,
   HardDriveIcon,
   PackageXIcon,
   ArrowUpDownIcon,
   CheckIcon,
+  SearchIcon,
+  SettingsIcon,
+  EyeOffIcon,
+  LockIcon,
+  RotateCcwIcon,
+  MinusIcon,
+  PlusIcon,
 } from "lucide-react";
 
 interface SavedVariablesProps {
@@ -123,164 +140,6 @@ const SIZE_BAR_COLORS: Record<SizeCategory, string> = {
   medium: "bg-amber-500/40",
   large: "bg-red-500/40",
 };
-
-// ─── Tree Node Renderer ──────────────────────────────────────
-
-function TypeIcon_({ type: t }: { type: string }) {
-  switch (t) {
-    case "string":
-      return <TypeIcon className="size-3 text-green-400" />;
-    case "number":
-      return <HashIcon className="size-3 text-blue-400" />;
-    case "boolean":
-      return <ToggleLeftIcon className="size-3 text-amber-400" />;
-    case "nil":
-      return <CircleSlashIcon className="size-3 text-muted-foreground" />;
-    case "table":
-      return <BracesIcon className="size-3 text-purple-400" />;
-    default:
-      return null;
-  }
-}
-
-const EMPTY_PATH: string[] = [];
-
-interface TreeNodeProps {
-  node: SvTreeNode;
-  depth: number;
-  onEdit: (path: string[], value: string | number | boolean | null) => void;
-  path: string[];
-}
-
-const TreeNode = memo(function TreeNode({ node, depth, onEdit, path }: TreeNodeProps) {
-  const [expanded, setExpanded] = useState(depth < 2);
-  const [editingValue, setEditingValue] = useState<string | null>(null);
-
-  const isTable = node.valueType === "table" && node.children;
-  const currentPath = useMemo(() => [...path, node.key], [path, node.key]);
-
-  const handleSave = () => {
-    if (editingValue === null) return;
-    let parsed: string | number | boolean | null;
-    if (node.valueType === "number") {
-      parsed = Number(editingValue);
-      if (isNaN(parsed)) {
-        toast.error("Invalid number");
-        return;
-      }
-    } else if (node.valueType === "boolean") {
-      parsed = editingValue === "true";
-    } else if (node.valueType === "nil") {
-      parsed = null;
-    } else {
-      parsed = editingValue;
-    }
-    onEdit(currentPath, parsed);
-    setEditingValue(null);
-  };
-
-  if (isTable) {
-    return (
-      <div className="select-text">
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left text-xs hover:bg-white/[0.04]"
-          style={{ paddingLeft: `${depth * 12 + 4}px` }}
-          aria-expanded={expanded}
-          aria-label={`${expanded ? "Collapse" : "Expand"} ${node.key}`}
-        >
-          {expanded ? (
-            <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
-          ) : (
-            <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" />
-          )}
-          <TypeIcon_ type={node.valueType} />
-          <span className="font-medium text-foreground/80">{node.key}</span>
-          <span className="ml-1 text-muted-foreground/50">
-            ({node.children?.length ?? 0} entries)
-          </span>
-        </button>
-        {expanded && (
-          <div>
-            {node.children?.map((child, i) => (
-              <TreeNode
-                key={`${child.key}-${i}`}
-                node={child}
-                depth={depth + 1}
-                onEdit={onEdit}
-                path={currentPath}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  const displayValue =
-    node.value === null || node.value === undefined
-      ? "nil"
-      : typeof node.value === "string"
-        ? `"${node.value}"`
-        : String(node.value);
-
-  return (
-    <div
-      className="flex items-center gap-1 rounded px-1 py-0.5 text-xs hover:bg-white/[0.04]"
-      style={{ paddingLeft: `${depth * 12 + 4}px` }}
-    >
-      <div className="size-3 shrink-0" />
-      <TypeIcon_ type={node.valueType} />
-      <span className="font-medium text-foreground/80">{node.key}</span>
-      <span className="mx-1 text-muted-foreground/40">=</span>
-      {editingValue !== null ? (
-        <span className="flex items-center gap-1">
-          {node.valueType === "boolean" ? (
-            <select
-              className="rounded border border-white/[0.1] bg-transparent px-1 py-0 text-xs"
-              value={editingValue}
-              onChange={(e) => setEditingValue(e.target.value)}
-              onBlur={handleSave}
-              aria-label={`Edit ${node.key}`}
-              autoFocus
-            >
-              <option value="true">true</option>
-              <option value="false">false</option>
-            </select>
-          ) : (
-            <input
-              type={node.valueType === "number" ? "number" : "text"}
-              className="w-40 rounded border border-white/[0.1] bg-transparent px-1 py-0 text-xs"
-              value={editingValue}
-              onChange={(e) => setEditingValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSave();
-                if (e.key === "Escape") setEditingValue(null);
-              }}
-              onBlur={handleSave}
-              aria-label={`Edit ${node.key}`}
-              autoFocus
-            />
-          )}
-        </span>
-      ) : (
-        <button
-          className="cursor-pointer truncate text-left text-foreground/60 hover:text-foreground"
-          onClick={() => {
-            if (node.valueType !== "nil") {
-              const raw = node.value === null || node.value === undefined ? "" : String(node.value);
-              setEditingValue(raw);
-            }
-          }}
-          title="Click to edit"
-          aria-label={`Edit ${node.key}, current value: ${displayValue}`}
-        >
-          {displayValue}
-        </button>
-      )}
-    </div>
-  );
-});
 
 // ─── Tree update helper ──────────────────────────────────────
 
@@ -761,19 +620,918 @@ function CleanupTab({
   );
 }
 
-// ─── Editor Tab ──────────────────────────────────────────────
+// ─── Editor Tab v2 — Two-panel layout with smart controls ───
+
+const OVERLAY_STORE_KEY = "sv-schema-overlay";
+
+// ── Nav Tree Item ────────────────────────────────────────────
+
+function NavTreeItem({
+  node,
+  depth,
+  selectedPath,
+  onSelect,
+  searchQuery,
+  knownCharacters,
+  expandedPaths,
+  toggleExpanded,
+}: {
+  node: SvTreeNode;
+  depth: number;
+  selectedPath: string[];
+  onSelect: (path: string[], node: SvTreeNode) => void;
+  searchQuery: string;
+  knownCharacters: Set<string>;
+  expandedPaths: Set<string>;
+  toggleExpanded: (pathKey: string) => void;
+}) {
+  const pathKey = [...selectedPath.slice(0, depth), node.key].join("/");
+  const isExpanded = expandedPaths.has(pathKey);
+  const tableChildren = getTableChildren(node);
+  const entryCount = node.children?.length ?? 0;
+  const isSelected =
+    selectedPath.length > depth &&
+    selectedPath[depth] === node.key &&
+    selectedPath.length === depth + 1;
+
+  const context = classifyContext(node.key, depth, knownCharacters);
+  const matchesSearch = !searchQuery || node.key.toLowerCase().includes(searchQuery.toLowerCase());
+
+  // Also check if any descendant matches
+  const hasMatchingDescendant = useMemo(() => {
+    if (!searchQuery) return true;
+    const check = (n: SvTreeNode): boolean => {
+      if (n.key.toLowerCase().includes(searchQuery.toLowerCase())) return true;
+      return (n.children ?? []).some(check);
+    };
+    return check(node);
+  }, [node, searchQuery]);
+
+  if (!matchesSearch && !hasMatchingDescendant) return null;
+
+  const currentPath = [...selectedPath.slice(0, depth), node.key];
+
+  return (
+    <div>
+      <button
+        onClick={() => {
+          onSelect(currentPath, node);
+          if (tableChildren.length > 0) toggleExpanded(pathKey);
+        }}
+        className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-xs transition-colors ${
+          isSelected
+            ? "bg-white/[0.08] text-foreground"
+            : "text-foreground/70 hover:bg-white/[0.04] hover:text-foreground"
+        }`}
+        style={{ paddingLeft: `${depth * 14 + 8}px` }}
+      >
+        {tableChildren.length > 0 ? (
+          isExpanded ? (
+            <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" />
+          )
+        ) : (
+          <div className="size-3 shrink-0" />
+        )}
+        <span className="truncate font-medium">{node.key}</span>
+        <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/50">{entryCount}</span>
+        {context === "account-wide" && (
+          <InfoPill color="sky" className="ml-1 !text-[9px] !px-1 !py-0">
+            Account
+          </InfoPill>
+        )}
+        {context === "per-character" && (
+          <InfoPill color="emerald" className="ml-1 !text-[9px] !px-1 !py-0">
+            Char
+          </InfoPill>
+        )}
+      </button>
+      {isExpanded &&
+        tableChildren.map((child, i) => (
+          <NavTreeItem
+            key={`${child.key}-${i}`}
+            node={child}
+            depth={depth + 1}
+            selectedPath={selectedPath}
+            onSelect={onSelect}
+            searchQuery={searchQuery}
+            knownCharacters={knownCharacters}
+            expandedPaths={expandedPaths}
+            toggleExpanded={toggleExpanded}
+          />
+        ))}
+    </div>
+  );
+}
+
+// ── Widget Controls ──────────────────────────────────────────
+
+function ToggleControl({
+  field,
+  onChange,
+}: {
+  field: EffectiveField;
+  onChange: (val: boolean) => void;
+}) {
+  const checked = field.value === true;
+  return (
+    <button
+      onClick={() => !field.readOnly && onChange(!checked)}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+        field.readOnly ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
+      } ${checked ? "bg-[#c4a44a]" : "bg-white/[0.12]"}`}
+      aria-label={`${field.label}: ${checked ? "on" : "off"}`}
+    >
+      <span
+        className={`inline-block size-3.5 rounded-full bg-white shadow transition-transform ${
+          checked ? "translate-x-[18px]" : "translate-x-[3px]"
+        }`}
+      />
+    </button>
+  );
+}
+
+function NumberControl({
+  field,
+  onChange,
+}: {
+  field: EffectiveField;
+  onChange: (val: number) => void;
+}) {
+  const fieldVal = String(field.value ?? 0);
+  const [localValue, setLocalValue] = useState(fieldVal);
+  const [prevFieldVal, setPrevFieldVal] = useState(fieldVal);
+  if (prevFieldVal !== fieldVal) {
+    setPrevFieldVal(fieldVal);
+    setLocalValue(fieldVal);
+  }
+
+  const commit = () => {
+    const num = Number(localValue);
+    if (!isNaN(num)) onChange(num);
+    else setLocalValue(String(field.value ?? 0));
+  };
+
+  const step = field.props.step ?? 1;
+
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        onClick={() => onChange((Number(field.value) || 0) - step)}
+        className="flex size-6 items-center justify-center rounded border border-white/[0.08] bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+        disabled={field.readOnly}
+      >
+        <MinusIcon className="size-3" />
+      </button>
+      <input
+        type="number"
+        className="w-20 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30"
+        value={localValue}
+        onChange={(e) => setLocalValue(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === "Enter" && commit()}
+        disabled={field.readOnly}
+        step={step}
+        min={field.props.min}
+        max={field.props.max}
+      />
+      <button
+        onClick={() => onChange((Number(field.value) || 0) + step)}
+        className="flex size-6 items-center justify-center rounded border border-white/[0.08] bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
+        disabled={field.readOnly}
+      >
+        <PlusIcon className="size-3" />
+      </button>
+    </div>
+  );
+}
+
+function SliderControl({
+  field,
+  onChange,
+}: {
+  field: EffectiveField;
+  onChange: (val: number) => void;
+}) {
+  const min = field.props.min ?? 0;
+  const max = field.props.max ?? 100;
+  const step = field.props.step ?? 1;
+  const value = Number(field.value) || min;
+
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="range"
+        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/[0.1] accent-[#c4a44a]"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        disabled={field.readOnly}
+      />
+      <span className="w-10 text-right text-xs text-muted-foreground tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+function ColorControl({
+  field,
+  originalNode,
+  onChangeColor,
+}: {
+  field: EffectiveField;
+  originalNode: SvTreeNode | null;
+  onChangeColor: (r: number, g: number, b: number, a?: number) => void;
+}) {
+  // Extract r,g,b,a from children
+  const children = originalNode?.children ?? [];
+  const getVal = (key: string) => {
+    const c = children.find((ch) => ch.key === key);
+    return c ? Number(c.value ?? 0) : 0;
+  };
+  const r = getVal("r");
+  const g = getVal("g");
+  const b = getVal("b");
+  const a = children.some((ch) => ch.key === "a") ? getVal("a") : undefined;
+
+  const hexColor = `#${Math.round(r * 255)
+    .toString(16)
+    .padStart(2, "0")}${Math.round(g * 255)
+    .toString(16)
+    .padStart(2, "0")}${Math.round(b * 255)
+    .toString(16)
+    .padStart(2, "0")}`;
+
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="color"
+        value={hexColor}
+        onChange={(e) => {
+          const hex = e.target.value;
+          const nr = parseInt(hex.slice(1, 3), 16) / 255;
+          const ng = parseInt(hex.slice(3, 5), 16) / 255;
+          const nb = parseInt(hex.slice(5, 7), 16) / 255;
+          onChangeColor(nr, ng, nb, a);
+        }}
+        className="size-7 cursor-pointer rounded border border-white/[0.1] bg-transparent p-0"
+        disabled={field.readOnly}
+      />
+      <span className="text-xs text-muted-foreground font-mono">{hexColor}</span>
+      {a !== undefined && (
+        <span className="text-xs text-muted-foreground/60">a: {a.toFixed(2)}</span>
+      )}
+    </div>
+  );
+}
+
+function TextControl({
+  field,
+  onChange,
+}: {
+  field: EffectiveField;
+  onChange: (val: string) => void;
+}) {
+  const fieldVal = String(field.value ?? "");
+  const [localValue, setLocalValue] = useState(fieldVal);
+  const [prevFieldVal, setPrevFieldVal] = useState(fieldVal);
+  if (prevFieldVal !== fieldVal) {
+    setPrevFieldVal(fieldVal);
+    setLocalValue(fieldVal);
+  }
+
+  const commit = () => onChange(localValue);
+
+  if (field.props.multiline) {
+    return (
+      <textarea
+        className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30 resize-y"
+        rows={3}
+        value={localValue}
+        onChange={(e) => setLocalValue(e.target.value)}
+        onBlur={commit}
+        disabled={field.readOnly}
+      />
+    );
+  }
+
+  return (
+    <input
+      type="text"
+      className="w-full max-w-xs rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30"
+      value={localValue}
+      onChange={(e) => setLocalValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === "Enter" && commit()}
+      disabled={field.readOnly}
+    />
+  );
+}
+
+function DropdownControl({
+  field,
+  onChange,
+}: {
+  field: EffectiveField;
+  onChange: (val: string) => void;
+}) {
+  const options = field.props.options ?? [];
+  return (
+    <select
+      className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-[#38bdf8]/50"
+      value={String(field.value ?? "")}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={field.readOnly}
+    >
+      {options.map((opt) => (
+        <option key={opt} value={opt}>
+          {opt}
+        </option>
+      ))}
+      {!options.includes(String(field.value ?? "")) && (
+        <option value={String(field.value ?? "")}>{String(field.value ?? "")}</option>
+      )}
+    </select>
+  );
+}
+
+function ReadonlyControl({ field }: { field: EffectiveField }) {
+  return (
+    <span className="text-xs text-muted-foreground/60 italic">
+      {field.value === null ? "nil" : String(field.value)}
+    </span>
+  );
+}
+
+function RawControl({
+  field,
+  onChange,
+}: {
+  field: EffectiveField;
+  onChange: (val: string) => void;
+}) {
+  const fieldVal = String(field.value ?? "");
+  const [localValue, setLocalValue] = useState(fieldVal);
+  const [prevFieldVal, setPrevFieldVal] = useState(fieldVal);
+  if (prevFieldVal !== fieldVal) {
+    setPrevFieldVal(fieldVal);
+    setLocalValue(fieldVal);
+  }
+
+  return (
+    <textarea
+      className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30 resize-y"
+      rows={2}
+      value={localValue}
+      onChange={(e) => setLocalValue(e.target.value)}
+      onBlur={() => onChange(localValue)}
+      disabled={field.readOnly}
+    />
+  );
+}
+
+// ── Customization Popover ────────────────────────────────────
+
+function WidgetCustomizer({
+  field,
+  overlay,
+  addonName,
+  onSave,
+}: {
+  field: EffectiveField;
+  overlay: SvSchemaOverlay;
+  addonName: string;
+  onSave: (overlay: SvSchemaOverlay) => void;
+}) {
+  const existing = overlay[addonName]?.[field.nodeId];
+  const [widgetType, setWidgetType] = useState<WidgetType | "">(existing?.widget ?? "");
+  const [label, setLabel] = useState(existing?.label ?? "");
+  const [hidden, setHidden] = useState(existing?.hidden ?? false);
+  const [readOnly, setReadOnly] = useState(existing?.readOnly ?? false);
+  const [min, setMin] = useState(String(existing?.props?.min ?? ""));
+  const [max, setMax] = useState(String(existing?.props?.max ?? ""));
+  const [step, setStep] = useState(String(existing?.props?.step ?? ""));
+  const [options, setOptions] = useState((existing?.props?.options ?? []).join(", "));
+
+  const handleSave = () => {
+    const override: WidgetOverride = {};
+    if (widgetType) override.widget = widgetType;
+    if (label.trim()) override.label = label.trim();
+    if (hidden) override.hidden = true;
+    if (readOnly) override.readOnly = true;
+
+    const props: Partial<WidgetProps> = {};
+    if (min !== "") props.min = Number(min);
+    if (max !== "") props.max = Number(max);
+    if (step !== "") props.step = Number(step);
+    if (options.trim())
+      props.options = options
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean);
+    if (Object.keys(props).length > 0) override.props = props;
+
+    const next = { ...overlay };
+    if (!next[addonName]) next[addonName] = {};
+    if (Object.keys(override).length > 0) {
+      next[addonName] = { ...next[addonName], [field.nodeId]: override };
+    } else {
+      const { [field.nodeId]: _, ...rest } = next[addonName];
+      next[addonName] = rest;
+    }
+
+    onSave(next);
+  };
+
+  const handleReset = () => {
+    const next = { ...overlay };
+    if (next[addonName]) {
+      const { [field.nodeId]: _, ...rest } = next[addonName];
+      next[addonName] = rest;
+    }
+    onSave(next);
+  };
+
+  return (
+    <div className="space-y-2.5">
+      <PopoverTitle>Customize Widget</PopoverTitle>
+
+      <div>
+        <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Widget Type
+        </label>
+        <select
+          className="mt-0.5 w-full rounded border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none"
+          value={widgetType}
+          onChange={(e) => setWidgetType((e.target.value || "") as WidgetType | "")}
+        >
+          <option value="">Auto-detect</option>
+          <option value="text">Text</option>
+          <option value="number">Number</option>
+          <option value="toggle">Toggle</option>
+          <option value="slider">Slider</option>
+          <option value="color">Color</option>
+          <option value="dropdown">Dropdown</option>
+          <option value="readonly">Read-only</option>
+          <option value="raw">Raw</option>
+        </select>
+      </div>
+
+      {(widgetType === "slider" || widgetType === "") && (
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Min
+            </label>
+            <input
+              type="number"
+              className="mt-0.5 w-full rounded border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none"
+              value={min}
+              onChange={(e) => setMin(e.target.value)}
+              placeholder="—"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Max
+            </label>
+            <input
+              type="number"
+              className="mt-0.5 w-full rounded border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none"
+              value={max}
+              onChange={(e) => setMax(e.target.value)}
+              placeholder="—"
+            />
+          </div>
+          <div className="flex-1">
+            <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Step
+            </label>
+            <input
+              type="number"
+              className="mt-0.5 w-full rounded border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none"
+              value={step}
+              onChange={(e) => setStep(e.target.value)}
+              placeholder="1"
+            />
+          </div>
+        </div>
+      )}
+
+      {widgetType === "dropdown" && (
+        <div>
+          <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            Options (comma-separated)
+          </label>
+          <input
+            type="text"
+            className="mt-0.5 w-full rounded border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none"
+            value={options}
+            onChange={(e) => setOptions(e.target.value)}
+            placeholder="option1, option2, option3"
+          />
+        </div>
+      )}
+
+      <div>
+        <label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Label Override
+        </label>
+        <input
+          type="text"
+          className="mt-0.5 w-full rounded border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder={humanizeKey(field.key)}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+          <input
+            type="checkbox"
+            checked={hidden}
+            onChange={(e) => setHidden(e.target.checked)}
+            className="size-3.5 accent-[#c4a44a]"
+          />
+          <EyeOffIcon className="size-3" />
+          Hide
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
+          <input
+            type="checkbox"
+            checked={readOnly}
+            onChange={(e) => setReadOnly(e.target.checked)}
+            className="size-3.5 accent-[#c4a44a]"
+          />
+          <LockIcon className="size-3" />
+          Read-only
+        </label>
+      </div>
+
+      <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
+        <button
+          onClick={handleReset}
+          className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          <RotateCcwIcon className="size-3" />
+          Reset to auto
+        </button>
+        <Button size="sm" onClick={handleSave}>
+          Apply
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ── Field Row (renders one EffectiveField with its widget) ───
+
+function FieldRow({
+  field,
+  originalNode,
+  overlay,
+  addonName,
+  onEdit,
+  onOverlayChange,
+}: {
+  field: EffectiveField;
+  originalNode: SvTreeNode | null;
+  overlay: SvSchemaOverlay;
+  addonName: string;
+  onEdit: (path: string[], value: string | number | boolean | null) => void;
+  onOverlayChange: (overlay: SvSchemaOverlay) => void;
+}) {
+  if (field.hidden) return null;
+
+  const pathSegments = field.nodeId.split("/").slice(1); // remove addon name prefix
+
+  const handleChange = (val: string | number | boolean | null) => {
+    onEdit(pathSegments, val);
+  };
+
+  const handleColorChange = (r: number, g: number, b: number, a?: number) => {
+    onEdit([...pathSegments, "r"], r);
+    onEdit([...pathSegments, "g"], g);
+    onEdit([...pathSegments, "b"], b);
+    if (a !== undefined) onEdit([...pathSegments, "a"], a);
+  };
+
+  const renderWidget = () => {
+    switch (field.widget) {
+      case "toggle":
+        return <ToggleControl field={field} onChange={(v) => handleChange(v)} />;
+      case "number":
+        return <NumberControl field={field} onChange={(v) => handleChange(v)} />;
+      case "slider":
+        return <SliderControl field={field} onChange={(v) => handleChange(v)} />;
+      case "color":
+        return (
+          <ColorControl
+            field={field}
+            originalNode={originalNode}
+            onChangeColor={handleColorChange}
+          />
+        );
+      case "text":
+        return <TextControl field={field} onChange={(v) => handleChange(v)} />;
+      case "dropdown":
+        return <DropdownControl field={field} onChange={(v) => handleChange(v)} />;
+      case "readonly":
+        return <ReadonlyControl field={field} />;
+      case "raw":
+        return <RawControl field={field} onChange={(v) => handleChange(v)} />;
+      default:
+        return <ReadonlyControl field={field} />;
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg px-2.5 py-1.5 hover:bg-white/[0.02] group">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-foreground/80">{field.label}</span>
+          <span className="text-[10px] font-mono text-muted-foreground/40">{field.key}</span>
+        </div>
+      </div>
+      <div className="shrink-0">{renderWidget()}</div>
+      {field.confidence !== "certain" && (
+        <Popover>
+          <PopoverTrigger className="opacity-0 group-hover:opacity-100 transition-opacity">
+            <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-[#38bdf8]" />
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-72">
+            <WidgetCustomizer
+              field={field}
+              overlay={overlay}
+              addonName={addonName}
+              onSave={onOverlayChange}
+            />
+          </PopoverContent>
+        </Popover>
+      )}
+    </div>
+  );
+}
+
+// ── Breadcrumb Bar ───────────────────────────────────────────
+
+function Breadcrumbs({
+  path,
+  knownCharacters,
+  onNavigate,
+}: {
+  path: string[];
+  knownCharacters: Set<string>;
+  onNavigate: (depth: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 text-xs overflow-x-auto pb-1">
+      <button
+        onClick={() => onNavigate(0)}
+        className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+      >
+        Root
+      </button>
+      {path.map((segment, i) => {
+        const ctx = classifyContext(segment, i, knownCharacters);
+        return (
+          <span key={i} className="flex items-center gap-1">
+            <ChevronRightIcon className="size-3 text-muted-foreground/40" />
+            <button
+              onClick={() => onNavigate(i + 1)}
+              className={`shrink-0 transition-colors ${
+                i === path.length - 1
+                  ? "text-foreground font-medium"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {segment}
+            </button>
+            {ctx === "account-wide" && (
+              <InfoPill color="sky" className="!text-[9px] !px-1 !py-0">
+                Account
+              </InfoPill>
+            )}
+            {ctx === "per-character" && (
+              <InfoPill color="emerald" className="!text-[9px] !px-1 !py-0">
+                Character
+              </InfoPill>
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Detail Panel (right side) ────────────────────────────────
+
+function DetailPanel({
+  selectedNode,
+  selectedPath,
+  tree,
+  overlay,
+  knownCharacters,
+  onNavigate,
+  onEdit,
+  onOverlayChange,
+  onSelectPath,
+}: {
+  selectedNode: SvTreeNode | null;
+  selectedPath: string[];
+  tree: SvTreeNode | null;
+  overlay: SvSchemaOverlay;
+  knownCharacters: Set<string>;
+  onNavigate: (depth: number) => void;
+  onEdit: (path: string[], value: string | number | boolean | null) => void;
+  onOverlayChange: (overlay: SvSchemaOverlay) => void;
+  onSelectPath: (path: string[], node: SvTreeNode) => void;
+}) {
+  const addonName = selectedPath[0] ?? "";
+  const leafChildren = useMemo(
+    () => (selectedNode ? getLeafChildren(selectedNode) : []),
+    [selectedNode]
+  );
+  const tableChildren = useMemo(
+    () => (selectedNode ? getTableChildren(selectedNode) : []),
+    [selectedNode]
+  );
+
+  // Build effective fields for leaf children
+  const effectiveFields = useMemo(() => {
+    return leafChildren.map((child) => {
+      const childPath = [...selectedPath, child.key];
+      const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
+      return resolveEffectiveField(child, childPath, ctx, overlay, addonName, knownCharacters);
+    });
+  }, [leafChildren, selectedPath, knownCharacters, overlay, addonName]);
+
+  // Color table children also get form rendering
+  const colorTableFields = useMemo(() => {
+    return tableChildren
+      .filter((child) => {
+        if (!child.children || child.children.length < 3 || child.children.length > 4) return false;
+        const keys = new Set(child.children.map((c) => c.key));
+        return keys.has("r") && keys.has("g") && keys.has("b");
+      })
+      .map((child) => {
+        const childPath = [...selectedPath, child.key];
+        const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
+        return {
+          field: resolveEffectiveField(child, childPath, ctx, overlay, addonName, knownCharacters),
+          node: child,
+        };
+      });
+  }, [tableChildren, selectedPath, knownCharacters, overlay, addonName]);
+
+  if (!selectedNode || !tree) {
+    return (
+      <div className="flex flex-1 items-center justify-center py-12">
+        <p className="text-sm text-muted-foreground">
+          Select a node from the tree to view its settings.
+        </p>
+      </div>
+    );
+  }
+
+  // Non-color table children (navigable groups)
+  const groupChildren = tableChildren.filter((child) => {
+    if (!child.children || child.children.length < 3 || child.children.length > 4) return true;
+    const keys = new Set(child.children.map((c) => c.key));
+    return !(keys.has("r") && keys.has("g") && keys.has("b"));
+  });
+
+  // Find original nodes for field rendering
+  const findOriginalNode = (key: string) =>
+    selectedNode.children?.find((c) => c.key === key) ?? null;
+
+  const visibleFields = effectiveFields.filter((f) => !f.hidden);
+  const visibleColorFields = colorTableFields.filter((f) => !f.field.hidden);
+
+  return (
+    <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
+      <Breadcrumbs path={selectedPath} knownCharacters={knownCharacters} onNavigate={onNavigate} />
+
+      <div className="mt-2 flex-1 overflow-y-auto space-y-3">
+        {/* Leaf settings */}
+        {visibleFields.length > 0 && (
+          <div>
+            <div className="mb-1.5 text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+              Settings
+            </div>
+            <div className="space-y-0.5">
+              {visibleFields.map((field) => (
+                <FieldRow
+                  key={field.nodeId}
+                  field={field}
+                  originalNode={findOriginalNode(field.key)}
+                  overlay={overlay}
+                  addonName={addonName}
+                  onEdit={onEdit}
+                  onOverlayChange={onOverlayChange}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Color fields from table children */}
+        {visibleColorFields.length > 0 && (
+          <div>
+            <div className="mb-1.5 text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+              Colors
+            </div>
+            <div className="space-y-0.5">
+              {visibleColorFields.map(({ field, node }) => (
+                <FieldRow
+                  key={field.nodeId}
+                  field={field}
+                  originalNode={node}
+                  overlay={overlay}
+                  addonName={addonName}
+                  onEdit={onEdit}
+                  onOverlayChange={onOverlayChange}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Sub-groups (navigable) */}
+        {groupChildren.length > 0 && (
+          <div>
+            <div className="mb-1.5 text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+              Groups
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {groupChildren.map((child, i) => {
+                const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
+                const entries = child.children?.length ?? 0;
+                return (
+                  <button
+                    key={`${child.key}-${i}`}
+                    onClick={() => onSelectPath([...selectedPath, child.key], child)}
+                    className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] p-2.5 text-left transition-all hover:border-white/[0.1] hover:bg-white/[0.04]"
+                  >
+                    <BracesIcon className="size-3.5 shrink-0 text-purple-400/70" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1">
+                        <span className="truncate text-xs font-medium">{child.key}</span>
+                        {ctx === "account-wide" && (
+                          <InfoPill color="sky" className="!text-[9px] !px-1 !py-0">
+                            Account
+                          </InfoPill>
+                        )}
+                        {ctx === "per-character" && (
+                          <InfoPill color="emerald" className="!text-[9px] !px-1 !py-0">
+                            Char
+                          </InfoPill>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-muted-foreground/50">
+                        {entries} {entries === 1 ? "entry" : "entries"}
+                      </span>
+                    </div>
+                    <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground/30" />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {visibleFields.length === 0 &&
+          visibleColorFields.length === 0 &&
+          groupChildren.length === 0 && (
+            <div className="py-8 text-center">
+              <EyeOffIcon className="mx-auto mb-2 size-6 text-muted-foreground/30" />
+              <p className="text-xs text-muted-foreground">No visible settings in this node.</p>
+            </div>
+          )}
+      </div>
+    </div>
+  );
+}
+
+// ── Editor Tab ──────────────────────────────────────────────
 
 function EditorTab({
   files,
   addonsPath,
   initialFile,
   esoRunning,
+  characters,
   onDirtyChange,
 }: {
   files: SavedVariableFile[];
   addonsPath: string;
   initialFile: string;
   esoRunning: boolean;
+  characters: CharacterInfo[];
   onDirtyChange: (dirty: boolean) => void;
 }) {
   const [selectedFile, setSelectedFile] = useState<string>(initialFile);
@@ -781,6 +1539,25 @@ function EditorTab({
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
+  const [overlay, setOverlay] = useState<SvSchemaOverlay>({});
+
+  // Navigation state
+  const [selectedPath, setSelectedPath] = useState<string[]>([]);
+  const [selectedNode, setSelectedNode] = useState<SvTreeNode | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+
+  const knownCharacters = useMemo(() => new Set(characters.map((c) => c.name)), [characters]);
+
+  // Load overlay from store
+  useEffect(() => {
+    void getSetting<SvSchemaOverlay>(OVERLAY_STORE_KEY, {}).then(setOverlay);
+  }, []);
+
+  const handleOverlayChange = useCallback((next: SvSchemaOverlay) => {
+    setOverlay(next);
+    void setSetting(OVERLAY_STORE_KEY, next);
+  }, []);
 
   // Notify parent of dirty state changes
   useEffect(() => {
@@ -799,6 +1576,8 @@ function EditorTab({
       if (!fileName) return;
       setLoading(true);
       setDirty(false);
+      setSelectedPath([]);
+      setSelectedNode(null);
       try {
         const result = await invokeOrThrow<SvTreeNode>("read_saved_variable", {
           addonsPath,
@@ -829,6 +1608,17 @@ function EditorTab({
     });
   }, []);
 
+  // Re-resolve selectedNode when tree changes (edits)
+  useEffect(() => {
+    if (!tree || selectedPath.length === 0) return;
+    let current: SvTreeNode | null = tree;
+    for (const segment of selectedPath) {
+      current = current?.children?.find((c) => c.key === segment) ?? null;
+      if (!current) break;
+    }
+    if (current) setSelectedNode(current);
+  }, [tree, selectedPath]);
+
   const handleSave = useCallback(async () => {
     if (!tree || !selectedFile) return;
 
@@ -846,13 +1636,65 @@ function EditorTab({
     }
   }, [tree, selectedFile, addonsPath]);
 
+  const handleSelectPath = useCallback((path: string[], node: SvTreeNode) => {
+    setSelectedPath(path);
+    setSelectedNode(node);
+  }, []);
+
+  const handleBreadcrumbNavigate = useCallback(
+    (depth: number) => {
+      if (depth === 0) {
+        setSelectedPath([]);
+        setSelectedNode(null);
+        return;
+      }
+      const newPath = selectedPath.slice(0, depth);
+      let current: SvTreeNode | null = tree;
+      for (const segment of newPath) {
+        current = current?.children?.find((c) => c.key === segment) ?? null;
+        if (!current) break;
+      }
+      if (current) {
+        setSelectedPath(newPath);
+        setSelectedNode(current);
+      }
+    },
+    [selectedPath, tree]
+  );
+
+  const toggleExpanded = useCallback((pathKey: string) => {
+    setExpandedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(pathKey)) next.delete(pathKey);
+      else next.add(pathKey);
+      return next;
+    });
+  }, []);
+
+  const expandAll = useCallback(() => {
+    if (!tree?.children) return;
+    const paths = new Set<string>();
+    const walk = (node: SvTreeNode, prefix: string) => {
+      const key = prefix ? `${prefix}/${node.key}` : node.key;
+      if (node.valueType === "table" && node.children) {
+        paths.add(key);
+        node.children.forEach((c) => walk(c, key));
+      }
+    };
+    tree.children.forEach((c) => walk(c, ""));
+    setExpandedPaths(paths);
+  }, [tree]);
+
+  const collapseAll = useCallback(() => {
+    setExpandedPaths(new Set());
+  }, []);
+
   return (
     <div className="space-y-3">
       {esoRunning && (
         <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-400">
           <AlertTriangleIcon className="size-4 shrink-0" />
-          ESO is currently running. Changes to SavedVariables may be overwritten when you exit the
-          game.
+          ESO is running. Changes may be overwritten when you exit the game.
         </div>
       )}
 
@@ -901,27 +1743,81 @@ function EditorTab({
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
 
-      <div className="max-h-[350px] overflow-y-auto rounded-lg border border-white/[0.06] bg-white/[0.02] p-2">
+      {/* Two-panel layout */}
+      <div
+        className="flex gap-0 rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden"
+        style={{ height: "380px" }}
+      >
         {loading ? (
-          <div className="flex items-center justify-center py-8">
+          <div className="flex flex-1 items-center justify-center">
             <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
           </div>
         ) : !tree ? (
-          <p className="py-8 text-center text-sm text-muted-foreground">
-            Select a file to view its contents.
-          </p>
-        ) : (
-          <div className="font-mono">
-            {tree.children?.map((child, i) => (
-              <TreeNode
-                key={`${child.key}-${i}`}
-                node={child}
-                depth={0}
-                onEdit={handleEdit}
-                path={EMPTY_PATH}
-              />
-            ))}
+          <div className="flex flex-1 items-center justify-center">
+            <p className="text-sm text-muted-foreground">Select a file to view its contents.</p>
           </div>
+        ) : (
+          <>
+            {/* Left panel — Nav tree */}
+            <div className="flex w-[200px] shrink-0 flex-col border-r border-white/[0.06]">
+              <div className="p-2">
+                <div className="relative">
+                  <SearchIcon className="absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground/50" />
+                  <input
+                    type="text"
+                    placeholder="Search..."
+                    className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 focus:border-[#38bdf8]/50"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto px-1 pb-1">
+                {tree.children?.map((child, i) => (
+                  <NavTreeItem
+                    key={`${child.key}-${i}`}
+                    node={child}
+                    depth={0}
+                    selectedPath={selectedPath}
+                    onSelect={handleSelectPath}
+                    searchQuery={searchQuery}
+                    knownCharacters={knownCharacters}
+                    expandedPaths={expandedPaths}
+                    toggleExpanded={toggleExpanded}
+                  />
+                ))}
+              </div>
+              <div className="flex gap-1 border-t border-white/[0.06] p-1.5">
+                <button
+                  onClick={expandAll}
+                  className="flex-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+                >
+                  Expand All
+                </button>
+                <button
+                  onClick={collapseAll}
+                  className="flex-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+                >
+                  Collapse All
+                </button>
+              </div>
+            </div>
+
+            {/* Right panel — Detail / Form */}
+            <div className="flex flex-1 flex-col overflow-hidden p-3">
+              <DetailPanel
+                selectedNode={selectedNode}
+                selectedPath={selectedPath}
+                tree={tree}
+                overlay={overlay}
+                knownCharacters={knownCharacters}
+                onNavigate={handleBreadcrumbNavigate}
+                onEdit={handleEdit}
+                onOverlayChange={handleOverlayChange}
+                onSelectPath={handleSelectPath}
+              />
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -932,10 +1828,12 @@ function EditorTab({
 
 function CopyProfileTab({
   files,
+  characters,
   addonsPath,
   onRefresh,
 }: {
   files: SavedVariableFile[];
+  characters: CharacterInfo[];
   addonsPath: string;
   onRefresh: () => void;
 }) {
@@ -950,9 +1848,24 @@ function CopyProfileTab({
     [files, selectedFile]
   );
 
-  const charKeys = useMemo(() => currentFile?.characterKeys ?? [], [currentFile]);
+  // Known character names from AddOnSettings.txt (authoritative source)
+  const knownNames = useMemo(() => new Set(characters.map((c) => c.name)), [characters]);
 
-  const destOptions = useMemo(() => charKeys.filter((k) => k !== sourceKey), [charKeys, sourceKey]);
+  // Filter this file's keys to only real characters (match known names)
+  const charKeys = useMemo(
+    () => (currentFile?.characterKeys ?? []).filter((k) => knownNames.has(k)),
+    [currentFile, knownNames]
+  );
+
+  // All known character names for the destination (even if not in this file yet)
+  const allCharNames = useMemo(() => [...knownNames].sort(), [knownNames]);
+
+  // Destination: characters in this file first, then others not yet in the file
+  const destInFile = useMemo(() => charKeys.filter((k) => k !== sourceKey), [charKeys, sourceKey]);
+  const destFromOtherFiles = useMemo(
+    () => allCharNames.filter((k) => k !== sourceKey && !charKeys.includes(k)),
+    [allCharNames, sourceKey, charKeys]
+  );
 
   const actualDest = destKey === "__custom__" ? customDest : destKey;
 
@@ -988,7 +1901,7 @@ function CopyProfileTab({
       <div>
         <label className="text-xs text-muted-foreground">1. Select SavedVariables file</label>
         <Select
-          value={selectedFile || undefined}
+          value={selectedFile}
           onValueChange={(v) => {
             if (!v) return;
             setSelectedFile(v);
@@ -1001,12 +1914,15 @@ function CopyProfileTab({
           </SelectTrigger>
           <SelectContent>
             {files
-              .filter((f) => f.characterKeys.length > 0)
-              .map((f) => (
-                <SelectItem key={f.fileName} value={f.fileName}>
-                  {f.addonName} ({f.characterKeys.length} profiles)
-                </SelectItem>
-              ))}
+              .filter((f) => f.characterKeys.some((k) => knownNames.has(k)))
+              .map((f) => {
+                const count = f.characterKeys.filter((k) => knownNames.has(k)).length;
+                return (
+                  <SelectItem key={f.fileName} value={f.fileName}>
+                    {f.addonName} ({count} {count === 1 ? "character" : "characters"})
+                  </SelectItem>
+                );
+              })}
           </SelectContent>
         </Select>
       </div>
@@ -1016,7 +1932,7 @@ function CopyProfileTab({
         <div>
           <label className="text-xs text-muted-foreground">2. Source character</label>
           <Select
-            value={sourceKey || undefined}
+            value={sourceKey}
             onValueChange={(v) => {
               if (!v) return;
               setSourceKey(v);
@@ -1041,17 +1957,23 @@ function CopyProfileTab({
       {sourceKey && (
         <div>
           <label className="text-xs text-muted-foreground">3. Destination character</label>
-          <Select value={destKey || undefined} onValueChange={(v) => v && setDestKey(v)}>
+          <Select value={destKey} onValueChange={(v) => v && setDestKey(v)}>
             <SelectTrigger className="mt-1 w-full">
               <SelectValue placeholder="Choose destination..." />
             </SelectTrigger>
             <SelectContent>
-              {destOptions.map((k) => (
+              {destInFile.map((k) => (
                 <SelectItem key={k} value={k}>
                   {k}
                 </SelectItem>
               ))}
-              <SelectItem value="__custom__">+ New character key...</SelectItem>
+              {destFromOtherFiles.map((k) => (
+                <SelectItem key={k} value={k}>
+                  <span className="text-muted-foreground">{k}</span>
+                  <span className="ml-1 text-[10px] text-muted-foreground/50">(other file)</span>
+                </SelectItem>
+              ))}
+              <SelectItem value="__custom__">+ Custom key...</SelectItem>
             </SelectContent>
           </Select>
           {destKey === "__custom__" && (
@@ -1208,6 +2130,7 @@ function ConfirmDialog({ state, onClose }: { state: ConfirmState | null; onClose
 
 export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVariablesProps) {
   const [files, setFiles] = useState<SavedVariableFile[]>([]);
+  const [characters, setCharacters] = useState<CharacterInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<string>("overview");
   const [editorFile, setEditorFile] = useState<string>("");
@@ -1236,7 +2159,10 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
 
   useEffect(() => {
     void loadFiles();
-  }, [loadFiles]);
+    invokeOrThrow<CharacterInfo[]>("list_characters", { addonsPath })
+      .then(setCharacters)
+      .catch(() => {});
+  }, [loadFiles, addonsPath]);
 
   useEffect(() => {
     invokeOrThrow<boolean>("is_eso_running")
@@ -1268,7 +2194,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
 
   return (
     <Dialog open onOpenChange={(open) => !open && handleClose()}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>SavedVariables Manager</DialogTitle>
         </DialogHeader>
@@ -1304,6 +2230,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
           <TabsContent value="copy">
             <CopyProfileTab
               files={files}
+              characters={characters}
               addonsPath={addonsPath}
               onRefresh={() => void loadFiles()}
             />
@@ -1315,6 +2242,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
               addonsPath={addonsPath}
               initialFile={editorFile}
               esoRunning={esoRunning}
+              characters={characters}
               onDirtyChange={handleDirtyChange}
             />
           </TabsContent>

@@ -143,6 +143,57 @@ export interface SvTreeNode {
   children?: SvTreeNode[];
 }
 
+// ── SavedVariables Editor v2 types ──────────────────────────────────────
+export type WidgetType =
+  | "text"
+  | "number"
+  | "toggle"
+  | "slider"
+  | "color"
+  | "dropdown"
+  | "readonly"
+  | "group"
+  | "raw";
+
+export type WidgetConfidence = "certain" | "inferred" | "ambiguous";
+export type NodeContext = "account-wide" | "per-character" | "setting";
+
+export interface WidgetProps {
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+  multiline?: boolean;
+}
+
+export interface WidgetOverride {
+  widget?: WidgetType;
+  props?: Partial<WidgetProps>;
+  hidden?: boolean;
+  readOnly?: boolean;
+  label?: string;
+}
+
+export interface SvSchemaOverlay {
+  [addonName: string]: {
+    [stablePathId: string]: WidgetOverride;
+  };
+}
+
+export interface EffectiveField {
+  nodeId: string;
+  key: string;
+  label: string;
+  widget: WidgetType;
+  confidence: WidgetConfidence;
+  context: NodeContext;
+  props: WidgetProps;
+  hidden: boolean;
+  readOnly: boolean;
+  value: string | number | boolean | null;
+  children?: EffectiveField[];
+}
+
 // App-level UI state types
 export type SortMode = "name" | "author";
 export type FilterMode = "all" | "addons" | "libraries" | "outdated" | "missing-deps" | "favorites";
