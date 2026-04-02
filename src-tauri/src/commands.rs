@@ -1281,6 +1281,16 @@ pub async fn browse_esoui_category(
         .map_err(|e| format!("Task failed: {}", e))?
 }
 
+#[tauri::command]
+pub async fn browse_esoui_popular(
+    page: u32,
+    sort_by: String,
+) -> Result<Vec<esoui::EsouiSearchResult>, String> {
+    tokio::task::spawn_blocking(move || esoui::browse_popular(page, &sort_by))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+}
+
 // ─── API Version Compatibility ───────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
