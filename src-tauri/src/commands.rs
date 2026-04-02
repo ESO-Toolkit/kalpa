@@ -2466,9 +2466,9 @@ pub async fn track_pack_install(pack_id: String) -> Result<(), String> {
         let url = format!("{}/packs/{}/install", base, pack_id);
 
         // Fire-and-forget: best-effort tracking, don't block the user
-        let _ = client.post(&url).send();
+        drop(client.post(&url).send());
 
-        Ok(())
+        Ok::<(), String>(())
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
