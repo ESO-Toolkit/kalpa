@@ -143,6 +143,21 @@ export interface SvTreeNode {
   children?: SvTreeNode[];
 }
 
+export interface SvFileStamp {
+  size: number;
+  modifiedEpochMs: number;
+}
+
+export interface SvReadResponse {
+  tree: SvTreeNode;
+  stamp: SvFileStamp;
+}
+
+export interface SvDiffPreview {
+  original: string;
+  serialized: string;
+}
+
 // ── SavedVariables Editor v2 types ──────────────────────────────────────
 export type WidgetType =
   | "text"

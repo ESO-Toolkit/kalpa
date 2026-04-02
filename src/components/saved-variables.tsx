@@ -5,6 +5,9 @@ import type {
   CharacterInfo,
   SavedVariableFile,
   SvTreeNode,
+  SvFileStamp,
+  SvReadResponse,
+  SvDiffPreview,
   EffectiveField,
   SvSchemaOverlay,
   WidgetType,
@@ -42,6 +45,16 @@ import { getSetting, setSetting } from "@/lib/store";
 import { classifyContext, humanizeKey, getTableChildren, getLeafChildren } from "@/lib/sv-nodes";
 import { resolveEffectiveField } from "@/lib/sv-widgets";
 import {
+  ToggleControl,
+  NumberControl,
+  SliderControl,
+  ColorControl,
+  TextControl,
+  DropdownControl,
+  ReadonlyControl,
+  RawControl,
+} from "@/components/sv-controls";
+import {
   RefreshCwIcon,
   ChevronRightIcon,
   ChevronDownIcon,
@@ -60,8 +73,6 @@ import {
   EyeOffIcon,
   LockIcon,
   RotateCcwIcon,
-  MinusIcon,
-  PlusIcon,
 } from "lucide-react";
 
 interface SavedVariablesProps {
@@ -668,6 +679,17 @@ function NavTreeItem({
   const context = classifyContext(node.key, depth, knownCharacters);
   const matchesSearch = !searchQuery || node.key.toLowerCase().includes(searchQuery.toLowerCase());
 
+  // Detect context wrapper nodes that should be auto-expanded and rendered as chips.
+  // These are structural containers (Default, @account, $AccountWide, server names)
+  // that users rarely need to interact with — the interesting data is inside them.
+  const isContextWrapper =
+    depth <= 2 &&
+    tableChildren.length > 0 &&
+    (node.key === "Default" ||
+      node.key.startsWith("@") ||
+      node.key === "$AccountWide" ||
+      node.key.includes("Megaserver"));
+
   // Also check if any descendant matches
   const hasMatchingDescendant = useMemo(() => {
     if (!searchQuery) return true;
@@ -679,6 +701,47 @@ function NavTreeItem({
   }, [node, searchQuery]);
 
   if (!matchesSearch && !hasMatchingDescendant) return null;
+
+  // Context wrappers: render as a compact chip divider and auto-show children
+  if (isContextWrapper) {
+    const chipColor =
+      node.key === "$AccountWide"
+        ? "sky"
+        : node.key.startsWith("@")
+          ? "sky"
+          : node.key.includes("Megaserver")
+            ? "violet"
+            : "muted";
+
+    return (
+      <div>
+        <div
+          className="flex items-center gap-1.5 px-2 py-0.5"
+          style={{ paddingLeft: `${depth * 14 + 8}px` }}
+        >
+          <div className="h-px flex-1 bg-white/[0.06]" />
+          <InfoPill color={chipColor} className="!text-[9px] !px-1.5 !py-0">
+            {node.key}
+          </InfoPill>
+          <div className="h-px flex-1 bg-white/[0.06]" />
+        </div>
+        {tableChildren.map((child, i) => (
+          <NavTreeItem
+            key={`${child.key}-${i}`}
+            node={child}
+            depth={depth}
+            parentPath={currentPath}
+            selectedPath={selectedPath}
+            onSelect={onSelect}
+            searchQuery={searchQuery}
+            knownCharacters={knownCharacters}
+            expandedPaths={expandedPaths}
+            toggleExpanded={toggleExpanded}
+          />
+        ))}
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -732,282 +795,6 @@ function NavTreeItem({
           />
         ))}
     </div>
-  );
-}
-
-// ── Widget Controls ──────────────────────────────────────────
-
-function ToggleControl({
-  field,
-  onChange,
-}: {
-  field: EffectiveField;
-  onChange: (val: boolean) => void;
-}) {
-  const checked = field.value === true;
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      onClick={() => !field.readOnly && onChange(!checked)}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-        field.readOnly ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
-      } ${checked ? "bg-[#c4a44a]" : "bg-white/[0.12]"}`}
-      aria-label={field.label}
-    >
-      <span
-        className={`inline-block size-3.5 rounded-full bg-white shadow transition-transform ${
-          checked ? "translate-x-[18px]" : "translate-x-[3px]"
-        }`}
-      />
-    </button>
-  );
-}
-
-function NumberControl({
-  field,
-  onChange,
-}: {
-  field: EffectiveField;
-  onChange: (val: number) => void;
-}) {
-  const fieldVal = String(field.value ?? 0);
-  const [localValue, setLocalValue] = useState(fieldVal);
-  const [prevFieldVal, setPrevFieldVal] = useState(fieldVal);
-  if (prevFieldVal !== fieldVal) {
-    setPrevFieldVal(fieldVal);
-    setLocalValue(fieldVal);
-  }
-
-  const commit = () => {
-    const num = Number(localValue);
-    if (!isNaN(num)) onChange(num);
-    else setLocalValue(String(field.value ?? 0));
-  };
-
-  const step = field.props.step ?? 1;
-  const { min, max } = field.props;
-
-  const clamp = (v: number) => {
-    if (min !== undefined && v < min) return min;
-    if (max !== undefined && v > max) return max;
-    return v;
-  };
-
-  return (
-    <div className="flex items-center gap-1">
-      <button
-        onClick={() => onChange(clamp((Number(field.value) || 0) - step))}
-        className="flex size-6 items-center justify-center rounded border border-white/[0.08] bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
-        disabled={field.readOnly}
-      >
-        <MinusIcon className="size-3" />
-      </button>
-      <input
-        type="number"
-        className="w-20 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30"
-        value={localValue}
-        onChange={(e) => setLocalValue(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => e.key === "Enter" && commit()}
-        disabled={field.readOnly}
-        step={step}
-        min={min}
-        max={max}
-      />
-      <button
-        onClick={() => onChange(clamp((Number(field.value) || 0) + step))}
-        className="flex size-6 items-center justify-center rounded border border-white/[0.08] bg-white/[0.04] text-muted-foreground hover:bg-white/[0.08] hover:text-foreground"
-        disabled={field.readOnly}
-      >
-        <PlusIcon className="size-3" />
-      </button>
-    </div>
-  );
-}
-
-function SliderControl({
-  field,
-  onChange,
-}: {
-  field: EffectiveField;
-  onChange: (val: number) => void;
-}) {
-  const min = field.props.min ?? 0;
-  const max = field.props.max ?? 100;
-  const step = field.props.step ?? 1;
-  const value = Number(field.value) || min;
-
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        type="range"
-        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/[0.1] accent-[#c4a44a]"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        disabled={field.readOnly}
-      />
-      <span className="w-10 text-right text-xs text-muted-foreground tabular-nums">{value}</span>
-    </div>
-  );
-}
-
-function ColorControl({
-  field,
-  originalNode,
-  onChangeColor,
-}: {
-  field: EffectiveField;
-  originalNode: SvTreeNode | null;
-  onChangeColor: (r: number, g: number, b: number, a?: number) => void;
-}) {
-  // Extract r,g,b,a from children
-  const children = originalNode?.children ?? [];
-  const getVal = (key: string) => {
-    const c = children.find((ch) => ch.key === key);
-    return c ? Number(c.value ?? 0) : 0;
-  };
-  const r = getVal("r");
-  const g = getVal("g");
-  const b = getVal("b");
-  const a = children.some((ch) => ch.key === "a") ? getVal("a") : undefined;
-
-  const hexColor = `#${Math.round(r * 255)
-    .toString(16)
-    .padStart(2, "0")}${Math.round(g * 255)
-    .toString(16)
-    .padStart(2, "0")}${Math.round(b * 255)
-    .toString(16)
-    .padStart(2, "0")}`;
-
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        type="color"
-        value={hexColor}
-        onChange={(e) => {
-          const hex = e.target.value;
-          const nr = parseInt(hex.slice(1, 3), 16) / 255;
-          const ng = parseInt(hex.slice(3, 5), 16) / 255;
-          const nb = parseInt(hex.slice(5, 7), 16) / 255;
-          onChangeColor(nr, ng, nb, a);
-        }}
-        className="size-7 cursor-pointer rounded border border-white/[0.1] bg-transparent p-0"
-        disabled={field.readOnly}
-      />
-      <span className="text-xs text-muted-foreground font-mono">{hexColor}</span>
-      {a !== undefined && (
-        <span className="text-xs text-muted-foreground/60">a: {a.toFixed(2)}</span>
-      )}
-    </div>
-  );
-}
-
-function TextControl({
-  field,
-  onChange,
-}: {
-  field: EffectiveField;
-  onChange: (val: string) => void;
-}) {
-  const fieldVal = String(field.value ?? "");
-  const [localValue, setLocalValue] = useState(fieldVal);
-  const [prevFieldVal, setPrevFieldVal] = useState(fieldVal);
-  if (prevFieldVal !== fieldVal) {
-    setPrevFieldVal(fieldVal);
-    setLocalValue(fieldVal);
-  }
-
-  const commit = () => onChange(localValue);
-
-  if (field.props.multiline) {
-    return (
-      <textarea
-        className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30 resize-y"
-        rows={3}
-        value={localValue}
-        onChange={(e) => setLocalValue(e.target.value)}
-        onBlur={commit}
-        disabled={field.readOnly}
-      />
-    );
-  }
-
-  return (
-    <input
-      type="text"
-      className="w-full max-w-xs rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30"
-      value={localValue}
-      onChange={(e) => setLocalValue(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => e.key === "Enter" && commit()}
-      disabled={field.readOnly}
-    />
-  );
-}
-
-function DropdownControl({
-  field,
-  onChange,
-}: {
-  field: EffectiveField;
-  onChange: (val: string) => void;
-}) {
-  const options = field.props.options ?? [];
-  const currentVal = String(field.value ?? "");
-  const allOptions = options.includes(currentVal) ? options : [currentVal, ...options];
-
-  return (
-    <Select value={currentVal} onValueChange={(v) => v && onChange(v)} disabled={field.readOnly}>
-      <SelectTrigger className="h-7 w-40 text-xs">
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {allOptions.map((opt) => (
-          <SelectItem key={opt} value={opt}>
-            {opt}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
-
-function ReadonlyControl({ field }: { field: EffectiveField }) {
-  return (
-    <span className="text-xs text-muted-foreground/60 italic">
-      {field.value === null ? "nil" : String(field.value)}
-    </span>
-  );
-}
-
-function RawControl({
-  field,
-  onChange,
-}: {
-  field: EffectiveField;
-  onChange: (val: string) => void;
-}) {
-  const fieldVal = String(field.value ?? "");
-  const [localValue, setLocalValue] = useState(fieldVal);
-  const [prevFieldVal, setPrevFieldVal] = useState(fieldVal);
-  if (prevFieldVal !== fieldVal) {
-    setPrevFieldVal(fieldVal);
-    setLocalValue(fieldVal);
-  }
-
-  return (
-    <textarea
-      className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30 resize-y"
-      rows={2}
-      value={localValue}
-      onChange={(e) => setLocalValue(e.target.value)}
-      onBlur={() => onChange(localValue)}
-      disabled={field.readOnly}
-    />
   );
 }
 
@@ -1563,10 +1350,12 @@ function EditorTab({
 }) {
   const [selectedFile, setSelectedFile] = useState<string>(initialFile);
   const [tree, setTree] = useState<SvTreeNode | null>(null);
+  const [fileStamp, setFileStamp] = useState<SvFileStamp | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [overlay, setOverlay] = useState<SvSchemaOverlay>({});
+  const [rawMode, setRawMode] = useState(false);
 
   // Navigation state
   const [selectedPath, setSelectedPath] = useState<string[]>([]);
@@ -1606,14 +1395,16 @@ function EditorTab({
       setSelectedPath([]);
       setSelectedNode(null);
       try {
-        const result = await invokeOrThrow<SvTreeNode>("read_saved_variable", {
+        const result = await invokeOrThrow<SvReadResponse>("read_saved_variable", {
           addonsPath,
           fileName,
         });
-        setTree(result);
+        setTree(result.tree);
+        setFileStamp(result.stamp);
       } catch (e) {
         toast.error(`Failed to read file: ${getTauriErrorMessage(e)}`);
         setTree(null);
+        setFileStamp(null);
       } finally {
         setLoading(false);
       }
@@ -1647,19 +1438,52 @@ function EditorTab({
   }, [tree, selectedPath]);
 
   const handleSave = useCallback(async () => {
-    if (!tree || !selectedFile) return;
+    if (!tree || !selectedFile || !fileStamp) return;
 
-    const lua = serializeTreeToLua(tree);
     try {
-      await invokeOrThrow("write_saved_variable", {
+      const newStamp = await invokeOrThrow<SvFileStamp>("write_saved_variable", {
         addonsPath,
         fileName: selectedFile,
-        content: lua,
+        tree,
+        stamp: fileStamp,
       });
+      setFileStamp(newStamp);
       toast.success("Saved successfully");
       setDirty(false);
     } catch (e) {
       toast.error(`Failed to save: ${getTauriErrorMessage(e)}`);
+    }
+  }, [tree, selectedFile, addonsPath, fileStamp]);
+
+  const handleRestoreBackup = useCallback(async () => {
+    if (!selectedFile) return;
+    try {
+      const newStamp = await invokeOrThrow<SvFileStamp>("restore_sv_backup", {
+        addonsPath,
+        fileName: selectedFile,
+      });
+      setFileStamp(newStamp);
+      // Reload the file to get the restored content
+      await loadFile(selectedFile);
+      toast.success("Backup restored successfully");
+    } catch (e) {
+      toast.error(`Failed to restore: ${getTauriErrorMessage(e)}`);
+    }
+  }, [selectedFile, addonsPath, loadFile]);
+
+  const [diffPreview, setDiffPreview] = useState<SvDiffPreview | null>(null);
+
+  const handlePreview = useCallback(async () => {
+    if (!tree || !selectedFile) return;
+    try {
+      const preview = await invokeOrThrow<SvDiffPreview>("preview_sv_save", {
+        addonsPath,
+        fileName: selectedFile,
+        tree,
+      });
+      setDiffPreview(preview);
+    } catch (e) {
+      toast.error(`Failed to generate preview: ${getTauriErrorMessage(e)}`);
     }
   }, [tree, selectedFile, addonsPath]);
 
@@ -1756,6 +1580,9 @@ function EditorTab({
         <Button size="sm" onClick={() => void handleSave()} disabled={!dirty}>
           Save Changes
         </Button>
+        <Button size="sm" variant="outline" onClick={() => void handlePreview()} disabled={!dirty}>
+          Preview
+        </Button>
         <Button
           size="sm"
           variant="outline"
@@ -1766,9 +1593,62 @@ function EditorTab({
         >
           Discard
         </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setConfirmState({
+              title: "Restore Backup",
+              description:
+                "This will restore the .bak file created before the last save. Any unsaved changes will be lost.",
+              confirmLabel: "Restore",
+              onConfirm: () => void handleRestoreBackup(),
+            });
+          }}
+          disabled={!selectedFile}
+        >
+          <RotateCcwIcon className="mr-1 size-3.5" />
+          Restore
+        </Button>
+        <div className="ml-auto flex items-center gap-1 rounded-lg border border-white/[0.08] bg-white/[0.02] p-0.5">
+          <button
+            onClick={() => setRawMode(false)}
+            className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+              !rawMode
+                ? "bg-white/[0.1] text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <SettingsIcon className="mr-1 inline-block size-3" />
+            Settings
+          </button>
+          <button
+            onClick={() => setRawMode(true)}
+            className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+              rawMode
+                ? "bg-white/[0.1] text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            <BracesIcon className="mr-1 inline-block size-3" />
+            Raw
+          </button>
+        </div>
       </div>
 
       <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
+
+      {/* Diff Preview Dialog */}
+      {diffPreview && (
+        <DiffPreviewDialog
+          preview={diffPreview}
+          onClose={() => setDiffPreview(null)}
+          onConfirmSave={() => {
+            setDiffPreview(null);
+            void handleSave();
+          }}
+        />
+      )}
 
       {/* Two-panel layout */}
       <div
@@ -1782,6 +1662,10 @@ function EditorTab({
         ) : !tree ? (
           <div className="flex flex-1 items-center justify-center">
             <p className="text-sm text-muted-foreground">Select a file to view its contents.</p>
+          </div>
+        ) : rawMode ? (
+          <div className="flex-1 overflow-y-auto p-3 font-mono text-xs">
+            <RawTreeView node={tree} depth={0} />
           </div>
         ) : (
           <>
@@ -1848,6 +1732,70 @@ function EditorTab({
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ─── Raw Tree View ──────────────────────────────────────────
+
+function RawTreeView({ node, depth }: { node: SvTreeNode; depth: number }) {
+  const [expanded, setExpanded] = useState(depth < 2);
+  const isTable = node.valueType === "table" && node.children;
+  const indent = depth * 16;
+
+  const valueDisplay = () => {
+    if (isTable) return `{${node.children?.length ?? 0} entries}`;
+    if (node.valueType === "string") return `"${String(node.value ?? "")}"`;
+    if (node.valueType === "nil") return "nil";
+    return String(node.value ?? "");
+  };
+
+  const valueColor = () => {
+    switch (node.valueType) {
+      case "string":
+        return "text-emerald-400";
+      case "number":
+        return "text-sky-400";
+      case "boolean":
+        return "text-amber-400";
+      case "nil":
+        return "text-muted-foreground/50";
+      case "table":
+        return "text-muted-foreground/60";
+      default:
+        return "text-foreground";
+    }
+  };
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-1 py-0.5 hover:bg-white/[0.03] rounded cursor-default"
+        style={{ paddingLeft: indent }}
+      >
+        {isTable ? (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="flex size-4 items-center justify-center text-muted-foreground hover:text-foreground"
+          >
+            {expanded ? (
+              <ChevronDownIcon className="size-3" />
+            ) : (
+              <ChevronRightIcon className="size-3" />
+            )}
+          </button>
+        ) : (
+          <span className="inline-block size-4" />
+        )}
+        <span className="text-foreground/70">{node.key}</span>
+        <span className="text-muted-foreground/40 mx-0.5">=</span>
+        <span className={valueColor()}>{valueDisplay()}</span>
+      </div>
+      {isTable &&
+        expanded &&
+        node.children?.map((child, i) => (
+          <RawTreeView key={`${child.key}-${i}`} node={child} depth={depth + 1} />
+        ))}
     </div>
   );
 }
@@ -2040,85 +1988,82 @@ function CopyProfileTab({
   );
 }
 
-// ─── Lua Serializer ──────────────────────────────────────────
-
-function serializeTreeToLua(root: SvTreeNode): string {
-  const lines: string[] = [];
-  if (root.children) {
-    for (const child of root.children) {
-      lines.push(`${child.key} = ${serializeNode(child, 0, true)}`);
-      lines.push("");
-    }
-  }
-  return lines.join("\n");
-}
-
-function serializeNode(node: SvTreeNode, depth: number, isTopLevel = false): string {
-  const indent = "\t".repeat(depth);
-
-  if (node.valueType === "table" && node.children) {
-    const lines: string[] = [];
-    lines.push(`${indent}{`);
-    for (const child of node.children) {
-      const keyPart = isNumericKey(child.key) ? `[${child.key}]` : `["${escLua(child.key)}"]`;
-      if (child.valueType === "table") {
-        lines.push(`${indent}\t${keyPart} = ${serializeNode(child, depth + 1)}`);
-      } else {
-        lines.push(`${indent}\t${keyPart} = ${serializeLeaf(child)},`);
-      }
-    }
-    // Top-level assignments must not have a trailing comma (Lua syntax error)
-    lines.push(isTopLevel ? `${indent}}` : `${indent}},`);
-    return lines.join("\n");
-  }
-
-  return `${indent}${serializeLeaf(node)}`;
-}
-
-function serializeLeaf(node: SvTreeNode): string {
-  switch (node.valueType) {
-    case "string":
-      return `"${escLua(String(node.value ?? ""))}"`;
-    case "number": {
-      const v = node.value;
-      // Guard against NaN/Infinity that came through as null from serde_json
-      if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "0";
-      return String(v);
-    }
-    case "boolean":
-      return String(node.value ?? false);
-    case "nil":
-      return "nil";
-    default:
-      return "nil";
-  }
-}
-
-function escLua(s: string): string {
-  let out = "";
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    const code = s.charCodeAt(i);
-    if (c === "\\") out += "\\\\";
-    else if (c === '"') out += '\\"';
-    else if (c === "\n") out += "\\n";
-    else if (c === "\r") out += "\\r";
-    else if (c === "\t") out += "\\t";
-    else if (code === 7) out += "\\a";
-    else if (code === 8) out += "\\b";
-    else if (code === 11) out += "\\v";
-    else if (code === 12) out += "\\f";
-    else if (code < 32 || code === 127) out += `\\${code}`;
-    else out += c;
-  }
-  return out;
-}
-
-function isNumericKey(key: string): boolean {
-  return /^-?\d+$/.test(key);
-}
-
 // ─── Confirm Dialog ─────────────────────────────────────────
+
+// ─── Diff Preview Dialog ────────────────────────────────────
+
+function DiffPreviewDialog({
+  preview,
+  onClose,
+  onConfirmSave,
+}: {
+  preview: SvDiffPreview;
+  onClose: () => void;
+  onConfirmSave: () => void;
+}) {
+  // Simple line-based diff: show lines that changed
+  const origLines = preview.original.split("\n");
+  const newLines = preview.serialized.split("\n");
+  const maxLen = Math.max(origLines.length, newLines.length);
+
+  const diffLines: Array<{ type: "same" | "added" | "removed"; content: string; line: number }> =
+    [];
+
+  for (let i = 0; i < maxLen; i++) {
+    const orig = origLines[i];
+    const next = newLines[i];
+    if (orig === next) {
+      if (orig !== undefined) diffLines.push({ type: "same", content: orig, line: i + 1 });
+    } else {
+      if (orig !== undefined) diffLines.push({ type: "removed", content: orig, line: i + 1 });
+      if (next !== undefined) diffLines.push({ type: "added", content: next, line: i + 1 });
+    }
+  }
+
+  const changedCount = diffLines.filter((d) => d.type !== "same").length;
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-3xl max-h-[80vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle>Preview Changes</DialogTitle>
+          <DialogDescription>
+            {changedCount === 0
+              ? "No changes detected."
+              : `${changedCount} line${changedCount === 1 ? "" : "s"} changed`}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex-1 overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[11px] leading-relaxed">
+          {diffLines.map((line, i) => (
+            <div
+              key={i}
+              className={`px-2 whitespace-pre ${
+                line.type === "removed"
+                  ? "bg-red-500/10 text-red-400"
+                  : line.type === "added"
+                    ? "bg-emerald-500/10 text-emerald-400"
+                    : "text-muted-foreground/60"
+              }`}
+            >
+              <span className="inline-block w-5 text-right mr-2 text-muted-foreground/30 select-none">
+                {line.type === "removed" ? "-" : line.type === "added" ? "+" : " "}
+              </span>
+              {line.content}
+            </div>
+          ))}
+        </div>
+        <DialogFooter>
+          <Button size="sm" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={onConfirmSave} disabled={changedCount === 0}>
+            Save Changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 interface ConfirmState {
   title: string;
