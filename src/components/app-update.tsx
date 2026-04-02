@@ -18,16 +18,6 @@ export function useAppUpdate() {
       const update = await check();
       if (update) {
         setState({ status: "available", update });
-        if (silent) {
-          toast(`App update ${update.version} available`, {
-            description: "A new version is ready to download.",
-            action: {
-              label: "View",
-              onClick: () => {},
-            },
-            duration: 8000,
-          });
-        }
       } else if (!silent) {
         toast.info("You're on the latest version.");
       }

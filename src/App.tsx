@@ -35,6 +35,8 @@ type ActiveDialog =
   | "api-compat"
   | "characters"
   | "saved-variables"
+  | "migration-wizard"
+  | "safety-center"
   | null;
 
 interface PendingDeepLinkPayload {
@@ -563,6 +565,17 @@ function App() {
 
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
+
+      // Create a pre-operation snapshot before batch updates
+      try {
+        await invokeOrThrow("create_pre_operation_snapshot", {
+          addonsPath: path,
+          operationLabel: "update-all",
+        });
+      } catch (snapshotError) {
+        console.error("[tauri:pre-op-snapshot]", snapshotError);
+        // Non-fatal: continue with updates even if snapshot fails
+      }
 
       let completed = 0;
       let failed = 0;

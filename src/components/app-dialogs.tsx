@@ -10,6 +10,12 @@ const Settings = lazy(() => import("./settings").then((m) => ({ default: m.Setti
 const SavedVariables = lazy(() =>
   import("./saved-variables").then((m) => ({ default: m.SavedVariables }))
 );
+const MigrationWizard = lazy(() =>
+  import("./migration-wizard").then((m) => ({ default: m.MigrationWizard }))
+);
+const SafetyCenter = lazy(() =>
+  import("./safety-center").then((m) => ({ default: m.SafetyCenter }))
+);
 
 type ActiveDialog =
   | "settings"
@@ -19,6 +25,8 @@ type ActiveDialog =
   | "api-compat"
   | "characters"
   | "saved-variables"
+  | "migration-wizard"
+  | "safety-center"
   | null;
 
 interface AppDialogsProps {
@@ -94,8 +102,18 @@ export function AppDialogs({
           onShowBackups={() => onShowDialog("backups")}
           onShowApiCompat={() => onShowDialog("api-compat")}
           onShowCharacters={() => onShowDialog("characters")}
+          onShowMigrationWizard={() => onShowDialog("migration-wizard")}
+          onShowSafetyCenter={() => onShowDialog("safety-center")}
           onCheckForAppUpdate={onCheckForAppUpdate}
         />
+      )}
+
+      {activeDialog === "migration-wizard" && (
+        <MigrationWizard addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
+      )}
+
+      {activeDialog === "safety-center" && (
+        <SafetyCenter addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
       )}
     </Suspense>
   );
