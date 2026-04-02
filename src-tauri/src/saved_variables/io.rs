@@ -1,6 +1,6 @@
 use super::parser;
 use super::serializer;
-use super::types::{SavedVariableFile, SvFileStamp, SvReadResponse, SvTreeNode};
+use super::types::{SavedVariableFile, SvChange, SvFileStamp, SvReadResponse, SvTreeNode};
 use crate::metadata;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -323,25 +323,142 @@ pub fn write_saved_variable_blocking(
     file_stamp(&file_path)
 }
 
-/// Generate a diff preview: serialize the tree and return both the current file
-/// content and the new serialized content so the frontend can display a diff.
+/// Format an SvTreeNode leaf value for display.
+fn format_sv_value(node: &SvTreeNode) -> String {
+    match node.value_type.as_str() {
+        "nil" => "nil".to_string(),
+        "boolean" => node
+            .value
+            .as_ref()
+            .and_then(|v| v.as_bool())
+            .map(|b| if b { "true" } else { "false" }.to_string())
+            .unwrap_or_else(|| "false".to_string()),
+        "number" => node
+            .value
+            .as_ref()
+            .map(|v| {
+                if let Some(n) = v.as_f64() {
+                    if n == (n as i64) as f64 {
+                        format!("{}", n as i64)
+                    } else {
+                        format!("{}", n)
+                    }
+                } else {
+                    v.to_string()
+                }
+            })
+            .unwrap_or_else(|| "0".to_string()),
+        "string" => node
+            .value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .map(|s| format!("\"{}\"", s))
+            .unwrap_or_else(|| "\"\"".to_string()),
+        "table" => {
+            let count = node.children.as_ref().map(|c| c.len()).unwrap_or(0);
+            format!("{{...}} ({} entries)", count)
+        }
+        other => format!("<{}>", other),
+    }
+}
+
+/// Recursively diff two trees and collect changes.
+fn diff_trees(
+    old: &SvTreeNode,
+    new: &SvTreeNode,
+    path: &mut Vec<String>,
+    changes: &mut Vec<SvChange>,
+) {
+    match (old.value_type.as_str(), new.value_type.as_str()) {
+        ("table", "table") => {
+            // Build lookup maps by key for children
+            let old_children: std::collections::HashMap<&str, &SvTreeNode> = old
+                .children
+                .as_ref()
+                .map(|c| c.iter().map(|n| (n.key.as_str(), n)).collect())
+                .unwrap_or_default();
+            let new_children: std::collections::HashMap<&str, &SvTreeNode> = new
+                .children
+                .as_ref()
+                .map(|c| c.iter().map(|n| (n.key.as_str(), n)).collect())
+                .unwrap_or_default();
+
+            // Check removed and modified
+            if let Some(old_c) = &old.children {
+                for child in old_c {
+                    path.push(child.key.clone());
+                    if let Some(new_child) = new_children.get(child.key.as_str()) {
+                        diff_trees(child, new_child, path, changes);
+                    } else {
+                        changes.push(SvChange {
+                            path: path.clone(),
+                            change_type: "removed".to_string(),
+                            old_value: Some(format_sv_value(child)),
+                            new_value: None,
+                        });
+                    }
+                    path.pop();
+                }
+            }
+            // Check added
+            if let Some(new_c) = &new.children {
+                for child in new_c {
+                    if !old_children.contains_key(child.key.as_str()) {
+                        path.push(child.key.clone());
+                        changes.push(SvChange {
+                            path: path.clone(),
+                            change_type: "added".to_string(),
+                            old_value: None,
+                            new_value: Some(format_sv_value(child)),
+                        });
+                        path.pop();
+                    }
+                }
+            }
+        }
+        _ => {
+            // Leaf comparison — check if type or value changed.
+            // serde_json stores i64 and f64 as different internal representations,
+            // so 42 (i64 from JS) != 42.0 (f64 from parser) even though they're
+            // the same number. Normalize to f64 for comparison.
+            let values_equal = match (&old.value, &new.value) {
+                (Some(a), Some(b)) if a.is_number() && b.is_number() => a.as_f64() == b.as_f64(),
+                (a, b) => a == b,
+            };
+            if old.value_type != new.value_type || !values_equal {
+                changes.push(SvChange {
+                    path: path.clone(),
+                    change_type: "modified".to_string(),
+                    old_value: Some(format_sv_value(old)),
+                    new_value: Some(format_sv_value(new)),
+                });
+            }
+        }
+    }
+}
+
+/// Generate a diff preview by comparing the on-disk tree against the edited tree.
 pub fn preview_save(
     addons_dir: &Path,
     file_name: &str,
     tree: &SvTreeNode,
-) -> Result<(String, String), String> {
+) -> Result<Vec<SvChange>, String> {
     let sv_dir = saved_variables_dir(addons_dir);
     let file_path = sv_dir.join(file_name);
 
-    let original = if file_path.is_file() {
+    let original_content = if file_path.is_file() {
         fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?
     } else {
-        String::new()
+        return Ok(Vec::new());
     };
 
-    let serialized = serializer::serialize_to_lua(tree);
+    let original_tree = parser::parse_sv_file(&original_content, file_name)?;
 
-    Ok((original, serialized))
+    let mut changes = Vec::new();
+    let mut path = Vec::new();
+    diff_trees(&original_tree, tree, &mut path, &mut changes);
+
+    Ok(changes)
 }
 
 /// Write raw Lua content (used by copy_sv_profile which manipulates raw text).

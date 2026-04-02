@@ -3059,11 +3059,8 @@ pub async fn preview_sv_save(
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        let (original, serialized) = sv_io::preview_save(&addons_dir, &file_name, &tree)?;
-        Ok(crate::saved_variables::SvDiffPreview {
-            original,
-            serialized,
-        })
+        let changes = sv_io::preview_save(&addons_dir, &file_name, &tree)?;
+        Ok(crate::saved_variables::SvDiffPreview { changes })
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?

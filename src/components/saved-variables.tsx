@@ -8,6 +8,7 @@ import type {
   SvFileStamp,
   SvReadResponse,
   SvDiffPreview,
+  SvChange,
   EffectiveField,
   SvSchemaOverlay,
   WidgetType,
@@ -1992,6 +1993,14 @@ function CopyProfileTab({
 
 // ─── Diff Preview Dialog ────────────────────────────────────
 
+/** Format a key path like ["Default", "@Account", "setting"] for display */
+function formatChangePath(change: SvChange): { setting: string; location: string } {
+  const path = change.path;
+  const setting = path[path.length - 1] ?? "unknown";
+  const location = path.length > 1 ? path.slice(0, -1).join(" > ") : "";
+  return { setting, location };
+}
+
 function DiffPreviewDialog({
   preview,
   onClose,
@@ -2001,62 +2010,111 @@ function DiffPreviewDialog({
   onClose: () => void;
   onConfirmSave: () => void;
 }) {
-  // Simple line-based diff: show lines that changed
-  const origLines = preview.original.split("\n");
-  const newLines = preview.serialized.split("\n");
-  const maxLen = Math.max(origLines.length, newLines.length);
-
-  const diffLines: Array<{ type: "same" | "added" | "removed"; content: string; line: number }> =
-    [];
-
-  for (let i = 0; i < maxLen; i++) {
-    const orig = origLines[i];
-    const next = newLines[i];
-    if (orig === next) {
-      if (orig !== undefined) diffLines.push({ type: "same", content: orig, line: i + 1 });
-    } else {
-      if (orig !== undefined) diffLines.push({ type: "removed", content: orig, line: i + 1 });
-      if (next !== undefined) diffLines.push({ type: "added", content: next, line: i + 1 });
-    }
-  }
-
-  const changedCount = diffLines.filter((d) => d.type !== "same").length;
+  const { changes } = preview;
+  const modified = changes.filter((c) => c.changeType === "modified");
+  const added = changes.filter((c) => c.changeType === "added");
+  const removed = changes.filter((c) => c.changeType === "removed");
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-3xl max-h-[80vh] flex flex-col">
+      <DialogContent className="sm:max-w-2xl max-h-[80vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>Preview Changes</DialogTitle>
+          <DialogTitle>Review Changes</DialogTitle>
           <DialogDescription>
-            {changedCount === 0
+            {changes.length === 0
               ? "No changes detected."
-              : `${changedCount} line${changedCount === 1 ? "" : "s"} changed`}
+              : `${changes.length} change${changes.length === 1 ? "" : "s"} will be saved`}
           </DialogDescription>
         </DialogHeader>
-        <div className="flex-1 overflow-auto rounded-lg border border-white/[0.06] bg-black/30 p-2 font-mono text-[11px] leading-relaxed">
-          {diffLines.map((line, i) => (
-            <div
-              key={i}
-              className={`px-2 whitespace-pre ${
-                line.type === "removed"
-                  ? "bg-red-500/10 text-red-400"
-                  : line.type === "added"
-                    ? "bg-emerald-500/10 text-emerald-400"
-                    : "text-muted-foreground/60"
-              }`}
-            >
-              <span className="inline-block w-5 text-right mr-2 text-muted-foreground/30 select-none">
-                {line.type === "removed" ? "-" : line.type === "added" ? "+" : " "}
-              </span>
-              {line.content}
-            </div>
-          ))}
+
+        {changes.length > 0 && (
+          <div className="flex gap-3 text-xs">
+            {modified.length > 0 && (
+              <span className="text-sky-400">{modified.length} modified</span>
+            )}
+            {added.length > 0 && <span className="text-emerald-400">{added.length} added</span>}
+            {removed.length > 0 && <span className="text-red-400">{removed.length} removed</span>}
+          </div>
+        )}
+
+        <div className="flex-1 overflow-auto space-y-1.5 pr-1">
+          {changes.map((change, i) => {
+            const { setting, location } = formatChangePath(change);
+            return (
+              <div
+                key={i}
+                className={`rounded-md border px-3 py-2 text-xs ${
+                  change.changeType === "added"
+                    ? "border-emerald-500/20 bg-emerald-500/5"
+                    : change.changeType === "removed"
+                      ? "border-red-500/20 bg-red-500/5"
+                      : "border-white/[0.06] bg-white/[0.02]"
+                }`}
+              >
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="font-medium text-muted-foreground font-mono truncate">
+                    {setting}
+                  </span>
+                  {change.changeType === "added" && (
+                    <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-emerald-400/80">
+                      Added
+                    </span>
+                  )}
+                  {change.changeType === "removed" && (
+                    <span className="shrink-0 text-[10px] font-medium uppercase tracking-wider text-red-400/80">
+                      Removed
+                    </span>
+                  )}
+                </div>
+
+                {location && (
+                  <div className="text-[10px] text-muted-foreground/50 mb-1.5 truncate">
+                    {location}
+                  </div>
+                )}
+
+                {change.changeType === "modified" ? (
+                  <div className="flex items-center gap-2 font-mono">
+                    <span
+                      className="rounded bg-red-500/10 px-1.5 py-0.5 text-red-400 truncate max-w-[45%]"
+                      title={change.oldValue ?? ""}
+                    >
+                      {change.oldValue}
+                    </span>
+                    <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/40" />
+                    <span
+                      className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-400 truncate max-w-[45%]"
+                      title={change.newValue ?? ""}
+                    >
+                      {change.newValue}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="font-mono">
+                    <span
+                      className={`rounded px-1.5 py-0.5 truncate inline-block max-w-full ${
+                        change.changeType === "added"
+                          ? "bg-emerald-500/10 text-emerald-400"
+                          : "bg-red-500/10 text-red-400"
+                      }`}
+                      title={
+                        (change.changeType === "added" ? change.newValue : change.oldValue) ?? ""
+                      }
+                    >
+                      {change.changeType === "added" ? change.newValue : change.oldValue}
+                    </span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
+
         <DialogFooter>
           <Button size="sm" variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button size="sm" onClick={onConfirmSave} disabled={changedCount === 0}>
+          <Button size="sm" onClick={onConfirmSave} disabled={changes.length === 0}>
             Save Changes
           </Button>
         </DialogFooter>

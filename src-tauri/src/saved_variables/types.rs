@@ -38,10 +38,23 @@ pub struct SvReadResponse {
     pub stamp: SvFileStamp,
 }
 
-/// Preview of what a save would produce: original content vs new content.
+/// A single value change detected between the original and edited trees.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvChange {
+    /// Key path from root, e.g. ["Default", "@Account", "settingName"]
+    pub path: Vec<String>,
+    /// "modified", "added", or "removed"
+    pub change_type: String,
+    /// Human-readable old value (None for additions)
+    pub old_value: Option<String>,
+    /// Human-readable new value (None for removals)
+    pub new_value: Option<String>,
+}
+
+/// Preview of changes: a list of individual value diffs.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SvDiffPreview {
-    pub original: String,
-    pub serialized: String,
+    pub changes: Vec<SvChange>,
 }

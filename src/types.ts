@@ -153,9 +153,15 @@ export interface SvReadResponse {
   stamp: SvFileStamp;
 }
 
+export interface SvChange {
+  path: string[];
+  changeType: "modified" | "added" | "removed";
+  oldValue: string | null;
+  newValue: string | null;
+}
+
 export interface SvDiffPreview {
-  original: string;
-  serialized: string;
+  changes: SvChange[];
 }
 
 // ── SavedVariables Editor v2 types ──────────────────────────────────────
