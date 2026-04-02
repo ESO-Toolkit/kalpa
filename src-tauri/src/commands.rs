@@ -2241,6 +2241,7 @@ pub struct PackPage {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn list_packs(
     state: tauri::State<'_, AuthState>,
     pack_type: Option<String>,
