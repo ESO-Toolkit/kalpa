@@ -10,6 +10,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import { RichDescription } from "@/components/ui/rich-description";
 
 interface AddonDetailProps {
   addon: AddonManifest | null;
@@ -357,7 +358,7 @@ export function AddonDetail({
       {addon.description && (
         <div className="mb-5">
           <SectionHeader className="mb-2">Description</SectionHeader>
-          <p className="text-sm leading-relaxed">{addon.description}</p>
+          <RichDescription text={addon.description} />
         </div>
       )}
 

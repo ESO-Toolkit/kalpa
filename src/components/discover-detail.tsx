@@ -6,6 +6,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import { RichDescription } from "@/components/ui/rich-description";
 import {
   Download,
   Calendar,
@@ -394,9 +395,7 @@ export function DiscoverDetail({
       {detail.description && (
         <div>
           <SectionHeader className="mb-2">Description</SectionHeader>
-          <div className="whitespace-pre-line rounded-xl border border-white/[0.04] bg-white/[0.02] p-4 text-sm leading-relaxed">
-            {detail.description}
-          </div>
+          <RichDescription text={detail.description} />
         </div>
       )}
     </div>
