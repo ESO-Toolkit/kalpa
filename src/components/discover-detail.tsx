@@ -216,13 +216,16 @@ export function DiscoverDetail({
             title={isOffline ? "Installs require an internet connection" : undefined}
             className="min-w-[100px]"
           >
-            {installingId === detail.id ? (
+            {installingId !== null ? (
               <span className="flex items-center gap-2">
                 <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
                 Installing
               </span>
             ) : installSuccess ? (
-              "Reinstall"
+              <span className="flex items-center gap-2">
+                <Check className="size-3.5" />
+                Reinstall
+              </span>
             ) : (
               <>
                 <Download className="size-3.5" />
