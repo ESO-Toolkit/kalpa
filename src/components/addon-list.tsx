@@ -419,8 +419,24 @@ export function AddonList({
                 <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
               </div>
             ) : addons.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-muted-foreground">
-                No addons found
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
+                {searchQuery || activeTagFilter || filterMode !== "all" ? (
+                  <>
+                    <p className="text-sm">No addons match your current filter</p>
+                    <button
+                      className="text-xs text-[#c4a44a]/70 hover:text-[#c4a44a] transition-colors"
+                      onClick={() => {
+                        onSearchChange("");
+                        onFilterChange("all");
+                        onActiveTagFilterChange(null);
+                      }}
+                    >
+                      Clear filters
+                    </button>
+                  </>
+                ) : (
+                  <p className="text-sm">No addons found</p>
+                )}
               </div>
             ) : (
               <div

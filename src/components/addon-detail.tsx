@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import type { AddonManifest, UpdateCheckResult, InstallResult } from "../types";
@@ -11,6 +11,16 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
+import { ExternalLink, Trash2, Check } from "lucide-react";
+
+function relativeDate(ts: number): string {
+  const diff = Date.now() - ts;
+  const days = Math.floor(diff / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 30) return `${days} days ago`;
+  return new Date(ts).toLocaleDateString();
+}
 
 interface AddonDetailProps {
   addon: AddonManifest | null;
@@ -38,7 +48,9 @@ export function AddonDetail({
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updateSuccess, setUpdateSuccess] = useState(false);
   const [installingDep, setInstallingDep] = useState<string | null>(null);
+  const [justInstalledDeps, setJustInstalledDeps] = useState<Set<string>>(new Set());
   const [removingDep, setRemovingDep] = useState<string | null>(null);
   const [customTagInput, setCustomTagInput] = useState("");
   const customTagRef = useRef<HTMLInputElement>(null);
@@ -55,6 +67,16 @@ export function AddonDetail({
         : [],
     [installedAddons, addon]
   );
+
+  // Escape key to cancel remove confirmation
+  useEffect(() => {
+    if (!confirmingRemove) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfirmingRemove(false);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [confirmingRemove]);
 
   if (!addon) {
     return (
@@ -117,6 +139,7 @@ export function AddonDetail({
         addonsPath,
         esouiId: updateResult.esouiId,
       });
+      setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
@@ -134,6 +157,7 @@ export function AddonDetail({
         depName,
       });
       toast.success(`Installed ${depName}`);
+      setJustInstalledDeps((prev) => new Set(prev).add(depName));
       onRemove(); // refresh addon list
     } catch (e) {
       toast.error(`Failed to install ${depName}: ${getTauriErrorMessage(e)}`);
@@ -158,6 +182,18 @@ export function AddonDetail({
     }
   };
 
+  const submitCustomTag = () => {
+    const tag = customTagInput.trim().toLowerCase();
+    if (!tag) return;
+    if (addon.tags.includes(tag)) {
+      toast.info("Tag already added");
+      setCustomTagInput("");
+      return;
+    }
+    onTagsChange(addon.folderName, [...addon.tags, tag]);
+    setCustomTagInput("");
+  };
+
   return (
     <div className="flex-1 overflow-y-auto p-6">
       <h2 className="font-heading text-xl font-semibold bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
@@ -165,24 +201,18 @@ export function AddonDetail({
       </h2>
       <div className="mt-1 mb-4 flex items-center gap-2 flex-wrap">
         <InfoPill color="muted">{addon.folderName}/</InfoPill>
-        {addon.esouiId && (
-          <a
-            className="inline-flex"
-            href={`https://www.esoui.com/downloads/info${addon.esouiId}`}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <InfoPill
-              color="sky"
-              className="hover:border-sky-400/40 cursor-pointer transition-colors"
-            >
-              ESOUI #{addon.esouiId}
-            </InfoPill>
-          </a>
-        )}
+        {addon.esouiId && <InfoPill color="sky">ESOUI #{addon.esouiId}</InfoPill>}
       </div>
 
-      {updateResult?.hasUpdate && (
+      {updateSuccess ? (
+        <GlassPanel
+          variant="subtle"
+          className="mb-4 flex items-center gap-2 border-emerald-500/20! bg-emerald-500/[0.04]! p-3"
+        >
+          <Check className="size-4 shrink-0 text-emerald-400" />
+          <span className="text-sm text-emerald-400">Updated successfully</span>
+        </GlassPanel>
+      ) : updateResult?.hasUpdate ? (
         <GlassPanel
           variant="subtle"
           className="mb-4 flex items-center justify-between gap-3 border-amber-500/20! bg-amber-500/[0.04]! p-3"
@@ -199,7 +229,7 @@ export function AddonDetail({
             {updating ? "Updating..." : "Update"}
           </Button>
         </GlassPanel>
-      )}
+      ) : null}
 
       {updateError && (
         <Alert variant="destructive" className="mb-4">
@@ -244,7 +274,7 @@ export function AddonDetail({
               <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
                 Last Updated
               </dt>
-              <dd>{new Date(addon.esouiLastUpdate).toLocaleDateString()}</dd>
+              <dd>{relativeDate(addon.esouiLastUpdate)}</dd>
             </>
           )}
         </dl>
@@ -254,21 +284,7 @@ export function AddonDetail({
               onClick={() => openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}`)}
               className="inline-flex items-center gap-1.5 rounded-md bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                <polyline points="15 3 21 3 21 9" />
-                <line x1="10" y1="14" x2="21" y2="3" />
-              </svg>
+              <ExternalLink className="size-3" />
               View on ESOUI
             </button>
           </div>
@@ -333,14 +349,10 @@ export function AddonDetail({
             ))}
           {/* Add custom tag */}
           <form
-            className="inline-flex"
+            className="inline-flex items-center gap-1"
             onSubmit={(e) => {
               e.preventDefault();
-              const tag = customTagInput.trim().toLowerCase();
-              if (tag && !addon.tags.includes(tag)) {
-                onTagsChange(addon.folderName, [...addon.tags, tag]);
-              }
-              setCustomTagInput("");
+              submitCustomTag();
             }}
           >
             <input
@@ -351,6 +363,15 @@ export function AddonDetail({
               placeholder="+ tag"
               className="w-16 focus:w-24 transition-all duration-150 rounded-md bg-white/[0.03] border border-white/[0.06] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-sky-400/30 focus:bg-white/[0.05]"
             />
+            {customTagInput.trim() && (
+              <button
+                type="submit"
+                className="flex items-center justify-center size-6 rounded-md bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 transition-colors text-xs font-bold"
+                aria-label="Add tag"
+              >
+                +
+              </button>
+            )}
           </form>
         </div>
       </div>
@@ -368,6 +389,7 @@ export function AddonDetail({
           <div className="space-y-0.5">
             {addon.dependsOn.map((dep) => {
               const installed = installedSet.has(dep.name);
+              const justInstalled = justInstalledDeps.has(dep.name);
               return (
                 <div
                   key={dep.name}
@@ -401,21 +423,7 @@ export function AddonDetail({
                       {removingDep === dep.name ? (
                         <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
                       ) : (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M3 6h18" />
-                          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-                          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                        </svg>
+                        <Trash2 className="size-3.5" />
                       )}
                     </button>
                   ) : (
@@ -431,6 +439,11 @@ export function AddonDetail({
                     >
                       {installingDep === dep.name ? (
                         <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
+                      ) : justInstalled ? (
+                        <span className="flex items-center gap-1 text-emerald-400">
+                          <Check className="size-3" />
+                          Installed
+                        </span>
                       ) : (
                         "Install"
                       )}
@@ -449,6 +462,7 @@ export function AddonDetail({
           <div className="space-y-0.5">
             {addon.optionalDependsOn.map((dep) => {
               const installed = installedSet.has(dep.name);
+              const justInstalled = justInstalledDeps.has(dep.name);
               return (
                 <div
                   key={dep.name}
@@ -482,21 +496,7 @@ export function AddonDetail({
                       {removingDep === dep.name ? (
                         <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
                       ) : (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M3 6h18" />
-                          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-                          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                        </svg>
+                        <Trash2 className="size-3.5" />
                       )}
                     </button>
                   ) : (
@@ -512,6 +512,11 @@ export function AddonDetail({
                     >
                       {installingDep === dep.name ? (
                         <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
+                      ) : justInstalled ? (
+                        <span className="flex items-center gap-1 text-emerald-400">
+                          <Check className="size-3" />
+                          Installed
+                        </span>
                       ) : (
                         "Install"
                       )}
@@ -542,7 +547,8 @@ export function AddonDetail({
             </p>
             {dependents.length > 0 && (
               <p className="mb-2 text-sm text-yellow-500">
-                Warning: {dependents.map((d) => d.title).join(", ")}{" "}
+                Warning:{" "}
+                {dependents.map((d) => `${d.title} (${d.folderName}/)`).join(", ")}{" "}
                 {dependents.length === 1 ? "depends" : "depend"} on this addon.
               </p>
             )}

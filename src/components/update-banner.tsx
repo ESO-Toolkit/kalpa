@@ -7,6 +7,7 @@ interface UpdateBannerProps {
     completed: number;
     failed: number;
     total: number;
+    currentAddon?: string;
   } | null;
   onUpdateAll: () => void;
   isOffline?: boolean;
@@ -25,12 +26,19 @@ export function UpdateBanner({
     <div className="animate-[slide-down_0.3s_ease-out] border-b border-[#c4a44a]/15 bg-gradient-to-r from-[#c4a44a]/[0.06] via-[#c4a44a]/[0.03] to-transparent backdrop-blur-sm">
       <div className="flex items-center justify-between px-5 py-2">
         {updatingAll && updateProgress ? (
-          <span className="text-sm font-medium text-[#c4a44a]">
-            Updating {updateProgress.completed + updateProgress.failed}/{updateProgress.total}
-            {updateProgress.failed > 0 && (
-              <span className="ml-1 text-red-400">({updateProgress.failed} failed)</span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-sm font-medium text-[#c4a44a] shrink-0">
+              Updating {updateProgress.completed + updateProgress.failed}/{updateProgress.total}
+              {updateProgress.failed > 0 && (
+                <span className="ml-1 text-red-400">({updateProgress.failed} failed)</span>
+              )}
+            </span>
+            {updateProgress.currentAddon && (
+              <span className="text-xs text-[#c4a44a]/50 truncate">
+                &mdash; {updateProgress.currentAddon}
+              </span>
             )}
-          </span>
+          </div>
         ) : (
           <span className="text-sm font-medium text-[#c4a44a]">
             {availableCount} update{availableCount > 1 ? "s" : ""} available
