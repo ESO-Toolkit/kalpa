@@ -34,6 +34,7 @@ type ActiveDialog =
   | "backups"
   | "api-compat"
   | "characters"
+  | "saved-variables"
   | "migration-wizard"
   | "safety-center"
   | null;
@@ -748,6 +749,7 @@ function App() {
         onBatchRemove={() => void handleBatchRemove()}
         onBatchUpdate={() => void handleBatchUpdate()}
         onOpenPacks={() => setActiveDialog("packs")}
+        onOpenSavedVars={() => setActiveDialog("saved-variables")}
         onOpenSettings={() => setActiveDialog("settings")}
         onRefresh={handleRefresh}
       />

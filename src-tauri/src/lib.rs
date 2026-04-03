@@ -6,6 +6,7 @@ mod manifest;
 mod manifest_cache;
 mod metadata;
 mod safe_migration;
+mod saved_variables;
 
 use serde::Serialize;
 use std::path::PathBuf;
@@ -293,6 +294,15 @@ pub fn run() {
             commands::export_pack_file,
             commands::import_pack_file,
             commands::fetch_roster_pack,
+            commands::get_saved_variables_path,
+            commands::list_saved_variables,
+            commands::read_saved_variable,
+            commands::write_saved_variable,
+            commands::copy_sv_profile,
+            commands::is_eso_running,
+            commands::delete_saved_variables,
+            commands::restore_sv_backup,
+            commands::preview_sv_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

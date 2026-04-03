@@ -1387,18 +1387,14 @@ pub struct BackupInfo {
     pub total_size: u64,
 }
 
+use crate::saved_variables::io as sv_io;
+
 fn backups_dir(addons_dir: &std::path::Path) -> PathBuf {
-    addons_dir
-        .parent()
-        .unwrap_or(addons_dir)
-        .join("kalpa-backups")
+    sv_io::backups_dir(addons_dir)
 }
 
 fn saved_variables_dir(addons_dir: &std::path::Path) -> PathBuf {
-    addons_dir
-        .parent()
-        .unwrap_or(addons_dir)
-        .join("SavedVariables")
+    sv_io::saved_variables_dir(addons_dir)
 }
 
 #[tauri::command]
@@ -3188,6 +3184,110 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     Ok(pack)
 }
 
+// ─── SavedVariables Manager ─────────────────────────────────
+
+#[tauri::command]
+pub async fn get_saved_variables_path(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<String, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = sv_io::saved_variables_dir(&addons_dir);
+        if !sv_dir.is_dir() {
+            return Err("SavedVariables folder not found.".to_string());
+        }
+        Ok(sv_dir.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn list_saved_variables(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<crate::saved_variables::SavedVariableFile>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || sv_io::list_saved_variables_blocking(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn read_saved_variable(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+) -> Result<crate::saved_variables::SvReadResponse, String> {
+    validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be read.".to_string());
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        sv_io::read_saved_variable_blocking(&addons_dir, &file_name)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn write_saved_variable(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+    tree: crate::saved_variables::SvTreeNode,
+    stamp: crate::saved_variables::SvFileStamp,
+) -> Result<crate::saved_variables::SvFileStamp, String> {
+    validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be written.".to_string());
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        sv_io::write_saved_variable_blocking(&addons_dir, &file_name, &tree, &stamp)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn preview_sv_save(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+    tree: crate::saved_variables::SvTreeNode,
+) -> Result<crate::saved_variables::SvDiffPreview, String> {
+    validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be previewed.".to_string());
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        let changes = sv_io::preview_save(&addons_dir, &file_name, &tree)?;
+        Ok(crate::saved_variables::SvDiffPreview { changes })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn restore_sv_backup(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+) -> Result<crate::saved_variables::SvFileStamp, String> {
+    validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be restored.".to_string());
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || sv_io::restore_backup_file(&addons_dir, &file_name))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+}
+
 // ── Roster Pack Install (deep link: kalpa://install-pack/{id}) ────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3231,6 +3331,150 @@ pub async fn fetch_roster_pack(pack_id: String) -> Result<RosterPack, String> {
             title: pack.title,
             addons: pack.addons,
         })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn copy_sv_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+    from_key: String,
+    to_key: String,
+) -> Result<(), String> {
+    validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be modified.".to_string());
+    }
+    if from_key.is_empty() || to_key.is_empty() {
+        return Err("Source and destination keys cannot be empty.".to_string());
+    }
+    if from_key.contains('"')
+        || to_key.contains('"')
+        || from_key.contains('\'')
+        || to_key.contains('\'')
+        || from_key.contains('\\')
+        || to_key.contains('\\')
+    {
+        return Err("Character keys must not contain quotes or backslashes.".to_string());
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        crate::saved_variables::profile::copy_sv_profile_blocking(
+            &addons_dir,
+            &file_name,
+            &from_key,
+            &to_key,
+        )
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn is_eso_running() -> Result<bool, String> {
+    tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        {
+            is_eso_running_windows()
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(false)
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// Check for eso64.exe / eso.exe using the Windows Toolhelp32 snapshot API.
+/// This avoids spawning a `tasklist` subprocess (which lists every process as CSV).
+#[cfg(target_os = "windows")]
+fn is_eso_running_windows() -> Result<bool, String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct PROCESSENTRY32W {
+        dwSize: u32,
+        cntUsage: u32,
+        th32ProcessID: u32,
+        th32DefaultHeapID: usize,
+        th32ModuleID: u32,
+        cntThreads: u32,
+        th32ParentProcessID: u32,
+        pcPriClassBase: i32,
+        dwFlags: u32,
+        szExeFile: [u16; 260],
+    }
+
+    const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> isize;
+        fn Process32FirstW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
+        fn Process32NextW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
+        fn CloseHandle(hObject: isize) -> i32;
+    }
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return Err("Failed to create process snapshot".to_string());
+        }
+
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut found = false;
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
+                let name = OsString::from_wide(&entry.szExeFile[..len])
+                    .to_string_lossy()
+                    .to_lowercase();
+                if name == "eso64.exe" || name == "eso.exe" {
+                    found = true;
+                    break;
+                }
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+
+        CloseHandle(snap);
+        Ok(found)
+    }
+}
+
+/// Delete selected SavedVariables files after creating an automatic backup.
+#[tauri::command]
+pub async fn delete_saved_variables(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_names: Vec<String>,
+) -> Result<u32, String> {
+    if file_names.is_empty() {
+        return Err("No files selected for deletion.".to_string());
+    }
+    if file_names.len() > 200 {
+        return Err("Too many files selected (max 200).".to_string());
+    }
+    for name in &file_names {
+        validate_name(name)?;
+        if !name.ends_with(".lua") {
+            return Err(format!("Only .lua files can be deleted: {}", name));
+        }
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        sv_io::delete_saved_variables_blocking(&addons_dir, &file_names)
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
