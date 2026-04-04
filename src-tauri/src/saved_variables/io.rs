@@ -27,7 +27,7 @@ pub fn backups_dir(addons_dir: &Path) -> std::path::PathBuf {
 }
 
 /// Get the file stamp (size + mtime) for overwrite protection.
-fn file_stamp(path: &Path) -> Result<SvFileStamp, String> {
+pub fn file_stamp(path: &Path) -> Result<SvFileStamp, String> {
     let meta = fs::metadata(path).map_err(|e| format!("Failed to read file metadata: {}", e))?;
     let modified_epoch_ms = meta
         .modified()

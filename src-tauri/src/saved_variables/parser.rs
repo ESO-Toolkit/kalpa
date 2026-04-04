@@ -22,6 +22,7 @@ pub fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, Stri
                 value_type: SvValueType::Boolean,
                 value: Some(serde_json::Value::Bool(true)),
                 children: None,
+                raw_lua_value: None,
             })
         }
         b'f' if chars[*pos..].starts_with(b"false") => {
@@ -31,6 +32,7 @@ pub fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, Stri
                 value_type: SvValueType::Boolean,
                 value: Some(serde_json::Value::Bool(false)),
                 children: None,
+                raw_lua_value: None,
             })
         }
         b'n' if chars[*pos..].starts_with(b"nil") => {
@@ -40,6 +42,7 @@ pub fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, Stri
                 value_type: SvValueType::Nil,
                 value: Some(serde_json::Value::Null),
                 children: None,
+                raw_lua_value: None,
             })
         }
         b'-' | b'0'..=b'9' => parse_lua_number(chars, pos),
@@ -109,6 +112,7 @@ pub fn skip_long_bracket(chars: &[u8], pos: usize) -> Option<usize> {
 
 fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
     let quote = chars[*pos];
+    let source_start = *pos; // remember start for fallback
     *pos += 1; // skip opening quote
     let mut out = Vec::new();
     while *pos < chars.len() && chars[*pos] != quote {
@@ -160,12 +164,26 @@ fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, 
         return Err("Unterminated string".to_string());
     }
     *pos += 1; // skip closing quote
-    let s = String::from_utf8_lossy(&out).to_string();
+
+    // If decoded bytes are valid UTF-8, use them directly (the common case).
+    // Otherwise, preserve the original source text between the quotes as
+    // `raw_lua_value` so that non-UTF8 byte sequences round-trip losslessly.
+    let (s, raw_lua) = match String::from_utf8(out) {
+        Ok(decoded) => (decoded, None),
+        Err(e) => {
+            let display = String::from_utf8_lossy(e.as_bytes()).to_string();
+            let inner_start = source_start + 1;
+            let inner_end = *pos - 1;
+            let raw = String::from_utf8_lossy(&chars[inner_start..inner_end]).to_string();
+            (display, Some(raw))
+        }
+    };
     Ok(SvTreeNode {
         key: String::new(),
         value_type: SvValueType::String,
         value: Some(serde_json::Value::String(s)),
         children: None,
+        raw_lua_value: raw_lua,
     })
 }
 
@@ -192,13 +210,22 @@ fn parse_lua_long_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, St
     let content_start = *pos;
     while *pos + close_pattern.len() <= chars.len() {
         if &chars[*pos..*pos + close_pattern.len()] == close_pattern.as_slice() {
-            let s = String::from_utf8_lossy(&chars[content_start..*pos]).to_string();
+            let raw_bytes = &chars[content_start..*pos];
+            let (s, raw_lua) = match std::str::from_utf8(raw_bytes) {
+                Ok(valid) => (valid.to_string(), None),
+                Err(_) => {
+                    let display = String::from_utf8_lossy(raw_bytes).to_string();
+                    // Long strings don't have escapes, so the raw source IS the content
+                    (display.clone(), Some(display))
+                }
+            };
             *pos += close_pattern.len();
             return Ok(SvTreeNode {
                 key: String::new(),
                 value_type: SvValueType::String,
                 value: Some(serde_json::Value::String(s)),
                 children: None,
+                raw_lua_value: raw_lua,
             });
         }
         *pos += 1;
@@ -265,6 +292,7 @@ fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String>
         value_type: SvValueType::Number,
         value: Some(value),
         children: None,
+        raw_lua_value: None,
     })
 }
 
@@ -307,6 +335,7 @@ fn parse_lua_table(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> 
         value_type: SvValueType::Table,
         value: None,
         children: Some(children),
+        raw_lua_value: None,
     })
 }
 
@@ -443,6 +472,7 @@ pub fn parse_sv_file(content: &str, file_name: &str) -> Result<SvTreeNode, Strin
         value_type: SvValueType::Table,
         value: None,
         children: Some(children),
+        raw_lua_value: None,
     })
 }
 

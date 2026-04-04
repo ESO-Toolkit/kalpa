@@ -1,5 +1,5 @@
 use super::io;
-use super::parser::{skip_lua_comment, skip_lua_string};
+use super::parser::{self, skip_lua_comment, skip_lua_string};
 use std::fs;
 use std::path::Path;
 
@@ -86,6 +86,10 @@ pub fn find_matching_brace(content: &str, open_pos: usize) -> Option<usize> {
 }
 
 /// Copy a character profile within a SavedVariables file.
+///
+/// Captures a file stamp before reading, then re-checks it before writing to
+/// detect concurrent modifications.  The generated Lua is re-parsed before
+/// writing to ensure it is syntactically valid.
 pub fn copy_sv_profile_blocking(
     addons_dir: &Path,
     file_name: &str,
@@ -98,6 +102,9 @@ pub fn copy_sv_profile_blocking(
     if !file_path.is_file() {
         return Err(format!("File not found: {}", file_name));
     }
+
+    // Capture stamp before reading for overwrite protection
+    let read_stamp = io::file_stamp(&file_path)?;
 
     let content =
         fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
@@ -176,6 +183,20 @@ pub fn copy_sv_profile_blocking(
     result.push_str(&content[..actual_insert]);
     result.push_str(&new_block);
     result.push_str(&content[actual_insert..]);
+
+    // Validation: re-parse the generated Lua to ensure it's syntactically valid
+    parser::parse_sv_file(&result, file_name)
+        .map_err(|e| format!("Copy produced invalid Lua: {}. Operation aborted.", e))?;
+
+    // Overwrite protection: reject if the file changed while we were computing
+    let pre_write_stamp = io::file_stamp(&file_path)?;
+    if pre_write_stamp.modified_epoch_ms != read_stamp.modified_epoch_ms
+        || pre_write_stamp.size != read_stamp.size
+    {
+        return Err("File was modified while the copy was being prepared. \
+             Please try again."
+            .to_string());
+    }
 
     io::write_raw_content(&sv_dir, file_name, &result)
 }
