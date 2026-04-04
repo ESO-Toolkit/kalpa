@@ -31,7 +31,7 @@ function badRequest(request: Request, errors: unknown): Response {
 }
 
 function unauthorized(request: Request): Response {
-  return json(request, { error: "Invalid or missing API key" }, 401);
+  return json(request, { error: "Authentication required" }, 401);
 }
 
 function requireAuth(request: Request, env: Env): boolean {
@@ -125,18 +125,24 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
   if (!pack) {
     return notFound(request, `Pack "${id}" not found`);
   }
-  // Hide draft packs from public access unless the requester is the author
-  // (authenticated requests include X-API-Key)
-  if (pack.status === "draft" && !requireAuth(request, env)) {
-    return notFound(request, `Pack "${id}" not found`);
+  // Hide draft packs from unauthenticated access
+  if (pack.status === "draft") {
+    const user = await validateBearerToken(request);
+    if (!user) {
+      return notFound(request, `Pack "${id}" not found`);
+    }
+    // Draft responses are auth-dependent — never cache in shared/CDN caches
+    return json(request, pack, 200, 0);
   }
-  // Pack data is not user-specific — use public so CDN/shared caches can serve it.
+  // Published pack data is not user-specific — use public so CDN/shared caches can serve it.
   return json(request, pack, 200, 300, "public");
 }
 
 // ── POST /packs — create a new pack ────────────────────────────────
 async function handleCreatePack(request: Request, env: Env, url: URL): Promise<Response> {
-  if (!requireAuth(request, env)) {
+  // Authenticate via Bearer token to derive server-side identity
+  const user = await validateBearerToken(request);
+  if (!user) {
     return unauthorized(request);
   }
 
@@ -159,6 +165,9 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     pack.status = "draft";
   }
 
+  // Override client-supplied creator with server-derived identity
+  pack.metadata.createdBy = String(user.id);
+
   // Check for ID conflict
   const existing = await getPack(env, pack.id);
   if (existing) {
@@ -167,7 +176,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
 
   // Per-user pack limit (25 max)
   const MAX_PACKS_PER_USER = 25;
-  const userId = pack.metadata.createdBy;
+  const userId = String(user.id);
   const index = (await getPackIndex(env)) ?? { items: [] };
   const userPackCount = index.items.filter((i) => i.createdBy === userId).length;
   if (userPackCount >= MAX_PACKS_PER_USER) {
@@ -202,7 +211,9 @@ async function handleUpdatePack(
   id: string,
   url: URL,
 ): Promise<Response> {
-  if (!requireAuth(request, env)) {
+  // Authenticate via Bearer token to derive server-side identity
+  const user = await validateBearerToken(request);
+  if (!user) {
     return unauthorized(request);
   }
 
@@ -218,9 +229,8 @@ async function handleUpdatePack(
     return badRequest(request, [{ field: "body", message: "Invalid JSON" }]);
   }
 
-  // Enforce ownership: only the original creator can update
-  const requestAuthor = (body as Pack).metadata?.createdBy;
-  if (existing.metadata.createdBy && requestAuthor !== existing.metadata.createdBy) {
+  // Enforce ownership: compare server-derived identity against stored creator
+  if (existing.metadata.createdBy && String(user.id) !== existing.metadata.createdBy) {
     return json(request, { error: "Only the pack creator can update it" }, 403);
   }
 
@@ -231,6 +241,7 @@ async function handleUpdatePack(
 
   const pack = body as Pack;
   pack.id = id; // Enforce URL id
+  pack.metadata.createdBy = existing.metadata.createdBy; // Preserve original creator
   pack.status = pack.status ?? existing.status ?? "published"; // Preserve existing status unless explicitly changed
   pack.metadata.createdAt = existing.metadata.createdAt; // Preserve original
   pack.metadata.updatedAt = new Date().toISOString();
@@ -261,7 +272,9 @@ async function handleDeletePack(
   id: string,
   url: URL,
 ): Promise<Response> {
-  if (!requireAuth(request, env)) {
+  // Authenticate via Bearer token to derive server-side identity
+  const user = await validateBearerToken(request);
+  if (!user) {
     return unauthorized(request);
   }
 
@@ -270,9 +283,8 @@ async function handleDeletePack(
     return notFound(request, `Pack "${id}" not found`);
   }
 
-  // Enforce ownership: only the original creator can delete
-  const userId = request.headers.get("X-User-Id");
-  if (existing.metadata.createdBy && userId !== existing.metadata.createdBy) {
+  // Enforce ownership: compare server-derived identity against stored creator
+  if (existing.metadata.createdBy && String(user.id) !== existing.metadata.createdBy) {
     return json(request, { error: "Only the pack creator can delete it" }, 403);
   }
 

@@ -3156,9 +3156,16 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&pack)
         .map_err(|e| format!("Failed to serialize pack: {}", e))?;
 
-    // Atomic write: write to .tmp then rename
+    // Atomic write: write to .tmp then replace destination
     let tmp_path = file_path.with_extension("esopack.tmp");
     fs::write(&tmp_path, json).map_err(|e| format!("Failed to write file: {}", e))?;
+    // On Windows, fs::rename fails if the destination exists. Remove it first.
+    if file_path.exists() {
+        fs::remove_file(&file_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("Failed to replace existing file: {}", e)
+        })?;
+    }
     fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         format!("Failed to finalize write: {}", e)
