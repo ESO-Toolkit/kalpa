@@ -66,7 +66,7 @@ export interface EsouiAddonDetail {
   author: string;
   description: string;
   compatibility: string;
-  fileSize: string;
+  md5: string;
   totalDownloads: string;
   monthlyDownloads: string;
   favorites: string;

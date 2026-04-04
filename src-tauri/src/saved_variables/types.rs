@@ -1,5 +1,23 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SvValueType {
+    Table,
+    String,
+    Number,
+    Boolean,
+    Nil,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SvChangeType {
+    Modified,
+    Added,
+    Removed,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedVariableFile {
@@ -14,7 +32,7 @@ pub struct SavedVariableFile {
 #[serde(rename_all = "camelCase")]
 pub struct SvTreeNode {
     pub key: String,
-    pub value_type: String,
+    pub value_type: SvValueType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,8 +62,7 @@ pub struct SvReadResponse {
 pub struct SvChange {
     /// Key path from root, e.g. ["Default", "@Account", "settingName"]
     pub path: Vec<String>,
-    /// "modified", "added", or "removed"
-    pub change_type: String,
+    pub change_type: SvChangeType,
     /// Human-readable old value (None for additions)
     pub old_value: Option<String>,
     /// Human-readable new value (None for removals)

@@ -41,11 +41,20 @@ interface DiscoverPanelProps {
   onInstalled: () => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   selectedResultId: number | null;
+  installedEsouiIds: Set<number>;
   isOffline?: boolean;
 }
 
-function useAddonInstall(addonsPath: string, onInstalled: () => void) {
+function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedIds: Set<number>) {
   const [installingId, setInstallingId] = useState<number | null>(null);
+  const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
+
+  // Merge persisted (from metadata) with session-installed IDs
+  const installedIds = useMemo(() => {
+    const merged = new Set(persistedIds);
+    for (const id of sessionInstalledIds) merged.add(id);
+    return merged;
+  }, [persistedIds, sessionInstalledIds]);
 
   const install = useCallback(
     async (id: number) => {
@@ -61,6 +70,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void) {
           esouiTitle: info.title,
           esouiVersion: info.version,
         });
+        setSessionInstalledIds((prev) => new Set(prev).add(id));
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
         onInstalled();
       } catch (e) {
@@ -72,13 +82,14 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void) {
     [addonsPath, onInstalled]
   );
 
-  return { installingId, install };
+  return { installingId, installedIds, install };
 }
 
 function DiscoverResultRow({
   result,
   selected,
   installingId,
+  installedIds,
   onSelect,
   onInstall,
   showMeta = false,
@@ -87,12 +98,14 @@ function DiscoverResultRow({
   result: EsouiSearchResult;
   selected: boolean;
   installingId: number | null;
+  installedIds: Set<number>;
   onSelect: () => void;
   onInstall: () => void;
   showMeta?: boolean;
   rank?: number;
 }) {
   const isInstalling = installingId === result.id;
+  const isInstalled = installedIds.has(result.id);
 
   return (
     <div
@@ -119,6 +132,7 @@ function DiscoverResultRow({
         <span className="flex-1 truncate text-sm font-medium">{result.title}</span>
         <Button
           size="xs"
+          variant={isInstalled ? "ghost" : "default"}
           onClick={(e) => {
             e.stopPropagation();
             onInstall();
@@ -126,13 +140,18 @@ function DiscoverResultRow({
           disabled={installingId !== null}
           className={cn(
             "shrink-0 transition-all",
-            isInstalling ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+            isInstalling || isInstalled ? "opacity-100" : "opacity-0 group-hover:opacity-100"
           )}
         >
           {isInstalling ? (
             <span className="flex items-center gap-1">
               <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
               Installing
+            </span>
+          ) : isInstalled ? (
+            <span className="flex items-center gap-1 text-emerald-400">
+              <Check className="size-3" />
+              Installed
             </span>
           ) : (
             "Install"
@@ -177,8 +196,15 @@ export function DiscoverPanel({
   onInstalled,
   onSelectResult,
   selectedResultId,
+  installedEsouiIds,
   isOffline,
 }: DiscoverPanelProps) {
+  const {
+    installingId,
+    installedIds,
+    install: handleInstall,
+  } = useAddonInstall(addonsPath, onInstalled, installedEsouiIds);
+
   if (isOffline) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
@@ -231,29 +257,38 @@ export function DiscoverPanel({
 
       {activeTab === "search" && (
         <SearchContent
-          addonsPath={addonsPath}
-          onInstalled={onInstalled}
+          installingId={installingId}
+          installedIds={installedIds}
+          onInstall={handleInstall}
           onSelectResult={onSelectResult}
           selectedResultId={selectedResultId}
         />
       )}
       {activeTab === "popular" && (
         <PopularContent
-          addonsPath={addonsPath}
-          onInstalled={onInstalled}
+          installingId={installingId}
+          installedIds={installedIds}
+          onInstall={handleInstall}
           onSelectResult={onSelectResult}
           selectedResultId={selectedResultId}
         />
       )}
       {activeTab === "categories" && (
         <CategoryContent
-          addonsPath={addonsPath}
-          onInstalled={onInstalled}
+          installingId={installingId}
+          installedIds={installedIds}
+          onInstall={handleInstall}
           onSelectResult={onSelectResult}
           selectedResultId={selectedResultId}
         />
       )}
-      {activeTab === "url" && <UrlContent addonsPath={addonsPath} onInstalled={onInstalled} />}
+      {activeTab === "url" && (
+        <UrlContent
+          addonsPath={addonsPath}
+          onInstalled={onInstalled}
+          installedEsouiIds={installedEsouiIds}
+        />
+      )}
     </div>
   );
 }
@@ -261,20 +296,21 @@ export function DiscoverPanel({
 /* ── Search Tab ───────────────────────────────────────── */
 
 function SearchContent({
-  addonsPath,
-  onInstalled,
+  installingId,
+  installedIds,
+  onInstall,
   onSelectResult,
   selectedResultId,
 }: {
-  addonsPath: string;
-  onInstalled: () => void;
+  installingId: number | null;
+  installedIds: Set<number>;
+  onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   selectedResultId: number | null;
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<EsouiSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
-  const { installingId, install: handleInstall } = useAddonInstall(addonsPath, onInstalled);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchIdRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -383,8 +419,9 @@ function SearchContent({
                 result={r}
                 selected={selectedResultId === r.id}
                 installingId={installingId}
+                installedIds={installedIds}
                 onSelect={() => onSelectResult(r)}
-                onInstall={() => handleInstall(r.id)}
+                onInstall={() => onInstall(r.id)}
                 showMeta
               />
             </div>
@@ -400,13 +437,15 @@ function SearchContent({
 type PopularSort = "downloads" | "newest";
 
 function PopularContent({
-  addonsPath,
-  onInstalled,
+  installingId,
+  installedIds,
+  onInstall,
   onSelectResult,
   selectedResultId,
 }: {
-  addonsPath: string;
-  onInstalled: () => void;
+  installingId: number | null;
+  installedIds: Set<number>;
+  onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   selectedResultId: number | null;
 }) {
@@ -415,7 +454,6 @@ function PopularContent({
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const pageRef = useRef(0);
-  const { installingId, install: handleInstall } = useAddonInstall(addonsPath, onInstalled);
 
   const loadPage = useCallback(async (p: number, sort: PopularSort, append: boolean) => {
     setLoading(true);
@@ -502,8 +540,9 @@ function PopularContent({
                 result={r}
                 selected={selectedResultId === r.id}
                 installingId={installingId}
+                installedIds={installedIds}
                 onSelect={() => onSelectResult(r)}
-                onInstall={() => handleInstall(r.id)}
+                onInstall={() => onInstall(r.id)}
                 showMeta
                 rank={idx + 1}
               />
@@ -520,13 +559,15 @@ function PopularContent({
 /* ── Categories Tab ───────────────────────────────────── */
 
 function CategoryContent({
-  addonsPath,
-  onInstalled,
+  installingId,
+  installedIds,
+  onInstall,
   onSelectResult,
   selectedResultId,
 }: {
-  addonsPath: string;
-  onInstalled: () => void;
+  installingId: number | null;
+  installedIds: Set<number>;
+  onInstall: (id: number) => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   selectedResultId: number | null;
 }) {
@@ -537,7 +578,6 @@ function CategoryContent({
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [filterText, setFilterText] = useState("");
-  const { installingId, install: handleInstall } = useAddonInstall(addonsPath, onInstalled);
   const pageRef = useRef(0);
 
   useEffect(() => {
@@ -691,8 +731,9 @@ function CategoryContent({
                 result={r}
                 selected={selectedResultId === r.id}
                 installingId={installingId}
+                installedIds={installedIds}
                 onSelect={() => onSelectResult(r)}
-                onInstall={() => handleInstall(r.id)}
+                onInstall={() => onInstall(r.id)}
                 showMeta
               />
             ))}
@@ -707,7 +748,15 @@ function CategoryContent({
 
 /* ── URL / ID Tab ─────────────────────────────────────── */
 
-function UrlContent({ addonsPath, onInstalled }: { addonsPath: string; onInstalled: () => void }) {
+function UrlContent({
+  addonsPath,
+  onInstalled,
+  installedEsouiIds,
+}: {
+  addonsPath: string;
+  onInstalled: () => void;
+  installedEsouiIds: Set<number>;
+}) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<
     "idle" | "resolving" | "resolved" | "installing" | "installed" | "error"
@@ -829,8 +878,14 @@ function UrlContent({ addonsPath, onInstalled }: { addonsPath: string; onInstall
               </span>
             )}
           </div>
+          {installedEsouiIds.has(addonInfo.id) && (
+            <div className="flex items-center gap-1.5 text-xs text-emerald-400">
+              <Check className="size-3" />
+              Already installed
+            </div>
+          )}
           <Button onClick={handleInstall} className="w-full" size="sm">
-            Install
+            {installedEsouiIds.has(addonInfo.id) ? "Reinstall" : "Install"}
           </Button>
         </div>
       )}

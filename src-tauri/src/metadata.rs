@@ -119,6 +119,9 @@ pub fn format_timestamp(secs: u64) -> String {
         }
         d -= year_days;
         y += 1;
+        if y > 3000 {
+            return format!("{}T{:02}:{:02}:{:02}Z", "9999-12-31", hours, mins, s);
+        }
     }
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
     let month_days = [
