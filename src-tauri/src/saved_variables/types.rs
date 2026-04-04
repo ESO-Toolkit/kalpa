@@ -37,6 +37,11 @@ pub struct SvTreeNode {
     pub value: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub children: Option<Vec<SvTreeNode>>,
+    /// Pre-escaped Lua string content for values that contain non-UTF8 bytes.
+    /// When present, the serializer outputs this directly instead of re-escaping
+    /// the `value` field, ensuring lossless round-tripping of binary addon data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_lua_value: Option<String>,
 }
 
 /// Metadata returned alongside a parsed tree so the frontend can
