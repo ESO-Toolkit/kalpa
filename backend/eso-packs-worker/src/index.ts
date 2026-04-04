@@ -3,7 +3,7 @@ import { getPack, getPackIndex, packToIndexItem, putPack, putPackIndex, getVote,
 import { corsHeaders, handlePreflight } from "./cors";
 import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
-import { handleCreateShare, handleResolveShare } from "./shares";
+import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
 
 function json(
   request: Request,
@@ -125,6 +125,9 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
   if (!pack) {
     return notFound(request, `Pack "${id}" not found`);
   }
+  if (pack.status === "draft" && !requireAuth(request, env)) {
+    return notFound(request, `Pack "${id}" not found`);
+  }
   // Pack data is not user-specific — use public so CDN/shared caches can serve it.
   return json(request, pack, 200, 300, "public");
 }
@@ -218,6 +221,11 @@ async function handleUpdatePack(
     return badRequest(request, errors);
   }
 
+  const requestAuthor = (body as Pack).metadata?.createdBy;
+  if (existing.metadata.createdBy && requestAuthor !== existing.metadata.createdBy) {
+    return json(request, { error: "Only the pack creator can update it" }, 403);
+  }
+
   const pack = body as Pack;
   pack.id = id; // Enforce URL id
   pack.status = pack.status ?? existing.status ?? "published"; // Preserve existing status unless explicitly changed
@@ -259,6 +267,11 @@ async function handleDeletePack(
     return notFound(request, `Pack "${id}" not found`);
   }
 
+  const userId = request.headers.get("X-User-Id");
+  if (existing.metadata.createdBy && userId !== existing.metadata.createdBy) {
+    return json(request, { error: "Only the pack creator can delete it" }, 403);
+  }
+
   await env.ESO_PACKS.delete(`pack:${id}`);
 
   // Remove from index
@@ -275,6 +288,9 @@ async function handleDeletePack(
 async function handleSeed(request: Request, env: Env): Promise<Response> {
   if (!requireAuth(request, env)) {
     return unauthorized(request);
+  }
+  if (env.ALLOW_SEED !== "true") {
+    return json(request, { error: "Seed endpoint is disabled" }, 403);
   }
   const errors: string[] = [];
 
@@ -304,17 +320,16 @@ async function handleVotePack(
   id: string,
   url: URL,
 ): Promise<Response> {
-  if (!requireAuth(request, env)) {
-    return unauthorized(request);
+  const user = await validateBearerToken(request);
+  if (!user) {
+    return json(request, { error: "Sign in to vote" }, 401);
   }
+  const userId = String(user.id);
 
   const pack = await getPack(env, id);
   if (!pack) {
     return notFound(request, `Pack "${id}" not found`);
   }
-
-  // Use a simple user identifier from the API key (in production, extract from JWT)
-  const userId = request.headers.get("X-User-Id") ?? "api-key-user";
 
   const existingVote = await getVote(env, id, userId);
   let voted: boolean;
@@ -359,6 +374,14 @@ async function handleInstallPack(
   if (!pack) {
     return notFound(request, `Pack "${id}" not found`);
   }
+
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rateLimitKey = `install-rate:${id}:${ip}`;
+  const existing = await env.ESO_PACKS.get(rateLimitKey);
+  if (existing) {
+    return json(request, { installCount: pack.installCount ?? 0 });
+  }
+  await env.ESO_PACKS.put(rateLimitKey, "1", { expirationTtl: 3600 });
 
   pack.installCount = (pack.installCount ?? 0) + 1;
   await putPack(env, pack);

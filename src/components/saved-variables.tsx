@@ -728,9 +728,9 @@ function NavTreeItem({
           </InfoPill>
           <div className="h-px flex-1 bg-white/[0.06]" />
         </div>
-        {tableChildren.map((child, i) => (
+        {tableChildren.map((child) => (
           <NavTreeItem
-            key={`${child.key}-${i}`}
+            key={child.key}
             node={child}
             depth={depth}
             structuralDepth={structuralDepth + 1}
@@ -784,9 +784,9 @@ function NavTreeItem({
         )}
       </button>
       {isExpanded &&
-        tableChildren.map((child, i) => (
+        tableChildren.map((child) => (
           <NavTreeItem
-            key={`${child.key}-${i}`}
+            key={child.key}
             node={child}
             depth={depth + 1}
             structuralDepth={structuralDepth + 1}
@@ -1530,14 +1530,15 @@ function EditorTab({
   const expandAll = useCallback(() => {
     if (!tree?.children) return;
     const paths = new Set<string>();
-    const walk = (node: SvTreeNode, prefix: string) => {
-      const key = prefix ? `${prefix}/${node.key}` : node.key;
+    const walk = (node: SvTreeNode, parentPath: string[]) => {
+      const currentPath = [...parentPath, node.key];
+      const key = currentPath.map((s) => s.replace(/\0/g, "\\0")).join("\0");
       if (node.valueType === "table" && node.children) {
         paths.add(key);
-        node.children.forEach((c) => walk(c, key));
+        node.children.forEach((c) => walk(c, currentPath));
       }
     };
-    tree.children.forEach((c) => walk(c, ""));
+    tree.children.forEach((c) => walk(c, []));
     setExpandedPaths(paths);
   }, [tree]);
 

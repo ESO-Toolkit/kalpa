@@ -6,6 +6,7 @@ const ID_PATTERN = /^[a-z0-9-]+$/;
 const MAX_NAME_LENGTH = 100;
 const MAX_DESCRIPTION_LENGTH = 1000;
 const MAX_TAGS = 10;
+const MAX_ID_LENGTH = 100;
 const MAX_ADDONS = 200;
 
 export function validatePack(pack: unknown): ValidationError[] {
@@ -17,11 +18,10 @@ export function validatePack(pack: unknown): ValidationError[] {
 
   const p = pack as Record<string, unknown>;
 
-  if (typeof p.id !== "string" || !ID_PATTERN.test(p.id)) {
+  if (typeof p.id !== "string" || p.id.length === 0 || p.id.length > MAX_ID_LENGTH || !ID_PATTERN.test(p.id)) {
     errors.push({
       field: "id",
-      message:
-        "id is required and must contain only lowercase letters, numbers, and hyphens",
+      message: "id is required, must be 1-100 characters, and contain only lowercase letters, numbers, and hyphens",
     });
   }
 
@@ -65,6 +65,16 @@ export function validatePack(pack: unknown): ValidationError[] {
       field: "tags",
       message: `tags must be an array with at most ${MAX_TAGS} entries`,
     });
+  } else {
+    for (let i = 0; i < p.tags.length; i++) {
+      if (typeof p.tags[i] !== "string" || p.tags[i].length === 0 || p.tags[i].length > 50) {
+        errors.push({
+          field: `tags[${i}]`,
+          message: "each tag must be a non-empty string of at most 50 characters",
+        });
+        break;
+      }
+    }
   }
 
   if (!Array.isArray(p.addons) || p.addons.length > MAX_ADDONS) {
@@ -75,7 +85,7 @@ export function validatePack(pack: unknown): ValidationError[] {
   } else {
     for (let i = 0; i < p.addons.length; i++) {
       const addon = p.addons[i] as Record<string, unknown>;
-      if (typeof addon.esouiId !== "number" || addon.esouiId <= 0) {
+      if (typeof addon.esouiId !== "number" || !Number.isInteger(addon.esouiId) || addon.esouiId <= 0) {
         errors.push({
           field: `addons[${i}].esouiId`,
           message: "esouiId must be a positive number",

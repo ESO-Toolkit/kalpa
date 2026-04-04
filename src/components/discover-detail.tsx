@@ -84,6 +84,8 @@ export function DiscoverDetail({
       const target = e.target as Element;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
       if (target.closest('[role="listbox"], [role="combobox"], [role="option"], select')) return;
+      const panel = document.querySelector("[data-discover-detail]");
+      if (!panel?.contains(document.activeElement)) return;
       if (e.key === "ArrowLeft") {
         setScreenshotIdx((prev) => (prev > 0 ? prev - 1 : detail.screenshots.length - 1));
       } else if (e.key === "ArrowRight") {
@@ -192,7 +194,7 @@ export function DiscoverDetail({
   const safeIdx = Math.max(0, Math.min(screenshotIdx, detail.screenshots.length - 1));
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 space-y-5">
+    <div data-discover-detail className="flex-1 overflow-y-auto p-6 space-y-5">
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex-1 min-w-0">

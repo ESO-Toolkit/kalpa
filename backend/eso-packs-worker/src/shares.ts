@@ -34,9 +34,19 @@ function json(
 }
 
 function generateCode(): string {
-  const bytes = new Uint8Array(CODE_LENGTH);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => ALPHABET[b % ALPHABET.length]).join("");
+  const code: string[] = [];
+  const limit = Math.floor(256 / ALPHABET.length) * ALPHABET.length;
+  while (code.length < CODE_LENGTH) {
+    const bytes = new Uint8Array(CODE_LENGTH * 2);
+    crypto.getRandomValues(bytes);
+    for (const b of bytes) {
+      if (b < limit) {
+        code.push(ALPHABET[b % ALPHABET.length]);
+        if (code.length >= CODE_LENGTH) break;
+      }
+    }
+  }
+  return code.join("");
 }
 
 function shareKey(code: string): string {
@@ -49,12 +59,12 @@ function userShareKey(userId: string, code: string): string {
 
 // ── Auth ──────────────────────────────────────────────────────────
 
-interface EsoLogsUser {
+export interface EsoLogsUser {
   id: number;
   name: string;
 }
 
-async function validateBearerToken(request: Request): Promise<EsoLogsUser | null> {
+export async function validateBearerToken(request: Request): Promise<EsoLogsUser | null> {
   const authHeader = request.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) return null;
 
@@ -107,6 +117,15 @@ function validateSharePayload(data: unknown): ValidationError[] {
 
   if (!Array.isArray(d.tags)) {
     errors.push({ field: "tags", message: "tags must be an array" });
+  } else if (d.tags.length > 10) {
+    errors.push({ field: "tags", message: "tags must have at most 10 entries" });
+  } else {
+    for (let i = 0; i < d.tags.length; i++) {
+      if (typeof d.tags[i] !== "string" || d.tags[i].length === 0 || d.tags[i].length > 50) {
+        errors.push({ field: `tags[${i}]`, message: "each tag must be a non-empty string of at most 50 characters" });
+        break;
+      }
+    }
   }
 
   if (!Array.isArray(d.addons) || d.addons.length === 0 || d.addons.length > MAX_ADDONS) {
@@ -114,7 +133,7 @@ function validateSharePayload(data: unknown): ValidationError[] {
   } else {
     for (let i = 0; i < d.addons.length; i++) {
       const addon = d.addons[i] as Record<string, unknown>;
-      if (typeof addon.esouiId !== "number" || addon.esouiId <= 0) {
+      if (typeof addon.esouiId !== "number" || !Number.isInteger(addon.esouiId) || addon.esouiId <= 0) {
         errors.push({ field: `addons[${i}].esouiId`, message: "esouiId must be a positive number" });
       }
       if (typeof addon.name !== "string" || addon.name.length === 0) {

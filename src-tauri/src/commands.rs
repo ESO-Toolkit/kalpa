@@ -1702,7 +1702,7 @@ pub fn activate_profile(
             };
 
             // Skip non-addon folders and our own files
-            if folder_name.starts_with("kalpa") {
+            if folder_name.starts_with("kalpa-") {
                 continue;
             }
 
@@ -1826,6 +1826,9 @@ pub fn backup_character_settings(
 ) -> Result<u32, String> {
     if character_name.trim().is_empty() {
         return Err("Character name cannot be empty.".to_string());
+    }
+    if character_name.len() < 3 {
+        return Err("Character name must be at least 3 characters.".to_string());
     }
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
@@ -3153,12 +3156,25 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&pack)
         .map_err(|e| format!("Failed to serialize pack: {}", e))?;
 
-    fs::write(&file_path, json).map_err(|e| format!("Failed to write file: {}", e))
+    // Atomic write: write to .tmp then rename
+    let tmp_path = file_path.with_extension("esopack.tmp");
+    fs::write(&tmp_path, json).map_err(|e| format!("Failed to write file: {}", e))?;
+    fs::rename(&tmp_path, &file_path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        format!("Failed to finalize write: {}", e)
+    })
 }
 
 #[tauri::command]
 pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     let file_path = PathBuf::from(&path);
+
+    if path.contains("..") {
+        return Err("Invalid file path.".to_string());
+    }
+    if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
+        return Err("Only .esopack files can be imported.".to_string());
+    }
 
     if !file_path.exists() {
         return Err("File not found.".to_string());

@@ -77,7 +77,19 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
   };
 
   useEffect(() => {
-    loadSnapshots();
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const result = await invokeOrThrow<SnapshotManifest[]>("list_snapshots", { addonsPath });
+        if (!cancelled) setSnapshots(result);
+      } catch (e) {
+        if (!cancelled) toast.error(`Failed to load snapshots: ${getTauriErrorMessage(e)}`);
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, [addonsPath]);
 
   const handleRestore = async (id: string) => {
@@ -256,9 +268,17 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
   const [entries, setEntries] = useState<OpLogEntry[]>([]);
 
   useEffect(() => {
+    let cancelled = false;
     void invokeOrThrow<OpLogEntry[]>("read_ops_log", { addonsPath })
-      .then(setEntries)
-      .catch((e) => toast.error(`Failed to load log: ${getTauriErrorMessage(e)}`));
+      .then((data) => {
+        if (!cancelled) setEntries(data);
+      })
+      .catch((e) => {
+        if (!cancelled) toast.error(`Failed to load log: ${getTauriErrorMessage(e)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [addonsPath]);
 
   return (

@@ -129,22 +129,36 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
     // Wait for callback (120s timeout)
     let timeout = Duration::from_secs(120);
     let start = std::time::Instant::now();
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("Failed to set nonblocking: {}", e))?;
 
     loop {
         if start.elapsed() > timeout {
             return Err("OAuth login timed out. Please try again.".to_string());
         }
 
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| format!("Failed to set nonblocking: {}", e))?;
-
         match listener.accept() {
             Ok((mut stream, _)) => {
-                let mut buf = [0u8; 8192];
                 stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let request = String::from_utf8_lossy(&buf[..n]);
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 16384];
+                loop {
+                    match stream.read(&mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                            if buf.len() > 65536 {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf);
 
                 if let Some(tokens) = extract_tokens_from_request(&request) {
                     // Send success page

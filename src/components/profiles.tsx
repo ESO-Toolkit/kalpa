@@ -4,6 +4,7 @@ import type { AddonProfile } from "../types";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -109,12 +110,11 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Addon Profiles</DialogTitle>
+          <DialogDescription>
+            Save and switch between addon configurations. Activating a profile enables/disables
+            addons by renaming folders.
+          </DialogDescription>
         </DialogHeader>
-
-        <p className="text-sm text-muted-foreground">
-          Save and switch between addon configurations. Activating a profile enables/disables addons
-          by renaming folders.
-        </p>
 
         <div className="flex gap-2">
           <Input

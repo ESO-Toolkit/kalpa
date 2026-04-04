@@ -4,6 +4,7 @@ import type { BackupInfo } from "../types";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -91,12 +92,11 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>SavedVariables Backup</DialogTitle>
+          <DialogDescription>
+            Back up your addon settings (SavedVariables). Restore after reinstalling ESO or
+            switching PCs.
+          </DialogDescription>
         </DialogHeader>
-
-        <p className="text-sm text-muted-foreground">
-          Back up your addon settings (SavedVariables). Restore after reinstalling ESO or switching
-          PCs.
-        </p>
 
         <div className="flex gap-2">
           <Input
