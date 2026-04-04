@@ -125,7 +125,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
                         size="sm"
                         variant="outline"
                         onClick={() => handleBackup(char)}
-                        disabled={backingUp !== null}
+                        disabled={backingUp === `${char.server}-${char.name}`}
                       >
                         {backingUp === `${char.server}-${char.name}`
                           ? "Backing up..."

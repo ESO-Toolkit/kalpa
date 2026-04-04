@@ -1,6 +1,8 @@
 use super::parser;
 use super::serializer;
-use super::types::{SavedVariableFile, SvChange, SvFileStamp, SvReadResponse, SvTreeNode};
+use super::types::{
+    SavedVariableFile, SvChange, SvChangeType, SvFileStamp, SvReadResponse, SvTreeNode, SvValueType,
+};
 use crate::metadata;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -190,12 +192,32 @@ pub fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVaria
                         use std::io::Read;
                         let read_limit = 256 * 1024;
                         let mut buf = vec![0u8; read_limit.min(size_bytes as usize)];
-                        let n = f.read(&mut buf).unwrap_or(0);
+                        let n = f
+                            .read(&mut buf)
+                            .map_err(|e| {
+                                eprintln!("Warning: failed to read {}: {}", path.display(), e);
+                                e
+                            })
+                            .unwrap_or(0);
                         buf.truncate(n);
-                        let content = String::from_utf8_lossy(&buf);
-                        extract_character_keys(&content)
+                        match String::from_utf8(buf) {
+                            Ok(content) => extract_character_keys(&content),
+                            Err(e) => {
+                                // Fall back to lossy conversion but log the issue
+                                eprintln!(
+                                    "Warning: {} contains invalid UTF-8: {}",
+                                    path.display(),
+                                    e
+                                );
+                                let content = String::from_utf8_lossy(e.as_bytes());
+                                extract_character_keys(&content)
+                            }
+                        }
                     }
-                    Err(_) => Vec::new(),
+                    Err(e) => {
+                        eprintln!("Warning: failed to open {}: {}", path.display(), e);
+                        Vec::new()
+                    }
                 };
                 if let Ok(mut c) = cache.lock() {
                     c.insert(
@@ -308,7 +330,8 @@ pub fn write_saved_variable_blocking(
     // Create a .bak copy before overwriting (automatic backup)
     if file_path.is_file() {
         let bak_path = file_path.with_extension("lua.bak");
-        let _ = fs::copy(&file_path, &bak_path);
+        fs::copy(&file_path, &bak_path)
+            .map_err(|e| format!("Failed to create backup before saving: {}", e))?;
     }
 
     // Write atomically via temp file + rename
@@ -325,15 +348,15 @@ pub fn write_saved_variable_blocking(
 
 /// Format an SvTreeNode leaf value for display.
 fn format_sv_value(node: &SvTreeNode) -> String {
-    match node.value_type.as_str() {
-        "nil" => "nil".to_string(),
-        "boolean" => node
+    match node.value_type {
+        SvValueType::Nil => "nil".to_string(),
+        SvValueType::Boolean => node
             .value
             .as_ref()
             .and_then(|v| v.as_bool())
             .map(|b| if b { "true" } else { "false" }.to_string())
             .unwrap_or_else(|| "false".to_string()),
-        "number" => node
+        SvValueType::Number => node
             .value
             .as_ref()
             .map(|v| {
@@ -348,17 +371,16 @@ fn format_sv_value(node: &SvTreeNode) -> String {
                 }
             })
             .unwrap_or_else(|| "0".to_string()),
-        "string" => node
+        SvValueType::String => node
             .value
             .as_ref()
             .and_then(|v| v.as_str())
             .map(|s| format!("\"{}\"", s))
             .unwrap_or_else(|| "\"\"".to_string()),
-        "table" => {
+        SvValueType::Table => {
             let count = node.children.as_ref().map(|c| c.len()).unwrap_or(0);
             format!("{{...}} ({} entries)", count)
         }
-        other => format!("<{}>", other),
     }
 }
 
@@ -369,8 +391,8 @@ fn diff_trees(
     path: &mut Vec<String>,
     changes: &mut Vec<SvChange>,
 ) {
-    match (old.value_type.as_str(), new.value_type.as_str()) {
-        ("table", "table") => {
+    match (old.value_type, new.value_type) {
+        (SvValueType::Table, SvValueType::Table) => {
             // Build lookup maps by key for children
             let old_children: std::collections::HashMap<&str, &SvTreeNode> = old
                 .children
@@ -392,7 +414,7 @@ fn diff_trees(
                     } else {
                         changes.push(SvChange {
                             path: path.clone(),
-                            change_type: "removed".to_string(),
+                            change_type: SvChangeType::Removed,
                             old_value: Some(format_sv_value(child)),
                             new_value: None,
                         });
@@ -407,7 +429,7 @@ fn diff_trees(
                         path.push(child.key.clone());
                         changes.push(SvChange {
                             path: path.clone(),
-                            change_type: "added".to_string(),
+                            change_type: SvChangeType::Added,
                             old_value: None,
                             new_value: Some(format_sv_value(child)),
                         });
@@ -428,7 +450,7 @@ fn diff_trees(
             if old.value_type != new.value_type || !values_equal {
                 changes.push(SvChange {
                     path: path.clone(),
-                    change_type: "modified".to_string(),
+                    change_type: SvChangeType::Modified,
                     old_value: Some(format_sv_value(old)),
                     new_value: Some(format_sv_value(new)),
                 });

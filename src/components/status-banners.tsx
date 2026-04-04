@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Alert, AlertAction } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { AppUpdateBanner, useAppUpdate } from "./app-update";
@@ -19,6 +20,8 @@ export function StatusBanners({
   onRestart,
   onOpenSettings,
 }: StatusBannersProps) {
+  const [offlineDismissed, setOfflineDismissed] = useState(false);
+
   return (
     <>
       {error && (
@@ -34,10 +37,15 @@ export function StatusBanners({
         </Alert>
       )}
 
-      {isOffline && (
+      {isOffline && !offlineDismissed && (
         <Alert className="rounded-none border-x-0 border-t-0 bg-muted/50 text-muted-foreground">
           You&apos;re offline — updates, installs, and discovery are unavailable until you
           reconnect.
+          <AlertAction>
+            <Button variant="outline" size="sm" onClick={() => setOfflineDismissed(true)}>
+              Dismiss
+            </Button>
+          </AlertAction>
         </Alert>
       )}
 

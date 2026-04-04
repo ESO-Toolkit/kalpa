@@ -7,6 +7,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   const [creating, setCreating] = useState(false);
   const [activating, setActivating] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const loadProfiles = async () => {
     try {
@@ -96,12 +98,15 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   };
 
   const handleDelete = async (name: string) => {
+    setDeleting(true);
     try {
       await invokeOrThrow("delete_profile", { addonsPath, profileName: name });
       toast.success(`Profile "${name}" deleted`);
       loadProfiles();
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -154,40 +159,48 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
                     {p.enabledAddons.length} addons &middot; {p.createdAt}
                   </div>
                 </div>
-                <div className="flex gap-1">
-                  <Button
-                    size="sm"
-                    variant={activeProfile === p.name ? "outline" : "default"}
-                    onClick={() => handleActivate(p.name)}
-                    disabled={activating !== null}
-                  >
-                    {activating === p.name ? "Activating..." : "Activate"}
-                  </Button>
+                <div className="flex gap-1 shrink-0">
                   {confirmDelete === p.name ? (
                     <div className="flex items-center gap-1">
-                      <span className="text-xs text-amber-400 mr-1">Delete this profile?</span>
+                      <span className="text-xs text-amber-400 mr-1">Delete?</span>
                       <Button
                         size="sm"
                         variant="destructive"
+                        disabled={deleting}
                         onClick={() => {
                           setConfirmDelete(null);
                           handleDelete(p.name);
                         }}
                       >
-                        Yes, Delete
+                        {deleting ? "..." : "Yes"}
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>
-                        Cancel
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={deleting}
+                        onClick={() => setConfirmDelete(null)}
+                      >
+                        No
                       </Button>
                     </div>
                   ) : (
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      onClick={() => setConfirmDelete(p.name)}
-                    >
-                      Delete
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant={activeProfile === p.name ? "outline" : "default"}
+                        onClick={() => handleActivate(p.name)}
+                        disabled={activating !== null}
+                      >
+                        {activating === p.name ? "Activating..." : "Activate"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => setConfirmDelete(p.name)}
+                      >
+                        Delete
+                      </Button>
+                    </>
                   )}
                 </div>
               </div>

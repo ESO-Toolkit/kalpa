@@ -3,10 +3,10 @@ import type { Pack, ValidationError } from "./types";
 const VALID_TYPES = ["addon-pack", "build-pack", "roster-pack"];
 const VALID_STATUSES = ["draft", "published"];
 const ID_PATTERN = /^[a-z0-9-]+$/;
+const MAX_ID_LENGTH = 100;
 const MAX_NAME_LENGTH = 100;
 const MAX_DESCRIPTION_LENGTH = 1000;
 const MAX_TAGS = 10;
-const MAX_ID_LENGTH = 100;
 const MAX_ADDONS = 200;
 
 export function validatePack(pack: unknown): ValidationError[] {
@@ -21,7 +21,8 @@ export function validatePack(pack: unknown): ValidationError[] {
   if (typeof p.id !== "string" || p.id.length === 0 || p.id.length > MAX_ID_LENGTH || !ID_PATTERN.test(p.id)) {
     errors.push({
       field: "id",
-      message: "id is required, must be 1-100 characters, and contain only lowercase letters, numbers, and hyphens",
+      message:
+        `id is required, must be 1-${MAX_ID_LENGTH} characters, and contain only lowercase letters, numbers, and hyphens`,
     });
   }
 

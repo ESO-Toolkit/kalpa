@@ -7,6 +7,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
   const [restoring, setRestoring] = useState<string | null>(null);
   const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const loadBackups = async () => {
     try {
@@ -78,12 +80,15 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
   };
 
   const handleDelete = async (name: string) => {
+    setDeleting(true);
     try {
       await invokeOrThrow("delete_backup", { addonsPath, backupName: name });
       toast.success(`Deleted backup "${name}"`);
       loadBackups();
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -164,14 +169,20 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
                       <Button
                         size="sm"
                         variant="destructive"
+                        disabled={deleting}
                         onClick={() => {
                           setConfirmDelete(null);
                           handleDelete(b.name);
                         }}
                       >
-                        Yes, Delete
+                        {deleting ? "Deleting..." : "Yes, Delete"}
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={deleting}
+                        onClick={() => setConfirmDelete(null)}
+                      >
                         Cancel
                       </Button>
                     </div>

@@ -35,9 +35,11 @@ function json(
 
 function generateCode(): string {
   const code: string[] = [];
-  const limit = Math.floor(256 / ALPHABET.length) * ALPHABET.length;
+  // Rejection sampling to avoid modulo bias (ALPHABET.length = 30)
+  // Largest multiple of 30 that fits in a byte: 240 (30 * 8)
+  const limit = 240;
   while (code.length < CODE_LENGTH) {
-    const bytes = new Uint8Array(CODE_LENGTH * 2);
+    const bytes = new Uint8Array(CODE_LENGTH * 2); // oversample to reduce iterations
     crypto.getRandomValues(bytes);
     for (const b of bytes) {
       if (b < limit) {

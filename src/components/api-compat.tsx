@@ -23,20 +23,24 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function load() {
-      try {
-        const result = await invokeOrThrow<ApiCompatInfo>("check_api_compatibility", {
-          addonsPath,
-        });
-        setInfo(result);
-      } catch (e) {
-        setError(getTauriErrorMessage(e));
-      } finally {
-        setLoading(false);
-      }
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await invokeOrThrow<ApiCompatInfo>("check_api_compatibility", {
+        addonsPath,
+      });
+      setInfo(result);
+    } catch (e) {
+      setError(getTauriErrorMessage(e));
+    } finally {
+      setLoading(false);
     }
+  };
+
+  useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addonsPath]);
 
   return (
@@ -52,7 +56,12 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
             <span className="ml-2 text-muted-foreground">Checking compatibility...</span>
           </div>
         ) : error ? (
-          <Alert variant="destructive">{error}</Alert>
+          <div className="space-y-2">
+            <Alert variant="destructive">{error}</Alert>
+            <Button size="sm" variant="outline" onClick={load}>
+              Retry
+            </Button>
+          </div>
         ) : info ? (
           <div className="flex-1 overflow-y-auto space-y-4">
             <div className="flex items-center gap-3">

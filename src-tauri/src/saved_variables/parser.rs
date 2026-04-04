@@ -1,4 +1,4 @@
-use super::types::SvTreeNode;
+use super::types::{SvTreeNode, SvValueType};
 
 /// Simple recursive descent parser for ESO SavedVariables Lua files.
 /// Only handles the subset of Lua that ESO actually generates.
@@ -19,7 +19,7 @@ pub fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, Stri
             *pos += 4;
             Ok(SvTreeNode {
                 key: String::new(),
-                value_type: "boolean".to_string(),
+                value_type: SvValueType::Boolean,
                 value: Some(serde_json::Value::Bool(true)),
                 children: None,
             })
@@ -28,7 +28,7 @@ pub fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, Stri
             *pos += 5;
             Ok(SvTreeNode {
                 key: String::new(),
-                value_type: "boolean".to_string(),
+                value_type: SvValueType::Boolean,
                 value: Some(serde_json::Value::Bool(false)),
                 children: None,
             })
@@ -37,7 +37,7 @@ pub fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, Stri
             *pos += 3;
             Ok(SvTreeNode {
                 key: String::new(),
-                value_type: "nil".to_string(),
+                value_type: SvValueType::Nil,
                 value: Some(serde_json::Value::Null),
                 children: None,
             })
@@ -163,7 +163,7 @@ fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, 
     let s = String::from_utf8_lossy(&out).to_string();
     Ok(SvTreeNode {
         key: String::new(),
-        value_type: "string".to_string(),
+        value_type: SvValueType::String,
         value: Some(serde_json::Value::String(s)),
         children: None,
     })
@@ -196,7 +196,7 @@ fn parse_lua_long_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, St
             *pos += close_pattern.len();
             return Ok(SvTreeNode {
                 key: String::new(),
-                value_type: "string".to_string(),
+                value_type: SvValueType::String,
                 value: Some(serde_json::Value::String(s)),
                 children: None,
             });
@@ -262,7 +262,7 @@ fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String>
     };
     Ok(SvTreeNode {
         key: String::new(),
-        value_type: "number".to_string(),
+        value_type: SvValueType::Number,
         value: Some(value),
         children: None,
     })
@@ -304,7 +304,7 @@ fn parse_lua_table(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> 
 
     Ok(SvTreeNode {
         key: String::new(),
-        value_type: "table".to_string(),
+        value_type: SvValueType::Table,
         value: None,
         children: Some(children),
     })
@@ -440,7 +440,7 @@ pub fn parse_sv_file(content: &str, file_name: &str) -> Result<SvTreeNode, Strin
 
     Ok(SvTreeNode {
         key: file_name.to_string(),
-        value_type: "table".to_string(),
+        value_type: SvValueType::Table,
         value: None,
         children: Some(children),
     })
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn lua_parse_string_simple() {
         let node = parse_value(r#""hello world""#).unwrap();
-        assert_eq!(node.value_type, "string");
+        assert_eq!(node.value_type, SvValueType::String);
         assert_eq!(node.value, Some(serde_json::json!("hello world")));
     }
 
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn lua_parse_long_string() {
         let node = parse_value("[[long string content]]").unwrap();
-        assert_eq!(node.value_type, "string");
+        assert_eq!(node.value_type, SvValueType::String);
         assert_eq!(node.value, Some(serde_json::json!("long string content")));
     }
 
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn lua_parse_integer() {
         let node = parse_value("42").unwrap();
-        assert_eq!(node.value_type, "number");
+        assert_eq!(node.value_type, SvValueType::Number);
         assert_eq!(node.value, Some(serde_json::json!(42.0)));
     }
 
@@ -584,28 +584,28 @@ mod tests {
     #[test]
     fn lua_parse_true() {
         let node = parse_value("true").unwrap();
-        assert_eq!(node.value_type, "boolean");
+        assert_eq!(node.value_type, SvValueType::Boolean);
         assert_eq!(node.value, Some(serde_json::json!(true)));
     }
 
     #[test]
     fn lua_parse_false() {
         let node = parse_value("false").unwrap();
-        assert_eq!(node.value_type, "boolean");
+        assert_eq!(node.value_type, SvValueType::Boolean);
         assert_eq!(node.value, Some(serde_json::json!(false)));
     }
 
     #[test]
     fn lua_parse_nil() {
         let node = parse_value("nil").unwrap();
-        assert_eq!(node.value_type, "nil");
+        assert_eq!(node.value_type, SvValueType::Nil);
         assert_eq!(node.value, Some(serde_json::Value::Null));
     }
 
     #[test]
     fn lua_parse_empty_table() {
         let node = parse_value("{}").unwrap();
-        assert_eq!(node.value_type, "table");
+        assert_eq!(node.value_type, SvValueType::Table);
         assert!(node.children.as_ref().unwrap().is_empty());
     }
 
@@ -656,7 +656,7 @@ mod tests {
         let node = parse_value(input).unwrap();
         let outer = &node.children.as_ref().unwrap()[0];
         assert_eq!(outer.key, "outer");
-        assert_eq!(outer.value_type, "table");
+        assert_eq!(outer.value_type, SvValueType::Table);
         let inner = &outer.children.as_ref().unwrap()[0];
         assert_eq!(inner.key, "inner");
         assert_eq!(inner.value, Some(serde_json::json!(42.0)));

@@ -1,4 +1,4 @@
-use super::types::SvTreeNode;
+use super::types::{SvTreeNode, SvValueType};
 
 /// Serialize an `SvTreeNode` tree back to Lua source text.
 /// The root node represents the file; each child is a top-level assignment.
@@ -16,15 +16,15 @@ pub fn serialize_to_lua(root: &SvTreeNode) -> String {
 }
 
 fn serialize_value(out: &mut String, node: &SvTreeNode, depth: usize) {
-    match node.value_type.as_str() {
-        "table" => serialize_table(out, node, depth),
-        "string" => {
+    match node.value_type {
+        SvValueType::Table => serialize_table(out, node, depth),
+        SvValueType::String => {
             let s = node.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
             out.push('"');
             escape_lua_string(out, s);
             out.push('"');
         }
-        "number" => {
+        SvValueType::Number => {
             if let Some(v) = &node.value {
                 if let Some(n) = v.as_f64() {
                     // Use integer representation when possible
@@ -38,7 +38,7 @@ fn serialize_value(out: &mut String, node: &SvTreeNode, depth: usize) {
                 }
             }
         }
-        "boolean" => {
+        SvValueType::Boolean => {
             if let Some(v) = &node.value {
                 out.push_str(if v.as_bool().unwrap_or(false) {
                     "true"
@@ -47,15 +47,7 @@ fn serialize_value(out: &mut String, node: &SvTreeNode, depth: usize) {
                 });
             }
         }
-        "nil" => out.push_str("nil"),
-        _ => {
-            // Fallback: try to represent the value literally
-            if let Some(v) = &node.value {
-                out.push_str(&v.to_string());
-            } else {
-                out.push_str("nil");
-            }
-        }
+        SvValueType::Nil => out.push_str("nil"),
     }
 }
 
@@ -126,8 +118,9 @@ fn escape_lua_string(out: &mut String, s: &str) {
             b'\x0B' => out.push_str("\\v"),
             b'\x0C' => out.push_str("\\f"),
             0x00..=0x1F => {
-                // Other control characters: use decimal escape
-                out.push_str(&format!("\\{}", b));
+                // Other control characters: use zero-padded decimal escape
+                // to avoid ambiguity when the next character is also a digit
+                out.push_str(&format!("\\{:03}", b));
             }
             _ => out.push(b as char),
         }
@@ -143,28 +136,28 @@ mod tests {
     fn serialize_simple_values() {
         let root = SvTreeNode {
             key: "test.lua".into(),
-            value_type: "table".into(),
+            value_type: SvValueType::Table,
             value: None,
             children: Some(vec![SvTreeNode {
                 key: "MyVar".into(),
-                value_type: "table".into(),
+                value_type: SvValueType::Table,
                 value: None,
                 children: Some(vec![
                     SvTreeNode {
                         key: "enabled".into(),
-                        value_type: "boolean".into(),
+                        value_type: SvValueType::Boolean,
                         value: Some(serde_json::json!(true)),
                         children: None,
                     },
                     SvTreeNode {
                         key: "count".into(),
-                        value_type: "number".into(),
+                        value_type: SvValueType::Number,
                         value: Some(serde_json::json!(42.0)),
                         children: None,
                     },
                     SvTreeNode {
                         key: "name".into(),
-                        value_type: "string".into(),
+                        value_type: SvValueType::String,
                         value: Some(serde_json::json!("hello")),
                         children: None,
                     },
@@ -183,15 +176,15 @@ mod tests {
     fn serialize_string_escapes() {
         let node = SvTreeNode {
             key: "test.lua".into(),
-            value_type: "table".into(),
+            value_type: SvValueType::Table,
             value: None,
             children: Some(vec![SvTreeNode {
                 key: "Var".into(),
-                value_type: "table".into(),
+                value_type: SvValueType::Table,
                 value: None,
                 children: Some(vec![SvTreeNode {
                     key: "msg".into(),
-                    value_type: "string".into(),
+                    value_type: SvValueType::String,
                     value: Some(serde_json::json!("line\nbreak\ttab\\slash\"quote")),
                     children: None,
                 }]),
@@ -208,15 +201,15 @@ mod tests {
     fn serialize_nil_value() {
         let node = SvTreeNode {
             key: "test.lua".into(),
-            value_type: "table".into(),
+            value_type: SvValueType::Table,
             value: None,
             children: Some(vec![SvTreeNode {
                 key: "Var".into(),
-                value_type: "table".into(),
+                value_type: SvValueType::Table,
                 value: None,
                 children: Some(vec![SvTreeNode {
                     key: "nothing".into(),
-                    value_type: "nil".into(),
+                    value_type: SvValueType::Nil,
                     value: Some(serde_json::Value::Null),
                     children: None,
                 }]),
@@ -230,22 +223,22 @@ mod tests {
     fn serialize_numeric_keys() {
         let node = SvTreeNode {
             key: "test.lua".into(),
-            value_type: "table".into(),
+            value_type: SvValueType::Table,
             value: None,
             children: Some(vec![SvTreeNode {
                 key: "Var".into(),
-                value_type: "table".into(),
+                value_type: SvValueType::Table,
                 value: None,
                 children: Some(vec![
                     SvTreeNode {
                         key: "1".into(),
-                        value_type: "string".into(),
+                        value_type: SvValueType::String,
                         value: Some(serde_json::json!("first")),
                         children: None,
                     },
                     SvTreeNode {
                         key: "2".into(),
-                        value_type: "string".into(),
+                        value_type: SvValueType::String,
                         value: Some(serde_json::json!("second")),
                         children: None,
                     },

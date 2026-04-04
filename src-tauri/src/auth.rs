@@ -133,6 +133,10 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
         .set_nonblocking(true)
         .map_err(|e| format!("Failed to set nonblocking: {}", e))?;
 
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("Failed to set nonblocking: {}", e))?;
+
     loop {
         if start.elapsed() > timeout {
             return Err("OAuth login timed out. Please try again.".to_string());
@@ -143,6 +147,7 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
                 stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 let mut buf = Vec::new();
                 let mut tmp = [0u8; 16384];
+                // Read until we have the full HTTP request headers
                 loop {
                     match stream.read(&mut tmp) {
                         Ok(0) => break,

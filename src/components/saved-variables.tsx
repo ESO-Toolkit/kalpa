@@ -669,7 +669,7 @@ function NavTreeItem({
   toggleExpanded: (pathKey: string) => void;
 }) {
   const currentPath = useMemo(() => [...parentPath, node.key], [parentPath, node.key]);
-  const pathKey = currentPath.join("/");
+  const pathKey = currentPath.map((s) => s.replace(/\0/g, "\\0")).join("\0");
   const isExpanded = expandedPaths.has(pathKey);
   const tableChildren = getTableChildren(node);
   const entryCount = node.children?.length ?? 0;

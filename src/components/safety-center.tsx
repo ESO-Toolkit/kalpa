@@ -78,15 +78,14 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
 
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
+    void (async () => {
       try {
         const result = await invokeOrThrow<SnapshotManifest[]>("list_snapshots", { addonsPath });
         if (!cancelled) setSnapshots(result);
       } catch (e) {
         if (!cancelled) toast.error(`Failed to load snapshots: ${getTauriErrorMessage(e)}`);
       }
-    };
-    load();
+    })();
     return () => {
       cancelled = true;
     };
