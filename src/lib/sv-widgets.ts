@@ -85,7 +85,7 @@ export function resolveEffectiveField(
   knownCharacters: Set<string>
 ): EffectiveField {
   // pathSegments already includes the addon name as the first element
-  const nodeId = pathSegments.join("/");
+  const nodeId = pathSegments.map((s) => s.replace(/\0/g, "\\0")).join("\0");
   const inferred = inferWidget(node);
 
   // Start with inferred values

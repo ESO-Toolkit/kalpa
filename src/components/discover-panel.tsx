@@ -41,12 +41,20 @@ interface DiscoverPanelProps {
   onInstalled: () => void;
   onSelectResult: (result: EsouiSearchResult | null) => void;
   selectedResultId: number | null;
+  installedEsouiIds: Set<number>;
   isOffline?: boolean;
 }
 
-function useAddonInstall(addonsPath: string, onInstalled: () => void) {
+function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedIds: Set<number>) {
   const [installingId, setInstallingId] = useState<number | null>(null);
-  const [installedIds, setInstalledIds] = useState<Set<number>>(new Set());
+  const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
+
+  // Merge persisted (from metadata) with session-installed IDs
+  const installedIds = useMemo(() => {
+    const merged = new Set(persistedIds);
+    for (const id of sessionInstalledIds) merged.add(id);
+    return merged;
+  }, [persistedIds, sessionInstalledIds]);
 
   const install = useCallback(
     async (id: number) => {
@@ -62,7 +70,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void) {
           esouiTitle: info.title,
           esouiVersion: info.version,
         });
-        setInstalledIds((prev) => new Set(prev).add(id));
+        setSessionInstalledIds((prev) => new Set(prev).add(id));
         toast.success(`Installed ${res.installedFolders.join(", ")}`);
         onInstalled();
       } catch (e) {
@@ -188,12 +196,14 @@ export function DiscoverPanel({
   onInstalled,
   onSelectResult,
   selectedResultId,
+  installedEsouiIds,
   isOffline,
 }: DiscoverPanelProps) {
-  const { installingId, installedIds, install: handleInstall } = useAddonInstall(
-    addonsPath,
-    onInstalled
-  );
+  const {
+    installingId,
+    installedIds,
+    install: handleInstall,
+  } = useAddonInstall(addonsPath, onInstalled, installedEsouiIds);
 
   if (isOffline) {
     return (
@@ -272,7 +282,13 @@ export function DiscoverPanel({
           selectedResultId={selectedResultId}
         />
       )}
-      {activeTab === "url" && <UrlContent addonsPath={addonsPath} onInstalled={onInstalled} />}
+      {activeTab === "url" && (
+        <UrlContent
+          addonsPath={addonsPath}
+          onInstalled={onInstalled}
+          installedEsouiIds={installedEsouiIds}
+        />
+      )}
     </div>
   );
 }
@@ -732,7 +748,15 @@ function CategoryContent({
 
 /* ── URL / ID Tab ─────────────────────────────────────── */
 
-function UrlContent({ addonsPath, onInstalled }: { addonsPath: string; onInstalled: () => void }) {
+function UrlContent({
+  addonsPath,
+  onInstalled,
+  installedEsouiIds,
+}: {
+  addonsPath: string;
+  onInstalled: () => void;
+  installedEsouiIds: Set<number>;
+}) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<
     "idle" | "resolving" | "resolved" | "installing" | "installed" | "error"
@@ -854,8 +878,14 @@ function UrlContent({ addonsPath, onInstalled }: { addonsPath: string; onInstall
               </span>
             )}
           </div>
+          {installedEsouiIds.has(addonInfo.id) && (
+            <div className="flex items-center gap-1.5 text-xs text-emerald-400">
+              <Check className="size-3" />
+              Already installed
+            </div>
+          )}
           <Button onClick={handleInstall} className="w-full" size="sm">
-            Install
+            {installedEsouiIds.has(addonInfo.id) ? "Reinstall" : "Install"}
           </Button>
         </div>
       )}

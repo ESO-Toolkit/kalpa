@@ -15,6 +15,7 @@ import { ExternalLink, Trash2, Check } from "lucide-react";
 
 function relativeDate(ts: number): string {
   const diff = Date.now() - ts;
+  if (diff < 0) return "Today"; // future timestamp (clock skew)
   const days = Math.floor(diff / 86400000);
   if (days === 0) return "Today";
   if (days === 1) return "Yesterday";
@@ -67,6 +68,13 @@ export function AddonDetail({
         : [],
     [installedAddons, addon]
   );
+
+  // Auto-dismiss update success banner after 5 seconds
+  useEffect(() => {
+    if (!updateSuccess) return;
+    const timer = setTimeout(() => setUpdateSuccess(false), 5000);
+    return () => clearTimeout(timer);
+  }, [updateSuccess]);
 
   // Escape key to cancel remove confirmation
   useEffect(() => {
@@ -126,6 +134,7 @@ export function AddonDetail({
       onRemove();
     } catch (e) {
       setRemoveError(getTauriErrorMessage(e));
+    } finally {
       setRemoving(false);
     }
   };
@@ -547,8 +556,7 @@ export function AddonDetail({
             </p>
             {dependents.length > 0 && (
               <p className="mb-2 text-sm text-yellow-500">
-                Warning:{" "}
-                {dependents.map((d) => `${d.title} (${d.folderName}/)`).join(", ")}{" "}
+                Warning: {dependents.map((d) => `${d.title} (${d.folderName}/)`).join(", ")}{" "}
                 {dependents.length === 1 ? "depends" : "depend"} on this addon.
               </p>
             )}

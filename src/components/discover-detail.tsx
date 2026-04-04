@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import type { EsouiSearchResult, EsouiAddonDetail, InstallResult } from "../types";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ interface DiscoverDetailProps {
   result: EsouiSearchResult | null;
   addonsPath: string;
   onInstalled: () => void;
+  installedEsouiIds: Set<number>;
   isOffline?: boolean;
 }
 
@@ -33,6 +35,7 @@ export function DiscoverDetail({
   result,
   addonsPath,
   onInstalled,
+  installedEsouiIds,
   isOffline,
 }: DiscoverDetailProps) {
   const [detail, setDetail] = useState<EsouiAddonDetail | null>(null);
@@ -84,6 +87,9 @@ export function DiscoverDetail({
       const target = e.target as Element;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
       if (target.closest('[role="listbox"], [role="combobox"], [role="option"], select')) return;
+      // Only handle arrow keys when focus is within the detail panel
+      const panel = document.querySelector("[data-discover-detail]");
+      if (!panel?.contains(document.activeElement ?? document.body)) return;
       if (e.key === "ArrowLeft") {
         setScreenshotIdx((prev) => (prev > 0 ? prev - 1 : detail.screenshots.length - 1));
       } else if (e.key === "ArrowRight") {
@@ -192,7 +198,7 @@ export function DiscoverDetail({
   const safeIdx = Math.max(0, Math.min(screenshotIdx, detail.screenshots.length - 1));
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 space-y-5">
+    <div className="flex-1 overflow-y-auto p-6 space-y-5" data-discover-detail>
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex-1 min-w-0">
@@ -221,7 +227,7 @@ export function DiscoverDetail({
                 <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
                 Installing
               </span>
-            ) : installSuccess ? (
+            ) : installSuccess || installedEsouiIds.has(result.id) ? (
               <span className="flex items-center gap-2">
                 <Check className="size-3.5" />
                 Reinstall
@@ -233,15 +239,13 @@ export function DiscoverDetail({
               </>
             )}
           </Button>
-          <a
-            href={`https://www.esoui.com/downloads/info${detail.id}.html`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[11px] text-muted-foreground/40 hover:text-muted-foreground/60 transition-colors flex items-center gap-1"
+          <button
+            onClick={() => openUrl(`https://www.esoui.com/downloads/info${detail.id}.html`)}
+            className="text-[11px] text-muted-foreground/40 hover:text-muted-foreground/60 transition-colors flex items-center gap-1 cursor-pointer"
           >
             <ExternalLink className="size-3" />
             View on ESOUI
-          </a>
+          </button>
         </div>
       </div>
 
@@ -294,11 +298,7 @@ export function DiscoverDetail({
             label="Compatibility"
             value={detail.compatibility}
           />
-          <MetaField
-            icon={<HardDrive className="size-3" />}
-            label="File Size"
-            value={detail.fileSize}
-          />
+          <MetaField icon={<HardDrive className="size-3" />} label="MD5" value={detail.md5} />
           <MetaField
             icon={<Calendar className="size-3" />}
             label="Created"
@@ -322,7 +322,7 @@ export function DiscoverDetail({
               <>
                 {/* Navigation arrows */}
                 <button
-                  className="absolute left-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
+                  className="absolute left-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
                   onClick={() =>
                     setScreenshotIdx((prev) =>
                       prev > 0 ? prev - 1 : detail.screenshots.length - 1
@@ -333,7 +333,7 @@ export function DiscoverDetail({
                   <ChevronLeft className="size-4" />
                 </button>
                 <button
-                  className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
                   onClick={() =>
                     setScreenshotIdx((prev) =>
                       prev < detail.screenshots.length - 1 ? prev + 1 : 0

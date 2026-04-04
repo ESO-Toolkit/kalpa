@@ -1,5 +1,5 @@
 use regex::Regex;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
@@ -19,6 +19,7 @@ struct ApiFileDetail {
     author: String,
     description: String,
     last_update: u64,
+    checksum: String,
     download_uri: String,
     downloads: u64,
     downloads_monthly: u64,
@@ -176,7 +177,7 @@ pub struct EsouiAddonDetail {
     pub author: String,
     pub description: String,
     pub compatibility: String,
-    pub file_size: String,
+    pub md5: String,
     pub total_downloads: String,
     pub monthly_downloads: String,
     pub favorites: String,
@@ -276,6 +277,55 @@ fn format_epoch_millis(millis: u64) -> String {
     )
 }
 
+/// Scrape compatibility and created from the ESOUI fileinfo HTML page.
+/// Best-effort: returns empty strings on any failure.
+fn scrape_fileinfo_page(client: &reqwest::blocking::Client, id: u32) -> (String, String) {
+    let url = format!("https://www.esoui.com/downloads/fileinfo.php?id={}", id);
+    let body = match fetch_page(client, &url, None) {
+        Ok(b) => b,
+        Err(_) => return (String::new(), String::new()),
+    };
+    let document = Html::parse_document(&body);
+
+    let td_sel = Selector::parse("td").unwrap();
+    let div_sel = Selector::parse("div").unwrap();
+    let cells: Vec<ElementRef> = document.select(&td_sel).collect();
+
+    let mut compatibility = String::new();
+    let mut created = String::new();
+
+    let mut i = 0;
+    while i < cells.len() {
+        let label = cells[i].text().collect::<String>();
+        let label = label.trim();
+
+        if label == "Compatibility:" {
+            if let Some(next) = cells.get(i + 1) {
+                // Value lives inside a child <div>
+                compatibility = next
+                    .select(&div_sel)
+                    .next()
+                    .map(|d| d.text().collect::<String>().trim().to_string())
+                    .unwrap_or_default();
+            }
+            i += 2;
+            continue;
+        }
+
+        if label == "Created:" {
+            if let Some(next) = cells.get(i + 1) {
+                created = next.text().collect::<String>().trim().to_string();
+            }
+            i += 2;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    (compatibility, created)
+}
+
 /// Fetch full addon details from the ESOUI JSON API.
 pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
     let client = http_client();
@@ -284,6 +334,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
     let description = strip_bbcode(&detail.description);
     let screenshots: Vec<String> = detail.images.into_iter().map(|img| img.image_url).collect();
     let updated = format_epoch_millis(detail.last_update);
+    let (compatibility, created) = scrape_fileinfo_page(client, detail.id);
 
     Ok(EsouiAddonDetail {
         id: detail.id,
@@ -291,13 +342,13 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
         version: detail.version,
         author: detail.author,
         description,
-        compatibility: String::new(), // Not available from API; gameVersions in filelist covers this
-        file_size: String::new(),     // Not available from filedetails API
+        compatibility,
+        md5: detail.checksum,
         total_downloads: format_number(detail.downloads),
         monthly_downloads: format_number(detail.downloads_monthly),
         favorites: format_number(detail.favorites),
         updated,
-        created: String::new(), // Not available from API
+        created,
         screenshots,
         download_url: detail.download_uri,
     })

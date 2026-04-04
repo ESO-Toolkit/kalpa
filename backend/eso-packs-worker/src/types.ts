@@ -116,4 +116,5 @@ export interface ShareCodeResponse {
 export interface Env {
   ESO_PACKS: KVNamespace;
   ADMIN_API_KEY: string;
+  ALLOW_SEED?: string;
 }

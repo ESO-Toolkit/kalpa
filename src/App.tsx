@@ -289,8 +289,6 @@ function App() {
           });
 
           await scanAddons(path);
-        } else if (updates.length > 0) {
-          toast.info(`${updates.length} update${updates.length > 1 ? "s" : ""} available`);
         }
       } catch (updateError) {
         if (seq !== checkSeqRef.current) return;
@@ -564,6 +562,14 @@ function App() {
     };
   }, [updateResults]);
 
+  const installedEsouiIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const addon of addons) {
+      if (addon.esouiId != null) ids.add(addon.esouiId);
+    }
+    return ids;
+  }, [addons]);
+
   const runBatchUpdates = useCallback(
     async (updates: UpdateCheckResult[]) => {
       const path = addonsPathRef.current;
@@ -588,9 +594,7 @@ function App() {
       const failedNames: string[] = [];
 
       for (const update of updates) {
-        setUpdateProgress((prev) =>
-          prev ? { ...prev, currentAddon: update.folderName } : null
-        );
+        setUpdateProgress((prev) => (prev ? { ...prev, currentAddon: update.folderName } : null));
         const result = await invokeResult<InstallResult>("update_addon", {
           addonsPath: path,
           esouiId: update.esouiId,
@@ -654,10 +658,7 @@ function App() {
       });
       toast.success(`Removed ${removed.length} addon${removed.length !== 1 ? "s" : ""}`);
       setSelectedFolders(new Set());
-      if (
-        selectedAddonRef.current &&
-        selectedFolders.has(selectedAddonRef.current.folderName)
-      ) {
+      if (selectedAddonRef.current && selectedFolders.has(selectedAddonRef.current.folderName)) {
         setSelectedAddon(null);
       }
       handleRefresh();
@@ -815,6 +816,7 @@ function App() {
           onInstalled={handleRefresh}
           onSelectDiscoverResult={setSelectedDiscoverResult}
           selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
+          installedEsouiIds={installedEsouiIds}
           isOffline={isOffline}
         />
 
@@ -839,6 +841,7 @@ function App() {
             result={selectedDiscoverResult}
             addonsPath={addonsPath}
             onInstalled={handleRefresh}
+            installedEsouiIds={installedEsouiIds}
             isOffline={isOffline}
           />
         )}

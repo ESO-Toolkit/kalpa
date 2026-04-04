@@ -54,7 +54,7 @@ export function UpdateBanner({
         </Button>
       </div>
       {updatingAll && updateProgress && (
-        <div className="h-0.5 bg-white/[0.06]">
+        <div className="relative h-1.5 bg-white/[0.06]">
           <div
             className="h-full bg-[#c4a44a] transition-all duration-300 ease-out"
             style={{

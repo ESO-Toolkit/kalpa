@@ -12,6 +12,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Alert } from "@/components/ui/alert";
 import { SectionHeader } from "@/components/ui/section-header";
@@ -152,19 +153,19 @@ export function Settings({
             <label htmlFor="addons-path" className="mb-1 block text-sm text-muted-foreground">
               ESO AddOns Folder Path
             </label>
-            <div className="flex gap-2">
-              <Input
-                id="addons-path"
-                value={path}
-                onChange={(e) => setPath(e.target.value)}
-                placeholder="C:\Users\...\Elder Scrolls Online\live\AddOns"
-                autoFocus
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleSave();
-                }}
-              />
+            <Input
+              id="addons-path"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="C:\Users\...\Elder Scrolls Online\live\AddOns"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSave();
+              }}
+            />
+            <div className="mt-2 flex gap-2">
               <Button variant="outline" size="sm" onClick={handleBrowse}>
-                Browse
+                Browse...
               </Button>
               <Button variant="outline" size="sm" disabled={redetecting} onClick={handleRedetect}>
                 {redetecting ? "Detecting..." : "Re-detect"}
@@ -176,15 +177,14 @@ export function Settings({
 
           <div>
             <SectionHeader className="mb-1">Auto-Update</SectionHeader>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
+            <label className="flex items-center gap-2 cursor-pointer group/field">
+              <Checkbox
                 checked={autoUpdate}
-                onChange={(e) => {
-                  setAutoUpdate(e.target.checked);
-                  setSetting("autoUpdate", e.target.checked);
+                onCheckedChange={(checked) => {
+                  const value = checked === true;
+                  setAutoUpdate(value);
+                  setSetting("autoUpdate", value);
                 }}
-                className="accent-[var(--primary)]"
               />
               <span className="text-sm">Automatically update all addons on launch</span>
             </label>

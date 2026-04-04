@@ -144,6 +144,7 @@ export function AppHeader({
           onClick={() => void getCurrentWindow().minimize()}
           className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
           aria-label="Minimize"
+          title="Minimize"
         >
           <MinusIcon className="size-3.5" />
         </button>
@@ -151,6 +152,7 @@ export function AppHeader({
           onClick={() => void getCurrentWindow().toggleMaximize()}
           className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
           aria-label="Maximize"
+          title="Maximize"
         >
           <SquareIcon className="size-3" />
         </button>
@@ -158,6 +160,7 @@ export function AppHeader({
           onClick={() => void getCurrentWindow().close()}
           className="flex h-8 w-8 items-center justify-center rounded-tr-sm text-muted-foreground/60 transition-colors hover:bg-red-500/20 hover:text-foreground"
           aria-label="Close"
+          title="Close"
         >
           <XIcon className="size-3.5" />
         </button>

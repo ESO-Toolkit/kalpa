@@ -42,7 +42,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
 
   const handleBackup = async (char: CharacterInfo) => {
     const name = backupName.trim() || `${char.name}-backup`;
-    setBackingUp(char.name);
+    setBackingUp(`${char.server}-${char.name}`);
     try {
       const count = await invokeOrThrow<number>("backup_character_settings", {
         addonsPath,
@@ -125,9 +125,11 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
                         size="sm"
                         variant="outline"
                         onClick={() => handleBackup(char)}
-                        disabled={backingUp !== null}
+                        disabled={backingUp === `${char.server}-${char.name}`}
                       >
-                        {backingUp === char.name ? "Backing up..." : "Backup Settings"}
+                        {backingUp === `${char.server}-${char.name}`
+                          ? "Backing up..."
+                          : "Backup Settings"}
                       </Button>
                     </div>
                   ))}

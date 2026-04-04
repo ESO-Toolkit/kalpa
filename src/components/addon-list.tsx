@@ -48,6 +48,7 @@ interface AddonListProps {
   onInstalled: () => void;
   onSelectDiscoverResult: (result: EsouiSearchResult | null) => void;
   selectedDiscoverResultId: number | null;
+  installedEsouiIds: Set<number>;
   isOffline?: boolean;
 }
 
@@ -203,6 +204,7 @@ export function AddonList({
   onInstalled,
   onSelectDiscoverResult,
   selectedDiscoverResultId,
+  installedEsouiIds,
   isOffline,
 }: AddonListProps) {
   const updatesMap = useMemo(
@@ -435,7 +437,15 @@ export function AddonList({
                     </button>
                   </>
                 ) : (
-                  <p className="text-sm">No addons found</p>
+                  <>
+                    <p className="text-sm">No addons installed yet</p>
+                    <button
+                      className="text-xs text-[#c4a44a]/70 hover:text-[#c4a44a] transition-colors"
+                      onClick={() => onViewModeChange("discover")}
+                    >
+                      Browse addons to get started
+                    </button>
+                  </>
                 )}
               </div>
             ) : (
@@ -486,6 +496,7 @@ export function AddonList({
           onInstalled={onInstalled}
           onSelectResult={onSelectDiscoverResult}
           selectedResultId={selectedDiscoverResultId}
+          installedEsouiIds={installedEsouiIds}
           isOffline={isOffline}
         />
       )}
