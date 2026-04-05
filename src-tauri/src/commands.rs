@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tauri::Manager;
+use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
 /// Prevents a compromised webview from targeting arbitrary filesystem locations.
@@ -1106,6 +1107,9 @@ pub struct ImportResult {
     pub installed: Vec<String>,
     pub failed: Vec<String>,
     pub skipped: Vec<String>,
+    /// Per-folder error reasons for entries in `failed`. Omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub errors: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1248,6 +1252,38 @@ pub async fn import_addon_list(
         .map_err(|e| format!("Task failed: {}", e))?
 }
 
+/// Fetch addon info and download its ZIP, retrying up to 3 times on HTTP 429.
+/// Backoff schedule: immediate, 1 s, 2 s.
+fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiAddonInfo), String> {
+    let mut last_err = String::new();
+    for attempt in 0u32..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(1 << (attempt - 1)));
+        }
+        let info = match esoui::fetch_addon_info(esoui_id) {
+            Ok(i) => i,
+            Err(e) => {
+                last_err = e.clone();
+                if e.contains("Too many requests") {
+                    continue;
+                }
+                return Err(e);
+            }
+        };
+        match esoui::download_addon(&info.download_url) {
+            Ok(tmp) => return Ok((tmp, info)),
+            Err(e) => {
+                last_err = e.clone();
+                if e.contains("Too many requests") {
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(last_err)
+}
+
 fn import_addon_list_blocking(
     addons_dir: &Path,
     export: &ExportData,
@@ -1262,60 +1298,66 @@ fn import_addon_list_blocking(
 
     let skipped: Vec<String> = to_skip.iter().map(|e| e.folder_name.clone()).collect();
 
-    // Fetch + download + extract in parallel, capped at 4 concurrent connections
+    // Phase 1 (parallel): fetch metadata + download ZIPs, capped at 4 connections.
+    // Extraction is intentionally excluded from this phase — concurrent writes to the
+    // same AddOns tree can corrupt shared folders (e.g. library bundles present in
+    // multiple addon ZIPs). Downloads are safe to parallelise; extraction is not.
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
         .build()
         .map_err(|e| format!("Thread pool error: {}", e))?;
 
-    struct SuccessData {
-        folders: Vec<String>,
+    struct Downloaded {
+        tmp: NamedTempFile,
+        info: EsouiAddonInfo,
         esoui_id: u32,
-        version: String,
-        title: String,
-        download_url: String,
     }
 
-    let outcomes: Vec<(String, Result<SuccessData, ()>)> = pool.install(|| {
+    let download_results: Vec<(String, Result<Downloaded, String>)> = pool.install(|| {
         to_install
             .par_iter()
             .map(|entry| {
-                let result = (|| -> Result<SuccessData, String> {
-                    let info = esoui::fetch_addon_info(entry.esoui_id)?;
-                    let tmp = esoui::download_addon(&info.download_url)?;
-                    let folders = installer::extract_addon_zip(tmp.path(), addons_dir)?;
-                    Ok(SuccessData {
-                        folders,
+                let result =
+                    fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| Downloaded {
+                        tmp,
+                        info,
                         esoui_id: entry.esoui_id,
-                        version: info.version,
-                        title: info.title,
-                        download_url: info.download_url,
-                    })
-                })();
-                (entry.folder_name.clone(), result.map_err(|_| ()))
+                    });
+                (entry.folder_name.clone(), result)
             })
             .collect()
     });
 
+    // Phase 2 (sequential): extract ZIPs and record metadata one at a time.
     let mut installed: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
+    let mut errors: HashMap<String, String> = HashMap::new();
 
-    for (folder_name, outcome) in outcomes {
-        match outcome {
-            Ok(data) => {
-                record_installed_folders(
-                    &mut store,
-                    addons_dir,
-                    &data.folders,
-                    data.esoui_id,
-                    &data.version,
-                    &data.title,
-                    &data.download_url,
-                    0,
-                );
-                installed.push(folder_name);
+    for (folder_name, result) in download_results {
+        match result {
+            Err(e) => {
+                errors.insert(folder_name.clone(), e);
+                failed.push(folder_name);
             }
-            Err(()) => failed.push(folder_name),
+            Ok(dl) => match installer::extract_addon_zip(dl.tmp.path(), addons_dir) {
+                Err(e) => {
+                    errors.insert(folder_name.clone(), e);
+                    failed.push(folder_name);
+                }
+                Ok(folders) => {
+                    record_installed_folders(
+                        &mut store,
+                        addons_dir,
+                        &folders,
+                        dl.esoui_id,
+                        &dl.info.version,
+                        &dl.info.title,
+                        &dl.info.download_url,
+                        0,
+                    );
+                    installed.push(folder_name);
+                }
+            },
         }
     }
 
@@ -1325,6 +1367,7 @@ fn import_addon_list_blocking(
         installed,
         failed,
         skipped,
+        errors,
     })
 }
 
