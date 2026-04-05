@@ -42,9 +42,9 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "${{ github.ref_name }}"
           releaseBody: |
-            See [CHANGELOG.md](https://github.com/ESO-Toolkit/kalpa/blob/main/CHANGELOG.md) for details.
+            See [CHANGELOG.md](https://github.com/ESO-Toolkit/kalpa/blob/main/CHANGELOG.md) for full details.
 
             ## Install
-            Download the `.exe` (NSIS) or `.msi` installer below.
+            Download the `.exe` installer below and run it. Kalpa will auto-update when future releases are published.
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
