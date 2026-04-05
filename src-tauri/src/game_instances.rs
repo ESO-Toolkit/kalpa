@@ -232,8 +232,12 @@ pub fn detect_all_game_instances() -> Vec<GameInstance> {
                 ClientType::Native => "Native",
             };
             let onedrive_suffix = if is_onedrive { " · OneDrive" } else { "" };
-            let display_label =
-                format!("{} · {}{}", client_label, region.display_name(), onedrive_suffix);
+            let display_label = format!(
+                "{} · {}{}",
+                client_label,
+                region.display_name(),
+                onedrive_suffix
+            );
 
             // Build a unique id. The first discovered path for a region gets the plain
             // env-folder name ("live"); additional same-region paths are numbered

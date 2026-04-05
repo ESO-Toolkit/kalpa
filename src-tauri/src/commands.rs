@@ -9,7 +9,7 @@ use crate::{PendingDeepLink, PendingDeepLinkPayload};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -873,12 +873,22 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
     let mut store = metadata::load_metadata(addons_dir);
     let mut metadata_changed = false;
 
-    // Fetch the full ESOUI filelist in a single API call
+    // Single API call fetches all ~4000 addons (result is cached in-session)
     let api_lookup = esoui::fetch_filelist_lookup()?;
 
-    let mut results: Vec<UpdateCheckResult> = Vec::new();
-
     let folder_names: Vec<String> = store.addons.keys().cloned().collect();
+
+    // Phase 1: determine update status for each addon (sequential — mutates store)
+    struct Pending {
+        folder_name: String,
+        esoui_id: u32,
+        current_version: String,
+        remote_version: String,
+        fallback_url: String,
+        has_update: bool,
+    }
+
+    let mut pending: Vec<Pending> = Vec::new();
 
     for folder_name in &folder_names {
         if !addons_dir.join(folder_name).is_dir() {
@@ -890,12 +900,10 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
             None => continue,
         };
 
-        // Skip bundled secondary folders (esoui_id 0)
         if meta.esoui_id == 0 {
             continue;
         }
 
-        // Look up the addon in the API data
         let api_entry = match api_lookup.get(folder_name) {
             Some(entry) => entry,
             None => continue,
@@ -917,38 +925,57 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
 
         let has_update = !remote_ver.is_empty() && !local_ver.is_empty() && remote_ver != local_ver;
 
-        // Sync stored version format
         if let Some(entry) = store.addons.get_mut(folder_name) {
             if !has_update && meta.installed_version != api_entry.version {
                 entry.installed_version = api_entry.version.clone();
                 metadata_changed = true;
             }
-            // Sync last_update from API
             if entry.esoui_last_update != api_entry.last_update {
                 entry.esoui_last_update = api_entry.last_update;
                 metadata_changed = true;
             }
         }
 
-        // Only fetch the download URL for addons that actually have updates
-        // (avoids N extra HTTP requests for up-to-date addons)
-        let download_url = if has_update {
-            esoui::fetch_addon_info(meta.esoui_id)
-                .map(|info| info.download_url)
-                .unwrap_or_else(|_| meta.download_url.clone())
-        } else {
-            meta.download_url.clone()
-        };
-
-        results.push(UpdateCheckResult {
+        pending.push(Pending {
             folder_name: folder_name.clone(),
             esoui_id: meta.esoui_id,
             current_version: meta.installed_version.clone(),
             remote_version: api_entry.version.clone(),
-            download_url,
+            fallback_url: meta.download_url.clone(),
             has_update,
         });
     }
+
+    // Phase 2: fetch download URLs for outdated addons in parallel
+    let url_map: HashMap<u32, String> = pending
+        .par_iter()
+        .filter(|p| p.has_update)
+        .filter_map(|p| {
+            esoui::fetch_addon_info(p.esoui_id)
+                .ok()
+                .map(|info| (p.esoui_id, info.download_url))
+        })
+        .collect();
+
+    // Phase 3: assemble final results
+    let results: Vec<UpdateCheckResult> = pending
+        .into_iter()
+        .map(|p| {
+            let download_url = if p.has_update {
+                url_map.get(&p.esoui_id).cloned().unwrap_or(p.fallback_url)
+            } else {
+                p.fallback_url
+            };
+            UpdateCheckResult {
+                folder_name: p.folder_name,
+                esoui_id: p.esoui_id,
+                current_version: p.current_version,
+                remote_version: p.remote_version,
+                download_url,
+                has_update: p.has_update,
+            }
+        })
+        .collect();
 
     if metadata_changed {
         let _ = metadata::save_metadata(addons_dir, &store);
@@ -1225,44 +1252,71 @@ fn import_addon_list_blocking(
     addons_dir: &Path,
     export: &ExportData,
 ) -> Result<ImportResult, String> {
-    let mut installed: Vec<String> = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
-
     let mut store = metadata::load_metadata(addons_dir);
 
-    for entry in &export.addons {
-        // Skip if already installed
-        if addons_dir.join(&entry.folder_name).is_dir() {
-            skipped.push(entry.folder_name.clone());
-            continue;
-        }
+    // Split into already-installed (skip) and to-install
+    let (to_skip, to_install): (Vec<_>, Vec<_>) = export
+        .addons
+        .iter()
+        .partition(|e| addons_dir.join(&e.folder_name).is_dir());
 
-        match esoui::fetch_addon_info(entry.esoui_id) {
-            Ok(info) => match esoui::download_addon(&info.download_url) {
-                Ok(tmp) => match installer::extract_addon_zip(tmp.path(), addons_dir) {
-                    Ok(folders) => {
-                        record_installed_folders(
-                            &mut store,
-                            addons_dir,
-                            &folders,
-                            entry.esoui_id,
-                            &info.version,
-                            &info.title,
-                            &info.download_url,
-                            0, // will be populated by auto_link
-                        );
-                        installed.push(entry.folder_name.clone());
-                    }
-                    Err(_) => failed.push(entry.folder_name.clone()),
-                },
-                Err(_) => failed.push(entry.folder_name.clone()),
-            },
-            Err(_) => failed.push(entry.folder_name.clone()),
-        }
+    let skipped: Vec<String> = to_skip.iter().map(|e| e.folder_name.clone()).collect();
 
-        // Be respectful to ESOUI
-        std::thread::sleep(std::time::Duration::from_millis(300));
+    // Fetch + download + extract in parallel, capped at 4 concurrent connections
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .map_err(|e| format!("Thread pool error: {}", e))?;
+
+    struct SuccessData {
+        folders: Vec<String>,
+        esoui_id: u32,
+        version: String,
+        title: String,
+        download_url: String,
+    }
+
+    let outcomes: Vec<(String, Result<SuccessData, ()>)> = pool.install(|| {
+        to_install
+            .par_iter()
+            .map(|entry| {
+                let result = (|| -> Result<SuccessData, String> {
+                    let info = esoui::fetch_addon_info(entry.esoui_id)?;
+                    let tmp = esoui::download_addon(&info.download_url)?;
+                    let folders = installer::extract_addon_zip(tmp.path(), addons_dir)?;
+                    Ok(SuccessData {
+                        folders,
+                        esoui_id: entry.esoui_id,
+                        version: info.version,
+                        title: info.title,
+                        download_url: info.download_url,
+                    })
+                })();
+                (entry.folder_name.clone(), result.map_err(|_| ()))
+            })
+            .collect()
+    });
+
+    let mut installed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+
+    for (folder_name, outcome) in outcomes {
+        match outcome {
+            Ok(data) => {
+                record_installed_folders(
+                    &mut store,
+                    addons_dir,
+                    &data.folders,
+                    data.esoui_id,
+                    &data.version,
+                    &data.title,
+                    &data.download_url,
+                    0,
+                );
+                installed.push(folder_name);
+            }
+            Err(()) => failed.push(folder_name),
+        }
     }
 
     metadata::save_metadata(addons_dir, &store)?;
