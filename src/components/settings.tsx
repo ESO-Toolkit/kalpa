@@ -331,7 +331,14 @@ export function Settings({
                   </p>
                 )}
                 {importResult.failed.length > 0 && (
-                  <Alert variant="destructive">Failed: {importResult.failed.join(", ")}</Alert>
+                  <Alert variant="destructive">
+                    Failed:{" "}
+                    {importResult.failed
+                      .map((f) =>
+                        importResult.errors?.[f] ? `${f} (${importResult.errors[f]})` : f
+                      )
+                      .join(", ")}
+                  </Alert>
                 )}
               </div>
             )}

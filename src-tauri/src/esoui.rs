@@ -3,7 +3,8 @@ use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 
 // ── ESOUI filedetails JSON API ──────────────────────────────────────────────
@@ -775,12 +776,48 @@ pub struct ApiAddonLookup {
     pub file_info_uri: String,
 }
 
+struct FilelistCache {
+    data: HashMap<String, ApiAddonLookup>,
+    fetched_at: Instant,
+}
+
+static FILELIST_CACHE: OnceLock<Mutex<Option<FilelistCache>>> = OnceLock::new();
+
+fn filelist_cache() -> &'static Mutex<Option<FilelistCache>> {
+    FILELIST_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Session-level TTL for the filelist cache. One fetch covers the whole
+/// session for typical usage; the cache refreshes automatically after this.
+const FILELIST_TTL: Duration = Duration::from_secs(900); // 15 minutes
+
 /// Fetch the full ESOUI filelist and build a lookup map keyed by addon folder path.
 ///
 /// Single HTTP request returns ~4000 addons with all their folder paths,
-/// versions, and last-updated timestamps. Far more reliable and faster than
-/// per-addon HTML scraping for bulk operations.
+/// versions, and last-updated timestamps. Result is cached in-memory for
+/// `FILELIST_TTL` so repeated update checks within a session don't re-fetch.
 pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String> {
+    {
+        let guard = filelist_cache().lock().unwrap();
+        if let Some(cache) = guard.as_ref() {
+            if cache.fetched_at.elapsed() < FILELIST_TTL {
+                return Ok(cache.data.clone());
+            }
+        }
+    }
+
+    let data = fetch_filelist_from_api()?;
+
+    let mut guard = filelist_cache().lock().unwrap();
+    *guard = Some(FilelistCache {
+        data: data.clone(),
+        fetched_at: Instant::now(),
+    });
+
+    Ok(data)
+}
+
+fn fetch_filelist_from_api() -> Result<HashMap<String, ApiAddonLookup>, String> {
     let client = http_client();
     let url = "https://api.mmoui.com/v4/game/ESO/filelist.json";
     let response = client.get(url).send().map_err(|e| {

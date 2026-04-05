@@ -48,6 +48,7 @@ export interface ImportResult {
   installed: string[];
   failed: string[];
   skipped: string[];
+  errors?: Record<string, string>;
 }
 
 export interface EsouiSearchResult {
