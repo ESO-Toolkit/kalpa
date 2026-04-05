@@ -6,15 +6,15 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/ui/logo";
-import type { AddonsDetectionResult, DetectedCandidate } from "@/types";
+import type { GameInstance } from "@/types";
 
 interface SetupWizardProps {
-  detection: AddonsDetectionResult;
+  instances: GameInstance[];
   onSelect: (path: string) => void;
 }
 
-export function SetupWizard({ detection, onSelect }: SetupWizardProps) {
-  const { primary, candidates, warnings } = detection;
+export function SetupWizard({ instances, onSelect }: SetupWizardProps) {
+  const hasOneDriveWarning = instances.some((inst) => inst.isOnedrive);
 
   return (
     <div className="flex h-screen items-center justify-center p-8">
@@ -27,46 +27,38 @@ export function SetupWizard({ detection, onSelect }: SetupWizardProps) {
           </div>
         </div>
 
-        {warnings.length > 0 && (
-          <div className="mb-4 space-y-2">
-            {warnings.map((warning) => (
-              <div
-                key={warning}
-                className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-xs text-amber-400"
-              >
-                {warning}
-              </div>
-            ))}
+        {hasOneDriveWarning && (
+          <div className="mb-4 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-xs text-amber-400">
+            One or more detected folders are inside OneDrive. Cloud sync can sometimes cause missing
+            or outdated addons — consider disabling sync for this folder if you see issues.
           </div>
         )}
 
-        {primary && candidates.length === 1 ? (
-          <SingleCandidate candidate={candidates[0]} onSelect={onSelect} />
-        ) : primary && candidates.length > 1 ? (
-          <MultipleCandidates candidates={candidates} onSelect={onSelect} />
-        ) : (
+        {instances.length === 0 ? (
           <NoCandidates onSelect={onSelect} />
+        ) : instances.length === 1 ? (
+          <SingleInstance instance={instances[0]} onSelect={onSelect} />
+        ) : (
+          <MultipleInstances instances={instances} onSelect={onSelect} />
         )}
       </GlassPanel>
     </div>
   );
 }
 
-function SingleCandidate({
-  candidate,
+function SingleInstance({
+  instance,
   onSelect,
 }: {
-  candidate: DetectedCandidate;
+  instance: GameInstance;
   onSelect: (path: string) => void;
 }) {
   return (
     <div className="space-y-4">
       <SectionHeader>Detected AddOns folder</SectionHeader>
-
-      <CandidateCard candidate={candidate} recommended />
-
+      <InstanceCard instance={instance} recommended />
       <div className="flex gap-2">
-        <Button className="flex-1" onClick={() => onSelect(candidate.path)}>
+        <Button className="flex-1" onClick={() => onSelect(instance.addonsPath)}>
           Use this folder
         </Button>
         <BrowseButton onSelect={onSelect} />
@@ -75,11 +67,11 @@ function SingleCandidate({
   );
 }
 
-function MultipleCandidates({
-  candidates,
+function MultipleInstances({
+  instances,
   onSelect,
 }: {
-  candidates: DetectedCandidate[];
+  instances: GameInstance[];
   onSelect: (path: string) => void;
 }) {
   return (
@@ -88,20 +80,18 @@ function MultipleCandidates({
       <p className="text-xs text-muted-foreground">
         Select which ESO AddOns folder to manage. The recommended folder is shown first.
       </p>
-
       <div className="space-y-2">
-        {candidates.map((candidate, i) => (
+        {instances.map((instance, i) => (
           <button
-            key={candidate.path}
+            key={instance.id}
             type="button"
             className="w-full text-left"
-            onClick={() => onSelect(candidate.path)}
+            onClick={() => onSelect(instance.addonsPath)}
           >
-            <CandidateCard candidate={candidate} recommended={i === 0} />
+            <InstanceCard instance={instance} recommended={i === 0} />
           </button>
         ))}
       </div>
-
       <div className="flex justify-end">
         <BrowseButton onSelect={onSelect} />
       </div>
@@ -127,13 +117,16 @@ function NoCandidates({ onSelect }: { onSelect: (path: string) => void }) {
   );
 }
 
-function CandidateCard({
-  candidate,
+function InstanceCard({
+  instance,
   recommended,
 }: {
-  candidate: DetectedCandidate;
+  instance: GameInstance;
   recommended?: boolean;
 }) {
+  const regionLabel = instance.region === "na" ? "NA" : instance.region === "eu" ? "EU" : "PTS";
+  const clientLabel = instance.clientType === "steam" ? "Steam" : "Native";
+
   return (
     <GlassPanel
       variant="subtle"
@@ -141,14 +134,18 @@ function CandidateCard({
     >
       <div className="mb-1 flex items-center gap-2">
         {recommended && <InfoPill color="gold">Recommended</InfoPill>}
-        {candidate.serverEnv && <InfoPill color="sky">{candidate.serverEnv}</InfoPill>}
-        {candidate.isOnedrive && <InfoPill color="amber">OneDrive</InfoPill>}
+        <InfoPill color="sky">{regionLabel}</InfoPill>
+        <InfoPill color={instance.clientType === "steam" ? "violet" : "muted"}>
+          {clientLabel}
+        </InfoPill>
+        {instance.isOnedrive && <InfoPill color="amber">OneDrive</InfoPill>}
       </div>
-      <p className="truncate font-mono text-xs text-white/80">{candidate.path}</p>
+      <p className="truncate font-mono text-xs text-white/80">{instance.addonsPath}</p>
       <p className="mt-1 text-xs text-muted-foreground">
-        {candidate.addonCount > 0
-          ? `${candidate.addonCount} addon${candidate.addonCount !== 1 ? "s" : ""} detected`
+        {instance.addonCount > 0
+          ? `${instance.addonCount} addon${instance.addonCount !== 1 ? "s" : ""} detected`
           : "No addons detected"}
+        {instance.hasAddonSettings && " · game has been run"}
       </p>
     </GlassPanel>
   );

@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import type { AddonManifest, AuthUser } from "@/types";
+import type { AddonManifest, AuthUser, GameInstance } from "@/types";
 
 const Packs = lazy(() => import("./packs").then((m) => ({ default: m.Packs })));
 const Profiles = lazy(() => import("./profiles").then((m) => ({ default: m.Profiles })));
@@ -36,6 +36,7 @@ interface AppDialogsProps {
   authUser: AuthUser | null;
   deepLinkPackId: string | null;
   deepLinkShareCode: string | null;
+  knownInstances: GameInstance[];
   onAuthChange: (user: AuthUser | null) => void;
   onCheckForAppUpdate: () => void;
   onCloseDialog: () => void;
@@ -51,6 +52,7 @@ export function AppDialogs({
   authUser,
   deepLinkPackId,
   deepLinkShareCode,
+  knownInstances,
   onAuthChange,
   onCheckForAppUpdate,
   onCloseDialog,
@@ -96,6 +98,7 @@ export function AppDialogs({
       {activeDialog === "settings" && (
         <Settings
           addonsPath={addonsPath}
+          knownInstances={knownInstances}
           onPathChange={onPathChange}
           onClose={onCloseDialog}
           onRefresh={onRefresh}

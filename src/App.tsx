@@ -16,8 +16,8 @@ import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import type {
   AddonManifest,
-  AddonsDetectionResult,
   AuthUser,
+  GameInstance,
   UpdateCheckResult,
   InstallResult,
   EsouiSearchResult,
@@ -91,7 +91,10 @@ function App() {
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
   const [batchRemoving, setBatchRemoving] = useState(false);
   const [activeTagFilter, setActiveTagFilter] = useState<string | null>(null);
-  const [setupDetection, setSetupDetection] = useState<AddonsDetectionResult | null>(null);
+  // null = not in setup mode; [] = in setup mode with no candidates found
+  const [setupInstances, setSetupInstances] = useState<GameInstance[] | null>(null);
+  // All detected instances; available after init for the instance switcher in Settings
+  const [knownInstances, setKnownInstances] = useState<GameInstance[]>([]);
 
   const {
     state: appUpdateState,
@@ -368,6 +371,11 @@ function App() {
         const autoUpdate = await getSetting<boolean>("autoUpdate", false);
         await checkForUpdates(savedPath, autoUpdate, false);
         void runAutoLink(savedPath);
+        // Populate knownInstances so the Settings instance switcher works for
+        // returning users. Fire-and-forget — does not block startup.
+        invokeOrThrow<GameInstance[]>("detect_game_instances")
+          .then(setKnownInstances)
+          .catch(() => {});
       } catch (initError) {
         setError(
           `Could not access saved AddOns folder — it may have been moved or deleted. ${getTauriErrorMessage(initError)}`
@@ -377,16 +385,15 @@ function App() {
       }
     } else {
       // No saved path — run detection and show wizard or auto-select
-      const detection = await invokeOrThrow<AddonsDetectionResult>("detect_addons_folders");
+      const instances = await invokeOrThrow<GameInstance[]>("detect_game_instances");
+      setKnownInstances(instances);
 
-      if (
-        detection.primary &&
-        detection.candidates.length === 1 &&
-        detection.warnings.length === 0
-      ) {
-        // Single clear candidate with no warnings — auto-select
+      const singleClean = instances.length === 1 && !instances[0].isOnedrive;
+
+      if (singleClean) {
+        // One unambiguous instance with no OneDrive complication — auto-select
         try {
-          const path = detection.primary;
+          const path = instances[0].addonsPath;
           setAddonsPath(path);
           await invokeOrThrow("set_addons_path", { addonsPath: path });
           await setSetting("addonsPath", path);
@@ -400,8 +407,8 @@ function App() {
           setLoading(false);
         }
       } else {
-        // Multiple candidates, warnings, or no candidates — show wizard
-        setSetupDetection(detection);
+        // Multiple instances, OneDrive warning, or nothing found — show wizard
+        setSetupInstances(instances);
         setLoading(false);
       }
     }
@@ -449,13 +456,13 @@ function App() {
   // Notify the user if a deep link is pending while the setup wizard is shown
   const pendingDeepLinkToastShown = useRef(false);
   useEffect(() => {
-    if (!setupDetection) return;
+    if (setupInstances === null) return;
     if (pendingDeepLinkToastShown.current) return;
     if (rosterPackInstallId || deepLinkPackId || deepLinkShareCode) {
       pendingDeepLinkToastShown.current = true;
       toast.info("Finish setup to continue with the incoming link.");
     }
-  }, [setupDetection, rosterPackInstallId, deepLinkPackId, deepLinkShareCode]);
+  }, [setupInstances, rosterPackInstallId, deepLinkPackId, deepLinkShareCode]);
 
   useEffect(() => {
     if (!activeTagFilter) return;
@@ -474,7 +481,7 @@ function App() {
         await invokeOrThrow("set_addons_path", { addonsPath: path });
         await setSetting("addonsPath", path);
         setAddonsPath(path);
-        setSetupDetection(null);
+        setSetupInstances(null);
         setErrorShowSettings(false);
         setLoading(true);
         await scanAddons(path);
@@ -742,11 +749,11 @@ function App() {
     setDeepLinkShareCode(null);
   }, []);
 
-  if (setupDetection) {
+  if (setupInstances !== null) {
     return (
       <div className="relative flex h-screen flex-col">
         <AppBackground />
-        <SetupWizard detection={setupDetection} onSelect={(path) => void handleSetupSelect(path)} />
+        <SetupWizard instances={setupInstances} onSelect={(path) => void handleSetupSelect(path)} />
       </div>
     );
   }
@@ -864,6 +871,7 @@ function App() {
         authUser={authUser}
         deepLinkPackId={deepLinkPackId}
         deepLinkShareCode={deepLinkShareCode}
+        knownInstances={knownInstances}
         onAuthChange={setAuthUser}
         onCheckForAppUpdate={() => void checkForAppUpdate(false)}
         onCloseDialog={handleCloseDialog}

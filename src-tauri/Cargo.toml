@@ -39,6 +39,9 @@ sha2 = "0.10"
 # depending on a system SQLite installation. Worth it for portable releases.
 rusqlite = { version = "0.39", features = ["bundled"] }
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
-import type { AddonsDetectionResult, ImportResult } from "../types";
+import type { GameInstance, ImportResult } from "../types";
 import {
   Dialog,
   DialogContent,
@@ -20,6 +20,7 @@ import { Logo } from "@/components/ui/logo";
 
 interface SettingsProps {
   addonsPath: string;
+  knownInstances: GameInstance[];
   onPathChange: (path: string) => void;
   onClose: () => void;
   onRefresh: () => void;
@@ -33,6 +34,7 @@ interface SettingsProps {
 
 export function Settings({
   addonsPath,
+  knownInstances,
   onPathChange,
   onClose,
   onRefresh,
@@ -51,6 +53,7 @@ export function Settings({
   const [autoUpdate, setAutoUpdate] = useState(false);
   const [minionDetected, setMinionDetected] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
+  const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
 
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
@@ -85,15 +88,22 @@ export function Settings({
 
   const handleRedetect = async () => {
     setRedetecting(true);
+    setRedetectedInstances(null);
     try {
-      const result = await invokeOrThrow<AddonsDetectionResult>("detect_addons_folders");
-      if (result.primary && result.primary !== addonsPath) {
-        setPath(result.primary);
-        toast.success(`Found a better candidate: ${result.primary}. Click Save to apply.`);
-      } else if (result.primary) {
-        toast.info("Current folder is already the best candidate.");
-      } else {
+      const instances = await invokeOrThrow<GameInstance[]>("detect_game_instances");
+      if (instances.length === 0) {
         toast.info("No ESO AddOns folders detected.");
+      } else if (instances.length === 1) {
+        const detected = instances[0].addonsPath;
+        if (detected !== addonsPath) {
+          setPath(detected);
+          toast.success("Found AddOns folder. Click Save to apply.");
+        } else {
+          toast.info("Current folder is already the best candidate.");
+        }
+      } else {
+        // Multiple instances — let the user pick
+        setRedetectedInstances(instances);
       }
     } catch (e) {
       toast.error(`Re-detection failed: ${getTauriErrorMessage(e)}`);
@@ -171,6 +181,60 @@ export function Settings({
                 {redetecting ? "Detecting..." : "Re-detect"}
               </Button>
             </div>
+
+            {/* Instance picker — shown after re-detect finds multiple folders */}
+            {redetectedInstances && redetectedInstances.length > 1 && (
+              <div className="mt-3 space-y-1">
+                <p className="text-xs text-muted-foreground">Select an instance:</p>
+                {redetectedInstances.map((inst) => (
+                  <button
+                    key={inst.id}
+                    type="button"
+                    className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-left text-xs text-white/80 transition-colors hover:border-white/[0.12] hover:bg-white/[0.04]"
+                    onClick={() => {
+                      setPath(inst.addonsPath);
+                      setRedetectedInstances(null);
+                    }}
+                  >
+                    <span className="font-medium">{inst.displayLabel}</span>
+                    <span className="ml-2 text-muted-foreground">
+                      {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Quick-switch between already-known instances */}
+            {knownInstances.length > 1 && !redetectedInstances && (
+              <div className="mt-3 space-y-1">
+                <p className="text-xs text-muted-foreground">Switch instance:</p>
+                {knownInstances.map((inst) => (
+                  <button
+                    key={inst.id}
+                    type="button"
+                    className={`w-full rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+                      inst.addonsPath === addonsPath
+                        ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
+                        : "border-white/[0.06] bg-white/[0.02] text-white/80 hover:border-white/[0.12] hover:bg-white/[0.04]"
+                    }`}
+                    onClick={() => {
+                      if (inst.addonsPath !== addonsPath) {
+                        setPath(inst.addonsPath);
+                      }
+                    }}
+                  >
+                    <span className="font-medium">{inst.displayLabel}</span>
+                    <span className="ml-2 text-muted-foreground">
+                      {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
+                    </span>
+                    {inst.addonsPath === addonsPath && (
+                      <span className="ml-2 text-sky-400">active</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="border-t border-white/[0.06]" />

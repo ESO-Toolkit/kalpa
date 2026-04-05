@@ -113,18 +113,24 @@ export interface MinionMigrationResult {
   alreadyTracked: number;
 }
 
-// ── Addon folder detection types ─────────────────────────────────────────
-export interface DetectedCandidate {
-  path: string;
-  serverEnv: string;
+// ── Game instance types (multi-region / launcher detection) ──────────────
+export type ClientType = "native" | "steam";
+export type ServerRegion = "na" | "eu" | "pts";
+
+export interface GameInstance {
+  /** Region env-folder name: "live" | "liveeu" | "pts" */
+  id: string;
+  clientType: ClientType;
+  region: ServerRegion;
+  /** Absolute path to the AddOns directory for this instance. */
+  addonsPath: string;
+  /** Number of valid addon manifests detected. */
   addonCount: number;
   isOnedrive: boolean;
-}
-
-export interface AddonsDetectionResult {
-  primary: string | null;
-  candidates: DetectedCandidate[];
-  warnings: string[];
+  hasSavedVariables: boolean;
+  hasAddonSettings: boolean;
+  /** Human-readable label, e.g. "Steam · EU" or "Native · NA". */
+  displayLabel: string;
 }
 
 // ── SavedVariables Manager types ─────────────────────────────────────────

@@ -1,6 +1,7 @@
 mod auth;
 mod commands;
 mod esoui;
+pub mod game_instances;
 mod installer;
 mod manifest;
 mod manifest_cache;
@@ -303,6 +304,7 @@ pub fn run() {
             commands::delete_saved_variables,
             commands::restore_sv_backup,
             commands::preview_sv_save,
+            commands::detect_game_instances,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

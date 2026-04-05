@@ -222,7 +222,7 @@ fn read_local_version(addons_dir: &Path, folder: &str) -> String {
         .unwrap_or_default()
 }
 
-fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<PathBuf> {
+pub(crate) fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<PathBuf> {
     let dir = addons_dir.join(folder_name);
     let txt = dir.join(format!("{}.txt", folder_name));
     if txt.exists() {
@@ -238,7 +238,7 @@ fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<Path
 // ── Enhanced addon folder detection ─────────────────────────────────────
 
 /// Candidate document root directories where ESO might store data.
-fn documents_candidates() -> Vec<PathBuf> {
+pub(crate) fn documents_candidates() -> Vec<PathBuf> {
     let mut bases: Vec<PathBuf> = Vec::new();
 
     if let Some(doc) = dirs::document_dir() {
@@ -327,7 +327,7 @@ fn score_addons_dir(addons: &Path) -> i32 {
 }
 
 /// Check if a path is inside an OneDrive-synced directory.
-fn is_onedrive_path(p: &Path) -> bool {
+pub(crate) fn is_onedrive_path(p: &Path) -> bool {
     p.ancestors().any(|a| {
         a.file_name()
             .and_then(|n| n.to_str())
@@ -391,7 +391,7 @@ fn detect_server_env(addons: &Path) -> String {
 }
 
 /// Count addon folders that have a valid manifest file.
-fn count_addon_manifests(addons: &Path) -> usize {
+pub(crate) fn count_addon_manifests(addons: &Path) -> usize {
     let Ok(entries) = std::fs::read_dir(addons) else {
         return 0;
     };
@@ -478,6 +478,19 @@ pub fn detect_addons_folder() -> Result<String, String> {
     result
         .primary
         .ok_or_else(|| "Could not find ESO AddOns folder. Please set it manually.".to_string())
+}
+
+/// Detect all ESO game instances (region × launcher) on this machine.
+///
+/// Returns a list of [`GameInstance`] structs sorted by activity score (most-active first).  Each
+/// instance carries the AddOns path, region, detected launcher type, and
+/// helpful metadata (addon count, OneDrive flag, SavedVariables presence).
+///
+/// Use this command in place of `detect_addons_folders` for the setup wizard
+/// and the instance-switcher in settings.
+#[tauri::command]
+pub fn detect_game_instances() -> Vec<crate::game_instances::GameInstance> {
+    crate::game_instances::detect_all_game_instances()
 }
 
 #[tauri::command]
