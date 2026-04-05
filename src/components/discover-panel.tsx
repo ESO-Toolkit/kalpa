@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import type {
+  BrowsePopularPage,
   DiscoverTab,
   EsouiSearchResult,
   EsouiCategory,
@@ -458,12 +459,12 @@ function PopularContent({
   const loadPage = useCallback(async (p: number, sort: PopularSort, append: boolean) => {
     setLoading(true);
     try {
-      const r = await invokeOrThrow<EsouiSearchResult[]>("browse_esoui_popular", {
+      const page = await invokeOrThrow<BrowsePopularPage>("browse_esoui_popular", {
         page: p,
         sortBy: sort,
       });
-      setResults((prev) => (append ? [...prev, ...r] : r));
-      setHasMore(r.length >= PAGE_SIZE);
+      setResults((prev) => (append ? [...prev, ...page.results] : page.results));
+      setHasMore(page.hasMore);
       pageRef.current = p;
     } catch (e) {
       toast.error(getTauriErrorMessage(e));

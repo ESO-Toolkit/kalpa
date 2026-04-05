@@ -60,6 +60,12 @@ export interface EsouiSearchResult {
   updated: string;
 }
 
+export interface BrowsePopularPage {
+  results: EsouiSearchResult[];
+  /** True when the upstream ESOUI page was full before library filtering. */
+  hasMore: boolean;
+}
+
 export interface EsouiAddonDetail {
   id: number;
   title: string;
