@@ -1,7 +1,7 @@
 # Kalpa
 
 [![CI](https://github.com/ESO-Toolkit/kalpa/actions/workflows/ci.yml/badge.svg)](https://github.com/ESO-Toolkit/kalpa/actions/workflows/ci.yml)
-[![Latest Release](https://img.shields.io/github/v/release/ESO-Toolkit/kalpa?color=c4a44a)](https://github.com/ESO-Toolkit/kalpa/releases/latest)
+[![Alpha Release](https://img.shields.io/badge/release-v0.1.0--alpha.1-c4a44a)](https://github.com/ESO-Toolkit/kalpa/releases/tag/v0.1.0-alpha.1)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 
 A fast, open-source addon manager for **The Elder Scrolls Online**. Built with Tauri, React, and Rust — designed as a modern alternative to Minion with community features, better dependency handling, and a native desktop experience.
@@ -9,6 +9,8 @@ A fast, open-source addon manager for **The Elder Scrolls Online**. Built with T
 <p align="center">
   <img src=".screenshots/main-desktop.png" alt="Kalpa — main view" width="800" />
 </p>
+
+> **Alpha Release** — Kalpa v0.1.0-alpha.1 is now available! This is the first public release. Download it from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/tag/v0.1.0-alpha.1) page and help shape the future of ESO addon management. Bug reports and feedback are welcome via [GitHub Issues](https://github.com/ESO-Toolkit/kalpa/issues).
 
 ---
 
@@ -19,6 +21,8 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Native performance** — Rust backend with a ~15 MB installer vs. Minion's Java runtime
 - **Automatic dependency resolution** — installs missing libraries without manual hunting
 - **Pack Hub** — share curated addon collections with the community (no other manager has this)
+- **SavedVariables manager** — view and edit addon settings directly in the app
+- **Multi-instance support** — handles native and Steam clients across NA, EU, and PTS servers
 - **Open source** — community contributions welcome
 - **Active development** — regular updates and new features
 
@@ -31,11 +35,13 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **One-click install** — paste an ESOUI URL or addon ID to install instantly, with automatic dependency resolution
 - **Bulk updates** — check for updates on startup and update all outdated addons at once
 - **Safe removal** — remove addons with dependency warnings so you don't break other addons
-- **ESOUI integration** — uses ESOUI's JSON API for reliable metadata, versions, and download links
+- **Safety Center** — see dependency warnings and conflicts at a glance before making changes
+- **ESOUI integration** — uses ESOUI's public JSON API for reliable metadata, versions, and download links
 
 ### Discovery
 - **Search ESOUI** — find new addons by keyword directly in the app
 - **Browse by category** — explore addons organized by category with sorting and pagination
+- **Popular addons** — browse the ESOUI Popular tab with filters and enhanced UX
 - **Addon details** — view descriptions, screenshots, download stats, compatibility info, and more before installing
 
 ### Pack Hub (Community Addon Collections)
@@ -65,11 +71,24 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Restore** — restore any backup to get your settings back
 - **Character management** — view all characters grouped by server (NA/EU)
 
+### SavedVariables Manager
+- **Browse settings** — view all addon SavedVariables files
+- **Edit in-app** — modify addon settings with change tracking and preview
+- **Profile management** — copy and delete SavedVariables profiles
+- **Auto-backups** — automatic backups before edits so you can always restore
+
+### Multi-Instance and Migration
+- **Game instance detection** — automatically finds native and Steam ESO installations
+- **Region support** — handles NA, EU, and PTS servers
+- **Setup wizard** — guided first-run setup with multi-candidate addon folder detection
+- **Minion migration** — import your existing Minion addon tracking data with dry-run preview, integrity checks, and snapshots before changes
+
 ### Additional Features
 - **API compatibility checking** — identify addons that are outdated for the current game API version
 - **Addon list export/import** — share your installed addon list as JSON and import on another machine
-- **Minion migration** — one-click import of your existing Minion addon tracking data
-- **Auto-update** — the app checks for and installs its own updates
+- **Deep link scheme** — `kalpa://` URLs for packs, share codes, and addon installs
+- **Auto-update** — the app checks for and installs its own updates via signed GitHub Releases
+- **Custom window chrome** — native-feeling desktop experience with a custom title bar
 - **Offline detection** — graceful handling when you're not connected
 - **Keyboard navigation** — navigate the addon list with arrow keys
 
@@ -92,7 +111,7 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 
 ### Pre-built (recommended)
 
-Download the latest Windows installer from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. Available as both `.exe` (NSIS) and `.msi` installers.
+Download the latest installer from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/tag/v0.1.0-alpha.1) page. Available as both `.exe` (NSIS) and `.msi` installers.
 
 ### Build from source
 
@@ -135,6 +154,7 @@ The production build outputs installers to `src-tauri/target/release/bundle/`.
 | **ESOUI client** | Fetches addon metadata and downloads via ESOUI's public JSON API — no private APIs or screen scraping |
 | **Metadata tracker** | Persists ESOUI IDs, versions, tags, and install dates in `kalpa.json` inside your AddOns folder |
 | **Pack Hub worker** | Cloudflare Worker + KV that powers community pack sharing, voting, and share codes |
+| **SavedVariables parser** | Reads and writes ESO's Lua-based SavedVariables files with change tracking |
 
 ---
 
@@ -147,6 +167,7 @@ The production build outputs installers to `src-tauri/target/release/bundle/`.
 - **HTTP**: reqwest
 - **HTML parsing**: scraper
 - **ZIP handling**: zip crate
+- **SavedVariables**: Custom Lua parser
 
 ---
 
@@ -165,6 +186,10 @@ src-tauri/src/              # Rust backend
   manifest.rs               # ESO addon manifest parser
   installer.rs              # ZIP extraction and addon installation
   metadata.rs               # Metadata tracking and persistence
+  safe_migration.rs         # Minion migration with dry-run and snapshots
+  game_instances.rs         # Multi-instance detection (native/Steam)
+  saved_variables/          # SavedVariables Lua parser and editor
+  auth.rs                   # Authentication
   lib.rs                    # Module definitions and app setup
 
 backend/                    # Cloudflare Workers
