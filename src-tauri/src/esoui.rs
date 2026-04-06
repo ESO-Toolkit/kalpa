@@ -835,7 +835,7 @@ const FILELIST_TTL: Duration = Duration::from_secs(900); // 15 minutes
 /// `FILELIST_TTL` so repeated update checks within a session don't re-fetch.
 pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String> {
     {
-        let guard = filelist_cache().lock().unwrap();
+        let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cache) = guard.as_ref() {
             if cache.fetched_at.elapsed() < FILELIST_TTL {
                 return Ok(cache.data.clone());
@@ -845,7 +845,7 @@ pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String
 
     let data = fetch_filelist_from_api()?;
 
-    let mut guard = filelist_cache().lock().unwrap();
+    let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(FilelistCache {
         data: data.clone(),
         fetched_at: Instant::now(),

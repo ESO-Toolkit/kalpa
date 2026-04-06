@@ -18,6 +18,7 @@ export interface AddonManifest {
   esouiId: number | null;
   tags: string[];
   esouiLastUpdate: number;
+  disabled: boolean;
 }
 
 export interface EsouiAddonInfo {
@@ -42,6 +43,12 @@ export interface UpdateCheckResult {
   remoteVersion: string;
   downloadUrl: string;
   hasUpdate: boolean;
+}
+
+export interface BatchUpdateResult {
+  completed: string[];
+  failed: string[];
+  errors?: Record<string, string>;
 }
 
 export interface ImportResult {
@@ -230,7 +237,14 @@ export interface EffectiveField {
 
 // App-level UI state types
 export type SortMode = "name" | "author";
-export type FilterMode = "all" | "addons" | "libraries" | "outdated" | "missing-deps" | "favorites";
+export type FilterMode =
+  | "all"
+  | "addons"
+  | "libraries"
+  | "outdated"
+  | "missing-deps"
+  | "favorites"
+  | "disabled";
 
 // Predefined tags users can apply to addons
 export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "raid"] as const;
