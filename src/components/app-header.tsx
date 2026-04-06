@@ -55,7 +55,7 @@ export function AppHeader({
       <div className="flex items-center gap-2">
         <Logo size={20} className="text-[#4dc2e6]" />
         <h1 className="bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-sm font-heading font-semibold tracking-wide text-transparent">
-          ESOTK.COM - Addon Manager
+          Kalpa - Addon Manager
         </h1>
       </div>
       <div className="flex-1" data-tauri-drag-region />
