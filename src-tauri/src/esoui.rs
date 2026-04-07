@@ -635,8 +635,27 @@ pub fn browse_category(
     Ok(results)
 }
 
+/// Return type for `browse_popular`: results plus an explicit pagination signal.
+///
+/// `has_more` reflects whether the **upstream** page was full before library
+/// filtering. This is important because post-fetch filtering reduces the result
+/// count below `PAGE_SIZE` even when more pages exist, so callers must not
+/// infer pagination from `results.len()` alone.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowsePopularPage {
+    pub results: Vec<EsouiSearchResult>,
+    /// True when the upstream page returned a full set of results, meaning
+    /// additional pages are likely available regardless of how many entries
+    /// survive the library filter.
+    pub has_more: bool,
+}
+
+/// ESOUI returns 25 entries per page; use the same constant to detect full pages.
+const ESOUI_PAGE_SIZE: usize = 25;
+
 /// Browse ESOUI's global listing sorted by popularity/newest.
-pub fn browse_popular(page: u32, sort_by: &str) -> Result<Vec<EsouiSearchResult>, String> {
+pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, String> {
     let client = http_client();
 
     let sb = match sort_by {
@@ -666,6 +685,10 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<Vec<EsouiSearchResult>
         categories.push(el.text().collect::<String>().trim().to_string());
     }
 
+    // Track how many unique upstream entries we see (before library filtering)
+    // so we can correctly signal whether more pages exist.
+    let mut upstream_count: usize = 0;
+
     let mut idx = 0;
     for el in document.select(&a_sel) {
         let href = el.value().attr("href").unwrap_or("");
@@ -688,6 +711,17 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<Vec<EsouiSearchResult>
         let category = categories.get(idx).cloned().unwrap_or_default();
         idx += 1;
 
+        // Count every unique upstream entry before the library filter so the
+        // has_more signal stays accurate even when many libraries are removed.
+        if !results.iter().any(|r| r.id == id) {
+            upstream_count += 1;
+        }
+
+        // Exclude libraries from the popular listing — they have their own category
+        if category.to_ascii_lowercase().contains("librar") {
+            continue;
+        }
+
         if results.iter().any(|r| r.id == id) {
             continue;
         }
@@ -702,7 +736,10 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<Vec<EsouiSearchResult>
         });
     }
 
-    Ok(results)
+    Ok(BrowsePopularPage {
+        has_more: upstream_count >= ESOUI_PAGE_SIZE,
+        results,
+    })
 }
 
 pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
@@ -798,7 +835,7 @@ const FILELIST_TTL: Duration = Duration::from_secs(900); // 15 minutes
 /// `FILELIST_TTL` so repeated update checks within a session don't re-fetch.
 pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String> {
     {
-        let guard = filelist_cache().lock().unwrap();
+        let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cache) = guard.as_ref() {
             if cache.fetched_at.elapsed() < FILELIST_TTL {
                 return Ok(cache.data.clone());
@@ -808,7 +845,7 @@ pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String
 
     let data = fetch_filelist_from_api()?;
 
-    let mut guard = filelist_cache().lock().unwrap();
+    let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(FilelistCache {
         data: data.clone(),
         fetched_at: Instant::now(),

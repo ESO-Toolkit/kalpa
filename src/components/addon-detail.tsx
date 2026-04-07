@@ -11,7 +11,7 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
-import { ExternalLink, Trash2, Check } from "lucide-react";
+import { ExternalLink, Trash2, Check, Power } from "lucide-react";
 
 function relativeDate(ts: number): string {
   const diff = Date.now() - ts;
@@ -28,6 +28,7 @@ interface AddonDetailProps {
   installedAddons: AddonManifest[];
   addonsPath: string;
   onRemove: () => void;
+  onToggleDisable: (folderName: string, currentlyDisabled: boolean) => void;
   updateResult: UpdateCheckResult | null;
   onAddonUpdated: (esouiId: number) => void;
   onTagsChange: (folderName: string, tags: string[]) => void;
@@ -39,6 +40,7 @@ export function AddonDetail({
   installedAddons,
   addonsPath,
   onRemove,
+  onToggleDisable,
   updateResult,
   onAddonUpdated,
   onTagsChange,
@@ -538,7 +540,28 @@ export function AddonDetail({
         </div>
       )}
 
-      <div className="mt-6 border-t border-white/[0.06] pt-4">
+      <div className="mt-6 border-t border-white/[0.06] pt-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => onToggleDisable(addon.folderName, addon.disabled)}
+            className={cn(
+              addon.disabled
+                ? "border-emerald-500/25 text-emerald-400 hover:bg-emerald-500/10"
+                : "border-amber-500/25 text-amber-400 hover:bg-amber-500/10"
+            )}
+          >
+            <Power className="size-4 mr-1.5" />
+            {addon.disabled ? "Enable Addon" : "Disable Addon"}
+          </Button>
+        </div>
+        {addon.disabled && dependents.length > 0 && (
+          <p className="text-xs text-amber-400/80">
+            {dependents.map((d) => d.title).join(", ")}{" "}
+            {dependents.length === 1 ? "depends" : "depend"} on this addon and may not work.
+          </p>
+        )}
+
         {!confirmingRemove ? (
           <Button
             variant="destructive"

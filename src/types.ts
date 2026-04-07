@@ -18,6 +18,7 @@ export interface AddonManifest {
   esouiId: number | null;
   tags: string[];
   esouiLastUpdate: number;
+  disabled: boolean;
 }
 
 export interface EsouiAddonInfo {
@@ -44,6 +45,12 @@ export interface UpdateCheckResult {
   hasUpdate: boolean;
 }
 
+export interface BatchUpdateResult {
+  completed: string[];
+  failed: string[];
+  errors?: Record<string, string>;
+}
+
 export interface ImportResult {
   installed: string[];
   failed: string[];
@@ -58,6 +65,12 @@ export interface EsouiSearchResult {
   category: string;
   downloads: string;
   updated: string;
+}
+
+export interface BrowsePopularPage {
+  results: EsouiSearchResult[];
+  /** True when the upstream ESOUI page was full before library filtering. */
+  hasMore: boolean;
 }
 
 export interface EsouiAddonDetail {
@@ -224,7 +237,14 @@ export interface EffectiveField {
 
 // App-level UI state types
 export type SortMode = "name" | "author";
-export type FilterMode = "all" | "addons" | "libraries" | "outdated" | "missing-deps" | "favorites";
+export type FilterMode =
+  | "all"
+  | "addons"
+  | "libraries"
+  | "outdated"
+  | "missing-deps"
+  | "favorites"
+  | "disabled";
 
 // Predefined tags users can apply to addons
 export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "raid"] as const;

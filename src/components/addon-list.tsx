@@ -78,13 +78,15 @@ const AddonListItem = memo(function AddonListItem({
       aria-selected={batchMode ? isSelected : isCurrent}
       className={cn(
         "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] group",
-        addon.missingDependencies.length > 0
-          ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_rgba(239,68,68,0.1)]"
-          : addon.isLibrary
-            ? "border-l-emerald-400 shadow-[inset_4px_0_12px_-4px_rgba(52,211,153,0.08)]"
-            : hasUpdate
-              ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
-              : "border-l-transparent",
+        addon.disabled
+          ? "border-l-zinc-500 opacity-50"
+          : addon.missingDependencies.length > 0
+            ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_rgba(239,68,68,0.1)]"
+            : addon.isLibrary
+              ? "border-l-emerald-400 shadow-[inset_4px_0_12px_-4px_rgba(52,211,153,0.08)]"
+              : hasUpdate
+                ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
+                : "border-l-transparent",
         isCurrent &&
           !batchMode &&
           "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]",
@@ -103,14 +105,18 @@ const AddonListItem = memo(function AddonListItem({
       }}
     >
       <div className="flex items-start gap-2">
-        {batchMode && (
-          <Checkbox
-            checked={isSelected}
-            onCheckedChange={() => onToggleSelect(addon.folderName)}
-            onClick={(e) => e.stopPropagation()}
-            className="shrink-0 mt-0.5"
-          />
-        )}
+        <div
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelect(addon.folderName);
+          }}
+          className={cn(
+            "shrink-0 mt-0.5 transition-opacity duration-150",
+            isSelected || batchMode ? "opacity-100" : "opacity-70 group-hover:opacity-100"
+          )}
+        >
+          <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
+        </div>
         <div className="flex-1 min-w-0">
           <div className="truncate text-sm font-medium">
             {addon.tags.includes("favorite") && (
@@ -137,6 +143,14 @@ const AddonListItem = memo(function AddonListItem({
                 className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
               >
                 Update
+              </Badge>
+            )}
+            {addon.disabled && (
+              <Badge
+                variant="outline"
+                className="border-zinc-400/20 bg-zinc-400/[0.04] text-zinc-400 text-[10px]"
+              >
+                Disabled
               </Badge>
             )}
             {addon.missingDependencies.length > 0 && (
@@ -177,6 +191,7 @@ const FILTERS: [FilterMode, string][] = [
   ["favorites", "\u2605 Favorites"],
   ["outdated", "Outdated"],
   ["missing-deps", "Issues"],
+  ["disabled", "Disabled"],
 ];
 
 export function AddonList({
@@ -220,6 +235,7 @@ export function AddonList({
       favorites: allAddons.filter((a) => a.tags.includes("favorite")).length,
       outdated: allAddons.filter((a) => updatesMap.has(a.folderName)).length,
       "missing-deps": allAddons.filter((a) => a.missingDependencies.length > 0).length,
+      disabled: allAddons.filter((a) => a.disabled).length,
     }),
     [allAddons, updatesMap]
   );
@@ -326,7 +342,7 @@ export function AddonList({
             aria-label="Filter addons"
           >
             {FILTERS.map(([mode, label]) => {
-              const hideIfZero = ["outdated", "missing-deps", "favorites"];
+              const hideIfZero = ["outdated", "missing-deps", "favorites", "disabled"];
               if (hideIfZero.includes(mode) && filterCounts[mode] === 0) return null;
               const isActive = filterMode === mode && !activeTagFilter;
               return (

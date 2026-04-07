@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
@@ -223,17 +223,21 @@ fn read_local_version(addons_dir: &Path, folder: &str) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<PathBuf> {
-    let dir = addons_dir.join(folder_name);
-    let txt = dir.join(format!("{}.txt", folder_name));
+/// Look for a manifest file inside `dir` with the given `base_name`.
+fn find_manifest_in(dir: &std::path::Path, base_name: &str) -> Option<PathBuf> {
+    let txt = dir.join(format!("{}.txt", base_name));
     if txt.exists() {
         return Some(txt);
     }
-    let addon = dir.join(format!("{}.addon", folder_name));
+    let addon = dir.join(format!("{}.addon", base_name));
     if addon.exists() {
         return Some(addon);
     }
     None
+}
+
+pub(crate) fn find_manifest(addons_dir: &std::path::Path, folder_name: &str) -> Option<PathBuf> {
+    find_manifest_in(&addons_dir.join(folder_name), folder_name)
 }
 
 // ── Enhanced addon folder detection ─────────────────────────────────────
@@ -518,51 +522,75 @@ fn scan_installed_addons_blocking(
         fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
 
     // Collect top-level directories first so we can process them in parallel.
-    let top_dirs: Vec<(String, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if !path.is_dir() {
-                return None;
-            }
-            let name = path.file_name()?.to_str()?.to_string();
-            Some((name, path))
-        })
+    // Each entry is (base_name, path, is_disabled).
+    //
+    // When both `Foo/` and `Foo.disabled/` exist on disk the enabled copy wins
+    // and the disabled duplicate is silently ignored.  This prevents two
+    // manifests with the same `folder_name` from colliding in the UI, cache,
+    // and downstream commands (remove / enable / update).
+    let mut seen: HashMap<String, (PathBuf, bool)> = HashMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let is_disabled = name.ends_with(".disabled");
+        let base_name = if is_disabled {
+            name.strip_suffix(".disabled").unwrap().to_string()
+        } else {
+            name
+        };
+        // If we already saw an enabled copy, skip the disabled duplicate
+        match seen.get(&base_name) {
+            Some((_, false)) if is_disabled => continue,
+            _ => {}
+        }
+        seen.insert(base_name, (path, is_disabled));
+    }
+    let top_dirs: Vec<(String, PathBuf, bool)> = seen
+        .into_iter()
+        .map(|(name, (path, disabled))| (name, path, disabled))
         .collect();
 
     // Open SQLite manifest cache in the app data dir (not the AddOns folder,
     // which ESO scans recursively and could cause odd behavior with a .db file).
-    let folder_names: Vec<&str> = top_dirs.iter().map(|(name, _)| name.as_str()).collect();
+    let folder_names: Vec<&str> = top_dirs.iter().map(|(name, _, _)| name.as_str()).collect();
     let mut cache_conn = manifest_cache::open_and_prune(cache_dir, &folder_names);
 
     // Two-pass strategy:
     // 1. Check the cache for each folder (sequential — SQLite is single-threaded)
     // 2. Parse uncached manifests in parallel with rayon, then store results back
     let mut addons: Vec<AddonManifest> = Vec::with_capacity(top_dirs.len());
-    let mut uncached: Vec<(String, PathBuf)> = Vec::new();
+    let mut uncached: Vec<(String, PathBuf, bool)> = Vec::new();
 
-    for (folder_name, _path) in &top_dirs {
-        let manifest_path = match find_manifest(addons_dir, folder_name) {
+    for (base_name, path, is_disabled) in &top_dirs {
+        let manifest_path = match find_manifest_in(path, base_name) {
             Some(p) => p,
             None => continue,
         };
         if let Some(ref conn) = cache_conn {
-            if let Some(cached) =
-                manifest_cache::parse_manifest_cached(conn, folder_name, &manifest_path)
+            if let Some(mut cached) =
+                manifest_cache::parse_manifest_cached(conn, base_name, &manifest_path)
             {
+                cached.disabled = *is_disabled;
                 addons.push(cached);
                 continue;
             }
         }
-        uncached.push((folder_name.clone(), manifest_path));
+        uncached.push((base_name.clone(), manifest_path, *is_disabled));
     }
 
     // Parse uncached manifests in parallel
-    let newly_parsed: Vec<(PathBuf, AddonManifest)> = uncached
+    let newly_parsed: Vec<(PathBuf, AddonManifest, bool)> = uncached
         .par_iter()
-        .filter_map(|(folder_name, manifest_path)| {
-            let m = manifest::parse_manifest(folder_name, manifest_path)?;
-            Some((manifest_path.clone(), m))
+        .filter_map(|(folder_name, manifest_path, is_disabled)| {
+            let mut m = manifest::parse_manifest(folder_name, manifest_path)?;
+            m.disabled = *is_disabled;
+            Some((manifest_path.clone(), m, *is_disabled))
         })
         .collect();
 
@@ -570,20 +598,24 @@ fn scan_installed_addons_blocking(
     // Without this, each INSERT is its own implicit transaction with a WAL flush.
     if let Some(ref mut conn) = cache_conn {
         if let Ok(tx) = conn.transaction() {
-            for (manifest_path, m) in &newly_parsed {
+            for (manifest_path, m, _) in &newly_parsed {
                 manifest_cache::store_parsed(&tx, &m.folder_name, manifest_path, m);
             }
             let _ = tx.commit();
         }
     }
-    addons.extend(newly_parsed.into_iter().map(|(_, m)| m));
+    addons.extend(newly_parsed.into_iter().map(|(_, m, _)| m));
 
     // Build set of ALL directory names in AddOns folder for dependency checking.
     // This includes folders without manifests (data folders) and catches everything
-    // ESO would recognize. ESO also searches subfolders up to 3 levels deep for
-    // embedded libraries, so we scan those too.
+    // ESO would recognize. Disabled addons are excluded since ESO won't load them.
+    // ESO also searches subfolders up to 3 levels deep for embedded libraries,
+    // so we scan those too.
     let mut installed: HashSet<String> = HashSet::with_capacity(top_dirs.len() * 2);
-    for (name, path) in &top_dirs {
+    for (name, path, is_disabled) in &top_dirs {
+        if *is_disabled {
+            continue;
+        }
         installed.insert(name.clone());
         // Scan subfolders (1-2 levels deep) for embedded libraries
         if let Ok(sub_entries) = fs::read_dir(path) {
@@ -616,7 +648,10 @@ fn scan_installed_addons_blocking(
     let stale: Vec<String> = store
         .addons
         .keys()
-        .filter(|name| !addons_dir.join(name).is_dir())
+        .filter(|name| {
+            !addons_dir.join(name).is_dir()
+                && !addons_dir.join(format!("{}.disabled", name)).is_dir()
+        })
         .cloned()
         .collect();
     if !stale.is_empty() {
@@ -820,8 +855,25 @@ pub fn remove_addon(
     addons_path: String,
     folder_name: String,
 ) -> Result<(), String> {
+    validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    installer::remove_addon(&addons_dir, &folder_name)?;
+
+    // Remove both the enabled and disabled copies if they exist.
+    // If only one exists, remove that one. Handles the edge case where
+    // an external tool or reinstall left both Foo/ and Foo.disabled/.
+    let enabled_exists = addons_dir.join(&folder_name).is_dir();
+    let disabled_name = format!("{}.disabled", folder_name);
+    let disabled_exists = addons_dir.join(&disabled_name).is_dir();
+
+    if enabled_exists {
+        installer::remove_addon(&addons_dir, &folder_name)?;
+    }
+    if disabled_exists {
+        installer::remove_addon(&addons_dir, &disabled_name)?;
+    }
+    if !enabled_exists && !disabled_exists {
+        return Err(format!("Addon folder not found: {}", folder_name));
+    }
 
     // Clean up metadata
     let mut store = metadata::load_metadata(&addons_dir);
@@ -829,6 +881,44 @@ pub fn remove_addon(
     metadata::save_metadata(&addons_dir, &store)?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn disable_addon(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+) -> Result<(), String> {
+    validate_name(&folder_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let src = addons_dir.join(&folder_name);
+    if !src.is_dir() {
+        return Err(format!("Addon folder not found: {}", folder_name));
+    }
+    let dst = addons_dir.join(format!("{}.disabled", folder_name));
+    if dst.exists() {
+        return Err(format!("{} is already disabled.", folder_name));
+    }
+    fs::rename(&src, &dst).map_err(|e| format!("Failed to disable {}: {}", folder_name, e))
+}
+
+#[tauri::command]
+pub fn enable_addon(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+) -> Result<(), String> {
+    validate_name(&folder_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let src = addons_dir.join(format!("{}.disabled", folder_name));
+    if !src.is_dir() {
+        return Err(format!("Disabled addon folder not found: {}", folder_name));
+    }
+    let dst = addons_dir.join(&folder_name);
+    if dst.exists() {
+        return Err(format!("A folder named {} already exists.", folder_name));
+    }
+    fs::rename(&src, &dst).map_err(|e| format!("Failed to enable {}: {}", folder_name, e))
 }
 
 #[tauri::command]
@@ -1052,6 +1142,198 @@ fn update_addon_blocking(
     })
 }
 
+// ── Batch update (parallel downloads, sequential extraction) ────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchUpdateEntry {
+    pub esoui_id: u32,
+    pub folder_name: String,
+    pub api_version: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchUpdateResult {
+    pub completed: Vec<String>,
+    pub failed: Vec<String>,
+    pub errors: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchUpdateProgress {
+    pub folder_name: String,
+    /// "downloading" | "extracting" | "completed" | "failed"
+    pub phase: String,
+    pub index: usize,
+    pub total: usize,
+}
+
+#[tauri::command]
+pub async fn batch_update_addons(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    app: tauri::AppHandle,
+    addons_path: String,
+    updates: Vec<BatchUpdateEntry>,
+) -> Result<BatchUpdateResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || batch_update_addons_blocking(&addons_dir, &updates, &app))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+}
+
+fn batch_update_addons_blocking(
+    addons_dir: &Path,
+    updates: &[BatchUpdateEntry],
+    app: &tauri::AppHandle,
+) -> Result<BatchUpdateResult, String> {
+    let total = updates.len();
+
+    // Emit "downloading" for all addons at the start
+    for (i, entry) in updates.iter().enumerate() {
+        let _ = app.emit(
+            "batch-update-progress",
+            BatchUpdateProgress {
+                folder_name: entry.folder_name.clone(),
+                phase: "downloading".to_string(),
+                index: i,
+                total,
+            },
+        );
+    }
+
+    // Phase 1 (parallel): fetch addon info + download ZIPs, capped at 4 threads
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .map_err(|e| format!("Thread pool error: {}", e))?;
+
+    struct Downloaded {
+        tmp: NamedTempFile,
+        info: EsouiAddonInfo,
+        esoui_id: u32,
+        api_version: String,
+        index: usize,
+    }
+
+    let app_clone = app.clone();
+    let download_results: Vec<(String, Result<Downloaded, String>)> = pool.install(|| {
+        updates
+            .par_iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let result = fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| {
+                    // Emit "extracting" as soon as download finishes
+                    let _ = app_clone.emit(
+                        "batch-update-progress",
+                        BatchUpdateProgress {
+                            folder_name: entry.folder_name.clone(),
+                            phase: "extracting".to_string(),
+                            index: i,
+                            total,
+                        },
+                    );
+                    Downloaded {
+                        tmp,
+                        info,
+                        esoui_id: entry.esoui_id,
+                        api_version: entry.api_version.clone(),
+                        index: i,
+                    }
+                });
+                if result.is_err() {
+                    let _ = app_clone.emit(
+                        "batch-update-progress",
+                        BatchUpdateProgress {
+                            folder_name: entry.folder_name.clone(),
+                            phase: "failed".to_string(),
+                            index: i,
+                            total,
+                        },
+                    );
+                }
+                (entry.folder_name.clone(), result)
+            })
+            .collect()
+    });
+
+    // Phase 2 (sequential): extract ZIPs and record metadata
+    let mut store = metadata::load_metadata(addons_dir);
+    let mut completed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut errors: HashMap<String, String> = HashMap::new();
+
+    for (folder_name, result) in download_results {
+        match result {
+            Err(e) => {
+                errors.insert(folder_name.clone(), e);
+                failed.push(folder_name);
+                // Already emitted "failed" during download phase
+            }
+            Ok(dl) => match installer::extract_addon_zip(dl.tmp.path(), addons_dir) {
+                Err(e) => {
+                    let _ = app.emit(
+                        "batch-update-progress",
+                        BatchUpdateProgress {
+                            folder_name: folder_name.clone(),
+                            phase: "failed".to_string(),
+                            index: dl.index,
+                            total,
+                        },
+                    );
+                    errors.insert(folder_name.clone(), e);
+                    failed.push(folder_name);
+                }
+                Ok(installed_folders) => {
+                    let version = &dl.api_version;
+                    // Clean up old metadata entries for this esoui_id
+                    // that aren't in the newly extracted folders (handles renames)
+                    let old_folders: Vec<String> = store
+                        .addons
+                        .iter()
+                        .filter(|(_, m)| m.esoui_id == dl.esoui_id)
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    for old in &old_folders {
+                        if !installed_folders.contains(old) {
+                            metadata::remove_entry(&mut store, old);
+                        }
+                    }
+                    record_installed_folders(
+                        &mut store,
+                        addons_dir,
+                        &installed_folders,
+                        dl.esoui_id,
+                        version,
+                        &dl.info.title,
+                        &dl.info.download_url,
+                        0,
+                    );
+                    let _ = app.emit(
+                        "batch-update-progress",
+                        BatchUpdateProgress {
+                            folder_name: folder_name.clone(),
+                            phase: "completed".to_string(),
+                            index: dl.index,
+                            total,
+                        },
+                    );
+                    completed.push(folder_name);
+                }
+            },
+        }
+    }
+
+    metadata::save_metadata(addons_dir, &store)?;
+
+    Ok(BatchUpdateResult {
+        completed,
+        failed,
+        errors,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportEntry {
@@ -1252,19 +1534,42 @@ pub async fn import_addon_list(
         .map_err(|e| format!("Task failed: {}", e))?
 }
 
+/// Return true if the error string indicates an HTTP 429 rate-limit response.
+/// Matches both `fetch_addon_info` ("Too many requests…") and `download_addon`
+/// ("Download failed (HTTP 429)…") error formats.
+fn is_rate_limited(err: &str) -> bool {
+    err.contains("Too many requests") || err.contains("HTTP 429")
+}
+
+/// Global counter used to spread jitter across parallel retry workers.
+/// Each thread gets a different offset so retries don't cluster even when
+/// `SystemTime` resolves to the same nanosecond.
+static RETRY_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Fetch addon info and download its ZIP, retrying up to 3 times on HTTP 429.
-/// Backoff schedule: immediate, 1 s, 2 s.
+/// Backoff: base delay doubles each attempt (1 s, 2 s) with up to 500 ms of
+/// jitter so parallel workers don't retry in lockstep.
 fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiAddonInfo), String> {
+    let seq = RETRY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
     let mut last_err = String::new();
     for attempt in 0u32..3 {
         if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(1 << (attempt - 1)));
+            let base_ms = 1000u64 * (1 << (attempt - 1));
+            // Spread jitter using an atomic counter + clock nanos so threads
+            // that started at the same instant still desynchronize.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let jitter_ms = ((nanos.wrapping_add(seq.wrapping_mul(7919))) % 500) as u64;
+            std::thread::sleep(std::time::Duration::from_millis(base_ms + jitter_ms));
         }
         let info = match esoui::fetch_addon_info(esoui_id) {
             Ok(i) => i,
             Err(e) => {
                 last_err = e.clone();
-                if e.contains("Too many requests") {
+                if is_rate_limited(&e) {
                     continue;
                 }
                 return Err(e);
@@ -1274,7 +1579,7 @@ fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiA
             Ok(tmp) => return Ok((tmp, info)),
             Err(e) => {
                 last_err = e.clone();
-                if e.contains("Too many requests") {
+                if is_rate_limited(&e) {
                     continue;
                 }
                 return Err(e);
@@ -1395,7 +1700,7 @@ pub async fn browse_esoui_category(
 pub async fn browse_esoui_popular(
     page: u32,
     sort_by: String,
-) -> Result<Vec<esoui::EsouiSearchResult>, String> {
+) -> Result<esoui::BrowsePopularPage, String> {
     tokio::task::spawn_blocking(move || esoui::browse_popular(page, &sort_by))
         .await
         .map_err(|e| format!("Task failed: {}", e))?

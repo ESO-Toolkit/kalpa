@@ -17,9 +17,9 @@ import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import type {
   AddonManifest,
   AuthUser,
+  BatchUpdateResult,
   GameInstance,
   UpdateCheckResult,
-  InstallResult,
   EsouiSearchResult,
   SortMode,
   FilterMode,
@@ -52,6 +52,7 @@ const VALID_FILTER_MODES: readonly FilterMode[] = [
   "outdated",
   "missing-deps",
   "favorites",
+  "disabled",
 ];
 
 function isFilterMode(value: string): value is FilterMode {
@@ -77,6 +78,9 @@ function App() {
     total: number;
     currentAddon?: string;
   } | null>(null);
+  const [addonStatuses, setAddonStatuses] = useState<
+    Map<string, "downloading" | "extracting" | "completed" | "failed">
+  >(new Map());
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
@@ -90,6 +94,7 @@ function App() {
   );
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
   const [batchRemoving, setBatchRemoving] = useState(false);
+  const [batchDisabling, setBatchDisabling] = useState(false);
   const [activeTagFilter, setActiveTagFilter] = useState<string | null>(null);
   // null = not in setup mode; [] = in setup mode with no candidates found
   const [setupInstances, setSetupInstances] = useState<GameInstance[] | null>(null);
@@ -177,6 +182,39 @@ function App() {
         console.error("[tauri:deep-link-share]", listenError);
       });
 
+    void listen<{ folderName: string; phase: string; index: number; total: number }>(
+      "batch-update-progress",
+      (event) => {
+        const { folderName, phase, total } = event.payload;
+        setAddonStatuses((prev) => {
+          const next = new Map(prev);
+          next.set(folderName, phase as "downloading" | "extracting" | "completed" | "failed");
+          return next;
+        });
+        // Keep legacy progress in sync
+        let completed = 0;
+        let failed = 0;
+        setAddonStatuses((current) => {
+          for (const s of current.values()) {
+            if (s === "completed") completed++;
+            if (s === "failed") failed++;
+          }
+          setUpdateProgress({ completed, failed, total, currentAddon: folderName });
+          return current;
+        });
+      }
+    )
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        cleanups.push(unlisten);
+      })
+      .catch((listenError) => {
+        console.error("[tauri:batch-update-progress]", listenError);
+      });
+
     void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
       .then((payload) => {
         if (disposed) return;
@@ -249,47 +287,44 @@ function App() {
           toast.info(`Auto-updating ${updates.length} addon${updates.length > 1 ? "s" : ""}...`);
           setUpdatingAll(true);
           setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
+          setAddonStatuses(new Map());
 
-          let completed = 0;
-          let failed = 0;
-
-          for (const update of updates) {
-            setUpdateProgress((prev) =>
-              prev ? { ...prev, currentAddon: update.folderName } : null
-            );
-            const updateResult = await invokeResult<InstallResult>("update_addon", {
-              addonsPath: path,
-              esouiId: update.esouiId,
-              apiVersion: update.remoteVersion,
-            });
-
-            if (updateResult.ok) {
-              completed++;
-            } else {
-              failed++;
-            }
-
-            if (seq !== checkSeqRef.current) return;
-            setUpdateProgress({ completed, failed, total: updates.length });
-          }
+          const batchResult = await invokeResult<BatchUpdateResult>("batch_update_addons", {
+            addonsPath: path,
+            updates: updates.map((u) => ({
+              esouiId: u.esouiId,
+              folderName: u.folderName,
+              apiVersion: u.remoteVersion,
+            })),
+          });
 
           if (seq !== checkSeqRef.current) return;
 
           setUpdatingAll(false);
           setUpdateProgress(null);
 
-          if (failed > 0) {
-            toast.warning(
-              `Auto-updated ${completed} addon${completed !== 1 ? "s" : ""}, ${failed} failed`
-            );
-          } else if (completed > 0) {
-            toast.success(`Auto-updated ${completed} addon${completed !== 1 ? "s" : ""}`);
-          }
+          if (batchResult.ok) {
+            const { completed, failed } = batchResult.data;
+            if (failed.length > 0) {
+              toast.warning(
+                `Auto-updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}, ${failed.length} failed`
+              );
+            } else if (completed.length > 0) {
+              toast.success(
+                `Auto-updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}`
+              );
+            }
 
-          setUpdateResults((prev) => {
-            const updatedIds = new Set(updates.map((update) => update.esouiId));
-            return prev.filter((result) => !updatedIds.has(result.esouiId));
-          });
+            // Only clear succeeded addons; keep failed ones visible as outdated
+            if (completed.length > 0) {
+              const succeededNames = new Set(completed);
+              setUpdateResults((prev) =>
+                prev.filter((result) => !succeededNames.has(result.folderName))
+              );
+            }
+          } else {
+            toast.error(`Auto-update failed: ${batchResult.error}`);
+          }
 
           await scanAddons(path);
         }
@@ -518,6 +553,20 @@ function App() {
     [addonsPath]
   );
 
+  const handleToggleDisable = useCallback(
+    async (folderName: string, currentlyDisabled: boolean) => {
+      const command = currentlyDisabled ? "enable_addon" : "disable_addon";
+      const result = await invokeResult(command, { addonsPath, folderName });
+      if (result.ok) {
+        toast.success(currentlyDisabled ? `Enabled ${folderName}` : `Disabled ${folderName}`);
+        handleRefresh();
+      } else {
+        toast.error(result.error);
+      }
+    },
+    [addonsPath, handleRefresh]
+  );
+
   const handleAddonUpdated = useCallback(
     (esouiId: number) => {
       if (addonsPathRef.current) {
@@ -582,58 +631,56 @@ function App() {
       const path = addonsPathRef.current;
       if (!path || updates.length === 0) return;
 
+      // Guard against double-clicks / concurrent batch runs
+      if (updatingAllRef.current) return;
+
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
+      setAddonStatuses(new Map());
 
-      // Create a pre-operation snapshot before batch updates
-      try {
-        await invokeOrThrow("create_pre_operation_snapshot", {
-          addonsPath: path,
-          operationLabel: "update-all",
-        });
-      } catch (snapshotError) {
-        console.error("[tauri:pre-op-snapshot]", snapshotError);
-        // Non-fatal: continue with updates even if snapshot fails
-      }
+      // Fire snapshot in the background — don't block updates on it.
+      // invokeResult never throws; errors are captured in the result.
+      void invokeResult("create_pre_operation_snapshot", {
+        addonsPath: path,
+        operationLabel: "update-all",
+      });
 
-      let completed = 0;
-      let failed = 0;
-      const failedNames: string[] = [];
-
-      for (const update of updates) {
-        setUpdateProgress((prev) => (prev ? { ...prev, currentAddon: update.folderName } : null));
-        const result = await invokeResult<InstallResult>("update_addon", {
-          addonsPath: path,
-          esouiId: update.esouiId,
-          apiVersion: update.remoteVersion,
-        });
-
-        if (result.ok) {
-          completed++;
-        } else {
-          failed++;
-          failedNames.push(update.folderName);
-        }
-
-        setUpdateProgress({ completed, failed, total: updates.length });
-      }
+      // Batch all downloads + extractions in a single Rust call
+      const batchResult = await invokeResult<BatchUpdateResult>("batch_update_addons", {
+        addonsPath: path,
+        updates: updates.map((u) => ({
+          esouiId: u.esouiId,
+          folderName: u.folderName,
+          apiVersion: u.remoteVersion,
+        })),
+      });
 
       setUpdatingAll(false);
       setUpdateProgress(null);
 
-      if (failed > 0) {
-        toast.warning(
-          `Updated ${completed} addon${completed !== 1 ? "s" : ""}, ${failed} failed: ${failedNames.join(", ")}`
-        );
+      if (batchResult.ok) {
+        const { completed, failed } = batchResult.data;
+        if (failed.length > 0) {
+          toast.warning(
+            `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}, ${failed.length} failed: ${failed.join(", ")}`
+          );
+        } else if (completed.length > 0) {
+          toast.success(`Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}`);
+        }
+
+        // Only clear update results for addons that actually succeeded;
+        // failed addons should remain visible in the "Outdated" filter.
+        if (completed.length > 0) {
+          const succeededNames = new Set(completed);
+          setUpdateResults((prev) =>
+            prev.filter((result) => !succeededNames.has(result.folderName))
+          );
+        }
       } else {
-        toast.success(`Updated ${completed} addon${completed !== 1 ? "s" : ""}`);
+        toast.error(`Batch update failed: ${batchResult.error}`);
       }
 
       await scanAddons(path);
-      setUpdateResults((prev) => {
-        const updatedIds = new Set(updates.map((update) => update.esouiId));
-        return prev.filter((result) => !updatedIds.has(result.esouiId));
-      });
     },
     [scanAddons]
   );
@@ -687,6 +734,72 @@ function App() {
     setSelectedFolders(new Set());
   }, [runBatchUpdates, selectedFolders, updatesAvailable]);
 
+  const handleBatchDisable = useCallback(async () => {
+    if (selectedFolders.size === 0) return;
+
+    setBatchDisabling(true);
+    let disabled = 0;
+    let enabled = 0;
+    let failed = 0;
+
+    for (const folderName of selectedFolders) {
+      const addon = addons.find((a) => a.folderName === folderName);
+      if (!addon) continue;
+      const command = addon.disabled ? "enable_addon" : "disable_addon";
+      const result = await invokeResult(command, { addonsPath, folderName });
+      if (result.ok) {
+        if (addon.disabled) enabled++;
+        else disabled++;
+      } else {
+        failed++;
+      }
+    }
+
+    setBatchDisabling(false);
+
+    const parts: string[] = [];
+    if (disabled > 0) parts.push(`disabled ${disabled}`);
+    if (enabled > 0) parts.push(`enabled ${enabled}`);
+    if (failed > 0) parts.push(`${failed} failed`);
+    toast.success(parts.join(", "));
+
+    setSelectedFolders(new Set());
+    handleRefresh();
+  }, [addons, addonsPath, handleRefresh, selectedFolders]);
+
+  const handleBatchTag = useCallback(
+    async (tag: string) => {
+      if (selectedFolders.size === 0) return;
+
+      let applied = 0;
+      for (const folderName of selectedFolders) {
+        const addon = addons.find((a) => a.folderName === folderName);
+        if (!addon) continue;
+        if (addon.tags.includes(tag)) continue;
+        try {
+          await invokeOrThrow("set_addon_tags", {
+            addonsPath,
+            folderName,
+            tags: [...addon.tags, tag],
+          });
+          applied++;
+        } catch {
+          // skip individual failures
+        }
+      }
+
+      if (applied > 0) {
+        toast.success(`Tagged ${applied} addon${applied !== 1 ? "s" : ""} as "${tag}"`);
+      } else {
+        toast.info(`All selected addons already have the "${tag}" tag`);
+      }
+
+      setSelectedFolders(new Set());
+      handleRefresh();
+    },
+    [addons, addonsPath, handleRefresh, selectedFolders]
+  );
+
   const filteredAddons = useMemo(
     () =>
       addons
@@ -712,6 +825,8 @@ function App() {
               return addon.missingDependencies.length > 0;
             case "favorites":
               return addon.tags.includes("favorite");
+            case "disabled":
+              return addon.disabled;
             default:
               if (activeTagFilter) return addon.tags.includes(activeTagFilter);
               return true;
@@ -766,13 +881,16 @@ function App() {
         addonsCount={addons.length}
         batchMode={batchMode}
         batchRemoving={batchRemoving}
+        batchDisabling={batchDisabling}
         checkingUpdates={checkingUpdates}
         loading={loading}
         selectedCount={selectedFolders.size}
         updatingAll={updatingAll}
         isOffline={isOffline}
         onBatchCancel={() => setSelectedFolders(new Set())}
+        onBatchDisable={() => void handleBatchDisable()}
         onBatchRemove={() => void handleBatchRemove()}
+        onBatchTag={handleBatchTag}
         onBatchUpdate={() => void handleBatchUpdate()}
         onOpenPacks={() => setActiveDialog("packs")}
         onOpenSavedVars={() => setActiveDialog("saved-variables")}
@@ -793,6 +911,7 @@ function App() {
         availableCount={updatesAvailable.length}
         updatingAll={updatingAll}
         updateProgress={updateProgress}
+        addonStatuses={addonStatuses}
         onUpdateAll={handleUpdateAll}
         isOffline={isOffline}
       />
@@ -837,6 +956,7 @@ function App() {
               setSelectedAddon(null);
               handleRefresh();
             }}
+            onToggleDisable={handleToggleDisable}
             updateResult={selectedUpdateResult}
             onAddonUpdated={handleAddonUpdated}
             onTagsChange={handleTagsChange}
