@@ -12,5 +12,9 @@ id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 # For local dev, create a .dev.vars file (git-ignored):
 #   ADMIN_API_KEY=dev-secret-key
 
+# Daily backup of pack index (midnight UTC)
+[triggers]
+crons = ["0 0 * * *"]
+
 [observability]
 enabled = true

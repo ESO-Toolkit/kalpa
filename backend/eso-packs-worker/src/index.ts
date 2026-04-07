@@ -454,6 +454,25 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
   });
 }
 
+// ── Scheduled backup ──────────────────────────────────────────────
+async function handleScheduled(env: Env): Promise<void> {
+  const index = await getPackIndex(env);
+  if (!index || index.packs.length === 0) return;
+
+  const timestamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const backupKey = `backup:${timestamp}`;
+
+  // Skip if today's backup already exists
+  const existing = await env.ESO_PACKS.get(backupKey);
+  if (existing) return;
+
+  // Write backup with 90-day TTL (keeps last ~90 daily snapshots)
+  await env.ESO_PACKS.put(backupKey, JSON.stringify(index), {
+    expirationTtl: 90 * 86400,
+  });
+  console.log(`Backup written: ${backupKey} (${index.packs.length} packs)`);
+}
+
 // ── Router ─────────────────────────────────────────────────────────
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -466,6 +485,14 @@ export default {
         status: 500,
         headers: { "Content-Type": "application/json", ...corsHeaders(request) },
       });
+    }
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    try {
+      await handleScheduled(env);
+    } catch (err) {
+      console.error("Scheduled backup failed:", err);
     }
   },
 } satisfies ExportedHandler<Env>;

@@ -31,8 +31,35 @@ jobs:
       - name: TypeScript check
         run: npx tsc --noEmit
 
+      - name: Verify worker name is kalpa-pack-hub
+        run: |
+          NAME=$(grep '^name' wrangler.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          if [ "$NAME" != "kalpa-pack-hub" ]; then
+            echo "::error::wrangler.toml name is '$NAME', expected 'kalpa-pack-hub'. Aborting to prevent deploying to the wrong worker."
+            exit 1
+          fi
+
+      - name: Dry-run deploy (validate bundle)
+        run: npx wrangler deploy --dry-run --outdir dist
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
       - name: Deploy to Cloudflare
         run: npx wrangler deploy
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Post-deploy health check
+        run: |
+          sleep 5
+          HEALTH=$(curl -sf https://kalpa-pack-hub.eso-toolkit.workers.dev/health)
+          echo "$HEALTH"
+          STATUS=$(echo "$HEALTH" | jq -r '.status')
+          KV=$(echo "$HEALTH" | jq -r '.kv')
+          if [ "$STATUS" != "ok" ] || [ "$KV" != "true" ]; then
+            echo "::error::Health check failed! status=$STATUS kv=$KV"
+            exit 1
+          fi
+          echo "Health check passed."
