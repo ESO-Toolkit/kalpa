@@ -1,4 +1,4 @@
-import type { Pack, ValidationError } from "./types";
+import type { ValidationError } from "./types";
 
 const VALID_TYPES = ["addon-pack", "build-pack", "roster-pack"];
 const VALID_STATUSES = ["draft", "published"];
@@ -9,6 +9,7 @@ const MAX_DESCRIPTION_LENGTH = 1000;
 const MAX_TAGS = 10;
 const MAX_ADDONS = 200;
 
+/** Validate a create/update pack payload from the Rust client. */
 export function validatePack(pack: unknown): ValidationError[] {
   const errors: ValidationError[] = [];
 
@@ -18,39 +19,34 @@ export function validatePack(pack: unknown): ValidationError[] {
 
   const p = pack as Record<string, unknown>;
 
-  if (typeof p.id !== "string" || p.id.length === 0 || p.id.length > MAX_ID_LENGTH || !ID_PATTERN.test(p.id)) {
+  // id is optional on create (server generates), required on update
+  if (p.id !== undefined) {
+    if (typeof p.id !== "string" || p.id.length === 0 || p.id.length > MAX_ID_LENGTH || !ID_PATTERN.test(p.id)) {
+      errors.push({
+        field: "id",
+        message: `id must be 1-${MAX_ID_LENGTH} characters, lowercase letters, numbers, and hyphens`,
+      });
+    }
+  }
+
+  if (typeof p.title !== "string" || p.title.length === 0 || p.title.length > MAX_NAME_LENGTH) {
     errors.push({
-      field: "id",
-      message:
-        `id is required, must be 1-${MAX_ID_LENGTH} characters, and contain only lowercase letters, numbers, and hyphens`,
+      field: "title",
+      message: `title is required and must be 1-${MAX_NAME_LENGTH} characters`,
     });
   }
 
-  if (
-    typeof p.name !== "string" ||
-    p.name.length === 0 ||
-    p.name.length > MAX_NAME_LENGTH
-  ) {
-    errors.push({
-      field: "name",
-      message: `name is required and must be 1-${MAX_NAME_LENGTH} characters`,
-    });
-  }
-
-  if (
-    typeof p.description !== "string" ||
-    p.description.length > MAX_DESCRIPTION_LENGTH
-  ) {
+  if (typeof p.description !== "string" || p.description.length > MAX_DESCRIPTION_LENGTH) {
     errors.push({
       field: "description",
       message: `description must be a string under ${MAX_DESCRIPTION_LENGTH} characters`,
     });
   }
 
-  if (typeof p.type !== "string" || !VALID_TYPES.includes(p.type)) {
+  if (typeof p.pack_type !== "string" || !VALID_TYPES.includes(p.pack_type)) {
     errors.push({
-      field: "type",
-      message: `type must be one of: ${VALID_TYPES.join(", ")}`,
+      field: "pack_type",
+      message: `pack_type must be one of: ${VALID_TYPES.join(", ")}`,
     });
   }
 
@@ -98,18 +94,6 @@ export function validatePack(pack: unknown): ValidationError[] {
           message: "name is required",
         });
       }
-    }
-  }
-
-  if (!p.metadata || typeof p.metadata !== "object") {
-    errors.push({ field: "metadata", message: "metadata is required" });
-  } else {
-    const m = p.metadata as Record<string, unknown>;
-    if (typeof m.createdBy !== "string" || m.createdBy.length === 0) {
-      errors.push({
-        field: "metadata.createdBy",
-        message: "createdBy is required",
-      });
     }
   }
 

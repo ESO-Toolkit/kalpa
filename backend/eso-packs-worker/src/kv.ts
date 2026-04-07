@@ -1,4 +1,4 @@
-import type { Env, Pack, PackIndex, PackIndexItem, VoteRecord } from "./types";
+import type { Env, Pack, PackIndex, VoteRecord } from "./types";
 
 const PACK_PREFIX = "pack:";
 const INDEX_KEY = "index:packs";
@@ -21,24 +21,6 @@ export async function putPackIndex(
   index: PackIndex,
 ): Promise<void> {
   await env.ESO_PACKS.put(INDEX_KEY, JSON.stringify(index));
-}
-
-export function packToIndexItem(pack: Pack): PackIndexItem {
-  return {
-    id: pack.id,
-    name: pack.name,
-    description: pack.description,
-    type: pack.type,
-    tags: pack.tags,
-    addonCount: pack.addons.length,
-    buildCount: pack.builds?.length ?? 0,
-    rosterCount: pack.rosters?.length ?? 0,
-    voteCount: pack.voteCount ?? 0,
-    installCount: pack.installCount ?? 0,
-    updatedAt: pack.metadata.updatedAt,
-    status: pack.status ?? "published",
-    createdBy: pack.metadata.createdBy,
-  };
 }
 
 // ── Vote helpers ──────────────────────────────────────────────────
