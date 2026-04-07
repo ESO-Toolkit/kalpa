@@ -78,6 +78,9 @@ function App() {
     total: number;
     currentAddon?: string;
   } | null>(null);
+  const [addonStatuses, setAddonStatuses] = useState<
+    Map<string, "downloading" | "extracting" | "completed" | "failed">
+  >(new Map());
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
@@ -179,6 +182,39 @@ function App() {
         console.error("[tauri:deep-link-share]", listenError);
       });
 
+    void listen<{ folderName: string; phase: string; index: number; total: number }>(
+      "batch-update-progress",
+      (event) => {
+        const { folderName, phase, total } = event.payload;
+        setAddonStatuses((prev) => {
+          const next = new Map(prev);
+          next.set(folderName, phase as "downloading" | "extracting" | "completed" | "failed");
+          return next;
+        });
+        // Keep legacy progress in sync
+        let completed = 0;
+        let failed = 0;
+        setAddonStatuses((current) => {
+          for (const s of current.values()) {
+            if (s === "completed") completed++;
+            if (s === "failed") failed++;
+          }
+          setUpdateProgress({ completed, failed, total, currentAddon: folderName });
+          return current;
+        });
+      }
+    )
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
+        cleanups.push(unlisten);
+      })
+      .catch((listenError) => {
+        console.error("[tauri:batch-update-progress]", listenError);
+      });
+
     void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
       .then((payload) => {
         if (disposed) return;
@@ -251,6 +287,7 @@ function App() {
           toast.info(`Auto-updating ${updates.length} addon${updates.length > 1 ? "s" : ""}...`);
           setUpdatingAll(true);
           setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
+          setAddonStatuses(new Map());
 
           const batchResult = await invokeResult<BatchUpdateResult>("batch_update_addons", {
             addonsPath: path,
@@ -599,6 +636,7 @@ function App() {
 
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
+      setAddonStatuses(new Map());
 
       // Fire snapshot in the background — don't block updates on it.
       // invokeResult never throws; errors are captured in the result.
@@ -873,6 +911,7 @@ function App() {
         availableCount={updatesAvailable.length}
         updatingAll={updatingAll}
         updateProgress={updateProgress}
+        addonStatuses={addonStatuses}
         onUpdateAll={handleUpdateAll}
         isOffline={isOffline}
       />

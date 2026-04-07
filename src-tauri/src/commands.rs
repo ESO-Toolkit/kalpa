@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tempfile::NamedTempFile;
 
 /// Validate that `addons_path` matches the approved path stored in managed state.
@@ -1160,14 +1160,25 @@ pub struct BatchUpdateResult {
     pub errors: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchUpdateProgress {
+    pub folder_name: String,
+    /// "downloading" | "extracting" | "completed" | "failed"
+    pub phase: String,
+    pub index: usize,
+    pub total: usize,
+}
+
 #[tauri::command]
 pub async fn batch_update_addons(
     state: tauri::State<'_, AllowedAddonsPath>,
+    app: tauri::AppHandle,
     addons_path: String,
     updates: Vec<BatchUpdateEntry>,
 ) -> Result<BatchUpdateResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || batch_update_addons_blocking(&addons_dir, &updates))
+    tokio::task::spawn_blocking(move || batch_update_addons_blocking(&addons_dir, &updates, &app))
         .await
         .map_err(|e| format!("Task failed: {}", e))?
 }
@@ -1175,7 +1186,23 @@ pub async fn batch_update_addons(
 fn batch_update_addons_blocking(
     addons_dir: &Path,
     updates: &[BatchUpdateEntry],
+    app: &tauri::AppHandle,
 ) -> Result<BatchUpdateResult, String> {
+    let total = updates.len();
+
+    // Emit "downloading" for all addons at the start
+    for (i, entry) in updates.iter().enumerate() {
+        let _ = app.emit(
+            "batch-update-progress",
+            BatchUpdateProgress {
+                folder_name: entry.folder_name.clone(),
+                phase: "downloading".to_string(),
+                index: i,
+                total,
+            },
+        );
+    }
+
     // Phase 1 (parallel): fetch addon info + download ZIPs, capped at 4 threads
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
@@ -1187,19 +1214,45 @@ fn batch_update_addons_blocking(
         info: EsouiAddonInfo,
         esoui_id: u32,
         api_version: String,
+        index: usize,
     }
 
+    let app_clone = app.clone();
     let download_results: Vec<(String, Result<Downloaded, String>)> = pool.install(|| {
         updates
             .par_iter()
-            .map(|entry| {
-                let result =
-                    fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| Downloaded {
+            .enumerate()
+            .map(|(i, entry)| {
+                let result = fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| {
+                    // Emit "extracting" as soon as download finishes
+                    let _ = app_clone.emit(
+                        "batch-update-progress",
+                        BatchUpdateProgress {
+                            folder_name: entry.folder_name.clone(),
+                            phase: "extracting".to_string(),
+                            index: i,
+                            total,
+                        },
+                    );
+                    Downloaded {
                         tmp,
                         info,
                         esoui_id: entry.esoui_id,
                         api_version: entry.api_version.clone(),
-                    });
+                        index: i,
+                    }
+                });
+                if result.is_err() {
+                    let _ = app_clone.emit(
+                        "batch-update-progress",
+                        BatchUpdateProgress {
+                            folder_name: entry.folder_name.clone(),
+                            phase: "failed".to_string(),
+                            index: i,
+                            total,
+                        },
+                    );
+                }
                 (entry.folder_name.clone(), result)
             })
             .collect()
@@ -1216,9 +1269,19 @@ fn batch_update_addons_blocking(
             Err(e) => {
                 errors.insert(folder_name.clone(), e);
                 failed.push(folder_name);
+                // Already emitted "failed" during download phase
             }
             Ok(dl) => match installer::extract_addon_zip(dl.tmp.path(), addons_dir) {
                 Err(e) => {
+                    let _ = app.emit(
+                        "batch-update-progress",
+                        BatchUpdateProgress {
+                            folder_name: folder_name.clone(),
+                            phase: "failed".to_string(),
+                            index: dl.index,
+                            total,
+                        },
+                    );
                     errors.insert(folder_name.clone(), e);
                     failed.push(folder_name);
                 }
@@ -1246,6 +1309,15 @@ fn batch_update_addons_blocking(
                         &dl.info.title,
                         &dl.info.download_url,
                         0,
+                    );
+                    let _ = app.emit(
+                        "batch-update-progress",
+                        BatchUpdateProgress {
+                            folder_name: folder_name.clone(),
+                            phase: "completed".to_string(),
+                            index: dl.index,
+                            total,
+                        },
                     );
                     completed.push(folder_name);
                 }
