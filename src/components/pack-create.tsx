@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
@@ -785,13 +786,14 @@ export function PackCreateView({
                     >
                       <div className="flex items-center gap-1.5 mb-1.5">
                         <p className="text-[11px] font-medium truncate flex-1">{addon.name}</p>
-                        <button
-                          onClick={() => handleRemoveAddon(addon.esouiId)}
-                          className="text-muted-foreground/20 hover:text-red-400 transition-colors p-0.5 opacity-0 group-hover/item:opacity-100"
-                          title="Remove"
-                        >
-                          <XIcon className="size-3" />
-                        </button>
+                        <SimpleTooltip content="Remove">
+                          <button
+                            onClick={() => handleRemoveAddon(addon.esouiId)}
+                            className="text-muted-foreground/20 hover:text-red-400 transition-colors p-0.5 opacity-0 group-hover/item:opacity-100"
+                          >
+                            <XIcon className="size-3" />
+                          </button>
+                        </SimpleTooltip>
                       </div>
                       {/* Required / Optional toggle pill */}
                       <div className="relative flex p-0.5 rounded-md bg-white/[0.03] border border-white/[0.06]">

@@ -11,6 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn, decodeHtml } from "@/lib/utils";
 import {
   SearchIcon,
@@ -168,15 +169,13 @@ export function PackListView({
                     </div>
                   </div>
                   {/* Vote button — right-aligned */}
+                  <SimpleTooltip content={authUser ? (pack.userVoted ? "Remove vote" : "Upvote") : "Sign in to vote"}>
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
                       onVote(pack.id);
                     }}
                     disabled={votingPacks.has(pack.id)}
-                    title={
-                      authUser ? (pack.userVoted ? "Remove vote" : "Upvote") : "Sign in to vote"
-                    }
                     className={cn(
                       "group/vote relative flex flex-col items-center gap-0.5 text-xs font-semibold rounded-lg px-2 py-1.5 transition-all duration-200 border shrink-0",
                       votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
@@ -198,6 +197,7 @@ export function PackListView({
                       {pack.voteCount > 0 ? pack.voteCount : 0}
                     </span>
                   </button>
+                  </SimpleTooltip>
                 </div>
 
                 {/* Description */}

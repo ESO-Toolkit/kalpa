@@ -8,6 +8,7 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import {
   Download,
   Calendar,
@@ -216,12 +217,12 @@ export function DiscoverDetail({
           </div>
         </div>
         <div className="flex flex-col gap-1.5 items-end shrink-0">
-          <Button
-            onClick={() => handleInstall(detail.downloadUrl)}
-            disabled={installingId !== null || isOffline}
-            title={isOffline ? "Installs require an internet connection" : undefined}
-            className="min-w-[100px]"
-          >
+          <SimpleTooltip content={isOffline ? "Installs require an internet connection" : ""}>
+            <Button
+              onClick={() => handleInstall(detail.downloadUrl)}
+              disabled={installingId !== null || isOffline}
+              className="min-w-[100px]"
+            >
             {installingId !== null ? (
               <span className="flex items-center gap-2">
                 <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
@@ -238,7 +239,8 @@ export function DiscoverDetail({
                 Install
               </>
             )}
-          </Button>
+            </Button>
+          </SimpleTooltip>
           <button
             onClick={() => openUrl(`https://www.esoui.com/downloads/info${detail.id}.html`)}
             className="text-[11px] text-muted-foreground/40 hover:text-muted-foreground/60 transition-colors flex items-center gap-1 cursor-pointer"

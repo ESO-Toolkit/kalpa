@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/ui/logo";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { PRESET_TAGS } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -99,15 +100,16 @@ export function AppHeader({
         {batchMode ? (
           <>
             <span className="mr-2 text-xs font-medium text-primary">{selectedCount} selected</span>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={onBatchUpdate}
-              disabled={updatingAll || isOffline}
-              title={isOffline ? "Updates require an internet connection" : undefined}
-            >
-              {updatingAll ? "Updating..." : "Update"}
-            </Button>
+            <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onBatchUpdate}
+                disabled={updatingAll || isOffline}
+              >
+                {updatingAll ? "Updating..." : "Update"}
+              </Button>
+            </SimpleTooltip>
             <Button
               size="sm"
               variant="outline"
@@ -231,71 +233,78 @@ export function AppHeader({
                 </span>
               )}
             </span>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={onRefresh}
-              disabled={loading}
-              aria-label="Refresh addons"
-              title="Refresh (Ctrl+R)"
-            >
-              <RefreshCwIcon className={loading ? "animate-spin" : ""} />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={onOpenPacks}
-              aria-label="Addon Packs"
-              title="Addon Packs"
-            >
-              <PackageIcon />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={onOpenSavedVars}
-              aria-label="Saved Vars"
-              title="SavedVariables Manager"
-            >
-              <FileSliders />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={onOpenSettings}
-              aria-label="Settings"
-              title="Settings"
-            >
-              <SettingsIcon />
-            </Button>
+            <SimpleTooltip content="Refresh (Ctrl+R)" side="bottom">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onRefresh}
+                disabled={loading}
+                aria-label="Refresh addons"
+              >
+                <RefreshCwIcon className={loading ? "animate-spin" : ""} />
+              </Button>
+            </SimpleTooltip>
+            <SimpleTooltip content="Addon Packs" side="bottom">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onOpenPacks}
+                aria-label="Addon Packs"
+              >
+                <PackageIcon />
+              </Button>
+            </SimpleTooltip>
+            <SimpleTooltip content="SavedVariables Manager" side="bottom">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onOpenSavedVars}
+                aria-label="Saved Vars"
+              >
+                <FileSliders />
+              </Button>
+            </SimpleTooltip>
+            <SimpleTooltip content="Settings" side="bottom">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onOpenSettings}
+                aria-label="Settings"
+              >
+                <SettingsIcon />
+              </Button>
+            </SimpleTooltip>
           </>
         )}
       </div>
       <div className="ml-3 -mr-2 flex items-center">
-        <button
-          onClick={() => void getCurrentWindow().minimize()}
-          className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
-          aria-label="Minimize"
-          title="Minimize"
-        >
-          <MinusIcon className="size-3.5" />
-        </button>
-        <button
-          onClick={() => void getCurrentWindow().toggleMaximize()}
-          className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
-          aria-label="Maximize"
-          title="Maximize"
-        >
-          <SquareIcon className="size-3" />
-        </button>
-        <button
-          onClick={() => void getCurrentWindow().close()}
-          className="flex h-8 w-8 items-center justify-center rounded-tr-sm text-muted-foreground/60 transition-colors hover:bg-red-500/20 hover:text-foreground"
-          aria-label="Close"
-          title="Close"
-        >
-          <XIcon className="size-3.5" />
-        </button>
+        <SimpleTooltip content="Minimize" side="bottom">
+          <button
+            onClick={() => void getCurrentWindow().minimize()}
+            className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
+            aria-label="Minimize"
+          >
+            <MinusIcon className="size-3.5" />
+          </button>
+        </SimpleTooltip>
+        <SimpleTooltip content="Maximize" side="bottom">
+          <button
+            onClick={() => void getCurrentWindow().toggleMaximize()}
+            className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
+            aria-label="Maximize"
+          >
+            <SquareIcon className="size-3" />
+          </button>
+        </SimpleTooltip>
+        <SimpleTooltip content="Close" side="bottom">
+          <button
+            onClick={() => void getCurrentWindow().close()}
+            className="flex h-8 w-8 items-center justify-center rounded-tr-sm text-muted-foreground/60 transition-colors hover:bg-red-500/20 hover:text-foreground"
+            aria-label="Close"
+          >
+            <XIcon className="size-3.5" />
+          </button>
+        </SimpleTooltip>
       </div>
     </header>
   );
