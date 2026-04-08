@@ -235,6 +235,98 @@
     background-image 0.15s ease;
 }
 
+/* === Dialog Header Gold Accent Shimmer === */
+@keyframes accent-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+[data-slot="dialog-header"]::before {
+  background: linear-gradient(
+    90deg,
+    rgba(196, 164, 74, 0) 0%,
+    rgba(212, 180, 90, 0.6) 20%,
+    rgba(196, 164, 74, 0.9) 40%,
+    rgba(255, 235, 160, 1) 50%,
+    rgba(196, 164, 74, 0.9) 60%,
+    rgba(212, 180, 90, 0.6) 80%,
+    rgba(196, 164, 74, 0) 100%
+  ) !important;
+  background-size: 200% 100%;
+  animation: accent-shimmer 4s ease-in-out infinite;
+}
+
+/* === Dialog Content Entrance Stagger === */
+[data-slot="dialog-content"] > [data-slot="dialog-header"] ~ * {
+  animation: dialog-child-enter 0.25s cubic-bezier(0, 0, 0.2, 1) both;
+}
+
+[data-slot="dialog-content"] > [data-slot="dialog-header"] ~ *:nth-child(2) {
+  animation-delay: 50ms;
+}
+[data-slot="dialog-content"] > [data-slot="dialog-header"] ~ *:nth-child(3) {
+  animation-delay: 100ms;
+}
+[data-slot="dialog-content"] > [data-slot="dialog-header"] ~ *:nth-child(4) {
+  animation-delay: 130ms;
+}
+[data-slot="dialog-content"] > [data-slot="dialog-header"] ~ *:nth-child(5) {
+  animation-delay: 160ms;
+}
+[data-slot="dialog-content"] > [data-slot="dialog-header"] ~ *:nth-child(n + 6) {
+  animation-delay: 180ms;
+}
+
+@keyframes dialog-child-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* === Refined Dialog Scrollbar === */
+[data-slot="dialog-content"] ::-webkit-scrollbar {
+  width: 6px;
+}
+
+[data-slot="dialog-content"] ::-webkit-scrollbar-track {
+  background: transparent;
+  margin: 4px;
+}
+
+[data-slot="dialog-content"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  border: none;
+}
+
+[data-slot="dialog-content"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* === Select Dropdown Scrollbar === */
+[data-slot="select-content"] ::-webkit-scrollbar {
+  width: 6px;
+}
+
+[data-slot="select-content"] ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-slot="select-content"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  border: none;
+}
+
 /* === Slide Down (update banner) === */
 @keyframes slide-down {
   from {

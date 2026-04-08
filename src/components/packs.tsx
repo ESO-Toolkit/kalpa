@@ -772,10 +772,10 @@ export function Packs({
                 create: editingPackId ? "Edit Pack" : "Create",
               };
               return (
-                <div className="relative flex mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+                <div className="relative flex mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06] shadow-[inset_0_1px_2px_rgba(0,0,0,0.12)]">
                   {/* Sliding pill background */}
                   <div
-                    className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+                    className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.1] border border-white/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
                     style={{
                       left: `calc(${(tabIndex / tabCount) * 100}% + 2px)`,
                       width: `calc(${100 / tabCount}% - 4px)`,
@@ -860,8 +860,8 @@ export function Packs({
                 className={cn(
                   "flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md border transition-all duration-200",
                   showImportPanel
-                    ? "text-[#c4a44a] border-[#c4a44a]/30 bg-[#c4a44a]/[0.06]"
-                    : "text-muted-foreground/50 border-white/[0.06] bg-white/[0.02] hover:text-muted-foreground hover:border-white/[0.1]"
+                    ? "text-[#c4a44a] border-[#c4a44a]/30 bg-[#c4a44a]/[0.08] shadow-[0_0_10px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]"
+                    : "text-muted-foreground/50 border-white/[0.06] bg-white/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:text-muted-foreground hover:border-white/[0.12] hover:bg-white/[0.04]"
                 )}
               >
                 <ImportIcon className="size-3.5" />
@@ -872,7 +872,7 @@ export function Packs({
 
             {/* Collapsible import panel */}
             {showImportPanel && (
-              <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+              <div className="rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.5)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
                 <PackImportView
                   key={importedPack ? "resolved" : "empty"}
                   shareCodeInput={shareCodeInput}

@@ -96,7 +96,7 @@ export function PackImportView({
 
         {/* All installed state */}
         {allInstalled && !installing && (
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] p-3">
+          <div className="flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] p-3 shadow-[0_0_12px_rgba(34,197,94,0.06),inset_0_1px_0_rgba(34,197,94,0.06)]">
             <CheckIcon className="size-4 text-emerald-400" />
             <span className="text-sm text-emerald-400 font-medium">
               All addons already installed
@@ -106,7 +106,7 @@ export function PackImportView({
 
         {/* Install progress */}
         {installing && installProgress && (
-          <div className="rounded-lg border border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] p-3">
+          <div className="rounded-lg border border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] p-3 shadow-[0_0_12px_rgba(196,164,74,0.06),inset_0_1px_0_rgba(196,164,74,0.04)]">
             <div className="flex items-center justify-between text-sm mb-2">
               <span className="text-[#c4a44a] font-medium">
                 Installing {installProgress.completed + installProgress.failed}/
@@ -116,9 +116,9 @@ export function PackImportView({
                 <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
               )}
             </div>
-            <div className="h-1 rounded-full bg-white/[0.06]">
+            <div className="h-1.5 rounded-full bg-white/[0.06]">
               <div
-                className="h-full rounded-full bg-[#c4a44a] transition-all duration-300 ease-out"
+                className="h-full rounded-full bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.5)] transition-all duration-300 ease-out"
                 style={{
                   width: `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`,
                 }}
@@ -135,7 +135,7 @@ export function PackImportView({
               {requiredAddons.map((addon) => (
                 <div
                   key={addon.esouiId}
-                  className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02]"
+                  className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                 >
                   <span className="text-sm">{addon.name}</span>
                   {installedEsouiIds.has(addon.esouiId) ? (
@@ -156,7 +156,7 @@ export function PackImportView({
               {optionalAddons.map((addon) => (
                 <div
                   key={addon.esouiId}
-                  className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02]"
+                  className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                 >
                   <span className="text-sm text-muted-foreground">{addon.name}</span>
                   {installedEsouiIds.has(addon.esouiId) && (
@@ -264,7 +264,7 @@ export function PackImportView({
       )}
 
       {importError && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.04] p-3">
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/[0.06] p-3 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
           <AlertCircleIcon className="size-4 text-red-400 shrink-0 mt-0.5" />
           <p className="text-sm text-red-300">{importError}</p>
         </div>

@@ -237,6 +237,21 @@ When performing changes, follow this workflow:
 
 ---
 
+## Dev Server Port
+
+Kalpa's Vite dev server uses **port 1430** (overriding Tauri's default 1420) so it doesn't collide with other Tauri projects running on the same machine.
+
+Port configuration lives in two places that must stay in sync:
+- `.env.local` → `VITE_PORT=1430` (read by `vite.config.ts` via `loadEnv`)
+- `src-tauri/tauri.conf.json` → `"devUrl": "http://localhost:1430"`
+
+If you need to change the port:
+1. Update `VITE_PORT` in `.env.local`
+2. Update `devUrl` in `src-tauri/tauri.conf.json` to match
+3. **Do not commit `.env.local`** — it is gitignored and machine-local.
+
+---
+
 ## Available Tools & Commands
 
 You can assume access (by the human developer) to:

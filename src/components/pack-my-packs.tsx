@@ -106,8 +106,8 @@ export function MyPacksView({
   if (!authUser) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-        <div className="rounded-xl bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.1] p-5">
-          <PackageIcon className="size-10 text-[#c4a44a]/50" />
+        <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-5 shadow-[0_0_32px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
+          <PackageIcon className="size-10 text-[#c4a44a]/60" />
         </div>
         <div>
           <p className="font-heading text-sm font-semibold">Sign in to manage your packs</p>
@@ -218,8 +218,8 @@ export function MyPacksView({
               </div>
             ) : packs.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-                <div className="rounded-xl bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.1] p-4">
-                  <SparklesIcon className="size-8 text-[#c4a44a]/50" />
+                <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-4 shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
+                  <SparklesIcon className="size-8 text-[#c4a44a]/60" />
                 </div>
                 <p className="font-heading text-sm font-medium">No packs yet</p>
                 <p className="text-xs text-muted-foreground/60 max-w-[260px]">
@@ -258,10 +258,12 @@ export function MyPacksView({
                       className={cn(
                         "group w-full text-left rounded-xl border border-white/[0.06] p-3",
                         "border-l-[3px] transition-all duration-200 cursor-pointer",
+                        "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
                         accent.border,
                         accent.bg,
                         accent.hoverBg,
-                        "hover:border-white/[0.12] hover:-translate-y-[1px] hover:shadow-[0_4px_16px_rgba(0,0,0,0.2)]",
+                        accent.hoverGlow,
+                        "hover:border-white/[0.12] hover:-translate-y-[1px]",
                         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
                       )}
                     >
@@ -367,7 +369,7 @@ export function MyPacksView({
 
                     {/* Inline delete confirmation */}
                     {isConfirmingDelete && (
-                      <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/20 bg-red-500/[0.06] px-3 py-2 overflow-hidden transition-all duration-200">
+                      <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/25 bg-red-500/[0.08] px-3 py-2 overflow-hidden transition-all duration-200 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
                         <span className="text-xs text-red-400 font-medium">Delete this pack?</span>
                         <div className="flex items-center gap-2">
                           <button
@@ -398,7 +400,7 @@ export function MyPacksView({
                 disabled={loadingMore}
                 className={cn(
                   "w-full py-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] text-xs font-semibold",
-                  "transition-all duration-200 hover:bg-white/[0.04] hover:border-white/[0.1]",
+                  "shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-all duration-200 hover:bg-white/[0.05] hover:border-white/[0.12] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_2px_8px_rgba(0,0,0,0.15)]",
                   "text-muted-foreground/60 hover:text-muted-foreground",
                   loadingMore && "opacity-60 cursor-wait"
                 )}
@@ -420,8 +422,8 @@ export function MyPacksView({
         <div className="flex-1 overflow-y-auto space-y-2 min-h-0 max-h-[400px] px-1 -mx-1 py-1 -my-1">
           {installedPackRefs.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-              <div className="rounded-xl bg-sky-400/[0.06] border border-sky-400/[0.1] p-4">
-                <DownloadIcon className="size-8 text-sky-400/50" />
+              <div className="rounded-xl bg-sky-400/[0.08] border border-sky-400/[0.15] p-4 shadow-[0_0_24px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(56,189,248,0.08)]">
+                <DownloadIcon className="size-8 text-sky-400/60" />
               </div>
               <p className="font-heading text-sm font-medium">No installed packs yet</p>
               <p className="text-xs text-muted-foreground/60 max-w-[260px]">
