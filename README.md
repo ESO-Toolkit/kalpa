@@ -96,11 +96,52 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 
 ## Screenshots
 
+### Discover
+
+Browse and search ESOUI directly in the app — view addon details, screenshots, stats, and install with one click.
+
 <p align="center">
-  <img src=".screenshots/discover-panel.png" alt="Discover panel — browse and search ESOUI" width="800" />
+  <img src=".screenshots/discover-panel.png" alt="Discover panel — browse and search ESOUI addons" width="800" />
+</p>
+
+### Pack Hub
+
+Share curated addon collections with the community. Browse, create, vote, and install packs.
+
+<p align="center">
+  <img src=".screenshots/packhub-browse.png" alt="Pack Hub — browse community addon packs" width="800" />
 </p>
 <p align="center">
-  <img src=".screenshots/settings-dialog.png" alt="Settings dialog" width="800" />
+  <img src=".screenshots/packhub-create1.png" alt="Pack Hub — create a pack with name, type, and tags" width="400" />
+  <img src=".screenshots/packhub-create2.png" alt="Pack Hub — select addons and publish" width="400" />
+</p>
+<p align="center">
+  <img src=".screenshots/packhub-install.png" alt="Pack Hub — view pack details and install addons" width="800" />
+</p>
+
+### SavedVariables Manager
+
+Browse, edit, copy, and clean up addon settings — all from within the app.
+
+<p align="center">
+  <img src=".screenshots/SVM-overview.png" alt="SavedVariables Manager — overview with file stats and orphan detection" width="400" />
+  <img src=".screenshots/SVM-editor.png" alt="SavedVariables Manager — edit addon settings with tree view" width="400" />
+</p>
+<p align="center">
+  <img src=".screenshots/SVM-copy.png" alt="SavedVariables Manager — copy profiles between characters" width="400" />
+  <img src=".screenshots/SVM-cleanup.png" alt="SavedVariables Manager — clean up orphaned files" width="400" />
+</p>
+
+### Settings
+
+Configure your addons folder, access tools like backups and API compatibility checks, and export/import your addon list.
+
+<p align="center">
+  <img src=".screenshots/settings.png" alt="Settings — general tab with addons folder configuration" width="400" />
+  <img src=".screenshots/settings-tools.png" alt="Settings — tools tab with backups, characters, and migration" width="400" />
+</p>
+<p align="center">
+  <img src=".screenshots/settings-data.png" alt="Settings — data tab with addon list export and import" width="400" />
 </p>
 
 ---
