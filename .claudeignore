@@ -1,0 +1,7 @@
+# Lock files — tracked by git but waste tokens for Claude
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Source maps
+*.map
