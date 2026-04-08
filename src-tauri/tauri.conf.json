@@ -29,7 +29,7 @@
         "font-src": "'self'",
         "connect-src": "ipc: http://ipc.localhost"
       },
-      "devCsp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' https://cdn-eso.mmoui.com https://*.esoui.com; font-src 'self'; connect-src ipc: http://ipc.localhost 'self' ws://localhost:* http://localhost:* http://127.0.0.1:*"
+      "devCsp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' https://cdn-eso.mmoui.com https://*.esoui.com; font-src 'self'; connect-src ipc: http://ipc.localhost 'self' ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:*"
     }
   },
   "plugins": {
