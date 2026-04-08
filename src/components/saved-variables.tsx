@@ -534,8 +534,7 @@ function CleanupTab({
           </div>
 
           <p className="text-xs text-muted-foreground mb-2">
-            These files belong to addons that are no longer installed. They waste disk space and
-            slow down game loading.
+            These files belong to addons that are no longer installed.
           </p>
 
           <div className="max-h-[220px] overflow-y-auto space-y-1">

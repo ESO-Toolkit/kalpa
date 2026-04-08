@@ -21,6 +21,9 @@
       "allow": [
         {
           "url": "https://www.esoui.com/*"
+        },
+        {
+          "url": "https://esotk.com"
         }
       ]
     }
