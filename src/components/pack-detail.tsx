@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { GlassPanel } from "@/components/ui/glass-panel";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn, decodeHtml, formatRelativeDate, formatRelativeExpiry } from "@/lib/utils";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -113,9 +114,11 @@ export function PackDetailView({
           const label = pack.updatedAt && pack.updatedAt !== pack.createdAt ? "Updated" : "Created";
           const relative = dateIso ? formatRelativeDate(dateIso) : "";
           return relative ? (
-            <span className="text-[10px] text-muted-foreground/40" title={dateIso}>
-              {label} {relative}
-            </span>
+            <SimpleTooltip content={dateIso}>
+              <span className="text-[10px] text-muted-foreground/40">
+                {label} {relative}
+              </span>
+            </SimpleTooltip>
           ) : null;
         })()}
         <div className="flex items-center gap-1.5 ml-auto">
@@ -174,29 +177,32 @@ export function PackDetailView({
             Share
           </Button>
         </div>
-        <button
-          onClick={() => onVote(pack.id)}
-          disabled={votingPacks.has(pack.id)}
-          title={
+        <SimpleTooltip
+          content={
             authUser ? (pack.userVoted ? "Remove vote" : "Upvote this pack") : "Sign in to vote"
           }
-          className={cn(
-            "group/vote relative flex items-center gap-1.5 text-sm font-medium rounded-full px-3 py-1.5 transition-all duration-200 border",
-            votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
-            pack.userVoted
-              ? "text-[#c4a44a] bg-[#c4a44a]/[0.12] border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.2] shadow-[0_0_12px_rgba(196,164,74,0.15)]"
-              : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-[#c4a44a] hover:border-[#c4a44a]/20 hover:bg-[#c4a44a]/[0.06]"
-          )}
         >
-          <ArrowUpIcon
+          <button
+            onClick={() => onVote(pack.id)}
+            disabled={votingPacks.has(pack.id)}
             className={cn(
-              "size-4 transition-all duration-200",
-              pack.userVoted ? "-translate-y-[1px]" : "group-hover/vote:-translate-y-[1px]"
+              "group/vote relative flex items-center gap-1.5 text-sm font-medium rounded-full px-3 py-1.5 transition-all duration-200 border",
+              votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
+              pack.userVoted
+                ? "text-[#c4a44a] bg-[#c4a44a]/[0.12] border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.2] shadow-[0_0_12px_rgba(196,164,74,0.15)]"
+                : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-[#c4a44a] hover:border-[#c4a44a]/20 hover:bg-[#c4a44a]/[0.06]"
             )}
-            strokeWidth={pack.userVoted ? 2.5 : 2}
-          />
-          <span>{pack.voteCount > 0 ? pack.voteCount : 0}</span>
-        </button>
+          >
+            <ArrowUpIcon
+              className={cn(
+                "size-4 transition-all duration-200",
+                pack.userVoted ? "-translate-y-[1px]" : "group-hover/vote:-translate-y-[1px]"
+              )}
+              strokeWidth={pack.userVoted ? 2.5 : 2}
+            />
+            <span>{pack.voteCount > 0 ? pack.voteCount : 0}</span>
+          </button>
+        </SimpleTooltip>
       </div>
 
       {/* Share section — Task C: two-mode toggle */}
@@ -238,35 +244,37 @@ export function PackDetailView({
                     <code className="flex-1 rounded-md bg-white/[0.05] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-[#c4a44a]">
                       {shareResult.code}
                     </code>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => onCopyToClipboard(shareResult.code, "code")}
-                      title="Copy share code"
-                    >
-                      {copiedField === "code" ? (
-                        <CheckIcon className="size-3.5 text-emerald-400" />
-                      ) : (
-                        <CopyIcon className="size-3.5" />
-                      )}
-                    </Button>
+                    <SimpleTooltip content="Copy share code">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => onCopyToClipboard(shareResult.code, "code")}
+                      >
+                        {copiedField === "code" ? (
+                          <CheckIcon className="size-3.5 text-emerald-400" />
+                        ) : (
+                          <CopyIcon className="size-3.5" />
+                        )}
+                      </Button>
+                    </SimpleTooltip>
                   </div>
                   <div className="flex items-center gap-2">
                     <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground/60">
                       {shareResult.deepLink}
                     </code>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => onCopyToClipboard(shareResult.deepLink, "link")}
-                      title="Copy deep link"
-                    >
-                      {copiedField === "link" ? (
-                        <CheckIcon className="size-3.5 text-emerald-400" />
-                      ) : (
-                        <CopyIcon className="size-3.5" />
-                      )}
-                    </Button>
+                    <SimpleTooltip content="Copy deep link">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => onCopyToClipboard(shareResult.deepLink, "link")}
+                      >
+                        {copiedField === "link" ? (
+                          <CheckIcon className="size-3.5 text-emerald-400" />
+                        ) : (
+                          <CopyIcon className="size-3.5" />
+                        )}
+                      </Button>
+                    </SimpleTooltip>
                   </div>
                   <div className="flex items-center justify-between">
                     <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground/40">

@@ -2,6 +2,7 @@ import { StrictMode, Component, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import "./index.css";
 import "./App.css";
 
@@ -75,8 +76,10 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>
-      <App />
-      <Toaster position="bottom-right" richColors />
+      <TooltipProvider delay={300}>
+        <App />
+        <Toaster position="bottom-right" richColors />
+      </TooltipProvider>
     </ErrorBoundary>
   </StrictMode>
 );

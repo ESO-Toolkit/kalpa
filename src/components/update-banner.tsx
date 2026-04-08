@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { CheckIcon, XIcon, DownloadIcon, PackageIcon } from "lucide-react";
 
 type AddonPhase = "downloading" | "extracting" | "completed" | "failed";
@@ -148,14 +149,11 @@ export function UpdateBanner({
             {availableCount} update{availableCount > 1 ? "s" : ""} available
           </span>
         )}
-        <Button
-          onClick={onUpdateAll}
-          size="sm"
-          disabled={updatingAll || isOffline}
-          title={isOffline ? "Updates require an internet connection" : undefined}
-        >
-          {updatingAll ? "Updating..." : "Update All"}
-        </Button>
+        <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+          <Button onClick={onUpdateAll} size="sm" disabled={updatingAll || isOffline}>
+            {updatingAll ? "Updating..." : "Update All"}
+          </Button>
+        </SimpleTooltip>
       </div>
 
       {/* Per-addon streaming pills */}
