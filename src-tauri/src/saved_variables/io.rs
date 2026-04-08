@@ -337,6 +337,13 @@ pub fn write_saved_variable_blocking(
     // Write atomically via temp file + rename
     let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
     fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    // On Windows, fs::rename fails if the destination exists. Remove it first.
+    if file_path.exists() {
+        fs::remove_file(&file_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("Failed to replace existing file: {}", e)
+        })?;
+    }
     fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         format!("Failed to finalize write: {}", e)
@@ -488,6 +495,13 @@ pub fn write_raw_content(sv_dir: &Path, file_name: &str, content: &str) -> Resul
     let file_path = sv_dir.join(file_name);
     let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
     fs::write(&tmp_path, content).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    // On Windows, fs::rename fails if the destination exists. Remove it first.
+    if file_path.exists() {
+        fs::remove_file(&file_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("Failed to replace existing file: {}", e)
+        })?;
+    }
     fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         format!("Failed to finalize write: {}", e)
