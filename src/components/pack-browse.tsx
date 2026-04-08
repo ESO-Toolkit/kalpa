@@ -169,34 +169,38 @@ export function PackListView({
                     </div>
                   </div>
                   {/* Vote button — right-aligned */}
-                  <SimpleTooltip content={authUser ? (pack.userVoted ? "Remove vote" : "Upvote") : "Sign in to vote"}>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onVote(pack.id);
-                    }}
-                    disabled={votingPacks.has(pack.id)}
-                    className={cn(
-                      "group/vote relative flex flex-col items-center gap-0.5 text-xs font-semibold rounded-lg px-2 py-1.5 transition-all duration-200 border shrink-0",
-                      votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
-                      pack.userVoted
-                        ? "text-[#c4a44a] bg-[#c4a44a]/[0.12] border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.2] shadow-[0_0_8px_rgba(196,164,74,0.15)]"
-                        : "text-muted-foreground/50 bg-white/[0.03] border-white/[0.06] hover:text-[#c4a44a] hover:border-[#c4a44a]/20 hover:bg-[#c4a44a]/[0.06]"
-                    )}
+                  <SimpleTooltip
+                    content={
+                      authUser ? (pack.userVoted ? "Remove vote" : "Upvote") : "Sign in to vote"
+                    }
                   >
-                    <ArrowUpIcon
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onVote(pack.id);
+                      }}
+                      disabled={votingPacks.has(pack.id)}
                       className={cn(
-                        "size-3.5 transition-all duration-200",
+                        "group/vote relative flex flex-col items-center gap-0.5 text-xs font-semibold rounded-lg px-2 py-1.5 transition-all duration-200 border shrink-0",
+                        votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
                         pack.userVoted
-                          ? "-translate-y-[1px]"
-                          : "group-hover/vote:-translate-y-[1px]"
+                          ? "text-[#c4a44a] bg-[#c4a44a]/[0.12] border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.2] shadow-[0_0_8px_rgba(196,164,74,0.15)]"
+                          : "text-muted-foreground/50 bg-white/[0.03] border-white/[0.06] hover:text-[#c4a44a] hover:border-[#c4a44a]/20 hover:bg-[#c4a44a]/[0.06]"
                       )}
-                      strokeWidth={pack.userVoted ? 2.5 : 2}
-                    />
-                    <span className="tabular-nums leading-none">
-                      {pack.voteCount > 0 ? pack.voteCount : 0}
-                    </span>
-                  </button>
+                    >
+                      <ArrowUpIcon
+                        className={cn(
+                          "size-3.5 transition-all duration-200",
+                          pack.userVoted
+                            ? "-translate-y-[1px]"
+                            : "group-hover/vote:-translate-y-[1px]"
+                        )}
+                        strokeWidth={pack.userVoted ? 2.5 : 2}
+                      />
+                      <span className="tabular-nums leading-none">
+                        {pack.voteCount > 0 ? pack.voteCount : 0}
+                      </span>
+                    </button>
                   </SimpleTooltip>
                 </div>
 

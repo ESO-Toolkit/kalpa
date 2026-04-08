@@ -2083,24 +2083,24 @@ function DiffPreviewDialog({
                 {change.changeType === "modified" ? (
                   <div className="flex items-center gap-2 font-mono">
                     <SimpleTooltip content={change.oldValue ?? ""}>
-                      <span
-                        className="rounded bg-red-500/10 px-1.5 py-0.5 text-red-400 truncate max-w-[45%]"
-                      >
+                      <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-red-400 truncate max-w-[45%]">
                         {change.oldValue}
                       </span>
                     </SimpleTooltip>
                     <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground/40" />
                     <SimpleTooltip content={change.newValue ?? ""}>
-                      <span
-                        className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-400 truncate max-w-[45%]"
-                      >
+                      <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-400 truncate max-w-[45%]">
                         {change.newValue}
                       </span>
                     </SimpleTooltip>
                   </div>
                 ) : (
                   <div className="font-mono">
-                    <SimpleTooltip content={(change.changeType === "added" ? change.newValue : change.oldValue) ?? ""}>
+                    <SimpleTooltip
+                      content={
+                        (change.changeType === "added" ? change.newValue : change.oldValue) ?? ""
+                      }
+                    >
                       <span
                         className={`rounded px-1.5 py-0.5 truncate inline-block max-w-full ${
                           change.changeType === "added"

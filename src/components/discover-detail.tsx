@@ -223,22 +223,22 @@ export function DiscoverDetail({
               disabled={installingId !== null || isOffline}
               className="min-w-[100px]"
             >
-            {installingId !== null ? (
-              <span className="flex items-center gap-2">
-                <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
-                Installing
-              </span>
-            ) : installSuccess || installedEsouiIds.has(result.id) ? (
-              <span className="flex items-center gap-2">
-                <Check className="size-3.5" />
-                Reinstall
-              </span>
-            ) : (
-              <>
-                <Download className="size-3.5" />
-                Install
-              </>
-            )}
+              {installingId !== null ? (
+                <span className="flex items-center gap-2">
+                  <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
+                  Installing
+                </span>
+              ) : installSuccess || installedEsouiIds.has(result.id) ? (
+                <span className="flex items-center gap-2">
+                  <Check className="size-3.5" />
+                  Reinstall
+                </span>
+              ) : (
+                <>
+                  <Download className="size-3.5" />
+                  Install
+                </>
+              )}
             </Button>
           </SimpleTooltip>
           <button

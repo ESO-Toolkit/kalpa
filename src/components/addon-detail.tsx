@@ -233,11 +233,7 @@ export function AddonDetail({
             Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
           </span>
           <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
-            <Button
-              onClick={handleUpdate}
-              disabled={updating || isOffline}
-              size="sm"
-            >
+            <Button onClick={handleUpdate} disabled={updating || isOffline} size="sm">
               {updating ? "Updating..." : "Update"}
             </Button>
           </SimpleTooltip>
@@ -441,7 +437,13 @@ export function AddonDetail({
                       </button>
                     </SimpleTooltip>
                   ) : (
-                    <SimpleTooltip content={isOffline ? "Installs require an internet connection" : `Install ${dep.name}`}>
+                    <SimpleTooltip
+                      content={
+                        isOffline
+                          ? "Installs require an internet connection"
+                          : `Install ${dep.name}`
+                      }
+                    >
                       <button
                         className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
                         onClick={() => handleInstallDep(dep.name)}
@@ -512,7 +514,13 @@ export function AddonDetail({
                       </button>
                     </SimpleTooltip>
                   ) : (
-                    <SimpleTooltip content={isOffline ? "Installs require an internet connection" : `Install ${dep.name}`}>
+                    <SimpleTooltip
+                      content={
+                        isOffline
+                          ? "Installs require an internet connection"
+                          : `Install ${dep.name}`
+                      }
+                    >
                       <button
                         className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
                         onClick={() => handleInstallDep(dep.name)}

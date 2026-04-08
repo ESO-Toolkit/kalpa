@@ -245,12 +245,7 @@ export function AppHeader({
               </Button>
             </SimpleTooltip>
             <SimpleTooltip content="Addon Packs" side="bottom">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onOpenPacks}
-                aria-label="Addon Packs"
-              >
+              <Button variant="ghost" size="icon-sm" onClick={onOpenPacks} aria-label="Addon Packs">
                 <PackageIcon />
               </Button>
             </SimpleTooltip>
@@ -265,12 +260,7 @@ export function AppHeader({
               </Button>
             </SimpleTooltip>
             <SimpleTooltip content="Settings" side="bottom">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={onOpenSettings}
-                aria-label="Settings"
-              >
+              <Button variant="ghost" size="icon-sm" onClick={onOpenSettings} aria-label="Settings">
                 <SettingsIcon />
               </Button>
             </SimpleTooltip>

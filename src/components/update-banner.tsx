@@ -150,11 +150,7 @@ export function UpdateBanner({
           </span>
         )}
         <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
-          <Button
-            onClick={onUpdateAll}
-            size="sm"
-            disabled={updatingAll || isOffline}
-          >
+          <Button onClick={onUpdateAll} size="sm" disabled={updatingAll || isOffline}>
             {updatingAll ? "Updating..." : "Update All"}
           </Button>
         </SimpleTooltip>

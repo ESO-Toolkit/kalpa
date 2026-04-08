@@ -177,27 +177,31 @@ export function PackDetailView({
             Share
           </Button>
         </div>
-        <SimpleTooltip content={authUser ? (pack.userVoted ? "Remove vote" : "Upvote this pack") : "Sign in to vote"}>
-        <button
-          onClick={() => onVote(pack.id)}
-          disabled={votingPacks.has(pack.id)}
-          className={cn(
-            "group/vote relative flex items-center gap-1.5 text-sm font-medium rounded-full px-3 py-1.5 transition-all duration-200 border",
-            votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
-            pack.userVoted
-              ? "text-[#c4a44a] bg-[#c4a44a]/[0.12] border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.2] shadow-[0_0_12px_rgba(196,164,74,0.15)]"
-              : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-[#c4a44a] hover:border-[#c4a44a]/20 hover:bg-[#c4a44a]/[0.06]"
-          )}
+        <SimpleTooltip
+          content={
+            authUser ? (pack.userVoted ? "Remove vote" : "Upvote this pack") : "Sign in to vote"
+          }
         >
-          <ArrowUpIcon
+          <button
+            onClick={() => onVote(pack.id)}
+            disabled={votingPacks.has(pack.id)}
             className={cn(
-              "size-4 transition-all duration-200",
-              pack.userVoted ? "-translate-y-[1px]" : "group-hover/vote:-translate-y-[1px]"
+              "group/vote relative flex items-center gap-1.5 text-sm font-medium rounded-full px-3 py-1.5 transition-all duration-200 border",
+              votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
+              pack.userVoted
+                ? "text-[#c4a44a] bg-[#c4a44a]/[0.12] border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.2] shadow-[0_0_12px_rgba(196,164,74,0.15)]"
+                : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-[#c4a44a] hover:border-[#c4a44a]/20 hover:bg-[#c4a44a]/[0.06]"
             )}
-            strokeWidth={pack.userVoted ? 2.5 : 2}
-          />
-          <span>{pack.voteCount > 0 ? pack.voteCount : 0}</span>
-        </button>
+          >
+            <ArrowUpIcon
+              className={cn(
+                "size-4 transition-all duration-200",
+                pack.userVoted ? "-translate-y-[1px]" : "group-hover/vote:-translate-y-[1px]"
+              )}
+              strokeWidth={pack.userVoted ? 2.5 : 2}
+            />
+            <span>{pack.voteCount > 0 ? pack.voteCount : 0}</span>
+          </button>
         </SimpleTooltip>
       </div>
 
