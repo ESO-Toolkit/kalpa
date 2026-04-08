@@ -55,6 +55,10 @@ jobs:
           cargo install cargo-audit --quiet
           cargo audit --file src-tauri/Cargo.lock
 
+      - name: Install worker dependencies
+        run: npm ci
+        working-directory: backend/eso-packs-worker
+
       - name: Worker TypeScript check
         run: npx tsc --noEmit
         working-directory: backend/eso-packs-worker
