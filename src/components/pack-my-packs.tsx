@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn, decodeHtml, formatRelativeDate } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -280,53 +281,57 @@ export function MyPacksView({
                         {/* Quick actions */}
                         <div className="flex items-center gap-1 shrink-0">
                           {pack.status === "draft" && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onPublish(pack);
-                              }}
-                              title="Publish"
-                              className="rounded-md p-1.5 text-muted-foreground/40 hover:text-emerald-400 hover:bg-emerald-400/[0.08] transition-all duration-150"
-                            >
-                              <ArrowUpIcon className="size-3.5" />
-                            </button>
+                            <SimpleTooltip content="Publish">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onPublish(pack);
+                                }}
+                                className="rounded-md p-1.5 text-muted-foreground/40 hover:text-emerald-400 hover:bg-emerald-400/[0.08] transition-all duration-150"
+                              >
+                                <ArrowUpIcon className="size-3.5" />
+                              </button>
+                            </SimpleTooltip>
                           )}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onEdit(pack);
-                            }}
-                            title="Edit"
-                            className="rounded-md p-1.5 text-muted-foreground/40 hover:text-[#c4a44a] hover:bg-[#c4a44a]/[0.08] transition-all duration-150"
-                          >
-                            <PencilIcon className="size-3.5" />
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onDuplicate(pack);
-                            }}
-                            title="Duplicate"
-                            className="rounded-md p-1.5 text-muted-foreground/40 hover:text-sky-400 hover:bg-sky-400/[0.08] transition-all duration-150"
-                          >
-                            <CopyIcon className="size-3.5" />
-                          </button>
-                          {pack.authorId === authUser.userId && (
+                          <SimpleTooltip content="Edit">
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setConfirmDeleteId(isConfirmingDelete ? null : pack.id);
+                                onEdit(pack);
                               }}
-                              title="Delete"
-                              className={cn(
-                                "rounded-md p-1.5 transition-all duration-150",
-                                isConfirmingDelete
-                                  ? "text-red-400 bg-red-400/[0.1]"
-                                  : "text-muted-foreground/40 hover:text-red-400 hover:bg-red-400/[0.08]"
-                              )}
+                              className="rounded-md p-1.5 text-muted-foreground/40 hover:text-[#c4a44a] hover:bg-[#c4a44a]/[0.08] transition-all duration-150"
                             >
-                              <TrashIcon className="size-3.5" />
+                              <PencilIcon className="size-3.5" />
                             </button>
+                          </SimpleTooltip>
+                          <SimpleTooltip content="Duplicate">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDuplicate(pack);
+                              }}
+                              className="rounded-md p-1.5 text-muted-foreground/40 hover:text-sky-400 hover:bg-sky-400/[0.08] transition-all duration-150"
+                            >
+                              <CopyIcon className="size-3.5" />
+                            </button>
+                          </SimpleTooltip>
+                          {pack.authorId === authUser.userId && (
+                            <SimpleTooltip content="Delete">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setConfirmDeleteId(isConfirmingDelete ? null : pack.id);
+                                }}
+                                className={cn(
+                                  "rounded-md p-1.5 transition-all duration-150",
+                                  isConfirmingDelete
+                                    ? "text-red-400 bg-red-400/[0.1]"
+                                    : "text-muted-foreground/40 hover:text-red-400 hover:bg-red-400/[0.08]"
+                                )}
+                              >
+                                <TrashIcon className="size-3.5" />
+                              </button>
+                            </SimpleTooltip>
                           )}
                         </div>
                       </div>
@@ -460,16 +465,17 @@ export function MyPacksView({
                         </InfoPill>
                       </div>
                     </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onRemoveInstalledRef(ref.packId);
-                      }}
-                      title="Remove from library"
-                      className="rounded-md p-1.5 text-muted-foreground/40 hover:text-red-400 hover:bg-red-400/[0.08] transition-all duration-150"
-                    >
-                      <XIcon className="size-3.5" />
-                    </button>
+                    <SimpleTooltip content="Remove from library">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRemoveInstalledRef(ref.packId);
+                        }}
+                        className="rounded-md p-1.5 text-muted-foreground/40 hover:text-red-400 hover:bg-red-400/[0.08] transition-all duration-150"
+                      >
+                        <XIcon className="size-3.5" />
+                      </button>
+                    </SimpleTooltip>
                   </div>
                   <div className="mt-2 flex items-center gap-1.5 flex-wrap">
                     <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">

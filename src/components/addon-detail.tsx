@@ -11,6 +11,7 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { ExternalLink, Trash2, Check, Power } from "lucide-react";
 
 function relativeDate(ts: number): string {
@@ -231,14 +232,11 @@ export function AddonDetail({
           <span className="text-sm text-amber-400">
             Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
           </span>
-          <Button
-            onClick={handleUpdate}
-            disabled={updating || isOffline}
-            size="sm"
-            title={isOffline ? "Updates require an internet connection" : undefined}
-          >
-            {updating ? "Updating..." : "Update"}
-          </Button>
+          <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+            <Button onClick={handleUpdate} disabled={updating || isOffline} size="sm">
+              {updating ? "Updating..." : "Update"}
+            </Button>
+          </SimpleTooltip>
         </GlassPanel>
       ) : null}
 
@@ -425,40 +423,44 @@ export function AddonDetail({
                     )}
                   </div>
                   {installed ? (
-                    <button
-                      className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
-                      onClick={() => handleRemoveDep(dep.name)}
-                      disabled={removingDep === dep.name}
-                      title={`Remove ${dep.name}`}
-                    >
-                      {removingDep === dep.name ? (
-                        <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
-                      ) : (
-                        <Trash2 className="size-3.5" />
-                      )}
-                    </button>
+                    <SimpleTooltip content={`Remove ${dep.name}`}>
+                      <button
+                        className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
+                        onClick={() => handleRemoveDep(dep.name)}
+                        disabled={removingDep === dep.name}
+                      >
+                        {removingDep === dep.name ? (
+                          <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
+                        ) : (
+                          <Trash2 className="size-3.5" />
+                        )}
+                      </button>
+                    </SimpleTooltip>
                   ) : (
-                    <button
-                      className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
-                      onClick={() => handleInstallDep(dep.name)}
-                      disabled={installingDep === dep.name || isOffline}
-                      title={
+                    <SimpleTooltip
+                      content={
                         isOffline
                           ? "Installs require an internet connection"
                           : `Install ${dep.name}`
                       }
                     >
-                      {installingDep === dep.name ? (
-                        <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
-                      ) : justInstalled ? (
-                        <span className="flex items-center gap-1 text-emerald-400">
-                          <Check className="size-3" />
-                          Installed
-                        </span>
-                      ) : (
-                        "Install"
-                      )}
-                    </button>
+                      <button
+                        className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
+                        onClick={() => handleInstallDep(dep.name)}
+                        disabled={installingDep === dep.name || isOffline}
+                      >
+                        {installingDep === dep.name ? (
+                          <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
+                        ) : justInstalled ? (
+                          <span className="flex items-center gap-1 text-emerald-400">
+                            <Check className="size-3" />
+                            Installed
+                          </span>
+                        ) : (
+                          "Install"
+                        )}
+                      </button>
+                    </SimpleTooltip>
                   )}
                 </div>
               );
@@ -498,40 +500,44 @@ export function AddonDetail({
                     )}
                   </div>
                   {installed ? (
-                    <button
-                      className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
-                      onClick={() => handleRemoveDep(dep.name)}
-                      disabled={removingDep === dep.name}
-                      title={`Remove ${dep.name}`}
-                    >
-                      {removingDep === dep.name ? (
-                        <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
-                      ) : (
-                        <Trash2 className="size-3.5" />
-                      )}
-                    </button>
+                    <SimpleTooltip content={`Remove ${dep.name}`}>
+                      <button
+                        className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
+                        onClick={() => handleRemoveDep(dep.name)}
+                        disabled={removingDep === dep.name}
+                      >
+                        {removingDep === dep.name ? (
+                          <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
+                        ) : (
+                          <Trash2 className="size-3.5" />
+                        )}
+                      </button>
+                    </SimpleTooltip>
                   ) : (
-                    <button
-                      className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
-                      onClick={() => handleInstallDep(dep.name)}
-                      disabled={installingDep === dep.name || isOffline}
-                      title={
+                    <SimpleTooltip
+                      content={
                         isOffline
                           ? "Installs require an internet connection"
                           : `Install ${dep.name}`
                       }
                     >
-                      {installingDep === dep.name ? (
-                        <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
-                      ) : justInstalled ? (
-                        <span className="flex items-center gap-1 text-emerald-400">
-                          <Check className="size-3" />
-                          Installed
-                        </span>
-                      ) : (
-                        "Install"
-                      )}
-                    </button>
+                      <button
+                        className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
+                        onClick={() => handleInstallDep(dep.name)}
+                        disabled={installingDep === dep.name || isOffline}
+                      >
+                        {installingDep === dep.name ? (
+                          <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
+                        ) : justInstalled ? (
+                          <span className="flex items-center gap-1 text-emerald-400">
+                            <Check className="size-3" />
+                            Installed
+                          </span>
+                        ) : (
+                          "Install"
+                        )}
+                      </button>
+                    </SimpleTooltip>
                   )}
                 </div>
               );
