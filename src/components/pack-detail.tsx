@@ -131,7 +131,7 @@ export function PackDetailView({
           {canEdit && (
             <>
               {showDeleteConfirm ? (
-                <div className="flex items-center gap-1.5 rounded-lg border border-red-500/20 bg-red-500/[0.06] px-2.5 py-1">
+                <div className="flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/[0.08] px-2.5 py-1 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
                   <span className="text-[11px] text-red-400 font-medium">Delete this pack?</span>
                   <Button
                     variant="outline"
@@ -189,8 +189,8 @@ export function PackDetailView({
               "group/vote relative flex items-center gap-1.5 text-sm font-medium rounded-full px-3 py-1.5 transition-all duration-200 border",
               votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
               pack.userVoted
-                ? "text-[#c4a44a] bg-[#c4a44a]/[0.12] border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.2] shadow-[0_0_12px_rgba(196,164,74,0.15)]"
-                : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-[#c4a44a] hover:border-[#c4a44a]/20 hover:bg-[#c4a44a]/[0.06]"
+                ? "text-[#c4a44a] bg-[#c4a44a]/[0.15] border-[#c4a44a]/40 hover:bg-[#c4a44a]/[0.22] shadow-[0_0_14px_rgba(196,164,74,0.25),inset_0_1px_0_rgba(196,164,74,0.12)]"
+                : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-[#c4a44a] hover:border-[#c4a44a]/25 hover:bg-[#c4a44a]/[0.08] hover:shadow-[0_0_8px_rgba(196,164,74,0.08)]"
             )}
           >
             <ArrowUpIcon
@@ -207,7 +207,7 @@ export function PackDetailView({
 
       {/* Share section — Task C: two-mode toggle */}
       {showShareSection && (
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-3">
+        <div className="rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.5)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
           {/* Segmented control: Private Link vs Export File */}
           <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
             <div
@@ -241,7 +241,7 @@ export function PackDetailView({
               {shareResult ? (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 rounded-md bg-white/[0.05] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-[#c4a44a]">
+                    <code className="flex-1 rounded-lg bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.15] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-[#c4a44a] shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]">
                       {shareResult.code}
                     </code>
                     <SimpleTooltip content="Copy share code">
@@ -326,10 +326,10 @@ export function PackDetailView({
       {(installing && installProgress) || installSucceeded ? (
         <div
           className={cn(
-            "rounded-lg border p-3",
+            "rounded-xl border p-3",
             installSucceeded
-              ? "border-emerald-400/20 bg-emerald-400/[0.04]"
-              : "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04]"
+              ? "border-emerald-400/25 bg-emerald-400/[0.06] shadow-[0_0_16px_rgba(34,197,94,0.08),inset_0_1px_0_rgba(34,197,94,0.06)]"
+              : "border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]"
           )}
         >
           {installProgress && (
@@ -349,11 +349,13 @@ export function PackDetailView({
               <span className="text-emerald-400 font-medium">Installed successfully</span>
             </div>
           )}
-          <div className="h-1 rounded-full bg-white/[0.06]">
+          <div className="h-1.5 rounded-full bg-white/[0.06]">
             <div
               className={cn(
                 "h-full rounded-full transition-all duration-300 ease-out",
-                installSucceeded ? "bg-emerald-400" : "bg-[#c4a44a]"
+                installSucceeded
+                  ? "bg-emerald-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]"
+                  : "bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.5)]"
               )}
               style={{
                 width: installSucceeded

@@ -106,8 +106,8 @@ export function PackListView({
           </div>
         ) : error ? (
           <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-            <div className="rounded-xl bg-red-500/[0.06] border border-red-500/[0.1] p-4">
-              <AlertCircleIcon className="size-8 text-red-400/60" />
+            <div className="rounded-xl bg-red-500/[0.08] border border-red-500/[0.15] p-4 shadow-[0_0_24px_rgba(239,68,68,0.08),inset_0_1px_0_rgba(239,68,68,0.06)]">
+              <AlertCircleIcon className="size-8 text-red-400/70" />
             </div>
             <p className="font-heading text-sm font-medium text-red-400">Could not load packs</p>
             <p className="text-xs text-muted-foreground/60 max-w-[280px]">{error}</p>
@@ -118,8 +118,8 @@ export function PackListView({
           </div>
         ) : packs.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-            <div className="rounded-xl bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.1] p-4">
-              <SparklesIcon className="size-8 text-[#c4a44a]/50" />
+            <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-4 shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
+              <SparklesIcon className="size-8 text-[#c4a44a]/60" />
             </div>
             <p className="font-heading text-sm font-medium">
               {searchQuery ? "No packs match your search" : "The Pack Hub is empty"}
@@ -149,10 +149,12 @@ export function PackListView({
                 className={cn(
                   "group w-full text-left rounded-xl border border-white/[0.06] p-3",
                   "border-l-[3px] transition-all duration-200 cursor-pointer",
+                  "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
                   accent.border,
                   accent.bg,
                   accent.hoverBg,
-                  "hover:border-white/[0.12] hover:-translate-y-[1px] hover:shadow-[0_4px_16px_rgba(0,0,0,0.2)]",
+                  accent.hoverGlow,
+                  "hover:border-white/[0.12] hover:-translate-y-[1px]",
                   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
                 )}
               >
@@ -184,8 +186,8 @@ export function PackListView({
                         "group/vote relative flex flex-col items-center gap-0.5 text-xs font-semibold rounded-lg px-2 py-1.5 transition-all duration-200 border shrink-0",
                         votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
                         pack.userVoted
-                          ? "text-[#c4a44a] bg-[#c4a44a]/[0.12] border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.2] shadow-[0_0_8px_rgba(196,164,74,0.15)]"
-                          : "text-muted-foreground/50 bg-white/[0.03] border-white/[0.06] hover:text-[#c4a44a] hover:border-[#c4a44a]/20 hover:bg-[#c4a44a]/[0.06]"
+                          ? "text-[#c4a44a] bg-[#c4a44a]/[0.15] border-[#c4a44a]/40 hover:bg-[#c4a44a]/[0.22] shadow-[0_0_12px_rgba(196,164,74,0.25),inset_0_1px_0_rgba(196,164,74,0.1)]"
+                          : "text-muted-foreground/50 bg-white/[0.03] border-white/[0.06] hover:text-[#c4a44a] hover:border-[#c4a44a]/25 hover:bg-[#c4a44a]/[0.08] hover:shadow-[0_0_8px_rgba(196,164,74,0.08)]"
                       )}
                     >
                       <ArrowUpIcon
@@ -239,7 +241,7 @@ export function PackListView({
                       <span
                         className={cn(
                           "inline-flex items-center justify-center size-4 rounded-full text-[8px] font-bold uppercase leading-none",
-                          "bg-white/[0.08] text-muted-foreground/60"
+                          "bg-gradient-to-b from-white/[0.14] to-white/[0.06] text-muted-foreground/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
                         )}
                       >
                         {[...decodeHtml(pack.authorName)][0]}
@@ -258,7 +260,7 @@ export function PackListView({
             disabled={loadingMore}
             className={cn(
               "w-full py-2.5 rounded-xl border border-white/[0.06] bg-white/[0.02] text-xs font-semibold",
-              "transition-all duration-200 hover:bg-white/[0.04] hover:border-white/[0.1]",
+              "shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-all duration-200 hover:bg-white/[0.05] hover:border-white/[0.12] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_2px_8px_rgba(0,0,0,0.15)]",
               "text-muted-foreground/60 hover:text-muted-foreground",
               loadingMore && "opacity-60 cursor-wait"
             )}
