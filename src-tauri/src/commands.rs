@@ -2490,14 +2490,14 @@ pub fn backup_minion_config(
     safe_migration::backup_minion_config(&addons_dir)
 }
 
-// ── Pack Hub API (roster-hub-api) ──────────────────────────────────────────
+// ── Pack Hub API (kalpa-pack-hub) ──────────────────────────────────────────
 
-/// Base URL for the Pack Hub (shared with the website).
+/// Base URL for the dedicated Pack Hub worker.
 fn pack_hub_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
         std::env::var("PACK_HUB_API_URL")
-            .unwrap_or_else(|_| "https://roster-hub-api.eso-toolkit.workers.dev".to_string())
+            .unwrap_or_else(|_| "https://kalpa-pack-hub.eso-toolkit.workers.dev".to_string())
     })
 }
 
@@ -2522,7 +2522,7 @@ fn pack_hub_client() -> &'static reqwest::blocking::Client {
     })
 }
 
-// ── Pack structs (matching roster-hub-api response) ───────────────────────
+// ── Pack structs (matching kalpa-pack-hub response) ───────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2538,7 +2538,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Full pack object returned by the roster-hub-api.
+/// Full pack object returned by kalpa-pack-hub.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HubPack {
@@ -3321,7 +3321,7 @@ fn share_worker_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
         std::env::var("SHARE_WORKER_URL")
-            .unwrap_or_else(|_| "https://eso-packs-worker.eso-toolkit.workers.dev".to_string())
+            .unwrap_or_else(|_| "https://kalpa-pack-hub.eso-toolkit.workers.dev".to_string())
     })
 }
 

@@ -3,70 +3,38 @@ export interface PackAddonEntry {
   esouiId: number;
   name: string;
   required: boolean;
-  defaultEnabled: boolean;
+  defaultEnabled?: boolean;
   note?: string;
 }
 
-// ── Build / Roster references (links to ESO Toolkit webapp) ────────
-export interface BuildReference {
-  buildHubId: string;
-  title: string;
-  esoClass?: string;
-  role?: string;
-}
-
-export interface RosterReference {
-  rosterHubId: string;
-  title: string;
-  trialId?: string;
-}
-
-// ── Pack metadata ──────────────────────────────────────────────────
-export interface PackMetadata {
-  createdBy: string;
-  createdAt: string;
-  updatedAt: string;
-  originUrl?: string;
-  version: number;
-}
-
+// ── Pack types ────────────────────────────────────────────────────────
 export type PackType = "addon-pack" | "build-pack" | "roster-pack";
 export type PackStatus = "draft" | "published";
 
-// ── Full pack ──────────────────────────────────────────────────────
+// ── Full pack (snake_case to match Rust HubPack) ─────────────────────
 export interface Pack {
   id: string;
-  name: string;
+  title: string;
   description: string;
-  type: PackType;
-  tags: string[];
-  metadata: PackMetadata;
+  pack_type: PackType;
+  author_id: string;
+  author_name: string;
+  is_anonymous: boolean;
   addons: PackAddonEntry[];
-  builds?: BuildReference[];
-  rosters?: RosterReference[];
-  voteCount: number;
-  installCount: number;
-  status: PackStatus;
-}
-
-// ── Index (lightweight listing) ────────────────────────────────────
-export interface PackIndexItem {
-  id: string;
-  name: string;
-  description: string;
-  type: PackType;
   tags: string[];
-  addonCount: number;
-  buildCount: number;
-  rosterCount: number;
-  voteCount: number;
-  installCount: number;
-  updatedAt: string;
+  vote_count: number;
+  install_count: number;
+  created_at: string;
+  updated_at: string;
   status: PackStatus;
-  createdBy: string;
 }
 
-// ── Vote tracking ─────────────────────────────────────────────────
+// ── Index (stores full packs for list queries) ────────────────────────
+export interface PackIndex {
+  packs: Pack[];
+}
+
+// ── Vote tracking ─────────────────────────────────────────────────────
 export interface VoteRecord {
   userId: string;
   packId: string;
@@ -78,17 +46,13 @@ export interface VoteResponse {
   voteCount: number;
 }
 
-export interface PackIndex {
-  items: PackIndexItem[];
-}
-
-// ── Validation ─────────────────────────────────────────────────────
+// ── Validation ────────────────────────────────────────────────────────
 export interface ValidationError {
   field: string;
   message: string;
 }
 
-// ── Share types ───────────────────────────────────────────────────
+// ── Share types ───────────────────────────────────────────────────────
 export interface SharePackData {
   title: string;
   description: string;
@@ -112,7 +76,7 @@ export interface ShareCodeResponse {
   deepLink: string;
 }
 
-// ── Env bindings ───────────────────────────────────────────────────
+// ── Env bindings ──────────────────────────────────────────────────────
 export interface Env {
   ESO_PACKS: KVNamespace;
   ADMIN_API_KEY: string;

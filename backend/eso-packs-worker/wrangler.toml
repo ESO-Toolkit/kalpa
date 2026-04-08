@@ -1,4 +1,4 @@
-name = "eso-packs-worker"
+name = "kalpa-pack-hub"
 main = "src/index.ts"
 compatibility_date = "2025-09-15"
 # Set CLOUDFLARE_ACCOUNT_ID env var or run `wrangler whoami` to configure.
@@ -6,13 +6,15 @@ compatibility_date = "2025-09-15"
 
 [[kv_namespaces]]
 binding = "ESO_PACKS"
-# Create your own KV namespace: `wrangler kv namespace create ESO_PACKS`
-# Then paste the returned id here.
-# id = ""
+id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 
 # Secrets are set via `wrangler secret put ADMIN_API_KEY`.
 # For local dev, create a .dev.vars file (git-ignored):
 #   ADMIN_API_KEY=dev-secret-key
+
+# Daily backup of pack index (midnight UTC)
+[triggers]
+crons = ["0 0 * * *"]
 
 [observability]
 enabled = true

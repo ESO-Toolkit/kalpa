@@ -65,9 +65,43 @@ src-tauri/src/          # Rust backend
   installer.rs          # ZIP extraction & addon installation
   metadata.rs           # Metadata caching & management
   lib.rs                # Module defs & Tauri app setup
+
+backend/eso-packs-worker/  # Pack Hub Cloudflare Worker (KV-based)
+  src/index.ts             # Router, handlers, scheduled backup
+  src/kv.ts                # KV read/write helpers
+  src/types.ts             # Pack types (snake_case, matches Rust HubPack)
+  src/validate.ts          # Input validation
+  src/shares.ts            # Share code create/resolve
+  src/cors.ts              # CORS config
+  wrangler.toml            # Worker config — name MUST be "kalpa-pack-hub"
 ```
 
 When adding new logic, pick the closest existing file that matches the concern before creating new modules.
+
+---
+
+## Pack Hub Worker — Critical Rules
+
+The Pack Hub is a **dedicated Cloudflare Worker** (`kalpa-pack-hub`) that is completely separate from the ESO Toolkit website API (`roster-hub-api`).
+
+### NEVER do these:
+- **NEVER deploy to `roster-hub-api`** — that is the ESO Toolkit website's full API (D1, Discord, AI). Deploying pack hub code there will overwrite the entire website API.
+- **NEVER change the `name` field in `wrangler.toml`** from `kalpa-pack-hub`.
+- **NEVER deploy to `eso-packs-worker`** — that was an old name and is now deleted.
+- **NEVER run `wrangler deploy` without running `tsc --noEmit` first.**
+
+### Architecture:
+- **Worker URL**: `https://kalpa-pack-hub.eso-toolkit.workers.dev`
+- **Storage**: Cloudflare KV (`ESO_PACKS` namespace)
+- **API format**: snake_case JSON matching Rust `HubPack` struct in `commands.rs`
+- **Auth**: ESO Logs Bearer token via `validateBearerToken()` in `shares.ts`
+- **Backup**: Daily cron at midnight UTC snapshots pack index to `backup:YYYY-MM-DD` keys (90-day TTL)
+- **CI**: `.github/workflows/deploy-worker.yml` — auto-deploys on push to main, with typecheck + name guard + health check
+
+### Rust integration:
+- `commands.rs` calls `kalpa-pack-hub.eso-toolkit.workers.dev` (see `pack_hub_url()` and `share_worker_url()`)
+- Response format: `{ packs: [...], page, sort }` for list, `{ pack: {...} }` for detail
+- Pack fields are snake_case: `title`, `pack_type`, `author_id`, `author_name`, `is_anonymous`, `vote_count`, etc.
 
 ---
 
