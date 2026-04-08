@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   FileSliders,
   MinusIcon,
@@ -89,11 +90,20 @@ export function AppHeader({
       className="relative z-20 flex items-center border-b border-white/[0.06] bg-[rgba(10,18,36,0.85)] px-4 py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2]"
     >
       <div className="absolute right-0 bottom-0 left-0 h-px bg-gradient-to-r from-transparent via-[#c4a44a]/30 to-transparent" />
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2.5">
         <Logo size={20} className="text-[#4dc2e6]" />
-        <h1 className="bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-sm font-heading font-semibold tracking-wide text-transparent">
-          Kalpa - Addon Manager
-        </h1>
+        <div className="flex items-center gap-2">
+          <h1 className="bg-gradient-to-r from-[#c4a44a] via-[#d4b45a] to-[#c4a44a] bg-clip-text font-heading text-[13px] font-bold uppercase tracking-[0.15em] text-transparent">
+            Kalpa
+          </h1>
+          <div className="h-3 w-px bg-white/[0.12]" />
+          <button
+            onClick={() => void openUrl("https://esotk.com")}
+            className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white/40 backdrop-blur-sm transition-colors duration-300 hover:border-[#38bdf8]/20 hover:text-white/60 cursor-pointer"
+          >
+            esotk.com
+          </button>
+        </div>
       </div>
       <div className="flex-1" data-tauri-drag-region />
       <div className="flex items-center gap-2">
