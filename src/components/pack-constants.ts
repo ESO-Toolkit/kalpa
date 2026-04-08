@@ -30,25 +30,31 @@ export const TAG_COLORS: Record<
 
 export const PACK_TYPE_ACCENT: Record<
   string,
-  { border: string; bg: string; hoverBg: string; text: string }
+  { border: string; bg: string; hoverBg: string; text: string; hoverGlow: string }
 > = {
   "addon-pack": {
-    border: "border-l-[#c4a44a]/60",
-    bg: "bg-[#c4a44a]/[0.02]",
-    hoverBg: "hover:bg-[#c4a44a]/[0.06]",
+    border: "border-l-[#c4a44a]/70",
+    bg: "bg-[#c4a44a]/[0.03]",
+    hoverBg: "hover:bg-[#c4a44a]/[0.08]",
     text: "text-[#c4a44a]",
+    hoverGlow:
+      "hover:shadow-[0_6px_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.06)]",
   },
   "build-pack": {
-    border: "border-l-sky-400/60",
-    bg: "bg-sky-400/[0.02]",
-    hoverBg: "hover:bg-sky-400/[0.06]",
+    border: "border-l-sky-400/70",
+    bg: "bg-sky-400/[0.03]",
+    hoverBg: "hover:bg-sky-400/[0.08]",
     text: "text-sky-400",
+    hoverGlow:
+      "hover:shadow-[0_6px_24px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(255,255,255,0.06)]",
   },
   "roster-pack": {
-    border: "border-l-violet-400/60",
-    bg: "bg-violet-400/[0.02]",
-    hoverBg: "hover:bg-violet-400/[0.06]",
+    border: "border-l-violet-400/70",
+    bg: "bg-violet-400/[0.03]",
+    hoverBg: "hover:bg-violet-400/[0.08]",
     text: "text-violet-400",
+    hoverGlow:
+      "hover:shadow-[0_6px_24px_rgba(167,139,250,0.1),inset_0_1px_0_rgba(255,255,255,0.06)]",
   },
 };
 

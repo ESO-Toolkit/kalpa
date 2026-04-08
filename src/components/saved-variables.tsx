@@ -259,11 +259,11 @@ function OverviewTab({
     <div className="space-y-3">
       {/* Summary stats */}
       <div className="grid grid-cols-3 gap-2">
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5 text-center">
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-2.5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_2px_8px_rgba(0,0,0,0.12)]">
           <div className="text-lg font-heading font-semibold">{files.length}</div>
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Files</div>
         </div>
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5 text-center">
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-2.5 text-center shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_2px_8px_rgba(0,0,0,0.12)]">
           <div className="text-lg font-heading font-semibold">{formatBytes(totalSize)}</div>
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
             Total Size
@@ -271,10 +271,10 @@ function OverviewTab({
         </div>
         <button
           onClick={orphaned.length > 0 ? onSwitchToCleanup : undefined}
-          className={`rounded-lg border p-2.5 text-center transition-colors ${
+          className={`rounded-xl border p-2.5 text-center transition-all duration-200 ${
             orphaned.length > 0
-              ? "border-amber-500/20 bg-amber-500/[0.05] hover:border-amber-500/30 cursor-pointer"
-              : "border-white/[0.06] bg-white/[0.02]"
+              ? "border-amber-500/25 bg-amber-500/[0.06] hover:border-amber-500/35 hover:shadow-[0_0_16px_rgba(245,158,11,0.1),inset_0_1px_0_rgba(245,158,11,0.06)] shadow-[inset_0_1px_0_rgba(245,158,11,0.04),0_2px_8px_rgba(0,0,0,0.12)] cursor-pointer"
+              : "border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_2px_8px_rgba(0,0,0,0.12)]"
           }`}
         >
           <div
@@ -290,7 +290,7 @@ function OverviewTab({
       {orphaned.length > 0 && (
         <button
           onClick={onSwitchToCleanup}
-          className="flex w-full items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] p-2.5 text-left text-xs text-amber-300 transition-colors hover:border-amber-500/30"
+          className="flex w-full items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-left text-xs text-amber-300 transition-all duration-200 hover:border-amber-500/35 shadow-[inset_0_1px_0_rgba(245,158,11,0.04),0_2px_8px_rgba(0,0,0,0.1)] hover:shadow-[0_0_16px_rgba(245,158,11,0.08),inset_0_1px_0_rgba(245,158,11,0.06)]"
         >
           <PackageXIcon className="size-4 shrink-0" />
           <span>
@@ -302,7 +302,7 @@ function OverviewTab({
       )}
 
       {largeFiles.length > 0 && orphaned.length === 0 && (
-        <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/[0.04] p-2.5 text-xs text-muted-foreground shadow-[inset_0_1px_0_rgba(239,68,68,0.03),0_2px_8px_rgba(0,0,0,0.1)]">
           <HardDriveIcon className="size-4 shrink-0 text-red-400" />
           <span>
             <strong className="text-red-400">{largeFiles.length} large files</strong> (&gt;5 MB) may
@@ -318,10 +318,10 @@ function OverviewTab({
             <button
               key={f}
               onClick={() => setFilter(f)}
-              className={`rounded-md px-2 py-0.5 text-xs transition-colors ${
+              className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
                 filter === f
-                  ? "bg-white/[0.1] text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
+                  ? "bg-white/[0.1] text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)] border border-white/[0.06]"
+                  : "text-muted-foreground hover:text-foreground hover:bg-white/[0.04]"
               }`}
             >
               {f === "all"
@@ -353,7 +353,9 @@ function OverviewTab({
       <div className="max-h-[320px] overflow-y-auto space-y-1">
         {sorted.length === 0 ? (
           <div className="py-8 text-center">
-            <FileTextIcon className="mx-auto mb-2 size-8 text-muted-foreground/30" />
+            <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-2xl bg-[#c4a44a]/[0.08] shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
+              <FileTextIcon className="size-6 text-[#c4a44a]/60" />
+            </div>
             <p className="text-sm text-muted-foreground">
               {filter !== "all" ? "No files match this filter." : "No SavedVariables files found."}
             </p>
@@ -369,7 +371,7 @@ function OverviewTab({
             <button
               key={f.fileName}
               onClick={() => onSelectFile(f)}
-              className="flex w-full items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-2.5 text-left transition-all duration-200 hover:border-white/[0.1]"
+              className="flex w-full items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.03] p-2.5 text-left transition-all duration-200 hover:border-white/[0.1] hover:bg-white/[0.05] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.15),inset_0_1px_0_rgba(255,255,255,0.05)]"
             >
               {/* Size bar */}
               <div className="w-14 shrink-0">
@@ -496,7 +498,9 @@ function CleanupTab({
   if (orphaned.length === 0 && largeFiles.length === 0) {
     return (
       <div className="py-10 text-center">
-        <ShieldCheckIcon className="mx-auto mb-3 size-10 text-emerald-500/60" />
+        <div className="mx-auto mb-3 flex size-14 items-center justify-center rounded-2xl bg-emerald-500/[0.08] shadow-[0_0_32px_rgba(34,197,94,0.1),inset_0_1px_0_rgba(34,197,94,0.08)]">
+          <ShieldCheckIcon className="size-7 text-emerald-400" />
+        </div>
         <p className="text-sm font-medium text-emerald-400">Your SavedVariables are clean</p>
         <p className="mt-1 text-xs text-muted-foreground">
           No orphaned files or oversized data detected.
@@ -538,12 +542,12 @@ function CleanupTab({
             {orphaned.map((f) => (
               <label
                 key={f.fileName}
-                className="flex items-center gap-2.5 rounded-lg border border-white/[0.06] bg-white/[0.02] p-2 cursor-pointer transition-colors hover:border-white/[0.1]"
+                className="flex items-center gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.03] p-2 cursor-pointer transition-all duration-200 hover:border-white/[0.1] hover:bg-white/[0.05] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.05)]"
               >
                 <div
-                  className={`flex size-4 shrink-0 items-center justify-center rounded border transition-colors ${
+                  className={`flex size-4 shrink-0 items-center justify-center rounded border transition-all duration-200 ${
                     selected.has(f.fileName)
-                      ? "border-[#c4a44a] bg-[#c4a44a]"
+                      ? "border-[#c4a44a] bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.4)]"
                       : "border-white/[0.2] bg-transparent"
                   }`}
                 >
@@ -566,7 +570,7 @@ function CleanupTab({
           </div>
 
           {/* Delete action */}
-          <div className="mt-3 flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] p-2.5">
+          <div className="mt-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.03] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_2px_8px_rgba(0,0,0,0.12)]">
             <div className="text-xs text-muted-foreground">
               {selected.size > 0 ? (
                 <span>
@@ -609,7 +613,7 @@ function CleanupTab({
             {largeFiles.map((f) => (
               <div
                 key={f.fileName}
-                className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-white/[0.02] p-2"
+                className="flex items-center justify-between rounded-xl border border-red-500/15 bg-red-500/[0.03] p-2 shadow-[inset_0_1px_0_rgba(239,68,68,0.03)]"
               >
                 <div className="min-w-0">
                   <div className="text-sm truncate">{f.addonName}</div>
@@ -755,10 +759,10 @@ function NavTreeItem({
           onSelect(currentPath, node);
           if (tableChildren.length > 0) toggleExpanded(pathKey);
         }}
-        className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-xs transition-colors ${
+        className={`flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left text-xs transition-all duration-150 ${
           isSelected
-            ? "bg-white/[0.08] text-foreground"
-            : "text-foreground/70 hover:bg-white/[0.04] hover:text-foreground"
+            ? "bg-white/[0.1] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_1px_3px_rgba(0,0,0,0.15)] border border-white/[0.06]"
+            : "text-foreground/70 hover:bg-white/[0.04] hover:text-foreground border border-transparent"
         }`}
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
@@ -983,7 +987,7 @@ function WidgetCustomizer({
         </label>
       </div>
 
-      <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
+      <div className="flex items-center justify-between border-t border-white/[0.06] pt-2.5 mt-0.5">
         <PopoverClose
           render={
             <button
@@ -1069,7 +1073,7 @@ function FieldRow({
   };
 
   return (
-    <div className="flex items-center gap-3 rounded-lg px-2.5 py-1.5 hover:bg-white/[0.02] group">
+    <div className="flex items-center gap-3 rounded-lg px-2.5 py-1.5 transition-colors duration-150 hover:bg-white/[0.03] group">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-medium text-foreground/80">{field.label}</span>
@@ -1108,7 +1112,7 @@ function Breadcrumbs({
   onNavigate: (depth: number) => void;
 }) {
   return (
-    <div className="flex items-center gap-1 text-xs overflow-x-auto pb-1">
+    <div className="flex items-center gap-1 text-xs overflow-x-auto pb-1 rounded-lg bg-white/[0.02] px-2 py-1.5 border border-white/[0.04]">
       <button
         onClick={() => onNavigate(0)}
         className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
@@ -1294,9 +1298,9 @@ function DetailPanel({
                   <button
                     key={`${child.key}-${i}`}
                     onClick={() => onSelectPath([...selectedPath, child.key], child)}
-                    className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] p-2.5 text-left transition-all hover:border-white/[0.1] hover:bg-white/[0.04]"
+                    className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.03] p-2.5 text-left transition-all duration-200 hover:border-white/[0.12] hover:bg-white/[0.05] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.15),inset_0_1px_0_rgba(255,255,255,0.05)]"
                   >
-                    <BracesIcon className="size-3.5 shrink-0 text-purple-400/70" />
+                    <BracesIcon className="size-3.5 shrink-0 text-violet-400/70" />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1">
                         <span className="truncate text-xs font-medium">{child.key}</span>
@@ -1328,7 +1332,9 @@ function DetailPanel({
           visibleColorFields.length === 0 &&
           groupChildren.length === 0 && (
             <div className="py-8 text-center">
-              <EyeOffIcon className="mx-auto mb-2 size-6 text-muted-foreground/30" />
+              <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-xl bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                <EyeOffIcon className="size-5 text-muted-foreground/40" />
+              </div>
               <p className="text-xs text-muted-foreground">No visible settings in this node.</p>
             </div>
           )}
@@ -1550,7 +1556,7 @@ function EditorTab({
   return (
     <div className="space-y-3">
       {esoRunning && (
-        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-400">
+        <div className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-xs text-amber-400 shadow-[0_0_16px_rgba(245,158,11,0.06),inset_0_1px_0_rgba(245,158,11,0.04)]">
           <AlertTriangleIcon className="size-4 shrink-0" />
           ESO is running. Changes may be overwritten when you exit the game.
         </div>
@@ -1617,13 +1623,13 @@ function EditorTab({
           <RotateCcwIcon className="mr-1 size-3.5" />
           Restore
         </Button>
-        <div className="ml-auto flex items-center gap-1 rounded-lg border border-white/[0.08] bg-white/[0.02] p-0.5">
+        <div className="ml-auto flex items-center gap-1 rounded-xl border border-white/[0.06] bg-white/[0.03] p-0.5 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)]">
           <button
             onClick={() => setRawMode(false)}
-            className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+            className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
               !rawMode
-                ? "bg-white/[0.1] text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+                ? "bg-white/[0.1] text-foreground border border-white/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)]"
+                : "text-muted-foreground/60 hover:text-muted-foreground"
             }`}
           >
             <SettingsIcon className="mr-1 inline-block size-3" />
@@ -1631,10 +1637,10 @@ function EditorTab({
           </button>
           <button
             onClick={() => setRawMode(true)}
-            className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+            className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-200 ${
               rawMode
-                ? "bg-white/[0.1] text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+                ? "bg-white/[0.1] text-foreground border border-white/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)]"
+                : "text-muted-foreground/60 hover:text-muted-foreground"
             }`}
           >
             <BracesIcon className="mr-1 inline-block size-3" />
@@ -1659,7 +1665,7 @@ function EditorTab({
 
       {/* Two-panel layout */}
       <div
-        className="flex gap-0 rounded-xl border border-white/[0.06] bg-white/[0.02] overflow-hidden"
+        className="flex gap-0 rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.4)] backdrop-blur-sm overflow-hidden shadow-[0_4px_16px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.04)]"
         style={{ height: "380px" }}
       >
         {loading ? (
@@ -1684,7 +1690,7 @@ function EditorTab({
                   <input
                     type="text"
                     placeholder="Search..."
-                    className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 focus:border-[#38bdf8]/50"
+                    className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-[#38bdf8]/50 focus:shadow-[0_0_0_3px_rgba(56,189,248,0.1),inset_0_1px_2px_rgba(0,0,0,0.1)]"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
@@ -1707,16 +1713,16 @@ function EditorTab({
                   />
                 ))}
               </div>
-              <div className="flex gap-1 border-t border-white/[0.06] p-1.5">
+              <div className="flex gap-1 border-t border-white/[0.06] bg-white/[0.02] p-1.5">
                 <button
                   onClick={expandAll}
-                  className="flex-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+                  className="flex-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-all duration-150 hover:bg-white/[0.06] hover:text-foreground"
                 >
                   Expand All
                 </button>
                 <button
                   onClick={collapseAll}
-                  className="flex-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+                  className="flex-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground transition-all duration-150 hover:bg-white/[0.06] hover:text-foreground"
                 >
                   Collapse All
                 </button>
@@ -1973,7 +1979,7 @@ function CopyProfileTab({
 
       {/* Step 4: Confirm */}
       {sourceKey && actualDest && (
-        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+        <div className="rounded-xl border border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] p-3 shadow-[0_0_16px_rgba(196,164,74,0.06),inset_0_1px_0_rgba(196,164,74,0.04)]">
           <p className="text-sm">
             Copy <span className="font-medium text-[#c4a44a]">{sourceKey}</span>
             {" \u2192 "}
@@ -2050,12 +2056,12 @@ function DiffPreviewDialog({
             return (
               <div
                 key={i}
-                className={`rounded-md border px-3 py-2 text-xs ${
+                className={`rounded-lg border px-3 py-2 text-xs ${
                   change.changeType === "added"
-                    ? "border-emerald-500/20 bg-emerald-500/5"
+                    ? "border-emerald-500/20 bg-emerald-500/[0.06] shadow-[inset_0_1px_0_rgba(34,197,94,0.04)]"
                     : change.changeType === "removed"
-                      ? "border-red-500/20 bg-red-500/5"
-                      : "border-white/[0.06] bg-white/[0.02]"
+                      ? "border-red-500/20 bg-red-500/[0.06] shadow-[inset_0_1px_0_rgba(239,68,68,0.04)]"
+                      : "border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                 }`}
               >
                 <div className="flex items-center gap-2 mb-1">
