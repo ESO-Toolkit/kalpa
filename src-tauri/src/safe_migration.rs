@@ -769,7 +769,14 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
 
     // Create an automatic pre-restore snapshot (SavedVariables + settings only, fast)
     // so the user has a rollback point if the restore goes wrong partway through.
-    let _ = create_zip_snapshot("Pre-restore", addons_dir, false, true, true);
+    if let Err(e) = create_zip_snapshot("Pre-restore", addons_dir, false, true, true) {
+        return Err(format!(
+            "Failed to create a safety snapshot before restoring. \
+             Your current data would be unrecoverable if the restore fails. \
+             Please free disk space or create a manual snapshot first. Error: {}",
+            e
+        ));
+    }
 
     let store = load_snapshot_store(addons_dir);
     let manifest = store
@@ -831,8 +838,17 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
                 .map_err(|e| format!("Failed to create restore file: {}", e))?;
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("Failed to write restore file: {}", e))?;
-            fs::rename(&tmp_dest, &dest)
-                .map_err(|e| format!("Failed to finalize restored file: {}", e))?;
+            // On Windows, fs::rename fails if the destination exists. Remove it first.
+            if dest.exists() {
+                fs::remove_file(&dest).map_err(|e| {
+                    let _ = fs::remove_file(&tmp_dest);
+                    format!("Failed to replace existing file: {}", e)
+                })?;
+            }
+            fs::rename(&tmp_dest, &dest).map_err(|e| {
+                let _ = fs::remove_file(&tmp_dest);
+                format!("Failed to finalize restored file: {}", e)
+            })?;
             restored += 1;
         }
     }

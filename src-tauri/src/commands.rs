@@ -1903,17 +1903,31 @@ pub fn create_backup(
     let entries =
         fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {}", e))?;
 
+    let mut failed: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() {
             if let Some(name) = path.file_name() {
                 let dest = backup_path.join(name);
-                if fs::copy(&path, &dest).is_ok() {
-                    file_count += 1;
-                    total_size += fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                match fs::copy(&path, &dest) {
+                    Ok(_) => {
+                        file_count += 1;
+                        total_size += fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                    }
+                    Err(e) => {
+                        failed.push(format!("{}: {}", name.to_string_lossy(), e));
+                    }
                 }
             }
         }
+    }
+
+    if !failed.is_empty() {
+        return Err(format!(
+            "Backup incomplete — {} file(s) failed to copy: {}",
+            failed.len(),
+            failed.join(", ")
+        ));
     }
 
     let created_at = metadata::format_timestamp(
@@ -1950,6 +1964,7 @@ pub fn restore_backup(
         .map_err(|e| format!("Failed to create SavedVariables folder: {}", e))?;
 
     let mut restored: u32 = 0;
+    let mut failed: Vec<String> = Vec::new();
     let entries =
         fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {}", e))?;
 
@@ -1958,11 +1973,22 @@ pub fn restore_backup(
         if path.is_file() {
             if let Some(name) = path.file_name() {
                 let dest = sv_dir.join(name);
-                if fs::copy(&path, &dest).is_ok() {
-                    restored += 1;
+                match fs::copy(&path, &dest) {
+                    Ok(_) => restored += 1,
+                    Err(e) => {
+                        failed.push(format!("{}: {}", name.to_string_lossy(), e));
+                    }
                 }
             }
         }
+    }
+
+    if !failed.is_empty() {
+        return Err(format!(
+            "Restore incomplete — {} file(s) failed to copy: {}",
+            failed.len(),
+            failed.join(", ")
+        ));
     }
 
     Ok(restored)

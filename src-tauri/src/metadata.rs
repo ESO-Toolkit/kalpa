@@ -94,7 +94,17 @@ pub fn save_json_with_backup<T: Serialize>(path: &Path, data: &T) -> Result<(), 
     // Write to temp file first, then atomically rename
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, &json).map_err(|e| format!("Failed to write temp file: {}", e))?;
-    fs::rename(&tmp, path).map_err(|e| format!("Failed to finalize write: {}", e))
+    // On Windows, fs::rename fails if the destination exists. Remove it first.
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("Failed to replace existing file: {}", e)
+        })?;
+    }
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("Failed to finalize write: {}", e)
+    })
 }
 
 pub fn format_timestamp(secs: u64) -> String {
