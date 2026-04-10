@@ -1,4 +1,4 @@
-export interface Dependency {
+interface Dependency {
   name: string;
   min_version: number | null;
 }
@@ -120,16 +120,9 @@ export interface CharacterInfo {
   name: string;
 }
 
-export interface MinionMigrationResult {
-  found: boolean;
-  addonCount: number;
-  imported: number;
-  alreadyTracked: number;
-}
-
 // ── Game instance types (multi-region / launcher detection) ──────────────
-export type ClientType = "native" | "steam";
-export type ServerRegion = "na" | "eu" | "pts";
+type ClientType = "native" | "steam";
+type ServerRegion = "na" | "eu" | "pts";
 
 export interface GameInstance {
   /** Region env-folder name: "live" | "liveeu" | "pts" */
@@ -248,7 +241,6 @@ export type FilterMode =
 
 // Predefined tags users can apply to addons
 export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "raid"] as const;
-export type PresetTag = (typeof PRESET_TAGS)[number];
 export type ViewMode = "installed" | "discover";
 export type DiscoverTab = "search" | "popular" | "categories" | "url";
 
@@ -262,7 +254,7 @@ export interface PackAddonEntry {
 
 export type PackType = "addon-pack" | "build-pack" | "roster-pack";
 
-export type PackStatus = "draft" | "published";
+type PackStatus = "draft" | "published";
 
 export interface Pack {
   id: string;
@@ -313,7 +305,7 @@ export interface EsoPackFile {
   sharedBy: string;
 }
 
-export interface EsoPackData {
+interface EsoPackData {
   title: string;
   description: string;
   packType: string;
