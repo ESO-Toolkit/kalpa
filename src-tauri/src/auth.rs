@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ── Constants ────────────────────────────────────────────────────────────
 
 /// The website URL that handles the OAuth flow and passes tokens back.
-const APP_AUTH_URL: &str = "https://eso-toolkit.github.io/dev-previews/pr-925/app-auth";
+const APP_AUTH_URL: &str = "https://esotk.com/app-auth";
 
 const USER_API: &str = "https://www.esologs.com/api/v2/user";
 
