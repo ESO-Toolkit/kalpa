@@ -1504,11 +1504,14 @@ pub fn batch_remove_addons(
     folder_names: Vec<String>,
 ) -> Result<Vec<String>, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    for name in &folder_names {
+        validate_name(name)?;
+    }
+
     let mut store = metadata::load_metadata(&addons_dir);
     let mut removed: Vec<String> = Vec::new();
 
     for name in &folder_names {
-        validate_name(name)?;
         if installer::remove_addon(&addons_dir, name).is_ok() {
             metadata::remove_entry(&mut store, name);
             removed.push(name.clone());
