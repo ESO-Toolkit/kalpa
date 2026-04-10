@@ -33,7 +33,7 @@ function isColorTable(node: SvTreeNode): boolean {
 /**
  * Infer widget type, confidence, and default props from a tree node.
  */
-export function inferWidget(node: SvTreeNode): {
+function inferWidget(node: SvTreeNode): {
   widget: WidgetType;
   confidence: WidgetConfidence;
   props: WidgetProps;
