@@ -38,7 +38,17 @@ function unauthorized(request: Request): Response {
 
 function requireAuth(request: Request, env: Env): boolean {
   const key = request.headers.get("X-API-Key");
-  return key === env.ADMIN_API_KEY;
+  if (!key || !env.ADMIN_API_KEY) return false;
+  const encoder = new TextEncoder();
+  const keyBytes = encoder.encode(key);
+  const expectedBytes = encoder.encode(env.ADMIN_API_KEY);
+  // timingSafeEqual requires equal-length buffers; compare against self if lengths differ
+  // so the call always takes the same time regardless of length mismatch.
+  if (keyBytes.byteLength !== expectedBytes.byteLength) {
+    crypto.subtle.timingSafeEqual(keyBytes, keyBytes);
+    return false;
+  }
+  return crypto.subtle.timingSafeEqual(keyBytes, expectedBytes);
 }
 
 /** Purge the CDN-cached pack list after a mutation. */
