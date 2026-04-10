@@ -1508,6 +1508,7 @@ pub fn batch_remove_addons(
     let mut removed: Vec<String> = Vec::new();
 
     for name in &folder_names {
+        validate_name(name)?;
         if installer::remove_addon(&addons_dir, name).is_ok() {
             metadata::remove_entry(&mut store, name);
             removed.push(name.clone());

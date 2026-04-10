@@ -133,10 +133,6 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
         .set_nonblocking(true)
         .map_err(|e| format!("Failed to set nonblocking: {}", e))?;
 
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("Failed to set nonblocking: {}", e))?;
-
     loop {
         if start.elapsed() > timeout {
             return Err("OAuth login timed out. Please try again.".to_string());
@@ -169,7 +165,7 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
                     // Send success page
                     let html = r#"<!DOCTYPE html><html><head><style>body{font-family:system-ui;background:#0b1220;color:#e5e7eb;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}div{text-align:center}h1{color:#c4a44a;font-size:1.5rem}p{opacity:0.6}</style></head><body><div><h1>Signed in!</h1><p>You can close this tab and return to Kalpa.</p></div></body></html>"#;
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: https://esotk.com\r\nConnection: close\r\n\r\n{}",
                         html.len(),
                         html
                     );
@@ -177,8 +173,8 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
                     let _ = stream.flush();
                     return Ok(tokens);
                 } else if request.contains("OPTIONS") {
-                    // Handle CORS preflight
-                    let response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    // Handle CORS preflight — only esotk.com needs access to this callback
+                    let response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: https://esotk.com\r\nAccess-Control-Allow-Methods: GET\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = stream.write_all(response.as_bytes());
                 } else {
                     let response =
