@@ -677,7 +677,7 @@ fn scan_installed_addons_blocking(
         }
     }
 
-    addons.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    addons.sort_by_key(|a| a.title.to_lowercase());
 
     Ok(addons)
 }
