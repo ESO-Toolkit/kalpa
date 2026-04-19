@@ -16,5 +16,12 @@ id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 [triggers]
 crons = ["0 0 * * *"]
 
+# Service binding — syncs pack mutations to roster-hub-api's D1 database
+# so esotk.com reflects the latest pack data.
+[[services]]
+binding = "ROSTER_HUB"
+service = "roster-hub-api"
+entrypoint = "PackSyncService"
+
 [observability]
 enabled = true

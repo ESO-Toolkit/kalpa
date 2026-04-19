@@ -1,9 +1,70 @@
-import type { Env, Pack, PackType, PackStatus, VoteResponse } from "./types";
+import type { Env, Pack, PackType, PackStatus, SyncPackData, VoteResponse } from "./types";
 import { getPack, getPackIndex, putPack, putPackIndex, getVote, putVote, deleteVote } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
 import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
+
+function toSyncData(pack: Pack): SyncPackData {
+  return {
+    id: pack.id,
+    title: pack.title,
+    description: pack.description,
+    pack_type: pack.pack_type,
+    author_id: pack.author_id,
+    author_name: pack.author_name,
+    is_anonymous: pack.is_anonymous,
+    addons: pack.addons.map((a) => ({
+      esouiId: a.esouiId,
+      name: a.name,
+      required: a.required,
+      note: a.note,
+    })),
+    tags: pack.tags,
+  };
+}
+
+async function syncPackToRosterHub(env: Env, pack: Pack): Promise<void> {
+  if (!env.ROSTER_HUB) return;
+  const isPublished = (pack.status ?? "published") === "published";
+  try {
+    if (isPublished) {
+      await env.ROSTER_HUB.syncPack(toSyncData(pack));
+    } else {
+      await env.ROSTER_HUB.removePack(pack.id);
+    }
+  } catch (err) {
+    console.error(`Pack sync failed [${pack.id}]:`, err);
+  }
+}
+
+async function removeSyncedPack(env: Env, id: string): Promise<void> {
+  if (!env.ROSTER_HUB) return;
+  try {
+    await env.ROSTER_HUB.removePack(id);
+  } catch (err) {
+    console.error(`Pack delete sync failed [${id}]:`, err);
+  }
+}
+
+async function reconcileAllPacks(env: Env): Promise<void> {
+  if (!env.ROSTER_HUB) {
+    console.warn("ROSTER_HUB binding not configured — skipping reconciliation");
+    return;
+  }
+  const index = await getPackIndex(env);
+  if (!index || index.packs.length === 0) return;
+
+  const published = index.packs.filter((p) => (p.status ?? "published") === "published");
+  const publishedData = published.map(toSyncData);
+
+  try {
+    const result = await env.ROSTER_HUB.reconcile(publishedData);
+    console.log(`Reconciliation complete: ${result.synced} synced, ${result.removed} removed`);
+  } catch (err) {
+    console.error("Reconciliation failed:", err);
+  }
+}
 
 const PACKS_PER_PAGE = 20;
 
@@ -229,6 +290,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
+  await syncPackToRosterHub(env, pack);
 
   return json(request, { pack }, 201);
 }
@@ -298,6 +360,7 @@ async function handleUpdatePack(
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
+  await syncPackToRosterHub(env, pack);
 
   return json(request, { pack });
 }
@@ -330,6 +393,7 @@ async function handleDeletePack(
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
+  await removeSyncedPack(env, id);
 
   return json(request, { ok: true });
 }
@@ -503,6 +567,11 @@ export default {
       await handleScheduled(env);
     } catch (err) {
       console.error("Scheduled backup failed:", err);
+    }
+    try {
+      await reconcileAllPacks(env);
+    } catch (err) {
+      console.error("Scheduled reconciliation failed:", err);
     }
   },
 } satisfies ExportedHandler<Env>;
