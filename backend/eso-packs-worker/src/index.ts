@@ -1,68 +1,73 @@
-import type { Env, Pack, PackType, PackStatus, SyncPackData, VoteResponse } from "./types";
+import type { Env, Pack, PackType, PackStatus, VoteResponse } from "./types";
 import { getPack, getPackIndex, putPack, putPackIndex, getVote, putVote, deleteVote } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
 import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
 
-function toSyncData(pack: Pack): SyncPackData {
-  return {
-    id: pack.id,
-    title: pack.title,
-    description: pack.description,
-    pack_type: pack.pack_type,
-    author_id: pack.author_id,
-    author_name: pack.author_name,
-    is_anonymous: pack.is_anonymous,
-    addons: pack.addons.map((a) => ({
-      esouiId: a.esouiId,
-      name: a.name,
-      required: a.required,
-      note: a.note,
-    })),
-    tags: pack.tags,
-  };
-}
+// ── D1 dual-write helpers ─────────────────────────────────────────
+// Both workers share the same Cloudflare account. kalpa-pack-hub binds
+// directly to roster-hub-db (D1) so every KV mutation is atomically
+// mirrored — no async sync, no reconciliation, no deployment ordering.
 
-async function syncPackToRosterHub(env: Env, pack: Pack): Promise<void> {
-  if (!env.ROSTER_HUB) return;
+async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
+  if (!env.ROSTER_HUB_DB) return;
   const isPublished = (pack.status ?? "published") === "published";
   try {
     if (isPublished) {
-      await env.ROSTER_HUB.syncPack(toSyncData(pack));
+      const addonsJson = JSON.stringify(pack.addons.map((a) => ({
+        esouiId: a.esouiId,
+        name: a.name,
+        required: a.required,
+        note: a.note,
+      })));
+      await env.ROSTER_HUB_DB
+        .prepare(
+          `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+           ON CONFLICT(id) DO UPDATE SET
+             title = excluded.title,
+             description = excluded.description,
+             pack_type = excluded.pack_type,
+             addons = excluded.addons,
+             is_anonymous = excluded.is_anonymous,
+             author_name = excluded.author_name,
+             updated_at = datetime('now')`,
+        )
+        .bind(
+          pack.id,
+          pack.author_id,
+          pack.author_name,
+          pack.is_anonymous ? 1 : 0,
+          pack.title,
+          pack.description,
+          pack.pack_type,
+          addonsJson,
+        )
+        .run();
+
+      // Replace tags
+      const tagStmts = [
+        env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
+        ...pack.tags.map((tag) =>
+          env.ROSTER_HUB_DB!.prepare("INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)").bind(pack.id, tag),
+        ),
+      ];
+      await env.ROSTER_HUB_DB.batch(tagStmts);
     } else {
-      await env.ROSTER_HUB.removePack(pack.id);
+      await env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(pack.id).run();
     }
   } catch (err) {
-    console.error(`Pack sync failed [${pack.id}]:`, err);
+    console.error(`D1 sync failed [${pack.id}]:`, err);
   }
 }
 
-async function removeSyncedPack(env: Env, id: string): Promise<void> {
-  if (!env.ROSTER_HUB) return;
+async function d1DeletePack(env: Env, id: string): Promise<void> {
+  if (!env.ROSTER_HUB_DB) return;
   try {
-    await env.ROSTER_HUB.removePack(id);
+    await env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id).run();
   } catch (err) {
-    console.error(`Pack delete sync failed [${id}]:`, err);
-  }
-}
-
-async function reconcileAllPacks(env: Env): Promise<void> {
-  if (!env.ROSTER_HUB) {
-    console.warn("ROSTER_HUB binding not configured — skipping reconciliation");
-    return;
-  }
-  const index = await getPackIndex(env);
-  if (!index || index.packs.length === 0) return;
-
-  const published = index.packs.filter((p) => (p.status ?? "published") === "published");
-  const publishedData = published.map(toSyncData);
-
-  try {
-    const result = await env.ROSTER_HUB.reconcile(publishedData);
-    console.log(`Reconciliation complete: ${result.synced} synced, ${result.removed} removed`);
-  } catch (err) {
-    console.error("Reconciliation failed:", err);
+    console.error(`D1 delete failed [${id}]:`, err);
   }
 }
 
@@ -290,7 +295,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
-  await syncPackToRosterHub(env, pack);
+  await d1UpsertPack(env, pack);
 
   return json(request, { pack }, 201);
 }
@@ -360,7 +365,7 @@ async function handleUpdatePack(
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
-  await syncPackToRosterHub(env, pack);
+  await d1UpsertPack(env, pack);
 
   return json(request, { pack });
 }
@@ -393,7 +398,7 @@ async function handleDeletePack(
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
-  await removeSyncedPack(env, id);
+  await d1DeletePack(env, id);
 
   return json(request, { ok: true });
 }
@@ -567,11 +572,6 @@ export default {
       await handleScheduled(env);
     } catch (err) {
       console.error("Scheduled backup failed:", err);
-    }
-    try {
-      await reconcileAllPacks(env);
-    } catch (err) {
-      console.error("Scheduled reconciliation failed:", err);
     }
   },
 } satisfies ExportedHandler<Env>;

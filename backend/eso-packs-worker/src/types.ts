@@ -76,30 +76,11 @@ export interface ShareCodeResponse {
   deepLink: string;
 }
 
-// ── Sync data sent to roster-hub-api via Service Binding RPC ─────────
-export interface SyncPackData {
-  id: string;
-  title: string;
-  description: string;
-  pack_type: string;
-  author_id: string;
-  author_name: string;
-  is_anonymous: boolean;
-  addons: { esouiId: number; name: string; required?: boolean; note?: string }[];
-  tags: string[];
-}
-
-export interface PackSyncBinding {
-  syncPack(data: SyncPackData): Promise<void>;
-  removePack(id: string): Promise<void>;
-  reconcile(published: SyncPackData[]): Promise<{ synced: number; removed: number }>;
-}
-
 // ── Env bindings ──────────────────────────────────────────────────────
 export interface Env {
   ESO_PACKS: KVNamespace;
   ADMIN_API_KEY: string;
   ALLOW_SEED?: string;
-  /** Service Binding RPC to roster-hub-api's PackSyncService entrypoint */
-  ROSTER_HUB?: PackSyncBinding;
+  /** Shared D1 binding to roster-hub-db — same database roster-hub-api uses */
+  ROSTER_HUB_DB?: D1Database;
 }

@@ -16,12 +16,13 @@ id = "ad8677b4cef048d68de9f8f4d0ef74a9"
 [triggers]
 crons = ["0 0 * * *"]
 
-# Service binding — syncs pack mutations to roster-hub-api's D1 database
-# so esotk.com reflects the latest pack data.
-[[services]]
-binding = "ROSTER_HUB"
-service = "roster-hub-api"
-entrypoint = "PackSyncService"
+# Shared D1 binding — same database roster-hub-api uses.
+# Dual-write: every KV mutation is mirrored to D1 inline so
+# esotk.com always reflects the latest pack data.
+[[d1_databases]]
+binding = "ROSTER_HUB_DB"
+database_name = "roster-hub-db"
+database_id = "22ff9f6a-ddb4-43bc-a0ef-89881124cfa2"
 
 [observability]
 enabled = true
