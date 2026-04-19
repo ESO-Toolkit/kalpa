@@ -87,6 +87,10 @@ export function AppHeader({
   return (
     <header
       data-tauri-drag-region
+      onDoubleClick={(e) => {
+        if ((e.target as HTMLElement).closest('button, a, input, [role="button"]')) return;
+        void getCurrentWindow().toggleMaximize();
+      }}
       className="relative z-20 flex items-center border-b border-white/[0.06] bg-[rgba(10,18,36,0.85)] px-4 py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2]"
     >
       <div className="absolute right-0 bottom-0 left-0 h-px bg-gradient-to-r from-transparent via-[#c4a44a]/30 to-transparent" />
