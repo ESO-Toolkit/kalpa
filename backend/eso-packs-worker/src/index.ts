@@ -5,6 +5,72 @@ import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
 
+// ── D1 dual-write helpers ─────────────────────────────────────────
+// Both workers share the same Cloudflare account. kalpa-pack-hub binds
+// directly to roster-hub-db (D1) so every KV mutation is atomically
+// mirrored — no async sync, no reconciliation, no deployment ordering.
+
+async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
+  if (!env.ROSTER_HUB_DB) return;
+  const isPublished = (pack.status ?? "published") === "published";
+  try {
+    if (isPublished) {
+      const addonsJson = JSON.stringify(pack.addons.map((a) => ({
+        esouiId: a.esouiId,
+        name: a.name,
+        required: a.required,
+        note: a.note,
+      })));
+      await env.ROSTER_HUB_DB
+        .prepare(
+          `INSERT INTO packs (id, author_id, author_name, is_anonymous, title, description, pack_type, addons, vote_count, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+           ON CONFLICT(id) DO UPDATE SET
+             title = excluded.title,
+             description = excluded.description,
+             pack_type = excluded.pack_type,
+             addons = excluded.addons,
+             is_anonymous = excluded.is_anonymous,
+             author_name = excluded.author_name,
+             updated_at = datetime('now')`,
+        )
+        .bind(
+          pack.id,
+          pack.author_id,
+          pack.author_name,
+          pack.is_anonymous ? 1 : 0,
+          pack.title,
+          pack.description,
+          pack.pack_type,
+          addonsJson,
+        )
+        .run();
+
+      // Replace tags
+      const tagStmts = [
+        env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
+        ...pack.tags.map((tag) =>
+          env.ROSTER_HUB_DB!.prepare("INSERT OR IGNORE INTO pack_tags (pack_id, tag) VALUES (?, ?)").bind(pack.id, tag),
+        ),
+      ];
+      await env.ROSTER_HUB_DB.batch(tagStmts);
+    } else {
+      await env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(pack.id).run();
+    }
+  } catch (err) {
+    console.error(`D1 sync failed [${pack.id}]:`, err);
+  }
+}
+
+async function d1DeletePack(env: Env, id: string): Promise<void> {
+  if (!env.ROSTER_HUB_DB) return;
+  try {
+    await env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id).run();
+  } catch (err) {
+    console.error(`D1 delete failed [${id}]:`, err);
+  }
+}
+
 const PACKS_PER_PAGE = 20;
 
 function json(
@@ -229,6 +295,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
+  await d1UpsertPack(env, pack);
 
   return json(request, { pack }, 201);
 }
@@ -298,6 +365,7 @@ async function handleUpdatePack(
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
+  await d1UpsertPack(env, pack);
 
   return json(request, { pack });
 }
@@ -330,6 +398,7 @@ async function handleDeletePack(
   await putPackIndex(env, index);
 
   await invalidatePackListCache(url);
+  await d1DeletePack(env, id);
 
   return json(request, { ok: true });
 }

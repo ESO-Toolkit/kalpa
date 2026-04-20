@@ -81,4 +81,6 @@ export interface Env {
   ESO_PACKS: KVNamespace;
   ADMIN_API_KEY: string;
   ALLOW_SEED?: string;
+  /** Shared D1 binding to roster-hub-db — same database roster-hub-api uses */
+  ROSTER_HUB_DB?: D1Database;
 }
