@@ -27,8 +27,8 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
-import { Tabs, TabsIndicator, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { Tabs, TabsIndicator, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { motion, AnimatePresence } from "motion/react";
 import {
   Select,
   SelectContent,
@@ -2239,53 +2239,82 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
             <TabsTrigger value="editor">Editor</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="overview" className="flex-1 min-h-0 overflow-y-auto">
-            <Fade className="h-full">
-              <OverviewTab
-                files={files}
-                loading={loading}
-                installedFolders={installedFolders}
-                onRefresh={() => void loadFiles()}
-                onSelectFile={handleSelectFile}
-                onSwitchToCleanup={() => setActiveTab("cleanup")}
-              />
-            </Fade>
-          </TabsContent>
-
-          <TabsContent value="cleanup" className="flex-1 min-h-0 overflow-y-auto">
-            <Fade className="h-full">
-              <CleanupTab
-                files={files}
-                installedFolders={installedFolders}
-                addonsPath={addonsPath}
-                onRefresh={() => void loadFiles()}
-              />
-            </Fade>
-          </TabsContent>
-
-          <TabsContent value="copy" className="flex-1 min-h-0 overflow-y-auto">
-            <Fade className="h-full">
-              <CopyProfileTab
-                files={files}
-                characters={characters}
-                addonsPath={addonsPath}
-                onRefresh={() => void loadFiles()}
-              />
-            </Fade>
-          </TabsContent>
-
-          <TabsContent value="editor" className="flex-1 min-h-0 overflow-y-auto">
-            <Fade className="h-full">
-              <EditorTab
-                files={files}
-                addonsPath={addonsPath}
-                initialFile={editorFile}
-                esoRunning={esoRunning}
-                characters={characters}
-                onDirtyChange={handleDirtyChange}
-              />
-            </Fade>
-          </TabsContent>
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <AnimatePresence mode="wait">
+              {activeTab === "overview" && (
+                <motion.div
+                  key="overview"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  className="h-full"
+                >
+                  <OverviewTab
+                    files={files}
+                    loading={loading}
+                    installedFolders={installedFolders}
+                    onRefresh={() => void loadFiles()}
+                    onSelectFile={handleSelectFile}
+                    onSwitchToCleanup={() => setActiveTab("cleanup")}
+                  />
+                </motion.div>
+              )}
+              {activeTab === "cleanup" && (
+                <motion.div
+                  key="cleanup"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  className="h-full"
+                >
+                  <CleanupTab
+                    files={files}
+                    installedFolders={installedFolders}
+                    addonsPath={addonsPath}
+                    onRefresh={() => void loadFiles()}
+                  />
+                </motion.div>
+              )}
+              {activeTab === "copy" && (
+                <motion.div
+                  key="copy"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  className="h-full"
+                >
+                  <CopyProfileTab
+                    files={files}
+                    characters={characters}
+                    addonsPath={addonsPath}
+                    onRefresh={() => void loadFiles()}
+                  />
+                </motion.div>
+              )}
+              {activeTab === "editor" && (
+                <motion.div
+                  key="editor"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  className="h-full"
+                >
+                  <EditorTab
+                    files={files}
+                    addonsPath={addonsPath}
+                    initialFile={editorFile}
+                    esoRunning={esoRunning}
+                    characters={characters}
+                    onDirtyChange={handleDirtyChange}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </Tabs>
 
         <DialogFooter>

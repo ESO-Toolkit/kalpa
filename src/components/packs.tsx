@@ -853,14 +853,14 @@ export function Packs({
               onExportFile={() => selectedPack && handleExportPackFile(selectedPack)}
             />
           ) : (
-            <AnimatePresence initial={false}>
+            <AnimatePresence mode="wait" initial={false}>
               {tab === "browse" && (
                 <motion.div
                   key="browse"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.15 }}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
                   className="flex flex-col gap-3 min-h-0"
                 >
                   {/* Import toggle button */}
@@ -940,10 +940,10 @@ export function Packs({
               {tab === "create" && (
                 <motion.div
                   key="create"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.15 }}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
                 >
                   <PackCreateView
                     installedAddons={installedAddons}
@@ -987,10 +987,10 @@ export function Packs({
               {tab === "my-packs" && (
                 <motion.div
                   key="my-packs"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.15 }}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
                 >
                   <MyPacksView
                     packs={myPacks}

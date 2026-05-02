@@ -9,7 +9,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsIndicator, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsIndicator, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { formatBytes } from "@/lib/utils";
@@ -21,7 +21,11 @@ interface SafetyCenterProps {
   onRefresh: () => void;
 }
 
+type SafetyTab = "snapshots" | "integrity" | "log";
+
 export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterProps) {
+  const [activeTab, setActiveTab] = useState<SafetyTab>("snapshots");
+
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg h-[70vh] flex flex-col">
@@ -29,7 +33,11 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
           <DialogTitle>Safety Center</DialogTitle>
         </DialogHeader>
 
-        <Tabs defaultValue="snapshots" className="flex-1 min-h-0 flex flex-col">
+        <Tabs
+          value={activeTab}
+          onValueChange={(v) => setActiveTab(v as SafetyTab)}
+          className="flex-1 min-h-0 flex flex-col"
+        >
           <TabsList className="w-full shrink-0">
             <TabsIndicator />
             <TabsTrigger value="snapshots" className="flex-1">
@@ -43,21 +51,43 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="snapshots" className="flex-1 min-h-0 overflow-y-auto">
-            <Fade className="h-full">
-              <SnapshotsTab addonsPath={addonsPath} onRefresh={onRefresh} />
-            </Fade>
-          </TabsContent>
-          <TabsContent value="integrity" className="flex-1 min-h-0 overflow-y-auto">
-            <Fade className="h-full">
-              <IntegrityTab addonsPath={addonsPath} />
-            </Fade>
-          </TabsContent>
-          <TabsContent value="log" className="flex-1 min-h-0 overflow-y-auto">
-            <Fade className="h-full">
-              <LogTab addonsPath={addonsPath} />
-            </Fade>
-          </TabsContent>
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <AnimatePresence mode="wait">
+              {activeTab === "snapshots" && (
+                <motion.div
+                  key="snapshots"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                >
+                  <SnapshotsTab addonsPath={addonsPath} onRefresh={onRefresh} />
+                </motion.div>
+              )}
+              {activeTab === "integrity" && (
+                <motion.div
+                  key="integrity"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                >
+                  <IntegrityTab addonsPath={addonsPath} />
+                </motion.div>
+              )}
+              {activeTab === "log" && (
+                <motion.div
+                  key="log"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                >
+                  <LogTab addonsPath={addonsPath} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </Tabs>
 
         <DialogFooter>
