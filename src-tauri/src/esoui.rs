@@ -196,7 +196,7 @@ fn clean_description(s: &str) -> String {
     let no_bbcode = re_bb.replace_all(&decoded, "");
 
     static RE_HTML: OnceLock<Regex> = OnceLock::new();
-    let re_html = RE_HTML.get_or_init(|| Regex::new(r"<[^>]+>").unwrap());
+    let re_html = RE_HTML.get_or_init(|| Regex::new(r"</?[A-Za-z][^>]*>").unwrap());
     re_html.replace_all(&no_bbcode, "").trim().to_string()
 }
 
@@ -991,6 +991,12 @@ mod tests {
     #[test]
     fn plain_text_passthrough() {
         assert_eq!(clean_description("hello world"), "hello world");
+    }
+
+    #[test]
+    fn preserve_decoded_angle_brackets_in_text() {
+        assert_eq!(clean_description("x &lt; 2 &gt; y"), "x < 2 > y");
+        assert_eq!(clean_description("a &lt;= b"), "a <= b");
     }
 
     #[test]
