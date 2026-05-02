@@ -861,7 +861,13 @@ function App() {
     }
     setSelectedFolders(new Set());
 
+    for (const addon of removedAddons) {
+      const existing = pendingRemovalsRef.current.get(addon.folderName);
+      if (existing) clearTimeout(existing.timer);
+    }
+
     const timer = setTimeout(() => {
+      for (const fn of folderNames) pendingRemovalsRef.current.delete(fn);
       void invokeOrThrow<string[]>("batch_remove_addons", {
         addonsPath,
         folderNames,
@@ -871,11 +877,16 @@ function App() {
       });
     }, 5000);
 
+    for (const addon of removedAddons) {
+      pendingRemovalsRef.current.set(addon.folderName, { timer, addon });
+    }
+
     toast(`Removed ${count} addon${count !== 1 ? "s" : ""}`, {
       action: {
         label: "Undo",
         onClick: () => {
           clearTimeout(timer);
+          for (const fn of folderNames) pendingRemovalsRef.current.delete(fn);
           setAddons((prev) => [...prev, ...removedAddons]);
           toast.success(`Restored ${count} addon${count !== 1 ? "s" : ""}`);
         },
