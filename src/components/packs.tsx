@@ -860,7 +860,7 @@ export function Packs({
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
                   className="flex flex-col gap-3 min-h-0"
                 >
                   {/* Import toggle button */}
@@ -943,7 +943,7 @@ export function Packs({
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
                 >
                   <PackCreateView
                     installedAddons={installedAddons}
@@ -990,7 +990,7 @@ export function Packs({
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
                 >
                   <MyPacksView
                     packs={myPacks}

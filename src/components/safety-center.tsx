@@ -59,7 +59,7 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
                 >
                   <SnapshotsTab addonsPath={addonsPath} onRefresh={onRefresh} />
                 </motion.div>
@@ -70,7 +70,7 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
                 >
                   <IntegrityTab addonsPath={addonsPath} />
                 </motion.div>
@@ -81,7 +81,7 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
                   initial={{ opacity: 0, y: 4 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 30, duration: 0.15 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
                 >
                   <LogTab addonsPath={addonsPath} />
                 </motion.div>
