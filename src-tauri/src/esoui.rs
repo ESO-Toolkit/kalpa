@@ -192,7 +192,45 @@ pub struct EsouiAddonDetail {
 fn strip_bbcode(s: &str) -> String {
     static RE_BBCODE: OnceLock<Regex> = OnceLock::new();
     let re = RE_BBCODE.get_or_init(|| Regex::new(r"\[/?[A-Za-z]+[^\]]*\]").unwrap());
-    re.replace_all(s, "").trim().to_string()
+    let stripped = re.replace_all(s, "");
+    decode_html_entities(&stripped).trim().to_string()
+}
+
+fn decode_html_entities(s: &str) -> String {
+    static RE_ENTITY: OnceLock<Regex> = OnceLock::new();
+    let re = RE_ENTITY.get_or_init(|| Regex::new(r"&(#(\d+)|#x([0-9a-fA-F]+)|(\w+));").unwrap());
+    re.replace_all(s, |caps: &regex::Captures| {
+        if let Some(decimal) = caps.get(2) {
+            if let Some(ch) = decimal
+                .as_str()
+                .parse::<u32>()
+                .ok()
+                .and_then(char::from_u32)
+            {
+                return ch.to_string();
+            }
+        } else if let Some(hex) = caps.get(3) {
+            if let Some(ch) = u32::from_str_radix(hex.as_str(), 16)
+                .ok()
+                .and_then(char::from_u32)
+            {
+                return ch.to_string();
+            }
+        } else if let Some(name) = caps.get(4) {
+            return match name.as_str() {
+                "amp" => "&",
+                "lt" => "<",
+                "gt" => ">",
+                "quot" => "\"",
+                "apos" => "'",
+                "nbsp" => " ",
+                _ => return caps[0].to_string(),
+            }
+            .to_string();
+        }
+        caps[0].to_string()
+    })
+    .into_owned()
 }
 
 /// Format a number with comma separators (e.g., 1234567 → "1,234,567").
