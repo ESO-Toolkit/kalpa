@@ -22,6 +22,8 @@ import {
   ArrowUpIcon,
   DownloadIcon,
 } from "lucide-react";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 
 export function PackListView({
   packs,
@@ -101,35 +103,41 @@ export function PackListView({
 
       <div className="flex-1 overflow-y-auto space-y-2 min-h-0 max-h-[400px] px-1 -mx-1 py-1 -my-1">
         {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-          </div>
+          <Fade>
+            <div className="flex items-center justify-center py-12">
+              <div className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+            </div>
+          </Fade>
         ) : error ? (
-          <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-            <div className="rounded-xl bg-red-500/[0.08] border border-red-500/[0.15] p-4 shadow-[0_0_24px_rgba(239,68,68,0.08),inset_0_1px_0_rgba(239,68,68,0.06)]">
-              <AlertCircleIcon className="size-8 text-red-400/70" />
+          <Fade>
+            <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+              <div className="rounded-xl bg-red-500/[0.08] border border-red-500/[0.15] p-4 shadow-[0_0_24px_rgba(239,68,68,0.08),inset_0_1px_0_rgba(239,68,68,0.06)]">
+                <AlertCircleIcon className="size-8 text-red-400/70" />
+              </div>
+              <p className="font-heading text-sm font-medium text-red-400">Could not load packs</p>
+              <p className="text-xs text-muted-foreground/60 max-w-[280px]">{error}</p>
+              <Button variant="outline" size="sm" onClick={onRetry} className="mt-1">
+                <RefreshCwIcon className="size-3.5 mr-1.5" />
+                Retry
+              </Button>
             </div>
-            <p className="font-heading text-sm font-medium text-red-400">Could not load packs</p>
-            <p className="text-xs text-muted-foreground/60 max-w-[280px]">{error}</p>
-            <Button variant="outline" size="sm" onClick={onRetry} className="mt-1">
-              <RefreshCwIcon className="size-3.5 mr-1.5" />
-              Retry
-            </Button>
-          </div>
+          </Fade>
         ) : packs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-            <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-4 shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
-              <SparklesIcon className="size-8 text-[#c4a44a]/60" />
+          <Fade>
+            <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+              <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-4 shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
+                <SparklesIcon className="size-8 text-[#c4a44a]/60" />
+              </div>
+              <p className="font-heading text-sm font-medium">
+                {searchQuery ? "No packs match your search" : "The Pack Hub is empty"}
+              </p>
+              <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+                {searchQuery
+                  ? "Try different keywords or clear filters"
+                  : "Be the first to share an addon pack with the community!"}
+              </p>
             </div>
-            <p className="font-heading text-sm font-medium">
-              {searchQuery ? "No packs match your search" : "The Pack Hub is empty"}
-            </p>
-            <p className="text-xs text-muted-foreground/60 max-w-[260px]">
-              {searchQuery
-                ? "Try different keywords or clear filters"
-                : "Be the first to share an addon pack with the community!"}
-            </p>
-          </div>
+          </Fade>
         ) : (
           packs.map((pack) => {
             const accent = PACK_TYPE_ACCENT[pack.packType] ?? PACK_TYPE_ACCENT["addon-pack"];
@@ -200,7 +208,11 @@ export function PackListView({
                         strokeWidth={pack.userVoted ? 2.5 : 2}
                       />
                       <span className="tabular-nums leading-none">
-                        {pack.voteCount > 0 ? pack.voteCount : 0}
+                        <CountingNumber
+                          number={pack.voteCount > 0 ? pack.voteCount : 0}
+                          transition={{ stiffness: 200, damping: 25 }}
+                          initiallyStable
+                        />
                       </span>
                     </button>
                   </SimpleTooltip>

@@ -2,6 +2,7 @@ import { Button as ButtonPrimitive } from "@base-ui/react/button";
 import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/utils";
+import { Shine } from "@/components/animate-ui/primitives/effects/shine";
 
 const buttonVariants = cva(
   "group/button inline-flex shrink-0 items-center justify-center rounded-lg border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-all duration-150 ease-[cubic-bezier(0.4,0,0.2,1)] outline-none select-none active:not-aria-[haspopup]:translate-y-px active:not-aria-[haspopup]:scale-[0.98] disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
@@ -47,13 +48,25 @@ function Button({
   size = "default",
   ...props
 }: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
-  return (
+  const isGold = variant === "default" || variant === undefined;
+
+  const btn = (
     <ButtonPrimitive
       data-slot="button"
       className={cn(buttonVariants({ variant, size, className }))}
       {...props}
     />
   );
+
+  if (isGold) {
+    return (
+      <Shine asChild enableOnHover color="rgba(255,255,255,0.4)" duration={600} opacity={0.35}>
+        {btn}
+      </Shine>
+    );
+  }
+
+  return btn;
 }
 
 export { Button, buttonVariants };

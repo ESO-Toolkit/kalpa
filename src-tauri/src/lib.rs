@@ -29,6 +29,8 @@ pub struct ApprovedAddonsPath {
 
 pub struct AllowedAddonsPath(pub Mutex<Option<ApprovedAddonsPath>>);
 
+pub struct TrayState(pub Mutex<Option<tauri::tray::TrayIcon>>);
+
 /// Actions that can be triggered by a deep link URL.
 #[derive(Clone)]
 enum DeepLinkAction {
@@ -129,6 +131,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
         .manage(auth::AuthState(Mutex::new(None)))
+        .manage(TrayState(Mutex::new(None)))
         .manage(PendingDeepLink(Mutex::new(
             PendingDeepLinkPayload::default(),
         )))
@@ -152,6 +155,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(desktop)]
             app.handle()
@@ -174,7 +178,7 @@ pub fn run() {
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
-            let _tray = TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .icon(
                     app.default_window_icon()
                         .cloned()
@@ -209,6 +213,10 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            if let Ok(mut guard) = app.state::<TrayState>().0.lock() {
+                *guard = Some(tray);
+            }
 
             // Load saved auth tokens from store
             {
@@ -308,6 +316,7 @@ pub fn run() {
             commands::restore_sv_backup,
             commands::preview_sv_save,
             commands::detect_game_instances,
+            commands::update_tray_tooltip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

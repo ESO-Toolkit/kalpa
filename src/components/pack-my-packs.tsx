@@ -11,6 +11,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { motion, AnimatePresence } from "motion/react";
 import {
   Select,
   SelectContent,
@@ -105,27 +107,29 @@ export function MyPacksView({
   // Auth gate
   if (!authUser) {
     return (
-      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-        <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-5 shadow-[0_0_32px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
-          <PackageIcon className="size-10 text-[#c4a44a]/60" />
+      <Fade>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-5 shadow-[0_0_32px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
+            <PackageIcon className="size-10 text-[#c4a44a]/60" />
+          </div>
+          <div>
+            <p className="font-heading text-sm font-semibold">Sign in to manage your packs</p>
+            <p className="mt-1 text-xs text-muted-foreground/60 max-w-[260px]">
+              Sign in with your ESO Logs account to view, edit, and manage your packs and drafts.
+            </p>
+          </div>
+          <Button onClick={handleLogin} disabled={loggingIn} className="mt-1">
+            {loggingIn ? (
+              <>
+                <Loader2Icon className="size-4 animate-spin mr-1.5" />
+                Signing in...
+              </>
+            ) : (
+              "Sign in with ESO Logs"
+            )}
+          </Button>
         </div>
-        <div>
-          <p className="font-heading text-sm font-semibold">Sign in to manage your packs</p>
-          <p className="mt-1 text-xs text-muted-foreground/60 max-w-[260px]">
-            Sign in with your ESO Logs account to view, edit, and manage your packs and drafts.
-          </p>
-        </div>
-        <Button onClick={handleLogin} disabled={loggingIn} className="mt-1">
-          {loggingIn ? (
-            <>
-              <Loader2Icon className="size-4 animate-spin mr-1.5" />
-              Signing in...
-            </>
-          ) : (
-            "Sign in with ESO Logs"
-          )}
-        </Button>
-      </div>
+      </Fade>
     );
   }
 
@@ -134,7 +138,7 @@ export function MyPacksView({
       {/* Sub-tab toggle: Created / Installed */}
       <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
         <div
-          className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+          className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-[left] duration-200 ease-out"
           style={{
             left: subTab === "created" ? "2px" : "calc(50% + 2px)",
             width: "calc(50% - 4px)",
@@ -217,27 +221,31 @@ export function MyPacksView({
                 <div className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
               </div>
             ) : packs.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-                <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-4 shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
-                  <SparklesIcon className="size-8 text-[#c4a44a]/60" />
+              <Fade>
+                <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+                  <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-4 shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
+                    <SparklesIcon className="size-8 text-[#c4a44a]/60" />
+                  </div>
+                  <p className="font-heading text-sm font-medium">No packs yet</p>
+                  <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+                    You haven&apos;t created any packs yet. Share your favourite addon collections
+                    with the community!
+                  </p>
+                  <Button size="sm" onClick={onCreatePack} className="mt-1">
+                    <PlusIcon className="size-3.5 mr-1.5" />
+                    Create your first pack
+                  </Button>
                 </div>
-                <p className="font-heading text-sm font-medium">No packs yet</p>
-                <p className="text-xs text-muted-foreground/60 max-w-[260px]">
-                  You haven&apos;t created any packs yet. Share your favourite addon collections
-                  with the community!
-                </p>
-                <Button size="sm" onClick={onCreatePack} className="mt-1">
-                  <PlusIcon className="size-3.5 mr-1.5" />
-                  Create your first pack
-                </Button>
-              </div>
+              </Fade>
             ) : filteredPacks.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-                <p className="font-heading text-sm font-medium">No packs match your filters</p>
-                <p className="text-xs text-muted-foreground/60 max-w-[260px]">
-                  Try different keywords or clear your filters.
-                </p>
-              </div>
+              <Fade>
+                <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+                  <p className="font-heading text-sm font-medium">No packs match your filters</p>
+                  <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+                    Try different keywords or clear your filters.
+                  </p>
+                </div>
+              </Fade>
             ) : (
               filteredPacks.map((pack) => {
                 const accent = PACK_TYPE_ACCENT[pack.packType] ?? PACK_TYPE_ACCENT["addon-pack"];
@@ -368,28 +376,40 @@ export function MyPacksView({
                     </div>
 
                     {/* Inline delete confirmation */}
-                    {isConfirmingDelete && (
-                      <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/25 bg-red-500/[0.08] px-3 py-2 overflow-hidden transition-all duration-200 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
-                        <span className="text-xs text-red-400 font-medium">Delete this pack?</span>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setConfirmDeleteId(null)}
-                            className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors px-2 py-0.5"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => {
-                              setConfirmDeleteId(null);
-                              onDelete(pack.id);
-                            }}
-                            className="text-xs font-semibold text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 rounded-md px-2.5 py-0.5 transition-all duration-150"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                    <AnimatePresence>
+                      {isConfirmingDelete && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          exit={{ opacity: 0, height: 0 }}
+                          transition={{ duration: 0.15 }}
+                          className="overflow-hidden"
+                        >
+                          <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/25 bg-red-500/[0.08] px-3 py-2 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
+                            <span className="text-xs text-red-400 font-medium">
+                              Delete this pack?
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setConfirmDeleteId(null)}
+                                className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors px-2 py-0.5"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setConfirmDeleteId(null);
+                                  onDelete(pack.id);
+                                }}
+                                className="text-xs font-semibold text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 rounded-md px-2.5 py-0.5 transition-all duration-150"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 );
               })
@@ -421,15 +441,17 @@ export function MyPacksView({
         /* -- Installed packs sub-tab -- */
         <div className="flex-1 overflow-y-auto space-y-2 min-h-0 max-h-[400px] px-1 -mx-1 py-1 -my-1">
           {installedPackRefs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-              <div className="rounded-xl bg-sky-400/[0.08] border border-sky-400/[0.15] p-4 shadow-[0_0_24px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(56,189,248,0.08)]">
-                <DownloadIcon className="size-8 text-sky-400/60" />
+            <Fade>
+              <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+                <div className="rounded-xl bg-sky-400/[0.08] border border-sky-400/[0.15] p-4 shadow-[0_0_24px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(56,189,248,0.08)]">
+                  <DownloadIcon className="size-8 text-sky-400/60" />
+                </div>
+                <p className="font-heading text-sm font-medium">No installed packs yet</p>
+                <p className="text-xs text-muted-foreground/60 max-w-[260px]">
+                  Packs you install from the Browse tab will appear here for easy reference.
+                </p>
               </div>
-              <p className="font-heading text-sm font-medium">No installed packs yet</p>
-              <p className="text-xs text-muted-foreground/60 max-w-[260px]">
-                Packs you install from the Browse tab will appear here for easy reference.
-              </p>
-            </div>
+            </Fade>
           ) : (
             installedPackRefs.map((ref) => {
               const accent = PACK_TYPE_ACCENT[ref.packType] ?? PACK_TYPE_ACCENT["addon-pack"];

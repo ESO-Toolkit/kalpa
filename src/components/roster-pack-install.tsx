@@ -8,9 +8,12 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { cn, decodeHtml } from "@/lib/utils";
 import {
@@ -97,6 +100,7 @@ export function RosterPackInstall({
   }, [packId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchPack();
   }, [fetchPack]);
 
@@ -104,6 +108,7 @@ export function RosterPackInstall({
   // but only when not mid-install (install loop manages its own status)
   useEffect(() => {
     if (!pack || installing) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAddonStates(
       pack.addons.map((addon) => ({
         addon,
@@ -247,27 +252,31 @@ export function RosterPackInstall({
 
         <div className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1">
           {loading && (
-            <div className="flex items-center justify-center py-8">
-              <Loader2Icon className="h-6 w-6 animate-spin text-[#c4a44a]" />
-            </div>
+            <Fade>
+              <div className="flex items-center justify-center py-8">
+                <Loader2Icon className="h-6 w-6 animate-spin text-[#c4a44a]" />
+              </div>
+            </Fade>
           )}
 
           {error && (
-            <GlassPanel variant="subtle" className="flex flex-col gap-2 p-3">
-              <div className="flex items-center gap-2 text-red-400">
-                <AlertCircleIcon className="h-4 w-4 shrink-0" />
-                <span className="text-sm">{error}</span>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="self-start"
-                onClick={() => void fetchPack()}
-              >
-                <RefreshCwIcon className="mr-1.5 h-3.5 w-3.5" />
-                Retry
-              </Button>
-            </GlassPanel>
+            <Fade>
+              <GlassPanel variant="subtle" className="flex flex-col gap-2 p-3">
+                <div className="flex items-center gap-2 text-red-400">
+                  <AlertCircleIcon className="h-4 w-4 shrink-0" />
+                  <span className="text-sm">{error}</span>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="self-start"
+                  onClick={() => void fetchPack()}
+                >
+                  <RefreshCwIcon className="mr-1.5 h-3.5 w-3.5" />
+                  Retry
+                </Button>
+              </GlassPanel>
+            </Fade>
           )}
 
           {pack && !loading && addonStates.length === 0 && (
@@ -289,23 +298,11 @@ export function RosterPackInstall({
                     )}
                   >
                     {/* Selection checkbox */}
-                    <button
-                      type="button"
+                    <Checkbox
+                      checked={selected || status === "installed"}
+                      onCheckedChange={() => toggleAddon(addon.esouiId)}
                       disabled={installing || status === "installed" || addon.required}
-                      onClick={() => toggleAddon(addon.esouiId)}
-                      className={cn(
-                        "flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors",
-                        selected || status === "installed"
-                          ? "border-sky-400 bg-sky-400/20"
-                          : "border-white/20 bg-white/[0.03]",
-                        (installing || status === "installed" || addon.required) &&
-                          "cursor-not-allowed opacity-50"
-                      )}
-                    >
-                      {(selected || status === "installed") && (
-                        <CheckIcon className="h-3 w-3 text-sky-400" />
-                      )}
-                    </button>
+                    />
 
                     {/* Addon info */}
                     <div className="flex min-w-0 flex-1 flex-col">
@@ -337,22 +334,28 @@ export function RosterPackInstall({
               </div>
 
               {installProgress && (
-                <div className="mt-1">
-                  <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
-                    <div
-                      className="h-full rounded-full bg-sky-400 transition-all duration-300"
-                      style={{
-                        width: `${(installProgress.completed / installProgress.total) * 100}%`,
-                      }}
-                    />
+                <Fade>
+                  <div className="mt-1">
+                    <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
+                      <div
+                        className="h-full rounded-full bg-sky-400 transition-all duration-300"
+                        style={{
+                          width: `${(installProgress.completed / installProgress.total) * 100}%`,
+                        }}
+                      />
+                    </div>
+                    <p className="mt-1 text-center text-xs text-white/40">
+                      <CountingNumber number={installProgress.completed + installProgress.failed} />{" "}
+                      / <CountingNumber number={installProgress.total} initiallyStable />
+                      {installProgress.failed > 0 && (
+                        <span className="text-red-400">
+                          {" "}
+                          (<CountingNumber number={installProgress.failed} /> failed)
+                        </span>
+                      )}
+                    </p>
                   </div>
-                  <p className="mt-1 text-center text-xs text-white/40">
-                    {installProgress.completed + installProgress.failed} / {installProgress.total}
-                    {installProgress.failed > 0 && (
-                      <span className="text-red-400"> ({installProgress.failed} failed)</span>
-                    )}
-                  </p>
-                </div>
+                </Fade>
               )}
             </>
           )}

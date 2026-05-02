@@ -8,6 +8,7 @@ import {
   TYPE_LABELS,
 } from "./pack-constants";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
@@ -16,6 +17,7 @@ import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import {
   SearchIcon,
   PackageIcon,
@@ -449,7 +451,8 @@ export function PackCreateView({
                 />
               </div>
               <span className="text-[10px] text-muted-foreground/40 tabular-nums">
-                {title.length}/100
+                <CountingNumber number={title.length} initiallyStable />
+                /100
               </span>
             </div>
           </div>
@@ -475,7 +478,8 @@ export function PackCreateView({
                 />
               </div>
               <span className="text-[10px] text-muted-foreground/40 tabular-nums">
-                {description.length}/500
+                <CountingNumber number={description.length} initiallyStable />
+                /500
               </span>
             </div>
           </div>
@@ -603,7 +607,7 @@ export function PackCreateView({
           {/* Source toggle with animated pill */}
           <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
             <div
-              className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+              className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-[left] duration-200 ease-out"
               style={{
                 left: addonSource === "search" ? "2px" : "calc(50% + 2px)",
                 width: "calc(50% - 4px)",
@@ -879,11 +883,9 @@ export function PackCreateView({
             {authUser ? (
               <>
                 <label className="flex items-center gap-2 text-xs text-muted-foreground/60 cursor-pointer">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={isAnonymous}
-                    onChange={(e) => setIsAnonymous(e.target.checked)}
-                    className="rounded border-white/20 bg-white/[0.03] accent-[#c4a44a]"
+                    onCheckedChange={(checked) => setIsAnonymous(checked === true)}
                   />
                   Publish anonymously
                 </label>

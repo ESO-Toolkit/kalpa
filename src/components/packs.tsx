@@ -32,6 +32,7 @@ import { Button } from "@/components/ui/button";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { cn, decodeHtml } from "@/lib/utils";
 import { PackageIcon, DownloadIcon, ArrowLeftIcon, Loader2Icon, ImportIcon } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
 
 // Sub-components
 import { PackListView } from "./pack-browse";
@@ -140,6 +141,7 @@ export function Packs({
   // When a pack is selected, pre-select all required addons
   useEffect(() => {
     if (selectedPack) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSelectedAddons(
         new Set(selectedPack.addons.filter((a) => a.required).map((a) => a.esouiId))
       );
@@ -147,6 +149,7 @@ export function Packs({
   }, [selectedPack]);
 
   const searchQueryRef = useRef(searchQuery);
+  // eslint-disable-next-line react-hooks/refs
   searchQueryRef.current = searchQuery;
 
   const loadPacksSeqRef = useRef(0);
@@ -240,6 +243,7 @@ export function Packs({
   // ── My Packs loader ──────────────────────────────────────────────
   const loadMyPacksSeqRef = useRef(0);
   const authUserRef = useRef(authUser);
+  // eslint-disable-next-line react-hooks/refs
   authUserRef.current = authUser;
 
   const loadMyPacks = useCallback(
@@ -287,6 +291,7 @@ export function Packs({
   // Load my packs when tab is switched to "my-packs" or user signs in
   useEffect(() => {
     if (tab === "my-packs" && authUser) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       loadMyPacks(1);
     }
   }, [tab, authUser, loadMyPacks]); // loadMyPacks is stable; authUser triggers reload on sign-in
@@ -326,6 +331,7 @@ export function Packs({
   // Auto-open a specific pack when triggered via deep link
   useEffect(() => {
     if (initialPackId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       handleSelectPack(initialPackId);
     }
   }, [initialPackId, handleSelectPack]);
@@ -463,6 +469,7 @@ export function Packs({
   // Auto-resolve share code from deep link
   useEffect(() => {
     if (initialShareCode) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setShareCodeInput(initialShareCode);
       setShowImportPanel(true);
       handleResolveShareCode(initialShareCode);
@@ -748,7 +755,7 @@ export function Packs({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+      <DialogContent className="sm:max-w-2xl h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {selectedPack && (
@@ -773,9 +780,8 @@ export function Packs({
               };
               return (
                 <div className="relative flex mt-2 p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06] shadow-[inset_0_1px_2px_rgba(0,0,0,0.12)]">
-                  {/* Sliding pill background */}
                   <div
-                    className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.1] border border-white/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+                    className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.1] border border-white/[0.06] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.06)] transition-[left] duration-200 ease-out"
                     style={{
                       left: `calc(${(tabIndex / tabCount) * 100}% + 2px)`,
                       width: `calc(${100 / tabCount}% - 4px)`,
@@ -803,228 +809,268 @@ export function Packs({
             })()}
         </DialogHeader>
 
-        {selectedPack ? (
-          <PackDetailView
-            key={selectedPack.id}
-            pack={selectedPack}
-            loading={loadingDetail}
-            installing={installing}
-            installProgress={installProgress}
-            installSucceeded={installSucceeded}
-            selectedAddons={selectedAddons}
-            installedEsouiIds={installedEsouiIds}
-            votingPacks={votingPacks}
-            onToggleAddon={handleToggleAddon}
-            onSelectAllOptional={(select) => {
-              if (!selectedPack) return;
-              setSelectedAddons((prev) => {
-                const next = new Set(prev);
-                for (const a of selectedPack.addons) {
-                  if (!a.required) {
-                    if (select) next.add(a.esouiId);
-                    else next.delete(a.esouiId);
-                  }
-                }
-                return next;
-              });
-            }}
-            onVote={handleVote}
-            authUser={authUser}
-            canEdit={canEditSelectedPack}
-            onEdit={() => selectedPack && handleStartEditing(selectedPack)}
-            onDelete={() => selectedPack && handleDeletePack(selectedPack.id)}
-            deletingPack={deletingPack}
-            showShareSection={showShareSection}
-            onToggleShare={() => {
-              setShowShareSection((prev) => !prev);
-              setShareResult(null);
-              setCopiedField(null);
-            }}
-            shareResult={shareResult}
-            generatingShare={generatingShare}
-            copiedField={copiedField}
-            onGenerateShareCode={() => selectedPack && handleGenerateShareCode(selectedPack)}
-            onRegenerateShareCode={() => {
-              setShareResult(null);
-              if (selectedPack) handleGenerateShareCode(selectedPack);
-            }}
-            onCopyToClipboard={handleCopyToClipboard}
-            onExportFile={() => selectedPack && handleExportPackFile(selectedPack)}
-          />
-        ) : tab === "browse" ? (
-          <div className="flex flex-col gap-3 min-h-0">
-            {/* Import toggle button */}
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setShowImportPanel((prev) => !prev)}
-                className={cn(
-                  "flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md border transition-all duration-200",
-                  showImportPanel
-                    ? "text-[#c4a44a] border-[#c4a44a]/30 bg-[#c4a44a]/[0.08] shadow-[0_0_10px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]"
-                    : "text-muted-foreground/50 border-white/[0.06] bg-white/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:text-muted-foreground hover:border-white/[0.12] hover:bg-white/[0.04]"
-                )}
-              >
-                <ImportIcon className="size-3.5" />
-                Import
-              </button>
-              <div className="flex-1" />
-            </div>
-
-            {/* Collapsible import panel */}
-            {showImportPanel && (
-              <div className="rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.5)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
-                <PackImportView
-                  key={importedPack ? "resolved" : "empty"}
-                  shareCodeInput={shareCodeInput}
-                  onShareCodeInputChange={setShareCodeInput}
-                  resolvingCode={resolvingCode}
-                  importedPack={importedPack}
-                  importError={importError}
-                  installing={installing}
-                  installProgress={installProgress}
-                  installedEsouiIds={installedEsouiIds}
-                  importedPackAddonsToInstall={importedPackAddonsToInstall}
-                  onResolveCode={handleResolveShareCode}
-                  onImportFile={handleImportFile}
-                  onInstall={handleInstallImportedPack}
-                  onClear={() => {
-                    setImportedPack(null);
-                    setImportError(null);
-                    setShareCodeInput("");
-                  }}
-                />
-              </div>
-            )}
-
-            {/* Pack list */}
-            <PackListView
-              packs={packs}
-              loading={loading}
-              loadingMore={loadingMore}
-              hasMore={hasMore}
-              error={error}
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              typeFilter={typeFilter}
-              onTypeFilterChange={setTypeFilter}
-              sortMode={sortMode}
-              onSortChange={setSortMode}
-              onSelectPack={handleSelectPack}
-              onLoadMore={handleLoadMore}
-              onRetry={() => loadPacks(searchQuery, 1)}
-              onVote={handleVote}
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          {selectedPack ? (
+            <PackDetailView
+              key={selectedPack.id}
+              pack={selectedPack}
+              loading={loadingDetail}
+              installing={installing}
+              installProgress={installProgress}
+              installSucceeded={installSucceeded}
+              selectedAddons={selectedAddons}
+              installedEsouiIds={installedEsouiIds}
               votingPacks={votingPacks}
-              authUser={authUser}
-            />
-          </div>
-        ) : tab === "create" ? (
-          <PackCreateView
-            installedAddons={installedAddons}
-            authUser={authUser}
-            onAuthChange={onAuthChange}
-            step={createStep}
-            onStepChange={setCreateStep}
-            title={createTitle}
-            onTitleChange={setCreateTitle}
-            description={createDescription}
-            onDescriptionChange={setCreateDescription}
-            packType={createPackType}
-            onPackTypeChange={setCreatePackType}
-            selectedTags={createTags}
-            onTagsChange={setCreateTags}
-            addons={createAddons}
-            onAddonsChange={setCreateAddons}
-            isAnonymous={createAnonymous}
-            onAnonymousChange={setCreateAnonymous}
-            editingPackId={editingPackId}
-            onPublished={(pack) => {
-              resetCreateForm();
-              setSelectedPack(pack);
-              setTab("browse");
-              loadPacks(searchQuery, 1);
-              if (authUser) loadMyPacks(1);
-            }}
-            onCancelEdit={
-              editingPackId
-                ? () => {
-                    resetCreateForm();
-                    setTab("browse");
-                    loadPacks(searchQuery, 1);
-                    if (authUser) loadMyPacks(1);
+              onToggleAddon={handleToggleAddon}
+              onSelectAllOptional={(select) => {
+                if (!selectedPack) return;
+                setSelectedAddons((prev) => {
+                  const next = new Set(prev);
+                  for (const a of selectedPack.addons) {
+                    if (!a.required) {
+                      if (select) next.add(a.esouiId);
+                      else next.delete(a.esouiId);
+                    }
                   }
-                : undefined
-            }
-          />
-        ) : tab === "my-packs" ? (
-          <MyPacksView
-            packs={myPacks}
-            loading={myPacksLoading}
-            loadingMore={myPacksLoadingMore}
-            hasMore={myPacksHasMore}
-            authUser={authUser}
-            onAuthChange={onAuthChange}
-            onSelectPack={handleSelectPack}
-            onLoadMore={() => loadMyPacks(myPacksPage + 1)}
-            installedPackRefs={installedPackRefs}
-            onRemoveInstalledRef={(packId) => {
-              setInstalledPackRefs((prev) => {
-                const updated = prev.filter((r) => r.packId !== packId);
-                setSetting("installed_packs", updated);
-                return updated;
-              });
-            }}
-            onEdit={(pack) => {
-              handleStartEditing(pack);
-            }}
-            onDuplicate={(pack) => {
-              if (duplicatingPackId) return;
-              setDuplicatingPackId(pack.id);
-              setCreateTitle(`Copy of ${decodeHtml(pack.title)}`);
-              setCreateDescription(decodeHtml(pack.description));
-              setCreatePackType(pack.packType);
-              setCreateTags([...pack.tags]);
-              setCreateAddons(
-                pack.addons.map((a) => ({
-                  esouiId: a.esouiId,
-                  name: decodeHtml(a.name),
-                  required: a.required,
-                  note: a.note ? decodeHtml(a.note) : undefined,
-                }))
-              );
-              setCreateAnonymous(pack.isAnonymous);
-              setCreateStep("details");
-              setEditingPackId(null);
-              setTab("create");
-              setDuplicatingPackId(null);
-            }}
-            onDelete={handleDeletePack}
-            onCreatePack={() => {
-              resetCreateForm();
-              setTab("create");
-            }}
-            onPublish={async (pack) => {
-              try {
-                await invokeOrThrow<Pack>("update_pack", {
-                  payload: {
-                    id: pack.id,
-                    title: pack.title,
-                    description: pack.description,
-                    packType: pack.packType,
-                    addons: pack.addons,
-                    tags: pack.tags,
-                    isAnonymous: pack.isAnonymous,
-                    status: "published",
-                  },
+                  return next;
                 });
-                toast.success("Pack published!");
-                loadMyPacks(1);
-                loadPacks(searchQuery, 1);
-              } catch (e) {
-                toast.error(`Publish failed: ${getTauriErrorMessage(e)}`);
-              }
-            }}
-          />
-        ) : null}
+              }}
+              onVote={handleVote}
+              authUser={authUser}
+              canEdit={canEditSelectedPack}
+              onEdit={() => selectedPack && handleStartEditing(selectedPack)}
+              onDelete={() => selectedPack && handleDeletePack(selectedPack.id)}
+              deletingPack={deletingPack}
+              showShareSection={showShareSection}
+              onToggleShare={() => {
+                setShowShareSection((prev) => !prev);
+                setShareResult(null);
+                setCopiedField(null);
+              }}
+              shareResult={shareResult}
+              generatingShare={generatingShare}
+              copiedField={copiedField}
+              onGenerateShareCode={() => selectedPack && handleGenerateShareCode(selectedPack)}
+              onRegenerateShareCode={() => {
+                setShareResult(null);
+                if (selectedPack) handleGenerateShareCode(selectedPack);
+              }}
+              onCopyToClipboard={handleCopyToClipboard}
+              onExportFile={() => selectedPack && handleExportPackFile(selectedPack)}
+            />
+          ) : (
+            <AnimatePresence mode="wait" initial={false}>
+              {tab === "browse" && (
+                <motion.div
+                  key="browse"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.08 }}
+                  className="flex flex-col gap-3 min-h-0"
+                >
+                  {/* Import toggle button */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setShowImportPanel((prev) => !prev)}
+                      className={cn(
+                        "flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md border transition-all duration-200",
+                        showImportPanel
+                          ? "text-[#c4a44a] border-[#c4a44a]/30 bg-[#c4a44a]/[0.08] shadow-[0_0_10px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]"
+                          : "text-muted-foreground/50 border-white/[0.06] bg-white/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:text-muted-foreground hover:border-white/[0.12] hover:bg-white/[0.04]"
+                      )}
+                    >
+                      <ImportIcon className="size-3.5" />
+                      Import
+                    </button>
+                    <div className="flex-1" />
+                  </div>
+
+                  {/* Collapsible import panel */}
+                  <AnimatePresence>
+                    {showImportPanel && (
+                      <motion.div
+                        key="import-panel"
+                        initial={{ opacity: 0, y: -8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -8 }}
+                        transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                        className="rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.5)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]"
+                      >
+                        <PackImportView
+                          key={importedPack ? "resolved" : "empty"}
+                          shareCodeInput={shareCodeInput}
+                          onShareCodeInputChange={setShareCodeInput}
+                          resolvingCode={resolvingCode}
+                          importedPack={importedPack}
+                          importError={importError}
+                          installing={installing}
+                          installProgress={installProgress}
+                          installedEsouiIds={installedEsouiIds}
+                          importedPackAddonsToInstall={importedPackAddonsToInstall}
+                          onResolveCode={handleResolveShareCode}
+                          onImportFile={handleImportFile}
+                          onInstall={handleInstallImportedPack}
+                          onClear={() => {
+                            setImportedPack(null);
+                            setImportError(null);
+                            setShareCodeInput("");
+                          }}
+                        />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* Pack list */}
+                  <PackListView
+                    packs={packs}
+                    loading={loading}
+                    loadingMore={loadingMore}
+                    hasMore={hasMore}
+                    error={error}
+                    searchQuery={searchQuery}
+                    onSearchChange={setSearchQuery}
+                    typeFilter={typeFilter}
+                    onTypeFilterChange={setTypeFilter}
+                    sortMode={sortMode}
+                    onSortChange={setSortMode}
+                    onSelectPack={handleSelectPack}
+                    onLoadMore={handleLoadMore}
+                    onRetry={() => loadPacks(searchQuery, 1)}
+                    onVote={handleVote}
+                    votingPacks={votingPacks}
+                    authUser={authUser}
+                  />
+                </motion.div>
+              )}
+              {tab === "create" && (
+                <motion.div
+                  key="create"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.08 }}
+                >
+                  <PackCreateView
+                    installedAddons={installedAddons}
+                    authUser={authUser}
+                    onAuthChange={onAuthChange}
+                    step={createStep}
+                    onStepChange={setCreateStep}
+                    title={createTitle}
+                    onTitleChange={setCreateTitle}
+                    description={createDescription}
+                    onDescriptionChange={setCreateDescription}
+                    packType={createPackType}
+                    onPackTypeChange={setCreatePackType}
+                    selectedTags={createTags}
+                    onTagsChange={setCreateTags}
+                    addons={createAddons}
+                    onAddonsChange={setCreateAddons}
+                    isAnonymous={createAnonymous}
+                    onAnonymousChange={setCreateAnonymous}
+                    editingPackId={editingPackId}
+                    onPublished={(pack) => {
+                      resetCreateForm();
+                      setSelectedPack(pack);
+                      setTab("browse");
+                      loadPacks(searchQuery, 1);
+                      if (authUser) loadMyPacks(1);
+                    }}
+                    onCancelEdit={
+                      editingPackId
+                        ? () => {
+                            resetCreateForm();
+                            setTab("browse");
+                            loadPacks(searchQuery, 1);
+                            if (authUser) loadMyPacks(1);
+                          }
+                        : undefined
+                    }
+                  />
+                </motion.div>
+              )}
+              {tab === "my-packs" && (
+                <motion.div
+                  key="my-packs"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.08 }}
+                >
+                  <MyPacksView
+                    packs={myPacks}
+                    loading={myPacksLoading}
+                    loadingMore={myPacksLoadingMore}
+                    hasMore={myPacksHasMore}
+                    authUser={authUser}
+                    onAuthChange={onAuthChange}
+                    onSelectPack={handleSelectPack}
+                    onLoadMore={() => loadMyPacks(myPacksPage + 1)}
+                    installedPackRefs={installedPackRefs}
+                    onRemoveInstalledRef={(packId) => {
+                      setInstalledPackRefs((prev) => {
+                        const updated = prev.filter((r) => r.packId !== packId);
+                        setSetting("installed_packs", updated);
+                        return updated;
+                      });
+                    }}
+                    onEdit={(pack) => {
+                      handleStartEditing(pack);
+                    }}
+                    onDuplicate={(pack) => {
+                      if (duplicatingPackId) return;
+                      setDuplicatingPackId(pack.id);
+                      setCreateTitle(`Copy of ${decodeHtml(pack.title)}`);
+                      setCreateDescription(decodeHtml(pack.description));
+                      setCreatePackType(pack.packType);
+                      setCreateTags([...pack.tags]);
+                      setCreateAddons(
+                        pack.addons.map((a) => ({
+                          esouiId: a.esouiId,
+                          name: decodeHtml(a.name),
+                          required: a.required,
+                          note: a.note ? decodeHtml(a.note) : undefined,
+                        }))
+                      );
+                      setCreateAnonymous(pack.isAnonymous);
+                      setCreateStep("details");
+                      setEditingPackId(null);
+                      setTab("create");
+                      setDuplicatingPackId(null);
+                    }}
+                    onDelete={handleDeletePack}
+                    onCreatePack={() => {
+                      resetCreateForm();
+                      setTab("create");
+                    }}
+                    onPublish={async (pack) => {
+                      try {
+                        await invokeOrThrow<Pack>("update_pack", {
+                          payload: {
+                            id: pack.id,
+                            title: pack.title,
+                            description: pack.description,
+                            packType: pack.packType,
+                            addons: pack.addons,
+                            tags: pack.tags,
+                            isAnonymous: pack.isAnonymous,
+                            status: "published",
+                          },
+                        });
+                        toast.success("Pack published!");
+                        loadMyPacks(1);
+                        loadPacks(searchQuery, 1);
+                      } catch (e) {
+                        toast.error(`Publish failed: ${getTauriErrorMessage(e)}`);
+                      }
+                    }}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          )}
+        </div>
 
         <DialogFooter>
           {selectedPack ? (

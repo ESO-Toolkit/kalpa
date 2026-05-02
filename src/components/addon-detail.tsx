@@ -13,6 +13,8 @@ import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { ExternalLink, Trash2, Check, Power } from "lucide-react";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { AnimatedCheckmark } from "@/components/ui/animated-checkmark";
 
 function relativeDate(ts: number): string {
   const diff = Date.now() - ts;
@@ -29,6 +31,7 @@ interface AddonDetailProps {
   installedAddons: AddonManifest[];
   addonsPath: string;
   onRemove: () => void;
+  onRemoveAddon: (folderName: string) => void;
   onToggleDisable: (folderName: string, currentlyDisabled: boolean) => void;
   updateResult: UpdateCheckResult | null;
   onAddonUpdated: (esouiId: number) => void;
@@ -41,15 +44,13 @@ export function AddonDetail({
   installedAddons,
   addonsPath,
   onRemove,
+  onRemoveAddon,
   onToggleDisable,
   updateResult,
   onAddonUpdated,
   onTagsChange,
   isOffline,
 }: AddonDetailProps) {
-  const [confirmingRemove, setConfirmingRemove] = useState(false);
-  const [removing, setRemoving] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateSuccess, setUpdateSuccess] = useState(false);
@@ -79,19 +80,12 @@ export function AddonDetail({
     return () => clearTimeout(timer);
   }, [updateSuccess]);
 
-  // Escape key to cancel remove confirmation
-  useEffect(() => {
-    if (!confirmingRemove) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setConfirmingRemove(false);
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [confirmingRemove]);
-
   if (!addon) {
     return (
-      <div className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8">
+      <Fade
+        transition={{ type: "spring", stiffness: 120, damping: 20 }}
+        className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8"
+      >
         {/* Ambient glow behind icon */}
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-[#c4a44a]/[0.04] blur-[60px]" />
         <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
@@ -120,27 +114,9 @@ export function AddonDetail({
             Select an addon from the list to view details
           </p>
         </div>
-      </div>
+      </Fade>
     );
   }
-
-  const handleRemove = async () => {
-    setRemoving(true);
-    setRemoveError(null);
-    try {
-      await invokeOrThrow("remove_addon", {
-        addonsPath,
-        folderName: addon.folderName,
-      });
-      setConfirmingRemove(false);
-      toast.success(`Removed ${addon.title}`);
-      onRemove();
-    } catch (e) {
-      setRemoveError(getTauriErrorMessage(e));
-    } finally {
-      setRemoving(false);
-    }
-  };
 
   const handleUpdate = async () => {
     if (!updateResult) return;
@@ -221,7 +197,7 @@ export function AddonDetail({
           variant="subtle"
           className="mb-4 flex items-center gap-2 border-emerald-500/20! bg-emerald-500/[0.04]! p-3"
         >
-          <Check className="size-4 shrink-0 text-emerald-400" />
+          <AnimatedCheckmark size={18} color="#34d399" />
           <span className="text-sm text-emerald-400">Updated successfully</span>
         </GlassPanel>
       ) : updateResult?.hasUpdate ? (
@@ -309,6 +285,8 @@ export function AddonDetail({
             return (
               <button
                 key={tag}
+                aria-label={`${active ? "Remove" : "Add"} tag: ${tag}`}
+                aria-pressed={active}
                 onClick={() => {
                   const next = active ? addon.tags.filter((t) => t !== tag) : [...addon.tags, tag];
                   onTagsChange(addon.folderName, next);
@@ -568,47 +546,15 @@ export function AddonDetail({
           </p>
         )}
 
-        {!confirmingRemove ? (
-          <Button
-            variant="destructive"
-            onClick={() => {
-              setConfirmingRemove(true);
-              setRemoveError(null);
-            }}
-          >
-            Remove Addon
-          </Button>
-        ) : (
-          <GlassPanel variant="subtle" className="border-red-500/20! bg-red-500/[0.04]! p-3">
-            <p className="mb-2 text-sm">
-              Remove <strong>{addon.title}</strong>?
-            </p>
-            {dependents.length > 0 && (
-              <p className="mb-2 text-sm text-yellow-500">
-                Warning: {dependents.map((d) => `${d.title} (${d.folderName}/)`).join(", ")}{" "}
-                {dependents.length === 1 ? "depends" : "depend"} on this addon.
-              </p>
-            )}
-            {removeError && (
-              <Alert variant="destructive" className="mb-2">
-                {removeError}
-              </Alert>
-            )}
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setConfirmingRemove(false)}
-                disabled={removing}
-              >
-                Cancel
-              </Button>
-              <Button variant="destructive" size="sm" onClick={handleRemove} disabled={removing}>
-                {removing ? "Removing..." : "Confirm Remove"}
-              </Button>
-            </div>
-          </GlassPanel>
+        {dependents.length > 0 && (
+          <p className="text-xs text-amber-400/70">
+            {dependents.map((d) => d.title).join(", ")}{" "}
+            {dependents.length === 1 ? "depends" : "depend"} on this addon.
+          </p>
         )}
+        <Button variant="destructive" onClick={() => onRemoveAddon(addon.folderName)}>
+          Remove Addon
+        </Button>
       </div>
     </div>
   );
