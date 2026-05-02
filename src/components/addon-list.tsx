@@ -104,7 +104,7 @@ const AddonListItem = memo(function AddonListItem({
       aria-selected={batchMode ? isSelected : isCurrent}
       aria-label={`${addon.title}${addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}`}
       className={cn(
-        "cursor-pointer border-l-3 border-l-transparent pr-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_rgba(196,164,74,0.02)] group",
+        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_rgba(196,164,74,0.02)] group",
         addon.disabled
           ? "border-l-zinc-500 opacity-50"
           : addon.missingDependencies.length > 0
@@ -131,13 +131,13 @@ const AddonListItem = memo(function AddonListItem({
         onRightClick(addon, { x: e.clientX, y: e.clientY });
       }}
     >
-      <div className="flex items-start">
+      <div className="flex items-start gap-2 relative">
         <div
           onClick={(e) => {
             e.stopPropagation();
             onToggleSelect(addon.folderName);
           }}
-          className="shrink-0 self-stretch flex items-center justify-center w-10 cursor-pointer"
+          className="absolute -left-4 top-0 bottom-0 w-10 cursor-pointer z-10 flex items-center justify-center"
         >
           <div
             className={cn(
