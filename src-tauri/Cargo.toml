@@ -40,7 +40,7 @@ sha2 = "0.11"
 rusqlite = { version = "0.39", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
-winreg = "0.55"
+winreg = "0.56"
 
 [profile.release]
 lto = true
