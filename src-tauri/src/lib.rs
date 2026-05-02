@@ -120,6 +120,36 @@ fn pending_deep_link_payload(action: &DeepLinkAction) -> PendingDeepLinkPayload 
     }
 }
 
+/// Clear the WebView2 cache when the app version changes.
+///
+/// The NSIS updater replaces the binary and bundled frontend assets, but
+/// WebView2 keeps its own disk cache under `%LOCALAPPDATA%\{identifier}\EBWebView`.
+/// Stale cached JS/CSS causes the UI to look outdated after an update.
+/// We store the last-seen version in a marker file and nuke the cache dir
+/// whenever it differs from the current build version.
+fn clear_webview_cache_on_upgrade() {
+    let current = env!("CARGO_PKG_VERSION");
+    let local_app_data = match std::env::var("LOCALAPPDATA") {
+        Ok(v) => std::path::PathBuf::from(v),
+        Err(_) => return,
+    };
+    let data_dir = local_app_data.join("com.kalpa.desktop");
+    let marker = data_dir.join(".kalpa-version");
+
+    let previous = std::fs::read_to_string(&marker).unwrap_or_default();
+    if previous.trim() == current {
+        return;
+    }
+
+    let cache_dir = data_dir.join("EBWebView");
+    if cache_dir.exists() {
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    let _ = std::fs::create_dir_all(&data_dir);
+    let _ = std::fs::write(&marker, current);
+}
+
 pub fn run() {
     // Enable Chrome DevTools Protocol in debug builds only
     #[cfg(debug_assertions)]
@@ -127,6 +157,8 @@ pub fn run() {
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--remote-debugging-port=9222",
     );
+
+    clear_webview_cache_on_upgrade();
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
