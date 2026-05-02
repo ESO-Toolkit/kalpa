@@ -123,7 +123,13 @@ const AddonListItem = memo(function AddonListItem({
         if (e.ctrlKey || e.metaKey) {
           onToggleSelect(addon.folderName);
         } else {
-          onSelect(addon);
+          const rect = e.currentTarget.getBoundingClientRect();
+          const localX = e.clientX - rect.left;
+          if (localX < 40) {
+            onToggleSelect(addon.folderName);
+          } else {
+            onSelect(addon);
+          }
         }
       }}
       onContextMenu={(e) => {
@@ -131,22 +137,14 @@ const AddonListItem = memo(function AddonListItem({
         onRightClick(addon, { x: e.clientX, y: e.clientY });
       }}
     >
-      <div className="flex items-start gap-2 relative">
+      <div className="flex items-start gap-2">
         <div
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleSelect(addon.folderName);
-          }}
-          className="absolute -left-4 top-0 bottom-0 w-10 cursor-pointer z-10 flex items-center justify-center"
+          className={cn(
+            "shrink-0 mt-0.5 transition-opacity duration-150",
+            isSelected || batchMode ? "opacity-100" : "opacity-0 group-hover:opacity-70"
+          )}
         >
-          <div
-            className={cn(
-              "transition-opacity duration-150",
-              isSelected || batchMode ? "opacity-100" : "opacity-0 group-hover:opacity-70"
-            )}
-          >
-            <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
-          </div>
+          <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
         </div>
         <div className="flex-1 min-w-0">
           <div className="truncate text-sm font-medium">
