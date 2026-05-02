@@ -274,7 +274,7 @@ export function DiscoverPanel({
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
+            transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
             className="flex min-h-0 flex-1 flex-col"
           >
             <SearchContent
@@ -292,7 +292,7 @@ export function DiscoverPanel({
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
+            transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
             className="flex min-h-0 flex-1 flex-col"
           >
             <PopularContent
@@ -310,7 +310,7 @@ export function DiscoverPanel({
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
+            transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
             className="flex min-h-0 flex-1 flex-col"
           >
             <CategoryContent
@@ -328,7 +328,7 @@ export function DiscoverPanel({
             initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -4 }}
-            transition={{ type: "spring", stiffness: 500, damping: 35, duration: 0.12 }}
+            transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
             className="flex min-h-0 flex-1 flex-col"
           >
             <UrlContent
