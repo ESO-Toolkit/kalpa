@@ -52,14 +52,14 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
           </TabsList>
 
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <AnimatePresence mode="wait">
+            <AnimatePresence>
               {activeTab === "snapshots" && (
                 <motion.div
                   key="snapshots"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                 >
                   <SnapshotsTab addonsPath={addonsPath} onRefresh={onRefresh} />
                 </motion.div>
@@ -67,10 +67,10 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
               {activeTab === "integrity" && (
                 <motion.div
                   key="integrity"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                 >
                   <IntegrityTab addonsPath={addonsPath} />
                 </motion.div>
@@ -78,10 +78,10 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
               {activeTab === "log" && (
                 <motion.div
                   key="log"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                 >
                   <LogTab addonsPath={addonsPath} />
                 </motion.div>

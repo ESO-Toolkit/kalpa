@@ -853,14 +853,14 @@ export function Packs({
               onExportFile={() => selectedPack && handleExportPackFile(selectedPack)}
             />
           ) : (
-            <AnimatePresence mode="wait" initial={false}>
+            <AnimatePresence initial={false}>
               {tab === "browse" && (
                 <motion.div
                   key="browse"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                   className="flex flex-col gap-3 min-h-0"
                 >
                   {/* Import toggle button */}
@@ -940,10 +940,10 @@ export function Packs({
               {tab === "create" && (
                 <motion.div
                   key="create"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                 >
                   <PackCreateView
                     installedAddons={installedAddons}
@@ -987,10 +987,10 @@ export function Packs({
               {tab === "my-packs" && (
                 <motion.div
                   key="my-packs"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                 >
                   <MyPacksView
                     packs={myPacks}

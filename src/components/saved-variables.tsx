@@ -2240,14 +2240,14 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
           </TabsList>
 
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <AnimatePresence mode="wait">
+            <AnimatePresence>
               {activeTab === "overview" && (
                 <motion.div
                   key="overview"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                   className="h-full"
                 >
                   <OverviewTab
@@ -2263,10 +2263,10 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
               {activeTab === "cleanup" && (
                 <motion.div
                   key="cleanup"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                   className="h-full"
                 >
                   <CleanupTab
@@ -2280,10 +2280,10 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
               {activeTab === "copy" && (
                 <motion.div
                   key="copy"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                   className="h-full"
                 >
                   <CopyProfileTab
@@ -2297,10 +2297,10 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
               {activeTab === "editor" && (
                 <motion.div
                   key="editor"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -4 }}
-                  transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.1 }}
                   className="h-full"
                 >
                   <EditorTab

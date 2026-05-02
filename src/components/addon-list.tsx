@@ -19,9 +19,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsIndicator, TabsTrigger } from "@/components/ui/tabs";
 import { DiscoverPanel } from "@/components/discover-panel";
 import { cn } from "@/lib/utils";
+import { motion, AnimatePresence } from "motion/react";
 
 interface AddonListProps {
   addons: AddonManifest[];
@@ -311,7 +312,8 @@ export function AddonList({
       {/* Mode switcher */}
       <div className="px-3 pt-3 pb-2">
         <Tabs value={viewMode} onValueChange={(v) => onViewModeChange(v as ViewMode)}>
-          <TabsList className="w-full bg-white/[0.04] border border-white/[0.06] [&_[data-slot=tabs-trigger]]:data-[selected]:bg-[#c4a44a]/[0.1] [&_[data-slot=tabs-trigger]]:data-[selected]:text-[#c4a44a] [&_[data-slot=tabs-trigger]]:data-[selected]:border-[#c4a44a]/20">
+          <TabsList className="w-full bg-white/[0.04] border border-white/[0.06] [&_[data-slot=tabs-trigger]]:data-active:text-[#c4a44a]">
+            <TabsIndicator className="bg-[#c4a44a]/[0.1] border-[#c4a44a]/20" />
             <TabsTrigger value="installed" className="flex-1">
               My Addons
             </TabsTrigger>
@@ -322,200 +324,220 @@ export function AddonList({
         </Tabs>
       </div>
 
-      {viewMode === "installed" ? (
-        <>
-          {/* Search */}
-          <div className="px-3 pb-2">
-            <Input
-              type="search"
-              placeholder="Search addons..."
-              aria-label="Search addons"
-              value={searchQuery}
-              onChange={(e) => onSearchChange(e.target.value)}
-            />
-          </div>
-
-          {/* Filter tabs */}
-          <div
-            className="flex gap-1 px-3 pb-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-            role="tablist"
-            aria-label="Filter addons"
+      <AnimatePresence initial={false}>
+        {viewMode === "installed" ? (
+          <motion.div
+            key="installed"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.12 }}
+            className="flex min-h-0 flex-1 flex-col"
           >
-            {FILTERS.map(([mode, label]) => {
-              const hideIfZero = ["outdated", "missing-deps", "favorites", "disabled"];
-              if (hideIfZero.includes(mode) && filterCounts[mode] === 0) return null;
-              const isActive = filterMode === mode && !activeTagFilter;
-              return (
-                <button
-                  key={mode}
-                  role="tab"
-                  aria-selected={isActive}
-                  aria-label={`Filter by ${label}`}
-                  className={cn(
-                    "shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150",
-                    isActive
-                      ? "bg-[#c4a44a]/15 text-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.05)] border border-[#c4a44a]/25"
-                      : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
-                  )}
-                  onClick={() => {
-                    onFilterChange(mode);
-                    onActiveTagFilterChange(null);
-                  }}
-                >
-                  {label}
-                  <span className="ml-1 opacity-50">({filterCounts[mode]})</span>
-                </button>
-              );
-            })}
+            {/* Search */}
+            <div className="px-3 pb-2">
+              <Input
+                type="search"
+                placeholder="Search addons..."
+                aria-label="Search addons"
+                value={searchQuery}
+                onChange={(e) => onSearchChange(e.target.value)}
+              />
+            </div>
 
-            {/* Dynamic tag tabs — one per tag in use */}
-            {[...tagCounts.entries()]
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([tag, count]) => {
-                const isActive = activeTagFilter === tag;
+            {/* Filter tabs */}
+            <div
+              className="flex gap-1 px-3 pb-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              role="tablist"
+              aria-label="Filter addons"
+            >
+              {FILTERS.map(([mode, label]) => {
+                const hideIfZero = ["outdated", "missing-deps", "favorites", "disabled"];
+                if (hideIfZero.includes(mode) && filterCounts[mode] === 0) return null;
+                const isActive = filterMode === mode && !activeTagFilter;
                 return (
                   <button
-                    key={`tag:${tag}`}
+                    key={mode}
                     role="tab"
                     aria-selected={isActive}
-                    aria-label={`Filter by tag: ${tag}`}
+                    aria-label={`Filter by ${label}`}
                     className={cn(
                       "shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150",
                       isActive
-                        ? "bg-sky-500/15 text-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(255,255,255,0.05)] border border-sky-500/25"
+                        ? "bg-[#c4a44a]/15 text-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.05)] border border-[#c4a44a]/25"
                         : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
                     )}
                     onClick={() => {
-                      onFilterChange("all");
-                      onActiveTagFilterChange(tag);
+                      onFilterChange(mode);
+                      onActiveTagFilterChange(null);
                     }}
                   >
-                    {tag}
-                    <span className="ml-1 opacity-50">({count})</span>
+                    {label}
+                    <span className="ml-1 opacity-50">({filterCounts[mode]})</span>
                   </button>
                 );
               })}
-          </div>
 
-          {/* Sort + count bar */}
-          <div className="flex items-center justify-between border-y border-white/[0.06] px-3 py-1.5">
-            <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/50">
-              {addons.length} {addons.length === 1 ? "addon" : "addons"}
-              {batchMode && (
-                <span className="text-[#c4a44a] font-medium normal-case tracking-normal">
-                  {" "}
-                  &middot; {selectedFolders.size} selected
-                </span>
-              )}
-            </span>
-            <Select value={sortMode} onValueChange={(v) => onSortChange(v as SortMode)}>
-              <SelectTrigger
-                size="sm"
-                className="h-6 w-auto gap-1 border-0 bg-transparent text-[11px] text-muted-foreground/50 hover:text-muted-foreground px-1.5"
-                aria-label="Sort by"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="name">Name</SelectItem>
-                <SelectItem value="author">Author</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div
-            ref={scrollContainerRef}
-            role="listbox"
-            aria-label="Installed addons"
-            aria-rowcount={addons.length}
-            aria-activedescendant={selectedAddon ? `addon-${selectedAddon.folderName}` : undefined}
-            tabIndex={0}
-            onKeyDown={handleListKeyDown}
-            className="flex-1 overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
-          >
-            {loading ? (
-              <div className="flex h-full items-center justify-center text-muted-foreground">
-                <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-              </div>
-            ) : addons.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
-                {searchQuery || activeTagFilter || filterMode !== "all" ? (
-                  <>
-                    <p className="text-sm">No addons match your current filter</p>
-                    <button
-                      className="text-xs text-[#c4a44a]/70 hover:text-[#c4a44a] transition-colors"
-                      onClick={() => {
-                        onSearchChange("");
-                        onFilterChange("all");
-                        onActiveTagFilterChange(null);
-                      }}
-                    >
-                      Clear filters
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-sm">No addons installed yet</p>
-                    <button
-                      className="text-xs text-[#c4a44a]/70 hover:text-[#c4a44a] transition-colors"
-                      onClick={() => onViewModeChange("discover")}
-                    >
-                      Browse addons to get started
-                    </button>
-                  </>
-                )}
-              </div>
-            ) : (
-              <div
-                style={{
-                  height: `${rowVirtualizer.getTotalSize()}px`,
-                  width: "100%",
-                  position: "relative",
-                }}
-              >
-                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                  const addon = addons[virtualRow.index];
+              {/* Dynamic tag tabs — one per tag in use */}
+              {[...tagCounts.entries()]
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([tag, count]) => {
+                  const isActive = activeTagFilter === tag;
                   return (
-                    <div
-                      key={addon.folderName}
-                      style={{
-                        position: "absolute",
-                        top: 0,
-                        left: 0,
-                        width: "100%",
-                        transform: `translateY(${virtualRow.start}px)`,
+                    <button
+                      key={`tag:${tag}`}
+                      role="tab"
+                      aria-selected={isActive}
+                      aria-label={`Filter by tag: ${tag}`}
+                      className={cn(
+                        "shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150",
+                        isActive
+                          ? "bg-sky-500/15 text-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(255,255,255,0.05)] border border-sky-500/25"
+                          : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
+                      )}
+                      onClick={() => {
+                        onFilterChange("all");
+                        onActiveTagFilterChange(tag);
                       }}
-                      ref={rowVirtualizer.measureElement}
-                      data-index={virtualRow.index}
-                      aria-rowindex={virtualRow.index + 1}
                     >
-                      <AddonListItem
-                        addon={addon}
-                        isCurrent={selectedAddon?.folderName === addon.folderName}
-                        isSelected={selectedFolders.has(addon.folderName)}
-                        batchMode={batchMode}
-                        hasUpdate={updatesMap.has(addon.folderName)}
-                        onSelect={onSelect}
-                        onToggleSelect={onToggleSelect}
-                      />
-                    </div>
+                      {tag}
+                      <span className="ml-1 opacity-50">({count})</span>
+                    </button>
                   );
                 })}
-              </div>
-            )}
-          </div>
-        </>
-      ) : (
-        <DiscoverPanel
-          activeTab={discoverTab}
-          onTabChange={onDiscoverTabChange}
-          addonsPath={addonsPath}
-          onInstalled={onInstalled}
-          onSelectResult={onSelectDiscoverResult}
-          selectedResultId={selectedDiscoverResultId}
-          installedEsouiIds={installedEsouiIds}
-          isOffline={isOffline}
-        />
-      )}
+            </div>
+
+            {/* Sort + count bar */}
+            <div className="flex items-center justify-between border-y border-white/[0.06] px-3 py-1.5">
+              <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/50">
+                {addons.length} {addons.length === 1 ? "addon" : "addons"}
+                {batchMode && (
+                  <span className="text-[#c4a44a] font-medium normal-case tracking-normal">
+                    {" "}
+                    &middot; {selectedFolders.size} selected
+                  </span>
+                )}
+              </span>
+              <Select value={sortMode} onValueChange={(v) => onSortChange(v as SortMode)}>
+                <SelectTrigger
+                  size="sm"
+                  className="h-6 w-auto gap-1 border-0 bg-transparent text-[11px] text-muted-foreground/50 hover:text-muted-foreground px-1.5"
+                  aria-label="Sort by"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="name">Name</SelectItem>
+                  <SelectItem value="author">Author</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div
+              ref={scrollContainerRef}
+              role="listbox"
+              aria-label="Installed addons"
+              aria-rowcount={addons.length}
+              aria-activedescendant={
+                selectedAddon ? `addon-${selectedAddon.folderName}` : undefined
+              }
+              tabIndex={0}
+              onKeyDown={handleListKeyDown}
+              className="flex-1 overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
+            >
+              {loading ? (
+                <div className="flex h-full items-center justify-center text-muted-foreground">
+                  <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+                </div>
+              ) : addons.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
+                  {searchQuery || activeTagFilter || filterMode !== "all" ? (
+                    <>
+                      <p className="text-sm">No addons match your current filter</p>
+                      <button
+                        className="text-xs text-[#c4a44a]/70 hover:text-[#c4a44a] transition-colors"
+                        onClick={() => {
+                          onSearchChange("");
+                          onFilterChange("all");
+                          onActiveTagFilterChange(null);
+                        }}
+                      >
+                        Clear filters
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-sm">No addons installed yet</p>
+                      <button
+                        className="text-xs text-[#c4a44a]/70 hover:text-[#c4a44a] transition-colors"
+                        onClick={() => onViewModeChange("discover")}
+                      >
+                        Browse addons to get started
+                      </button>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    height: `${rowVirtualizer.getTotalSize()}px`,
+                    width: "100%",
+                    position: "relative",
+                  }}
+                >
+                  {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                    const addon = addons[virtualRow.index];
+                    return (
+                      <div
+                        key={addon.folderName}
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          width: "100%",
+                          transform: `translateY(${virtualRow.start}px)`,
+                        }}
+                        ref={rowVirtualizer.measureElement}
+                        data-index={virtualRow.index}
+                        aria-rowindex={virtualRow.index + 1}
+                      >
+                        <AddonListItem
+                          addon={addon}
+                          isCurrent={selectedAddon?.folderName === addon.folderName}
+                          isSelected={selectedFolders.has(addon.folderName)}
+                          batchMode={batchMode}
+                          hasUpdate={updatesMap.has(addon.folderName)}
+                          onSelect={onSelect}
+                          onToggleSelect={onToggleSelect}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        ) : (
+          <motion.div
+            key="discover"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.12 }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <DiscoverPanel
+              activeTab={discoverTab}
+              onTabChange={onDiscoverTabChange}
+              addonsPath={addonsPath}
+              onInstalled={onInstalled}
+              onSelectResult={onSelectDiscoverResult}
+              selectedResultId={selectedDiscoverResultId}
+              installedEsouiIds={installedEsouiIds}
+              isOffline={isOffline}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

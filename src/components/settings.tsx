@@ -216,14 +216,14 @@ export function Settings({
 
         {/* Tab content */}
         <div className="flex-1 min-h-0 overflow-y-auto">
-          <AnimatePresence mode="wait">
+          <AnimatePresence>
             {activeTab === "general" && (
               <motion.div
                 key={activeTab}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.1 }}
                 className="space-y-3"
               >
                 {/* Path configuration */}
@@ -350,10 +350,10 @@ export function Settings({
             {activeTab === "tools" && (
               <motion.div
                 key={activeTab}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.1 }}
                 className="space-y-2"
               >
                 <ToolItem
@@ -401,10 +401,10 @@ export function Settings({
             {activeTab === "data" && (
               <motion.div
                 key={activeTab}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.1 }}
                 className="space-y-3"
               >
                 <GlassPanel variant="subtle" className="p-3 space-y-3">

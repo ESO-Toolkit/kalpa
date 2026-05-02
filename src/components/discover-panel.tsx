@@ -267,14 +267,14 @@ export function DiscoverPanel({
         ))}
       </div>
 
-      <AnimatePresence mode="wait">
+      <AnimatePresence>
         {activeTab === "search" && (
           <motion.div
             key="search"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.1 }}
             className="flex min-h-0 flex-1 flex-col"
           >
             <SearchContent
@@ -289,10 +289,10 @@ export function DiscoverPanel({
         {activeTab === "popular" && (
           <motion.div
             key="popular"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.1 }}
             className="flex min-h-0 flex-1 flex-col"
           >
             <PopularContent
@@ -307,10 +307,10 @@ export function DiscoverPanel({
         {activeTab === "categories" && (
           <motion.div
             key="categories"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.1 }}
             className="flex min-h-0 flex-1 flex-col"
           >
             <CategoryContent
@@ -325,10 +325,10 @@ export function DiscoverPanel({
         {activeTab === "url" && (
           <motion.div
             key="url"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ type: "spring", stiffness: 700, damping: 40, duration: 0.08 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.1 }}
             className="flex min-h-0 flex-1 flex-col"
           >
             <UrlContent
