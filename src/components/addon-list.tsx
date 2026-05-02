@@ -26,6 +26,8 @@ import {
   Star,
   Power,
   Trash2,
+  CheckSquare,
+  Square,
 } from "lucide-react";
 import { ContextMenu, type ContextMenuEntry } from "@/components/ui/context-menu";
 import {
@@ -117,8 +119,8 @@ const AddonListItem = memo(function AddonListItem({
           "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]",
         isSelected && "bg-[#c4a44a]/[0.04] border-l-[#c4a44a]!"
       )}
-      onClick={() => {
-        if (batchMode) {
+      onClick={(e) => {
+        if (e.ctrlKey || e.metaKey) {
           onToggleSelect(addon.folderName);
         } else {
           onSelect(addon);
@@ -136,8 +138,8 @@ const AddonListItem = memo(function AddonListItem({
             onToggleSelect(addon.folderName);
           }}
           className={cn(
-            "shrink-0 mt-0.5 transition-opacity duration-150",
-            isSelected || batchMode ? "opacity-100" : "opacity-70 group-hover:opacity-100"
+            "shrink-0 mt-0.5 -ml-2 pl-2 pr-1 py-0.5 transition-opacity duration-150",
+            isSelected || batchMode ? "opacity-100" : "opacity-0 group-hover:opacity-70"
           )}
         >
           <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
@@ -363,6 +365,15 @@ export function AddonList({
       });
     }
 
+    items.push({ separator: true });
+
+    const addonSelected = selectedFolders.has(addon.folderName);
+    items.push({
+      label: addonSelected ? "Deselect" : "Select",
+      icon: addonSelected ? CheckSquare : Square,
+      onClick: () => onToggleSelect(addon.folderName),
+    });
+
     if (onRemoveAddon) {
       items.push({ separator: true });
       items.push({
@@ -378,10 +389,12 @@ export function AddonList({
     ctxMenu,
     updatesMap,
     isOffline,
+    selectedFolders,
     onUpdateAddon,
     onOpenFolder,
     onToggleFavorite,
     onToggleDisable,
+    onToggleSelect,
     onRemoveAddon,
   ]);
 
@@ -417,11 +430,7 @@ export function AddonList({
       } else if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         if (currentIndex >= 0) {
-          if (batchMode) {
-            onToggleSelect(addons[currentIndex].folderName);
-          } else {
-            onSelect(addons[currentIndex]);
-          }
+          onSelect(addons[currentIndex]);
         }
       } else if (e.key === "Home") {
         e.preventDefault();
@@ -433,7 +442,7 @@ export function AddonList({
         rowVirtualizer.scrollToIndex(addons.length - 1, { align: "end" });
       }
     },
-    [addons, selectedAddon, onSelect, batchMode, onToggleSelect, rowVirtualizer]
+    [addons, selectedAddon, onSelect, rowVirtualizer]
   );
 
   return (
