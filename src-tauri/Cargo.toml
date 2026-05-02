@@ -1,6 +1,6 @@
 [package]
 name = "kalpa"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2021"
 description = "A fast, open-source addon manager for The Elder Scrolls Online"
 license = "BSL-1.1"
