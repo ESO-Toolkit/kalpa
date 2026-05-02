@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
+import { motion, AnimatePresence } from "motion/react";
 import type { AddonProfile } from "../types";
 import {
   Dialog,
@@ -12,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 
@@ -137,72 +139,91 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
 
         <div className="max-h-[300px] overflow-y-auto space-y-2">
           {profiles.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-4">
-              No profiles yet. Save your current addon setup as a profile.
-            </p>
+            <Fade>
+              <p className="text-sm text-muted-foreground text-center py-4">
+                No profiles yet. Save your current addon setup as a profile.
+              </p>
+            </Fade>
           ) : (
-            profiles.map((p) => (
-              <div
-                key={p.name}
-                className={cn(
-                  "flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200",
-                  activeProfile === p.name && "border-[#c4a44a]/30 bg-[#c4a44a]/[0.04]"
-                )}
-              >
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-sm">{p.name}</span>
-                    {activeProfile === p.name && <InfoPill color="gold">Active</InfoPill>}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    {p.enabledAddons.length} addons &middot; {p.createdAt}
-                  </div>
-                </div>
-                <div className="flex gap-1 shrink-0">
-                  {confirmDelete === p.name ? (
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs text-amber-400 mr-1">Delete?</span>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        disabled={deleting}
-                        onClick={() => {
-                          setConfirmDelete(null);
-                          handleDelete(p.name);
-                        }}
-                      >
-                        {deleting ? "..." : "Yes"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={deleting}
-                        onClick={() => setConfirmDelete(null)}
-                      >
-                        No
-                      </Button>
-                    </div>
-                  ) : (
-                    <>
-                      <Button
-                        size="sm"
-                        variant={activeProfile === p.name ? "outline" : "default"}
-                        onClick={() => handleActivate(p.name)}
-                        disabled={activating !== null}
-                      >
-                        {activating === p.name ? "Activating..." : "Activate"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => setConfirmDelete(p.name)}
-                      >
-                        Delete
-                      </Button>
-                    </>
+            profiles.map((p, i) => (
+              <Fade key={p.name} delay={i * 50}>
+                <div
+                  className={cn(
+                    "flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200",
+                    activeProfile === p.name && "border-[#c4a44a]/30 bg-[#c4a44a]/[0.04]"
                   )}
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm">{p.name}</span>
+                      {activeProfile === p.name && <InfoPill color="gold">Active</InfoPill>}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      {p.enabledAddons.length} addons &middot; {p.createdAt}
+                    </div>
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <AnimatePresence mode="wait">
+                      {confirmDelete === p.name ? (
+                        <motion.div
+                          key="confirm-delete"
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95 }}
+                          transition={{ duration: 0.15 }}
+                          className="flex items-center gap-1"
+                        >
+                          <span className="text-xs text-amber-400 mr-1">Delete?</span>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={deleting}
+                            onClick={() => {
+                              setConfirmDelete(null);
+                              handleDelete(p.name);
+                            }}
+                          >
+                            {deleting ? "..." : "Yes"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={deleting}
+                            onClick={() => setConfirmDelete(null)}
+                          >
+                            No
+                          </Button>
+                        </motion.div>
+                      ) : (
+                        <motion.div
+                          key="action-btns"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.1 }}
+                          className="flex gap-1"
+                        >
+                          <Button
+                            size="sm"
+                            variant={activeProfile === p.name ? "outline" : "default"}
+                            onClick={() => handleActivate(p.name)}
+                            disabled={activating !== null}
+                          >
+                            {activating === p.name ? "Activating..." : "Activate"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => setConfirmDelete(p.name)}
+                          >
+                            Delete
+                          </Button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
                 </div>
-              </div>
+              </Fade>
             ))
           )}
         </div>

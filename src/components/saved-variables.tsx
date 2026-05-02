@@ -24,9 +24,11 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsIndicator, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import {
   Select,
   SelectContent,
@@ -69,7 +71,6 @@ import {
   HardDriveIcon,
   PackageXIcon,
   ArrowUpDownIcon,
-  CheckIcon,
   SearchIcon,
   SettingsIcon,
   EyeOffIcon,
@@ -543,20 +544,9 @@ function CleanupTab({
                 key={f.fileName}
                 className="flex items-center gap-2.5 rounded-xl border border-white/[0.06] bg-white/[0.03] p-2 cursor-pointer transition-all duration-200 hover:border-white/[0.1] hover:bg-white/[0.05] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:shadow-[0_2px_8px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.05)]"
               >
-                <div
-                  className={`flex size-4 shrink-0 items-center justify-center rounded border transition-all duration-200 ${
-                    selected.has(f.fileName)
-                      ? "border-[#c4a44a] bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.4)]"
-                      : "border-white/[0.2] bg-transparent"
-                  }`}
-                >
-                  {selected.has(f.fileName) && <CheckIcon className="size-3 text-black" />}
-                </div>
-                <input
-                  type="checkbox"
-                  className="sr-only"
+                <Checkbox
                   checked={selected.has(f.fileName)}
-                  onChange={() => toggleFile(f.fileName)}
+                  onCheckedChange={() => toggleFile(f.fileName)}
                 />
                 <div className="min-w-0 flex-1">
                   <div className="text-sm truncate">{f.addonName}</div>
@@ -965,21 +955,14 @@ function WidgetCustomizer({
 
       <div className="flex items-center gap-3">
         <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
-          <input
-            type="checkbox"
-            checked={hidden}
-            onChange={(e) => setHidden(e.target.checked)}
-            className="size-3.5 accent-[#c4a44a]"
-          />
+          <Checkbox checked={hidden} onCheckedChange={(checked) => setHidden(checked === true)} />
           <EyeOffIcon className="size-3" />
           Hide
         </label>
         <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={readOnly}
-            onChange={(e) => setReadOnly(e.target.checked)}
-            className="size-3.5 accent-[#c4a44a]"
+            onCheckedChange={(checked) => setReadOnly(checked === true)}
           />
           <LockIcon className="size-3" />
           Read-only
@@ -2238,57 +2221,70 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
 
   return (
     <Dialog open onOpenChange={(open) => !open && handleClose()}>
-      <DialogContent className="sm:max-w-4xl">
+      <DialogContent className="sm:max-w-4xl h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>SavedVariables Manager</DialogTitle>
         </DialogHeader>
 
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList variant="line">
+        <Tabs
+          value={activeTab}
+          onValueChange={setActiveTab}
+          className="flex-1 min-h-0 flex flex-col"
+        >
+          <TabsList variant="line" className="shrink-0">
+            <TabsIndicator />
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="cleanup">Cleanup</TabsTrigger>
             <TabsTrigger value="copy">Copy Profile</TabsTrigger>
             <TabsTrigger value="editor">Editor</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="overview">
-            <OverviewTab
-              files={files}
-              loading={loading}
-              installedFolders={installedFolders}
-              onRefresh={() => void loadFiles()}
-              onSelectFile={handleSelectFile}
-              onSwitchToCleanup={() => setActiveTab("cleanup")}
-            />
+          <TabsContent value="overview" className="flex-1 min-h-0 overflow-y-auto">
+            <Fade className="h-full">
+              <OverviewTab
+                files={files}
+                loading={loading}
+                installedFolders={installedFolders}
+                onRefresh={() => void loadFiles()}
+                onSelectFile={handleSelectFile}
+                onSwitchToCleanup={() => setActiveTab("cleanup")}
+              />
+            </Fade>
           </TabsContent>
 
-          <TabsContent value="cleanup">
-            <CleanupTab
-              files={files}
-              installedFolders={installedFolders}
-              addonsPath={addonsPath}
-              onRefresh={() => void loadFiles()}
-            />
+          <TabsContent value="cleanup" className="flex-1 min-h-0 overflow-y-auto">
+            <Fade className="h-full">
+              <CleanupTab
+                files={files}
+                installedFolders={installedFolders}
+                addonsPath={addonsPath}
+                onRefresh={() => void loadFiles()}
+              />
+            </Fade>
           </TabsContent>
 
-          <TabsContent value="copy">
-            <CopyProfileTab
-              files={files}
-              characters={characters}
-              addonsPath={addonsPath}
-              onRefresh={() => void loadFiles()}
-            />
+          <TabsContent value="copy" className="flex-1 min-h-0 overflow-y-auto">
+            <Fade className="h-full">
+              <CopyProfileTab
+                files={files}
+                characters={characters}
+                addonsPath={addonsPath}
+                onRefresh={() => void loadFiles()}
+              />
+            </Fade>
           </TabsContent>
 
-          <TabsContent value="editor">
-            <EditorTab
-              files={files}
-              addonsPath={addonsPath}
-              initialFile={editorFile}
-              esoRunning={esoRunning}
-              characters={characters}
-              onDirtyChange={handleDirtyChange}
-            />
+          <TabsContent value="editor" className="flex-1 min-h-0 overflow-y-auto">
+            <Fade className="h-full">
+              <EditorTab
+                files={files}
+                addonsPath={addonsPath}
+                initialFile={editorFile}
+                esoRunning={esoRunning}
+                characters={characters}
+                onDirtyChange={handleDirtyChange}
+              />
+            </Fade>
           </TabsContent>
         </Tabs>
 

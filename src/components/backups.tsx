@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
+import { motion, AnimatePresence } from "motion/react";
 import type { BackupInfo } from "../types";
 import {
   Dialog,
@@ -11,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { formatBytes } from "@/lib/utils";
 
@@ -119,83 +121,122 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
 
         <div className="max-h-[300px] overflow-y-auto space-y-2">
           {backups.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-4">No backups yet.</p>
+            <Fade>
+              <p className="text-sm text-muted-foreground text-center py-4">No backups yet.</p>
+            </Fade>
           ) : (
-            backups.map((b) => (
-              <div
-                key={b.name}
-                className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]"
-              >
-                <div>
-                  <div className="font-medium text-sm">{b.name}</div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    {b.fileCount} files &middot; {formatBytes(b.totalSize)} &middot; {b.createdAt}
+            backups.map((b, i) => (
+              <Fade key={b.name} delay={i * 50}>
+                <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
+                  <div>
+                    <div className="font-medium text-sm">{b.name}</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      {b.fileCount} files &middot; {formatBytes(b.totalSize)} &middot; {b.createdAt}
+                    </div>
+                  </div>
+                  <div className="flex gap-1">
+                    <AnimatePresence mode="wait">
+                      {confirmRestore === b.name ? (
+                        <motion.div
+                          key="confirm-restore"
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95 }}
+                          transition={{ duration: 0.15 }}
+                          className="flex items-center gap-1"
+                        >
+                          <span className="text-xs text-amber-400 mr-1">
+                            Overwrite current SavedVariables?
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => {
+                              setConfirmRestore(null);
+                              handleRestore(b.name);
+                            }}
+                            disabled={restoring !== null}
+                          >
+                            {restoring === b.name ? "Restoring..." : "Yes, Restore"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setConfirmRestore(null)}
+                          >
+                            Cancel
+                          </Button>
+                        </motion.div>
+                      ) : (
+                        <motion.div
+                          key="restore-btn"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.1 }}
+                        >
+                          <Button
+                            size="sm"
+                            onClick={() => setConfirmRestore(b.name)}
+                            disabled={restoring !== null}
+                          >
+                            {restoring === b.name ? "Restoring..." : "Restore"}
+                          </Button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                    <AnimatePresence mode="wait">
+                      {confirmDelete === b.name ? (
+                        <motion.div
+                          key="confirm-delete"
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95 }}
+                          transition={{ duration: 0.15 }}
+                          className="flex items-center gap-1"
+                        >
+                          <span className="text-xs text-amber-400 mr-1">Delete this backup?</span>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={deleting}
+                            onClick={() => {
+                              setConfirmDelete(null);
+                              handleDelete(b.name);
+                            }}
+                          >
+                            {deleting ? "Deleting..." : "Yes, Delete"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={deleting}
+                            onClick={() => setConfirmDelete(null)}
+                          >
+                            Cancel
+                          </Button>
+                        </motion.div>
+                      ) : (
+                        <motion.div
+                          key="delete-btn"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.1 }}
+                        >
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => setConfirmDelete(b.name)}
+                          >
+                            Delete
+                          </Button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 </div>
-                <div className="flex gap-1">
-                  {confirmRestore === b.name ? (
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs text-amber-400 mr-1">
-                        Overwrite current SavedVariables?
-                      </span>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => {
-                          setConfirmRestore(null);
-                          handleRestore(b.name);
-                        }}
-                        disabled={restoring !== null}
-                      >
-                        {restoring === b.name ? "Restoring..." : "Yes, Restore"}
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => setConfirmRestore(null)}>
-                        Cancel
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button
-                      size="sm"
-                      onClick={() => setConfirmRestore(b.name)}
-                      disabled={restoring !== null}
-                    >
-                      {restoring === b.name ? "Restoring..." : "Restore"}
-                    </Button>
-                  )}
-                  {confirmDelete === b.name ? (
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs text-amber-400 mr-1">Delete this backup?</span>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        disabled={deleting}
-                        onClick={() => {
-                          setConfirmDelete(null);
-                          handleDelete(b.name);
-                        }}
-                      >
-                        {deleting ? "Deleting..." : "Yes, Delete"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={deleting}
-                        onClick={() => setConfirmDelete(null)}
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      onClick={() => setConfirmDelete(b.name)}
-                    >
-                      Delete
-                    </Button>
-                  )}
-                </div>
-              </div>
+              </Fade>
             ))
           )}
         </div>

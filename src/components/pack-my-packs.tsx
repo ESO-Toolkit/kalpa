@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { motion, AnimatePresence } from "motion/react";
 import {
   Select,
   SelectContent,
@@ -137,7 +138,7 @@ export function MyPacksView({
       {/* Sub-tab toggle: Created / Installed */}
       <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
         <div
-          className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+          className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-[left] duration-200 ease-out"
           style={{
             left: subTab === "created" ? "2px" : "calc(50% + 2px)",
             width: "calc(50% - 4px)",
@@ -375,28 +376,40 @@ export function MyPacksView({
                     </div>
 
                     {/* Inline delete confirmation */}
-                    {isConfirmingDelete && (
-                      <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/25 bg-red-500/[0.08] px-3 py-2 overflow-hidden transition-all duration-200 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
-                        <span className="text-xs text-red-400 font-medium">Delete this pack?</span>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setConfirmDeleteId(null)}
-                            className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors px-2 py-0.5"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => {
-                              setConfirmDeleteId(null);
-                              onDelete(pack.id);
-                            }}
-                            className="text-xs font-semibold text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 rounded-md px-2.5 py-0.5 transition-all duration-150"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                    <AnimatePresence>
+                      {isConfirmingDelete && (
+                        <motion.div
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: "auto" }}
+                          exit={{ opacity: 0, height: 0 }}
+                          transition={{ duration: 0.15 }}
+                          className="overflow-hidden"
+                        >
+                          <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/25 bg-red-500/[0.08] px-3 py-2 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
+                            <span className="text-xs text-red-400 font-medium">
+                              Delete this pack?
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setConfirmDeleteId(null)}
+                                className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors px-2 py-0.5"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setConfirmDeleteId(null);
+                                  onDelete(pack.id);
+                                }}
+                                className="text-xs font-semibold text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 rounded-md px-2.5 py-0.5 transition-all duration-150"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 );
               })

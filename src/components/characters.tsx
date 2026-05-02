@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 
 interface CharactersProps {
@@ -98,44 +99,54 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
 
         <div className="max-h-[350px] overflow-y-auto space-y-4">
           {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-            </div>
-          ) : Object.keys(byServer).length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-4">
-              No characters found. Launch ESO at least once to generate character data.
-            </p>
-          ) : (
-            Object.entries(byServer).map(([server, chars]) => (
-              <div key={server}>
-                <div className="flex items-center gap-2 mb-2">
-                  <InfoPill color="sky">{server}</InfoPill>
-                  <span className="text-xs text-muted-foreground">
-                    {chars.length} character{chars.length !== 1 ? "s" : ""}
-                  </span>
-                </div>
-                <div className="space-y-1">
-                  {chars.map((char) => (
-                    <div
-                      key={`${char.server}-${char.name}`}
-                      className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]"
-                    >
-                      <span className="text-sm font-medium">{char.name}</span>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleBackup(char)}
-                        disabled={backingUp === `${char.server}-${char.name}`}
-                      >
-                        {backingUp === `${char.server}-${char.name}`
-                          ? "Backing up..."
-                          : "Backup Settings"}
-                      </Button>
-                    </div>
-                  ))}
-                </div>
+            <Fade>
+              <div className="flex items-center justify-center py-8">
+                <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
               </div>
-            ))
+            </Fade>
+          ) : Object.keys(byServer).length === 0 ? (
+            <Fade>
+              <p className="text-sm text-muted-foreground text-center py-4">
+                No characters found. Launch ESO at least once to generate character data.
+              </p>
+            </Fade>
+          ) : (
+            <div className="space-y-4">
+              {Object.entries(byServer).map(([server, chars], serverIdx) => (
+                <Fade key={server} delay={serverIdx * 80}>
+                  <div>
+                    <div className="flex items-center gap-2 mb-2">
+                      <InfoPill color="sky">{server}</InfoPill>
+                      <span className="text-xs text-muted-foreground">
+                        {chars.length} character{chars.length !== 1 ? "s" : ""}
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      {chars.map((char, charIdx) => (
+                        <Fade
+                          key={`${char.server}-${char.name}`}
+                          delay={serverIdx * 80 + charIdx * 40}
+                        >
+                          <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
+                            <span className="text-sm font-medium">{char.name}</span>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => handleBackup(char)}
+                              disabled={backingUp === `${char.server}-${char.name}`}
+                            >
+                              {backingUp === `${char.server}-${char.name}`
+                                ? "Backing up..."
+                                : "Backup Settings"}
+                            </Button>
+                          </div>
+                        </Fade>
+                      ))}
+                    </div>
+                  </div>
+                </Fade>
+              ))}
+            </div>
           )}
         </div>
 

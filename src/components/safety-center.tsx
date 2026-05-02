@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
+import { motion, AnimatePresence } from "motion/react";
 import {
   Dialog,
   DialogContent,
@@ -8,7 +9,8 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsIndicator, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { formatBytes } from "@/lib/utils";
 import type { SnapshotManifest, IntegrityResult, OpLogEntry } from "@/types";
@@ -22,13 +24,14 @@ interface SafetyCenterProps {
 export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterProps) {
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="sm:max-w-lg h-[70vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Safety Center</DialogTitle>
         </DialogHeader>
 
-        <Tabs defaultValue="snapshots">
-          <TabsList className="w-full">
+        <Tabs defaultValue="snapshots" className="flex-1 min-h-0 flex flex-col">
+          <TabsList className="w-full shrink-0">
+            <TabsIndicator />
             <TabsTrigger value="snapshots" className="flex-1">
               Snapshots
             </TabsTrigger>
@@ -40,14 +43,20 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="snapshots">
-            <SnapshotsTab addonsPath={addonsPath} onRefresh={onRefresh} />
+          <TabsContent value="snapshots" className="flex-1 min-h-0 overflow-y-auto">
+            <Fade className="h-full">
+              <SnapshotsTab addonsPath={addonsPath} onRefresh={onRefresh} />
+            </Fade>
           </TabsContent>
-          <TabsContent value="integrity">
-            <IntegrityTab addonsPath={addonsPath} />
+          <TabsContent value="integrity" className="flex-1 min-h-0 overflow-y-auto">
+            <Fade className="h-full">
+              <IntegrityTab addonsPath={addonsPath} />
+            </Fade>
           </TabsContent>
-          <TabsContent value="log">
-            <LogTab addonsPath={addonsPath} />
+          <TabsContent value="log" className="flex-1 min-h-0 overflow-y-auto">
+            <Fade className="h-full">
+              <LogTab addonsPath={addonsPath} />
+            </Fade>
           </TabsContent>
         </Tabs>
 
@@ -129,65 +138,116 @@ function SnapshotsTab({ addonsPath, onRefresh }: { addonsPath: string; onRefresh
 
       <div className="max-h-[300px] overflow-y-auto space-y-2">
         {snapshots.length === 0 ? (
-          <p className="text-sm text-muted-foreground text-center py-4">No snapshots yet.</p>
+          <Fade>
+            <p className="text-sm text-muted-foreground text-center py-4">No snapshots yet.</p>
+          </Fade>
         ) : (
-          snapshots.map((s) => (
-            <div
-              key={s.id}
-              className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]"
-            >
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="font-medium text-sm">{s.label}</div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    {s.fileCount} files &middot; {formatBytes(s.totalSize)} &middot; {s.createdAt}
-                  </div>
-                  <div className="text-[10px] text-muted-foreground mt-0.5">
-                    Includes: {s.sourcePaths.join(", ")}
-                  </div>
-                </div>
-                <div className="flex gap-1 shrink-0">
-                  {confirmRestore === s.id ? (
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs text-amber-400 mr-1">Restore?</span>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => handleRestore(s.id)}
-                        disabled={restoring !== null}
-                      >
-                        {restoring === s.id ? "Restoring..." : "Yes"}
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => setConfirmRestore(null)}>
-                        No
-                      </Button>
+          snapshots.map((s, i) => (
+            <Fade key={s.id} delay={i * 50}>
+              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="font-medium text-sm">{s.label}</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      {s.fileCount} files &middot; {formatBytes(s.totalSize)} &middot; {s.createdAt}
                     </div>
-                  ) : (
-                    <Button
-                      size="sm"
-                      onClick={() => setConfirmRestore(s.id)}
-                      disabled={restoring !== null}
-                    >
-                      Restore
-                    </Button>
-                  )}
-                  {confirmDelete === s.id ? (
-                    <div className="flex items-center gap-1">
-                      <Button size="sm" variant="destructive" onClick={() => handleDelete(s.id)}>
-                        Delete
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => setConfirmDelete(null)}>
-                        Keep
-                      </Button>
+                    <div className="text-[10px] text-muted-foreground mt-0.5">
+                      Includes: {s.sourcePaths.join(", ")}
                     </div>
-                  ) : (
-                    <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(s.id)}>
-                      Delete
-                    </Button>
-                  )}
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <AnimatePresence mode="wait">
+                      {confirmRestore === s.id ? (
+                        <motion.div
+                          key="confirm-restore"
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95 }}
+                          transition={{ duration: 0.15 }}
+                          className="flex items-center gap-1"
+                        >
+                          <span className="text-xs text-amber-400 mr-1">Restore?</span>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => handleRestore(s.id)}
+                            disabled={restoring !== null}
+                          >
+                            {restoring === s.id ? "Restoring..." : "Yes"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setConfirmRestore(null)}
+                          >
+                            No
+                          </Button>
+                        </motion.div>
+                      ) : (
+                        <motion.div
+                          key="restore-btn"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.1 }}
+                        >
+                          <Button
+                            size="sm"
+                            onClick={() => setConfirmRestore(s.id)}
+                            disabled={restoring !== null}
+                          >
+                            Restore
+                          </Button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                    <AnimatePresence mode="wait">
+                      {confirmDelete === s.id ? (
+                        <motion.div
+                          key="confirm-delete"
+                          initial={{ opacity: 0, scale: 0.95 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.95 }}
+                          transition={{ duration: 0.15 }}
+                          className="flex items-center gap-1"
+                        >
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => handleDelete(s.id)}
+                          >
+                            Delete
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setConfirmDelete(null)}
+                          >
+                            Keep
+                          </Button>
+                        </motion.div>
+                      ) : (
+                        <motion.div
+                          key="delete-btn"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.1 }}
+                        >
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => setConfirmDelete(s.id)}
+                          >
+                            Delete
+                          </Button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
                 </div>
               </div>
-            </div>
+            </Fade>
           ))
         )}
       </div>
@@ -223,31 +283,33 @@ function IntegrityTab({ addonsPath }: { addonsPath: string }) {
       </Button>
 
       {result && (
-        <div className="space-y-2">
-          <div className="flex gap-3 text-sm">
-            <StatusBadge ok={result.addonsFolderOk} label="AddOns" />
-            <StatusBadge ok={result.savedVariablesOk} label="SavedVariables" />
-            <span className="text-muted-foreground">
-              {result.addonCount} tracked addon{result.addonCount !== 1 ? "s" : ""}
-            </span>
+        <Fade>
+          <div className="space-y-2">
+            <div className="flex gap-3 text-sm">
+              <StatusBadge ok={result.addonsFolderOk} label="AddOns" />
+              <StatusBadge ok={result.savedVariablesOk} label="SavedVariables" />
+              <span className="text-muted-foreground">
+                {result.addonCount} tracked addon{result.addonCount !== 1 ? "s" : ""}
+              </span>
+            </div>
+            {result.issues.length > 0 ? (
+              <div className="space-y-1 max-h-[200px] overflow-y-auto">
+                {result.issues.map((issue) => (
+                  <div
+                    key={issue}
+                    className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-1.5 text-xs text-amber-400"
+                  >
+                    {issue}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] px-3 py-2 text-xs text-emerald-400">
+                All checks passed. No issues found.
+              </div>
+            )}
           </div>
-          {result.issues.length > 0 ? (
-            <div className="space-y-1 max-h-[200px] overflow-y-auto">
-              {result.issues.map((issue) => (
-                <div
-                  key={issue}
-                  className="rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-1.5 text-xs text-amber-400"
-                >
-                  {issue}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] px-3 py-2 text-xs text-emerald-400">
-              All checks passed. No issues found.
-            </div>
-          )}
-        </div>
+        </Fade>
       )}
     </div>
   );
@@ -288,25 +350,28 @@ function LogTab({ addonsPath }: { addonsPath: string }) {
 
       <div className="max-h-[300px] overflow-y-auto space-y-1.5">
         {entries.length === 0 ? (
-          <p className="text-sm text-muted-foreground text-center py-4">No operations logged.</p>
+          <Fade>
+            <p className="text-sm text-muted-foreground text-center py-4">No operations logged.</p>
+          </Fade>
         ) : (
           [...entries].reverse().map((entry, i) => (
-            <div
-              key={`${entry.startedAt}-${i}`}
-              className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2 text-xs"
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-medium text-white/80">{entry.operation}</span>
-                <span className={entry.status === "success" ? "text-emerald-400" : "text-red-400"}>
-                  {entry.status}
-                </span>
+            <Fade key={`${entry.startedAt}-${i}`} delay={i * 40}>
+              <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-2 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-white/80">{entry.operation}</span>
+                  <span
+                    className={entry.status === "success" ? "text-emerald-400" : "text-red-400"}
+                  >
+                    {entry.status}
+                  </span>
+                </div>
+                <div className="text-muted-foreground mt-0.5">{entry.details}</div>
+                <div className="text-[10px] text-white/30 mt-0.5">
+                  {entry.startedAt} &rarr; {entry.finishedAt}
+                  {entry.snapshotId && ` | Snapshot: ${entry.snapshotId}`}
+                </div>
               </div>
-              <div className="text-muted-foreground mt-0.5">{entry.details}</div>
-              <div className="text-[10px] text-white/30 mt-0.5">
-                {entry.startedAt} &rarr; {entry.finishedAt}
-                {entry.snapshotId && ` | Snapshot: ${entry.snapshotId}`}
-              </div>
-            </div>
+            </Fade>
           ))
         )}
       </div>
