@@ -56,10 +56,10 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
               {activeTab === "snapshots" && (
                 <motion.div
                   key="snapshots"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
+                  initial={{ opacity: 0, y: 3 }}
+                  animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.1 }}
+                  transition={{ type: "spring", stiffness: 600, damping: 35 }}
                 >
                   <SnapshotsTab addonsPath={addonsPath} onRefresh={onRefresh} />
                 </motion.div>
@@ -67,10 +67,10 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
               {activeTab === "integrity" && (
                 <motion.div
                   key="integrity"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
+                  initial={{ opacity: 0, y: 3 }}
+                  animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.1 }}
+                  transition={{ type: "spring", stiffness: 600, damping: 35 }}
                 >
                   <IntegrityTab addonsPath={addonsPath} />
                 </motion.div>
@@ -78,10 +78,10 @@ export function SafetyCenter({ addonsPath, onClose, onRefresh }: SafetyCenterPro
               {activeTab === "log" && (
                 <motion.div
                   key="log"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
+                  initial={{ opacity: 0, y: 3 }}
+                  animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.1 }}
+                  transition={{ type: "spring", stiffness: 600, damping: 35 }}
                 >
                   <LogTab addonsPath={addonsPath} />
                 </motion.div>

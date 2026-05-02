@@ -220,10 +220,10 @@ export function Settings({
             {activeTab === "general" && (
               <motion.div
                 key={activeTab}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
+                initial={{ opacity: 0, y: 3 }}
+                animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
-                transition={{ duration: 0.1 }}
+                transition={{ type: "spring", stiffness: 600, damping: 35 }}
                 className="space-y-3"
               >
                 {/* Path configuration */}
@@ -350,10 +350,10 @@ export function Settings({
             {activeTab === "tools" && (
               <motion.div
                 key={activeTab}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
+                initial={{ opacity: 0, y: 3 }}
+                animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
-                transition={{ duration: 0.1 }}
+                transition={{ type: "spring", stiffness: 600, damping: 35 }}
                 className="space-y-2"
               >
                 <ToolItem
@@ -401,10 +401,10 @@ export function Settings({
             {activeTab === "data" && (
               <motion.div
                 key={activeTab}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
+                initial={{ opacity: 0, y: 3 }}
+                animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
-                transition={{ duration: 0.1 }}
+                transition={{ type: "spring", stiffness: 600, damping: 35 }}
                 className="space-y-3"
               >
                 <GlassPanel variant="subtle" className="p-3 space-y-3">
