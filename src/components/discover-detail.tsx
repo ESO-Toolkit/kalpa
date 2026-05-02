@@ -22,6 +22,7 @@ import {
   Hash,
   Swords,
   Check,
+  Copy,
 } from "lucide-react";
 
 interface DiscoverDetailProps {
@@ -45,6 +46,7 @@ export function DiscoverDetail({
   const [installingId, setInstallingId] = useState<number | null>(null);
   const [installSuccess, setInstallSuccess] = useState<InstallResult | null>(null);
   const [screenshotIdx, setScreenshotIdx] = useState(0);
+  const [md5Copied, setMd5Copied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +65,7 @@ export function DiscoverDetail({
     setError(null);
     setInstallSuccess(null);
     setScreenshotIdx(0);
+    setMd5Copied(false);
 
     void invokeOrThrow<EsouiAddonDetail>("fetch_esoui_detail", { esouiId: result.id })
       .then((detailResult) => {
@@ -300,7 +303,43 @@ export function DiscoverDetail({
             label="Compatibility"
             value={detail.compatibility}
           />
-          <MetaField icon={<HardDrive className="size-3" />} label="MD5" value={detail.md5} />
+          <div>
+            <span className="text-muted-foreground/50 font-heading text-[10px] uppercase tracking-wider flex items-center gap-1">
+              <HardDrive className="size-3" />
+              MD5
+            </span>
+            {detail.md5 ? (
+              <SimpleTooltip content={detail.md5}>
+                <button
+                  className="group/md5 flex items-center gap-1.5 mt-0.5 font-mono text-xs font-medium hover:text-[#38bdf8] transition-colors duration-150"
+                  aria-label={`Copy MD5: ${detail.md5}`}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(detail.md5);
+                      setMd5Copied(true);
+                      setTimeout(() => setMd5Copied(false), 2000);
+                    } catch {
+                      toast.error("Failed to copy to clipboard");
+                    }
+                  }}
+                >
+                  <span>{detail.md5.slice(0, 8)}&hellip;</span>
+                  <span
+                    className={cn(
+                      "transition-all duration-150",
+                      md5Copied
+                        ? "text-emerald-400"
+                        : "text-muted-foreground/40 group-hover/md5:text-[#38bdf8]"
+                    )}
+                  >
+                    {md5Copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+                  </span>
+                </button>
+              </SimpleTooltip>
+            ) : (
+              <div className="font-medium mt-0.5">&mdash;</div>
+            )}
+          </div>
           <MetaField
             icon={<Calendar className="size-3" />}
             label="Created"
