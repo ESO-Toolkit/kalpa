@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { cn, formatRelativeDate } from "@/lib/utils";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import {
   ImportIcon,
   SearchIcon,
@@ -55,139 +56,143 @@ export function PackImportView({
     const allInstalled = importedPackAddonsToInstall.length === 0;
 
     return (
-      <div className="flex flex-col gap-3 overflow-y-auto max-h-[400px]">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">{importedPack.title}</h3>
-          <Button variant="ghost" size="sm" onClick={onClear}>
-            <XIcon className="size-3.5 mr-1" />
-            Clear
+      <Fade>
+        <div className="flex flex-col gap-3 overflow-y-auto max-h-[400px]">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold">{importedPack.title}</h3>
+            <Button variant="ghost" size="sm" onClick={onClear}>
+              <XIcon className="size-3.5 mr-1" />
+              Clear
+            </Button>
+          </div>
+
+          {importedPack.description && (
+            <p className="text-sm text-muted-foreground">{importedPack.description}</p>
+          )}
+
+          {/* Preview metadata */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <InfoPill color={PACK_TYPE_PILL_COLOR[importedPack.packType] ?? "muted"}>
+              {TYPE_LABELS[importedPack.packType] ?? importedPack.packType}
+            </InfoPill>
+            {importedPack.tags.map((tag) => (
+              <InfoPill key={tag} color={TAG_COLORS[tag] ?? "muted"}>
+                {tag}
+              </InfoPill>
+            ))}
+            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
+              <PackageIcon className="size-3" />
+              {importedPack.addons.length} addon{importedPack.addons.length !== 1 ? "s" : ""}
+            </span>
+            {importedPack.sharedBy && (
+              <span className="text-[11px] text-muted-foreground/40">
+                shared by {importedPack.sharedBy}
+              </span>
+            )}
+            {importedPack.sharedAt && formatRelativeDate(importedPack.sharedAt) && (
+              <span className="text-[10px] text-muted-foreground/30">
+                {formatRelativeDate(importedPack.sharedAt)}
+              </span>
+            )}
+          </div>
+
+          {/* All installed state */}
+          {allInstalled && !installing && (
+            <div className="flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] p-3 shadow-[0_0_12px_rgba(34,197,94,0.06),inset_0_1px_0_rgba(34,197,94,0.06)]">
+              <CheckIcon className="size-4 text-emerald-400" />
+              <span className="text-sm text-emerald-400 font-medium">
+                All addons already installed
+              </span>
+            </div>
+          )}
+
+          {/* Install progress */}
+          {installing && installProgress && (
+            <Fade>
+              <div className="rounded-lg border border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] p-3 shadow-[0_0_12px_rgba(196,164,74,0.06),inset_0_1px_0_rgba(196,164,74,0.04)]">
+                <div className="flex items-center justify-between text-sm mb-2">
+                  <span className="text-[#c4a44a] font-medium">
+                    Installing {installProgress.completed + installProgress.failed}/
+                    {installProgress.total}
+                  </span>
+                  {installProgress.failed > 0 && (
+                    <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
+                  )}
+                </div>
+                <div className="h-1.5 rounded-full bg-white/[0.06]">
+                  <div
+                    className="h-full rounded-full bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.5)] transition-all duration-300 ease-out"
+                    style={{
+                      width: `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            </Fade>
+          )}
+
+          {/* Addon list */}
+          {requiredAddons.length > 0 && (
+            <div>
+              <SectionHeader>Required ({requiredAddons.length})</SectionHeader>
+              <div className="mt-1.5 space-y-1">
+                {requiredAddons.map((addon) => (
+                  <div
+                    key={addon.esouiId}
+                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                  >
+                    <span className="text-sm">{addon.name}</span>
+                    {installedEsouiIds.has(addon.esouiId) ? (
+                      <span className="text-[10px] text-emerald-400/60 font-medium">Installed</span>
+                    ) : (
+                      <span className="text-[10px] text-[#c4a44a]/60 font-medium">New</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {optionalAddons.length > 0 && (
+            <div>
+              <SectionHeader>Optional ({optionalAddons.length})</SectionHeader>
+              <div className="mt-1.5 space-y-1">
+                {optionalAddons.map((addon) => (
+                  <div
+                    key={addon.esouiId}
+                    className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                  >
+                    <span className="text-sm text-muted-foreground">{addon.name}</span>
+                    {installedEsouiIds.has(addon.esouiId) && (
+                      <span className="text-[10px] text-emerald-400/60 font-medium">Installed</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <Button onClick={onInstall} disabled={installing || allInstalled} className="w-full">
+            {installing ? (
+              <>
+                <Loader2Icon className="size-4 animate-spin mr-1.5" />
+                Installing...
+              </>
+            ) : allInstalled ? (
+              <>
+                <CheckIcon className="size-4 mr-1.5" />
+                All Installed
+              </>
+            ) : (
+              <>
+                <DownloadIcon className="size-4 mr-1.5" />
+                Install {importedPackAddonsToInstall.length} New Addon
+                {importedPackAddonsToInstall.length !== 1 ? "s" : ""}
+              </>
+            )}
           </Button>
         </div>
-
-        {importedPack.description && (
-          <p className="text-sm text-muted-foreground">{importedPack.description}</p>
-        )}
-
-        {/* Preview metadata */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <InfoPill color={PACK_TYPE_PILL_COLOR[importedPack.packType] ?? "muted"}>
-            {TYPE_LABELS[importedPack.packType] ?? importedPack.packType}
-          </InfoPill>
-          {importedPack.tags.map((tag) => (
-            <InfoPill key={tag} color={TAG_COLORS[tag] ?? "muted"}>
-              {tag}
-            </InfoPill>
-          ))}
-          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
-            <PackageIcon className="size-3" />
-            {importedPack.addons.length} addon{importedPack.addons.length !== 1 ? "s" : ""}
-          </span>
-          {importedPack.sharedBy && (
-            <span className="text-[11px] text-muted-foreground/40">
-              shared by {importedPack.sharedBy}
-            </span>
-          )}
-          {importedPack.sharedAt && formatRelativeDate(importedPack.sharedAt) && (
-            <span className="text-[10px] text-muted-foreground/30">
-              {formatRelativeDate(importedPack.sharedAt)}
-            </span>
-          )}
-        </div>
-
-        {/* All installed state */}
-        {allInstalled && !installing && (
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] p-3 shadow-[0_0_12px_rgba(34,197,94,0.06),inset_0_1px_0_rgba(34,197,94,0.06)]">
-            <CheckIcon className="size-4 text-emerald-400" />
-            <span className="text-sm text-emerald-400 font-medium">
-              All addons already installed
-            </span>
-          </div>
-        )}
-
-        {/* Install progress */}
-        {installing && installProgress && (
-          <div className="rounded-lg border border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] p-3 shadow-[0_0_12px_rgba(196,164,74,0.06),inset_0_1px_0_rgba(196,164,74,0.04)]">
-            <div className="flex items-center justify-between text-sm mb-2">
-              <span className="text-[#c4a44a] font-medium">
-                Installing {installProgress.completed + installProgress.failed}/
-                {installProgress.total}
-              </span>
-              {installProgress.failed > 0 && (
-                <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
-              )}
-            </div>
-            <div className="h-1.5 rounded-full bg-white/[0.06]">
-              <div
-                className="h-full rounded-full bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.5)] transition-all duration-300 ease-out"
-                style={{
-                  width: `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`,
-                }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Addon list */}
-        {requiredAddons.length > 0 && (
-          <div>
-            <SectionHeader>Required ({requiredAddons.length})</SectionHeader>
-            <div className="mt-1.5 space-y-1">
-              {requiredAddons.map((addon) => (
-                <div
-                  key={addon.esouiId}
-                  className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-                >
-                  <span className="text-sm">{addon.name}</span>
-                  {installedEsouiIds.has(addon.esouiId) ? (
-                    <span className="text-[10px] text-emerald-400/60 font-medium">Installed</span>
-                  ) : (
-                    <span className="text-[10px] text-[#c4a44a]/60 font-medium">New</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {optionalAddons.length > 0 && (
-          <div>
-            <SectionHeader>Optional ({optionalAddons.length})</SectionHeader>
-            <div className="mt-1.5 space-y-1">
-              {optionalAddons.map((addon) => (
-                <div
-                  key={addon.esouiId}
-                  className="flex items-center justify-between px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-                >
-                  <span className="text-sm text-muted-foreground">{addon.name}</span>
-                  {installedEsouiIds.has(addon.esouiId) && (
-                    <span className="text-[10px] text-emerald-400/60 font-medium">Installed</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <Button onClick={onInstall} disabled={installing || allInstalled} className="w-full">
-          {installing ? (
-            <>
-              <Loader2Icon className="size-4 animate-spin mr-1.5" />
-              Installing...
-            </>
-          ) : allInstalled ? (
-            <>
-              <CheckIcon className="size-4 mr-1.5" />
-              All Installed
-            </>
-          ) : (
-            <>
-              <DownloadIcon className="size-4 mr-1.5" />
-              Install {importedPackAddonsToInstall.length} New Addon
-              {importedPackAddonsToInstall.length !== 1 ? "s" : ""}
-            </>
-          )}
-        </Button>
-      </div>
+      </Fade>
     );
   }
 
@@ -264,10 +269,12 @@ export function PackImportView({
       )}
 
       {importError && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/[0.06] p-3 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
-          <AlertCircleIcon className="size-4 text-red-400 shrink-0 mt-0.5" />
-          <p className="text-sm text-red-300">{importError}</p>
-        </div>
+        <Fade>
+          <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/[0.06] p-3 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
+            <AlertCircleIcon className="size-4 text-red-400 shrink-0 mt-0.5" />
+            <p className="text-sm text-red-300">{importError}</p>
+          </div>
+        </Fade>
       )}
     </div>
   );

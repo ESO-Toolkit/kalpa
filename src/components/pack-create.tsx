@@ -16,6 +16,7 @@ import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import {
   SearchIcon,
   PackageIcon,
@@ -449,7 +450,8 @@ export function PackCreateView({
                 />
               </div>
               <span className="text-[10px] text-muted-foreground/40 tabular-nums">
-                {title.length}/100
+                <CountingNumber number={title.length} initiallyStable />
+                /100
               </span>
             </div>
           </div>
@@ -475,7 +477,8 @@ export function PackCreateView({
                 />
               </div>
               <span className="text-[10px] text-muted-foreground/40 tabular-nums">
-                {description.length}/500
+                <CountingNumber number={description.length} initiallyStable />
+                /500
               </span>
             </div>
           </div>
