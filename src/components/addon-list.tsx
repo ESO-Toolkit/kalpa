@@ -324,7 +324,7 @@ export function AddonList({
         </Tabs>
       </div>
 
-      <AnimatePresence initial={false}>
+      <AnimatePresence mode="wait" initial={false}>
         {viewMode === "installed" ? (
           <motion.div
             key="installed"
