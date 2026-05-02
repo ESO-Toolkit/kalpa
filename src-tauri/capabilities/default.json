@@ -26,6 +26,8 @@
           "url": "https://esotk.com"
         }
       ]
-    }
+    },
+    "opener:allow-reveal-item-in-dir",
+    "notification:default"
   ]
 }

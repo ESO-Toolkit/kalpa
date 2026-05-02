@@ -8,6 +8,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { MinusIcon, PlusIcon } from "lucide-react";
+import { motion } from "motion/react";
 
 export function ToggleControl({
   field,
@@ -27,8 +28,10 @@ export function ToggleControl({
       } ${checked ? "bg-[#c4a44a]" : "bg-white/[0.12]"}`}
       aria-label={field.label}
     >
-      <span
-        className={`inline-block size-3.5 rounded-full bg-white shadow transition-transform ${
+      <motion.span
+        layout
+        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+        className={`inline-block size-3.5 rounded-full bg-white shadow ${
           checked ? "translate-x-[18px]" : "translate-x-[3px]"
         }`}
       />

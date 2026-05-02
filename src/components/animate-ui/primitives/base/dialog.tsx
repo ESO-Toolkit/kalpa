@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
-import { AnimatePresence, motion, type HTMLMotionProps } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 
 import { useControlledState } from "@/hooks/use-controlled-state";
 
@@ -78,6 +78,7 @@ function DialogBackdrop({
   transition = { duration: 0.2, ease: "easeInOut" },
   ...props
 }: DialogBackdropProps) {
+  const prefersReducedMotion = useReducedMotion();
   return (
     <DialogPrimitive.Backdrop
       data-slot="dialog-backdrop"
@@ -87,7 +88,7 @@ function DialogBackdrop({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={transition}
+          transition={prefersReducedMotion ? { duration: 0 } : transition}
           {...props}
         />
       }
@@ -104,6 +105,7 @@ function DialogPopup({
   transition = { type: "spring", stiffness: 400, damping: 30 },
   ...props
 }: DialogPopupProps) {
+  const prefersReducedMotion = useReducedMotion();
   return (
     <DialogPrimitive.Popup
       initialFocus={initialFocus}
@@ -112,10 +114,10 @@ function DialogPopup({
         <motion.div
           key="dialog-popup"
           data-slot="dialog-popup"
-          initial={{ opacity: 0, scale: 0.95, y: 8 }}
+          initial={prefersReducedMotion ? { opacity: 1 } : { opacity: 0, scale: 0.95, y: 8 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          exit={{ opacity: 0, scale: 0.95, y: 8 }}
-          transition={transition}
+          exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.95, y: 8 }}
+          transition={prefersReducedMotion ? { duration: 0 } : transition}
           {...props}
         />
       }

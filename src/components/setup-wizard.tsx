@@ -6,6 +6,8 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/ui/logo";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { Blur } from "@/components/animate-ui/primitives/effects/blur";
 import type { GameInstance } from "@/types";
 
 interface SetupWizardProps {
@@ -18,30 +20,39 @@ export function SetupWizard({ instances, onSelect }: SetupWizardProps) {
 
   return (
     <div className="flex h-screen items-center justify-center p-8">
-      <GlassPanel variant="primary" className="w-full max-w-lg p-6">
-        <div className="mb-6 flex items-center gap-3">
-          <Logo size={32} />
-          <div>
-            <h1 className="font-heading text-lg font-bold text-white">Kalpa</h1>
-            <p className="text-sm text-muted-foreground">Set up your AddOns folder</p>
-          </div>
-        </div>
+      <Blur
+        initialBlur={8}
+        transition={{ type: "spring", stiffness: 100, damping: 20 }}
+        className="w-full max-w-lg"
+      >
+        <Fade transition={{ type: "spring", stiffness: 100, damping: 20 }}>
+          <GlassPanel variant="primary" className="p-6">
+            <div className="mb-6 flex items-center gap-3">
+              <Logo size={32} />
+              <div>
+                <h1 className="font-heading text-lg font-bold text-white">Kalpa</h1>
+                <p className="text-sm text-muted-foreground">Set up your AddOns folder</p>
+              </div>
+            </div>
 
-        {hasOneDriveWarning && (
-          <div className="mb-4 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-xs text-amber-400">
-            One or more detected folders are inside OneDrive. Cloud sync can sometimes cause missing
-            or outdated addons — consider disabling sync for this folder if you see issues.
-          </div>
-        )}
+            {hasOneDriveWarning && (
+              <div className="mb-4 rounded-lg border border-amber-400/20 bg-amber-400/[0.04] px-3 py-2 text-xs text-amber-400">
+                One or more detected folders are inside OneDrive. Cloud sync can sometimes cause
+                missing or outdated addons — consider disabling sync for this folder if you see
+                issues.
+              </div>
+            )}
 
-        {instances.length === 0 ? (
-          <NoCandidates onSelect={onSelect} />
-        ) : instances.length === 1 ? (
-          <SingleInstance instance={instances[0]} onSelect={onSelect} />
-        ) : (
-          <MultipleInstances instances={instances} onSelect={onSelect} />
-        )}
-      </GlassPanel>
+            {instances.length === 0 ? (
+              <NoCandidates onSelect={onSelect} />
+            ) : instances.length === 1 ? (
+              <SingleInstance instance={instances[0]} onSelect={onSelect} />
+            ) : (
+              <MultipleInstances instances={instances} onSelect={onSelect} />
+            )}
+          </GlassPanel>
+        </Fade>
+      </Blur>
     </div>
   );
 }

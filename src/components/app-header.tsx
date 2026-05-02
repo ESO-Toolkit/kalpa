@@ -18,11 +18,11 @@ import { Logo } from "@/components/ui/logo";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { PRESET_TAGS } from "@/types";
 import { cn } from "@/lib/utils";
+import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 
 interface AppHeaderProps {
   addonsCount: number;
   batchMode: boolean;
-  batchRemoving: boolean;
   batchDisabling: boolean;
   checkingUpdates: boolean;
   loading: boolean;
@@ -43,7 +43,6 @@ interface AppHeaderProps {
 export function AppHeader({
   addonsCount,
   batchMode,
-  batchRemoving,
   batchDisabling,
   checkingUpdates,
   loading,
@@ -61,15 +60,12 @@ export function AppHeader({
   onRefresh,
 }: AppHeaderProps) {
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
-  const [confirmRemove, setConfirmRemove] = useState(false);
   const [customTagInput, setCustomTagInput] = useState("");
   const tagMenuRef = useRef<HTMLDivElement>(null);
   const customTagInputRef = useRef<HTMLInputElement>(null);
 
-  // Reset confirm/tag state when leaving batch mode
   useEffect(() => {
     if (!batchMode) {
-      setConfirmRemove(false); // eslint-disable-line react-hooks/set-state-in-effect -- reset derived state on prop change
       setCustomTagInput("");
     }
   }, [batchMode]);
@@ -113,7 +109,14 @@ export function AppHeader({
       <div className="flex items-center gap-2">
         {batchMode ? (
           <>
-            <span className="mr-2 text-xs font-medium text-primary">{selectedCount} selected</span>
+            <span className="mr-2 text-xs font-medium text-primary">
+              <CountingNumber
+                number={selectedCount}
+                transition={{ stiffness: 200, damping: 25 }}
+                initiallyStable
+              />{" "}
+              selected
+            </span>
             <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
               <Button
                 size="sm"
@@ -198,39 +201,12 @@ export function AppHeader({
                 </div>
               )}
             </div>
-            {confirmRemove ? (
-              <>
-                <span className="text-xs text-red-400 font-medium">
-                  Remove {selectedCount} addon{selectedCount !== 1 ? "s" : ""}? This cannot be
-                  undone.
-                </span>
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  onClick={onBatchRemove}
-                  disabled={batchRemoving}
-                >
-                  {batchRemoving ? "Removing..." : "Confirm Remove"}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setConfirmRemove(false)}
-                  disabled={batchRemoving}
-                >
-                  Back
-                </Button>
-              </>
-            ) : (
-              <>
-                <Button size="sm" variant="destructive" onClick={() => setConfirmRemove(true)}>
-                  Remove
-                </Button>
-                <Button size="sm" variant="outline" onClick={onBatchCancel}>
-                  Cancel
-                </Button>
-              </>
-            )}
+            <Button size="sm" variant="destructive" onClick={onBatchRemove}>
+              Remove
+            </Button>
+            <Button size="sm" variant="outline" onClick={onBatchCancel}>
+              Cancel
+            </Button>
           </>
         ) : (
           <>
@@ -239,7 +215,12 @@ export function AppHeader({
               aria-live="polite"
               aria-atomic="true"
             >
-              {addonsCount} addons
+              <CountingNumber
+                number={addonsCount}
+                transition={{ stiffness: 200, damping: 25 }}
+                initiallyStable
+              />{" "}
+              addons
               {checkingUpdates && (
                 <span className="ml-1 inline-flex items-center gap-1">
                   ·

@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type {
   AddonManifest,
@@ -12,6 +12,22 @@ import type {
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { Logo } from "@/components/ui/logo";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import {
+  Search,
+  Globe,
+  X,
+  RefreshCw,
+  FolderOpen,
+  ExternalLink,
+  Copy,
+  Star,
+  Power,
+  Trash2,
+} from "lucide-react";
+import { ContextMenu, type ContextMenuEntry } from "@/components/ui/context-menu";
 import {
   Select,
   SelectContent,
@@ -51,6 +67,11 @@ interface AddonListProps {
   selectedDiscoverResultId: number | null;
   installedEsouiIds: Set<number>;
   isOffline?: boolean;
+  onUpdateAddon?: (folderName: string) => void;
+  onRemoveAddon?: (folderName: string) => void;
+  onToggleDisable?: (folderName: string, disabled: boolean) => void;
+  onOpenFolder?: (folderName: string) => void;
+  onToggleFavorite?: (folderName: string, tags: string[]) => void;
 }
 
 interface AddonListItemProps {
@@ -61,6 +82,7 @@ interface AddonListItemProps {
   hasUpdate: boolean;
   onSelect: (addon: AddonManifest) => void;
   onToggleSelect: (folderName: string) => void;
+  onRightClick: (addon: AddonManifest, pos: { x: number; y: number }) => void;
 }
 
 const AddonListItem = memo(function AddonListItem({
@@ -71,14 +93,16 @@ const AddonListItem = memo(function AddonListItem({
   hasUpdate,
   onSelect,
   onToggleSelect,
+  onRightClick,
 }: AddonListItemProps) {
   return (
     <div
       id={`addon-${addon.folderName}`}
       role="option"
       aria-selected={batchMode ? isSelected : isCurrent}
+      aria-label={`${addon.title}${addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}`}
       className={cn(
-        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] group",
+        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_rgba(196,164,74,0.02)] group",
         addon.disabled
           ? "border-l-zinc-500 opacity-50"
           : addon.missingDependencies.length > 0
@@ -102,7 +126,7 @@ const AddonListItem = memo(function AddonListItem({
       }}
       onContextMenu={(e) => {
         e.preventDefault();
-        onToggleSelect(addon.folderName);
+        onRightClick(addon, { x: e.clientX, y: e.clientY });
       }}
     >
       <div className="flex items-start gap-2">
@@ -222,6 +246,11 @@ export function AddonList({
   selectedDiscoverResultId,
   installedEsouiIds,
   isOffline,
+  onUpdateAddon,
+  onRemoveAddon,
+  onToggleDisable,
+  onOpenFolder,
+  onToggleFavorite,
 }: AddonListProps) {
   const updatesMap = useMemo(
     () => new Map(updateResults.filter((r) => r.hasUpdate).map((r) => [r.folderName, r] as const)),
@@ -255,6 +284,106 @@ export function AddonList({
   }, [allAddons]);
 
   const batchMode = selectedFolders.size > 0;
+
+  const [ctxMenu, setCtxMenu] = useState<{
+    addon: AddonManifest;
+    pos: { x: number; y: number };
+  } | null>(null);
+
+  const handleRightClick = useCallback((addon: AddonManifest, pos: { x: number; y: number }) => {
+    setCtxMenu({ addon, pos });
+  }, []);
+
+  const ctxMenuItems = useMemo<ContextMenuEntry[]>(() => {
+    if (!ctxMenu) return [];
+    const { addon } = ctxMenu;
+    const hasUpdate = updatesMap.has(addon.folderName);
+    const items: ContextMenuEntry[] = [];
+
+    if (hasUpdate && onUpdateAddon) {
+      items.push({
+        label: "Update",
+        icon: RefreshCw,
+        onClick: () => onUpdateAddon(addon.folderName),
+        disabled: isOffline,
+      });
+      items.push({ separator: true });
+    }
+
+    if (onOpenFolder) {
+      items.push({
+        label: "Open Folder",
+        icon: FolderOpen,
+        onClick: () => onOpenFolder(addon.folderName),
+      });
+    }
+
+    if (addon.esouiId) {
+      items.push({
+        label: "View on ESOUI",
+        icon: ExternalLink,
+        onClick: () => {
+          void import("@tauri-apps/plugin-opener").then((m) =>
+            m.openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}`)
+          );
+        },
+      });
+      items.push({
+        label: "Copy ESOUI Link",
+        icon: Copy,
+        onClick: () => {
+          void navigator.clipboard.writeText(
+            `https://www.esoui.com/downloads/info${addon.esouiId}`
+          );
+        },
+      });
+    }
+
+    items.push({ separator: true });
+
+    if (onToggleFavorite) {
+      const isFav = addon.tags.includes("favorite");
+      items.push({
+        label: isFav ? "Unfavorite" : "Favorite",
+        icon: Star,
+        onClick: () => {
+          const next = isFav
+            ? addon.tags.filter((t) => t !== "favorite")
+            : [...addon.tags, "favorite"];
+          onToggleFavorite(addon.folderName, next);
+        },
+      });
+    }
+
+    if (onToggleDisable) {
+      items.push({
+        label: addon.disabled ? "Enable" : "Disable",
+        icon: Power,
+        onClick: () => onToggleDisable(addon.folderName, addon.disabled),
+      });
+    }
+
+    if (onRemoveAddon) {
+      items.push({ separator: true });
+      items.push({
+        label: "Remove",
+        icon: Trash2,
+        destructive: true,
+        onClick: () => onRemoveAddon(addon.folderName),
+      });
+    }
+
+    return items;
+  }, [
+    ctxMenu,
+    updatesMap,
+    isOffline,
+    onUpdateAddon,
+    onOpenFolder,
+    onToggleFavorite,
+    onToggleDisable,
+    onRemoveAddon,
+  ]);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -436,6 +565,7 @@ export function AddonList({
               ref={scrollContainerRef}
               role="listbox"
               aria-label="Installed addons"
+              aria-roledescription="addon list"
               aria-rowcount={addons.length}
               aria-activedescendant={
                 selectedAddon ? `addon-${selectedAddon.folderName}` : undefined
@@ -449,31 +579,94 @@ export function AddonList({
                   <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
                 </div>
               ) : addons.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
+                <div className="flex h-full flex-col items-center justify-center px-5">
                   {searchQuery || activeTagFilter || filterMode !== "all" ? (
-                    <>
-                      <p className="text-sm">No addons match your current filter</p>
+                    <Fade className="flex flex-col items-center gap-3 text-center">
+                      <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] p-3">
+                        <Search className="size-6 text-muted-foreground/30" />
+                      </div>
+                      <div>
+                        <p className="text-sm text-muted-foreground">No addons match</p>
+                        <p className="mt-0.5 text-xs text-muted-foreground/50">
+                          {searchQuery
+                            ? `"${searchQuery}"`
+                            : activeTagFilter
+                              ? `tag: ${activeTagFilter}`
+                              : filterMode}
+                        </p>
+                      </div>
                       <button
-                        className="text-xs text-[#c4a44a]/70 hover:text-[#c4a44a] transition-colors"
+                        className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/[0.08] hover:text-foreground transition-colors"
                         onClick={() => {
                           onSearchChange("");
                           onFilterChange("all");
                           onActiveTagFilterChange(null);
                         }}
                       >
+                        <X className="size-3 inline mr-1 -mt-px" />
                         Clear filters
                       </button>
-                    </>
+                    </Fade>
                   ) : (
-                    <>
-                      <p className="text-sm">No addons installed yet</p>
-                      <button
-                        className="text-xs text-[#c4a44a]/70 hover:text-[#c4a44a] transition-colors"
-                        onClick={() => onViewModeChange("discover")}
-                      >
-                        Browse addons to get started
-                      </button>
-                    </>
+                    <Fade className="w-full">
+                      <GlassPanel variant="subtle" className="relative p-5 overflow-hidden">
+                        <div className="absolute -top-10 -right-10 h-[120px] w-[120px] rounded-full bg-[#c4a44a]/[0.03] blur-[40px]" />
+                        <div className="flex flex-col items-center gap-4 relative">
+                          <Logo size={36} className="opacity-60" />
+                          <div className="text-center">
+                            <p className="font-heading text-sm font-medium text-foreground/80">
+                              No addons installed yet
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground/50">
+                              Get started with one of these options
+                            </p>
+                          </div>
+                          <div className="w-full space-y-2">
+                            <button
+                              onClick={() => {
+                                onViewModeChange("discover");
+                                onDiscoverTabChange("search");
+                              }}
+                              className="flex w-full items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.06] hover:border-white/[0.1] group"
+                            >
+                              <div className="flex size-7 items-center justify-center rounded-md bg-[#c4a44a]/10 text-[#c4a44a]">
+                                <Globe className="size-3.5" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-medium text-foreground/80 group-hover:text-foreground">
+                                  Browse the ESOUI catalog
+                                </p>
+                                <p className="text-[10px] text-muted-foreground/40">
+                                  Search and install from thousands of addons
+                                </p>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => {
+                                onViewModeChange("discover");
+                                onDiscoverTabChange("url");
+                              }}
+                              className="flex w-full items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.06] hover:border-white/[0.1] group"
+                            >
+                              <div className="flex size-7 items-center justify-center rounded-md bg-sky-500/10 text-sky-400">
+                                <Search className="size-3.5" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-medium text-foreground/80 group-hover:text-foreground">
+                                  Paste an ESOUI URL
+                                </p>
+                                <p className="text-[10px] text-muted-foreground/40">
+                                  Install directly from a link
+                                </p>
+                              </div>
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground/30 tabular-nums">
+                            Ctrl+B to browse &middot; Ctrl+I to install by URL
+                          </p>
+                        </div>
+                      </GlassPanel>
+                    </Fade>
                   )}
                 </div>
               ) : (
@@ -508,6 +701,7 @@ export function AddonList({
                           hasUpdate={updatesMap.has(addon.folderName)}
                           onSelect={onSelect}
                           onToggleSelect={onToggleSelect}
+                          onRightClick={handleRightClick}
                         />
                       </div>
                     );
@@ -538,6 +732,10 @@ export function AddonList({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {ctxMenu && ctxMenuItems.length > 0 && (
+        <ContextMenu items={ctxMenuItems} position={ctxMenu.pos} onClose={() => setCtxMenu(null)} />
+      )}
     </div>
   );
 }

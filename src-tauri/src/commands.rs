@@ -3951,6 +3951,31 @@ pub async fn delete_saved_variables(
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
+#[tauri::command]
+pub fn update_tray_tooltip(
+    tray_state: tauri::State<'_, crate::TrayState>,
+    update_count: u32,
+) -> Result<(), String> {
+    let guard = tray_state
+        .0
+        .lock()
+        .map_err(|_| "Internal error".to_string())?;
+    if let Some(tray) = &*guard {
+        let tooltip = if update_count > 0 {
+            format!(
+                "Kalpa — {} update{} available",
+                update_count,
+                if update_count != 1 { "s" } else { "" }
+            )
+        } else {
+            "Kalpa".to_string()
+        };
+        tray.set_tooltip(Some(&tooltip))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
