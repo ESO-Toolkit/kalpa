@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import type { EsouiSearchResult, EsouiAddonDetail, InstallResult } from "../types";
@@ -23,6 +23,7 @@ import {
   Hash,
   Swords,
   Check,
+  Copy,
 } from "lucide-react";
 
 interface DiscoverDetailProps {
@@ -46,6 +47,8 @@ export function DiscoverDetail({
   const [installingId, setInstallingId] = useState<number | null>(null);
   const [installSuccess, setInstallSuccess] = useState<InstallResult | null>(null);
   const [screenshotIdx, setScreenshotIdx] = useState(0);
+  const [md5Copied, setMd5Copied] = useState(false);
+  const md5TimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +67,8 @@ export function DiscoverDetail({
     setError(null);
     setInstallSuccess(null);
     setScreenshotIdx(0);
+    setMd5Copied(false);
+    if (md5TimerRef.current) clearTimeout(md5TimerRef.current);
 
     void invokeOrThrow<EsouiAddonDetail>("fetch_esoui_detail", { esouiId: result.id })
       .then((detailResult) => {

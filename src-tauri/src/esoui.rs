@@ -188,11 +188,53 @@ pub struct EsouiAddonDetail {
     pub download_url: String,
 }
 
-/// Strip BBCode tags for plain-text display.
-fn strip_bbcode(s: &str) -> String {
+fn clean_description(s: &str) -> String {
+    let decoded = decode_html_entities(s);
+
     static RE_BBCODE: OnceLock<Regex> = OnceLock::new();
-    let re = RE_BBCODE.get_or_init(|| Regex::new(r"\[/?[A-Za-z]+[^\]]*\]").unwrap());
-    re.replace_all(s, "").trim().to_string()
+    let re_bb = RE_BBCODE.get_or_init(|| Regex::new(r"\[/?[A-Za-z]+[^\]]*\]").unwrap());
+    let no_bbcode = re_bb.replace_all(&decoded, "");
+
+    static RE_HTML: OnceLock<Regex> = OnceLock::new();
+    let re_html = RE_HTML.get_or_init(|| Regex::new(r"</?[A-Za-z][^>]*>").unwrap());
+    re_html.replace_all(&no_bbcode, "").trim().to_string()
+}
+
+fn decode_html_entities(s: &str) -> String {
+    static RE_ENTITY: OnceLock<Regex> = OnceLock::new();
+    let re = RE_ENTITY.get_or_init(|| Regex::new(r"&(#(\d+)|#x([0-9a-fA-F]+)|(\w+));").unwrap());
+    re.replace_all(s, |caps: &regex::Captures| {
+        if let Some(decimal) = caps.get(2) {
+            if let Some(ch) = decimal
+                .as_str()
+                .parse::<u32>()
+                .ok()
+                .and_then(char::from_u32)
+            {
+                return ch.to_string();
+            }
+        } else if let Some(hex) = caps.get(3) {
+            if let Some(ch) = u32::from_str_radix(hex.as_str(), 16)
+                .ok()
+                .and_then(char::from_u32)
+            {
+                return ch.to_string();
+            }
+        } else if let Some(name) = caps.get(4) {
+            return match name.as_str() {
+                "amp" => "&",
+                "lt" => "<",
+                "gt" => ">",
+                "quot" => "\"",
+                "apos" => "'",
+                "nbsp" => " ",
+                _ => return caps[0].to_string(),
+            }
+            .to_string();
+        }
+        caps[0].to_string()
+    })
+    .into_owned()
 }
 
 /// Format a number with comma separators (e.g., 1234567 → "1,234,567").
@@ -332,7 +374,7 @@ pub fn fetch_addon_detail(id: u32) -> Result<EsouiAddonDetail, String> {
     let client = http_client();
     let detail = fetch_file_detail(client, id)?;
 
-    let description = strip_bbcode(&detail.description);
+    let description = clean_description(&detail.description);
     let screenshots: Vec<String> = detail.images.into_iter().map(|img| img.image_url).collect();
     let updated = format_epoch_millis(detail.last_update);
     let (compatibility, created) = scrape_fileinfo_page(client, detail.id);
@@ -894,4 +936,74 @@ fn fetch_filelist_from_api() -> Result<HashMap<String, ApiAddonLookup>, String> 
     }
 
     Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_cyrillic_numeric_entities() {
+        assert_eq!(clean_description("&#1042;&#1055;"), "ВП");
+    }
+
+    #[test]
+    fn decode_hex_entities() {
+        assert_eq!(clean_description("&#x412;"), "В");
+    }
+
+    #[test]
+    fn decode_named_entities() {
+        assert_eq!(clean_description("&amp;"), "&");
+        assert_eq!(clean_description("&quot;"), "\"");
+        assert_eq!(clean_description("&apos;"), "'");
+        assert_eq!(clean_description("&nbsp;"), "");
+    }
+
+    #[test]
+    fn strip_entity_encoded_bbcode() {
+        assert_eq!(clean_description("&#91;b&#93;bold&#91;/b&#93;"), "bold");
+    }
+
+    #[test]
+    fn strip_entity_encoded_html() {
+        assert_eq!(
+            clean_description("&lt;br&gt;line&lt;b&gt;bold&lt;/b&gt;"),
+            "linebold"
+        );
+    }
+
+    #[test]
+    fn strip_literal_bbcode_with_entities() {
+        assert_eq!(clean_description("[b]&#1042;[/b]"), "В");
+    }
+
+    #[test]
+    fn strip_literal_html_tags() {
+        assert_eq!(clean_description("hello<br>world<b>!</b>"), "helloworld!");
+    }
+
+    #[test]
+    fn invalid_codepoint_passthrough() {
+        assert_eq!(clean_description("&#99999999;"), "&#99999999;");
+    }
+
+    #[test]
+    fn plain_text_passthrough() {
+        assert_eq!(clean_description("hello world"), "hello world");
+    }
+
+    #[test]
+    fn preserve_decoded_angle_brackets_in_text() {
+        assert_eq!(clean_description("x &lt; 2 &gt; y"), "x < 2 > y");
+        assert_eq!(clean_description("a &lt;= b"), "a <= b");
+    }
+
+    #[test]
+    fn mixed_cyrillic_description() {
+        let input = "If you want to help: PP at GitHub\n\n--RU--- &#1042; &#1087;&#1088;&#1086;&#1094;&#1077;&#1089;&#1089;&#1077; &#1088;&#1072;&#1079;&#1088;&#1072;&#1073;&#1086;&#1090;&#1082;&#1080;!";
+        let result = clean_description(input);
+        assert!(result.contains("В процессе разработки!"));
+        assert!(result.contains("If you want to help"));
+    }
 }
