@@ -5,14 +5,33 @@ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { AnimatePresence, motion, type HTMLMotionProps } from "motion/react";
 
 import { useControlledState } from "@/hooks/use-controlled-state";
-import { getStrictContext } from "@/lib/get-strict-context";
 
 type DialogContextType = {
   isOpen: boolean;
   setIsOpen: DialogProps["onOpenChange"];
 };
 
-const [DialogProvider, useDialog] = getStrictContext<DialogContextType>("DialogContext");
+const DialogContext = React.createContext<DialogContextType | null>(null);
+
+function DialogProvider({
+  value,
+  children,
+}: {
+  value: DialogContextType;
+  children?: React.ReactNode;
+}) {
+  return <DialogContext.Provider value={value}>{children}</DialogContext.Provider>;
+}
+
+function useDialog() {
+  const ctx = React.useContext(DialogContext);
+  if (!ctx) throw new Error("useDialog must be used within a Dialog");
+  return ctx;
+}
+
+function useDialogOptional() {
+  return React.useContext(DialogContext);
+}
 
 type DialogProps = React.ComponentProps<typeof DialogPrimitive.Root>;
 
@@ -39,11 +58,15 @@ function DialogTrigger(props: DialogTriggerProps) {
 type DialogPortalProps = Omit<React.ComponentProps<typeof DialogPrimitive.Portal>, "keepMounted">;
 
 function DialogPortal(props: DialogPortalProps) {
-  const { isOpen } = useDialog();
+  const ctx = useDialogOptional();
+
+  if (!ctx) {
+    return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />;
+  }
 
   return (
     <AnimatePresence>
-      {isOpen && <DialogPrimitive.Portal data-slot="dialog-portal" keepMounted {...props} />}
+      {ctx.isOpen && <DialogPrimitive.Portal data-slot="dialog-portal" keepMounted {...props} />}
     </AnimatePresence>
   );
 }
