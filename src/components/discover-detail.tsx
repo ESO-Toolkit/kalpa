@@ -51,6 +51,7 @@ export function DiscoverDetail({
     let cancelled = false;
 
     if (!result) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDetail(null);
       setError(null);
       setInstallSuccess(null);

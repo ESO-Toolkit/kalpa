@@ -18,6 +18,7 @@ export function useControlledState<T, Rest extends any[] = []>(
   );
 
   React.useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (value !== undefined) setInternalState(value);
   }, [value]);
 

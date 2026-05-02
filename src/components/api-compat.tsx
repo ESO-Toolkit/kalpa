@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import type { ApiCompatInfo } from "../types";
 import {
   Dialog,
@@ -24,7 +24,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -37,12 +37,12 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [addonsPath]);
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addonsPath]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>

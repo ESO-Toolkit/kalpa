@@ -141,6 +141,7 @@ export function Packs({
   // When a pack is selected, pre-select all required addons
   useEffect(() => {
     if (selectedPack) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSelectedAddons(
         new Set(selectedPack.addons.filter((a) => a.required).map((a) => a.esouiId))
       );
@@ -148,6 +149,7 @@ export function Packs({
   }, [selectedPack]);
 
   const searchQueryRef = useRef(searchQuery);
+  // eslint-disable-next-line react-hooks/refs
   searchQueryRef.current = searchQuery;
 
   const loadPacksSeqRef = useRef(0);
@@ -241,6 +243,7 @@ export function Packs({
   // ── My Packs loader ──────────────────────────────────────────────
   const loadMyPacksSeqRef = useRef(0);
   const authUserRef = useRef(authUser);
+  // eslint-disable-next-line react-hooks/refs
   authUserRef.current = authUser;
 
   const loadMyPacks = useCallback(
@@ -288,6 +291,7 @@ export function Packs({
   // Load my packs when tab is switched to "my-packs" or user signs in
   useEffect(() => {
     if (tab === "my-packs" && authUser) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       loadMyPacks(1);
     }
   }, [tab, authUser, loadMyPacks]); // loadMyPacks is stable; authUser triggers reload on sign-in
@@ -327,6 +331,7 @@ export function Packs({
   // Auto-open a specific pack when triggered via deep link
   useEffect(() => {
     if (initialPackId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       handleSelectPack(initialPackId);
     }
   }, [initialPackId, handleSelectPack]);
@@ -464,6 +469,7 @@ export function Packs({
   // Auto-resolve share code from deep link
   useEffect(() => {
     if (initialShareCode) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setShareCodeInput(initialShareCode);
       setShowImportPanel(true);
       handleResolveShareCode(initialShareCode);

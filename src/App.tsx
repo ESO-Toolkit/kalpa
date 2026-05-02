@@ -123,10 +123,12 @@ function App() {
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
 
-  selectedAddonRef.current = selectedAddon;
-  addonsPathRef.current = addonsPath;
-  viewModeRef.current = viewMode;
-  updatingAllRef.current = updatingAll;
+  useEffect(() => {
+    selectedAddonRef.current = selectedAddon;
+    addonsPathRef.current = addonsPath;
+    viewModeRef.current = viewMode;
+    updatingAllRef.current = updatingAll;
+  });
 
   useEffect(() => {
     const goOffline = () => setIsOffline(true);
@@ -511,13 +513,10 @@ function App() {
     }
   }, [setupInstances, rosterPackInstallId, deepLinkPackId, deepLinkShareCode]);
 
-  useEffect(() => {
-    if (!activeTagFilter) return;
-    const tagStillExists = addons.some((addon) => addon.tags.includes(activeTagFilter));
-    if (!tagStillExists) {
-      setActiveTagFilter(null);
-    }
-  }, [activeTagFilter, addons]);
+  const effectiveTagFilter =
+    activeTagFilter && addons.some((a) => a.tags.includes(activeTagFilter))
+      ? activeTagFilter
+      : null;
 
   const handleSetupSelect = useCallback(
     async (selectedPath: string) => {
@@ -1001,7 +1000,7 @@ function App() {
             case "disabled":
               return addon.disabled;
             default:
-              if (activeTagFilter) return addon.tags.includes(activeTagFilter);
+              if (effectiveTagFilter) return addon.tags.includes(effectiveTagFilter);
               return true;
           }
         })
@@ -1014,7 +1013,7 @@ function App() {
               return left.title.toLowerCase().localeCompare(right.title.toLowerCase());
           }
         }),
-    [activeTagFilter, addons, filterMode, searchQuery, sortMode, updatesSet]
+    [effectiveTagFilter, addons, filterMode, searchQuery, sortMode, updatesSet]
   );
 
   const selectedUpdateResult = useMemo(
@@ -1105,7 +1104,7 @@ function App() {
           onSortChange={handleSortChange}
           filterMode={filterMode}
           onFilterChange={handleFilterChange}
-          activeTagFilter={activeTagFilter}
+          activeTagFilter={effectiveTagFilter}
           onActiveTagFilterChange={setActiveTagFilter}
           selectedFolders={selectedFolders}
           onToggleSelect={handleToggleSelect}

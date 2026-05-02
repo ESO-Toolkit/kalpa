@@ -524,6 +524,7 @@ function PopularContent({
 
   // Load on mount
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadPage(0, "downloads", false);
   }, [loadPage]);
 

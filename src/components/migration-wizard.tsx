@@ -61,6 +61,7 @@ export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWiz
   }, [addonsPath]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     checkPreconditions();
   }, [checkPreconditions]);
 

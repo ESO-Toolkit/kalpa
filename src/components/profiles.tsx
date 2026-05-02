@@ -48,6 +48,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadProfiles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

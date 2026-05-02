@@ -100,6 +100,7 @@ export function RosterPackInstall({
   }, [packId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchPack();
   }, [fetchPack]);
 
@@ -107,6 +108,7 @@ export function RosterPackInstall({
   // but only when not mid-install (install loop manages its own status)
   useEffect(() => {
     if (!pack || installing) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAddonStates(
       pack.addons.map((addon) => ({
         addon,

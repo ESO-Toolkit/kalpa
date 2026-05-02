@@ -1377,6 +1377,7 @@ function EditorTab({
   // Sync when parent changes the initial file
   useEffect(() => {
     if (initialFile) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSelectedFile(initialFile);
     }
   }, [initialFile]);
@@ -1408,6 +1409,7 @@ function EditorTab({
 
   useEffect(() => {
     if (selectedFile) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       void loadFile(selectedFile);
     }
   }, [selectedFile, loadFile]);
@@ -1420,16 +1422,21 @@ function EditorTab({
     });
   }, []);
 
-  // Re-resolve selectedNode when tree changes (edits)
-  useEffect(() => {
-    if (!tree || selectedPath.length === 0) return;
+  const resolvedNode = useMemo(() => {
+    if (!tree || selectedPath.length === 0) return null;
     let current: SvTreeNode | null = tree;
     for (const segment of selectedPath) {
       current = current?.children?.find((c) => c.key === segment) ?? null;
       if (!current) break;
     }
-    if (current) setSelectedNode(current);
+    return current;
   }, [tree, selectedPath]);
+
+  useEffect(() => {
+    // Re-sync selected node reference when tree data changes after edits
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (resolvedNode) setSelectedNode(resolvedNode);
+  }, [resolvedNode]);
 
   const handleSave = useCallback(async () => {
     if (!tree || !selectedFile || !fileStamp) return;
@@ -2185,6 +2192,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   }, [addonsPath]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadFiles();
     invokeOrThrow<CharacterInfo[]>("list_characters", { addonsPath })
       .then(setCharacters)

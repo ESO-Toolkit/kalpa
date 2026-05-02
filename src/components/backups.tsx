@@ -40,6 +40,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadBackups();
     // Generate default name
     const now = new Date();
