@@ -104,7 +104,7 @@ const AddonListItem = memo(function AddonListItem({
       aria-selected={batchMode ? isSelected : isCurrent}
       aria-label={`${addon.title}${addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}`}
       className={cn(
-        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_rgba(196,164,74,0.02)] group",
+        "cursor-pointer border-l-3 border-l-transparent pr-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_rgba(196,164,74,0.02)] group",
         addon.disabled
           ? "border-l-zinc-500 opacity-50"
           : addon.missingDependencies.length > 0
@@ -131,18 +131,22 @@ const AddonListItem = memo(function AddonListItem({
         onRightClick(addon, { x: e.clientX, y: e.clientY });
       }}
     >
-      <div className="flex items-start gap-2">
+      <div className="flex items-start">
         <div
           onClick={(e) => {
             e.stopPropagation();
             onToggleSelect(addon.folderName);
           }}
-          className={cn(
-            "shrink-0 mt-0.5 -ml-2 pl-2 pr-1 py-0.5 transition-opacity duration-150",
-            isSelected || batchMode ? "opacity-100" : "opacity-0 group-hover:opacity-70"
-          )}
+          className="shrink-0 self-stretch flex items-center justify-center w-10 cursor-pointer"
         >
-          <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
+          <div
+            className={cn(
+              "transition-opacity duration-150",
+              isSelected || batchMode ? "opacity-100" : "opacity-0 group-hover:opacity-70"
+            )}
+          >
+            <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
+          </div>
         </div>
         <div className="flex-1 min-w-0">
           <div className="truncate text-sm font-medium">
