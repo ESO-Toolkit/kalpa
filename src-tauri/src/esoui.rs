@@ -191,9 +191,14 @@ pub struct EsouiAddonDetail {
 fn clean_description(s: &str) -> String {
     let decoded = decode_html_entities(s);
 
+    // Replace [*] list bullets with newlines so items don't run together
+    static RE_BULLET: OnceLock<Regex> = OnceLock::new();
+    let re_bullet = RE_BULLET.get_or_init(|| Regex::new(r"\[\*\]").unwrap());
+    let with_newlines = re_bullet.replace_all(&decoded, "\n• ");
+
     static RE_BBCODE: OnceLock<Regex> = OnceLock::new();
-    let re_bb = RE_BBCODE.get_or_init(|| Regex::new(r"\[/?[A-Za-z]+[^\]]*\]").unwrap());
-    let no_bbcode = re_bb.replace_all(&decoded, "");
+    let re_bb = RE_BBCODE.get_or_init(|| Regex::new(r"\[/?[A-Za-z*]+[^\]]*\]").unwrap());
+    let no_bbcode = re_bb.replace_all(&with_newlines, "");
 
     static RE_HTML: OnceLock<Regex> = OnceLock::new();
     let re_html = RE_HTML.get_or_init(|| Regex::new(r"</?[A-Za-z][^>]*>").unwrap());
