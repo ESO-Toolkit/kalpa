@@ -753,8 +753,8 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, Str
     let mut entries: Vec<&ApiFileEntry> = cache.entries.iter().filter(|e| !e.library).collect();
 
     match sort_by {
-        "newest" => entries.sort_by(|a, b| b.last_update.cmp(&a.last_update)),
-        _ => entries.sort_by(|a, b| b.downloads.cmp(&a.downloads)),
+        "newest" => entries.sort_by_key(|e| std::cmp::Reverse(e.last_update)),
+        _ => entries.sort_by_key(|e| std::cmp::Reverse(e.downloads)),
     }
 
     let start = page as usize * POPULAR_PAGE_SIZE;

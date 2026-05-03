@@ -691,8 +691,9 @@ function App() {
 
   const handleRemoveByEsouiId = useCallback(
     (esouiId: number) => {
-      const addon = addons.find((a) => a.esouiId === esouiId);
-      if (addon) handleSingleRemove(addon.folderName);
+      for (const addon of addons.filter((a) => a.esouiId === esouiId)) {
+        handleSingleRemove(addon.folderName);
+      }
     },
     [addons, handleSingleRemove]
   );
