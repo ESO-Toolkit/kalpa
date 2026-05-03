@@ -15,6 +15,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { SearchResultListSkeleton } from "@/components/ui/skeletons";
 import { toast } from "sonner";
 import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
@@ -667,9 +668,7 @@ export function PackCreateView({
             <div className="flex-1 overflow-y-auto space-y-1 min-w-0">
               {addonSource === "search" ? (
                 searching ? (
-                  <div className="flex items-center justify-center py-8">
-                    <div className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-                  </div>
+                  <SearchResultListSkeleton count={5} />
                 ) : searchResults.length === 0 ? (
                   <div className="text-center py-8">
                     <SearchIcon className="size-6 mx-auto text-muted-foreground/20 mb-2" />

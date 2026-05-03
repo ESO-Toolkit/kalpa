@@ -77,6 +77,7 @@ import {
   LockIcon,
   RotateCcwIcon,
 } from "lucide-react";
+import { SavedVariablesSkeleton } from "@/components/ui/skeletons";
 
 interface SavedVariablesProps {
   addonsPath: string;
@@ -1658,9 +1659,7 @@ function EditorTab({
         style={{ height: "380px" }}
       >
         {loading ? (
-          <div className="flex flex-1 items-center justify-center">
-            <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-          </div>
+          <SavedVariablesSkeleton />
         ) : !tree ? (
           <div className="flex flex-1 items-center justify-center">
             <p className="text-sm text-muted-foreground">Select a file to view its contents.</p>

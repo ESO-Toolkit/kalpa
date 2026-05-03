@@ -73,6 +73,9 @@
 
   /* Card alt */
   --color-card-alt: var(--card-alt);
+
+  /* Skeleton shimmer */
+  --animate-shimmer: shimmer 1.6s ease-in-out infinite;
 }
 
 /* ESO-inspired dark theme — always dark */
@@ -356,6 +359,15 @@
   to {
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+@keyframes skeleton-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 

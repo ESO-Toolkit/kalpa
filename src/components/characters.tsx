@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { CharactersSkeleton } from "@/components/ui/skeletons";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 
 interface CharactersProps {
@@ -99,11 +100,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
 
         <div className="max-h-[350px] overflow-y-auto space-y-4">
           {loading ? (
-            <Fade>
-              <div className="flex items-center justify-center py-8">
-                <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-              </div>
-            </Fade>
+            <CharactersSkeleton />
           ) : Object.keys(byServer).length === 0 ? (
             <Fade>
               <p className="text-sm text-muted-foreground text-center py-4">

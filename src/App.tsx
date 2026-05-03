@@ -689,6 +689,15 @@ function App() {
     [addons, addonsPath, srAnnounce]
   );
 
+  const handleRemoveByEsouiId = useCallback(
+    (esouiId: number) => {
+      for (const addon of addons.filter((a) => a.esouiId === esouiId)) {
+        handleSingleRemove(addon.folderName);
+      }
+    },
+    [addons, handleSingleRemove]
+  );
+
   const handlePathChange = useCallback(
     async (newPath: string) => {
       const nextPath = newPath.trim();
@@ -1148,6 +1157,7 @@ function App() {
             result={selectedDiscoverResult}
             addonsPath={addonsPath}
             onInstalled={handleRefresh}
+            onRemoveByEsouiId={handleRemoveByEsouiId}
             installedEsouiIds={installedEsouiIds}
             isOffline={isOffline}
           />
