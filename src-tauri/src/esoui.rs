@@ -430,10 +430,12 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     let a_sel = Selector::parse("a[href]").unwrap();
 
     let mut results: Vec<EsouiSearchResult> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
     for row in document.select(&row_sel) {
         let cells: Vec<_> = row.select(&td_sel).collect();
-        if cells.len() < 5 {
+        // Real result rows have 5-6 cells; skip the search summary header (~21 cells)
+        if cells.len() < 5 || cells.len() > 10 {
             continue;
         }
 
@@ -484,6 +486,10 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
             .get(title_idx + 4)
             .map(|c| c.text().collect::<String>().trim().to_string())
             .unwrap_or_default();
+
+        if !seen_ids.insert(id) {
+            continue;
+        }
 
         results.push(EsouiSearchResult {
             id,
