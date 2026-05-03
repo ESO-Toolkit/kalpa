@@ -202,7 +202,7 @@ fn clean_description(s: &str) -> String {
 
 fn decode_html_entities(s: &str) -> String {
     static RE_ENTITY: OnceLock<Regex> = OnceLock::new();
-    let re = RE_ENTITY.get_or_init(|| Regex::new(r"&(#(\d+)|#x([0-9a-fA-F]+)|(\w+));").unwrap());
+    let re = RE_ENTITY.get_or_init(|| Regex::new(r"&(#(\d+)|#[xX]([0-9a-fA-F]+)|(\w+));").unwrap());
     re.replace_all(s, |caps: &regex::Captures| {
         if let Some(decimal) = caps.get(2) {
             if let Some(ch) = decimal
