@@ -18,6 +18,14 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ["dist/", "src-tauri/", "node_modules/"],
+    ignores: [
+      "dist/",
+      "src-tauri/",
+      "node_modules/",
+      "src/components/animate-ui/",
+      "src/hooks/use-auto-height.tsx",
+      "src/hooks/use-is-in-view.tsx",
+      "src/lib/get-strict-context.tsx",
+    ],
   }
 );

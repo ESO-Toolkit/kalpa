@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import type { ApiCompatInfo } from "../types";
 import {
   Dialog,
@@ -12,6 +12,7 @@ import { Alert } from "@/components/ui/alert";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 
 interface ApiCompatProps {
   addonsPath: string;
@@ -23,7 +24,7 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -36,12 +37,12 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [addonsPath]);
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addonsPath]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -51,10 +52,12 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
         </DialogHeader>
 
         {loading ? (
-          <div className="flex items-center justify-center py-8">
-            <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-            <span className="ml-2 text-muted-foreground">Checking compatibility...</span>
-          </div>
+          <Fade>
+            <div className="flex items-center justify-center py-8">
+              <span className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+              <span className="ml-2 text-muted-foreground">Checking compatibility...</span>
+            </div>
+          </Fade>
         ) : error ? (
           <div className="space-y-2">
             <Alert variant="destructive">{error}</Alert>
@@ -63,67 +66,71 @@ export function ApiCompat({ addonsPath, onClose }: ApiCompatProps) {
             </Button>
           </div>
         ) : info ? (
-          <div className="flex-1 overflow-y-auto space-y-4">
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-muted-foreground/60">Game API Version:</span>
-              <InfoPill color="sky" className="font-mono">
-                {info.gameApiVersion}
-              </InfoPill>
-            </div>
+          <Fade className="flex-1 overflow-hidden">
+            <div className="h-full overflow-y-auto space-y-4">
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-muted-foreground/60">Game API Version:</span>
+                <InfoPill color="sky" className="font-mono">
+                  {info.gameApiVersion}
+                </InfoPill>
+              </div>
 
-            {info.outdatedAddons.length > 0 && (
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <SectionHeader className="text-amber-400!">
-                    Outdated API ({info.outdatedAddons.length})
+              {info.outdatedAddons.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <SectionHeader className="text-amber-400!">
+                      Outdated API ({info.outdatedAddons.length})
+                    </SectionHeader>
+                    <span className="text-xs text-muted-foreground">
+                      May need updates for current game version
+                    </span>
+                  </div>
+                  <div className="space-y-1">
+                    {info.outdatedAddons.map((name) => (
+                      <div
+                        key={name}
+                        className="flex items-center gap-2 rounded-xl px-3 py-1.5 text-sm bg-amber-500/[0.04] border border-amber-500/20"
+                      >
+                        <span className="text-yellow-400">!</span>
+                        <span>{name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {info.outdatedAddons.length > 0 && info.upToDateAddons.length > 0 && (
+                <div className="border-t border-white/[0.06]" />
+              )}
+
+              {info.upToDateAddons.length > 0 && (
+                <div>
+                  <SectionHeader className="text-emerald-400! mb-2">
+                    Compatible ({info.upToDateAddons.length})
                   </SectionHeader>
-                  <span className="text-xs text-muted-foreground">
-                    May need updates for current game version
-                  </span>
+                  <div className="space-y-1">
+                    {info.upToDateAddons.map((name) => (
+                      <div
+                        key={name}
+                        className="flex items-center gap-2 rounded px-3 py-1.5 text-sm text-muted-foreground"
+                      >
+                        <span className="text-emerald-400">{"\u2713"}</span>
+                        <span>{name}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="space-y-1">
-                  {info.outdatedAddons.map((name) => (
-                    <div
-                      key={name}
-                      className="flex items-center gap-2 rounded-xl px-3 py-1.5 text-sm bg-amber-500/[0.04] border border-amber-500/20"
-                    >
-                      <span className="text-yellow-400">!</span>
-                      <span>{name}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+              )}
 
-            {info.outdatedAddons.length > 0 && info.upToDateAddons.length > 0 && (
-              <div className="border-t border-white/[0.06]" />
-            )}
-
-            {info.upToDateAddons.length > 0 && (
-              <div>
-                <SectionHeader className="text-emerald-400! mb-2">
-                  Compatible ({info.upToDateAddons.length})
-                </SectionHeader>
-                <div className="space-y-1">
-                  {info.upToDateAddons.map((name) => (
-                    <div
-                      key={name}
-                      className="flex items-center gap-2 rounded px-3 py-1.5 text-sm text-muted-foreground"
-                    >
-                      <span className="text-emerald-400">{"\u2713"}</span>
-                      <span>{name}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {info.outdatedAddons.length === 0 && (
-              <div className="text-center py-4 text-emerald-400 text-sm">
-                All addons are compatible with the current game version!
-              </div>
-            )}
-          </div>
+              {info.outdatedAddons.length === 0 && (
+                <Fade>
+                  <div className="text-center py-4 text-emerald-400 text-sm">
+                    All addons are compatible with the current game version!
+                  </div>
+                </Fade>
+              )}
+            </div>
+          </Fade>
         ) : null}
 
         <DialogFooter>

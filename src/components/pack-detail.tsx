@@ -21,6 +21,10 @@ import {
   PlusIcon,
   ExternalLinkIcon,
 } from "lucide-react";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { PackDetailSkeleton } from "@/components/ui/skeletons";
+import { Slide } from "@/components/animate-ui/primitives/effects/slide";
+import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 
 // ── Detail View ───────────────────────────────────────────────────────────
 
@@ -81,11 +85,7 @@ export function PackDetailView({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   if (loading || !pack) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-      </div>
-    );
+    return <PackDetailSkeleton />;
   }
 
   const requiredAddons = pack.addons.filter((a) => a.required);
@@ -131,29 +131,35 @@ export function PackDetailView({
           {canEdit && (
             <>
               {showDeleteConfirm ? (
-                <div className="flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/[0.08] px-2.5 py-1 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
-                  <span className="text-[11px] text-red-400 font-medium">Delete this pack?</span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setShowDeleteConfirm(false)}
-                    className="h-6 px-2 text-[10px]"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setShowDeleteConfirm(false);
-                      onDelete();
-                    }}
-                    disabled={deletingPack}
-                    className="h-6 px-2 text-[10px] border-red-500/30 text-red-400 hover:bg-red-500/10"
-                  >
-                    {deletingPack ? <Loader2Icon className="size-3 animate-spin" /> : "Delete"}
-                  </Button>
-                </div>
+                <Slide
+                  direction="right"
+                  offset={8}
+                  transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                >
+                  <div className="flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/[0.08] px-2.5 py-1 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
+                    <span className="text-[11px] text-red-400 font-medium">Delete this pack?</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setShowDeleteConfirm(false)}
+                      className="h-6 px-2 text-[10px]"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setShowDeleteConfirm(false);
+                        onDelete();
+                      }}
+                      disabled={deletingPack}
+                      className="h-6 px-2 text-[10px] border-red-500/30 text-red-400 hover:bg-red-500/10"
+                    >
+                      {deletingPack ? <Loader2Icon className="size-3 animate-spin" /> : "Delete"}
+                    </Button>
+                  </div>
+                </Slide>
               ) : (
                 <Button
                   variant="outline"
@@ -200,173 +206,194 @@ export function PackDetailView({
               )}
               strokeWidth={pack.userVoted ? 2.5 : 2}
             />
-            <span>{pack.voteCount > 0 ? pack.voteCount : 0}</span>
+            <CountingNumber
+              number={pack.voteCount > 0 ? pack.voteCount : 0}
+              transition={{ stiffness: 200, damping: 25 }}
+              initiallyStable
+            />
           </button>
         </SimpleTooltip>
       </div>
 
       {/* Share section — Task C: two-mode toggle */}
       {showShareSection && (
-        <div className="rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.5)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
-          {/* Segmented control: Private Link vs Export File */}
-          <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
-            <div
-              className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
-              style={{
-                left: shareMode === "private-link" ? "2px" : "calc(50% + 2px)",
-                width: "calc(50% - 4px)",
-              }}
-            />
-            {(["private-link", "export-file"] as ShareMode[]).map((mode) => (
-              <button
-                key={mode}
-                onClick={() => setShareMode(mode)}
-                className={cn(
-                  "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
-                  shareMode === mode
-                    ? "text-foreground"
-                    : "text-muted-foreground/60 hover:text-muted-foreground"
-                )}
-              >
-                {mode === "private-link" ? "Private Link" : "Export File"}
-              </button>
-            ))}
-          </div>
-
-          {shareMode === "private-link" ? (
-            <div className="space-y-2">
-              <p className="text-[11px] text-muted-foreground/50">
-                Share privately — only people with this code can import this pack.
-              </p>
-              {shareResult ? (
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 rounded-lg bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.15] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-[#c4a44a] shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]">
-                      {shareResult.code}
-                    </code>
-                    <SimpleTooltip content="Copy share code">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => onCopyToClipboard(shareResult.code, "code")}
-                      >
-                        {copiedField === "code" ? (
-                          <CheckIcon className="size-3.5 text-emerald-400" />
-                        ) : (
-                          <CopyIcon className="size-3.5" />
-                        )}
-                      </Button>
-                    </SimpleTooltip>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground/60">
-                      {shareResult.deepLink}
-                    </code>
-                    <SimpleTooltip content="Copy deep link">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => onCopyToClipboard(shareResult.deepLink, "link")}
-                      >
-                        {copiedField === "link" ? (
-                          <CheckIcon className="size-3.5 text-emerald-400" />
-                        ) : (
-                          <CopyIcon className="size-3.5" />
-                        )}
-                      </Button>
-                    </SimpleTooltip>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground/40">
-                      <ClockIcon className="size-3" />
-                      {shareResult.expiresAt
-                        ? formatRelativeExpiry(shareResult.expiresAt)
-                        : "Expires in ~7 days"}
-                    </p>
-                    <button
-                      onClick={onRegenerateShareCode}
-                      className="text-[10px] text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-                    >
-                      Regenerate
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={onGenerateShareCode}
-                  disabled={generatingShare}
-                  className="w-full"
-                >
-                  {generatingShare ? (
-                    <Loader2Icon className="size-3.5 animate-spin mr-1.5" />
-                  ) : (
-                    <ShareIcon className="size-3.5 mr-1.5" />
+        <Slide
+          direction="down"
+          offset={12}
+          transition={{ type: "spring", stiffness: 300, damping: 25 }}
+        >
+          <div className="rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.5)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
+            {/* Segmented control: Private Link vs Export File */}
+            <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
+              <div
+                className="absolute top-0.5 bottom-0.5 rounded-md bg-white/[0.08] shadow-sm transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+                style={{
+                  left: shareMode === "private-link" ? "2px" : "calc(50% + 2px)",
+                  width: "calc(50% - 4px)",
+                }}
+              />
+              {(["private-link", "export-file"] as ShareMode[]).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setShareMode(mode)}
+                  className={cn(
+                    "relative z-10 flex-1 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors duration-200",
+                    shareMode === mode
+                      ? "text-foreground"
+                      : "text-muted-foreground/60 hover:text-muted-foreground"
                   )}
-                  Generate Code
+                >
+                  {mode === "private-link" ? "Private Link" : "Export File"}
+                </button>
+              ))}
+            </div>
+
+            {shareMode === "private-link" ? (
+              <div className="space-y-2">
+                <p className="text-[11px] text-muted-foreground/50">
+                  Share privately — only people with this code can import this pack.
+                </p>
+                {shareResult ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 rounded-lg bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.15] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-[#c4a44a] shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]">
+                        {shareResult.code}
+                      </code>
+                      <SimpleTooltip content="Copy share code">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => onCopyToClipboard(shareResult.code, "code")}
+                        >
+                          {copiedField === "code" ? (
+                            <CheckIcon className="size-3.5 text-emerald-400" />
+                          ) : (
+                            <CopyIcon className="size-3.5" />
+                          )}
+                        </Button>
+                      </SimpleTooltip>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <code className="flex-1 truncate rounded-md bg-white/[0.05] px-3 py-1.5 text-xs text-muted-foreground/60">
+                        {shareResult.deepLink}
+                      </code>
+                      <SimpleTooltip content="Copy deep link">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => onCopyToClipboard(shareResult.deepLink, "link")}
+                        >
+                          {copiedField === "link" ? (
+                            <CheckIcon className="size-3.5 text-emerald-400" />
+                          ) : (
+                            <CopyIcon className="size-3.5" />
+                          )}
+                        </Button>
+                      </SimpleTooltip>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <p className="flex items-center gap-1.5 text-[10px] text-muted-foreground/40">
+                        <ClockIcon className="size-3" />
+                        {shareResult.expiresAt
+                          ? formatRelativeExpiry(shareResult.expiresAt)
+                          : "Expires in ~7 days"}
+                      </p>
+                      <button
+                        onClick={onRegenerateShareCode}
+                        className="text-[10px] text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+                      >
+                        Regenerate
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={onGenerateShareCode}
+                    disabled={generatingShare}
+                    className="w-full"
+                  >
+                    {generatingShare ? (
+                      <Loader2Icon className="size-3.5 animate-spin mr-1.5" />
+                    ) : (
+                      <ShareIcon className="size-3.5 mr-1.5" />
+                    )}
+                    Generate Code
+                  </Button>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-[11px] text-muted-foreground/50">
+                  Save as a .esopack file to share on Discord, forums, or privately.
+                </p>
+                <Button variant="outline" size="sm" onClick={onExportFile} className="w-full">
+                  <FileDownIcon className="size-3.5 mr-1.5" />
+                  Export .esopack File
                 </Button>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-[11px] text-muted-foreground/50">
-                Save as a .esopack file to share on Discord, forums, or privately.
-              </p>
-              <Button variant="outline" size="sm" onClick={onExportFile} className="w-full">
-                <FileDownIcon className="size-3.5 mr-1.5" />
-                Export .esopack File
-              </Button>
-            </div>
-          )}
-        </div>
+              </div>
+            )}
+          </div>
+        </Slide>
       )}
 
       {/* Install progress bar */}
       {(installing && installProgress) || installSucceeded ? (
-        <div
-          className={cn(
-            "rounded-xl border p-3",
-            installSucceeded
-              ? "border-emerald-400/25 bg-emerald-400/[0.06] shadow-[0_0_16px_rgba(34,197,94,0.08),inset_0_1px_0_rgba(34,197,94,0.06)]"
-              : "border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]"
-          )}
-        >
-          {installProgress && (
-            <div className="flex items-center justify-between text-sm mb-2">
-              <span className="text-[#c4a44a] font-medium">
-                Installing {installProgress.completed + installProgress.failed}/
-                {installProgress.total}
-              </span>
-              {installProgress.failed > 0 && (
-                <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
-              )}
+        <Fade transition={{ type: "spring", stiffness: 200, damping: 25 }}>
+          <div
+            className={cn(
+              "rounded-xl border p-3",
+              installSucceeded
+                ? "border-emerald-400/25 bg-emerald-400/[0.06] shadow-[0_0_16px_rgba(34,197,94,0.08),inset_0_1px_0_rgba(34,197,94,0.06)]"
+                : "border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]"
+            )}
+          >
+            {installProgress && (
+              <div className="flex items-center justify-between text-sm mb-2">
+                <span className="text-[#c4a44a] font-medium">
+                  Installing{" "}
+                  <CountingNumber
+                    number={installProgress.completed + installProgress.failed}
+                    transition={{ stiffness: 200, damping: 25 }}
+                  />
+                  /
+                  <CountingNumber
+                    number={installProgress.total}
+                    initiallyStable
+                    transition={{ stiffness: 200, damping: 25 }}
+                  />
+                </span>
+                {installProgress.failed > 0 && (
+                  <span className="text-red-400 text-xs">{installProgress.failed} failed</span>
+                )}
+              </div>
+            )}
+            {installSucceeded && !installProgress && (
+              <div className="flex items-center gap-2 text-sm mb-2">
+                <CheckIcon className="size-4 text-emerald-400" />
+                <span className="text-emerald-400 font-medium">Installed successfully</span>
+              </div>
+            )}
+            <div className="h-1.5 rounded-full bg-white/[0.06]">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all duration-300 ease-out",
+                  installSucceeded
+                    ? "bg-emerald-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]"
+                    : "bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.5)]"
+                )}
+                style={{
+                  width: installSucceeded
+                    ? "100%"
+                    : installProgress
+                      ? `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`
+                      : "0%",
+                }}
+              />
             </div>
-          )}
-          {installSucceeded && !installProgress && (
-            <div className="flex items-center gap-2 text-sm mb-2">
-              <CheckIcon className="size-4 text-emerald-400" />
-              <span className="text-emerald-400 font-medium">Installed successfully</span>
-            </div>
-          )}
-          <div className="h-1.5 rounded-full bg-white/[0.06]">
-            <div
-              className={cn(
-                "h-full rounded-full transition-all duration-300 ease-out",
-                installSucceeded
-                  ? "bg-emerald-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]"
-                  : "bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.5)]"
-              )}
-              style={{
-                width: installSucceeded
-                  ? "100%"
-                  : installProgress
-                    ? `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`
-                    : "0%",
-              }}
-            />
           </div>
-        </div>
+        </Fade>
       ) : null}
 
       {/* Required addons — always installed */}

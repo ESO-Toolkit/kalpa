@@ -1,7 +1,7 @@
 # Kalpa
 
 [![CI](https://github.com/ESO-Toolkit/kalpa/actions/workflows/ci.yml/badge.svg)](https://github.com/ESO-Toolkit/kalpa/actions/workflows/ci.yml)
-[![Alpha Release](https://img.shields.io/badge/release-v0.1.0--alpha.1-c4a44a)](https://github.com/ESO-Toolkit/kalpa/releases/tag/v0.1.0-alpha.1)
+[![Latest Release](https://img.shields.io/github/v/release/ESO-Toolkit/kalpa?color=c4a44a&label=release)](https://github.com/ESO-Toolkit/kalpa/releases/latest)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 
 A fast, open-source addon manager for **The Elder Scrolls Online**. Built with Tauri, React, and Rust — designed as a modern alternative to Minion with community features, better dependency handling, and a native desktop experience.
@@ -10,7 +10,7 @@ A fast, open-source addon manager for **The Elder Scrolls Online**. Built with T
   <img src=".screenshots/main-desktop.png" alt="Kalpa — main view" width="800" />
 </p>
 
-> **Alpha Release** — Kalpa v0.1.0-alpha.1 is now available! This is the first public release. Download it from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/tag/v0.1.0-alpha.1) page and help shape the future of ESO addon management. Bug reports and feedback are welcome via [GitHub Issues](https://github.com/ESO-Toolkit/kalpa/issues).
+> **Alpha Release** — Kalpa is in active development. Download the latest version from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. The app auto-updates, so you'll always be notified when a new version is available. Bug reports and feedback are welcome via [GitHub Issues](https://github.com/ESO-Toolkit/kalpa/issues).
 
 ---
 
@@ -152,7 +152,7 @@ Configure your addons folder, access tools like backups and API compatibility ch
 
 ### Pre-built (recommended)
 
-Download the latest installer from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/tag/v0.1.0-alpha.1) page. Available as both `.exe` (NSIS) and `.msi` installers.
+Download the latest installer from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. Kalpa auto-updates after install — you'll see a banner when a new version is available.
 
 ### Build from source
 

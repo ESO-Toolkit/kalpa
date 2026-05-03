@@ -3,11 +3,15 @@ import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 
 import { cn } from "@/lib/utils";
 
-const Popover = PopoverPrimitive.Root;
-
-const PopoverTrigger = PopoverPrimitive.Trigger;
-
-const PopoverClose = PopoverPrimitive.Close;
+import {
+  Popover,
+  PopoverTrigger,
+  PopoverPortal,
+  PopoverPositioner,
+  PopoverPopup,
+  PopoverClose,
+  type PopoverPopupProps,
+} from "@/components/animate-ui/primitives/base/popover";
 
 function PopoverContent({
   className,
@@ -16,25 +20,28 @@ function PopoverContent({
   align = "center",
   children,
   ...props
-}: PopoverPrimitive.Popup.Props &
-  Pick<PopoverPrimitive.Positioner.Props, "align" | "side" | "sideOffset">) {
+}: PopoverPopupProps &
+  Pick<
+    React.ComponentProps<typeof PopoverPrimitive.Positioner>,
+    "align" | "side" | "sideOffset"
+  > & {
+    children?: React.ReactNode;
+  }) {
   return (
-    <PopoverPrimitive.Portal>
-      <PopoverPrimitive.Positioner side={side} sideOffset={sideOffset} align={align}>
-        <PopoverPrimitive.Popup
-          data-slot="popover-content"
+    <PopoverPortal>
+      <PopoverPositioner side={side} sideOffset={sideOffset} align={align}>
+        <PopoverPopup
           className={cn(
             "z-50 w-64 origin-(--transform-origin) rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.92)] p-3 shadow-lg backdrop-blur-xl",
-            "data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95",
-            "data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
             className
           )}
+          transition={{ type: "spring", stiffness: 500, damping: 30 }}
           {...props}
         >
           {children}
-        </PopoverPrimitive.Popup>
-      </PopoverPrimitive.Positioner>
-    </PopoverPrimitive.Portal>
+        </PopoverPopup>
+      </PopoverPositioner>
+    </PopoverPortal>
   );
 }
 

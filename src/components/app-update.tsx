@@ -3,6 +3,8 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { toast } from "sonner";
 import { DownloadIcon, RefreshCwIcon } from "lucide-react";
+import { Slide } from "@/components/animate-ui/primitives/effects/slide";
+import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 
 type AppUpdateState =
   | { status: "idle" }
@@ -94,44 +96,56 @@ export function AppUpdateBanner({ state, onDownload, onRestart }: AppUpdateBanne
   if (state.status === "idle") return null;
 
   return (
-    <div className="flex items-center gap-2 border-b border-white/[0.06] bg-[#c4a44a]/[0.08] px-3 py-1.5 text-xs">
-      {state.status === "available" && (
-        <>
-          <DownloadIcon className="h-3.5 w-3.5 text-[#c4a44a]" />
-          <span className="text-[#c4a44a]">Version {state.update.version} available</span>
-          <button
-            onClick={onDownload}
-            className="ml-auto rounded-md bg-[#c4a44a]/20 px-2 py-0.5 text-[#c4a44a] transition-colors hover:bg-[#c4a44a]/30"
-          >
-            Update Now
-          </button>
-        </>
-      )}
-      {state.status === "downloading" && (
-        <>
-          <RefreshCwIcon className="h-3.5 w-3.5 animate-spin text-[#c4a44a]" />
-          <span className="text-[#c4a44a]">Downloading update...</span>
-          <div className="ml-auto h-1.5 w-24 overflow-hidden rounded-full bg-white/[0.1]">
-            <div
-              className="h-full rounded-full bg-[#c4a44a] transition-all"
-              style={{ width: `${state.progress}%` }}
-            />
-          </div>
-          <span className="text-[#c4a44a]/70">{state.progress}%</span>
-        </>
-      )}
-      {state.status === "ready" && (
-        <>
-          <DownloadIcon className="h-3.5 w-3.5 text-emerald-400" />
-          <span className="text-emerald-400">Update ready</span>
-          <button
-            onClick={onRestart}
-            className="ml-auto rounded-md bg-emerald-400/20 px-2 py-0.5 text-emerald-400 transition-colors hover:bg-emerald-400/30"
-          >
-            Restart Now
-          </button>
-        </>
-      )}
-    </div>
+    <Slide
+      direction="down"
+      offset={12}
+      transition={{ type: "spring", stiffness: 300, damping: 25 }}
+    >
+      <div className="flex items-center gap-2 border-b border-white/[0.06] bg-[#c4a44a]/[0.08] px-3 py-1.5 text-xs">
+        {state.status === "available" && (
+          <>
+            <DownloadIcon className="h-3.5 w-3.5 text-[#c4a44a]" />
+            <span className="text-[#c4a44a]">Version {state.update.version} available</span>
+            <button
+              onClick={onDownload}
+              className="ml-auto rounded-md bg-[#c4a44a]/20 px-2 py-0.5 text-[#c4a44a] transition-colors hover:bg-[#c4a44a]/30"
+            >
+              Update Now
+            </button>
+          </>
+        )}
+        {state.status === "downloading" && (
+          <>
+            <RefreshCwIcon className="h-3.5 w-3.5 animate-spin text-[#c4a44a]" />
+            <span className="text-[#c4a44a]">Downloading update...</span>
+            <div className="ml-auto h-1.5 w-24 overflow-hidden rounded-full bg-white/[0.1]">
+              <div
+                className="h-full rounded-full bg-[#c4a44a] transition-all"
+                style={{ width: `${state.progress}%` }}
+              />
+            </div>
+            <span className="text-[#c4a44a]/70">
+              <CountingNumber
+                number={state.progress}
+                transition={{ stiffness: 200, damping: 25 }}
+              />
+              %
+            </span>
+          </>
+        )}
+        {state.status === "ready" && (
+          <>
+            <DownloadIcon className="h-3.5 w-3.5 text-emerald-400" />
+            <span className="text-emerald-400">Update ready</span>
+            <button
+              onClick={onRestart}
+              className="ml-auto rounded-md bg-emerald-400/20 px-2 py-0.5 text-emerald-400 transition-colors hover:bg-emerald-400/30"
+            >
+              Restart Now
+            </button>
+          </>
+        )}
+      </div>
+    </Slide>
   );
 }

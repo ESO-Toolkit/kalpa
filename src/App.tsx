@@ -93,13 +93,19 @@ function App() {
     null
   );
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
-  const [batchRemoving, setBatchRemoving] = useState(false);
   const [batchDisabling, setBatchDisabling] = useState(false);
   const [activeTagFilter, setActiveTagFilter] = useState<string | null>(null);
   // null = not in setup mode; [] = in setup mode with no candidates found
   const [setupInstances, setSetupInstances] = useState<GameInstance[] | null>(null);
   // All detected instances; available after init for the instance switcher in Settings
   const [knownInstances, setKnownInstances] = useState<GameInstance[]>([]);
+
+  const [srAnnouncement, setSrAnnouncement] = useState("");
+
+  const srAnnounce = useCallback((message: string) => {
+    setSrAnnouncement("");
+    requestAnimationFrame(() => setSrAnnouncement(message));
+  }, []);
 
   const {
     state: appUpdateState,
@@ -117,10 +123,12 @@ function App() {
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
 
-  selectedAddonRef.current = selectedAddon;
-  addonsPathRef.current = addonsPath;
-  viewModeRef.current = viewMode;
-  updatingAllRef.current = updatingAll;
+  useEffect(() => {
+    selectedAddonRef.current = selectedAddon;
+    addonsPathRef.current = addonsPath;
+    viewModeRef.current = viewMode;
+    updatingAllRef.current = updatingAll;
+  });
 
   useEffect(() => {
     const goOffline = () => setIsOffline(true);
@@ -283,6 +291,12 @@ function App() {
         setUpdateResults(results);
         const updates = results.filter((result) => result.hasUpdate);
 
+        void invokeResult("update_tray_tooltip", { updateCount: updates.length });
+
+        if (updates.length > 0) {
+          srAnnounce(`${updates.length} update${updates.length !== 1 ? "s" : ""} available`);
+        }
+
         if (autoUpdate && updates.length > 0) {
           toast.info(`Auto-updating ${updates.length} addon${updates.length > 1 ? "s" : ""}...`);
           setUpdatingAll(true);
@@ -340,7 +354,7 @@ function App() {
         }
       }
     },
-    [scanAddons]
+    [scanAddons, srAnnounce]
   );
 
   const scanAndCheck = useCallback(
@@ -499,13 +513,10 @@ function App() {
     }
   }, [setupInstances, rosterPackInstallId, deepLinkPackId, deepLinkShareCode]);
 
-  useEffect(() => {
-    if (!activeTagFilter) return;
-    const tagStillExists = addons.some((addon) => addon.tags.includes(activeTagFilter));
-    if (!tagStillExists) {
-      setActiveTagFilter(null);
-    }
-  }, [activeTagFilter, addons]);
+  const effectiveTagFilter =
+    activeTagFilter && addons.some((a) => a.tags.includes(activeTagFilter))
+      ? activeTagFilter
+      : null;
 
   const handleSetupSelect = useCallback(
     async (selectedPath: string) => {
@@ -575,6 +586,116 @@ function App() {
       setUpdateResults((prev) => prev.filter((result) => result.esouiId !== esouiId));
     },
     [scanAddons]
+  );
+
+  const handleOpenFolder = useCallback(
+    async (folderName: string) => {
+      try {
+        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+        await revealItemInDir(`${addonsPath}\\${folderName}`);
+      } catch (e) {
+        toast.error(`Could not open folder: ${getTauriErrorMessage(e)}`);
+      }
+    },
+    [addonsPath]
+  );
+
+  const handleSingleUpdate = useCallback(
+    async (folderName: string) => {
+      const ur = updateResults.find((r) => r.folderName === folderName && r.hasUpdate);
+      if (!ur) return;
+      try {
+        await invokeOrThrow("update_addon", {
+          addonsPath,
+          esouiId: ur.esouiId,
+        });
+        toast.success(`Updated ${folderName}`);
+        srAnnounce(`Updated ${folderName}`);
+        handleAddonUpdated(ur.esouiId);
+      } catch (e) {
+        toast.error(`Update failed: ${getTauriErrorMessage(e)}`);
+      }
+    },
+    [addonsPath, updateResults, srAnnounce, handleAddonUpdated]
+  );
+
+  const pendingRemovalsRef = useRef<
+    Map<string, { timer: ReturnType<typeof setTimeout>; addon: AddonManifest }>
+  >(new Map());
+
+  const flushPendingRemovals = useCallback(() => {
+    for (const [folderName, { timer }] of pendingRemovalsRef.current) {
+      clearTimeout(timer);
+      void invokeOrThrow("remove_addon", { addonsPath, folderName }).catch(() => {});
+    }
+    pendingRemovalsRef.current.clear();
+  }, [addonsPath]);
+
+  useEffect(() => {
+    const handler = () => flushPendingRemovals();
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [flushPendingRemovals]);
+
+  const handleSingleRemove = useCallback(
+    (folderName: string) => {
+      const addon = addons.find((a) => a.folderName === folderName);
+      if (!addon) return;
+
+      // Optimistically hide from UI
+      setAddons((prev) => prev.filter((a) => a.folderName !== folderName));
+      setUpdateResults((prev) => prev.filter((r) => r.folderName !== folderName));
+      setSelectedFolders((prev) => {
+        if (!prev.has(folderName)) return prev;
+        const next = new Set(prev);
+        next.delete(folderName);
+        return next;
+      });
+      if (selectedAddonRef.current?.folderName === folderName) {
+        setSelectedAddon(null);
+      }
+
+      // Cancel any existing pending removal for this addon
+      const existing = pendingRemovalsRef.current.get(folderName);
+      if (existing) clearTimeout(existing.timer);
+
+      const timer = setTimeout(() => {
+        pendingRemovalsRef.current.delete(folderName);
+        void invokeOrThrow("remove_addon", { addonsPath, folderName }).catch((e) => {
+          toast.error(`Remove failed: ${getTauriErrorMessage(e)}`);
+          setAddons((prev) => [...prev, addon]);
+        });
+      }, 5000);
+
+      pendingRemovalsRef.current.set(folderName, { timer, addon });
+
+      toast(`Removed ${addon.title}`, {
+        action: {
+          label: "Undo",
+          onClick: () => {
+            const pending = pendingRemovalsRef.current.get(folderName);
+            if (pending) {
+              clearTimeout(pending.timer);
+              pendingRemovalsRef.current.delete(folderName);
+              setAddons((prev) => [...prev, addon]);
+              toast.success(`Restored ${addon.title}`);
+            }
+          },
+        },
+        duration: 5000,
+      });
+      srAnnounce(`Removed ${addon.title}. Press undo to restore.`);
+    },
+    [addons, addonsPath, srAnnounce]
+  );
+
+  const handleRemoveByEsouiId = useCallback(
+    (esouiId: number) => {
+      for (const addon of addons.filter((a) => a.esouiId === esouiId)) {
+        handleSingleRemove(addon.folderName);
+      }
+    },
+    [addons, handleSingleRemove]
   );
 
   const handlePathChange = useCallback(
@@ -664,25 +785,55 @@ function App() {
           toast.warning(
             `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}, ${failed.length} failed: ${failed.join(", ")}`
           );
+          srAnnounce(`Updated ${completed.length} addons, ${failed.length} failed`);
         } else if (completed.length > 0) {
           toast.success(`Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}`);
+          srAnnounce(
+            `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""} successfully`
+          );
         }
 
         // Only clear update results for addons that actually succeeded;
         // failed addons should remain visible in the "Outdated" filter.
         if (completed.length > 0) {
           const succeededNames = new Set(completed);
-          setUpdateResults((prev) =>
-            prev.filter((result) => !succeededNames.has(result.folderName))
-          );
+          setUpdateResults((prev) => {
+            const remaining = prev.filter((result) => !succeededNames.has(result.folderName));
+            const remainingUpdates = remaining.filter((r) => r.hasUpdate).length;
+            void invokeResult("update_tray_tooltip", {
+              updateCount: remainingUpdates,
+            });
+            return remaining;
+          });
+
+          // Send OS notification if app is in the tray
+          void (async () => {
+            try {
+              const { getCurrentWindow } = await import("@tauri-apps/api/window");
+              const isVisible = await getCurrentWindow().isVisible();
+              if (!isVisible) {
+                const { isPermissionGranted, sendNotification } =
+                  await import("@tauri-apps/plugin-notification");
+                if (await isPermissionGranted()) {
+                  sendNotification({
+                    title: "Kalpa",
+                    body: `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}${failed.length > 0 ? `, ${failed.length} failed` : ""}`,
+                  });
+                }
+              }
+            } catch {
+              // Notification is best-effort
+            }
+          })();
         }
       } else {
         toast.error(`Batch update failed: ${batchResult.error}`);
+        srAnnounce("Batch update failed");
       }
 
       await scanAddons(path);
     },
-    [scanAddons]
+    [scanAddons, srAnnounce]
   );
 
   const handleUpdateAll = useCallback(() => {
@@ -701,27 +852,57 @@ function App() {
     });
   }, []);
 
-  const handleBatchRemove = useCallback(async () => {
+  const handleBatchRemove = useCallback(() => {
     if (selectedFolders.size === 0) return;
 
-    setBatchRemoving(true);
-    try {
-      const removed = await invokeOrThrow<string[]>("batch_remove_addons", {
-        addonsPath,
-        folderNames: Array.from(selectedFolders),
-      });
-      toast.success(`Removed ${removed.length} addon${removed.length !== 1 ? "s" : ""}`);
-      setSelectedFolders(new Set());
-      if (selectedAddonRef.current && selectedFolders.has(selectedAddonRef.current.folderName)) {
-        setSelectedAddon(null);
-      }
-      handleRefresh();
-    } catch (removeError) {
-      toast.error(`Batch remove failed: ${getTauriErrorMessage(removeError)}`);
-    } finally {
-      setBatchRemoving(false);
+    const removedAddons = addons.filter((a) => selectedFolders.has(a.folderName));
+    const folderNames = Array.from(selectedFolders);
+    const count = removedAddons.length;
+
+    const removedSet = new Set(folderNames);
+
+    // Optimistically hide from all relevant state
+    setAddons((prev) => prev.filter((a) => !removedSet.has(a.folderName)));
+    setUpdateResults((prev) => prev.filter((r) => !removedSet.has(r.folderName)));
+    if (selectedAddonRef.current && selectedFolders.has(selectedAddonRef.current.folderName)) {
+      setSelectedAddon(null);
     }
-  }, [addonsPath, handleRefresh, selectedFolders]);
+    setSelectedFolders(new Set());
+
+    for (const addon of removedAddons) {
+      const existing = pendingRemovalsRef.current.get(addon.folderName);
+      if (existing) clearTimeout(existing.timer);
+    }
+
+    const timer = setTimeout(() => {
+      for (const fn of folderNames) pendingRemovalsRef.current.delete(fn);
+      void invokeOrThrow<string[]>("batch_remove_addons", {
+        addonsPath,
+        folderNames,
+      }).catch((e) => {
+        toast.error(`Batch remove failed: ${getTauriErrorMessage(e)}`);
+        setAddons((prev) => [...prev, ...removedAddons]);
+      });
+    }, 5000);
+
+    for (const addon of removedAddons) {
+      pendingRemovalsRef.current.set(addon.folderName, { timer, addon });
+    }
+
+    toast(`Removed ${count} addon${count !== 1 ? "s" : ""}`, {
+      action: {
+        label: "Undo",
+        onClick: () => {
+          clearTimeout(timer);
+          for (const fn of folderNames) pendingRemovalsRef.current.delete(fn);
+          setAddons((prev) => [...prev, ...removedAddons]);
+          toast.success(`Restored ${count} addon${count !== 1 ? "s" : ""}`);
+        },
+      },
+      duration: 5000,
+    });
+    srAnnounce(`Removed ${count} addon${count !== 1 ? "s" : ""}. Press undo to restore.`);
+  }, [addons, addonsPath, selectedFolders, srAnnounce]);
 
   const handleBatchUpdate = useCallback(async () => {
     const toUpdate = updatesAvailable.filter((update) => selectedFolders.has(update.folderName));
@@ -828,7 +1009,7 @@ function App() {
             case "disabled":
               return addon.disabled;
             default:
-              if (activeTagFilter) return addon.tags.includes(activeTagFilter);
+              if (effectiveTagFilter) return addon.tags.includes(effectiveTagFilter);
               return true;
           }
         })
@@ -841,7 +1022,7 @@ function App() {
               return left.title.toLowerCase().localeCompare(right.title.toLowerCase());
           }
         }),
-    [activeTagFilter, addons, filterMode, searchQuery, sortMode, updatesSet]
+    [effectiveTagFilter, addons, filterMode, searchQuery, sortMode, updatesSet]
   );
 
   const selectedUpdateResult = useMemo(
@@ -875,12 +1056,14 @@ function App() {
 
   return (
     <div className="relative flex h-screen flex-col">
+      <div className="sr-only" aria-live="assertive" aria-atomic="true" role="status">
+        {srAnnouncement}
+      </div>
       <AppBackground />
 
       <AppHeader
         addonsCount={addons.length}
         batchMode={batchMode}
-        batchRemoving={batchRemoving}
         batchDisabling={batchDisabling}
         checkingUpdates={checkingUpdates}
         loading={loading}
@@ -930,7 +1113,7 @@ function App() {
           onSortChange={handleSortChange}
           filterMode={filterMode}
           onFilterChange={handleFilterChange}
-          activeTagFilter={activeTagFilter}
+          activeTagFilter={effectiveTagFilter}
           onActiveTagFilterChange={setActiveTagFilter}
           selectedFolders={selectedFolders}
           onToggleSelect={handleToggleSelect}
@@ -944,6 +1127,11 @@ function App() {
           selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
           installedEsouiIds={installedEsouiIds}
           isOffline={isOffline}
+          onUpdateAddon={(fn) => void handleSingleUpdate(fn)}
+          onRemoveAddon={(fn) => void handleSingleRemove(fn)}
+          onToggleDisable={handleToggleDisable}
+          onOpenFolder={(fn) => void handleOpenFolder(fn)}
+          onToggleFavorite={handleTagsChange}
         />
 
         {viewMode === "installed" ? (
@@ -956,6 +1144,7 @@ function App() {
               setSelectedAddon(null);
               handleRefresh();
             }}
+            onRemoveAddon={handleSingleRemove}
             onToggleDisable={handleToggleDisable}
             updateResult={selectedUpdateResult}
             onAddonUpdated={handleAddonUpdated}
@@ -968,6 +1157,7 @@ function App() {
             result={selectedDiscoverResult}
             addonsPath={addonsPath}
             onInstalled={handleRefresh}
+            onRemoveByEsouiId={handleRemoveByEsouiId}
             installedEsouiIds={installedEsouiIds}
             isOffline={isOffline}
           />

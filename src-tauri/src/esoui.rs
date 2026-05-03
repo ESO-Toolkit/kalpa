@@ -609,68 +609,103 @@ pub fn browse_category(
     let client = http_client();
 
     let sb = match sort_by {
-        "downloads" => "dec_download",
-        "newest" => "lastupdate",
-        "name" => "title",
-        _ => "dec_download",
+        "downloads" => "dec_hits",
+        "newest" => "dec_date",
+        "name" => "dec_title",
+        _ => "dec_hits",
     };
 
+    // ESOUI uses 1-based `page=` for paginated category listings
+    let esoui_page = page + 1;
     let url = format!(
-        "https://www.esoui.com/downloads/index.php?cid={}&sb={}&so=desc&pt=f&dp={}",
-        category_id, sb, page
+        "https://www.esoui.com/downloads/index.php?cid={}&sb={}&so=desc&pt=f&page={}",
+        category_id, sb, esoui_page
     );
 
     let body = fetch_page(client, &url, None)?;
     let document = Html::parse_document(&body);
 
-    static RE_BROWSE_ID: OnceLock<Regex> = OnceLock::new();
-    let re_id = RE_BROWSE_ID.get_or_init(|| Regex::new(r"info(\d+)").unwrap());
-    let a_sel = Selector::parse("a.addonLink").unwrap();
-    let cat_sel = Selector::parse("li.category").unwrap();
+    static RE_FILE_ID: OnceLock<Regex> = OnceLock::new();
+    let re_id = RE_FILE_ID.get_or_init(|| Regex::new(r"file_(\d+)").unwrap());
+    static RE_DL_COUNT: OnceLock<Regex> = OnceLock::new();
+    let re_dl = RE_DL_COUNT.get_or_init(|| Regex::new(r"^[\d,]+").unwrap());
+    let file_sel = Selector::parse("div.file").unwrap();
+    let title_sel = Selector::parse("a[href*='fileinfo']").unwrap();
+    let author_sel = Selector::parse("div.author").unwrap();
+    let dl_sel = Selector::parse("div.downloads").unwrap();
+    let updated_sel = Selector::parse("div.updated").unwrap();
 
-    // Parse the listing — each addon has a title link and a category label
     let mut results: Vec<EsouiSearchResult> = Vec::new();
-    let mut categories: Vec<String> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
-    // Collect all category labels in order
-    for el in document.select(&cat_sel) {
-        categories.push(el.text().collect::<String>().trim().to_string());
-    }
-
-    let mut idx = 0;
-    for el in document.select(&a_sel) {
-        let href = el.value().attr("href").unwrap_or("");
-        let title = el.text().collect::<String>().trim().to_string();
-
-        let id = match re_id.captures(href) {
+    for file_el in document.select(&file_sel) {
+        let file_id_attr = file_el.value().attr("id").unwrap_or("");
+        let id = match re_id.captures(file_id_attr) {
             Some(caps) => match caps[1].parse::<u32>() {
                 Ok(id) => id,
-                Err(_) => {
-                    idx += 1;
-                    continue;
-                }
+                Err(_) => continue,
             },
-            None => {
-                idx += 1;
-                continue;
-            }
+            None => continue,
         };
 
-        let category = categories.get(idx).cloned().unwrap_or_default();
-        idx += 1;
-
-        // Skip duplicates (ESOUI sometimes lists addons twice)
-        if results.iter().any(|r| r.id == id) {
+        if !seen_ids.insert(id) {
             continue;
         }
+
+        let title = file_el
+            .select(&title_sel)
+            .next()
+            .map(|a| a.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+
+        if title.is_empty() {
+            continue;
+        }
+
+        let author = file_el
+            .select(&author_sel)
+            .next()
+            .map(|el| {
+                el.text()
+                    .collect::<String>()
+                    .trim()
+                    .trim_start_matches("By:")
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default();
+
+        // "6,443,139 Downloads (71,750 Monthly)" → "6,443,139"
+        let downloads = file_el
+            .select(&dl_sel)
+            .next()
+            .and_then(|el| {
+                let text = el.text().collect::<String>();
+                re_dl.find(text.trim()).map(|m| m.as_str().to_string())
+            })
+            .unwrap_or_default();
+
+        // "Updated 04/25/26 07:49 AM" → "04/25/26 07:49 AM"
+        let updated = file_el
+            .select(&updated_sel)
+            .next()
+            .map(|el| {
+                el.text()
+                    .collect::<String>()
+                    .trim()
+                    .trim_start_matches("Updated")
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default();
 
         results.push(EsouiSearchResult {
             id,
             title,
-            author: String::new(), // Not available in category listing
-            category,
-            downloads: String::new(),
-            updated: String::new(),
+            author,
+            category: String::new(),
+            downloads,
+            updated,
         });
     }
 
@@ -693,95 +728,53 @@ pub struct BrowsePopularPage {
     pub has_more: bool,
 }
 
-/// ESOUI returns 25 entries per page; use the same constant to detect full pages.
-const ESOUI_PAGE_SIZE: usize = 25;
+const POPULAR_PAGE_SIZE: usize = 25;
+
+fn format_download_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
 
 /// Browse ESOUI's global listing sorted by popularity/newest.
+///
+/// Uses the ESOUI filelist JSON API for accurate sorting across all addons,
+/// with in-memory pagination. Libraries are excluded from results.
 pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, String> {
-    let client = http_client();
+    ensure_filelist_cache()?;
 
-    let sb = match sort_by {
-        "downloads" => "dec_download",
-        "newest" => "lastupdate",
-        "name" => "title",
-        _ => "dec_download",
-    };
+    let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.as_ref().unwrap();
 
-    let url = format!(
-        "https://www.esoui.com/downloads/index.php?sb={}&so=desc&pt=f&dp={}",
-        sb, page
-    );
+    let mut entries: Vec<&ApiFileEntry> = cache.entries.iter().filter(|e| !e.library).collect();
 
-    let body = fetch_page(client, &url, None)?;
-    let document = Html::parse_document(&body);
-
-    static RE_BROWSE_ID: OnceLock<Regex> = OnceLock::new();
-    let re_id = RE_BROWSE_ID.get_or_init(|| Regex::new(r"info(\d+)").unwrap());
-    let a_sel = Selector::parse("a.addonLink").unwrap();
-    let cat_sel = Selector::parse("li.category").unwrap();
-
-    let mut results: Vec<EsouiSearchResult> = Vec::new();
-    let mut categories: Vec<String> = Vec::new();
-
-    for el in document.select(&cat_sel) {
-        categories.push(el.text().collect::<String>().trim().to_string());
+    match sort_by {
+        "newest" => entries.sort_by_key(|e| std::cmp::Reverse(e.last_update)),
+        _ => entries.sort_by_key(|e| std::cmp::Reverse(e.downloads)),
     }
 
-    // Track how many unique upstream entries we see (before library filtering)
-    // so we can correctly signal whether more pages exist.
-    let mut upstream_count: usize = 0;
+    let start = page as usize * POPULAR_PAGE_SIZE;
+    let results: Vec<EsouiSearchResult> = entries
+        .iter()
+        .skip(start)
+        .take(POPULAR_PAGE_SIZE)
+        .map(|e| EsouiSearchResult {
+            id: e.id,
+            title: e.title.clone(),
+            author: e.author.clone(),
+            category: String::new(),
+            downloads: format_download_count(e.downloads),
+            updated: format_epoch_millis(e.last_update),
+        })
+        .collect();
 
-    let mut idx = 0;
-    for el in document.select(&a_sel) {
-        let href = el.value().attr("href").unwrap_or("");
-        let title = el.text().collect::<String>().trim().to_string();
+    let has_more = start + POPULAR_PAGE_SIZE < entries.len();
 
-        let id = match re_id.captures(href) {
-            Some(caps) => match caps[1].parse::<u32>() {
-                Ok(id) => id,
-                Err(_) => {
-                    idx += 1;
-                    continue;
-                }
-            },
-            None => {
-                idx += 1;
-                continue;
-            }
-        };
-
-        let category = categories.get(idx).cloned().unwrap_or_default();
-        idx += 1;
-
-        // Count every unique upstream entry before the library filter so the
-        // has_more signal stays accurate even when many libraries are removed.
-        if !results.iter().any(|r| r.id == id) {
-            upstream_count += 1;
-        }
-
-        // Exclude libraries from the popular listing — they have their own category
-        if category.to_ascii_lowercase().contains("librar") {
-            continue;
-        }
-
-        if results.iter().any(|r| r.id == id) {
-            continue;
-        }
-
-        results.push(EsouiSearchResult {
-            id,
-            title,
-            author: String::new(),
-            category,
-            downloads: String::new(),
-            updated: String::new(),
-        });
-    }
-
-    Ok(BrowsePopularPage {
-        has_more: upstream_count >= ESOUI_PAGE_SIZE,
-        results,
-    })
+    Ok(BrowsePopularPage { results, has_more })
 }
 
 pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
@@ -818,13 +811,23 @@ pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
 /// A single addon entry from the ESOUI filelist API.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct ApiFileEntry {
     pub id: u32,
+    pub category_id: u32,
     pub version: String,
     pub last_update: u64, // epoch millis
     pub title: String,
     pub author: String,
     pub file_info_uri: String,
+    #[serde(default)]
+    pub downloads: u64,
+    #[serde(default)]
+    pub downloads_monthly: u64,
+    #[serde(default)]
+    pub favorites: u64,
+    #[serde(default)]
+    pub library: bool,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub addons: Vec<ApiAddonPath>,
 }
@@ -856,7 +859,8 @@ pub struct ApiAddonLookup {
 }
 
 struct FilelistCache {
-    data: HashMap<String, ApiAddonLookup>,
+    entries: Vec<ApiFileEntry>,
+    lookup: HashMap<String, ApiAddonLookup>,
     fetched_at: Instant,
 }
 
@@ -870,33 +874,41 @@ fn filelist_cache() -> &'static Mutex<Option<FilelistCache>> {
 /// session for typical usage; the cache refreshes automatically after this.
 const FILELIST_TTL: Duration = Duration::from_secs(900); // 15 minutes
 
+fn ensure_filelist_cache() -> Result<(), String> {
+    {
+        let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cache) = guard.as_ref() {
+            if cache.fetched_at.elapsed() < FILELIST_TTL {
+                return Ok(());
+            }
+        }
+    }
+
+    let entries = fetch_filelist_entries()?;
+    let lookup = build_filelist_lookup(&entries);
+
+    let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(FilelistCache {
+        entries,
+        lookup,
+        fetched_at: Instant::now(),
+    });
+
+    Ok(())
+}
+
 /// Fetch the full ESOUI filelist and build a lookup map keyed by addon folder path.
 ///
 /// Single HTTP request returns ~4000 addons with all their folder paths,
 /// versions, and last-updated timestamps. Result is cached in-memory for
 /// `FILELIST_TTL` so repeated update checks within a session don't re-fetch.
 pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String> {
-    {
-        let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(cache) = guard.as_ref() {
-            if cache.fetched_at.elapsed() < FILELIST_TTL {
-                return Ok(cache.data.clone());
-            }
-        }
-    }
-
-    let data = fetch_filelist_from_api()?;
-
-    let mut guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(FilelistCache {
-        data: data.clone(),
-        fetched_at: Instant::now(),
-    });
-
-    Ok(data)
+    ensure_filelist_cache()?;
+    let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
+    Ok(guard.as_ref().unwrap().lookup.clone())
 }
 
-fn fetch_filelist_from_api() -> Result<HashMap<String, ApiAddonLookup>, String> {
+fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
     let client = http_client();
     let url = "https://api.mmoui.com/v4/game/ESO/filelist.json";
     let response = client.get(url).send().map_err(|e| {
@@ -911,12 +923,14 @@ fn fetch_filelist_from_api() -> Result<HashMap<String, ApiAddonLookup>, String> 
         return Err(format!("ESOUI API returned HTTP {}", response.status()));
     }
 
-    let entries: Vec<ApiFileEntry> = response
+    response
         .json()
-        .map_err(|e| format!("Failed to parse ESOUI API response: {}", e))?;
+        .map_err(|e| format!("Failed to parse ESOUI API response: {}", e))
+}
 
+fn build_filelist_lookup(entries: &[ApiFileEntry]) -> HashMap<String, ApiAddonLookup> {
     let mut map = HashMap::new();
-    for entry in &entries {
+    for entry in entries {
         let lookup = ApiAddonLookup {
             esoui_id: entry.id,
             title: entry.title.clone(),
@@ -935,7 +949,77 @@ fn fetch_filelist_from_api() -> Result<HashMap<String, ApiAddonLookup>, String> 
         }
     }
 
-    Ok(map)
+    map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_cyrillic_numeric_entities() {
+        assert_eq!(clean_description("&#1042;&#1055;"), "ВП");
+    }
+
+    #[test]
+    fn decode_hex_entities() {
+        assert_eq!(clean_description("&#x412;"), "В");
+    }
+
+    #[test]
+    fn decode_named_entities() {
+        assert_eq!(clean_description("&amp;"), "&");
+        assert_eq!(clean_description("&quot;"), "\"");
+        assert_eq!(clean_description("&apos;"), "'");
+        assert_eq!(clean_description("&nbsp;"), "");
+    }
+
+    #[test]
+    fn strip_entity_encoded_bbcode() {
+        assert_eq!(clean_description("&#91;b&#93;bold&#91;/b&#93;"), "bold");
+    }
+
+    #[test]
+    fn strip_entity_encoded_html() {
+        assert_eq!(
+            clean_description("&lt;br&gt;line&lt;b&gt;bold&lt;/b&gt;"),
+            "linebold"
+        );
+    }
+
+    #[test]
+    fn strip_literal_bbcode_with_entities() {
+        assert_eq!(clean_description("[b]&#1042;[/b]"), "В");
+    }
+
+    #[test]
+    fn strip_literal_html_tags() {
+        assert_eq!(clean_description("hello<br>world<b>!</b>"), "helloworld!");
+    }
+
+    #[test]
+    fn invalid_codepoint_passthrough() {
+        assert_eq!(clean_description("&#99999999;"), "&#99999999;");
+    }
+
+    #[test]
+    fn plain_text_passthrough() {
+        assert_eq!(clean_description("hello world"), "hello world");
+    }
+
+    #[test]
+    fn preserve_decoded_angle_brackets_in_text() {
+        assert_eq!(clean_description("x &lt; 2 &gt; y"), "x < 2 > y");
+        assert_eq!(clean_description("a &lt;= b"), "a <= b");
+    }
+
+    #[test]
+    fn mixed_cyrillic_description() {
+        let input = "If you want to help: PP at GitHub\n\n--RU--- &#1042; &#1087;&#1088;&#1086;&#1094;&#1077;&#1089;&#1089;&#1077; &#1088;&#1072;&#1079;&#1088;&#1072;&#1073;&#1086;&#1090;&#1082;&#1080;!";
+        let result = clean_description(input);
+        assert!(result.contains("В процессе разработки!"));
+        assert!(result.contains("If you want to help"));
+    }
 }
 
 #[cfg(test)]

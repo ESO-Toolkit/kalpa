@@ -32,6 +32,9 @@ import {
   WifiOff,
 } from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { DiscoverResultListSkeleton } from "@/components/ui/skeletons";
+import { motion, AnimatePresence } from "motion/react";
 
 const PAGE_SIZE = 25;
 
@@ -243,53 +246,100 @@ export function DiscoverPanel({
             role="tab"
             aria-selected={activeTab === tab}
             className={cn(
-              "flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium transition-all duration-150 flex items-center justify-center gap-1",
+              "relative flex-1 min-w-0 rounded-lg px-1.5 py-1 text-xs font-medium transition-colors duration-150 flex items-center justify-center gap-1",
               activeTab === tab
-                ? "bg-[#c4a44a]/15 text-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.05)] border border-[#c4a44a]/25"
+                ? "text-[#c4a44a]"
                 : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
             )}
             onClick={() => onTabChange(tab)}
           >
-            <Icon className="size-3 shrink-0" />
-            <span className="truncate">{label}</span>
+            {activeTab === tab && (
+              <motion.span
+                layoutId="discover-tab-indicator"
+                className="absolute inset-0 rounded-lg bg-[#c4a44a]/15 border border-[#c4a44a]/25 shadow-[0_0_8px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                transition={{ type: "spring", stiffness: 400, damping: 30 }}
+              />
+            )}
+            <span className="relative z-10 flex items-center justify-center gap-1">
+              <Icon className="size-3 shrink-0" />
+              <span className="truncate">{label}</span>
+            </span>
           </button>
         ))}
       </div>
 
-      {activeTab === "search" && (
-        <SearchContent
-          installingId={installingId}
-          installedIds={installedIds}
-          onInstall={handleInstall}
-          onSelectResult={onSelectResult}
-          selectedResultId={selectedResultId}
-        />
-      )}
-      {activeTab === "popular" && (
-        <PopularContent
-          installingId={installingId}
-          installedIds={installedIds}
-          onInstall={handleInstall}
-          onSelectResult={onSelectResult}
-          selectedResultId={selectedResultId}
-        />
-      )}
-      {activeTab === "categories" && (
-        <CategoryContent
-          installingId={installingId}
-          installedIds={installedIds}
-          onInstall={handleInstall}
-          onSelectResult={onSelectResult}
-          selectedResultId={selectedResultId}
-        />
-      )}
-      {activeTab === "url" && (
-        <UrlContent
-          addonsPath={addonsPath}
-          onInstalled={onInstalled}
-          installedEsouiIds={installedEsouiIds}
-        />
-      )}
+      <AnimatePresence mode="wait">
+        {activeTab === "search" && (
+          <motion.div
+            key="search"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.08 }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <SearchContent
+              installingId={installingId}
+              installedIds={installedIds}
+              onInstall={handleInstall}
+              onSelectResult={onSelectResult}
+              selectedResultId={selectedResultId}
+            />
+          </motion.div>
+        )}
+        {activeTab === "popular" && (
+          <motion.div
+            key="popular"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.08 }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <PopularContent
+              installingId={installingId}
+              installedIds={installedIds}
+              onInstall={handleInstall}
+              onSelectResult={onSelectResult}
+              selectedResultId={selectedResultId}
+            />
+          </motion.div>
+        )}
+        {activeTab === "categories" && (
+          <motion.div
+            key="categories"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.08 }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <CategoryContent
+              installingId={installingId}
+              installedIds={installedIds}
+              onInstall={handleInstall}
+              onSelectResult={onSelectResult}
+              selectedResultId={selectedResultId}
+            />
+          </motion.div>
+        )}
+        {activeTab === "url" && (
+          <motion.div
+            key="url"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.08 }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <UrlContent
+              addonsPath={addonsPath}
+              onInstalled={onInstalled}
+              installedEsouiIds={installedEsouiIds}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -400,7 +450,7 @@ function SearchContent({
 
       <div ref={listRef} className="flex-1 overflow-y-auto">
         {searching ? (
-          <LoadingSpinner message="Searching..." />
+          <DiscoverResultListSkeleton />
         ) : results.length === 0 && query.trim() ? (
           <EmptyState
             icon={<Search className="size-8 text-muted-foreground/30" />}
@@ -475,6 +525,7 @@ function PopularContent({
 
   // Load on mount
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadPage(0, "downloads", false);
   }, [loadPage]);
 
@@ -526,7 +577,7 @@ function PopularContent({
 
       <div className="flex-1 overflow-y-auto">
         {results.length === 0 && loading ? (
-          <LoadingSpinner message="Loading popular addons..." />
+          <DiscoverResultListSkeleton />
         ) : results.length === 0 ? (
           <EmptyState
             icon={<Flame className="size-8 text-muted-foreground/20" />}
@@ -549,7 +600,7 @@ function PopularContent({
               />
             ))}
             {hasMore && <div ref={sentinelRef} className="h-1" />}
-            {loading && <LoadingSpinner message="Loading more..." />}
+            {loading && <DiscoverResultListSkeleton count={3} />}
           </>
         )}
       </div>
@@ -707,7 +758,7 @@ function CategoryContent({
 
       <div className="flex-1 overflow-y-auto">
         {results.length === 0 && loading ? (
-          <LoadingSpinner message="Loading..." />
+          <DiscoverResultListSkeleton />
         ) : filteredResults.length === 0 && filterText ? (
           <EmptyState
             icon={<Search className="size-8 text-muted-foreground/20" />}
@@ -739,7 +790,7 @@ function CategoryContent({
               />
             ))}
             {hasMore && !filterText && <div ref={sentinelRef} className="h-1" />}
-            {loading && <LoadingSpinner message="Loading more..." />}
+            {loading && <DiscoverResultListSkeleton count={3} />}
           </>
         )}
       </div>
@@ -924,21 +975,6 @@ function UrlContent({
 
 /* ── Shared Components ────────────────────────────────── */
 
-function LoadingSpinner({ message }: { message: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground gap-3">
-      <div className="relative">
-        <span className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-        <span
-          className="absolute inset-0 inline-block size-6 animate-spin rounded-full border-2 border-transparent border-b-[#c4a44a]/30"
-          style={{ animationDirection: "reverse", animationDuration: "1.5s" }}
-        />
-      </div>
-      <span className="text-sm">{message}</span>
-    </div>
-  );
-}
-
 function EmptyState({
   icon,
   title,
@@ -949,14 +985,16 @@ function EmptyState({
   subtitle: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center py-12 gap-3 px-6">
-      <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
-        {icon}
+    <Fade transition={{ type: "spring", stiffness: 200, damping: 25 }}>
+      <div className="flex flex-col items-center justify-center py-12 gap-3 px-6">
+        <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
+          {icon}
+        </div>
+        <div className="text-center">
+          <p className="font-heading text-sm font-medium text-foreground/70">{title}</p>
+          <p className="mt-1 text-xs text-muted-foreground/40 max-w-[200px]">{subtitle}</p>
+        </div>
       </div>
-      <div className="text-center">
-        <p className="font-heading text-sm font-medium text-foreground/70">{title}</p>
-        <p className="mt-1 text-xs text-muted-foreground/40 max-w-[200px]">{subtitle}</p>
-      </div>
-    </div>
+    </Fade>
   );
 }

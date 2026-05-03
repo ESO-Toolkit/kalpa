@@ -29,6 +29,8 @@ pub struct ApprovedAddonsPath {
 
 pub struct AllowedAddonsPath(pub Mutex<Option<ApprovedAddonsPath>>);
 
+pub struct TrayState(pub Mutex<Option<tauri::tray::TrayIcon>>);
+
 /// Actions that can be triggered by a deep link URL.
 #[derive(Clone)]
 enum DeepLinkAction {
@@ -118,6 +120,36 @@ fn pending_deep_link_payload(action: &DeepLinkAction) -> PendingDeepLinkPayload 
     }
 }
 
+/// Clear the WebView2 cache when the app version changes.
+///
+/// The NSIS updater replaces the binary and bundled frontend assets, but
+/// WebView2 keeps its own disk cache under `%LOCALAPPDATA%\{identifier}\EBWebView`.
+/// Stale cached JS/CSS causes the UI to look outdated after an update.
+/// We store the last-seen version in a marker file and nuke the cache dir
+/// whenever it differs from the current build version.
+fn clear_webview_cache_on_upgrade() {
+    let current = env!("CARGO_PKG_VERSION");
+    let local_app_data = match std::env::var("LOCALAPPDATA") {
+        Ok(v) => std::path::PathBuf::from(v),
+        Err(_) => return,
+    };
+    let data_dir = local_app_data.join("com.kalpa.desktop");
+    let marker = data_dir.join(".kalpa-version");
+
+    let previous = std::fs::read_to_string(&marker).unwrap_or_default();
+    if previous.trim() == current {
+        return;
+    }
+
+    let cache_dir = data_dir.join("EBWebView");
+    if cache_dir.exists() {
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    let _ = std::fs::create_dir_all(&data_dir);
+    let _ = std::fs::write(&marker, current);
+}
+
 pub fn run() {
     // Enable Chrome DevTools Protocol in debug builds only
     #[cfg(debug_assertions)]
@@ -126,9 +158,12 @@ pub fn run() {
         "--remote-debugging-port=9222",
     );
 
+    clear_webview_cache_on_upgrade();
+
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
         .manage(auth::AuthState(Mutex::new(None)))
+        .manage(TrayState(Mutex::new(None)))
         .manage(PendingDeepLink(Mutex::new(
             PendingDeepLinkPayload::default(),
         )))
@@ -152,6 +187,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(desktop)]
             app.handle()
@@ -174,7 +210,7 @@ pub fn run() {
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
-            let _tray = TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .icon(
                     app.default_window_icon()
                         .cloned()
@@ -209,6 +245,10 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            if let Ok(mut guard) = app.state::<TrayState>().0.lock() {
+                *guard = Some(tray);
+            }
 
             // Load saved auth tokens from store
             {
@@ -308,6 +348,7 @@ pub fn run() {
             commands::restore_sv_backup,
             commands::preview_sv_save,
             commands::detect_game_instances,
+            commands::update_tray_tooltip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

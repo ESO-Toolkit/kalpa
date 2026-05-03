@@ -8,8 +8,10 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Alert } from "@/components/ui/alert";
 import { SectionHeader } from "@/components/ui/section-header";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { formatBytes } from "@/lib/utils";
 import type {
@@ -59,6 +61,7 @@ export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWiz
   }, [addonsPath]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     checkPreconditions();
   }, [checkPreconditions]);
 
@@ -141,43 +144,55 @@ export function MigrationWizard({ addonsPath, onClose, onRefresh }: MigrationWiz
           )}
 
           {phase === "preconditions" && (
-            <PreconditionsPhase
-              preconditions={preconditions}
-              loading={loading}
-              canProceed={!!canProceedFromPreconditions}
-              onProceed={() => setPhase("snapshot")}
-              onRetry={checkPreconditions}
-            />
+            <Fade>
+              <PreconditionsPhase
+                preconditions={preconditions}
+                loading={loading}
+                canProceed={!!canProceedFromPreconditions}
+                onProceed={() => setPhase("snapshot")}
+                onRetry={checkPreconditions}
+              />
+            </Fade>
           )}
 
           {phase === "snapshot" && (
-            <SnapshotPhase
-              loading={loading}
-              includeAddons={includeAddons}
-              onIncludeAddonsChange={setIncludeAddons}
-              onCreateSnapshot={handleCreateSnapshot}
-            />
+            <Fade>
+              <SnapshotPhase
+                loading={loading}
+                includeAddons={includeAddons}
+                onIncludeAddonsChange={setIncludeAddons}
+                onCreateSnapshot={handleCreateSnapshot}
+              />
+            </Fade>
           )}
 
           {(phase === "dry-run" || phase === "confirm") && (
-            <DryRunPhase
-              dryRun={dryRun}
-              loading={loading}
-              confirmed={phase === "confirm"}
-              onExecute={handleExecute}
-            />
+            <Fade>
+              <DryRunPhase
+                dryRun={dryRun}
+                loading={loading}
+                confirmed={phase === "confirm"}
+                onExecute={handleExecute}
+              />
+            </Fade>
           )}
 
           {phase === "migrating" && (
-            <div className="flex flex-col items-center justify-center py-8">
-              <div className="text-sm text-muted-foreground">Importing metadata...</div>
-              <p className="mt-2 text-xs text-muted-foreground">
-                Only writing kalpa.json. No addon files or SavedVariables will be modified.
-              </p>
-            </div>
+            <Fade>
+              <div className="flex flex-col items-center justify-center py-8">
+                <div className="text-sm text-muted-foreground">Importing metadata...</div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Only writing kalpa.json. No addon files or SavedVariables will be modified.
+                </p>
+              </div>
+            </Fade>
           )}
 
-          {phase === "complete" && result && <CompletePhase result={result} snapshot={snapshot} />}
+          {phase === "complete" && result && (
+            <Fade>
+              <CompletePhase result={result} snapshot={snapshot} />
+            </Fade>
+          )}
         </div>
 
         <DialogFooter>
@@ -334,11 +349,9 @@ function SnapshotPhase({
             UserSettings.txt &amp; AddOnSettings.txt
           </div>
           <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={includeAddons}
-              onChange={(e) => onIncludeAddonsChange(e.target.checked)}
-              className="accent-[var(--primary)]"
+              onCheckedChange={(checked) => onIncludeAddonsChange(checked === true)}
             />
             AddOns folder (larger backup, recommended for first migration)
           </label>

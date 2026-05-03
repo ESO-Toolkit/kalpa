@@ -9,6 +9,8 @@ import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
+import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { DiscoverDetailSkeleton } from "@/components/ui/skeletons";
 import {
   Download,
   Calendar,
@@ -18,17 +20,16 @@ import {
   ChevronLeft,
   ChevronRight,
   ExternalLink,
-  HardDrive,
-  Hash,
-  Swords,
   Check,
   Copy,
+  Trash2,
 } from "lucide-react";
 
 interface DiscoverDetailProps {
   result: EsouiSearchResult | null;
   addonsPath: string;
   onInstalled: () => void;
+  onRemoveByEsouiId?: (esouiId: number) => void;
   installedEsouiIds: Set<number>;
   isOffline?: boolean;
 }
@@ -37,6 +38,7 @@ export function DiscoverDetail({
   result,
   addonsPath,
   onInstalled,
+  onRemoveByEsouiId,
   installedEsouiIds,
   isOffline,
 }: DiscoverDetailProps) {
@@ -53,6 +55,7 @@ export function DiscoverDetail({
     let cancelled = false;
 
     if (!result) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDetail(null);
       setError(null);
       setInstallSuccess(null);
@@ -176,26 +179,21 @@ export function DiscoverDetail({
 
   if (loading) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3">
-        <div className="relative">
-          <span className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-          <span
-            className="absolute inset-0 inline-block size-6 animate-spin rounded-full border-2 border-transparent border-b-[#c4a44a]/30"
-            style={{ animationDirection: "reverse", animationDuration: "1.5s" }}
-          />
-        </div>
-        <span className="text-muted-foreground text-sm">Loading details...</span>
-      </div>
+      <Fade className="flex-1 overflow-hidden">
+        <DiscoverDetailSkeleton />
+      </Fade>
     );
   }
 
   if (error) {
     return (
-      <div className="flex flex-1 items-center justify-center px-8">
-        <div className="rounded-xl border border-red-400/20 bg-red-400/[0.04] p-4 text-sm text-red-400">
-          {error}
+      <Fade className="flex-1">
+        <div className="flex flex-1 items-center justify-center px-8 h-full">
+          <div className="rounded-xl border border-red-400/20 bg-red-400/[0.04] p-4 text-sm text-red-400">
+            {error}
+          </div>
         </div>
-      </div>
+      </Fade>
     );
   }
 
@@ -204,116 +202,152 @@ export function DiscoverDetail({
   const safeIdx = Math.max(0, Math.min(screenshotIdx, detail.screenshots.length - 1));
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 space-y-5" data-discover-detail>
-      {/* Header */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex-1 min-w-0">
-          <h2 className="font-heading text-xl font-semibold bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
-            {detail.title}
-          </h2>
-          <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground/60">
-            <span>by {detail.author}</span>
-            {result.category && (
-              <>
-                <span className="text-muted-foreground/20">&middot;</span>
-                <InfoPill color="muted">{result.category}</InfoPill>
-              </>
+    <Fade className="flex-1 overflow-hidden">
+      <div className="h-full overflow-y-auto p-6 space-y-5" data-discover-detail>
+        {/* Header */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <h2 className="font-heading text-xl font-semibold bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
+              {detail.title}
+            </h2>
+            {detail.version && (
+              <span className="mt-1 inline-block text-xs font-mono text-muted-foreground/40 bg-white/[0.04] px-1.5 py-0.5 rounded">
+                v{detail.version}
+              </span>
             )}
-          </div>
-        </div>
-        <div className="flex flex-col gap-1.5 items-end shrink-0">
-          <SimpleTooltip content={isOffline ? "Installs require an internet connection" : ""}>
-            <Button
-              onClick={() => handleInstall(detail.downloadUrl)}
-              disabled={installingId !== null || isOffline}
-              className="min-w-[100px]"
-            >
-              {installingId !== null ? (
-                <span className="flex items-center gap-2">
-                  <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
-                  Installing
-                </span>
-              ) : installSuccess || installedEsouiIds.has(result.id) ? (
-                <span className="flex items-center gap-2">
-                  <Check className="size-3.5" />
-                  Reinstall
-                </span>
-              ) : (
+            <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground/60">
+              <span>by {detail.author}</span>
+              {result.category && (
                 <>
-                  <Download className="size-3.5" />
-                  Install
+                  <span className="text-muted-foreground/20">&middot;</span>
+                  <InfoPill color="muted">{result.category}</InfoPill>
                 </>
               )}
-            </Button>
-          </SimpleTooltip>
-          <button
-            onClick={() => openUrl(`https://www.esoui.com/downloads/info${detail.id}.html`)}
-            className="text-[11px] text-muted-foreground/40 hover:text-muted-foreground/60 transition-colors flex items-center gap-1 cursor-pointer"
-          >
-            <ExternalLink className="size-3" />
-            View on ESOUI
-          </button>
+            </div>
+            {detail.compatibility && (
+              <div className="mt-1.5 text-xs text-muted-foreground/40">
+                Compatible with {detail.compatibility}
+              </div>
+            )}
+          </div>
+          <div className="flex flex-col gap-1.5 items-end shrink-0">
+            <div className="flex items-center gap-1.5">
+              {(installSuccess || installedEsouiIds.has(result.id)) && onRemoveByEsouiId && (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    onRemoveByEsouiId(result.id);
+                    setInstallSuccess(null);
+                  }}
+                  className="border-red-400/20 text-red-400 hover:bg-red-400/[0.08] hover:text-red-400"
+                >
+                  <Trash2 className="size-3.5" />
+                  Uninstall
+                </Button>
+              )}
+              <SimpleTooltip content={isOffline ? "Installs require an internet connection" : ""}>
+                <Button
+                  onClick={() => handleInstall(detail.downloadUrl)}
+                  disabled={installingId !== null || isOffline}
+                  className="min-w-[100px]"
+                >
+                  {installingId !== null ? (
+                    <span className="flex items-center gap-2">
+                      <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
+                      Installing
+                    </span>
+                  ) : installSuccess || installedEsouiIds.has(result.id) ? (
+                    <span className="flex items-center gap-2">
+                      <Check className="size-3.5" />
+                      Reinstall
+                    </span>
+                  ) : (
+                    <>
+                      <Download className="size-3.5" />
+                      Install
+                    </>
+                  )}
+                </Button>
+              </SimpleTooltip>
+            </div>
+            <button
+              onClick={() => openUrl(`https://www.esoui.com/downloads/info${detail.id}.html`)}
+              className="text-[11px] text-muted-foreground/40 hover:text-muted-foreground/60 transition-colors flex items-center gap-1 cursor-pointer"
+            >
+              <ExternalLink className="size-3" />
+              View on ESOUI
+            </button>
+          </div>
         </div>
-      </div>
 
-      {/* Install success */}
-      {installSuccess && (
-        <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-sm text-emerald-400 flex items-center gap-2">
-          <Check className="size-4 shrink-0" />
-          <span>
-            Installed: {installSuccess.installedFolders.join(", ")}
-            {installSuccess.installedDeps.length > 0 &&
-              ` + deps: ${installSuccess.installedDeps.join(", ")}`}
-          </span>
-        </div>
-      )}
-
-      {/* Quick Stats Bar */}
-      <div className="grid grid-cols-4 gap-2">
-        <StatCard
-          icon={<Download className="size-3.5 text-sky-400" />}
-          label="Downloads"
-          value={detail.totalDownloads}
-          accent="sky"
-        />
-        <StatCard
-          icon={<FileDown className="size-3.5 text-emerald-400" />}
-          label="Monthly"
-          value={detail.monthlyDownloads}
-          accent="emerald"
-        />
-        <StatCard
-          icon={<Star className="size-3.5 text-[#c4a44a]" />}
-          label="Favorites"
-          value={detail.favorites}
-          accent="gold"
-        />
-        <StatCard
-          icon={<Clock className="size-3.5 text-violet-400" />}
-          label="Updated"
-          value={detail.updated}
-          accent="violet"
-        />
-      </div>
-
-      {/* Metadata grid */}
-      <div className="rounded-xl border border-white/[0.04] bg-white/[0.02] p-3">
-        <div className="grid grid-cols-2 gap-x-6 gap-y-2.5 text-sm sm:grid-cols-3">
-          <MetaField icon={<Hash className="size-3" />} label="Version" value={detail.version} />
-          <MetaField
-            icon={<Swords className="size-3" />}
-            label="Compatibility"
-            value={detail.compatibility}
-          />
-          <div>
-            <span className="text-muted-foreground/50 font-heading text-[10px] uppercase tracking-wider flex items-center gap-1">
-              <HardDrive className="size-3" />
-              MD5
+        {/* Install success */}
+        {installSuccess && (
+          <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-sm text-emerald-400 flex items-center gap-2">
+            <Check className="size-4 shrink-0" />
+            <span className="flex-1">
+              Installed: {installSuccess.installedFolders.join(", ")}
+              {installSuccess.installedDeps.length > 0 &&
+                ` + deps: ${installSuccess.installedDeps.join(", ")}`}
             </span>
-            {detail.md5 ? (
+            {onRemoveByEsouiId && result && (
+              <button
+                onClick={() => {
+                  onRemoveByEsouiId(result.id);
+                  setInstallSuccess(null);
+                }}
+                className="shrink-0 rounded-lg border border-red-400/20 bg-red-400/[0.06] px-2.5 py-1 text-xs font-medium text-red-400 hover:bg-red-400/[0.12] transition-colors"
+              >
+                <Trash2 className="size-3 inline -mt-px mr-1" />
+                Uninstall
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Quick Stats Bar */}
+        <div className="grid grid-cols-4 gap-2">
+          <StatCard
+            icon={<Download className="size-3.5 text-sky-400" />}
+            label="Downloads"
+            value={detail.totalDownloads}
+            accent="sky"
+          />
+          <StatCard
+            icon={<FileDown className="size-3.5 text-emerald-400" />}
+            label="Monthly"
+            value={detail.monthlyDownloads}
+            accent="emerald"
+          />
+          <StatCard
+            icon={<Star className="size-3.5 text-[#c4a44a]" />}
+            label="Favorites"
+            value={detail.favorites}
+            accent="gold"
+          />
+          <StatCard
+            icon={<Clock className="size-3.5 text-violet-400" />}
+            label="Updated"
+            value={detail.updated}
+            accent="violet"
+          />
+        </div>
+
+        {/* Secondary metadata */}
+        <div className="flex items-center gap-2 text-xs text-muted-foreground/40">
+          {detail.created && (
+            <SimpleTooltip content={detail.created}>
+              <span className="flex items-center gap-1">
+                <Calendar className="size-3" />
+                Created {detail.created}
+              </span>
+            </SimpleTooltip>
+          )}
+          {detail.md5 && (
+            <>
+              <span>&middot;</span>
               <SimpleTooltip content={detail.md5}>
                 <button
-                  className="group/md5 flex items-center gap-1.5 mt-0.5 font-mono text-xs font-medium hover:text-[#38bdf8] transition-colors duration-150"
+                  className="group/md5 flex items-center gap-1 hover:text-[#38bdf8] transition-colors duration-150"
                   aria-label={`Copy MD5: ${detail.md5}`}
                   onClick={async () => {
                     try {
@@ -326,126 +360,121 @@ export function DiscoverDetail({
                     }
                   }}
                 >
-                  <span>{detail.md5.slice(0, 8)}&hellip;</span>
+                  <span className="font-mono">{detail.md5.slice(0, 8)}&hellip;</span>
                   <span
                     className={cn(
                       "transition-all duration-150",
                       md5Copied
                         ? "text-emerald-400"
-                        : "text-muted-foreground/40 group-hover/md5:text-[#38bdf8]"
+                        : "text-muted-foreground/30 group-hover/md5:text-[#38bdf8]"
                     )}
                   >
-                    {md5Copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+                    {md5Copied ? <Check className="size-2.5" /> : <Copy className="size-2.5" />}
                   </span>
                 </button>
               </SimpleTooltip>
-            ) : (
-              <div className="font-medium mt-0.5">&mdash;</div>
-            )}
-          </div>
-          <MetaField
-            icon={<Calendar className="size-3" />}
-            label="Created"
-            value={detail.created}
-          />
-        </div>
-      </div>
-
-      {/* Screenshots */}
-      {detail.screenshots.length > 0 && (
-        <div>
-          <SectionHeader className="mb-2">Screenshots ({detail.screenshots.length})</SectionHeader>
-          <div className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] group/screenshot">
-            <img
-              src={detail.screenshots[safeIdx]}
-              alt={`Screenshot ${safeIdx + 1}`}
-              className="w-full max-h-[300px] object-contain"
-              loading="lazy"
-            />
-            {detail.screenshots.length > 1 && (
-              <>
-                {/* Navigation arrows */}
-                <button
-                  className="absolute left-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
-                  onClick={() =>
-                    setScreenshotIdx((prev) =>
-                      prev > 0 ? prev - 1 : detail.screenshots.length - 1
-                    )
-                  }
-                  aria-label="Previous screenshot"
-                >
-                  <ChevronLeft className="size-4" />
-                </button>
-                <button
-                  className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
-                  onClick={() =>
-                    setScreenshotIdx((prev) =>
-                      prev < detail.screenshots.length - 1 ? prev + 1 : 0
-                    )
-                  }
-                  aria-label="Next screenshot"
-                >
-                  <ChevronRight className="size-4" />
-                </button>
-
-                {/* Dot indicators */}
-                <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-2 py-1">
-                  {detail.screenshots.map((_, i) => (
-                    <button
-                      key={i}
-                      className={cn(
-                        "size-2 rounded-full transition-all duration-200",
-                        i === safeIdx ? "bg-[#c4a44a] scale-110" : "bg-white/30 hover:bg-white/50"
-                      )}
-                      onClick={() => setScreenshotIdx(i)}
-                      aria-label={`Screenshot ${i + 1}`}
-                    />
-                  ))}
-                </div>
-
-                {/* Counter */}
-                <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-white/70">
-                  {safeIdx + 1} / {detail.screenshots.length}
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Thumbnail strip */}
-          {detail.screenshots.length > 1 && (
-            <div className="mt-2 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
-              {detail.screenshots.map((src, i) => (
-                <button
-                  key={i}
-                  onClick={() => setScreenshotIdx(i)}
-                  className={cn(
-                    "shrink-0 overflow-hidden rounded-lg border-2 transition-all duration-200",
-                    i === safeIdx
-                      ? "border-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.3)]"
-                      : "border-white/[0.06] hover:border-white/[0.15] opacity-60 hover:opacity-100"
-                  )}
-                >
-                  <img
-                    src={src}
-                    alt={`Thumb ${i + 1}`}
-                    className="h-14 w-24 object-cover"
-                    loading="lazy"
-                  />
-                </button>
-              ))}
-            </div>
+            </>
           )}
         </div>
-      )}
 
-      {/* Description */}
-      {detail.description && (
-        <div>
-          <SectionHeader className="mb-2">Description</SectionHeader>
-          <RichDescription text={detail.description} />
-        </div>
-      )}
-    </div>
+        {/* Screenshots */}
+        {detail.screenshots.length > 0 && (
+          <div>
+            <SectionHeader className="mb-2">
+              Screenshots ({detail.screenshots.length})
+            </SectionHeader>
+            <div className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.02] group/screenshot">
+              <img
+                src={detail.screenshots[safeIdx]}
+                alt={`Screenshot ${safeIdx + 1}`}
+                className="w-full max-h-[300px] object-contain"
+                loading="lazy"
+              />
+              {detail.screenshots.length > 1 && (
+                <>
+                  {/* Navigation arrows */}
+                  <button
+                    className="absolute left-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
+                    onClick={() =>
+                      setScreenshotIdx((prev) =>
+                        prev > 0 ? prev - 1 : detail.screenshots.length - 1
+                      )
+                    }
+                    aria-label="Previous screenshot"
+                  >
+                    <ChevronLeft className="size-4" />
+                  </button>
+                  <button
+                    className="absolute right-2 top-1/2 -translate-y-1/2 size-8 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center opacity-40 group-hover/screenshot:opacity-100 transition-opacity hover:bg-black/70"
+                    onClick={() =>
+                      setScreenshotIdx((prev) =>
+                        prev < detail.screenshots.length - 1 ? prev + 1 : 0
+                      )
+                    }
+                    aria-label="Next screenshot"
+                  >
+                    <ChevronRight className="size-4" />
+                  </button>
+
+                  {/* Dot indicators */}
+                  <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-2 py-1">
+                    {detail.screenshots.map((_, i) => (
+                      <button
+                        key={i}
+                        className={cn(
+                          "size-2 rounded-full transition-all duration-200",
+                          i === safeIdx ? "bg-[#c4a44a] scale-110" : "bg-white/30 hover:bg-white/50"
+                        )}
+                        onClick={() => setScreenshotIdx(i)}
+                        aria-label={`Screenshot ${i + 1}`}
+                      />
+                    ))}
+                  </div>
+
+                  {/* Counter */}
+                  <div className="absolute top-2 right-2 bg-black/50 backdrop-blur-sm rounded-md px-2 py-0.5 text-[11px] text-white/70">
+                    {safeIdx + 1} / {detail.screenshots.length}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Thumbnail strip */}
+            {detail.screenshots.length > 1 && (
+              <div className="mt-2 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
+                {detail.screenshots.map((src, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setScreenshotIdx(i)}
+                    className={cn(
+                      "shrink-0 overflow-hidden rounded-lg border-2 transition-all duration-200",
+                      i === safeIdx
+                        ? "border-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.3)]"
+                        : "border-white/[0.06] hover:border-white/[0.15] opacity-60 hover:opacity-100"
+                    )}
+                  >
+                    <img
+                      src={src}
+                      alt={`Thumb ${i + 1}`}
+                      className="h-14 w-24 object-cover"
+                      loading="lazy"
+                    />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Description */}
+        {detail.description && (
+          <div>
+            <SectionHeader className="mb-2">Description</SectionHeader>
+            <RichDescription text={detail.description} />
+          </div>
+        )}
+      </div>
+    </Fade>
   );
 }
 
@@ -468,39 +497,21 @@ function StatCard({
   };
 
   return (
-    <div
-      className={cn(
-        "rounded-xl border bg-white/[0.02] p-2.5 transition-colors",
-        borderColors[accent]
-      )}
-    >
-      <div className="flex items-center gap-1.5 mb-1">
-        {icon}
-        <span className="text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/40">
-          {label}
-        </span>
+    <SimpleTooltip content={value || ""}>
+      <div
+        className={cn(
+          "rounded-xl border bg-white/[0.02] p-2.5 transition-colors",
+          borderColors[accent]
+        )}
+      >
+        <div className="flex items-center gap-1.5 mb-1">
+          {icon}
+          <span className="text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/40">
+            {label}
+          </span>
+        </div>
+        <div className="text-sm font-semibold truncate">{value || "\u2014"}</div>
       </div>
-      <div className="text-sm font-semibold truncate">{value || "\u2014"}</div>
-    </div>
-  );
-}
-
-function MetaField({
-  icon,
-  label,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div>
-      <span className="text-muted-foreground/50 font-heading text-[10px] uppercase tracking-wider flex items-center gap-1">
-        {icon}
-        {label}
-      </span>
-      <div className="font-medium mt-0.5">{value || "\u2014"}</div>
-    </div>
+    </SimpleTooltip>
   );
 }
