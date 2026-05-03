@@ -22,6 +22,7 @@ import {
   ExternalLinkIcon,
 } from "lucide-react";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { PackDetailSkeleton } from "@/components/ui/skeletons";
 import { Slide } from "@/components/animate-ui/primitives/effects/slide";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 
@@ -84,11 +85,7 @@ export function PackDetailView({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   if (loading || !pack) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-      </div>
-    );
+    return <PackDetailSkeleton />;
   }
 
   const requiredAddons = pack.addons.filter((a) => a.required);

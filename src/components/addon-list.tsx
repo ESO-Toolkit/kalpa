@@ -502,9 +502,9 @@ export function AddonList({
                     aria-selected={isActive}
                     aria-label={`Filter by ${label}`}
                     className={cn(
-                      "shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150",
+                      "relative shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150",
                       isActive
-                        ? "bg-[#c4a44a]/15 text-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.05)] border border-[#c4a44a]/25"
+                        ? "text-[#c4a44a]"
                         : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
                     )}
                     onClick={() => {
@@ -512,8 +512,17 @@ export function AddonList({
                       onActiveTagFilterChange(null);
                     }}
                   >
-                    {label}
-                    <span className="ml-1 opacity-50">({filterCounts[mode]})</span>
+                    {isActive && (
+                      <motion.span
+                        layoutId="filter-tab-indicator"
+                        className="absolute inset-0 rounded-lg bg-[#c4a44a]/15 border border-[#c4a44a]/25 shadow-[0_0_8px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                        transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                      />
+                    )}
+                    <span className="relative z-10">
+                      {label}
+                      <span className="ml-1 opacity-50">({filterCounts[mode]})</span>
+                    </span>
                   </button>
                 );
               })}
@@ -530,9 +539,9 @@ export function AddonList({
                       aria-selected={isActive}
                       aria-label={`Filter by tag: ${tag}`}
                       className={cn(
-                        "shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150",
+                        "relative shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150",
                         isActive
-                          ? "bg-sky-500/15 text-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(255,255,255,0.05)] border border-sky-500/25"
+                          ? "text-sky-400"
                           : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
                       )}
                       onClick={() => {
@@ -540,8 +549,17 @@ export function AddonList({
                         onActiveTagFilterChange(tag);
                       }}
                     >
-                      {tag}
-                      <span className="ml-1 opacity-50">({count})</span>
+                      {isActive && (
+                        <motion.span
+                          layoutId="filter-tab-indicator"
+                          className="absolute inset-0 rounded-lg bg-sky-500/15 border border-sky-500/25 shadow-[0_0_8px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                          transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                        />
+                      )}
+                      <span className="relative z-10">
+                        {tag}
+                        <span className="ml-1 opacity-50">({count})</span>
+                      </span>
                     </button>
                   );
                 })}

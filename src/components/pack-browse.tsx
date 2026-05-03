@@ -23,6 +23,7 @@ import {
   DownloadIcon,
 } from "lucide-react";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { PackListSkeleton } from "@/components/ui/skeletons";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 
 export function PackListView({
@@ -103,11 +104,7 @@ export function PackListView({
 
       <div className="flex-1 overflow-y-auto space-y-2 min-h-0 max-h-[400px] px-1 -mx-1 py-1 -my-1">
         {loading ? (
-          <Fade>
-            <div className="flex items-center justify-center py-12">
-              <div className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-            </div>
-          </Fade>
+          <PackListSkeleton />
         ) : error ? (
           <Fade>
             <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">

@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { useInfiniteScroll } from "@/lib/use-infinite-scroll";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { DiscoverResultListSkeleton } from "@/components/ui/skeletons";
 import { motion, AnimatePresence } from "motion/react";
 
 const PAGE_SIZE = 25;
@@ -449,7 +450,7 @@ function SearchContent({
 
       <div ref={listRef} className="flex-1 overflow-y-auto">
         {searching ? (
-          <LoadingSpinner message="Searching..." />
+          <DiscoverResultListSkeleton />
         ) : results.length === 0 && query.trim() ? (
           <EmptyState
             icon={<Search className="size-8 text-muted-foreground/30" />}
@@ -576,7 +577,7 @@ function PopularContent({
 
       <div className="flex-1 overflow-y-auto">
         {results.length === 0 && loading ? (
-          <LoadingSpinner message="Loading popular addons..." />
+          <DiscoverResultListSkeleton />
         ) : results.length === 0 ? (
           <EmptyState
             icon={<Flame className="size-8 text-muted-foreground/20" />}
@@ -599,7 +600,7 @@ function PopularContent({
               />
             ))}
             {hasMore && <div ref={sentinelRef} className="h-1" />}
-            {loading && <LoadingSpinner message="Loading more..." />}
+            {loading && <DiscoverResultListSkeleton count={3} />}
           </>
         )}
       </div>
@@ -757,7 +758,7 @@ function CategoryContent({
 
       <div className="flex-1 overflow-y-auto">
         {results.length === 0 && loading ? (
-          <LoadingSpinner message="Loading..." />
+          <DiscoverResultListSkeleton />
         ) : filteredResults.length === 0 && filterText ? (
           <EmptyState
             icon={<Search className="size-8 text-muted-foreground/20" />}
@@ -789,7 +790,7 @@ function CategoryContent({
               />
             ))}
             {hasMore && !filterText && <div ref={sentinelRef} className="h-1" />}
-            {loading && <LoadingSpinner message="Loading more..." />}
+            {loading && <DiscoverResultListSkeleton count={3} />}
           </>
         )}
       </div>
@@ -973,21 +974,6 @@ function UrlContent({
 }
 
 /* ── Shared Components ────────────────────────────────── */
-
-function LoadingSpinner({ message }: { message: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center py-12 text-muted-foreground gap-3">
-      <div className="relative">
-        <span className="inline-block size-6 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-        <span
-          className="absolute inset-0 inline-block size-6 animate-spin rounded-full border-2 border-transparent border-b-[#c4a44a]/30"
-          style={{ animationDirection: "reverse", animationDuration: "1.5s" }}
-        />
-      </div>
-      <span className="text-sm">{message}</span>
-    </div>
-  );
-}
 
 function EmptyState({
   icon,

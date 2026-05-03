@@ -13,6 +13,7 @@ import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
+import { RosterPackSkeleton } from "@/components/ui/skeletons";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { cn, decodeHtml } from "@/lib/utils";
@@ -251,13 +252,7 @@ export function RosterPackInstall({
         </DialogHeader>
 
         <div className="flex max-h-[60vh] flex-col gap-3 overflow-y-auto pr-1">
-          {loading && (
-            <Fade>
-              <div className="flex items-center justify-center py-8">
-                <Loader2Icon className="h-6 w-6 animate-spin text-[#c4a44a]" />
-              </div>
-            </Fade>
-          )}
+          {loading && <RosterPackSkeleton />}
 
           {error && (
             <Fade>
