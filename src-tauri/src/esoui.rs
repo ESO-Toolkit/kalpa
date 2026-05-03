@@ -191,9 +191,14 @@ pub struct EsouiAddonDetail {
 fn clean_description(s: &str) -> String {
     let decoded = decode_html_entities(s);
 
+    // Replace [*] list bullets with newlines so items don't run together
+    static RE_BULLET: OnceLock<Regex> = OnceLock::new();
+    let re_bullet = RE_BULLET.get_or_init(|| Regex::new(r"\[\*\]").unwrap());
+    let with_newlines = re_bullet.replace_all(&decoded, "\n• ");
+
     static RE_BBCODE: OnceLock<Regex> = OnceLock::new();
-    let re_bb = RE_BBCODE.get_or_init(|| Regex::new(r"\[/?[A-Za-z]+[^\]]*\]").unwrap());
-    let no_bbcode = re_bb.replace_all(&decoded, "");
+    let re_bb = RE_BBCODE.get_or_init(|| Regex::new(r"\[/?[A-Za-z*]+[^\]]*\]").unwrap());
+    let no_bbcode = re_bb.replace_all(&with_newlines, "");
 
     static RE_HTML: OnceLock<Regex> = OnceLock::new();
     let re_html = RE_HTML.get_or_init(|| Regex::new(r"</?[A-Za-z][^>]*>").unwrap());
@@ -202,7 +207,7 @@ fn clean_description(s: &str) -> String {
 
 fn decode_html_entities(s: &str) -> String {
     static RE_ENTITY: OnceLock<Regex> = OnceLock::new();
-    let re = RE_ENTITY.get_or_init(|| Regex::new(r"&(#(\d+)|#x([0-9a-fA-F]+)|(\w+));").unwrap());
+    let re = RE_ENTITY.get_or_init(|| Regex::new(r"&(#(\d+)|#[xX]([0-9a-fA-F]+)|(\w+));").unwrap());
     re.replace_all(s, |caps: &regex::Captures| {
         if let Some(decimal) = caps.get(2) {
             if let Some(ch) = decimal
@@ -950,6 +955,76 @@ fn build_filelist_lookup(entries: &[ApiFileEntry]) -> HashMap<String, ApiAddonLo
     }
 
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_cyrillic_numeric_entities() {
+        assert_eq!(clean_description("&#1042;&#1055;"), "ВП");
+    }
+
+    #[test]
+    fn decode_hex_entities() {
+        assert_eq!(clean_description("&#x412;"), "В");
+    }
+
+    #[test]
+    fn decode_named_entities() {
+        assert_eq!(clean_description("&amp;"), "&");
+        assert_eq!(clean_description("&quot;"), "\"");
+        assert_eq!(clean_description("&apos;"), "'");
+        assert_eq!(clean_description("&nbsp;"), "");
+    }
+
+    #[test]
+    fn strip_entity_encoded_bbcode() {
+        assert_eq!(clean_description("&#91;b&#93;bold&#91;/b&#93;"), "bold");
+    }
+
+    #[test]
+    fn strip_entity_encoded_html() {
+        assert_eq!(
+            clean_description("&lt;br&gt;line&lt;b&gt;bold&lt;/b&gt;"),
+            "linebold"
+        );
+    }
+
+    #[test]
+    fn strip_literal_bbcode_with_entities() {
+        assert_eq!(clean_description("[b]&#1042;[/b]"), "В");
+    }
+
+    #[test]
+    fn strip_literal_html_tags() {
+        assert_eq!(clean_description("hello<br>world<b>!</b>"), "helloworld!");
+    }
+
+    #[test]
+    fn invalid_codepoint_passthrough() {
+        assert_eq!(clean_description("&#99999999;"), "&#99999999;");
+    }
+
+    #[test]
+    fn plain_text_passthrough() {
+        assert_eq!(clean_description("hello world"), "hello world");
+    }
+
+    #[test]
+    fn preserve_decoded_angle_brackets_in_text() {
+        assert_eq!(clean_description("x &lt; 2 &gt; y"), "x < 2 > y");
+        assert_eq!(clean_description("a &lt;= b"), "a <= b");
+    }
+
+    #[test]
+    fn mixed_cyrillic_description() {
+        let input = "If you want to help: PP at GitHub\n\n--RU--- &#1042; &#1087;&#1088;&#1086;&#1094;&#1077;&#1089;&#1089;&#1077; &#1088;&#1072;&#1079;&#1088;&#1072;&#1073;&#1086;&#1090;&#1082;&#1080;!";
+        let result = clean_description(input);
+        assert!(result.contains("В процессе разработки!"));
+        assert!(result.contains("If you want to help"));
+    }
 }
 
 #[cfg(test)]

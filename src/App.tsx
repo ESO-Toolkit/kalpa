@@ -665,7 +665,7 @@ function App() {
           toast.error(`Remove failed: ${getTauriErrorMessage(e)}`);
           setAddons((prev) => [...prev, addon]);
         });
-      }, 5000);
+      }, 3000);
 
       pendingRemovalsRef.current.set(folderName, { timer, addon });
 
@@ -682,7 +682,7 @@ function App() {
             }
           },
         },
-        duration: 5000,
+        duration: 3000,
       });
       srAnnounce(`Removed ${addon.title}. Press undo to restore.`);
     },
@@ -883,7 +883,7 @@ function App() {
         toast.error(`Batch remove failed: ${getTauriErrorMessage(e)}`);
         setAddons((prev) => [...prev, ...removedAddons]);
       });
-    }, 5000);
+    }, 3000);
 
     for (const addon of removedAddons) {
       pendingRemovalsRef.current.set(addon.folderName, { timer, addon });
@@ -899,7 +899,7 @@ function App() {
           toast.success(`Restored ${count} addon${count !== 1 ? "s" : ""}`);
         },
       },
-      duration: 5000,
+      duration: 3000,
     });
     srAnnounce(`Removed ${count} addon${count !== 1 ? "s" : ""}. Press undo to restore.`);
   }, [addons, addonsPath, selectedFolders, srAnnounce]);
