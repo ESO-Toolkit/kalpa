@@ -1798,11 +1798,16 @@ pub async fn update_addon_with_decisions(
                 .clone()
         };
 
-        // Collect files to skip (user wants to keep their version)
-        let skip_files: HashSet<String> = decisions
+        let kept_files: Vec<String> = decisions
             .iter()
             .filter(|d| d.action == "keep_mine")
-            .map(|d| format!("{}/{}", pu.folder_name, d.relative_path))
+            .map(|d| d.relative_path.clone())
+            .collect();
+
+        // Collect files to skip during extraction (full ZIP path with folder prefix)
+        let skip_files: HashSet<String> = kept_files
+            .iter()
+            .map(|p| format!("{}/{}", pu.folder_name, p))
             .collect();
 
         // Collect files to back up (user chose "take_update" on their edited files)
@@ -1828,6 +1833,24 @@ pub async fn update_addon_with_decisions(
             )?;
         }
 
+        // For kept files, get the upstream hashes from the ZIP.
+        // These become the stored baseline so the user's edit stays
+        // detectable on the next update cycle.
+        let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
+            None
+        } else {
+            let zip_hashes = file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?;
+            let overrides: HashMap<String, String> = kept_files
+                .iter()
+                .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
+                .collect();
+            if overrides.is_empty() {
+                None
+            } else {
+                Some(overrides)
+            }
+        };
+
         // Extract with selective skipping
         let installed_folders = if skip_files.is_empty() {
             installer::extract_addon_zip(&pu.zip_path, &addons_dir)?
@@ -1835,12 +1858,12 @@ pub async fn update_addon_with_decisions(
             installer::extract_addon_zip_selective(&pu.zip_path, &addons_dir, &skip_files)?
         };
 
-        // Record new hashes (skipped files retain their user-modified hash naturally)
-        file_hashes::record_hashes_for_folders(
+        file_hashes::record_hashes_for_folders_with_overrides(
             &addons_dir,
             &installed_folders,
             pu.esoui_id,
             &pu.update_version,
+            hash_overrides.as_ref(),
         );
 
         // Update metadata

@@ -204,6 +204,25 @@ pub fn record_hashes_for_folders(
     esoui_id: u32,
     version: &str,
 ) {
+    record_hashes_for_folders_with_overrides(
+        addons_dir,
+        installed_folders,
+        esoui_id,
+        version,
+        None,
+    );
+}
+
+/// Record hashes with optional overrides for files the user kept during a
+/// conflict resolution. For "keep_mine" files, we store the *upstream* hash
+/// (from the ZIP) so the next update still detects the user's edit.
+pub fn record_hashes_for_folders_with_overrides(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    esoui_id: u32,
+    version: &str,
+    hash_overrides: Option<&HashMap<String, String>>,
+) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -212,12 +231,31 @@ pub fn record_hashes_for_folders(
 
     for folder in installed_folders {
         let addon_path = addons_dir.join(folder);
-        let files = match compute_addon_hashes(&addon_path) {
+        let mut files = match compute_addon_hashes(&addon_path) {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("Warning: failed to hash addon {}: {}", folder, e);
                 continue;
             }
+        };
+
+        // For kept files, replace disk hash with the upstream ZIP hash
+        // so the user's edit remains detectable on the next update.
+        if let Some(overrides) = hash_overrides {
+            for (path, upstream_hash) in overrides {
+                if files.contains_key(path) {
+                    files.insert(path.clone(), upstream_hash.clone());
+                }
+            }
+        }
+
+        let modified_files: Vec<String> = if let Some(ov) = hash_overrides {
+            ov.keys()
+                .filter(|k| files.contains_key(*k))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
         };
 
         let manifest = HashManifest {
@@ -226,7 +264,7 @@ pub fn record_hashes_for_folders(
             recorded_at: timestamp.clone(),
             installed_version: version.to_string(),
             files,
-            modified_files: Vec::new(),
+            modified_files,
         };
 
         if let Err(e) = save_hash_manifest(addons_dir, &manifest) {
