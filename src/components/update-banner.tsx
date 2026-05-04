@@ -1,11 +1,11 @@
 import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { CheckIcon, XIcon, DownloadIcon, PackageIcon } from "lucide-react";
+import { CheckIcon, XIcon, DownloadIcon, PackageIcon, SearchIcon } from "lucide-react";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { Slide } from "@/components/animate-ui/primitives/effects/slide";
 
-type AddonPhase = "downloading" | "extracting" | "completed" | "failed";
+type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
 
 interface UpdateBannerProps {
   availableCount: number;
@@ -25,6 +25,8 @@ function PhaseIcon({ phase }: { phase: AddonPhase }) {
   switch (phase) {
     case "downloading":
       return <DownloadIcon className="h-3 w-3 animate-pulse text-[#38bdf8]" />;
+    case "scanning":
+      return <SearchIcon className="h-3 w-3 animate-pulse text-violet-400" />;
     case "extracting":
       return <PackageIcon className="h-3 w-3 animate-pulse text-[#c4a44a]" />;
     case "completed":
@@ -50,7 +52,9 @@ function AddonStatusPill({ name, phase }: { name: string; phase: AddonPhase }) {
         ? "bg-red-500/[0.06] border-red-500/15"
         : phase === "extracting"
           ? "bg-[#c4a44a]/[0.06] border-[#c4a44a]/15"
-          : "bg-[#38bdf8]/[0.06] border-[#38bdf8]/15";
+          : phase === "scanning"
+            ? "bg-violet-400/[0.06] border-violet-400/15"
+            : "bg-[#38bdf8]/[0.06] border-[#38bdf8]/15";
 
   return (
     <div
@@ -89,9 +93,10 @@ export function UpdateBanner({
   const sortedEntries = [...addonStatuses.entries()].sort((a, b) => {
     const order: Record<AddonPhase, number> = {
       downloading: 0,
-      extracting: 1,
-      failed: 2,
-      completed: 3,
+      scanning: 1,
+      extracting: 2,
+      failed: 3,
+      completed: 4,
     };
     return order[a[1]] - order[b[1]];
   });

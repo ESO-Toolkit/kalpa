@@ -1,5 +1,6 @@
 use crate::auth::{self, AuthState, AuthTokens, AuthUser};
 use crate::esoui::{self, EsouiAddonDetail, EsouiAddonInfo, EsouiCategory, EsouiSearchResult};
+use crate::file_hashes;
 use crate::installer;
 use crate::manifest::{self, AddonManifest};
 use crate::manifest_cache;
@@ -207,6 +208,8 @@ fn try_install_dep(
     let dep_tmp = esoui::download_addon(&dep_info.download_url).map_err(|_| "download_failed")?;
     let dep_folders =
         installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
+
+    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version);
 
     for f in &dep_folders {
         let dep_version = read_local_version(addons_dir, f);
@@ -675,6 +678,11 @@ fn scan_installed_addons_blocking(
             addon.tags = meta.tags.clone();
             addon.esoui_last_update = meta.esoui_last_update;
         }
+
+        if let Some(hash_manifest) = file_hashes::load_hash_manifest(addons_dir, &addon.folder_name)
+        {
+            addon.modified_file_count = hash_manifest.modified_files.len() as u32;
+        }
     }
 
     addons.sort_by_key(|a| a.title.to_lowercase());
@@ -782,6 +790,8 @@ fn install_addon_blocking(
 ) -> Result<InstallResult, String> {
     let tmp_file = esoui::download_addon(download_url)?;
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
+
+    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, esoui_version);
 
     let mut store = metadata::load_metadata(addons_dir);
 
@@ -1108,6 +1118,8 @@ fn update_addon_blocking(
     // the two sources returned slightly different version strings.
     let version = api_version.unwrap_or(&info.version);
 
+    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version);
+
     // Clean up any old metadata entries for the same esoui_id
     // that aren't in the newly extracted folders (handles addon renames).
     let mut store = metadata::load_metadata(addons_dir);
@@ -1287,6 +1299,14 @@ fn batch_update_addons_blocking(
                 }
                 Ok(installed_folders) => {
                     let version = &dl.api_version;
+
+                    file_hashes::record_hashes_for_folders(
+                        addons_dir,
+                        &installed_folders,
+                        dl.esoui_id,
+                        version,
+                    );
+
                     // Clean up old metadata entries for this esoui_id
                     // that aren't in the newly extracted folders (handles renames)
                     let old_folders: Vec<String> = store
@@ -1332,6 +1352,862 @@ fn batch_update_addons_blocking(
         failed,
         errors,
     })
+}
+
+// ── Protected Edits: Conflict scanning & file browser ───────���─────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileConflict {
+    pub relative_path: String,
+    pub user_hash: String,
+    pub upstream_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConflictReport {
+    pub session_id: String,
+    pub folder_name: String,
+    pub update_version: String,
+    pub safe_files: Vec<String>,
+    pub auto_kept_files: Vec<String>,
+    pub conflicts: Vec<FileConflict>,
+}
+
+fn generate_session_id(folder_name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let input = format!("{}-{}", folder_name, nanos);
+    let hash = Sha256::digest(input.as_bytes());
+    hash.iter().take(16).map(|b| format!("{:02x}", b)).collect()
+}
+
+fn build_conflict_report(
+    addons_dir: &Path,
+    folder_name: &str,
+    zip_path: &Path,
+    update_version: &str,
+    session_id: &str,
+) -> Result<ConflictReport, String> {
+    let stored = file_hashes::load_hash_manifest(addons_dir, folder_name);
+    let addon_path = addons_dir.join(folder_name);
+
+    let disk_hashes = if addon_path.is_dir() {
+        file_hashes::compute_addon_hashes(&addon_path)?
+    } else {
+        HashMap::new()
+    };
+
+    let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
+
+    let stored_files = stored.as_ref().map(|m| &m.files);
+
+    let mut safe_files = Vec::new();
+    let mut auto_kept_files = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for (rel_path, zip_hash) in &zip_hashes {
+        let stored_hash = stored_files.and_then(|f| f.get(rel_path));
+        let disk_hash = disk_hashes.get(rel_path);
+
+        let user_modified = match (stored_hash, disk_hash) {
+            (Some(stored), Some(disk)) => stored != disk,
+            (Some(_), None) => true, // file deleted
+            (None, _) => false,      // no stored hash = no baseline = treat as unmodified
+        };
+
+        let upstream_changed = match stored_hash {
+            Some(stored) => stored != zip_hash,
+            None => true, // new file in upstream or no baseline
+        };
+
+        match (user_modified, upstream_changed) {
+            (false, _) => safe_files.push(rel_path.clone()),
+            (true, false) => auto_kept_files.push(rel_path.clone()),
+            (true, true) => {
+                conflicts.push(FileConflict {
+                    relative_path: rel_path.clone(),
+                    user_hash: disk_hash.cloned().unwrap_or_default(),
+                    upstream_hash: zip_hash.clone(),
+                });
+            }
+        }
+    }
+
+    // New files in ZIP (not in stored manifest) are always safe
+    // They're already in safe_files from the loop above (no baseline = unmodified)
+
+    safe_files.sort();
+    auto_kept_files.sort();
+    conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+    Ok(ConflictReport {
+        session_id: session_id.to_string(),
+        folder_name: folder_name.to_string(),
+        update_version: update_version.to_string(),
+        safe_files,
+        auto_kept_files,
+        conflicts,
+    })
+}
+
+#[tauri::command]
+pub async fn scan_update_conflicts(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    pending: tauri::State<'_, crate::PendingUpdates>,
+    addons_path: String,
+    folder_name: String,
+    esoui_id: u32,
+) -> Result<ConflictReport, String> {
+    validate_name(&folder_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let pending_clone = pending.0.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let info = esoui::fetch_addon_info(esoui_id)?;
+        let tmp_file = esoui::download_addon(&info.download_url)?;
+
+        let (_, kept_path) = tmp_file
+            .keep()
+            .map_err(|e| format!("Failed to persist temp ZIP: {}", e))?;
+
+        let session_id = generate_session_id(&folder_name);
+
+        let report = build_conflict_report(
+            &addons_dir,
+            &folder_name,
+            &kept_path,
+            &info.version,
+            &session_id,
+        )?;
+
+        if let Ok(mut map) = pending_clone.lock() {
+            map.insert(
+                session_id.clone(),
+                crate::PendingUpdate {
+                    zip_path: kept_path,
+                    folder_name: folder_name.clone(),
+                    esoui_id,
+                    update_version: info.version,
+                },
+            );
+        }
+
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchConflictEntry {
+    pub esoui_id: u32,
+    pub folder_name: String,
+    pub api_version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchConflictAddon {
+    pub session_id: String,
+    pub folder_name: String,
+    pub update_version: String,
+    pub conflicts: Vec<FileConflict>,
+    pub auto_kept_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoConflictAddon {
+    pub session_id: String,
+    pub folder_name: String,
+    pub update_version: String,
+    pub auto_kept_files: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchConflictResult {
+    pub no_conflict_addons: Vec<NoConflictAddon>,
+    pub conflicting_addons: Vec<BatchConflictAddon>,
+    pub failed: Vec<String>,
+    pub errors: HashMap<String, String>,
+}
+
+#[tauri::command]
+pub async fn scan_batch_conflicts(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    pending: tauri::State<'_, crate::PendingUpdates>,
+    app: tauri::AppHandle,
+    addons_path: String,
+    updates: Vec<BatchConflictEntry>,
+) -> Result<BatchConflictResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let pending_clone = pending.0.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let total = updates.len();
+
+        for (i, entry) in updates.iter().enumerate() {
+            let _ = app.emit(
+                "batch-update-progress",
+                BatchUpdateProgress {
+                    folder_name: entry.folder_name.clone(),
+                    phase: "downloading".to_string(),
+                    index: i,
+                    total,
+                },
+            );
+        }
+
+        // Phase 1: parallel download
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .map_err(|e| format!("Thread pool error: {}", e))?;
+
+        struct Downloaded {
+            kept_path: PathBuf,
+            esoui_id: u32,
+            api_version: String,
+        }
+
+        let app_clone = app.clone();
+        let download_results: Vec<(String, usize, Result<Downloaded, String>)> =
+            pool.install(|| {
+                updates
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, entry)| {
+                        let result = fetch_and_download_with_retry(entry.esoui_id).and_then(
+                            |(tmp, _info)| {
+                                let _ = app_clone.emit(
+                                    "batch-update-progress",
+                                    BatchUpdateProgress {
+                                        folder_name: entry.folder_name.clone(),
+                                        phase: "scanning".to_string(),
+                                        index: i,
+                                        total,
+                                    },
+                                );
+                                let (_, kept_path) = tmp
+                                    .keep()
+                                    .map_err(|e| format!("Failed to persist temp ZIP: {}", e))?;
+                                Ok(Downloaded {
+                                    kept_path,
+                                    esoui_id: entry.esoui_id,
+                                    api_version: entry.api_version.clone(),
+                                })
+                            },
+                        );
+                        if result.is_err() {
+                            let _ = app_clone.emit(
+                                "batch-update-progress",
+                                BatchUpdateProgress {
+                                    folder_name: entry.folder_name.clone(),
+                                    phase: "failed".to_string(),
+                                    index: i,
+                                    total,
+                                },
+                            );
+                        }
+                        (entry.folder_name.clone(), i, result)
+                    })
+                    .collect()
+            });
+
+        // Phase 2: conflict analysis
+        let mut no_conflict_addons = Vec::new();
+        let mut conflicting_addons = Vec::new();
+        let mut failed = Vec::new();
+        let mut errors: HashMap<String, String> = HashMap::new();
+
+        for (folder_name, _index, result) in download_results {
+            match result {
+                Err(e) => {
+                    errors.insert(folder_name.clone(), e);
+                    failed.push(folder_name);
+                }
+                Ok(dl) => {
+                    let session_id = generate_session_id(&folder_name);
+                    let version = &dl.api_version;
+
+                    match build_conflict_report(
+                        &addons_dir,
+                        &folder_name,
+                        &dl.kept_path,
+                        version,
+                        &session_id,
+                    ) {
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&dl.kept_path);
+                            errors.insert(folder_name.clone(), e);
+                            failed.push(folder_name);
+                        }
+                        Ok(report) => {
+                            if let Ok(mut map) = pending_clone.lock() {
+                                map.insert(
+                                    session_id.clone(),
+                                    crate::PendingUpdate {
+                                        zip_path: dl.kept_path,
+                                        folder_name: folder_name.clone(),
+                                        esoui_id: dl.esoui_id,
+                                        update_version: version.to_string(),
+                                    },
+                                );
+                            }
+
+                            if report.conflicts.is_empty() {
+                                no_conflict_addons.push(NoConflictAddon {
+                                    session_id: report.session_id,
+                                    folder_name: report.folder_name,
+                                    update_version: report.update_version,
+                                    auto_kept_files: report.auto_kept_files,
+                                });
+                            } else {
+                                conflicting_addons.push(BatchConflictAddon {
+                                    session_id: report.session_id,
+                                    folder_name: report.folder_name,
+                                    update_version: report.update_version,
+                                    conflicts: report.conflicts,
+                                    auto_kept_files: report.auto_kept_files,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(BatchConflictResult {
+            no_conflict_addons,
+            conflicting_addons,
+            failed,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffData {
+    pub user_content: String,
+    pub upstream_content: String,
+    pub is_binary: bool,
+}
+
+#[tauri::command]
+pub async fn get_conflict_diff(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    pending: tauri::State<'_, crate::PendingUpdates>,
+    addons_path: String,
+    session_id: String,
+    relative_path: String,
+) -> Result<DiffData, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let pending_clone = pending.0.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let (zip_path, folder_name) = {
+            let map = pending_clone
+                .lock()
+                .map_err(|_| "Failed to access pending updates".to_string())?;
+            let pu = map
+                .get(&session_id)
+                .ok_or_else(|| format!("Session {} not found", session_id))?;
+            (pu.zip_path.clone(), pu.folder_name.clone())
+        };
+
+        // Read user's file from disk
+        let user_file_path = addons_dir
+            .join(&folder_name)
+            .join(relative_path.replace('/', "\\"));
+        let user_content = if user_file_path.exists() {
+            let bytes = fs::read(&user_file_path)
+                .map_err(|e| format!("Failed to read user file: {}", e))?;
+            if bytes.iter().take(512).any(|&b| b == 0) {
+                return Ok(DiffData {
+                    user_content: String::new(),
+                    upstream_content: String::new(),
+                    is_binary: true,
+                });
+            }
+            String::from_utf8_lossy(&bytes).to_string()
+        } else {
+            String::new()
+        };
+
+        // Read upstream file from ZIP
+        let file = fs::File::open(&zip_path).map_err(|e| format!("Failed to open ZIP: {}", e))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP: {}", e))?;
+        let zip_entry_name = format!("{}/{}", folder_name, relative_path);
+        let mut entry = archive
+            .by_name(&zip_entry_name)
+            .map_err(|e| format!("File not found in ZIP: {}", e))?;
+
+        let mut upstream_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut upstream_bytes)
+            .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
+
+        if upstream_bytes.iter().take(512).any(|&b| b == 0) {
+            return Ok(DiffData {
+                user_content: String::new(),
+                upstream_content: String::new(),
+                is_binary: true,
+            });
+        }
+
+        let upstream_content = String::from_utf8_lossy(&upstream_bytes).to_string();
+
+        Ok(DiffData {
+            user_content,
+            upstream_content,
+            is_binary: false,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDecision {
+    pub relative_path: String,
+    pub action: String, // "keep_mine" | "take_update"
+}
+
+#[tauri::command]
+pub async fn update_addon_with_decisions(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    pending: tauri::State<'_, crate::PendingUpdates>,
+    addons_path: String,
+    session_id: String,
+    decisions: Vec<FileDecision>,
+) -> Result<InstallResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let pending_clone = pending.0.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let pu = {
+            let map = pending_clone
+                .lock()
+                .map_err(|_| "Failed to access pending updates".to_string())?;
+            map.get(&session_id)
+                .ok_or_else(|| format!("Session {} not found", session_id))?
+                .clone()
+        };
+
+        let kept_files: Vec<String> = decisions
+            .iter()
+            .filter(|d| d.action == "keep_mine")
+            .map(|d| d.relative_path.clone())
+            .collect();
+
+        // Collect files to skip during extraction (full ZIP path with folder prefix)
+        let skip_files: HashSet<String> = kept_files
+            .iter()
+            .map(|p| format!("{}/{}", pu.folder_name, p))
+            .collect();
+
+        // Collect files to back up (user chose "take_update" on their edited files)
+        let files_to_backup: Vec<String> = decisions
+            .iter()
+            .filter(|d| d.action == "take_update")
+            .map(|d| d.relative_path.clone())
+            .collect();
+
+        // Get current version from hash manifest for backup metadata
+        let from_version = file_hashes::load_hash_manifest(&addons_dir, &pu.folder_name)
+            .map(|m| m.installed_version)
+            .unwrap_or_default();
+
+        // Back up files before overwriting
+        if !files_to_backup.is_empty() {
+            crate::edit_backups::backup_user_files(
+                &addons_dir,
+                &pu.folder_name,
+                &files_to_backup,
+                &from_version,
+                &pu.update_version,
+            )?;
+        }
+
+        // For kept files, get the upstream hashes from the ZIP.
+        // These become the stored baseline so the user's edit stays
+        // detectable on the next update cycle.
+        let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
+            None
+        } else {
+            let zip_hashes = file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?;
+            let overrides: HashMap<String, String> = kept_files
+                .iter()
+                .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
+                .collect();
+            if overrides.is_empty() {
+                None
+            } else {
+                Some(overrides)
+            }
+        };
+
+        // Extract with selective skipping
+        let installed_folders = if skip_files.is_empty() {
+            installer::extract_addon_zip(&pu.zip_path, &addons_dir)?
+        } else {
+            installer::extract_addon_zip_selective(&pu.zip_path, &addons_dir, &skip_files)?
+        };
+
+        file_hashes::record_hashes_for_folders_with_overrides(
+            &addons_dir,
+            &installed_folders,
+            pu.esoui_id,
+            &pu.update_version,
+            hash_overrides.as_ref(),
+        );
+
+        // Update metadata
+        let mut store = metadata::load_metadata(&addons_dir);
+        let old_folders: Vec<String> = store
+            .addons
+            .iter()
+            .filter(|(_, m)| m.esoui_id == pu.esoui_id)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for old in &old_folders {
+            if !installed_folders.contains(old) {
+                metadata::remove_entry(&mut store, old);
+            }
+        }
+        record_installed_folders(
+            &mut store,
+            &addons_dir,
+            &installed_folders,
+            pu.esoui_id,
+            &pu.update_version,
+            &pu.folder_name,
+            "",
+            0,
+        );
+        metadata::save_metadata(&addons_dir, &store)?;
+
+        // Clean up pending state and temp file
+        if let Ok(mut map) = pending_clone.lock() {
+            map.remove(&session_id);
+        }
+        let _ = fs::remove_file(&pu.zip_path);
+
+        Ok(InstallResult {
+            installed_folders,
+            installed_deps: Vec::new(),
+            failed_deps: Vec::new(),
+            skipped_deps: Vec::new(),
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+// ── File browser commands ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonFileEntry {
+    pub relative_path: String,
+    pub is_directory: bool,
+    pub size_bytes: u64,
+    pub status: String, // "stock" | "modified" | "unknown"
+    pub extension: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonFileTree {
+    pub folder_name: String,
+    pub files: Vec<AddonFileEntry>,
+    pub modified_count: u32,
+}
+
+#[tauri::command]
+pub async fn list_addon_files(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+) -> Result<AddonFileTree, String> {
+    validate_name(&folder_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let addon_path = addons_dir.join(&folder_name);
+        if !addon_path.is_dir() {
+            return Err(format!("Addon folder not found: {}", folder_name));
+        }
+
+        let manifest = file_hashes::load_hash_manifest(&addons_dir, &folder_name);
+        let modified_set: HashSet<String> = manifest
+            .as_ref()
+            .map(|m| m.modified_files.iter().cloned().collect())
+            .unwrap_or_default();
+        let has_manifest = manifest.is_some();
+
+        let mut files = Vec::new();
+
+        fn walk_files(
+            base: &Path,
+            current: &Path,
+            files: &mut Vec<AddonFileEntry>,
+            modified_set: &HashSet<String>,
+            has_manifest: bool,
+        ) -> Result<(), String> {
+            let entries =
+                fs::read_dir(current).map_err(|e| format!("Failed to read directory: {}", e))?;
+
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("Dir entry error: {}", e))?;
+                let path = entry.path();
+
+                let relative = path
+                    .strip_prefix(base)
+                    .map_err(|e| format!("Path prefix error: {}", e))?;
+                let rel_str = relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join("/");
+
+                let is_dir = path.is_dir();
+                let size = if is_dir {
+                    0
+                } else {
+                    path.metadata().map(|m| m.len()).unwrap_or(0)
+                };
+
+                let extension = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+
+                let status = if is_dir {
+                    "stock".to_string()
+                } else if !has_manifest {
+                    "unknown".to_string()
+                } else if modified_set.contains(&rel_str) {
+                    "modified".to_string()
+                } else {
+                    "stock".to_string()
+                };
+
+                files.push(AddonFileEntry {
+                    relative_path: rel_str,
+                    is_directory: is_dir,
+                    size_bytes: size,
+                    status,
+                    extension,
+                });
+
+                if is_dir {
+                    walk_files(base, &path, files, modified_set, has_manifest)?;
+                }
+            }
+            Ok(())
+        }
+
+        walk_files(
+            &addon_path,
+            &addon_path,
+            &mut files,
+            &modified_set,
+            has_manifest,
+        )?;
+
+        files.sort_by(|a, b| {
+            b.is_directory
+                .cmp(&a.is_directory)
+                .then(a.relative_path.cmp(&b.relative_path))
+        });
+
+        let modified_count = files.iter().filter(|f| f.status == "modified").count() as u32;
+
+        Ok(AddonFileTree {
+            folder_name,
+            files,
+            modified_count,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+fn validate_relative_path(relative_path: &str) -> Result<(), String> {
+    if relative_path.contains("..") {
+        return Err("Invalid path: contains '..'".to_string());
+    }
+    Ok(())
+}
+
+fn resolve_addon_file_path(
+    addons_dir: &Path,
+    folder_name: &str,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let file_path = addons_dir
+        .join(folder_name)
+        .join(relative_path.replace('/', "\\"));
+
+    let canonical_addons = addons_dir
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve addons path: {}", e))?;
+    let canonical_file = file_path
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve file path: {}", e))?;
+
+    if !canonical_file.starts_with(&canonical_addons) {
+        return Err("File path is outside the AddOns directory.".to_string());
+    }
+
+    Ok(file_path)
+}
+
+#[tauri::command]
+pub async fn read_addon_file(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+    relative_path: String,
+) -> Result<String, String> {
+    validate_name(&folder_name)?;
+    validate_relative_path(&relative_path)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let file_path = resolve_addon_file_path(&addons_dir, &folder_name, &relative_path)?;
+
+        let bytes = fs::read(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
+
+        if bytes.iter().take(512).any(|&b| b == 0) {
+            return Err("Cannot read binary file.".to_string());
+        }
+
+        String::from_utf8(bytes).map_err(|_| "File contains invalid UTF-8.".to_string())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn write_addon_file(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+    relative_path: String,
+    content: String,
+) -> Result<(), String> {
+    validate_name(&folder_name)?;
+    validate_relative_path(&relative_path)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let file_path = resolve_addon_file_path(&addons_dir, &folder_name, &relative_path)?;
+
+        fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
+
+        // Re-hash the single file and update the manifest cache
+        if let Some(mut manifest) = file_hashes::load_hash_manifest(&addons_dir, &folder_name) {
+            let new_hash = file_hashes::compute_addon_hashes(&addons_dir.join(&folder_name))?;
+            if let Some(hash) = new_hash.get(&relative_path.replace('\\', "/")) {
+                let key = relative_path.replace('\\', "/");
+                let is_modified = manifest.files.get(&key).map(|h| h != hash).unwrap_or(true);
+                if is_modified && !manifest.modified_files.contains(&key) {
+                    manifest.modified_files.push(key);
+                    manifest.modified_files.sort();
+                } else if !is_modified {
+                    manifest.modified_files.retain(|f| f != &key);
+                }
+            }
+            file_hashes::save_hash_manifest(&addons_dir, &manifest)?;
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn rescan_addon_hashes(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+) -> Result<Vec<String>, String> {
+    validate_name(&folder_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        file_hashes::detect_modifications(&addons_dir, &folder_name)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn cancel_pending_update(
+    pending: tauri::State<'_, crate::PendingUpdates>,
+    session_id: String,
+) -> Result<(), String> {
+    let pending_clone = pending.0.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(mut map) = pending_clone.lock() {
+            if let Some(pu) = map.remove(&session_id) {
+                let _ = fs::remove_file(&pu.zip_path);
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn list_edit_backups(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+) -> Result<Vec<crate::edit_backups::BackupManifest>, String> {
+    validate_name(&folder_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    Ok(crate::edit_backups::list_backups(&addons_dir, &folder_name))
+}
+
+#[tauri::command]
+pub async fn restore_edit_backup(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+    backed_up_at: String,
+    relative_path: String,
+) -> Result<(), String> {
+    validate_name(&folder_name)?;
+    validate_relative_path(&relative_path)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        crate::edit_backups::restore_backup_file(
+            &addons_dir,
+            &folder_name,
+            &backed_up_at,
+            &relative_path,
+        )
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
