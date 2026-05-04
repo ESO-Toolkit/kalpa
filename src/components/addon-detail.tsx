@@ -3,6 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import type {
   AddonManifest,
+  BatchConflictAddon,
   UpdateCheckResult,
   InstallResult,
   ConflictReport,
@@ -16,6 +17,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Tabs, TabsList, TabsTrigger, TabsContent, TabsIndicator } from "@/components/ui/tabs";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { getSetting } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
@@ -46,6 +48,8 @@ interface AddonDetailProps {
   onAddonUpdated: (esouiId: number) => void;
   onTagsChange: (folderName: string, tags: string[]) => void;
   isOffline?: boolean;
+  pendingConflict?: BatchConflictAddon;
+  onConflictResolved?: (folderName: string) => void;
 }
 
 export function AddonDetail({
@@ -59,6 +63,8 @@ export function AddonDetail({
   onAddonUpdated,
   onTagsChange,
   isOffline,
+  pendingConflict,
+  onConflictResolved,
 }: AddonDetailProps) {
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -141,6 +147,27 @@ export function AddonDetail({
       });
 
       if (report.conflicts.length > 0) {
+        const policy = await getSetting<"ask" | "keep_mine" | "take_update">(
+          "conflictPolicy",
+          "ask"
+        );
+
+        if (policy !== "ask") {
+          const autoDecisions: FileDecision[] = report.conflicts.map((c) => ({
+            relativePath: c.relativePath,
+            action: policy,
+          }));
+          await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
+            addonsPath,
+            sessionId: report.sessionId,
+            decisions: autoDecisions,
+          });
+          setUpdateSuccess(true);
+          toast.success(`Updated ${addon.title}`);
+          onAddonUpdated(updateResult.esouiId);
+          return;
+        }
+
         setConflictReport(report);
         setUpdating(false);
         return;
@@ -285,6 +312,39 @@ export function AddonDetail({
             addonsPath={addonsPath}
             onResolve={handleConflictResolve}
             onSkip={handleConflictSkip}
+          />
+        </div>
+      )}
+
+      {!conflictReport && pendingConflict && (
+        <div className="mb-4">
+          <UpdateConflictPanel
+            folderName={pendingConflict.folderName}
+            currentVersion={updateResult?.currentVersion ?? addon.version}
+            updateVersion={pendingConflict.updateVersion}
+            conflicts={pendingConflict.conflicts}
+            autoKeptFiles={pendingConflict.autoKeptFiles}
+            safeFileCount={0}
+            sessionId={pendingConflict.sessionId}
+            addonsPath={addonsPath}
+            onResolve={async (decisions) => {
+              setUpdating(true);
+              try {
+                await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
+                  addonsPath,
+                  sessionId: pendingConflict.sessionId,
+                  decisions,
+                });
+                toast.success(`Updated ${addon.title}`);
+                onConflictResolved?.(addon.folderName);
+                if (updateResult) onAddonUpdated(updateResult.esouiId);
+              } catch (e) {
+                setUpdateError(getTauriErrorMessage(e));
+              } finally {
+                setUpdating(false);
+              }
+            }}
+            onSkip={() => onConflictResolved?.(addon.folderName)}
           />
         </div>
       )}

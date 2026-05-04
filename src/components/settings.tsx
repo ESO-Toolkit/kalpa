@@ -77,9 +77,13 @@ export function Settings({
   const [minionDetected, setMinionDetected] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
   const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
+  const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
 
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
+    void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
+      setConflictPolicy
+    );
     void invokeResult<boolean>("detect_minion").then((result) => {
       if (result.ok) {
         setMinionDetected(result.data);
@@ -343,6 +347,41 @@ export function Settings({
                       </p>
                     </div>
                   </label>
+                </GlassPanel>
+
+                {/* Conflict policy */}
+                <GlassPanel variant="subtle" className="p-3 space-y-2">
+                  <SectionHeader>When your edited files conflict with an update</SectionHeader>
+                  {(
+                    [
+                      ["ask", "Ask me each time"],
+                      ["keep_mine", "Always keep my version"],
+                      ["take_update", "Always take the update (back up my files)"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className="flex items-center gap-3 cursor-pointer w-full text-left"
+                      onClick={() => {
+                        setConflictPolicy(value);
+                        void setSetting("conflictPolicy", value);
+                      }}
+                    >
+                      <span
+                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                          conflictPolicy === value
+                            ? "border-[#c4a44a] bg-[#c4a44a]/20"
+                            : "border-white/20 bg-white/[0.03]"
+                        }`}
+                      >
+                        {conflictPolicy === value && (
+                          <span className="h-2 w-2 rounded-full bg-[#c4a44a]" />
+                        )}
+                      </span>
+                      <span className="text-sm text-white/80">{label}</span>
+                    </button>
+                  ))}
                 </GlassPanel>
               </motion.div>
             )}

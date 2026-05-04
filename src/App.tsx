@@ -17,8 +17,11 @@ import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import type {
   AddonManifest,
   AuthUser,
+  BatchConflictAddon,
+  BatchConflictResult,
   BatchUpdateResult,
   GameInstance,
+  InstallResult,
   UpdateCheckResult,
   EsouiSearchResult,
   SortMode,
@@ -79,8 +82,11 @@ function App() {
     currentAddon?: string;
   } | null>(null);
   const [addonStatuses, setAddonStatuses] = useState<
-    Map<string, "downloading" | "extracting" | "completed" | "failed">
+    Map<string, "downloading" | "scanning" | "extracting" | "completed" | "failed">
   >(new Map());
+  const [pendingConflicts, setPendingConflicts] = useState<Map<string, BatchConflictAddon>>(
+    new Map()
+  );
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
@@ -196,7 +202,10 @@ function App() {
         const { folderName, phase, total } = event.payload;
         setAddonStatuses((prev) => {
           const next = new Map(prev);
-          next.set(folderName, phase as "downloading" | "extracting" | "completed" | "failed");
+          next.set(
+            folderName,
+            phase as "downloading" | "scanning" | "extracting" | "completed" | "failed"
+          );
           return next;
         });
         // Keep legacy progress in sync
@@ -752,22 +761,19 @@ function App() {
       const path = addonsPathRef.current;
       if (!path || updates.length === 0) return;
 
-      // Guard against double-clicks / concurrent batch runs
       if (updatingAllRef.current) return;
 
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
       setAddonStatuses(new Map());
 
-      // Fire snapshot in the background — don't block updates on it.
-      // invokeResult never throws; errors are captured in the result.
       void invokeResult("create_pre_operation_snapshot", {
         addonsPath: path,
         operationLabel: "update-all",
       });
 
-      // Batch all downloads + extractions in a single Rust call
-      const batchResult = await invokeResult<BatchUpdateResult>("batch_update_addons", {
+      // Phase 1: Scan all addons for conflicts (downloads ZIPs in parallel on Rust side)
+      const scanResult = await invokeResult<BatchConflictResult>("scan_batch_conflicts", {
         addonsPath: path,
         updates: updates.map((u) => ({
           esouiId: u.esouiId,
@@ -776,59 +782,149 @@ function App() {
         })),
       });
 
+      if (!scanResult.ok) {
+        setUpdatingAll(false);
+        setUpdateProgress(null);
+        toast.error(`Batch update failed: ${scanResult.error}`);
+        srAnnounce("Batch update failed");
+        return;
+      }
+
+      const { noConflictAddons, conflictingAddons, failed: scanFailed } = scanResult.data;
+      const total = noConflictAddons.length + conflictingAddons.length + scanFailed.length;
+      const completed: string[] = [];
+      const failed: string[] = [...scanFailed];
+
+      // Phase 2: Update non-conflicting addons sequentially
+      for (let i = 0; i < noConflictAddons.length; i++) {
+        const addon = noConflictAddons[i];
+        setAddonStatuses((prev) => {
+          const next = new Map(prev);
+          next.set(addon.folderName, "extracting");
+          return next;
+        });
+
+        const result = await invokeResult<InstallResult>("update_addon_with_decisions", {
+          addonsPath: path,
+          sessionId: addon.sessionId,
+          decisions: [],
+        });
+
+        if (result.ok) {
+          completed.push(addon.folderName);
+          setAddonStatuses((prev) => {
+            const next = new Map(prev);
+            next.set(addon.folderName, "completed");
+            return next;
+          });
+        } else {
+          failed.push(addon.folderName);
+          setAddonStatuses((prev) => {
+            const next = new Map(prev);
+            next.set(addon.folderName, "failed");
+            return next;
+          });
+        }
+
+        setUpdateProgress({
+          completed: completed.length,
+          failed: failed.length,
+          total,
+          currentAddon: addon.folderName,
+        });
+      }
+
       setUpdatingAll(false);
       setUpdateProgress(null);
 
-      if (batchResult.ok) {
-        const { completed, failed } = batchResult.data;
-        if (failed.length > 0) {
-          toast.warning(
-            `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}, ${failed.length} failed: ${failed.join(", ")}`
-          );
-          srAnnounce(`Updated ${completed.length} addons, ${failed.length} failed`);
-        } else if (completed.length > 0) {
-          toast.success(`Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}`);
-          srAnnounce(
-            `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""} successfully`
-          );
-        }
+      // Handle conflicting addons based on user's policy preference
+      const remainingConflicts: typeof conflictingAddons = [];
+      if (conflictingAddons.length > 0) {
+        const policy = await getSetting<"ask" | "keep_mine" | "take_update">(
+          "conflictPolicy",
+          "ask"
+        );
 
-        // Only clear update results for addons that actually succeeded;
-        // failed addons should remain visible in the "Outdated" filter.
-        if (completed.length > 0) {
-          const succeededNames = new Set(completed);
-          setUpdateResults((prev) => {
-            const remaining = prev.filter((result) => !succeededNames.has(result.folderName));
-            const remainingUpdates = remaining.filter((r) => r.hasUpdate).length;
-            void invokeResult("update_tray_tooltip", {
-              updateCount: remainingUpdates,
+        if (policy !== "ask") {
+          for (const ca of conflictingAddons) {
+            const autoDecisions = ca.conflicts.map((c) => ({
+              relativePath: c.relativePath,
+              action: policy as "keep_mine" | "take_update",
+            }));
+            const result = await invokeResult<InstallResult>("update_addon_with_decisions", {
+              addonsPath: path,
+              sessionId: ca.sessionId,
+              decisions: autoDecisions,
             });
-            return remaining;
-          });
-
-          // Send OS notification if app is in the tray
-          void (async () => {
-            try {
-              const { getCurrentWindow } = await import("@tauri-apps/api/window");
-              const isVisible = await getCurrentWindow().isVisible();
-              if (!isVisible) {
-                const { isPermissionGranted, sendNotification } =
-                  await import("@tauri-apps/plugin-notification");
-                if (await isPermissionGranted()) {
-                  sendNotification({
-                    title: "Kalpa",
-                    body: `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}${failed.length > 0 ? `, ${failed.length} failed` : ""}`,
-                  });
-                }
-              }
-            } catch {
-              // Notification is best-effort
+            if (result.ok) {
+              completed.push(ca.folderName);
+            } else {
+              failed.push(ca.folderName);
             }
-          })();
+          }
+        } else {
+          remainingConflicts.push(...conflictingAddons);
         }
-      } else {
-        toast.error(`Batch update failed: ${batchResult.error}`);
-        srAnnounce("Batch update failed");
+      }
+
+      if (remainingConflicts.length > 0) {
+        setPendingConflicts((prev) => {
+          const next = new Map(prev);
+          for (const ca of remainingConflicts) {
+            next.set(ca.folderName, ca);
+          }
+          return next;
+        });
+      }
+
+      // Summary toast
+      const conflictCount = remainingConflicts.length;
+      if (completed.length > 0 || failed.length > 0) {
+        let msg = `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}`;
+        if (failed.length > 0) msg += `, ${failed.length} failed`;
+        if (conflictCount > 0)
+          msg += `, ${conflictCount} need${conflictCount === 1 ? "s" : ""} your attention`;
+        if (failed.length > 0) {
+          toast.warning(msg);
+        } else if (conflictCount > 0) {
+          toast.info(msg);
+        } else {
+          toast.success(msg);
+        }
+        srAnnounce(msg);
+      } else if (conflictCount > 0) {
+        toast.info(`${conflictCount} addon${conflictCount !== 1 ? "s" : ""} need your attention`);
+      }
+
+      if (completed.length > 0) {
+        const succeededNames = new Set(completed);
+        setUpdateResults((prev) => {
+          const remaining = prev.filter((result) => !succeededNames.has(result.folderName));
+          const remainingUpdates = remaining.filter((r) => r.hasUpdate).length;
+          void invokeResult("update_tray_tooltip", {
+            updateCount: remainingUpdates,
+          });
+          return remaining;
+        });
+
+        void (async () => {
+          try {
+            const { getCurrentWindow } = await import("@tauri-apps/api/window");
+            const isVisible = await getCurrentWindow().isVisible();
+            if (!isVisible) {
+              const { isPermissionGranted, sendNotification } =
+                await import("@tauri-apps/plugin-notification");
+              if (await isPermissionGranted()) {
+                sendNotification({
+                  title: "Kalpa",
+                  body: `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}${failed.length > 0 ? `, ${failed.length} failed` : ""}${conflictCount > 0 ? `, ${conflictCount} need review` : ""}`,
+                });
+              }
+            }
+          } catch {
+            // Notification is best-effort
+          }
+        })();
       }
 
       await scanAddons(path);
@@ -1099,6 +1195,14 @@ function App() {
         isOffline={isOffline}
       />
 
+      {pendingConflicts.size > 0 && (
+        <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs text-amber-400">
+          <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+          {pendingConflicts.size} addon{pendingConflicts.size !== 1 ? "s" : ""} need your attention
+          — click one to review your edited files
+        </div>
+      )}
+
       <div className="flex flex-1 overflow-hidden">
         <AddonList
           addons={filteredAddons}
@@ -1150,6 +1254,19 @@ function App() {
             onAddonUpdated={handleAddonUpdated}
             onTagsChange={handleTagsChange}
             isOffline={isOffline}
+            pendingConflict={
+              selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
+            }
+            onConflictResolved={(folderName) => {
+              setPendingConflicts((prev) => {
+                const next = new Map(prev);
+                next.delete(folderName);
+                return next;
+              });
+              handleAddonUpdated(
+                updateResults.find((r) => r.folderName === folderName)?.esouiId ?? 0
+              );
+            }}
           />
         ) : (
           <DiscoverDetail
