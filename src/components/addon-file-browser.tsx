@@ -1,11 +1,23 @@
 import { useState, useEffect } from "react";
-import type { AddonFileTree, AddonFileEntry } from "../types";
+import type { AddonFileTree, AddonFileEntry, EditBackupManifest } from "../types";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
+import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
-import { FolderOpen, RotateCw, ChevronRight, ChevronDown, FileText } from "lucide-react";
+import { toast } from "sonner";
+import {
+  FolderOpen,
+  RotateCw,
+  ChevronRight,
+  ChevronDown,
+  FileText,
+  ExternalLink,
+  History,
+  Undo2,
+} from "lucide-react";
+import { AddonFileEditor } from "@/components/addon-file-editor";
 
 interface AddonFileBrowserProps {
   addonsPath: string;
@@ -54,10 +66,12 @@ function FileTreeNode({
   node,
   depth,
   onOpenFile,
+  selectedPath,
 }: {
   node: TreeNode;
   depth: number;
   onOpenFile: (path: string) => void;
+  selectedPath: string | null;
 }) {
   const [expanded, setExpanded] = useState(depth < 2);
   const isDir = !node.entry && node.children.size > 0;
@@ -87,7 +101,13 @@ function FileTreeNode({
         </button>
         {expanded &&
           sorted.map((child) => (
-            <FileTreeNode key={child.name} node={child} depth={depth + 1} onOpenFile={onOpenFile} />
+            <FileTreeNode
+              key={child.name}
+              node={child}
+              depth={depth + 1}
+              onOpenFile={onOpenFile}
+              selectedPath={selectedPath}
+            />
           ))}
       </div>
     );
@@ -97,11 +117,15 @@ function FileTreeNode({
 
   const ext = file.extension.toUpperCase();
   const pillColor = EXT_COLORS[file.extension] || "muted";
+  const isSelected = file.relativePath === selectedPath;
 
   return (
     <button
       onClick={() => onOpenFile(file.relativePath)}
-      className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-sm hover:bg-white/[0.04] transition-colors group"
+      className={cn(
+        "flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-sm transition-colors group",
+        isSelected ? "bg-sky-400/[0.08] border-l-2 border-sky-400/40" : "hover:bg-white/[0.04]"
+      )}
       style={{ paddingLeft: `${depth * 16 + 6}px` }}
     >
       <FileText className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />
@@ -130,6 +154,10 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [loadState, setLoadState] = useState<"loading" | "done" | "error">("loading");
+  const [editingFile, setEditingFile] = useState<string | null>(null);
+  const [backups, setBackups] = useState<EditBackupManifest[]>([]);
+  const [showBackups, setShowBackups] = useState(false);
+  const [restoringFile, setRestoringFile] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -154,10 +182,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
   const handleRescan = async () => {
     setRescanning(true);
     try {
-      await invokeOrThrow<string[]>("rescan_addon_hashes", {
-        addonsPath,
-        folderName,
-      });
+      await invokeOrThrow<string[]>("rescan_addon_hashes", { addonsPath, folderName });
       setRefreshKey((k) => k + 1);
     } catch (e) {
       setError(String(e));
@@ -175,13 +200,50 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
     }
   };
 
-  const handleOpenFile = async (relativePath: string) => {
+  const handleOpenExternal = async (relativePath: string) => {
     try {
       const { openPath } = await import("@tauri-apps/plugin-opener");
       const fullPath = `${addonsPath}\\${folderName}\\${relativePath.replace(/\//g, "\\")}`;
       await openPath(fullPath);
     } catch {
       // best-effort
+    }
+  };
+
+  const handleOpenFile = (relativePath: string) => {
+    setEditingFile(relativePath);
+  };
+
+  const handleLoadBackups = async () => {
+    setShowBackups(!showBackups);
+    if (!showBackups) {
+      try {
+        const list = await invokeOrThrow<EditBackupManifest[]>("list_edit_backups", {
+          addonsPath,
+          folderName,
+        });
+        setBackups(list);
+      } catch {
+        setBackups([]);
+      }
+    }
+  };
+
+  const handleRestore = async (backedUpAt: string, relativePath: string) => {
+    setRestoringFile(relativePath);
+    try {
+      await invokeOrThrow("restore_edit_backup", {
+        addonsPath,
+        folderName,
+        backedUpAt,
+        relativePath,
+      });
+      toast.success(`Restored ${relativePath}`);
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      toast.error(`Restore failed: ${String(e)}`);
+    } finally {
+      setRestoringFile(null);
     }
   };
 
@@ -205,7 +267,6 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
   if (!fileTree) return null;
 
   const tree = buildTree(fileTree.files);
-
   const sorted = [...tree.children.values()].sort((a, b) => {
     const aDir = !a.entry && a.children.size > 0;
     const bDir = !b.entry && b.children.size > 0;
@@ -213,23 +274,43 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
     return a.name.localeCompare(b.name);
   });
 
+  const editingEntry = editingFile
+    ? fileTree.files.find((f) => f.relativePath === editingFile)
+    : null;
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <Button variant="outline" size="sm" onClick={handleOpenFolder}>
           <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
           Open Folder
         </Button>
+        {editingFile && (
+          <Button variant="outline" size="sm" onClick={() => handleOpenExternal(editingFile)}>
+            <ExternalLink className="h-3.5 w-3.5 mr-1.5" />
+            Open in Editor
+          </Button>
+        )}
         <Button variant="ghost" size="sm" onClick={handleRescan} disabled={rescanning}>
           <RotateCw className={cn("h-3.5 w-3.5 mr-1.5", rescanning && "animate-spin")} />
           Rescan
         </Button>
+        <Button variant="ghost" size="sm" onClick={handleLoadBackups}>
+          <History className="h-3.5 w-3.5 mr-1.5" />
+          Backups
+        </Button>
       </div>
 
       <GlassPanel variant="subtle" className="p-2">
-        <div className="max-h-[400px] overflow-y-auto">
+        <div className="max-h-[300px] overflow-y-auto">
           {sorted.map((child) => (
-            <FileTreeNode key={child.name} node={child} depth={0} onOpenFile={handleOpenFile} />
+            <FileTreeNode
+              key={child.name}
+              node={child}
+              depth={0}
+              onOpenFile={handleOpenFile}
+              selectedPath={editingFile}
+            />
           ))}
         </div>
       </GlassPanel>
@@ -240,6 +321,59 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
           {fileTree.modifiedCount} file{fileTree.modifiedCount !== 1 ? "s" : ""} edited
           <span className="text-muted-foreground/30">·</span>
           Protected on update
+        </div>
+      )}
+
+      {editingFile && (
+        <AddonFileEditor
+          addonsPath={addonsPath}
+          folderName={folderName}
+          relativePath={editingFile}
+          isModified={editingEntry?.status === "modified"}
+          onClose={() => setEditingFile(null)}
+          onSaved={() => setRefreshKey((k) => k + 1)}
+        />
+      )}
+
+      {showBackups && (
+        <div className="space-y-2">
+          <SectionHeader>Edit Backups</SectionHeader>
+          {backups.length === 0 ? (
+            <p className="text-xs text-muted-foreground/50">
+              No backups yet. Backups are created when your edited files are overwritten by an
+              update.
+            </p>
+          ) : (
+            backups.map((backup) => (
+              <GlassPanel key={backup.backedUpAt} variant="subtle" className="p-3">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-medium text-muted-foreground/80">
+                    {backup.updateFrom} → {backup.updateTo}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground/40">{backup.backedUpAt}</span>
+                </div>
+                <div className="space-y-1">
+                  {backup.files.map((file) => (
+                    <div key={file} className="flex items-center gap-2 text-xs">
+                      <span className="flex-1 font-mono truncate text-muted-foreground/70">
+                        {file}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[10px]"
+                        onClick={() => handleRestore(backup.backedUpAt, file)}
+                        disabled={restoringFile === file}
+                      >
+                        <Undo2 className="h-3 w-3 mr-1" />
+                        {restoringFile === file ? "Restoring..." : "Restore"}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </GlassPanel>
+            ))
+          )}
         </div>
       )}
     </div>

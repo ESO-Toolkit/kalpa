@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_BACKUPS_PER_ADDON: usize = 5;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BackupManifest {
     pub addon_folder: String,
     pub backed_up_at: String,
@@ -80,6 +80,66 @@ pub fn backup_user_files(
     metadata::save_json_with_backup(&manifest_path, &manifest)?;
 
     prune_old_backups(addons_dir, folder_name);
+
+    Ok(())
+}
+
+pub fn list_backups(addons_dir: &Path, folder_name: &str) -> Vec<BackupManifest> {
+    let addon_backup_dir = backups_dir(addons_dir).join(folder_name);
+    if !addon_backup_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    let mut entries: Vec<_> = fs::read_dir(&addon_backup_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .collect();
+
+    entries.sort_by_key(|e| e.file_name());
+    entries.reverse();
+
+    for entry in entries {
+        let manifest_path = entry.path().join("manifest.json");
+        if manifest_path.exists() {
+            let manifest: BackupManifest = metadata::load_json_with_backup(&manifest_path);
+            if !manifest.addon_folder.is_empty() {
+                results.push(manifest);
+            }
+        }
+    }
+
+    results
+}
+
+pub fn restore_backup_file(
+    addons_dir: &Path,
+    folder_name: &str,
+    backed_up_at: &str,
+    relative_path: &str,
+) -> Result<(), String> {
+    let timestamp_dir = backed_up_at.replace(':', "-");
+    let backup_file = backups_dir(addons_dir)
+        .join(folder_name)
+        .join(&timestamp_dir)
+        .join(relative_path.replace('/', "\\"));
+
+    if !backup_file.exists() {
+        return Err(format!("Backup file not found: {}", relative_path));
+    }
+
+    let dest = addons_dir
+        .join(folder_name)
+        .join(relative_path.replace('/', "\\"));
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+    }
+
+    fs::copy(&backup_file, &dest).map_err(|e| format!("Failed to restore file: {}", e))?;
 
     Ok(())
 }

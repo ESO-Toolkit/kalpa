@@ -13,10 +13,14 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     clearScreen: false,
+    optimizeDeps: {
+      exclude: ["@codemirror/state", "@codemirror/view", "@codemirror/language"],
+    },
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src"),
       },
+      dedupe: ["@codemirror/state", "@codemirror/view", "@codemirror/language"],
     },
     build: {
       rollupOptions: {

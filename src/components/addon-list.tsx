@@ -190,6 +190,14 @@ const AddonListItem = memo(function AddonListItem({
                 {addon.missingDependencies.length} missing
               </Badge>
             )}
+            {addon.modifiedFileCount > 0 && (
+              <Badge
+                variant="outline"
+                className="border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] text-[#c4a44a]/70 text-[10px]"
+              >
+                {addon.modifiedFileCount} edited
+              </Badge>
+            )}
             {addon.tags.includes("broken") && (
               <Badge
                 variant="outline"

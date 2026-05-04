@@ -385,6 +385,8 @@ pub fn run() {
             commands::read_addon_file,
             commands::write_addon_file,
             commands::rescan_addon_hashes,
+            commands::list_edit_backups,
+            commands::restore_edit_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

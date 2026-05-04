@@ -19,6 +19,7 @@ export interface AddonManifest {
   tags: string[];
   esouiLastUpdate: number;
   disabled: boolean;
+  modifiedFileCount: number;
 }
 
 export interface EsouiAddonInfo {
@@ -457,4 +458,12 @@ export interface AddonFileTree {
   folderName: string;
   files: AddonFileEntry[];
   modifiedCount: number;
+}
+
+export interface EditBackupManifest {
+  addonFolder: string;
+  backedUpAt: string;
+  updateFrom: string;
+  updateTo: string;
+  files: string[];
 }

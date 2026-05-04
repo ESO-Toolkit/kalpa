@@ -678,6 +678,11 @@ fn scan_installed_addons_blocking(
             addon.tags = meta.tags.clone();
             addon.esoui_last_update = meta.esoui_last_update;
         }
+
+        if let Some(hash_manifest) = file_hashes::load_hash_manifest(addons_dir, &addon.folder_name)
+        {
+            addon.modified_file_count = hash_manifest.modified_files.len() as u32;
+        }
     }
 
     addons.sort_by_key(|a| a.title.to_lowercase());
@@ -2144,6 +2149,42 @@ pub async fn rescan_addon_hashes(
 
     tokio::task::spawn_blocking(move || {
         file_hashes::detect_modifications(&addons_dir, &folder_name)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn list_edit_backups(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+) -> Result<Vec<crate::edit_backups::BackupManifest>, String> {
+    validate_name(&folder_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    Ok(crate::edit_backups::list_backups(&addons_dir, &folder_name))
+}
+
+#[tauri::command]
+pub async fn restore_edit_backup(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    folder_name: String,
+    backed_up_at: String,
+    relative_path: String,
+) -> Result<(), String> {
+    validate_name(&folder_name)?;
+    validate_relative_path(&relative_path)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        crate::edit_backups::restore_backup_file(
+            &addons_dir,
+            &folder_name,
+            &backed_up_at,
+            &relative_path,
+        )
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?
