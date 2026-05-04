@@ -395,3 +395,66 @@ export interface AuthUser {
   userId: string;
   userName: string;
 }
+
+// ── Protected Edits types ──────────────────────────────────────────────
+
+export interface FileConflict {
+  relativePath: string;
+  userHash: string;
+  upstreamHash: string;
+}
+
+export interface ConflictReport {
+  sessionId: string;
+  folderName: string;
+  updateVersion: string;
+  safeFiles: string[];
+  autoKeptFiles: string[];
+  conflicts: FileConflict[];
+}
+
+export interface DiffData {
+  userContent: string;
+  upstreamContent: string;
+  isBinary: boolean;
+}
+
+export interface FileDecision {
+  relativePath: string;
+  action: "keep_mine" | "take_update";
+}
+
+export interface NoConflictAddon {
+  sessionId: string;
+  folderName: string;
+  updateVersion: string;
+}
+
+export interface BatchConflictAddon {
+  sessionId: string;
+  folderName: string;
+  updateVersion: string;
+  conflicts: FileConflict[];
+  autoKeptFiles: string[];
+}
+
+export interface BatchConflictResult {
+  noConflictAddons: NoConflictAddon[];
+  conflictingAddons: BatchConflictAddon[];
+  failed: string[];
+  errors: Record<string, string>;
+}
+
+export interface AddonFileEntry {
+  relativePath: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  status: "stock" | "modified" | "unknown";
+  extension: string;
+}
+
+export interface AddonFileTree {
+  folderName: string;
+  files: AddonFileEntry[];
+  modifiedCount: number;
+}
