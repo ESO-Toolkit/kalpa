@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, lazy, Suspense } from "react";
 import type { AddonFileTree, AddonFileEntry, EditBackupManifest } from "../types";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -17,7 +17,10 @@ import {
   History,
   Undo2,
 } from "lucide-react";
-import { AddonFileEditor } from "@/components/addon-file-editor";
+
+const AddonFileEditor = lazy(() =>
+  import("@/components/addon-file-editor").then((m) => ({ default: m.AddonFileEditor }))
+);
 
 interface AddonFileBrowserProps {
   addonsPath: string;
@@ -325,14 +328,23 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
       )}
 
       {editingFile && (
-        <AddonFileEditor
-          addonsPath={addonsPath}
-          folderName={folderName}
-          relativePath={editingFile}
-          isModified={editingEntry?.status === "modified"}
-          onClose={() => setEditingFile(null)}
-          onSaved={() => setRefreshKey((k) => k + 1)}
-        />
+        <Suspense
+          fallback={
+            <div className="flex items-center justify-center py-8 text-muted-foreground/50 text-sm">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a] mr-2" />
+              Loading editor...
+            </div>
+          }
+        >
+          <AddonFileEditor
+            addonsPath={addonsPath}
+            folderName={folderName}
+            relativePath={editingFile}
+            isModified={editingEntry?.status === "modified"}
+            onClose={() => setEditingFile(null)}
+            onSaved={() => setRefreshKey((k) => k + 1)}
+          />
+        </Suspense>
       )}
 
       {showBackups && (
