@@ -1,5 +1,6 @@
 mod auth;
 mod commands;
+mod edit_backups;
 mod esoui;
 mod file_hashes;
 pub mod game_instances;
@@ -11,8 +12,9 @@ mod safe_migration;
 mod saved_variables;
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -52,6 +54,16 @@ pub struct PendingDeepLinkPayload {
 }
 
 pub struct PendingDeepLink(pub Mutex<PendingDeepLinkPayload>);
+
+#[derive(Clone)]
+pub struct PendingUpdate {
+    pub zip_path: PathBuf,
+    pub folder_name: String,
+    pub esoui_id: u32,
+    pub update_version: String,
+}
+
+pub struct PendingUpdates(pub Arc<Mutex<HashMap<String, PendingUpdate>>>);
 
 /// Extract an action from a deep link URL.
 fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
@@ -151,6 +163,19 @@ fn clear_webview_cache_on_upgrade() {
     let _ = std::fs::write(&marker, current);
 }
 
+fn cleanup_orphaned_pending_zips() {
+    let temp_dir = std::env::temp_dir();
+    if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("kalpa-pending-") && name.ends_with(".zip") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
 pub fn run() {
     // Enable Chrome DevTools Protocol in debug builds only
     #[cfg(debug_assertions)]
@@ -160,6 +185,7 @@ pub fn run() {
     );
 
     clear_webview_cache_on_upgrade();
+    cleanup_orphaned_pending_zips();
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
@@ -168,6 +194,7 @@ pub fn run() {
         .manage(PendingDeepLink(Mutex::new(
             PendingDeepLinkPayload::default(),
         )))
+        .manage(PendingUpdates(Arc::new(Mutex::new(HashMap::new()))))
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
@@ -350,6 +377,14 @@ pub fn run() {
             commands::preview_sv_save,
             commands::detect_game_instances,
             commands::update_tray_tooltip,
+            commands::scan_update_conflicts,
+            commands::scan_batch_conflicts,
+            commands::get_conflict_diff,
+            commands::update_addon_with_decisions,
+            commands::list_addon_files,
+            commands::read_addon_file,
+            commands::write_addon_file,
+            commands::rescan_addon_hashes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
