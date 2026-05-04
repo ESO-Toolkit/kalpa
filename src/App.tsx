@@ -19,7 +19,6 @@ import type {
   AuthUser,
   BatchConflictAddon,
   BatchConflictResult,
-  BatchUpdateResult,
   GameInstance,
   InstallResult,
   UpdateCheckResult,
@@ -126,6 +125,7 @@ function App() {
   const addonsPathRef = useRef("");
   const viewModeRef = useRef<ViewMode>("installed");
   const updatingAllRef = useRef(false);
+  const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
 
@@ -308,48 +308,7 @@ function App() {
 
         if (autoUpdate && updates.length > 0) {
           toast.info(`Auto-updating ${updates.length} addon${updates.length > 1 ? "s" : ""}...`);
-          setUpdatingAll(true);
-          setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
-          setAddonStatuses(new Map());
-
-          const batchResult = await invokeResult<BatchUpdateResult>("batch_update_addons", {
-            addonsPath: path,
-            updates: updates.map((u) => ({
-              esouiId: u.esouiId,
-              folderName: u.folderName,
-              apiVersion: u.remoteVersion,
-            })),
-          });
-
-          if (seq !== checkSeqRef.current) return;
-
-          setUpdatingAll(false);
-          setUpdateProgress(null);
-
-          if (batchResult.ok) {
-            const { completed, failed } = batchResult.data;
-            if (failed.length > 0) {
-              toast.warning(
-                `Auto-updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}, ${failed.length} failed`
-              );
-            } else if (completed.length > 0) {
-              toast.success(
-                `Auto-updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}`
-              );
-            }
-
-            // Only clear succeeded addons; keep failed ones visible as outdated
-            if (completed.length > 0) {
-              const succeededNames = new Set(completed);
-              setUpdateResults((prev) =>
-                prev.filter((result) => !succeededNames.has(result.folderName))
-              );
-            }
-          } else {
-            toast.error(`Auto-update failed: ${batchResult.error}`);
-          }
-
-          await scanAddons(path);
+          await runBatchUpdatesRef.current?.(updates);
         }
       } catch (updateError) {
         if (seq !== checkSeqRef.current) return;
@@ -363,7 +322,7 @@ function App() {
         }
       }
     },
-    [scanAddons, srAnnounce]
+    [srAnnounce]
   );
 
   const scanAndCheck = useCallback(
@@ -834,9 +793,6 @@ function App() {
         });
       }
 
-      setUpdatingAll(false);
-      setUpdateProgress(null);
-
       // Handle conflicting addons based on user's policy preference
       const remainingConflicts: typeof conflictingAddons = [];
       if (conflictingAddons.length > 0) {
@@ -866,6 +822,9 @@ function App() {
           remainingConflicts.push(...conflictingAddons);
         }
       }
+
+      setUpdatingAll(false);
+      setUpdateProgress(null);
 
       if (remainingConflicts.length > 0) {
         setPendingConflicts((prev) => {
@@ -931,6 +890,10 @@ function App() {
     },
     [scanAddons, srAnnounce]
   );
+
+  useEffect(() => {
+    runBatchUpdatesRef.current = runBatchUpdates;
+  }, [runBatchUpdates]);
 
   const handleUpdateAll = useCallback(() => {
     void runBatchUpdates(updatesAvailable);

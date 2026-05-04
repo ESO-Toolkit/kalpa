@@ -75,6 +75,7 @@ export function AddonDetail({
   const [customTagInput, setCustomTagInput] = useState("");
   const customTagRef = useRef<HTMLInputElement>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
+  const [pendingConflictDismissed, setPendingConflictDismissed] = useState(false);
 
   const installedSet = useMemo(
     () => new Set(installedAddons.map((a) => a.folderName)),
@@ -316,7 +317,7 @@ export function AddonDetail({
         </div>
       )}
 
-      {!conflictReport && pendingConflict && (
+      {!conflictReport && pendingConflict && !pendingConflictDismissed && (
         <div className="mb-4">
           <UpdateConflictPanel
             folderName={pendingConflict.folderName}
@@ -344,7 +345,7 @@ export function AddonDetail({
                 setUpdating(false);
               }
             }}
-            onSkip={() => onConflictResolved?.(addon.folderName)}
+            onSkip={() => setPendingConflictDismissed(true)}
           />
         </div>
       )}
