@@ -1,6 +1,7 @@
 mod auth;
 mod commands;
 mod esoui;
+mod file_hashes;
 pub mod game_instances;
 mod installer;
 mod manifest;

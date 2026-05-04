@@ -1,5 +1,6 @@
 use crate::auth::{self, AuthState, AuthTokens, AuthUser};
 use crate::esoui::{self, EsouiAddonDetail, EsouiAddonInfo, EsouiCategory, EsouiSearchResult};
+use crate::file_hashes;
 use crate::installer;
 use crate::manifest::{self, AddonManifest};
 use crate::manifest_cache;
@@ -207,6 +208,8 @@ fn try_install_dep(
     let dep_tmp = esoui::download_addon(&dep_info.download_url).map_err(|_| "download_failed")?;
     let dep_folders =
         installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
+
+    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version);
 
     for f in &dep_folders {
         let dep_version = read_local_version(addons_dir, f);
@@ -783,6 +786,8 @@ fn install_addon_blocking(
     let tmp_file = esoui::download_addon(download_url)?;
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
 
+    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, esoui_version);
+
     let mut store = metadata::load_metadata(addons_dir);
 
     // Only the primary folder gets the esoui_id so that check_for_updates
@@ -1108,6 +1113,8 @@ fn update_addon_blocking(
     // the two sources returned slightly different version strings.
     let version = api_version.unwrap_or(&info.version);
 
+    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version);
+
     // Clean up any old metadata entries for the same esoui_id
     // that aren't in the newly extracted folders (handles addon renames).
     let mut store = metadata::load_metadata(addons_dir);
@@ -1287,6 +1294,14 @@ fn batch_update_addons_blocking(
                 }
                 Ok(installed_folders) => {
                     let version = &dl.api_version;
+
+                    file_hashes::record_hashes_for_folders(
+                        addons_dir,
+                        &installed_folders,
+                        dl.esoui_id,
+                        version,
+                    );
+
                     // Clean up old metadata entries for this esoui_id
                     // that aren't in the newly extracted folders (handles renames)
                     let old_folders: Vec<String> = store
