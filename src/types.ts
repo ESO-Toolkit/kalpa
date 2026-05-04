@@ -429,6 +429,7 @@ export interface NoConflictAddon {
   sessionId: string;
   folderName: string;
   updateVersion: string;
+  autoKeptFiles: string[];
 }
 
 export interface BatchConflictAddon {

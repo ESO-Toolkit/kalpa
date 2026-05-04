@@ -154,10 +154,16 @@ export function AddonDetail({
         );
 
         if (policy !== "ask") {
-          const autoDecisions: FileDecision[] = report.conflicts.map((c) => ({
-            relativePath: c.relativePath,
-            action: policy,
-          }));
+          const autoDecisions: FileDecision[] = [
+            ...report.autoKeptFiles.map((p) => ({
+              relativePath: p,
+              action: "keep_mine" as const,
+            })),
+            ...report.conflicts.map((c) => ({
+              relativePath: c.relativePath,
+              action: policy,
+            })),
+          ];
           await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
             addonsPath,
             sessionId: report.sessionId,
@@ -174,11 +180,15 @@ export function AddonDetail({
         return;
       }
 
-      // No conflicts — proceed directly
+      // No conflicts — proceed directly (preserve auto-kept files)
+      const autoKeptDecisions: FileDecision[] = report.autoKeptFiles.map((p) => ({
+        relativePath: p,
+        action: "keep_mine" as const,
+      }));
       await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
         addonsPath,
         sessionId: report.sessionId,
-        decisions: [],
+        decisions: autoKeptDecisions,
       });
       setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);
@@ -212,6 +222,9 @@ export function AddonDetail({
   };
 
   const handleConflictSkip = () => {
+    if (conflictReport) {
+      void invokeOrThrow("cancel_pending_update", { sessionId: conflictReport.sessionId });
+    }
     setConflictReport(null);
   };
 

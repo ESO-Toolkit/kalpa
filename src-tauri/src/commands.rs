@@ -1527,6 +1527,7 @@ pub struct NoConflictAddon {
     pub session_id: String,
     pub folder_name: String,
     pub update_version: String,
+    pub auto_kept_files: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1666,6 +1667,7 @@ pub async fn scan_batch_conflicts(
                                     session_id: report.session_id,
                                     folder_name: report.folder_name,
                                     update_version: report.update_version,
+                                    auto_kept_files: report.auto_kept_files,
                                 });
                             } else {
                                 conflicting_addons.push(BatchConflictAddon {
@@ -2149,6 +2151,24 @@ pub async fn rescan_addon_hashes(
 
     tokio::task::spawn_blocking(move || {
         file_hashes::detect_modifications(&addons_dir, &folder_name)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn cancel_pending_update(
+    pending: tauri::State<'_, crate::PendingUpdates>,
+    session_id: String,
+) -> Result<(), String> {
+    let pending_clone = pending.0.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(mut map) = pending_clone.lock() {
+            if let Some(pu) = map.remove(&session_id) {
+                let _ = fs::remove_file(&pu.zip_path);
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?

@@ -385,6 +385,7 @@ pub fn run() {
             commands::read_addon_file,
             commands::write_addon_file,
             commands::rescan_addon_hashes,
+            commands::cancel_pending_update,
             commands::list_edit_backups,
             commands::restore_edit_backup,
         ])

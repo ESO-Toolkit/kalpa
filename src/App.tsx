@@ -763,10 +763,14 @@ function App() {
           return next;
         });
 
+        const keepDecisions = addon.autoKeptFiles.map((p) => ({
+          relativePath: p,
+          action: "keep_mine" as const,
+        }));
         const result = await invokeResult<InstallResult>("update_addon_with_decisions", {
           addonsPath: path,
           sessionId: addon.sessionId,
-          decisions: [],
+          decisions: keepDecisions,
         });
 
         if (result.ok) {
@@ -803,10 +807,16 @@ function App() {
 
         if (policy !== "ask") {
           for (const ca of conflictingAddons) {
-            const autoDecisions = ca.conflicts.map((c) => ({
-              relativePath: c.relativePath,
-              action: policy as "keep_mine" | "take_update",
-            }));
+            const autoDecisions = [
+              ...ca.autoKeptFiles.map((p) => ({
+                relativePath: p,
+                action: "keep_mine" as const,
+              })),
+              ...ca.conflicts.map((c) => ({
+                relativePath: c.relativePath,
+                action: policy as "keep_mine" | "take_update",
+              })),
+            ];
             const result = await invokeResult<InstallResult>("update_addon_with_decisions", {
               addonsPath: path,
               sessionId: ca.sessionId,
