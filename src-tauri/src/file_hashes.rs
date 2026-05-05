@@ -7,9 +7,19 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HashManifest {
     pub addon_folder: String,
+    /// Canonical list of ESOUI IDs that ship files into this folder.
+    #[serde(default)]
+    pub esoui_ids: Vec<u32>,
+    /// Legacy single-ID field kept for deserializing manifests written before
+    /// esoui_ids was introduced. Migrated to esoui_ids on load; never written.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub esoui_id: u32,
     pub recorded_at: String,
     pub installed_version: String,
@@ -26,7 +36,7 @@ fn manifest_path(addons_dir: &Path, folder_name: &str) -> std::path::PathBuf {
     hashes_dir(addons_dir).join(format!("{}.json", folder_name))
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
+pub fn hash_file(path: &Path) -> Result<String, String> {
     let mut file =
         fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {}", e))?;
     let mut hasher = Sha256::new();
@@ -85,7 +95,7 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
                     .map(|c| c.as_os_str().to_string_lossy().to_string())
                     .collect::<Vec<_>>()
                     .join("/");
-                let hash = sha256_file(&path)?;
+                let hash = hash_file(&path)?;
                 hashes.insert(key, hash);
             }
         }
@@ -159,7 +169,11 @@ pub fn load_hash_manifest(addons_dir: &Path, folder_name: &str) -> Option<HashMa
     if !path.exists() {
         return None;
     }
-    let manifest: HashManifest = metadata::load_json_with_backup(&path);
+    let mut manifest: HashManifest = metadata::load_json_with_backup(&path);
+    // Migrate manifests written before esoui_ids was introduced.
+    if manifest.esoui_ids.is_empty() && manifest.esoui_id != 0 {
+        manifest.esoui_ids = vec![manifest.esoui_id];
+    }
     Some(manifest)
 }
 
@@ -189,7 +203,16 @@ pub fn detect_modifications(addons_dir: &Path, folder_name: &str) -> Result<Vec<
         }
     }
 
+    // Detect files that exist on disk but were not part of the recorded baseline.
+    // These may conflict with new files added by an upstream update.
+    for path in current_hashes.keys() {
+        if !manifest.files.contains_key(path) {
+            modified.push(path.clone());
+        }
+    }
+
     modified.sort();
+    modified.dedup();
     manifest.modified_files = modified.clone();
     save_hash_manifest(addons_dir, &manifest)?;
 
@@ -227,7 +250,7 @@ pub fn record_hashes_for_folders_with_overrides(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let timestamp = metadata::format_timestamp(now);
+    let timestamp = metadata::format_timestamp(now).replace(':', "-");
 
     for folder in installed_folders {
         let addon_path = addons_dir.join(folder);
@@ -260,11 +283,12 @@ pub fn record_hashes_for_folders_with_overrides(
 
         let manifest = HashManifest {
             addon_folder: folder.clone(),
-            esoui_id,
+            esoui_ids: vec![esoui_id],
             recorded_at: timestamp.clone(),
             installed_version: version.to_string(),
             files,
             modified_files,
+            ..Default::default()
         };
 
         if let Err(e) = save_hash_manifest(addons_dir, &manifest) {
@@ -364,18 +388,19 @@ mod tests {
 
         let manifest = HashManifest {
             addon_folder: "TestAddon".to_string(),
-            esoui_id: 42,
+            esoui_ids: vec![42],
             recorded_at: "2026-05-03T12:00:00Z".to_string(),
             installed_version: "1.0.0".to_string(),
             files,
             modified_files: Vec::new(),
+            ..Default::default()
         };
 
         save_hash_manifest(&addons_dir, &manifest).unwrap();
 
         let loaded = load_hash_manifest(&addons_dir, "TestAddon").unwrap();
         assert_eq!(loaded.addon_folder, "TestAddon");
-        assert_eq!(loaded.esoui_id, 42);
+        assert_eq!(loaded.esoui_ids, vec![42]);
         assert_eq!(loaded.files.len(), 1);
     }
 
@@ -454,11 +479,46 @@ mod tests {
         );
 
         let a = load_hash_manifest(&addons_dir, "AddonA").unwrap();
-        assert_eq!(a.esoui_id, 99);
+        assert_eq!(a.esoui_ids, vec![99]);
         assert!(a.files.contains_key("a.lua"));
 
         let b = load_hash_manifest(&addons_dir, "AddonB").unwrap();
         assert!(b.files.contains_key("b.lua"));
+    }
+
+    #[test]
+    fn detect_modifications_finds_new_untracked_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        create_addon_dir(&addons_dir, "MyAddon", &[("init.lua", "original")]);
+
+        record_hashes_for_folders(&addons_dir, &["MyAddon".to_string()], 1, "1.0");
+
+        // Simulate a new file appearing on disk (e.g., added by upstream update or user)
+        fs::write(addons_dir.join("MyAddon/new_module.lua"), "new content").unwrap();
+
+        let modified = detect_modifications(&addons_dir, "MyAddon").unwrap();
+        assert!(
+            modified.contains(&"new_module.lua".to_string()),
+            "expected new_module.lua to be flagged, got: {:?}",
+            modified
+        );
+    }
+
+    #[test]
+    fn load_manifest_migrates_legacy_esoui_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        // Write a manifest in the old format with esoui_id (singular)
+        let old_json = r#"{"addon_folder":"LegacyAddon","esoui_id":77,"recorded_at":"2025-01-01T00:00:00Z","installed_version":"1.0","files":{}}"#;
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        fs::write(hashes_dir.join("LegacyAddon.json"), old_json).unwrap();
+
+        let loaded = load_hash_manifest(&addons_dir, "LegacyAddon").unwrap();
+        assert_eq!(loaded.esoui_ids, vec![77]);
     }
 
     #[test]

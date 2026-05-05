@@ -1,3 +1,4 @@
+use crate::file_hashes;
 use crate::metadata;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -52,6 +53,10 @@ pub fn backup_user_files(
     for rel_path in files {
         let src = addon_path.join(rel_path.replace('/', "\\"));
         if !src.exists() {
+            eprintln!(
+                "Warning: backup source not found for {}/{}, skipping: {}",
+                folder_name, rel_path, rel_path
+            );
             continue;
         }
         let dest = backup_root.join(rel_path.replace('/', "\\"));
@@ -141,6 +146,17 @@ pub fn restore_backup_file(
 
     fs::copy(&backup_file, &dest).map_err(|e| format!("Failed to restore file: {}", e))?;
 
+    // Update the stored hash so the restored file is no longer flagged as
+    // modified by detect_modifications on the next update check.
+    let normalized = relative_path.replace('\\', "/");
+    if let Some(mut manifest) = file_hashes::load_hash_manifest(addons_dir, folder_name) {
+        if let Ok(new_hash) = file_hashes::hash_file(&dest) {
+            manifest.files.insert(normalized.clone(), new_hash);
+            manifest.modified_files.retain(|f| f != &normalized);
+            let _ = file_hashes::save_hash_manifest(addons_dir, &manifest);
+        }
+    }
+
     Ok(())
 }
 
@@ -165,7 +181,14 @@ fn prune_old_backups(addons_dir: &Path, folder_name: &str) {
     entries.sort_by_key(|e| e.file_name());
     let to_remove = entries.len() - MAX_BACKUPS_PER_ADDON;
     for entry in entries.into_iter().take(to_remove) {
-        let _ = fs::remove_dir_all(entry.path());
+        eprintln!(
+            "Pruning old backup for {}: {}",
+            folder_name,
+            entry.file_name().to_string_lossy()
+        );
+        if let Err(e) = fs::remove_dir_all(entry.path()) {
+            eprintln!("Warning: failed to remove old backup {:?}: {}", entry.path(), e);
+        }
     }
 }
 
@@ -228,5 +251,51 @@ mod tests {
         let result = backup_user_files(tmp.path(), "TestAddon", &[], "1.0", "2.0");
         assert!(result.is_ok());
         assert!(!backups_dir(tmp.path()).exists());
+    }
+
+    #[test]
+    fn restore_updates_hash_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_path = addons_dir.join("TestAddon");
+        std::fs::create_dir_all(&addon_path).unwrap();
+        std::fs::write(addon_path.join("init.lua"), "original content").unwrap();
+
+        // Record baseline hashes
+        crate::file_hashes::record_hashes_for_folders(
+            &addons_dir,
+            &["TestAddon".to_string()],
+            1,
+            "1.0",
+        );
+
+        // Back up the file, then overwrite it to simulate an update
+        backup_user_files(
+            &addons_dir,
+            "TestAddon",
+            &["init.lua".to_string()],
+            "1.0",
+            "2.0",
+        )
+        .unwrap();
+        std::fs::write(addon_path.join("init.lua"), "updated content").unwrap();
+
+        // Confirm detect_modifications sees the change
+        let modified = crate::file_hashes::detect_modifications(&addons_dir, "TestAddon").unwrap();
+        assert!(modified.contains(&"init.lua".to_string()));
+
+        // Restore the backup — should clear the modification flag
+        let backups = list_backups(&addons_dir, "TestAddon");
+        assert_eq!(backups.len(), 1);
+        restore_backup_file(&addons_dir, "TestAddon", &backups[0].backed_up_at, "init.lua")
+            .unwrap();
+
+        // After restore, detect_modifications should not flag init.lua
+        let modified_after = crate::file_hashes::detect_modifications(&addons_dir, "TestAddon").unwrap();
+        assert!(
+            !modified_after.contains(&"init.lua".to_string()),
+            "expected init.lua to be clean after restore, got: {:?}",
+            modified_after
+        );
     }
 }
