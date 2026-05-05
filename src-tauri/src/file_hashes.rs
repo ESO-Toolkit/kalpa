@@ -36,7 +36,7 @@ fn manifest_path(addons_dir: &Path, folder_name: &str) -> std::path::PathBuf {
     hashes_dir(addons_dir).join(format!("{}.json", folder_name))
 }
 
-pub fn hash_file(path: &Path) -> Result<String, String> {
+fn hash_file(path: &Path) -> Result<String, String> {
     let mut file =
         fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {}", e))?;
     let mut hasher = Sha256::new();
