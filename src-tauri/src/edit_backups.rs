@@ -52,6 +52,10 @@ pub fn backup_user_files(
     for rel_path in files {
         let src = addon_path.join(rel_path.replace('/', "\\"));
         if !src.exists() {
+            eprintln!(
+                "Warning: backup source not found for {}/{}, skipping: {}",
+                folder_name, rel_path, rel_path
+            );
             continue;
         }
         let dest = backup_root.join(rel_path.replace('/', "\\"));
@@ -165,7 +169,14 @@ fn prune_old_backups(addons_dir: &Path, folder_name: &str) {
     entries.sort_by_key(|e| e.file_name());
     let to_remove = entries.len() - MAX_BACKUPS_PER_ADDON;
     for entry in entries.into_iter().take(to_remove) {
-        let _ = fs::remove_dir_all(entry.path());
+        eprintln!(
+            "Pruning old backup for {}: {}",
+            folder_name,
+            entry.file_name().to_string_lossy()
+        );
+        if let Err(e) = fs::remove_dir_all(entry.path()) {
+            eprintln!("Warning: failed to remove old backup {:?}: {}", entry.path(), e);
+        }
     }
 }
 
@@ -229,4 +240,5 @@ mod tests {
         assert!(result.is_ok());
         assert!(!backups_dir(tmp.path()).exists());
     }
+
 }
