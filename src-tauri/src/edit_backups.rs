@@ -175,7 +175,11 @@ fn prune_old_backups(addons_dir: &Path, folder_name: &str) {
             entry.file_name().to_string_lossy()
         );
         if let Err(e) = fs::remove_dir_all(entry.path()) {
-            eprintln!("Warning: failed to remove old backup {:?}: {}", entry.path(), e);
+            eprintln!(
+                "Warning: failed to remove old backup {:?}: {}",
+                entry.path(),
+                e
+            );
         }
     }
 }
@@ -240,5 +244,4 @@ mod tests {
         assert!(result.is_ok());
         assert!(!backups_dir(tmp.path()).exists());
     }
-
 }

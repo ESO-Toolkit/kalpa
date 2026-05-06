@@ -2952,10 +2952,15 @@ pub fn restore_backup_safe(
                 if path.is_file() {
                     if let Some(name) = path.file_name() {
                         let dest = snapshot_path.join(name);
-                        if fs::copy(&path, &dest).is_ok() {
-                            file_count += 1;
-                            total_size += fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-                        }
+                        fs::copy(&path, &dest).map_err(|e| {
+                            format!(
+                                "Failed to copy '{}' to safety snapshot: {}. Restore aborted to prevent data loss.",
+                                path.display(),
+                                e
+                            )
+                        })?;
+                        file_count += 1;
+                        total_size += fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
                     }
                 }
             }
