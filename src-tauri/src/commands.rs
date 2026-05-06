@@ -4984,6 +4984,52 @@ pub async fn delete_saved_variables(
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
+/// Phase 0 spike: scrub a SavedVariables file with the proposed templating +
+/// heuristic pipeline and return a report. Debug builds only — gives us a way
+/// to validate the scrubber against real addons without committing to any
+/// `.esopack` v2 wire format or UI.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevScrubResult {
+    pub file_name: String,
+    pub original_bytes: usize,
+    pub scrubbed_bytes: usize,
+    pub drops: Vec<crate::saved_variables::scrub::DropEntry>,
+    pub templated_keys: Vec<crate::saved_variables::scrub::TemplateEntry>,
+    pub scrubbed_lua: String,
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_scrub_saved_variable(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+    ctx: crate::saved_variables::scrub::ScrubContext,
+) -> Result<DevScrubResult, String> {
+    validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be scrubbed.".to_string());
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || -> Result<DevScrubResult, String> {
+        let response = sv_io::read_saved_variable_blocking(&addons_dir, &file_name)?;
+        let (scrubbed, report) = crate::saved_variables::scrub::scrub(&response.tree, &ctx);
+        let scrubbed_lua = crate::saved_variables::serializer::serialize_to_lua(&scrubbed);
+        Ok(DevScrubResult {
+            file_name,
+            original_bytes: report.original_bytes,
+            scrubbed_bytes: report.scrubbed_bytes,
+            drops: report.drops,
+            templated_keys: report.templated_keys,
+            scrubbed_lua,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
 #[tauri::command]
 pub fn update_tray_tooltip(
     tray_state: tauri::State<'_, crate::TrayState>,

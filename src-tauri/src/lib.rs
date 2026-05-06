@@ -389,6 +389,8 @@ pub fn run() {
             commands::cancel_pending_update,
             commands::list_edit_backups,
             commands::restore_edit_backup,
+            #[cfg(debug_assertions)]
+            commands::dev_scrub_saved_variable,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
