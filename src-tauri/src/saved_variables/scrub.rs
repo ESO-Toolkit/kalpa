@@ -611,4 +611,311 @@ mod tests {
             .iter()
             .any(|d| matches!(d.reason, DropReason::StringValueLooksLikeAccount)));
     }
+
+    // ── Realistic-fixture report ──────────────────────────────────────────
+    //
+    // Synthetic SV files modelled after the *shape* of real popular addons.
+    // Run with:
+    //
+    //     cargo test --lib saved_variables::scrub::tests::fixture_report \
+    //         -- --nocapture --include-ignored
+    //
+    // The test is `#[ignore]` so normal CI runs stay quiet; it's intended as
+    // a hand-driven Phase 0 readout, not a regression check.
+
+    fn fixture_action_duration_reminder() -> String {
+        // Pure config: toggles, numbers, colors. Should survive almost intact.
+        r#"ActionDurationReminderSV = {
+            ["Default"] = {
+                ["@Author"] = {
+                    ["$AccountWide"] = {
+                        ["enabled"] = true,
+                        ["scale"] = 1.25,
+                        ["fadeOut"] = 0.3,
+                        ["showStackCount"] = true,
+                        ["barColor"] = { ["r"] = 0.8, ["g"] = 0.4, ["b"] = 0.2, ["a"] = 1.0 },
+                        ["frame"] = {
+                            ["x"] = 640.5,
+                            ["y"] = 480.0,
+                            ["width"] = 240,
+                            ["height"] = 32,
+                        },
+                        ["ignoredAbilities"] = {
+                            ["1"] = "Critical Surge",
+                            ["2"] = "Resolving Vigor",
+                            ["3"] = "Echoing Vigor",
+                        },
+                        ["$LastCharacterName"] = "Mainchar",
+                    },
+                },
+            },
+        }"#
+        .to_string()
+    }
+
+    fn fixture_combat_metrics(fights: usize) -> String {
+        // Typical CombatMetrics shape: lots of fight data per character.
+        let mut s = String::from(
+            "CombatMetrics_Save = {\n\
+             [\"Default\"] = {\n\
+             [\"@Author\"] = {\n\
+             [\"$AccountWide\"] = {\n\
+             [\"enabled\"] = true,\n\
+             [\"liveReport\"] = true,\n\
+             [\"theme\"] = \"dark\",\n\
+             },\n\
+             [\"Mainchar\"] = {\n\
+             [\"fightData\"] = {\n",
+        );
+        for i in 0..fights {
+            s.push_str(&format!(
+                "[{}] = {{ [\"DPSOut\"] = {}.5, [\"duration\"] = {}, [\"bossName\"] = \"Boss-{}\", [\"log\"] = \"line A\\nline B\\nline C\\nline D\\nline E\" }},\n",
+                i + 1,
+                10000 + i * 137,
+                30 + i % 60,
+                i
+            ));
+        }
+        s.push_str("},\n},\n},\n},\n}\n");
+        s
+    }
+
+    fn fixture_master_merchant(listings: usize) -> String {
+        let mut s = String::from(
+            "MasterMerchant_SavedVariables = {\n\
+             [\"Default\"] = {\n\
+             [\"@Author\"] = {\n\
+             [\"$AccountWide\"] = {\n\
+             [\"trimDecimals\"] = true,\n\
+             [\"showFullPrice\"] = true,\n\
+             [\"defaultDays\"] = 30,\n\
+             [\"SalesHistory\"] = {\n",
+        );
+        for i in 0..listings {
+            s.push_str(&format!(
+                "[{}] = {{ [\"itemLink\"] = \"|H1:item:{}:|h|h\", [\"price\"] = {}, [\"buyer\"] = \"@Buyer{}\", [\"seller\"] = \"@Author\", [\"guild\"] = \"GuildName{}\" }},\n",
+                i + 1,
+                10000 + i,
+                500 + i * 17,
+                i % 200,
+                i % 5
+            ));
+        }
+        s.push_str(
+            "},\n\
+             [\"GuildRoster\"] = { [\"GuildName0\"] = { [\"@MemberA\"] = true, [\"@MemberB\"] = true } },\n\
+             },\n},\n},\n}\n",
+        );
+        s
+    }
+
+    fn fixture_lib_histoire(events: usize) -> String {
+        let mut s = String::from(
+            "LibHistoire_SV = {\n\
+             [\"Default\"] = {\n\
+             [\"@Author\"] = {\n\
+             [\"$AccountWide\"] = {\n\
+             [\"showProgress\"] = true,\n\
+             [\"guildHistory\"] = {\n\
+             [\"GuildName0\"] = {\n",
+        );
+        for i in 0..events {
+            s.push_str(&format!(
+                "[{}] = {{ [\"type\"] = \"deposit\", [\"who\"] = \"@Friend{}\", [\"amount\"] = {}, [\"timestamp\"] = {} }},\n",
+                i + 1,
+                i % 50,
+                100 + i * 3,
+                1700000000 + i * 60
+            ));
+        }
+        s.push_str("},\n},\n},\n},\n},\n}\n");
+        s
+    }
+
+    fn fixture_p_chat(messages: usize) -> String {
+        let mut s = String::from(
+            "pChatData = {\n\
+             [\"Default\"] = {\n\
+             [\"@Author\"] = {\n\
+             [\"$AccountWide\"] = {\n\
+             [\"timestampFormat\"] = \"HH:mm\",\n\
+             [\"channelColors\"] = { [\"say\"] = \"FFFFFF\", [\"yell\"] = \"FF0000\" },\n\
+             [\"chatLogs\"] = {\n",
+        );
+        for i in 0..messages {
+            s.push_str(&format!(
+                "[{}] = {{ [\"channel\"] = \"whisper\", [\"from\"] = \"@Friend{}\", [\"text\"] = \"hello there friend, how are you doing today?\" }},\n",
+                i + 1,
+                i % 30
+            ));
+        }
+        s.push_str(
+            "},\n\
+             [\"recentWhispers\"] = { [\"1\"] = \"@A\", [\"2\"] = \"@B\" },\n\
+             },\n},\n},\n}\n",
+        );
+        s
+    }
+
+    fn realistic_ctx() -> ScrubContext {
+        ScrubContext {
+            accounts: vec!["@Author".to_string()],
+            characters: vec!["Mainchar".to_string()],
+            character_ids: vec![],
+            extra_worlds: vec![],
+        }
+    }
+
+    /// Drop-stat aggregator for the report.
+    fn run_one(name: &str, lua: String, ctx: &ScrubContext) -> (usize, usize, usize, usize) {
+        let tree = parse_sv_file(&lua, &format!("{}.lua", name)).expect("parse");
+        let original_bytes = lua.len();
+        let (_scrubbed, report) = scrub(&tree, ctx);
+
+        // Count drops by reason.
+        let mut by_block = 0usize;
+        let mut by_identity = 0usize;
+        let mut by_handle = 0usize;
+        let mut by_always = 0usize;
+        for d in &report.drops {
+            match d.reason {
+                DropReason::BlockedKeyHeuristic => by_block += d.bytes_removed,
+                DropReason::StringValueContainsIdentity => by_identity += d.bytes_removed,
+                DropReason::StringValueLooksLikeAccount => by_handle += d.bytes_removed,
+                DropReason::AlwaysDropped => by_always += d.bytes_removed,
+            }
+        }
+
+        println!("\n── {} ─────────────────────────────────────────", name);
+        println!(
+            "  raw input bytes (Lua source)       : {:>10}",
+            original_bytes
+        );
+        println!(
+            "  parsed re-serialized (baseline)    : {:>10}",
+            report.original_bytes
+        );
+        println!(
+            "  scrubbed bytes                     : {:>10}",
+            report.scrubbed_bytes
+        );
+        let pct = if report.original_bytes > 0 {
+            100.0 * report.scrubbed_bytes as f64 / report.original_bytes as f64
+        } else {
+            0.0
+        };
+        println!("  retained vs baseline               : {:>9.1}%", pct);
+        println!("  drops:");
+        println!(
+            "    blocked-key-heuristic            : {:>10} bytes",
+            by_block
+        );
+        println!(
+            "    string-value-contains-identity   : {:>10} bytes",
+            by_identity
+        );
+        println!(
+            "    string-value-looks-like-account  : {:>10} bytes",
+            by_handle
+        );
+        println!(
+            "    always-dropped                   : {:>10} bytes",
+            by_always
+        );
+        println!(
+            "  templated keys                     : {:>10}",
+            report.templated_keys.len()
+        );
+        println!(
+            "  drop entries                       : {:>10}",
+            report.drops.len()
+        );
+
+        (
+            original_bytes,
+            report.original_bytes,
+            report.scrubbed_bytes,
+            report.drops.len(),
+        )
+    }
+
+    #[test]
+    #[ignore = "fixture report — run explicitly with --include-ignored --nocapture"]
+    fn fixture_report() {
+        let ctx = realistic_ctx();
+
+        println!("\n=== Phase 0 scrub fixture report ===");
+
+        // 1) Pure-config addon: should be tiny and almost fully retained.
+        let (raw_a, base_a, post_a, _) = run_one(
+            "ActionDurationReminder",
+            fixture_action_duration_reminder(),
+            &ctx,
+        );
+        // 2) Combat log heavy.
+        let (raw_b, base_b, post_b, _) = run_one(
+            "CombatMetrics (500 fights)",
+            fixture_combat_metrics(500),
+            &ctx,
+        );
+        // 3) Sales history heavy.
+        let (raw_c, base_c, post_c, _) = run_one(
+            "MasterMerchant (2000 listings)",
+            fixture_master_merchant(2000),
+            &ctx,
+        );
+        // 4) Guild history heavy.
+        let (raw_d, base_d, post_d, _) = run_one(
+            "LibHistoire (3000 events)",
+            fixture_lib_histoire(3000),
+            &ctx,
+        );
+        // 5) Chat log heavy.
+        let (raw_e, base_e, post_e, _) =
+            run_one("pChat (2000 messages)", fixture_p_chat(2000), &ctx);
+
+        println!("\n=== Summary ===");
+        println!(
+            "{:<32} {:>10} {:>10} {:>10} {:>8}",
+            "fixture", "raw", "baseline", "scrubbed", "kept%"
+        );
+        for (name, raw, base, post) in [
+            ("ActionDurationReminder", raw_a, base_a, post_a),
+            ("CombatMetrics", raw_b, base_b, post_b),
+            ("MasterMerchant", raw_c, base_c, post_c),
+            ("LibHistoire", raw_d, base_d, post_d),
+            ("pChat", raw_e, base_e, post_e),
+        ] {
+            let pct = if base > 0 {
+                100.0 * post as f64 / base as f64
+            } else {
+                0.0
+            };
+            println!(
+                "{:<32} {:>10} {:>10} {:>10} {:>7.1}%",
+                name, raw, base, post, pct
+            );
+        }
+
+        // Sanity: heavy fixtures should be heavily stripped; the config-only
+        // fixture should be mostly retained (above 30% — it loses identity
+        // keys but not real config).
+        assert!(
+            post_a as f64 / base_a as f64 > 0.3,
+            "config-only addon should retain >30% after scrub"
+        );
+        for (label, base, post) in [
+            ("CombatMetrics", base_b, post_b),
+            ("MasterMerchant", base_c, post_c),
+            ("LibHistoire", base_d, post_d),
+            ("pChat", base_e, post_e),
+        ] {
+            assert!(
+                (post as f64 / base as f64) < 0.2,
+                "{} should be reduced below 20% (got {:.1}%)",
+                label,
+                100.0 * post as f64 / base as f64
+            );
+        }
+    }
 }
