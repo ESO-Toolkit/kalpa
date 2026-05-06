@@ -329,7 +329,6 @@ pub fn run() {
             commands::check_api_compatibility,
             commands::list_backups,
             commands::create_backup,
-            commands::restore_backup,
             commands::restore_backup_safe,
             commands::get_backups_folder_path,
             commands::delete_backup,

@@ -397,7 +397,7 @@ export function Settings({
               >
                 <ToolItem
                   icon={Archive}
-                  label="Backup &amp; Restore"
+                  label="Backup & Restore"
                   description="Save and recover your addon settings"
                   onClick={onShowBackups}
                 />

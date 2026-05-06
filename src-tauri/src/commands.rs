@@ -82,8 +82,23 @@ fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Name cannot be empty.".to_string());
     }
+
+    // Reject path traversal and separators.
     if name.contains("..") || name.contains('/') || name.contains('\\') {
         return Err("Name contains invalid characters.".to_string());
+    }
+
+    // Reject characters forbidden in Windows file/folder names.
+    let forbidden: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+    if name.contains(forbidden) {
+        return Err(
+            "Name contains a forbidden character (< > : \" | ? * are not allowed).".to_string(),
+        );
+    }
+
+    // Reject trailing dots and spaces (silently stripped by Windows, causing mismatches).
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err("Name must not end with a dot or space.".to_string());
     }
 
     // Reject Windows reserved device names (case-insensitive).
@@ -2853,60 +2868,39 @@ pub fn create_backup(
     })
 }
 
-#[tauri::command]
-pub fn restore_backup(
-    state: tauri::State<'_, AllowedAddonsPath>,
-    addons_path: String,
-    backup_name: String,
-) -> Result<u32, String> {
-    validate_name(&backup_name)?;
-    let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let sv_dir = saved_variables_dir(&addons_dir);
-    let backup_path = backups_dir(&addons_dir).join(&backup_name);
-
-    if !backup_path.is_dir() {
-        return Err(format!("Backup '{}' not found.", backup_name));
-    }
-
-    fs::create_dir_all(&sv_dir)
-        .map_err(|e| format!("Failed to create SavedVariables folder: {}", e))?;
-
-    let mut restored: u32 = 0;
-    let mut failed: Vec<String> = Vec::new();
-    let entries =
-        fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {}", e))?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name() {
-                let dest = sv_dir.join(name);
-                match fs::copy(&path, &dest) {
-                    Ok(_) => restored += 1,
-                    Err(e) => {
-                        failed.push(format!("{}: {}", name.to_string_lossy(), e));
-                    }
-                }
-            }
-        }
-    }
-
-    if !failed.is_empty() {
-        return Err(format!(
-            "Restore incomplete — {} file(s) failed to copy: {}",
-            failed.len(),
-            failed.join(", ")
-        ));
-    }
-
-    Ok(restored)
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafeRestoreResult {
     pub restored_files: u32,
     pub safety_snapshot: Option<BackupInfo>,
+}
+
+/// Remove oldest `auto-before-restore-*` snapshots, keeping at most `keep` of the most recent.
+/// Errors are logged but do not fail the caller — pruning is best-effort.
+fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
+    let prefix = "auto-before-restore-";
+    let mut dirs: Vec<_> = match fs::read_dir(backups_dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix) && e.path().is_dir())
+            .collect(),
+        Err(_) => return,
+    };
+    if dirs.len() <= keep {
+        return;
+    }
+    // Sort by name ascending (names embed epoch timestamps, so lexicographic == chronological).
+    dirs.sort_by_key(|e| e.file_name());
+    let to_remove = dirs.len() - keep;
+    for entry in dirs.into_iter().take(to_remove) {
+        if let Err(e) = fs::remove_dir_all(entry.path()) {
+            eprintln!(
+                "Warning: failed to remove old auto-snapshot {:?}: {}",
+                entry.path(),
+                e
+            );
+        }
+    }
 }
 
 /// Restore a backup, but first capture the user's current SavedVariables into a
@@ -2973,6 +2967,10 @@ pub fn restore_backup_safe(
                 total_size,
                 kind: BackupKind::AutoBeforeRestore,
             });
+
+            // Keep only the 3 most recent auto-before-restore snapshots to prevent
+            // unbounded disk growth (SavedVariables can reach 1-2 GB on trade-addon-heavy accounts).
+            prune_auto_snapshots(&backups_dir(&addons_dir), 3);
         }
     }
 
@@ -3000,10 +2998,18 @@ pub fn restore_backup_safe(
     }
 
     if !failed.is_empty() {
+        let snap_note = match &safety_snapshot {
+            Some(snap) => format!(
+                " Your previous settings were saved as a safety snapshot (\"{}\") and can be restored to undo.",
+                snap.name
+            ),
+            None => String::new(),
+        };
         return Err(format!(
-            "Restore incomplete — {} file(s) failed to copy: {}",
+            "Restore incomplete — {} file(s) failed to copy: {}{}",
             failed.len(),
-            failed.join(", ")
+            failed.join(", "),
+            snap_note
         ));
     }
 

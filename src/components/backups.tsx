@@ -121,7 +121,11 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
   }, []);
 
   const latest = useMemo(() => {
-    return [...backups].sort((a, b) => b.createdAtEpoch - a.createdAtEpoch)[0] ?? null;
+    return (
+      [...backups]
+        .filter((b) => b.kind !== "autoBeforeRestore")
+        .sort((a, b) => b.createdAtEpoch - a.createdAtEpoch)[0] ?? null
+    );
   }, [backups]);
 
   const protection = computeProtection(latest);
@@ -156,7 +160,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
       });
       const snap = result.safetySnapshot;
       const undoNote = snap
-        ? ` Your previous settings were saved as "${snap.name}" — restore it to undo.`
+        ? " Your previous settings were saved as a safety snapshot — look for it in the list to undo."
         : "";
       toast.success(
         `Restored ${result.restoredFiles} file${result.restoredFiles === 1 ? "" : "s"}.${undoNote}`,
@@ -201,7 +205,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Backup &amp; Restore</DialogTitle>
+          <DialogTitle>Backup & Restore</DialogTitle>
           <DialogDescription>
             Save a copy of your addon settings so you can recover them if something goes wrong, or
             move them to a new PC.
@@ -327,13 +331,10 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
                     backup={b}
                     isLatest={latest?.name === b.name}
                     isRestoring={restoring === b.name}
-                    confirmingRestore={confirmRestore?.name === b.name}
                     confirmingDelete={confirmDelete === b.name}
                     onAskRestore={() => setConfirmRestore(b)}
                     onAskDelete={() => setConfirmDelete(b.name)}
-                    onCancelRestore={() => setConfirmRestore(null)}
                     onCancelDelete={() => setConfirmDelete(null)}
-                    onConfirmRestore={() => handleRestore(b)}
                     onConfirmDelete={() => handleDelete(b.name)}
                     deleting={deleting}
                     anyRestoring={restoring !== null}
@@ -450,13 +451,10 @@ function BackupRow({
   backup: BackupInfo;
   isLatest: boolean;
   isRestoring: boolean;
-  confirmingRestore: boolean;
   confirmingDelete: boolean;
   onAskRestore: () => void;
   onAskDelete: () => void;
-  onCancelRestore: () => void;
   onCancelDelete: () => void;
-  onConfirmRestore: () => void;
   onConfirmDelete: () => void;
   deleting: boolean;
   anyRestoring: boolean;
