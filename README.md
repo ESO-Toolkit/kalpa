@@ -66,9 +66,10 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Enable/disable** — profiles toggle addons on and off without uninstalling them
 
 ### Backups and Characters
-- **Full backups** — back up all SavedVariables with custom naming
+- **Full backups** — back up all SavedVariables with one click; custom label is optional
 - **Character-specific backups** — back up settings for individual characters
-- **Restore** — restore any backup to get your settings back
+- **Safe restore** — automatic safety snapshot taken before every restore so you can always undo
+- **Protection status** — at-a-glance indicator shows when you last backed up and whether you're covered
 - **Character management** — view all characters grouped by server (NA/EU)
 
 ### SavedVariables Manager
