@@ -103,11 +103,20 @@ export interface ApiCompatInfo {
   upToDateAddons: string[];
 }
 
+export type BackupKind = "manual" | "autoBeforeRestore" | "character";
+
 export interface BackupInfo {
   name: string;
   createdAt: string;
+  createdAtEpoch: number;
   fileCount: number;
   totalSize: number;
+  kind: BackupKind;
+}
+
+export interface SafeRestoreResult {
+  restoredFiles: number;
+  safetySnapshot: BackupInfo | null;
 }
 
 export interface AddonProfile {

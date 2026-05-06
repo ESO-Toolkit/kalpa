@@ -82,8 +82,23 @@ fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Name cannot be empty.".to_string());
     }
+
+    // Reject path traversal and separators.
     if name.contains("..") || name.contains('/') || name.contains('\\') {
         return Err("Name contains invalid characters.".to_string());
+    }
+
+    // Reject characters forbidden in Windows file/folder names.
+    let forbidden: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+    if name.contains(forbidden) {
+        return Err(
+            "Name contains a forbidden character (< > : \" | ? * are not allowed).".to_string(),
+        );
+    }
+
+    // Reject trailing dots and spaces (silently stripped by Windows, causing mismatches).
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err("Name must not end with a dot or space.".to_string());
     }
 
     // Reject Windows reserved device names (case-insensitive).
@@ -2678,8 +2693,18 @@ pub fn check_api_compatibility(
 pub struct BackupInfo {
     pub name: String,
     pub created_at: String,
+    pub created_at_epoch: u64,
     pub file_count: u32,
     pub total_size: u64,
+    pub kind: BackupKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupKind {
+    Manual,
+    AutoBeforeRestore,
+    Character,
 }
 
 use crate::saved_variables::io as sv_io;
@@ -2731,26 +2756,35 @@ pub fn list_backups(
         }
 
         // Extract timestamp from folder name or use modification time
-        let created_at = fs::metadata(&path)
+        let created_at_epoch = fs::metadata(&path)
             .and_then(|m| m.modified())
             .map(|t| {
-                let secs = t
-                    .duration_since(std::time::UNIX_EPOCH)
+                t.duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs();
-                metadata::format_timestamp(secs)
+                    .as_secs()
             })
-            .unwrap_or_default();
+            .unwrap_or(0);
+        let created_at = metadata::format_timestamp(created_at_epoch);
+
+        let kind = if name.starts_with("char-") {
+            BackupKind::Character
+        } else if name.starts_with("auto-before-restore-") {
+            BackupKind::AutoBeforeRestore
+        } else {
+            BackupKind::Manual
+        };
 
         results.push(BackupInfo {
             name,
             created_at,
+            created_at_epoch,
             file_count,
             total_size,
+            kind,
         });
     }
 
-    results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    results.sort_by_key(|b| std::cmp::Reverse(b.created_at_epoch));
     Ok(results)
 }
 
@@ -2810,27 +2844,74 @@ pub fn create_backup(
         ));
     }
 
-    let created_at = metadata::format_timestamp(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    );
+    let created_at_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let created_at = metadata::format_timestamp(created_at_epoch);
+
+    let kind = if backup_name.starts_with("char-") {
+        BackupKind::Character
+    } else if backup_name.starts_with("auto-before-restore-") {
+        BackupKind::AutoBeforeRestore
+    } else {
+        BackupKind::Manual
+    };
 
     Ok(BackupInfo {
         name: backup_name,
         created_at,
+        created_at_epoch,
         file_count,
         total_size,
+        kind,
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeRestoreResult {
+    pub restored_files: u32,
+    pub safety_snapshot: Option<BackupInfo>,
+}
+
+/// Remove oldest `auto-before-restore-*` snapshots, keeping at most `keep` of the most recent.
+/// Errors are logged but do not fail the caller — pruning is best-effort.
+fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
+    let prefix = "auto-before-restore-";
+    let mut dirs: Vec<_> = match fs::read_dir(backups_dir) {
+        Ok(rd) => rd
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix) && e.path().is_dir())
+            .collect(),
+        Err(_) => return,
+    };
+    if dirs.len() <= keep {
+        return;
+    }
+    // Sort by name ascending (names embed epoch timestamps, so lexicographic == chronological).
+    dirs.sort_by_key(|e| e.file_name());
+    let to_remove = dirs.len() - keep;
+    for entry in dirs.into_iter().take(to_remove) {
+        if let Err(e) = fs::remove_dir_all(entry.path()) {
+            eprintln!(
+                "Warning: failed to remove old auto-snapshot {:?}: {}",
+                entry.path(),
+                e
+            );
+        }
+    }
+}
+
+/// Restore a backup, but first capture the user's current SavedVariables into a
+/// timestamped "auto-before-restore-…" snapshot so the restore can be undone.
+/// If the user has no current SavedVariables, the snapshot step is skipped.
 #[tauri::command]
-pub fn restore_backup(
+pub fn restore_backup_safe(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     backup_name: String,
-) -> Result<u32, String> {
+) -> Result<SafeRestoreResult, String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let sv_dir = saved_variables_dir(&addons_dir);
@@ -2838,6 +2919,59 @@ pub fn restore_backup(
 
     if !backup_path.is_dir() {
         return Err(format!("Backup '{}' not found.", backup_name));
+    }
+
+    let mut safety_snapshot: Option<BackupInfo> = None;
+
+    if sv_dir.is_dir() {
+        let has_files = fs::read_dir(&sv_dir)
+            .map(|mut it| it.any(|e| e.as_ref().map(|e| e.path().is_file()).unwrap_or(false)))
+            .unwrap_or(false);
+        if has_files {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let snapshot_name = format!("auto-before-restore-{}", now);
+            let snapshot_path = backups_dir(&addons_dir).join(&snapshot_name);
+            fs::create_dir_all(&snapshot_path)
+                .map_err(|e| format!("Failed to create safety snapshot folder: {}", e))?;
+
+            let mut file_count: u32 = 0;
+            let mut total_size: u64 = 0;
+            let entries = fs::read_dir(&sv_dir)
+                .map_err(|e| format!("Failed to read SavedVariables: {}", e))?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(name) = path.file_name() {
+                        let dest = snapshot_path.join(name);
+                        fs::copy(&path, &dest).map_err(|e| {
+                            format!(
+                                "Failed to copy '{}' to safety snapshot: {}. Restore aborted to prevent data loss.",
+                                path.display(),
+                                e
+                            )
+                        })?;
+                        file_count += 1;
+                        total_size += fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                    }
+                }
+            }
+
+            safety_snapshot = Some(BackupInfo {
+                name: snapshot_name,
+                created_at: metadata::format_timestamp(now),
+                created_at_epoch: now,
+                file_count,
+                total_size,
+                kind: BackupKind::AutoBeforeRestore,
+            });
+
+            // Keep only the 3 most recent auto-before-restore snapshots to prevent
+            // unbounded disk growth (SavedVariables can reach 1-2 GB on trade-addon-heavy accounts).
+            prune_auto_snapshots(&backups_dir(&addons_dir), 3);
+        }
     }
 
     fs::create_dir_all(&sv_dir)
@@ -2864,14 +2998,37 @@ pub fn restore_backup(
     }
 
     if !failed.is_empty() {
+        let snap_note = match &safety_snapshot {
+            Some(snap) => format!(
+                " Your previous settings were saved as a safety snapshot (\"{}\") and can be restored to undo.",
+                snap.name
+            ),
+            None => String::new(),
+        };
         return Err(format!(
-            "Restore incomplete — {} file(s) failed to copy: {}",
+            "Restore incomplete — {} file(s) failed to copy: {}{}",
             failed.len(),
-            failed.join(", ")
+            failed.join(", "),
+            snap_note
         ));
     }
 
-    Ok(restored)
+    Ok(SafeRestoreResult {
+        restored_files: restored,
+        safety_snapshot,
+    })
+}
+
+/// Return the absolute path to the kalpa-backups folder so the UI can reveal it.
+#[tauri::command]
+pub fn get_backups_folder_path(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<String, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let path = backups_dir(&addons_dir);
+    fs::create_dir_all(&path).map_err(|e| format!("Failed to create backups folder: {}", e))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
