@@ -6,7 +6,7 @@
 //!
 //! Currently surfaced only via a debug-only Tauri command
 //! (`dev_scrub_saved_variable`); production export/import wiring lands in a
-//! later change.
+//! later change. Remove the module-level `dead_code` allow then.
 //!
 //! Current rules (intentionally conservative):
 //!
@@ -26,6 +26,8 @@
 //!   benign.
 //! * **Self-mapping helper keys are dropped.** `$LastCharacterName` and
 //!   similar helpers are author-local and meaningless on import.
+
+#![cfg_attr(not(debug_assertions), allow(dead_code))]
 
 use super::serializer::serialize_to_lua;
 use super::types::{SvTreeNode, SvValueType};
@@ -282,30 +284,38 @@ fn string_contains_identity(s: &str, ctx: &ScrubContext) -> bool {
     false
 }
 
-/// Walk a parsed SV tree and infer the exporter's identities from the keys
-/// that appear at the canonical ESO depths.
+/// Walk a parsed SV tree and infer the exporter's identities by recognising
+/// the canonical SavedVariables shape ESO produces.
 ///
-/// Structure ESO produces:
 /// ```text
-/// MyAddon_SV = {
-///     ["Default"] = {                    -- depth 1
-///         ["@AccountHandle"] = {         -- depth 2 (account key)
-///             ["NA Megaserver"] = {      -- depth 3 (optional world layer)
-///                 ["@AccountHandle"] = { -- depth 4 in that case
-///                     ["$AccountWide"] = ...
-///                     ["CharacterName"] = ...   -- character keys
-///                 },
-///             },
-///             ["$AccountWide"] = ...
-///             ["CharacterName"] = ...
+/// MyAddon_SV = {                         -- depth 1
+///     ["Default"] = {                    -- depth 2
+///         ["@AccountHandle"] = {         -- depth 3 (account key)
+///             ["$AccountWide"] = ...     -- depth 4 (marker)
+///             ["CharacterName"] = ...    -- depth 4 (character)
 ///         },
 ///     },
 /// }
 /// ```
-/// The detector recognises `@Handle`, `$AccountWide`, world names from
-/// `WELL_KNOWN_WORLDS`, and treats anything sitting at the per-character
-/// depth that *isn't* a recognised marker as a character name (or character
-/// ID if it's all digits).
+///
+/// or, when the addon stores per-server data (`ZO_SavedVars:NewAccountWide`
+/// with `GetWorldName()` passed in):
+///
+/// ```text
+/// MyAddon_SV = {
+///     ["Default"] = {
+///         ["NA Megaserver"] = {          -- depth 3 (world layer)
+///             ["@AccountHandle"] = {     -- depth 4
+///                 ["$AccountWide"] = ... -- depth 5
+///                 ["CharacterName"] = ...
+///             },
+///         },
+///     },
+/// }
+/// ```
+///
+/// Anything outside this shape is treated as addon config and not inspected,
+/// so config keys are never mis-detected as identities.
 pub fn detect_identities_from_tree(tree: &SvTreeNode) -> ScrubContext {
     let mut acc = DetectAcc::default();
 
@@ -1181,6 +1191,110 @@ mod tests {
                 label,
                 100.0 * post as f64 / base as f64
             );
+        }
+    }
+
+    // ── Real-file scrubber ────────────────────────────────────────────────
+    //
+    // Hand-driven helper for validating the scrubber against an actual
+    // SavedVariables file without needing the Tauri app. Accepts a path
+    // through the `KALPA_SCRUB_PATH` env var, runs identity auto-detection
+    // + scrub, prints a report, and (optionally) writes the scrubbed Lua
+    // to `KALPA_SCRUB_OUT` so a human can diff it against the original.
+    //
+    //   KALPA_SCRUB_PATH=/path/to/SavedVariables/ActionDurationReminder.lua \
+    //   KALPA_SCRUB_OUT=/tmp/adr.scrubbed.lua \
+    //   cargo test --lib \
+    //     saved_variables::scrub::tests::real_file_scrub \
+    //     -- --include-ignored --nocapture
+    //
+    // No assertions beyond "the file parses" — the human reads the report.
+
+    #[test]
+    #[ignore = "real-file scrub helper — set KALPA_SCRUB_PATH and run with --include-ignored"]
+    fn real_file_scrub() {
+        let path = match std::env::var("KALPA_SCRUB_PATH") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("Set KALPA_SCRUB_PATH to a SavedVariables .lua file path and re-run.");
+                return;
+            }
+        };
+
+        let content =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
+        let file_name = std::path::Path::new(&path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown.lua".to_string());
+
+        let tree = parse_sv_file(&content, &file_name)
+            .unwrap_or_else(|e| panic!("parse {}: {}", file_name, e));
+
+        let detected = detect_identities_from_tree(&tree);
+        println!("\n── Detected identities ──────────────────────────────────────");
+        println!("  accounts        : {:?}", detected.accounts);
+        println!("  characters      : {:?}", detected.characters);
+        println!("  character_ids   : {:?}", detected.character_ids);
+        println!("  extra_worlds    : {:?}", detected.extra_worlds);
+
+        let (scrubbed, report) = scrub(&tree, &detected);
+        let scrubbed_lua = serialize_to_lua(&scrubbed);
+
+        println!("\n── Scrub report ────────────────────────────────────────────");
+        println!("  file                 : {}", file_name);
+        println!("  raw input bytes      : {:>12}", content.len());
+        println!("  parsed → reserialized: {:>12}", report.original_bytes);
+        println!("  scrubbed bytes       : {:>12}", report.scrubbed_bytes);
+        if report.original_bytes > 0 {
+            let pct = 100.0 * report.scrubbed_bytes as f64 / report.original_bytes as f64;
+            println!("  retained vs baseline : {:>11.2}%", pct);
+        }
+        println!(
+            "  templated keys       : {:>12}",
+            report.templated_keys.len()
+        );
+        println!("  drops                : {:>12}", report.drops.len());
+
+        // Drop breakdown by reason.
+        let mut by_reason: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        for d in &report.drops {
+            let reason_key = match d.reason {
+                DropReason::BlockedKeyHeuristic => "blocked-key-heuristic",
+                DropReason::AlwaysDropped => "always-dropped",
+                DropReason::StringValueContainsIdentity => "string-value-contains-identity",
+                DropReason::StringValueLooksLikeAccount => "string-value-looks-like-account",
+            }
+            .to_string();
+            let entry = by_reason.entry(reason_key).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += d.bytes_removed;
+        }
+
+        println!("\n── Drop breakdown by reason ────────────────────────────────");
+        for (reason, (count, bytes)) in &by_reason {
+            println!("  {:<35} {:>6} drops, {:>10} bytes", reason, count, bytes);
+        }
+
+        // First few drop paths for spot-checking.
+        let preview = report.drops.iter().take(15);
+        if preview.clone().count() > 0 {
+            println!("\n── First 15 dropped paths ──────────────────────────────────");
+            for d in preview {
+                println!(
+                    "  [{:>10} bytes] {:?}  ({:?})",
+                    d.bytes_removed, d.path, d.reason
+                );
+            }
+            if report.drops.len() > 15 {
+                println!("  ...and {} more", report.drops.len() - 15);
+            }
+        }
+
+        if let Ok(out_path) = std::env::var("KALPA_SCRUB_OUT") {
+            std::fs::write(&out_path, &scrubbed_lua)
+                .unwrap_or_else(|e| panic!("write {}: {}", out_path, e));
+            println!("\nScrubbed Lua written to: {}", out_path);
         }
     }
 }
