@@ -4984,10 +4984,12 @@ pub async fn delete_saved_variables(
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
-/// Phase 0 spike: scrub a SavedVariables file with the proposed templating +
-/// heuristic pipeline and return a report. Debug builds only — gives us a way
-/// to validate the scrubber against real addons without committing to any
-/// `.esopack` v2 wire format or UI.
+/// Scrub a SavedVariables file with the templating + heuristic pipeline and
+/// return a report. Debug builds only — used to validate the scrubber against
+/// real addons before the production export/import flow ships.
+///
+/// If `ctx` is the default (no accounts/characters supplied), the command
+/// auto-detects identities from the parsed tree.
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -4995,6 +4997,7 @@ pub struct DevScrubResult {
     pub file_name: String,
     pub original_bytes: usize,
     pub scrubbed_bytes: usize,
+    pub detected_context: crate::saved_variables::scrub::ScrubContext,
     pub drops: Vec<crate::saved_variables::scrub::DropEntry>,
     pub templated_keys: Vec<crate::saved_variables::scrub::TemplateEntry>,
     pub scrubbed_lua: String,
@@ -5006,7 +5009,7 @@ pub async fn dev_scrub_saved_variable(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     file_name: String,
-    ctx: crate::saved_variables::scrub::ScrubContext,
+    ctx: Option<crate::saved_variables::scrub::ScrubContext>,
 ) -> Result<DevScrubResult, String> {
     validate_name(&file_name)?;
     if !file_name.ends_with(".lua") {
@@ -5015,12 +5018,17 @@ pub async fn dev_scrub_saved_variable(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || -> Result<DevScrubResult, String> {
         let response = sv_io::read_saved_variable_blocking(&addons_dir, &file_name)?;
-        let (scrubbed, report) = crate::saved_variables::scrub::scrub(&response.tree, &ctx);
+        let effective_ctx = ctx.unwrap_or_else(|| {
+            crate::saved_variables::scrub::detect_identities_from_tree(&response.tree)
+        });
+        let (scrubbed, report) =
+            crate::saved_variables::scrub::scrub(&response.tree, &effective_ctx);
         let scrubbed_lua = crate::saved_variables::serializer::serialize_to_lua(&scrubbed);
         Ok(DevScrubResult {
             file_name,
             original_bytes: report.original_bytes,
             scrubbed_bytes: report.scrubbed_bytes,
+            detected_context: effective_ctx,
             drops: report.drops,
             templated_keys: report.templated_keys,
             scrubbed_lua,

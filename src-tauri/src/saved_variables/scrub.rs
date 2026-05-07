@@ -1,12 +1,12 @@
-//! Phase 0 spike: identity templating + heuristic value scrubbing for
-//! SavedVariables trees.
+//! Identity templating + heuristic value scrubbing for SavedVariables trees.
 //!
-//! Goal: validate whether a generic scrub pass produces output that is
-//! (a) small enough to share over the existing pack channel and
-//! (b) free of obvious account/character/social data
-//! before committing to a `.esopack` v2 wire format or any UI work.
+//! Used as the foundation for `.esopack` v2 settings export: takes a parsed
+//! SV tree plus the exporter's identities and returns a templated, scrubbed
+//! copy alongside a report listing every drop and substitution.
 //!
-//! Not wired into export yet — exposed only via a debug-only Tauri command.
+//! Currently surfaced only via a debug-only Tauri command
+//! (`dev_scrub_saved_variable`); production export/import wiring lands in a
+//! later change.
 //!
 //! Current rules (intentionally conservative):
 //!
@@ -19,9 +19,11 @@
 //!   `${CHAR_ID:N}`, `${WORLD}`).
 //! * **Identity-bearing string values are dropped, not templated.** Some
 //!   addons store account/character names in string values as legitimate
-//!   config (allowlists, ignore lists). Substituting an importer's identity
-//!   would silently change behaviour, so we drop those leaves and record
-//!   them in the report.
+//!   config (allowlists). Substituting an importer's identity would silently
+//!   change behaviour, so we drop those leaves and record them in the report.
+//!   The `@Handle` shape is detected on its own, so player ignore/whisper
+//!   lists holding handles are caught even when their containing key looks
+//!   benign.
 //! * **Self-mapping helper keys are dropped.** `$LastCharacterName` and
 //!   similar helpers are author-local and meaningless on import.
 
@@ -61,7 +63,10 @@ const BLOCKED_KEY_SUBSTRINGS: &[&str] = &[
     "mail",
     "friend",
     "whisper",
-    "ignore",
+    // NB: "ignore" is intentionally absent. The fixture run showed it
+    // collides with legitimate ability-ignore-list config (e.g. ADR's
+    // `ignoredAbilities`); player-ignore lists are caught by the
+    // `@Handle`-in-string-value rule when they actually hold handles.
     "sales",
     "history",
     "purchase",
@@ -275,6 +280,138 @@ fn string_contains_identity(s: &str, ctx: &ScrubContext) -> bool {
         }
     }
     false
+}
+
+/// Walk a parsed SV tree and infer the exporter's identities from the keys
+/// that appear at the canonical ESO depths.
+///
+/// Structure ESO produces:
+/// ```text
+/// MyAddon_SV = {
+///     ["Default"] = {                    -- depth 1
+///         ["@AccountHandle"] = {         -- depth 2 (account key)
+///             ["NA Megaserver"] = {      -- depth 3 (optional world layer)
+///                 ["@AccountHandle"] = { -- depth 4 in that case
+///                     ["$AccountWide"] = ...
+///                     ["CharacterName"] = ...   -- character keys
+///                 },
+///             },
+///             ["$AccountWide"] = ...
+///             ["CharacterName"] = ...
+///         },
+///     },
+/// }
+/// ```
+/// The detector recognises `@Handle`, `$AccountWide`, world names from
+/// `WELL_KNOWN_WORLDS`, and treats anything sitting at the per-character
+/// depth that *isn't* a recognised marker as a character name (or character
+/// ID if it's all digits).
+pub fn detect_identities_from_tree(tree: &SvTreeNode) -> ScrubContext {
+    let mut acc = DetectAcc::default();
+
+    // Find the SavedVariables layer-by-layer.
+    //
+    // root → top-level addon var → "Default" → (world?) → "@Account" →
+    //   ("$AccountWide" | character key)
+    //
+    // Anything outside that chain is addon config and should not be inspected.
+
+    if let Some(top_levels) = tree_children(tree) {
+        for top in top_levels {
+            if let Some(default_children) = direct_child(top, "Default") {
+                for layer in default_children {
+                    classify_under_default(layer, &mut acc);
+                }
+            }
+        }
+    }
+
+    acc.into_context()
+}
+
+#[derive(Default)]
+struct DetectAcc {
+    accounts: std::collections::BTreeSet<String>,
+    characters: std::collections::BTreeSet<String>,
+    character_ids: std::collections::BTreeSet<String>,
+    extra_worlds: std::collections::BTreeSet<String>,
+}
+
+impl DetectAcc {
+    fn into_context(self) -> ScrubContext {
+        ScrubContext {
+            accounts: self.accounts.into_iter().collect(),
+            characters: self.characters.into_iter().collect(),
+            character_ids: self.character_ids.into_iter().collect(),
+            extra_worlds: self.extra_worlds.into_iter().collect(),
+        }
+    }
+}
+
+fn tree_children(node: &SvTreeNode) -> Option<&Vec<SvTreeNode>> {
+    if !matches!(node.value_type, SvValueType::Table) {
+        return None;
+    }
+    node.children.as_ref()
+}
+
+/// Return the children of the named child, if it exists and is a table.
+fn direct_child<'a>(node: &'a SvTreeNode, key: &str) -> Option<&'a Vec<SvTreeNode>> {
+    let children = tree_children(node)?;
+    let target = children.iter().find(|c| c.key == key)?;
+    tree_children(target)
+}
+
+/// `node` is something sitting directly under `Default` — either a world
+/// layer or an account handle.
+fn classify_under_default(node: &SvTreeNode, acc: &mut DetectAcc) {
+    let key = node.key.as_str();
+    if key.starts_with('@') {
+        acc.accounts.insert(key.to_string());
+        if let Some(children) = tree_children(node) {
+            for child in children {
+                classify_under_account(child, acc);
+            }
+        }
+    } else if WELL_KNOWN_WORLDS.contains(&key) || key.contains(' ') {
+        // World layer (well-known or unfamiliar). Anything below should be
+        // accounts; their children are characters.
+        if !WELL_KNOWN_WORLDS.contains(&key) {
+            acc.extra_worlds.insert(key.to_string());
+        }
+        if let Some(children) = tree_children(node) {
+            for child in children {
+                if child.key.starts_with('@') {
+                    acc.accounts.insert(child.key.clone());
+                    if let Some(grand) = tree_children(child) {
+                        for g in grand {
+                            classify_under_account(g, acc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `node` is something sitting directly under an account handle. ESO uses
+/// either `$AccountWide` (account-wide subtable) or a character name / ID
+/// here.
+fn classify_under_account(node: &SvTreeNode, acc: &mut DetectAcc) {
+    let key = node.key.as_str();
+    if key.starts_with('$') {
+        // $AccountWide and friends — markers, not identities.
+        return;
+    }
+    if !key.is_empty() && key.bytes().all(|b| b.is_ascii_digit()) {
+        if key.len() >= 10 {
+            acc.character_ids.insert(key.to_string());
+        }
+        return;
+    }
+    if !key.is_empty() {
+        acc.characters.insert(key.to_string());
+    }
 }
 
 /// Recursive worker. Returns `Some(node)` if the node survives, `None` if it
@@ -610,6 +747,134 @@ mod tests {
             .drops
             .iter()
             .any(|d| matches!(d.reason, DropReason::StringValueLooksLikeAccount)));
+    }
+
+    #[test]
+    fn ignored_abilities_config_survives() {
+        // Regression: the fixture run showed that a generic "ignore" blocklist
+        // entry nukes legitimate ability-ignore-list config (ADR's
+        // `ignoredAbilities`). That entry has been removed; the @-handle
+        // string-value heuristic still catches social ignore lists that
+        // actually hold handles.
+        let tree = parse(
+            r#"ADR_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = {
+                            ["ignoredAbilities"] = {
+                                ["1"] = "Critical Surge",
+                                ["2"] = "Resolving Vigor",
+                            },
+                        },
+                    },
+                },
+            }"#,
+        );
+        let (out, _) = scrub(&tree, &ctx());
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            serialized.contains("ignoredAbilities"),
+            "ability ignore list should not be dropped: {}",
+            serialized
+        );
+        assert!(serialized.contains("Critical Surge"));
+    }
+
+    #[test]
+    fn ignore_list_holding_handles_still_drops_the_handles() {
+        // Player ignore lists are typically `@Handle` strings, which the
+        // string-value heuristic catches even when the surrounding key
+        // doesn't trigger any rule.
+        let tree = parse(
+            r#"SocialAddon_SV = {
+                ["ignoreList"] = {
+                    ["1"] = "@SomeJerk",
+                    ["2"] = "@AnotherOne",
+                },
+            }"#,
+        );
+        let (out, _) = scrub(&tree, &ScrubContext::default());
+        let serialized = serialize_to_lua(&out);
+        assert!(!serialized.contains("@SomeJerk"));
+        assert!(!serialized.contains("@AnotherOne"));
+    }
+
+    #[test]
+    fn detect_identities_finds_account_and_characters() {
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["enabled"] = true },
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["Alttank"] = { ["x"] = 2 },
+                    },
+                },
+            }"#,
+        );
+        let detected = detect_identities_from_tree(&tree);
+        assert_eq!(detected.accounts, vec!["@Author".to_string()]);
+        assert!(detected.characters.contains(&"Mainchar".to_string()));
+        assert!(detected.characters.contains(&"Alttank".to_string()));
+        assert!(detected.character_ids.is_empty());
+    }
+
+    #[test]
+    fn detect_identities_handles_world_layer() {
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["NA Megaserver"] = {
+                        ["@Author"] = {
+                            ["$AccountWide"] = { ["enabled"] = true },
+                            ["Mainchar"] = { ["x"] = 1 },
+                        },
+                    },
+                },
+            }"#,
+        );
+        let detected = detect_identities_from_tree(&tree);
+        assert_eq!(detected.accounts, vec!["@Author".to_string()]);
+        assert_eq!(detected.characters, vec!["Mainchar".to_string()]);
+    }
+
+    #[test]
+    fn detect_identities_finds_numeric_character_ids() {
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["123456789012345"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
+        );
+        let detected = detect_identities_from_tree(&tree);
+        assert_eq!(detected.accounts, vec!["@Author".to_string()]);
+        assert_eq!(detected.character_ids, vec!["123456789012345".to_string()]);
+        assert!(detected.characters.is_empty());
+    }
+
+    #[test]
+    fn detect_then_scrub_round_trip() {
+        // End-to-end: the detector's output should fully scrub a tree without
+        // the caller having to know identities up front.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["Mainchar"] = { ["pos"] = 5 },
+                    },
+                },
+            }"#,
+        );
+        let detected = detect_identities_from_tree(&tree);
+        let (out, _) = scrub(&tree, &detected);
+        let serialized = serialize_to_lua(&out);
+        assert!(!serialized.contains("@Author"));
+        assert!(!serialized.contains("Mainchar"));
+        assert!(serialized.contains("${ACCOUNT}"));
+        assert!(serialized.contains("${CHAR:0}"));
     }
 
     // ── Realistic-fixture report ──────────────────────────────────────────
