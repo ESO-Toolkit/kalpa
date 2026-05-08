@@ -56,19 +56,28 @@ pub struct ScrubContext {
 /// `GetWorldName()` returns these strings.
 pub const WELL_KNOWN_WORLDS: &[&str] = &["NA Megaserver", "EU Megaserver", "PTS"];
 
-/// Substrings (lowercased) that, when found in a key name, mark its subtree
-/// as containing addon state we don't want to share.
+/// Substrings (lowercased) that, when found in a **table** key name, cause
+/// the entire subtree to be dropped.
 ///
-/// Kept intentionally aggressive for the spike — false positives are visible
-/// in the report and easy to whitelist later via per-addon overrides.
+/// Only applied to table-typed nodes — scalar leaves (bools, numbers, short
+/// strings) are never dropped by this heuristic, because addons often store
+/// numeric config like `maxSavedFights = 50` whose key happens to contain
+/// "fight". The heuristic is designed to nuke data-heavy *collections*, not
+/// individual settings.
+///
+/// Also skipped at path depth 1 (direct children of the synthetic file root),
+/// where the key is an addon's top-level variable name. Those names sometimes
+/// embed category words (e.g. `TamrielTradeCentreVars`) that would otherwise
+/// wipe the entire addon.
+///
+/// NB: "ignore" is intentionally absent. The fixture run showed it collides
+/// with legitimate ability-ignore-list config (e.g. ADR's `ignoredAbilities`);
+/// player-ignore lists are caught by the `@Handle`-in-string-value rule when
+/// they actually hold handles.
 const BLOCKED_KEY_SUBSTRINGS: &[&str] = &[
     "mail",
     "friend",
     "whisper",
-    // NB: "ignore" is intentionally absent. The fixture run showed it
-    // collides with legitimate ability-ignore-list config (e.g. ADR's
-    // `ignoredAbilities`); player-ignore lists are caught by the
-    // `@Handle`-in-string-value rule when they actually hold handles.
     "sales",
     "history",
     "purchase",
@@ -83,7 +92,7 @@ const BLOCKED_KEY_SUBSTRINGS: &[&str] = &[
     "recent",
     "lastseen",
     "lastonline",
-    "fight", // CombatMetrics: fightData, fights
+    "fight", // CombatMetrics: fightData, fights (table collections)
     "combatlog",
     "logs",
     "events",
@@ -92,11 +101,22 @@ const BLOCKED_KEY_SUBSTRINGS: &[&str] = &[
     "guildhistory",
     "guildbank",
     "guildroster",
+    "charidtoname", // IIfA: CharIdToName / CharNameToId lookup tables
+    "charnametoid",
+    "linestrings", // pChat: LineStrings = per-session chat log
 ];
 
 /// Exact key names (case-sensitive) that should always be dropped because
 /// they encode the exporter's identity in a way templating can't fix.
-const ALWAYS_DROPPED_KEYS: &[&str] = &["$LastCharacterName"];
+const ALWAYS_DROPPED_KEYS: &[&str] = &[
+    "$LastCharacterName",
+    // Srendarr and similar addons store the last-used character name as a
+    // plain string value under this key; same semantics as $LastCharacterName.
+    "lastCharname",
+    // pChat stores character name as a string value inside chatConfSync
+    // entries keyed by character ID. The value is always a character name.
+    "charName",
+];
 
 /// Reason a node was dropped.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,10 +252,10 @@ impl PlaceholderTable {
     }
 }
 
-fn key_is_blocked(key: &str) -> bool {
-    if ALWAYS_DROPPED_KEYS.contains(&key) {
-        return true;
-    }
+/// Returns true if the key matches a `BLOCKED_KEY_SUBSTRINGS` heuristic.
+/// Does NOT check `ALWAYS_DROPPED_KEYS` — the caller handles those separately
+/// so they can be applied regardless of node type or depth.
+fn key_is_heuristic_blocked(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     BLOCKED_KEY_SUBSTRINGS
         .iter()
@@ -287,51 +307,55 @@ fn string_contains_identity(s: &str, ctx: &ScrubContext) -> bool {
 /// Walk a parsed SV tree and infer the exporter's identities by recognising
 /// the canonical SavedVariables shape ESO produces.
 ///
-/// ```text
-/// MyAddon_SV = {                         -- depth 1
-///     ["Default"] = {                    -- depth 2
-///         ["@AccountHandle"] = {         -- depth 3 (account key)
-///             ["$AccountWide"] = ...     -- depth 4 (marker)
-///             ["CharacterName"] = ...    -- depth 4 (character)
-///         },
-///     },
-/// }
-/// ```
-///
-/// or, when the addon stores per-server data (`ZO_SavedVars:NewAccountWide`
-/// with `GetWorldName()` passed in):
+/// Handles four observed layouts:
 ///
 /// ```text
+/// -- Standard (ZO_SavedVars:New)
 /// MyAddon_SV = {
 ///     ["Default"] = {
-///         ["NA Megaserver"] = {          -- depth 3 (world layer)
-///             ["@AccountHandle"] = {     -- depth 4
-///                 ["$AccountWide"] = ... -- depth 5
-///                 ["CharacterName"] = ...
-///             },
+///         ["@AccountHandle"] = {         -- account
+///             ["$AccountWide"] = ...
+///             ["CharacterName"] = ...    -- character
 ///         },
 ///     },
 /// }
+///
+/// -- World-scoped (ZO_SavedVars:NewAccountWide with GetWorldName())
+/// MyAddon_SV = {
+///     ["Default"] = {
+///         ["NA Megaserver"] = {          -- world layer
+///             ["@AccountHandle"] = { ... },
+///         },
+///     },
+/// }
+///
+/// -- World-first, no Default (pChat)
+/// PCHAT_OPTS = {
+///     ["NA Megaserver"] = {              -- world layer at depth 2
+///         ["@AccountHandle"] = { ... },
+///     },
+/// }
+///
+/// -- Direct account key under top-level var (IIfA, some others)
+/// IIfA_Data = {
+///     ["Default"] = { ["@Primary"] = { ... } },
+///     ["@Secondary"] = { ... },         -- extra account at depth 2
+/// }
 /// ```
 ///
-/// Anything outside this shape is treated as addon config and not inspected,
+/// Anything outside these shapes is treated as addon config and not inspected,
 /// so config keys are never mis-detected as identities.
 pub fn detect_identities_from_tree(tree: &SvTreeNode) -> ScrubContext {
     let mut acc = DetectAcc::default();
 
-    // Find the SavedVariables layer-by-layer.
-    //
-    // root → top-level addon var → "Default" → (world?) → "@Account" →
-    //   ("$AccountWide" | character key)
-    //
-    // Anything outside that chain is addon config and should not be inspected.
-
     if let Some(top_levels) = tree_children(tree) {
         for top in top_levels {
-            if let Some(default_children) = direct_child(top, "Default") {
-                for layer in default_children {
-                    classify_under_default(layer, &mut acc);
-                }
+            let top_children = match tree_children(top) {
+                Some(c) => c,
+                None => continue,
+            };
+            for layer in top_children {
+                classify_under_top(layer, &mut acc);
             }
         }
     }
@@ -365,16 +389,43 @@ fn tree_children(node: &SvTreeNode) -> Option<&Vec<SvTreeNode>> {
     node.children.as_ref()
 }
 
-/// Return the children of the named child, if it exists and is a table.
-fn direct_child<'a>(node: &'a SvTreeNode, key: &str) -> Option<&'a Vec<SvTreeNode>> {
-    let children = tree_children(node)?;
-    let target = children.iter().find(|c| c.key == key)?;
-    tree_children(target)
+/// `node` is a direct child of a top-level addon variable. It may be:
+///   - `"Default"` (standard layout — recurse into its children)
+///   - `"@AccountHandle"` (account key at depth 2, e.g. IIfA secondary account)
+///   - A world name (pChat world-first layout)
+///   - Something else (addon config — skip)
+fn classify_under_top(node: &SvTreeNode, acc: &mut DetectAcc) {
+    let key = node.key.as_str();
+    if key == "Default" {
+        // Standard layout: Default → (world? | account) → characters.
+        if let Some(children) = tree_children(node) {
+            for child in children {
+                classify_account_or_world(child, acc);
+            }
+        }
+    } else if key.starts_with('@') {
+        // Account key sitting directly under the addon variable (no Default
+        // wrapper). Record the account but do NOT inspect children for
+        // character names — at this depth the children are addon section keys
+        // (e.g. "settings", "servers"), not ESO character names.
+        // Only collect numeric character IDs, which are unambiguous.
+        acc.accounts.insert(key.to_string());
+        if let Some(children) = tree_children(node) {
+            for child in children {
+                let k = child.key.as_str();
+                if !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()) && k.len() >= 10 {
+                    acc.character_ids.insert(k.to_string());
+                }
+            }
+        }
+    } else if WELL_KNOWN_WORLDS.contains(&key) || key.contains(' ') {
+        // World-first layout (pChat): world layer at depth 2, accounts below.
+        classify_world_layer(key, node, acc);
+    }
 }
 
-/// `node` is something sitting directly under `Default` — either a world
-/// layer or an account handle.
-fn classify_under_default(node: &SvTreeNode, acc: &mut DetectAcc) {
+/// `node` is under `Default` — either a world name or an account handle.
+fn classify_account_or_world(node: &SvTreeNode, acc: &mut DetectAcc) {
     let key = node.key.as_str();
     if key.starts_with('@') {
         acc.accounts.insert(key.to_string());
@@ -384,19 +435,22 @@ fn classify_under_default(node: &SvTreeNode, acc: &mut DetectAcc) {
             }
         }
     } else if WELL_KNOWN_WORLDS.contains(&key) || key.contains(' ') {
-        // World layer (well-known or unfamiliar). Anything below should be
-        // accounts; their children are characters.
-        if !WELL_KNOWN_WORLDS.contains(&key) {
-            acc.extra_worlds.insert(key.to_string());
-        }
-        if let Some(children) = tree_children(node) {
-            for child in children {
-                if child.key.starts_with('@') {
-                    acc.accounts.insert(child.key.clone());
-                    if let Some(grand) = tree_children(child) {
-                        for g in grand {
-                            classify_under_account(g, acc);
-                        }
+        classify_world_layer(key, node, acc);
+    }
+}
+
+/// `node` is a world-name layer; its children should be account handles.
+fn classify_world_layer(key: &str, node: &SvTreeNode, acc: &mut DetectAcc) {
+    if !WELL_KNOWN_WORLDS.contains(&key) {
+        acc.extra_worlds.insert(key.to_string());
+    }
+    if let Some(children) = tree_children(node) {
+        for child in children {
+            if child.key.starts_with('@') {
+                acc.accounts.insert(child.key.clone());
+                if let Some(grand) = tree_children(child) {
+                    for g in grand {
+                        classify_under_account(g, acc);
                     }
                 }
             }
@@ -426,6 +480,9 @@ fn classify_under_account(node: &SvTreeNode, acc: &mut DetectAcc) {
 
 /// Recursive worker. Returns `Some(node)` if the node survives, `None` if it
 /// (and its key in the parent) should be dropped.
+///
+/// `path` tracks the current key path from the root (empty = synthetic root,
+/// length 1 = addon variable name, length 2+ = data inside the addon).
 fn scrub_node(
     node: &SvTreeNode,
     path: &mut Vec<String>,
@@ -433,9 +490,19 @@ fn scrub_node(
     placeholders: &mut PlaceholderTable,
     report: &mut ScrubReport,
 ) -> Option<SvTreeNode> {
-    // Block the entire subtree if its key triggers a heuristic. We skip this
-    // at depth 0 (the synthetic file-root has no meaningful key).
-    if !path.is_empty() && key_is_blocked(&node.key) {
+    // Block subtrees whose key name suggests sensitive data.
+    //
+    // Two constraints:
+    // 1. Depth 1 is skipped — those keys are addon variable names (e.g.
+    //    `TamrielTradeCentreVars`), not data categories.
+    // 2. Only table nodes are blocked — scalar leaves like `maxSavedFights =
+    //    50` should survive even when their key contains "fight". The heuristic
+    //    is designed to drop data *collections*, not individual config values.
+    let is_table = matches!(node.value_type, SvValueType::Table);
+    let is_always_dropped = !path.is_empty() && ALWAYS_DROPPED_KEYS.contains(&node.key.as_str());
+    let is_heuristic_blocked = path.len() >= 2 && is_table && key_is_heuristic_blocked(&node.key);
+
+    if is_always_dropped || is_heuristic_blocked {
         let removed = serialize_to_lua(node).len();
         report.drops.push(DropEntry {
             path: path.clone(),
@@ -885,6 +952,158 @@ mod tests {
         assert!(!serialized.contains("Mainchar"));
         assert!(serialized.contains("${ACCOUNT}"));
         assert!(serialized.contains("${CHAR:0}"));
+    }
+
+    #[test]
+    fn drops_last_charname_helper() {
+        // Regression: Srendarr stores lastCharname = "CharName" per-character.
+        let tree = parse(
+            r#"SrendarrDB = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["123456789012345"] = {
+                            ["lastCharname"] = "Mainchar",
+                            ["enabled"] = true,
+                        },
+                    },
+                },
+            }"#,
+        );
+        let (out, report) = scrub(&tree, &ctx());
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            !serialized.contains("Mainchar"),
+            "character name leaked via lastCharname: {}",
+            serialized
+        );
+        assert!(serialized.contains("enabled = true"));
+        assert!(report
+            .drops
+            .iter()
+            .any(|d| matches!(d.reason, DropReason::AlwaysDropped)));
+    }
+
+    #[test]
+    fn top_level_var_name_with_trade_not_wiped() {
+        // Regression: TamrielTradeCentreVars contains "trade" in its name.
+        // The depth-1 skip should prevent the entire addon from being dropped.
+        let tree = parse(
+            r#"TamrielTradeCentreVars = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = {
+                            ["version"] = 3,
+                            ["showTooltip"] = true,
+                        },
+                    },
+                },
+            }"#,
+        );
+        let (out, report) = scrub(&tree, &ctx());
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            serialized.contains("showTooltip"),
+            "config wiped by top-level var name heuristic: {}",
+            serialized
+        );
+        assert!(
+            !report.drops.iter().any(|d| d.path.len() == 1),
+            "depth-1 node should never be dropped by heuristic"
+        );
+    }
+
+    #[test]
+    fn scalar_fight_config_survives_table_fight_data_drops() {
+        // Regression: CombatMetrics stores maxSavedFights = 50 (scalar) and
+        // a fightData table. The scalar should survive; the table should drop.
+        let tree = parse(
+            r#"CombatMetrics_Save = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = {
+                            ["maxSavedFights"] = 50,
+                            ["keepbossfights"] = false,
+                            ["fightData"] = {
+                                [1] = { ["dps"] = 50000, ["log"] = "big data" },
+                            },
+                        },
+                    },
+                },
+            }"#,
+        );
+        let (out, report) = scrub(&tree, &ctx());
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            serialized.contains("maxSavedFights"),
+            "scalar fight config dropped: {}",
+            serialized
+        );
+        assert!(
+            serialized.contains("keepbossfights"),
+            "scalar fight config dropped: {}",
+            serialized
+        );
+        assert!(
+            !serialized.contains("fightData"),
+            "fight data table should be dropped: {}",
+            serialized
+        );
+        assert!(report
+            .drops
+            .iter()
+            .any(|d| matches!(d.reason, DropReason::BlockedKeyHeuristic)));
+    }
+
+    #[test]
+    fn detect_identities_world_first_no_default() {
+        // pChat layout: world key sits directly under the addon var (no Default).
+        let tree = parse(
+            r#"PCHAT_OPTS = {
+                ["NA Megaserver"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["enabled"] = true },
+                        ["Mainchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
+        );
+        let detected = detect_identities_from_tree(&tree);
+        assert!(
+            detected.accounts.contains(&"@Author".to_string()),
+            "account not detected in world-first layout: {:?}",
+            detected.accounts
+        );
+        assert!(
+            detected.characters.contains(&"Mainchar".to_string()),
+            "character not detected in world-first layout"
+        );
+    }
+
+    #[test]
+    fn detect_identities_direct_account_under_top_var() {
+        // IIfA layout: account key appears directly under the top-level variable
+        // (without a Default wrapper), as a secondary account entry.
+        let tree = parse(
+            r#"IIfA_Data = {
+                ["Default"] = {
+                    ["@Primary"] = { ["settings"] = { ["x"] = 1 } },
+                },
+                ["@Secondary"] = {
+                    ["settings"] = { ["y"] = 2 },
+                },
+            }"#,
+        );
+        let detected = detect_identities_from_tree(&tree);
+        assert!(
+            detected.accounts.contains(&"@Primary".to_string()),
+            "primary account not detected: {:?}",
+            detected.accounts
+        );
+        assert!(
+            detected.accounts.contains(&"@Secondary".to_string()),
+            "secondary account (no Default wrapper) not detected: {:?}",
+            detected.accounts
+        );
     }
 
     // ── Realistic-fixture report ──────────────────────────────────────────
