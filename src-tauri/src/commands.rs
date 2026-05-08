@@ -4822,7 +4822,10 @@ fn retain_account_wide_only(
                 children
                     .iter()
                     .map(|child| {
-                        if child.key == "Default" || child.key.contains(' ') {
+                        if child.key == "Default"
+                            || child.key.contains(' ')
+                            || child.key == "${WORLD}"
+                        {
                             // Default or world layer — recurse one more level
                             let inner = child
                                 .children
@@ -4830,16 +4833,24 @@ fn retain_account_wide_only(
                                 .map(|gc| {
                                     gc.iter()
                                         .map(|gchild| {
-                                            if gchild.key.starts_with('@') {
+                                            if gchild.key.starts_with('@')
+                                                || gchild.key.starts_with("${ACCOUNT")
+                                            {
                                                 filter_account_node(gchild)
-                                            } else if gchild.key.contains(' ') {
+                                            } else if gchild.key.contains(' ')
+                                                || gchild.key == "${WORLD}"
+                                            {
                                                 // world under Default — recurse
                                                 let accounts = gchild
                                                     .children
                                                     .as_ref()
                                                     .map(|ac| {
                                                         ac.iter()
-                                                            .filter(|a| a.key.starts_with('@'))
+                                                            .filter(|a| {
+                                                                a.key.starts_with('@')
+                                                                    || a.key
+                                                                        .starts_with("${ACCOUNT")
+                                                            })
                                                             .map(filter_account_node)
                                                             .collect::<Vec<_>>()
                                                     })
@@ -4865,7 +4876,7 @@ fn retain_account_wide_only(
                                 children: Some(inner),
                                 raw_lua_value: None,
                             }
-                        } else if child.key.starts_with('@') {
+                        } else if child.key.starts_with('@') || child.key.starts_with("${ACCOUNT") {
                             // Account key directly under top var (no Default wrapper)
                             filter_account_node(child)
                         } else {

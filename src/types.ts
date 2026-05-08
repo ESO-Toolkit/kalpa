@@ -307,12 +307,36 @@ export interface SharedPack {
   expiresAt: string;
 }
 
+export interface ScrubContext {
+  accounts: string[];
+  characters: string[];
+  characterIds: string[];
+  extraWorlds: string[];
+}
+
+export interface AddonSettings {
+  encoding: string;
+  lua: string;
+  originalBytes: number;
+  scrubbedBytes: number;
+  detectedIdentities: ScrubContext;
+  scrubReport: unknown;
+}
+
+export interface SvImportResult {
+  applied: string[];
+  skipped: string[];
+  errors: string[];
+}
+
 export interface EsoPackFile {
   format: string;
   version: number;
   pack: EsoPackData;
   sharedAt: string;
   sharedBy: string;
+  /** v2: per-addon scrubbed SavedVariables settings (keyed by addon folder name) */
+  settings?: Record<string, AddonSettings>;
 }
 
 interface EsoPackData {
