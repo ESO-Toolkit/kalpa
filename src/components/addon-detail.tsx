@@ -536,7 +536,12 @@ export function AddonDetail({
               <SectionHeader className="mb-2">Required Dependencies</SectionHeader>
               <div className="space-y-0.5">
                 {addon.dependsOn.map((dep) => {
-                  const installed = installedSet.has(dep.name);
+                  // satisfied = backend truth (accounts for bundled sub-modules in subfolders)
+                  // isTopLevel = dep exists as its own removable top-level addon
+                  const satisfied =
+                    !addon.missingDependencies.includes(dep.name) ||
+                    justInstalledDeps.has(dep.name);
+                  const isTopLevel = installedSet.has(dep.name);
                   const outdated = addon.outdatedDependencies.includes(dep.name);
                   const justInstalled = justInstalledDeps.has(dep.name);
                   return (
@@ -549,12 +554,12 @@ export function AddonDetail({
                           "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
                           outdated
                             ? "bg-amber-500/15 text-amber-400"
-                            : installed
+                            : satisfied
                               ? "bg-emerald-500/15 text-emerald-400"
                               : "bg-red-500/15 text-red-400"
                         )}
                       >
-                        {outdated ? "!" : installed ? "\u2713" : "!"}
+                        {outdated ? "!" : satisfied ? "\u2713" : "!"}
                       </span>
                       <div className="flex-1 min-w-0">
                         <span className="truncate block">{dep.name}</span>
@@ -569,20 +574,22 @@ export function AddonDetail({
                           </span>
                         )}
                       </div>
-                      {installed ? (
-                        <SimpleTooltip content={`Remove ${dep.name}`}>
-                          <button
-                            className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
-                            onClick={() => handleRemoveDep(dep.name)}
-                            disabled={removingDep === dep.name}
-                          >
-                            {removingDep === dep.name ? (
-                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
-                            ) : (
-                              <Trash2 className="size-3.5" />
-                            )}
-                          </button>
-                        </SimpleTooltip>
+                      {satisfied ? (
+                        isTopLevel ? (
+                          <SimpleTooltip content={`Remove ${dep.name}`}>
+                            <button
+                              className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
+                              onClick={() => handleRemoveDep(dep.name)}
+                              disabled={removingDep === dep.name}
+                            >
+                              {removingDep === dep.name ? (
+                                <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
+                              ) : (
+                                <Trash2 className="size-3.5" />
+                              )}
+                            </button>
+                          </SimpleTooltip>
+                        ) : null
                       ) : (
                         <SimpleTooltip
                           content={
