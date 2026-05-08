@@ -1946,6 +1946,35 @@ mod tests {
         assert_eq!(kept, vec!["$AccountWide"], "got: {kept:?}");
     }
 
+    /// Default → world → account (3 levels deep): root → MyVar → Default → ${WORLD} → ${ACCOUNT} → [...]
+    /// Some ESO addons use this layout (world node inside Default, not world-first).
+    #[test]
+    fn retain_account_wide_default_world_account_three_levels() {
+        let account_node = make_table(
+            "${ACCOUNT}",
+            vec![
+                make_table("$AccountWide", vec![make_leaf("deepSetting")]),
+                make_table("HeroChar", vec![make_leaf("deepChar")]),
+            ],
+        );
+        let world_node = make_table("${WORLD}", vec![account_node]);
+        let default_node = make_table("Default", vec![world_node]);
+        let addon_var = make_table("SomeAddonVars", vec![default_node]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = retain_account_wide_only(&root);
+
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        let default = &addon.children.as_ref().unwrap()[0];
+        assert_eq!(default.key, "Default");
+        let world = &default.children.as_ref().unwrap()[0];
+        assert_eq!(world.key, "${WORLD}");
+        let account = &world.children.as_ref().unwrap()[0];
+        assert_eq!(account.key, "${ACCOUNT}");
+        let kept = child_keys(account);
+        assert_eq!(kept, vec!["$AccountWide"], "got: {kept:?}");
+    }
+
     // ── Realistic-fixture report ──────────────────────────────────────────
     //
     // Synthetic SV files modelled after the *shape* of real popular addons.
