@@ -231,11 +231,18 @@ export function AddonDetail({
   const handleInstallDep = async (depName: string) => {
     setInstallingDep(depName);
     try {
-      await invokeOrThrow<InstallResult>("install_dependency", {
+      const result = await invokeOrThrow<InstallResult>("install_dependency", {
         addonsPath,
         depName,
       });
-      toast.success(`Installed ${depName}`);
+      const depCount = result.installedDeps.length;
+      if (depCount > 0) {
+        toast.success(
+          `Installed ${depName} + ${depCount} ${depCount === 1 ? "dependency" : "dependencies"}`
+        );
+      } else {
+        toast.success(`Installed ${depName}`);
+      }
       setJustInstalledDeps((prev) => new Set(prev).add(depName));
       onRemove(); // refresh addon list
     } catch (e) {
