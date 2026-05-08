@@ -12,6 +12,9 @@ import type {
   SharedPack,
   EsoPackFile,
   InstalledPackRef,
+  AddonSettings,
+  ScrubContext,
+  SvImportResult,
 } from "../types";
 import { getSetting, setSetting } from "@/lib/store";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
@@ -107,6 +110,15 @@ export function Packs({
   const [resolvingCode, setResolvingCode] = useState(false);
   const [importedPack, setImportedPack] = useState<SharedPack | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  // Settings from a loaded .esopack v2 file (not available via share codes)
+  const [importedFileSettings, setImportedFileSettings] = useState<Record<
+    string,
+    AddonSettings
+  > | null>(null);
+  const [applyingSettings, setApplyingSettings] = useState(false);
+
+  // Export state
+  const [exportIncludeSettings, setExportIncludeSettings] = useState(false);
 
   // Installation — selected addons (esouiId set)
   const [installing, setInstalling] = useState(false);
@@ -399,11 +411,39 @@ export function Packs({
     });
     if (!path) return;
 
+    let settings: Record<string, AddonSettings> | undefined;
+    if (exportIncludeSettings) {
+      try {
+        // Map pack addon esouiIds to local folder names via installedAddons
+        const idToFolder = new Map(
+          installedAddons
+            .filter((a) => a.esouiId && a.esouiId > 0)
+            .map((a) => [a.esouiId!, a.folderName])
+        );
+        const addonFolders = pack.addons
+          .map((a) => idToFolder.get(a.esouiId))
+          .filter((f): f is string => !!f);
+
+        if (addonFolders.length > 0) {
+          const exported = await invokeOrThrow<Record<string, AddonSettings>>(
+            "export_sv_settings",
+            { addonsPath, addonFolders }
+          );
+          if (Object.keys(exported).length > 0) {
+            settings = exported;
+          }
+        }
+      } catch (e) {
+        toast.error(`Settings export failed: ${getTauriErrorMessage(e)}`);
+        return;
+      }
+    }
+
     try {
       await invokeOrThrow("export_pack_file", {
         pack: {
           format: "esopack",
-          version: 1,
+          version: settings ? 2 : 1,
           pack: {
             title: pack.title,
             description: pack.description,
@@ -413,10 +453,15 @@ export function Packs({
           },
           sharedAt: new Date().toISOString(),
           sharedBy: authUser?.userName ?? "Anonymous",
+          ...(settings ? { settings } : {}),
         },
         path,
       });
-      toast.success("Pack exported successfully");
+      toast.success(
+        settings
+          ? `Pack exported with settings for ${Object.keys(settings).length} addon${Object.keys(settings).length !== 1 ? "s" : ""}`
+          : "Pack exported successfully"
+      );
     } catch (e) {
       toast.error(`Failed to export pack: ${getTauriErrorMessage(e)}`);
     }
@@ -430,6 +475,7 @@ export function Packs({
     setResolvingCode(true);
     setImportError(null);
     setImportedPack(null);
+    setImportedFileSettings(null);
     try {
       const pack = await invokeOrThrow<SharedPack>("resolve_share_code", { code: trimmed });
       setImportedPack(pack);
@@ -449,6 +495,7 @@ export function Packs({
 
     setImportError(null);
     setImportedPack(null);
+    setImportedFileSettings(null);
     try {
       const result = await invokeOrThrow<EsoPackFile>("import_pack_file", { path });
       setImportedPack({
@@ -461,6 +508,9 @@ export function Packs({
         sharedAt: result.sharedAt,
         expiresAt: "",
       });
+      if (result.settings && Object.keys(result.settings).length > 0) {
+        setImportedFileSettings(result.settings);
+      }
     } catch (e) {
       setImportError(getTauriErrorMessage(e));
     }
@@ -531,6 +581,33 @@ export function Packs({
     }
     if (failed > 0) {
       toast.error(`${failed} addon${failed !== 1 ? "s" : ""} failed to install`);
+    }
+
+    // Apply SV settings from a v2 .esopack file after addons are installed
+    if (importedFileSettings && Object.keys(importedFileSettings).length > 0) {
+      setApplyingSettings(true);
+      try {
+        const ctx = await invokeOrThrow<ScrubContext>("detect_local_identities", { addonsPath });
+        const addonFolders = Object.keys(importedFileSettings);
+        const result = await invokeOrThrow<SvImportResult>("import_sv_settings", {
+          addonsPath,
+          settings: importedFileSettings,
+          ctx,
+          addonFolders,
+        });
+        if (result.applied.length > 0) {
+          toast.success(
+            `Applied settings for ${result.applied.length} addon${result.applied.length !== 1 ? "s" : ""}`
+          );
+        }
+        if (result.errors.length > 0) {
+          toast.error(`Settings import errors: ${result.errors.join(", ")}`);
+        }
+      } catch (e) {
+        toast.error(`Failed to apply settings: ${getTauriErrorMessage(e)}`);
+      } finally {
+        setApplyingSettings(false);
+      }
     }
   };
 
@@ -857,6 +934,8 @@ export function Packs({
               }}
               onCopyToClipboard={handleCopyToClipboard}
               onExportFile={() => selectedPack && handleExportPackFile(selectedPack)}
+              exportIncludeSettings={exportIncludeSettings}
+              onToggleExportSettings={() => setExportIncludeSettings((v) => !v)}
             />
           ) : (
             <AnimatePresence mode="wait" initial={false}>
@@ -911,8 +990,13 @@ export function Packs({
                           onResolveCode={handleResolveShareCode}
                           onImportFile={handleImportFile}
                           onInstall={handleInstallImportedPack}
+                          hasSettings={
+                            !!importedFileSettings && Object.keys(importedFileSettings).length > 0
+                          }
+                          applyingSettings={applyingSettings}
                           onClear={() => {
                             setImportedPack(null);
+                            setImportedFileSettings(null);
                             setImportError(null);
                             setShareCodeInput("");
                           }}

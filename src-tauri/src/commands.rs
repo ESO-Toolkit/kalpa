@@ -4909,6 +4909,80 @@ pub async fn import_sv_settings(
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
+/// Detect the account/character identities present in the local SavedVariables
+/// directory. Reads any available `.lua` file that parses successfully and
+/// accumulates identities across all of them. Returns the merged `ScrubContext`.
+///
+/// The frontend passes this context to `import_sv_settings` so that
+/// placeholder tokens from a v2 `.esopack` file can be substituted with the
+/// local player's real names.
+#[tauri::command]
+pub async fn detect_local_identities(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<crate::saved_variables::scrub::ScrubContext, String> {
+    use crate::saved_variables::parser::parse_sv_file;
+    use crate::saved_variables::scrub::{detect_identities_from_tree, ScrubContext};
+
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = sv_io::saved_variables_dir(&addons_dir);
+        let mut merged = ScrubContext::default();
+
+        let entries = match fs::read_dir(&sv_dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(merged),
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+                continue;
+            }
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown.lua")
+                .to_string();
+            let tree = match parse_sv_file(&content, &file_name) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            let ctx = detect_identities_from_tree(&tree);
+            for acc in ctx.accounts {
+                if !merged.accounts.contains(&acc) {
+                    merged.accounts.push(acc);
+                }
+            }
+            for ch in ctx.characters {
+                if !merged.characters.contains(&ch) {
+                    merged.characters.push(ch);
+                }
+            }
+            for id in ctx.character_ids {
+                if !merged.character_ids.contains(&id) {
+                    merged.character_ids.push(id);
+                }
+            }
+            for w in ctx.extra_worlds {
+                if !merged.extra_worlds.contains(&w) {
+                    merged.extra_worlds.push(w);
+                }
+            }
+        }
+
+        Ok(merged)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
 // ─── SavedVariables Manager ─────────────────────────────────
 
 #[tauri::command]

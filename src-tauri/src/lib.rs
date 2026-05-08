@@ -368,6 +368,7 @@ pub fn run() {
             commands::import_pack_file,
             commands::export_sv_settings,
             commands::import_sv_settings,
+            commands::detect_local_identities,
             commands::fetch_roster_pack,
             commands::get_saved_variables_path,
             commands::list_saved_variables,

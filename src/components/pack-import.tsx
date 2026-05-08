@@ -33,6 +33,8 @@ export function PackImportView({
   onImportFile,
   onInstall,
   onClear,
+  hasSettings = false,
+  applyingSettings = false,
 }: {
   shareCodeInput: string;
   onShareCodeInputChange: (value: string) => void;
@@ -47,6 +49,8 @@ export function PackImportView({
   onImportFile: () => void;
   onInstall: () => void;
   onClear: () => void;
+  hasSettings?: boolean;
+  applyingSettings?: boolean;
 }) {
   const [importMode, setImportMode] = useState<ImportMode>("enter-code");
 
@@ -169,6 +173,21 @@ export function PackImportView({
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {hasSettings && (
+            <div className="flex items-center gap-2 rounded-lg border border-[#c4a44a]/20 bg-[#c4a44a]/[0.05] px-3 py-2">
+              <span className="text-[11px] text-[#c4a44a]/80">
+                Includes addon settings — will be applied after install
+              </span>
+            </div>
+          )}
+
+          {applyingSettings && (
+            <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] px-3 py-2">
+              <Loader2Icon className="size-3.5 animate-spin text-muted-foreground/50 shrink-0" />
+              <span className="text-[11px] text-muted-foreground/50">Applying settings...</span>
             </div>
           )}
 
