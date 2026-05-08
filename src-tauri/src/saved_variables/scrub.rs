@@ -184,6 +184,7 @@ pub struct ScrubReport {
 ///
 /// Phase 1 ships with an empty registry; entries are added as real-file testing
 /// reveals addon-specific exceptions (e.g. HarvestMap's non-`@` account keys).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddonOverride {
@@ -203,6 +204,7 @@ pub struct AddonOverride {
 /// Run the scrubber with per-addon overrides. Returns the cleaned tree plus a
 /// report. The caller should populate `overrides` from a registry built during
 /// real-file testing; an empty slice is equivalent to calling [`scrub`].
+#[allow(dead_code)]
 pub fn scrub_with_overrides(
     tree: &SvTreeNode,
     ctx: &ScrubContext,
@@ -337,7 +339,7 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
     pairs.push(("${WORLD}".to_string(), world.to_string()));
 
     // Sort by token length descending so longer tokens match first.
-    pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    pairs.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
 
     let mut result = lua.to_string();
     for (token, replacement) in &pairs {
@@ -763,6 +765,7 @@ fn scrub_node(
 }
 
 /// Like `scrub_node` but also checks per-addon allow/deny path lists.
+#[allow(dead_code)]
 fn scrub_node_override(
     node: &SvTreeNode,
     path: &mut Vec<String>,
