@@ -289,3 +289,140 @@ fn instance_score(inst: &GameInstance) -> i32 {
     }
     score
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_instance() -> GameInstance {
+        GameInstance {
+            id: "live".to_string(),
+            client_type: ClientType::Native,
+            region: ServerRegion::Na,
+            addons_path: "/tmp/AddOns".to_string(),
+            addon_count: 0,
+            is_onedrive: false,
+            has_saved_variables: false,
+            has_addon_settings: false,
+            display_label: "Native · NA".to_string(),
+        }
+    }
+
+    // ── ServerRegion ─────────────────────────────────────────────────
+
+    #[test]
+    fn server_region_env_folder_matches_eso_layout() {
+        assert_eq!(ServerRegion::Na.env_folder(), "live");
+        assert_eq!(ServerRegion::Eu.env_folder(), "liveeu");
+        assert_eq!(ServerRegion::Pts.env_folder(), "pts");
+    }
+
+    #[test]
+    fn server_region_display_name_is_user_facing_label() {
+        assert_eq!(ServerRegion::Na.display_name(), "NA");
+        assert_eq!(ServerRegion::Eu.display_name(), "EU");
+        assert_eq!(ServerRegion::Pts.display_name(), "PTS");
+    }
+
+    // ── instance_score ───────────────────────────────────────────────
+
+    #[test]
+    fn instance_score_baseline_is_zero() {
+        assert_eq!(instance_score(&make_instance()), 0);
+    }
+
+    #[test]
+    fn instance_score_saved_variables_worth_three() {
+        let mut inst = make_instance();
+        inst.has_saved_variables = true;
+        assert_eq!(instance_score(&inst), 3);
+    }
+
+    #[test]
+    fn instance_score_addon_settings_worth_two() {
+        let mut inst = make_instance();
+        inst.has_addon_settings = true;
+        assert_eq!(instance_score(&inst), 2);
+    }
+
+    #[test]
+    fn instance_score_addons_count_one_per_each() {
+        let mut inst = make_instance();
+        inst.addon_count = 17;
+        assert_eq!(instance_score(&inst), 17);
+    }
+
+    #[test]
+    fn instance_score_onedrive_penalty_is_minus_ten() {
+        let mut inst = make_instance();
+        inst.is_onedrive = true;
+        assert_eq!(instance_score(&inst), -10);
+    }
+
+    #[test]
+    fn instance_score_combines_all_factors() {
+        let mut inst = make_instance();
+        inst.has_saved_variables = true;
+        inst.has_addon_settings = true;
+        inst.addon_count = 5;
+        inst.is_onedrive = false;
+        // 3 + 2 + 5 = 10
+        assert_eq!(instance_score(&inst), 10);
+    }
+
+    #[test]
+    fn instance_score_onedrive_outweighs_a_few_addons() {
+        // OneDrive copy with light usage: should rank below empty local.
+        let mut onedrive = make_instance();
+        onedrive.is_onedrive = true;
+        onedrive.addon_count = 5;
+        onedrive.has_addon_settings = true;
+        // 5 + 2 - 10 = -3
+
+        let local = make_instance();
+        // 0
+
+        assert!(instance_score(&onedrive) < instance_score(&local));
+    }
+
+    #[test]
+    fn instance_score_played_local_beats_played_onedrive() {
+        // Both have same evidence; OneDrive must lose by 10.
+        let mut local = make_instance();
+        local.has_saved_variables = true;
+        local.has_addon_settings = true;
+        local.addon_count = 20;
+
+        let mut onedrive = local.clone();
+        onedrive.is_onedrive = true;
+
+        assert_eq!(
+            instance_score(&local) - instance_score(&onedrive),
+            10,
+            "OneDrive penalty should be exactly -10"
+        );
+    }
+
+    #[test]
+    fn instance_score_orders_real_world_priority() {
+        // Strongest: actively-played local with many addons.
+        let mut active = make_instance();
+        active.has_saved_variables = true;
+        active.has_addon_settings = true;
+        active.addon_count = 30;
+
+        // Weaker: configured but no SV, fewer addons.
+        let mut configured = make_instance();
+        configured.has_addon_settings = true;
+        configured.addon_count = 5;
+
+        // Weakest: pristine.
+        let pristine = make_instance();
+
+        let mut all = vec![configured.clone(), pristine.clone(), active.clone()];
+        all.sort_by_key(|inst| std::cmp::Reverse(instance_score(inst)));
+
+        assert_eq!(all[0].addon_count, 30, "active should rank first");
+        assert_eq!(all[2].addon_count, 0, "pristine should rank last");
+    }
+}

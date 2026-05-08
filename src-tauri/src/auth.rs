@@ -335,3 +335,192 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
         .json::<CallbackTokens>()
         .map_err(|e| format!("Failed to parse refresh response: {}", e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn now_secs() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+
+    fn encode_tokens_param(json: &str) -> String {
+        STANDARD.encode(json.as_bytes())
+    }
+
+    fn http_request_with_query(query: &str) -> String {
+        format!(
+            "GET /callback?{} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            query
+        )
+    }
+
+    // ── urlencoding::decode ──────────────────────────────────────────
+
+    #[test]
+    fn urldecode_passes_through_plain_ascii() {
+        assert_eq!(urlencoding::decode("hello").unwrap(), "hello");
+    }
+
+    #[test]
+    fn urldecode_translates_plus_to_space() {
+        assert_eq!(urlencoding::decode("hello+world").unwrap(), "hello world");
+    }
+
+    #[test]
+    fn urldecode_decodes_percent_escapes() {
+        assert_eq!(urlencoding::decode("a%20b%2Fc").unwrap(), "a b/c");
+    }
+
+    #[test]
+    fn urldecode_handles_full_byte_range() {
+        // %FF must round-trip as 0xFF
+        let decoded = urlencoding::decode("%C3%A9").unwrap(); // é (UTF-8)
+        assert_eq!(decoded, "é");
+    }
+
+    #[test]
+    fn urldecode_rejects_truncated_percent_escape() {
+        assert!(urlencoding::decode("a%2").is_err());
+        assert!(urlencoding::decode("%").is_err());
+    }
+
+    #[test]
+    fn urldecode_rejects_non_hex_escape() {
+        assert!(urlencoding::decode("%ZZ").is_err());
+    }
+
+    #[test]
+    fn urldecode_rejects_invalid_utf8_sequences() {
+        // 0xFF is not valid UTF-8 on its own
+        assert!(urlencoding::decode("%FF").is_err());
+    }
+
+    // ── extract_tokens_from_request ──────────────────────────────────
+
+    #[test]
+    fn extract_tokens_returns_valid_callback_tokens() {
+        let payload = r#"{"access_token":"AT","refresh_token":"RT","expires_in":3600}"#;
+        let encoded = encode_tokens_param(payload);
+        let request = http_request_with_query(&format!("tokens={}", encoded));
+        let tokens = extract_tokens_from_request(&request).expect("tokens parsed");
+        assert_eq!(tokens.access_token, "AT");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("RT"));
+        assert_eq!(tokens.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn extract_tokens_handles_optional_refresh_and_expires() {
+        let payload = r#"{"access_token":"AT"}"#;
+        let encoded = encode_tokens_param(payload);
+        let request = http_request_with_query(&format!("tokens={}", encoded));
+        let tokens = extract_tokens_from_request(&request).expect("tokens parsed");
+        assert_eq!(tokens.access_token, "AT");
+        assert!(tokens.refresh_token.is_none());
+        assert!(tokens.expires_in.is_none());
+    }
+
+    #[test]
+    fn extract_tokens_decodes_percent_encoded_param() {
+        let payload = r#"{"access_token":"hello world"}"#;
+        let encoded = encode_tokens_param(payload);
+        // Replace any '+' (base64 alt char) is irrelevant; force percent-encoding instead.
+        let percent_encoded = encoded.replace("=", "%3D");
+        let request = http_request_with_query(&format!("tokens={}", percent_encoded));
+        let tokens = extract_tokens_from_request(&request).expect("tokens parsed");
+        assert_eq!(tokens.access_token, "hello world");
+    }
+
+    #[test]
+    fn extract_tokens_finds_param_among_others() {
+        let payload = r#"{"access_token":"AT"}"#;
+        let encoded = encode_tokens_param(payload);
+        let request = http_request_with_query(&format!("foo=bar&tokens={}&baz=qux", encoded));
+        let tokens = extract_tokens_from_request(&request).expect("tokens parsed");
+        assert_eq!(tokens.access_token, "AT");
+    }
+
+    #[test]
+    fn extract_tokens_rejects_non_callback_path() {
+        let payload = r#"{"access_token":"AT"}"#;
+        let encoded = encode_tokens_param(payload);
+        let request = format!(
+            "GET /something-else?tokens={} HTTP/1.1\r\nHost: x\r\n\r\n",
+            encoded
+        );
+        assert!(extract_tokens_from_request(&request).is_none());
+    }
+
+    #[test]
+    fn extract_tokens_rejects_when_param_missing() {
+        let request = "GET /callback?other=1 HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert!(extract_tokens_from_request(request).is_none());
+    }
+
+    #[test]
+    fn extract_tokens_rejects_request_without_query() {
+        let request = "GET /callback HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert!(extract_tokens_from_request(request).is_none());
+    }
+
+    #[test]
+    fn extract_tokens_rejects_invalid_base64() {
+        let request = http_request_with_query("tokens=!!!not-base64!!!");
+        assert!(extract_tokens_from_request(request.as_str()).is_none());
+    }
+
+    #[test]
+    fn extract_tokens_rejects_invalid_json_after_decoding() {
+        let encoded = STANDARD.encode(b"not-json-at-all");
+        let request = http_request_with_query(&format!("tokens={}", encoded));
+        assert!(extract_tokens_from_request(&request).is_none());
+    }
+
+    #[test]
+    fn extract_tokens_rejects_empty_request() {
+        assert!(extract_tokens_from_request("").is_none());
+    }
+
+    // ── ensure_valid_token (offline paths) ────────────────────────────
+
+    fn make_tokens(expires_at: i64, refresh: &str) -> AuthTokens {
+        AuthTokens {
+            access_token: "at".to_string(),
+            refresh_token: refresh.to_string(),
+            expires_at,
+            user_id: "1".to_string(),
+            user_name: "ada".to_string(),
+        }
+    }
+
+    #[test]
+    fn ensure_valid_token_returns_none_when_token_still_valid() {
+        let tokens = make_tokens(now_secs() + 3600, "rt");
+        let result = ensure_valid_token(&tokens).expect("should not error");
+        assert!(result.is_none(), "fresh token must not trigger refresh");
+    }
+
+    #[test]
+    fn ensure_valid_token_returns_none_at_safety_buffer_boundary() {
+        // expires_at = now + 120 → > now + 60, so still valid
+        let tokens = make_tokens(now_secs() + 120, "rt");
+        assert!(ensure_valid_token(&tokens).unwrap().is_none());
+    }
+
+    #[test]
+    fn ensure_valid_token_errors_when_expired_and_no_refresh_token() {
+        let tokens = make_tokens(now_secs() - 10, "");
+        let err = ensure_valid_token(&tokens).expect_err("should fail");
+        assert!(err.contains("sign in"), "got unexpected error: {}", err);
+    }
+
+    #[test]
+    fn ensure_valid_token_errors_when_inside_buffer_and_no_refresh_token() {
+        // expires_at = now + 30 → < now + 60, refresh required, but none available
+        let tokens = make_tokens(now_secs() + 30, "");
+        assert!(ensure_valid_token(&tokens).is_err());
+    }
+}
