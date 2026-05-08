@@ -306,6 +306,55 @@ fn try_install_dep(
     Ok(dep_folders)
 }
 
+/// Build the set of all "installed" names visible to ESO from the addons directory.
+///
+/// ESO searches top-level addon folders AND their subfolders up to 2 levels deep
+/// for embedded libraries. We mirror that so dependency checks match what ESO sees.
+/// Disabled folders (ending in `.disabled`) are excluded.
+pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
+    let Ok(entries) = fs::read_dir(addons_dir) else {
+        return HashSet::new();
+    };
+    let mut installed = HashSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if name.ends_with(".disabled") {
+            continue;
+        }
+        installed.insert(name);
+        if let Ok(sub_entries) = fs::read_dir(&path) {
+            for sub in sub_entries.flatten() {
+                let sub_path = sub.path();
+                if !sub_path.is_dir() {
+                    continue;
+                }
+                if let Some(sub_name) = sub_path.file_name().and_then(|n| n.to_str()) {
+                    installed.insert(sub_name.to_string());
+                }
+                if let Ok(sub2_entries) = fs::read_dir(&sub_path) {
+                    for sub2 in sub2_entries.flatten() {
+                        if sub2.path().is_dir() {
+                            if let Some(sub2_name) =
+                                sub2.path().file_name().and_then(|n| n.to_str())
+                            {
+                                installed.insert(sub2_name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    installed
+}
+
 /// Read the local manifest version for a folder, or empty string if not found.
 fn read_local_version(addons_dir: &Path, folder: &str) -> String {
     find_manifest(addons_dir, folder)
@@ -697,40 +746,7 @@ fn scan_installed_addons_blocking(
     }
     addons.extend(newly_parsed.into_iter().map(|(_, m, _)| m));
 
-    // Build set of ALL directory names in AddOns folder for dependency checking.
-    // This includes folders without manifests (data folders) and catches everything
-    // ESO would recognize. Disabled addons are excluded since ESO won't load them.
-    // ESO also searches subfolders up to 3 levels deep for embedded libraries,
-    // so we scan those too.
-    let mut installed: HashSet<String> = HashSet::with_capacity(top_dirs.len() * 2);
-    for (name, path, is_disabled) in &top_dirs {
-        if *is_disabled {
-            continue;
-        }
-        installed.insert(name.clone());
-        // Scan subfolders (1-2 levels deep) for embedded libraries
-        if let Ok(sub_entries) = fs::read_dir(path) {
-            for sub in sub_entries.flatten() {
-                if sub.path().is_dir() {
-                    if let Some(sub_name) = sub.path().file_name().and_then(|n| n.to_str()) {
-                        installed.insert(sub_name.to_string());
-                    }
-                    // One more level (libs/LibFoo/)
-                    if let Ok(sub2_entries) = fs::read_dir(sub.path()) {
-                        for sub2 in sub2_entries.flatten() {
-                            if sub2.path().is_dir() {
-                                if let Some(sub2_name) =
-                                    sub2.path().file_name().and_then(|n| n.to_str())
-                                {
-                                    installed.insert(sub2_name.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let installed = build_installed_set(addons_dir);
 
     // Load metadata and clean up stale entries:
     // - Remove entries for addon folders that no longer exist on disk
