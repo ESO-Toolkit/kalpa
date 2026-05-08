@@ -1159,13 +1159,56 @@ fn update_addon_blocking(
         &info.download_url,
         0, // preserved from existing metadata
     );
+
+    // Check for new dependencies introduced by the update
+    let mut all_installed: HashSet<String> = HashSet::new();
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    all_installed.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    let mut missing_deps: Vec<String> = Vec::new();
+    for folder in &installed_folders {
+        let addon =
+            find_manifest(addons_dir, folder).and_then(|p| manifest::parse_manifest(folder, &p));
+        if let Some(addon) = addon {
+            for dep in &addon.depends_on {
+                if !all_installed.contains(&dep.name) && !missing_deps.contains(&dep.name) {
+                    missing_deps.push(dep.name.clone());
+                }
+            }
+        }
+    }
+
+    let mut installed_deps: Vec<String> = Vec::new();
+    let mut failed_deps: Vec<String> = Vec::new();
+    let mut skipped_deps: Vec<String> = Vec::new();
+
+    for dep_name in &missing_deps {
+        match try_install_dep(dep_name, addons_dir, &mut store) {
+            Ok(dep_folders) => {
+                for f in &dep_folders {
+                    all_installed.insert(f.clone());
+                }
+                installed_deps.push(dep_name.clone());
+            }
+            Err("not_found") => skipped_deps.push(dep_name.clone()),
+            Err(_) => failed_deps.push(dep_name.clone()),
+        }
+    }
+
     metadata::save_metadata(addons_dir, &store)?;
 
     Ok(InstallResult {
         installed_folders,
-        installed_deps: Vec::new(),
-        failed_deps: Vec::new(),
-        skipped_deps: Vec::new(),
+        installed_deps,
+        failed_deps,
+        skipped_deps,
     })
 }
 
@@ -1911,6 +1954,49 @@ pub async fn update_addon_with_decisions(
             "",
             0,
         );
+
+        // Check for new dependencies introduced by the update
+        let mut all_installed: HashSet<String> = HashSet::new();
+        if let Ok(entries) = fs::read_dir(&addons_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        all_installed.insert(name.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut missing_deps: Vec<String> = Vec::new();
+        for folder in &installed_folders {
+            let addon = find_manifest(&addons_dir, folder)
+                .and_then(|p| manifest::parse_manifest(folder, &p));
+            if let Some(addon) = addon {
+                for dep in &addon.depends_on {
+                    if !all_installed.contains(&dep.name) && !missing_deps.contains(&dep.name) {
+                        missing_deps.push(dep.name.clone());
+                    }
+                }
+            }
+        }
+
+        let mut installed_deps: Vec<String> = Vec::new();
+        let mut failed_deps: Vec<String> = Vec::new();
+        let mut skipped_deps: Vec<String> = Vec::new();
+
+        for dep_name in &missing_deps {
+            match try_install_dep(dep_name, &addons_dir, &mut store) {
+                Ok(dep_folders) => {
+                    for f in &dep_folders {
+                        all_installed.insert(f.clone());
+                    }
+                    installed_deps.push(dep_name.clone());
+                }
+                Err("not_found") => skipped_deps.push(dep_name.clone()),
+                Err(_) => failed_deps.push(dep_name.clone()),
+            }
+        }
+
         metadata::save_metadata(&addons_dir, &store)?;
 
         // Clean up pending state and temp file
@@ -1921,9 +2007,9 @@ pub async fn update_addon_with_decisions(
 
         Ok(InstallResult {
             installed_folders,
-            installed_deps: Vec::new(),
-            failed_deps: Vec::new(),
-            skipped_deps: Vec::new(),
+            installed_deps,
+            failed_deps,
+            skipped_deps,
         })
     })
     .await
