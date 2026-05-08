@@ -131,6 +131,10 @@ pub enum DropReason {
     /// String value matched the `@Handle` shape even though no specific
     /// identity was provided in `ScrubContext`.
     StringValueLooksLikeAccount,
+    /// Addon was disabled via an `AddonOverride`.
+    OverrideDisabled,
+    /// Path was in the `deny_paths` list of an `AddonOverride`.
+    OverrideDenyPath,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +173,177 @@ pub struct ScrubReport {
     pub templated_keys: Vec<TemplateEntry>,
     pub original_bytes: usize,
     pub scrubbed_bytes: usize,
+}
+
+/// Per-addon scrub configuration supplied by the caller.
+///
+/// Overrides are matched by `addon` (the addon folder name, case-sensitive).
+/// `allow_paths` is a list of dot-separated key paths that should survive even
+/// if they'd otherwise be dropped by a heuristic (e.g. `"HarvestMap.Default.@Account"`).
+/// `deny_paths` is a list of paths that should always be dropped.
+///
+/// Phase 1 ships with an empty registry; entries are added as real-file testing
+/// reveals addon-specific exceptions (e.g. HarvestMap's non-`@` account keys).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonOverride {
+    /// Addon folder name this override applies to (case-sensitive).
+    pub addon: String,
+    /// If true, scrub produces an empty tree for this addon (opt-out).
+    #[serde(default)]
+    pub disabled: bool,
+    /// Paths to preserve even if a heuristic would drop them (dot-joined keys).
+    #[serde(default)]
+    pub allow_paths: Vec<String>,
+    /// Paths to always drop regardless of other rules (dot-joined keys).
+    #[serde(default)]
+    pub deny_paths: Vec<String>,
+}
+
+/// Run the scrubber with per-addon overrides. Returns the cleaned tree plus a
+/// report. The caller should populate `overrides` from a registry built during
+/// real-file testing; an empty slice is equivalent to calling [`scrub`].
+pub fn scrub_with_overrides(
+    tree: &SvTreeNode,
+    ctx: &ScrubContext,
+    overrides: &[AddonOverride],
+) -> (SvTreeNode, ScrubReport) {
+    // Determine which top-level variable names are covered by a disabled
+    // override, and which paths are explicitly allowed/denied.
+    // We look at the tree's direct children (top-level addon variables) and
+    // match them against the addon folder via the variable name prefix — not
+    // the folder name directly, since the SV file can declare multiple vars.
+    // For now the matching is best-effort: if any variable name starts with or
+    // equals the addon name (case-insensitive), we apply the override.
+    let original_bytes = serialize_to_lua(tree).len();
+    let mut report = ScrubReport {
+        original_bytes,
+        ..ScrubReport::default()
+    };
+    let mut placeholders = PlaceholderTable::new(ctx);
+    let mut path: Vec<String> = Vec::new();
+
+    let children = match &tree.children {
+        Some(c) => c,
+        None => {
+            return (
+                SvTreeNode {
+                    key: tree.key.clone(),
+                    value_type: SvValueType::Table,
+                    value: None,
+                    children: Some(Vec::new()),
+                    raw_lua_value: None,
+                },
+                report,
+            )
+        }
+    };
+
+    let mut new_children: Vec<SvTreeNode> = Vec::new();
+    for top_var in children {
+        let var_name = top_var.key.as_str();
+        let ov = overrides.iter().find(|o| {
+            var_name
+                .to_ascii_lowercase()
+                .starts_with(&o.addon.to_ascii_lowercase())
+        });
+
+        if let Some(ov) = ov {
+            if ov.disabled {
+                let removed = serialize_to_lua(top_var).len();
+                report.drops.push(DropEntry {
+                    path: vec![var_name.to_string()],
+                    reason: DropReason::OverrideDisabled,
+                    bytes_removed: removed,
+                });
+                continue;
+            }
+            // Build allow/deny prefix sets for this variable.
+            let allow_set: Vec<Vec<String>> = ov
+                .allow_paths
+                .iter()
+                .map(|p| p.split('.').map(str::to_string).collect())
+                .collect();
+            let deny_set: Vec<Vec<String>> = ov
+                .deny_paths
+                .iter()
+                .map(|p| p.split('.').map(str::to_string).collect())
+                .collect();
+
+            path.push(var_name.to_string());
+            if let Some(scrubbed) = scrub_node_override(
+                top_var,
+                &mut path,
+                ctx,
+                &mut placeholders,
+                &mut report,
+                &allow_set,
+                &deny_set,
+            ) {
+                new_children.push(scrubbed);
+            }
+            path.pop();
+        } else {
+            path.push(var_name.to_string());
+            if let Some(scrubbed) =
+                scrub_node(top_var, &mut path, ctx, &mut placeholders, &mut report)
+            {
+                new_children.push(scrubbed);
+            }
+            path.pop();
+        }
+    }
+
+    let scrubbed_root = SvTreeNode {
+        key: tree.key.clone(),
+        value_type: SvValueType::Table,
+        value: None,
+        children: Some(new_children),
+        raw_lua_value: None,
+    };
+    report.scrubbed_bytes = serialize_to_lua(&scrubbed_root).len();
+    (scrubbed_root, report)
+}
+
+/// Replace identity placeholders in a Lua string with the importer's real values.
+///
+/// Substitution order: longer tokens first to avoid `${ACCOUNT}` matching as a
+/// prefix of `${ACCOUNT:1}`. Tokens with no mapping in `ctx` are left as-is.
+/// `world_names` should be `WELL_KNOWN_WORLDS`; `${WORLD}` maps to
+/// `ctx.extra_worlds[0]` if set, otherwise the first well-known world name.
+pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&str]) -> String {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+
+    for (i, account) in ctx.accounts.iter().enumerate() {
+        let token = if i == 0 {
+            "${ACCOUNT}".to_string()
+        } else {
+            format!("${{ACCOUNT:{}}}", i)
+        };
+        pairs.push((token, account.clone()));
+    }
+    for (i, character) in ctx.characters.iter().enumerate() {
+        pairs.push((format!("${{CHAR:{}}}", i), character.clone()));
+    }
+    for (i, id) in ctx.character_ids.iter().enumerate() {
+        pairs.push((format!("${{CHAR_ID:{}}}", i), id.clone()));
+    }
+    let world = ctx
+        .extra_worlds
+        .first()
+        .map(|s| s.as_str())
+        .or_else(|| world_names.first().copied())
+        .unwrap_or("NA Megaserver");
+    pairs.push(("${WORLD}".to_string(), world.to_string()));
+
+    // Sort by token length descending so longer tokens match first.
+    pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    let mut result = lua.to_string();
+    for (token, replacement) in &pairs {
+        result = result.replace(token.as_str(), replacement.as_str());
+    }
+    result
 }
 
 /// Run the scrubber. Returns the cleaned tree alongside a report describing
@@ -577,6 +752,180 @@ fn scrub_node(
             })
         }
         // Numbers, booleans, nil — pass through untouched.
+        _ => Some(SvTreeNode {
+            key: new_key,
+            value_type: node.value_type,
+            value: node.value.clone(),
+            children: None,
+            raw_lua_value: node.raw_lua_value.clone(),
+        }),
+    }
+}
+
+/// Like `scrub_node` but also checks per-addon allow/deny path lists.
+fn scrub_node_override(
+    node: &SvTreeNode,
+    path: &mut Vec<String>,
+    ctx: &ScrubContext,
+    placeholders: &mut PlaceholderTable,
+    report: &mut ScrubReport,
+    allow_set: &[Vec<String>],
+    deny_set: &[Vec<String>],
+) -> Option<SvTreeNode> {
+    // Check deny paths first — explicit deny wins.
+    if deny_set
+        .iter()
+        .any(|deny| path.starts_with(deny.as_slice()))
+    {
+        let removed = serialize_to_lua(node).len();
+        report.drops.push(DropEntry {
+            path: path.clone(),
+            reason: DropReason::OverrideDenyPath,
+            bytes_removed: removed,
+        });
+        return None;
+    }
+
+    // Check if path is explicitly allowed — skip all heuristics if so.
+    let explicitly_allowed = allow_set
+        .iter()
+        .any(|allow| path.starts_with(allow.as_slice()));
+
+    if explicitly_allowed {
+        // Pass through with identity templating only (no heuristic drops).
+        let mut new_key = node.key.clone();
+        if !path.is_empty() {
+            if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key, ctx) {
+                report.templated_keys.push(TemplateEntry {
+                    path: path.clone(),
+                    kind,
+                    original: node.key.clone(),
+                    placeholder: placeholder.clone(),
+                });
+                new_key = placeholder;
+            }
+        }
+        return match node.value_type {
+            SvValueType::Table => {
+                let mut new_children = Vec::new();
+                if let Some(children) = &node.children {
+                    for child in children {
+                        path.push(child.key.clone());
+                        if let Some(c) = scrub_node_override(
+                            child,
+                            path,
+                            ctx,
+                            placeholders,
+                            report,
+                            allow_set,
+                            deny_set,
+                        ) {
+                            new_children.push(c);
+                        }
+                        path.pop();
+                    }
+                }
+                Some(SvTreeNode {
+                    key: new_key,
+                    value_type: SvValueType::Table,
+                    value: None,
+                    children: Some(new_children),
+                    raw_lua_value: None,
+                })
+            }
+            _ => Some(SvTreeNode {
+                key: new_key,
+                value_type: node.value_type,
+                value: node.value.clone(),
+                children: None,
+                raw_lua_value: node.raw_lua_value.clone(),
+            }),
+        };
+    }
+
+    // Not in allow or deny — fall back to normal scrub, but propagate
+    // allow/deny into children.
+    let is_table = matches!(node.value_type, SvValueType::Table);
+    let is_always_dropped = !path.is_empty() && ALWAYS_DROPPED_KEYS.contains(&node.key.as_str());
+    let is_heuristic_blocked = path.len() >= 2 && is_table && key_is_heuristic_blocked(&node.key);
+
+    if is_always_dropped || is_heuristic_blocked {
+        let removed = serialize_to_lua(node).len();
+        report.drops.push(DropEntry {
+            path: path.clone(),
+            reason: drop_reason_for_key(&node.key),
+            bytes_removed: removed,
+        });
+        return None;
+    }
+
+    let mut new_key = node.key.clone();
+    if !path.is_empty() {
+        if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key, ctx) {
+            report.templated_keys.push(TemplateEntry {
+                path: path.clone(),
+                kind,
+                original: node.key.clone(),
+                placeholder: placeholder.clone(),
+            });
+            new_key = placeholder;
+        }
+    }
+
+    match node.value_type {
+        SvValueType::Table => {
+            let mut new_children = Vec::new();
+            if let Some(children) = &node.children {
+                for child in children {
+                    path.push(child.key.clone());
+                    if let Some(c) = scrub_node_override(
+                        child,
+                        path,
+                        ctx,
+                        placeholders,
+                        report,
+                        allow_set,
+                        deny_set,
+                    ) {
+                        new_children.push(c);
+                    }
+                    path.pop();
+                }
+            }
+            Some(SvTreeNode {
+                key: new_key,
+                value_type: SvValueType::Table,
+                value: None,
+                children: Some(new_children),
+                raw_lua_value: None,
+            })
+        }
+        SvValueType::String => {
+            let s = node.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+            if string_contains_identity(s, ctx) {
+                report.drops.push(DropEntry {
+                    path: path.clone(),
+                    reason: DropReason::StringValueContainsIdentity,
+                    bytes_removed: s.len(),
+                });
+                return None;
+            }
+            if looks_like_account_handle(s) {
+                report.drops.push(DropEntry {
+                    path: path.clone(),
+                    reason: DropReason::StringValueLooksLikeAccount,
+                    bytes_removed: s.len(),
+                });
+                return None;
+            }
+            Some(SvTreeNode {
+                key: new_key,
+                value_type: SvValueType::String,
+                value: node.value.clone(),
+                children: None,
+                raw_lua_value: node.raw_lua_value.clone(),
+            })
+        }
         _ => Some(SvTreeNode {
             key: new_key,
             value_type: node.value_type,
@@ -1106,6 +1455,151 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scrub_with_overrides_disabled_drops_entire_addon() {
+        let tree = parse(
+            r#"HarvestMap_Data = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["nodes"] = { [1] = { ["x"] = 0.5 } } },
+                    },
+                },
+            }"#,
+        );
+        let ov = AddonOverride {
+            addon: "HarvestMap".to_string(),
+            disabled: true,
+            ..AddonOverride::default()
+        };
+        let (out, report) = scrub_with_overrides(&tree, &ctx(), &[ov]);
+        let serialized = serialize_to_lua(&out);
+        // The disabled addon's variable should not appear in output.
+        assert!(
+            !serialized.contains("HarvestMap_Data"),
+            "disabled addon still present: {}",
+            serialized
+        );
+        assert!(report
+            .drops
+            .iter()
+            .any(|d| matches!(d.reason, DropReason::OverrideDisabled)));
+    }
+
+    #[test]
+    fn scrub_with_overrides_deny_path_drops_subtree() {
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = {
+                            ["keepConfig"] = true,
+                            ["sensitiveTable"] = { ["x"] = 1 },
+                        },
+                    },
+                },
+            }"#,
+        );
+        let ov = AddonOverride {
+            addon: "MyAddon".to_string(),
+            deny_paths: vec![
+                "MyAddon_SV.Default.${ACCOUNT}.$AccountWide.sensitiveTable".to_string()
+            ],
+            ..AddonOverride::default()
+        };
+        // Note: deny_path matching uses the literal path *before* templating.
+        // This test checks that deny_paths work when the path matches exactly.
+        let ov_literal = AddonOverride {
+            addon: "MyAddon".to_string(),
+            deny_paths: vec!["MyAddon_SV.Default.@Author.$AccountWide.sensitiveTable".to_string()],
+            ..AddonOverride::default()
+        };
+        let (out, report) = scrub_with_overrides(&tree, &ctx(), &[ov_literal]);
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            serialized.contains("keepConfig"),
+            "allowed key was dropped: {}",
+            serialized
+        );
+        assert!(
+            !serialized.contains("sensitiveTable"),
+            "denied key survived: {}",
+            serialized
+        );
+        // Suppress unused `ov` warning from above.
+        let _ = ov;
+        assert!(report
+            .drops
+            .iter()
+            .any(|d| matches!(d.reason, DropReason::OverrideDenyPath)));
+    }
+
+    #[test]
+    fn scrub_with_empty_overrides_equals_scrub() {
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["enabled"] = true },
+                    },
+                },
+            }"#,
+        );
+        let (plain_out, _) = scrub(&tree, &ctx());
+        let (override_out, _) = scrub_with_overrides(&tree, &ctx(), &[]);
+        assert_eq!(
+            serialize_to_lua(&plain_out),
+            serialize_to_lua(&override_out)
+        );
+    }
+
+    #[test]
+    fn substitute_placeholders_replaces_all_tokens() {
+        let ctx = ScrubContext {
+            accounts: vec!["@Real".to_string(), "@Alt".to_string()],
+            characters: vec!["MyChar".to_string(), "AltChar".to_string()],
+            character_ids: vec!["123456789012345".to_string()],
+            extra_worlds: vec![],
+        };
+        let lua = concat!(
+            r#"["${ACCOUNT}"] = { "#,
+            r#"["${CHAR:0}"] = { ["id"] = "${CHAR_ID:0}" }, "#,
+            r#"["${CHAR:1}"] = { } } "#,
+            r#"["${ACCOUNT:1}"] = { } "#,
+            r#"["${WORLD}"] = { }"#,
+        );
+        let result = substitute_placeholders(lua, &ctx, WELL_KNOWN_WORLDS);
+        assert!(
+            result.contains("@Real"),
+            "account not substituted: {}",
+            result
+        );
+        assert!(
+            result.contains("@Alt"),
+            "alt account not substituted: {}",
+            result
+        );
+        assert!(
+            result.contains("MyChar"),
+            "char not substituted: {}",
+            result
+        );
+        assert!(
+            result.contains("AltChar"),
+            "alt char not substituted: {}",
+            result
+        );
+        assert!(
+            result.contains("123456789012345"),
+            "char id not substituted: {}",
+            result
+        );
+        assert!(
+            result.contains("NA Megaserver"),
+            "world not substituted: {}",
+            result
+        );
+    }
+
     // ── Realistic-fixture report ──────────────────────────────────────────
     //
     // Synthetic SV files modelled after the *shape* of real popular addons.
@@ -1277,6 +1771,7 @@ mod tests {
                 DropReason::StringValueContainsIdentity => by_identity += d.bytes_removed,
                 DropReason::StringValueLooksLikeAccount => by_handle += d.bytes_removed,
                 DropReason::AlwaysDropped => by_always += d.bytes_removed,
+                DropReason::OverrideDisabled | DropReason::OverrideDenyPath => {}
             }
         }
 
@@ -1483,6 +1978,8 @@ mod tests {
                 DropReason::AlwaysDropped => "always-dropped",
                 DropReason::StringValueContainsIdentity => "string-value-contains-identity",
                 DropReason::StringValueLooksLikeAccount => "string-value-looks-like-account",
+                DropReason::OverrideDisabled => "override-disabled",
+                DropReason::OverrideDenyPath => "override-deny-path",
             }
             .to_string();
             let entry = by_reason.entry(reason_key).or_insert((0, 0));

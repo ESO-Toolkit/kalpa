@@ -366,6 +366,8 @@ pub fn run() {
             commands::resolve_share_code,
             commands::export_pack_file,
             commands::import_pack_file,
+            commands::export_sv_settings,
+            commands::import_sv_settings,
             commands::fetch_roster_pack,
             commands::get_saved_variables_path,
             commands::list_saved_variables,

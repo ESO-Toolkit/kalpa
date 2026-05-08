@@ -4603,6 +4603,24 @@ pub async fn resolve_share_code(code: String) -> Result<SharedPack, String> {
 
 // ── Pack Export / Import (.esopack files) ───────────────────────────────────
 
+/// Scrubbed SavedVariables for one addon stored in an `.esopack` v2 file.
+///
+/// `encoding` is always `"lua-text"` for Phase 1. `lua` is the scrubbed Lua
+/// source with identity placeholders in place of real names/IDs. `scrub_report`
+/// is the full scrub report (drops + templated keys) for user review on import.
+/// `detected_identities` captures the `ScrubContext` used during export so the
+/// importer knows the placeholder → real-name mapping strategy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonSettings {
+    pub encoding: String,
+    pub lua: String,
+    pub original_bytes: usize,
+    pub scrubbed_bytes: usize,
+    pub detected_identities: crate::saved_variables::scrub::ScrubContext,
+    pub scrub_report: crate::saved_variables::scrub::ScrubReport,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EsoPackFile {
@@ -4611,6 +4629,9 @@ pub struct EsoPackFile {
     pub pack: EsoPackData,
     pub shared_at: String,
     pub shared_by: String,
+    /// v2 only: scrubbed SavedVariables keyed by addon folder name.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub settings: HashMap<String, AddonSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4675,7 +4696,7 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
         return Err("Not a valid .esopack file (wrong format field).".to_string());
     }
 
-    if pack.version != 1 {
+    if pack.version != 1 && pack.version != 2 {
         return Err(format!(
             "Unsupported .esopack version {}. Please update the app.",
             pack.version
@@ -4683,6 +4704,317 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     }
 
     Ok(pack)
+}
+
+/// Export the SavedVariables settings block for a list of addon folder names.
+///
+/// For each addon, reads the corresponding `.lua` file from the SavedVariables
+/// directory, detects identities, scrubs the tree, and returns an `AddonSettings`
+/// map keyed by addon folder name. Only `$AccountWide` subtrees are retained
+/// (per-character data is not exported in Phase 1).
+///
+/// The caller merges this map into an `EsoPackFile` and writes it with
+/// `export_pack_file`.
+#[tauri::command]
+pub async fn export_sv_settings(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    addon_folders: Vec<String>,
+) -> Result<HashMap<String, AddonSettings>, String> {
+    use crate::saved_variables::parser::parse_sv_file;
+    use crate::saved_variables::scrub::{detect_identities_from_tree, scrub};
+    use crate::saved_variables::serializer::serialize_to_lua;
+
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = sv_io::saved_variables_dir(&addons_dir);
+        let mut result: HashMap<String, AddonSettings> = HashMap::new();
+
+        for folder in &addon_folders {
+            let sv_file = sv_dir.join(format!("{}.lua", folder));
+            if !sv_file.is_file() {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&sv_file) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "export_sv_settings: failed to read {}: {}",
+                        sv_file.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let file_name = format!("{}.lua", folder);
+            let tree = match parse_sv_file(&content, &file_name) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("export_sv_settings: failed to parse {}: {}", file_name, e);
+                    continue;
+                }
+            };
+
+            let ctx = detect_identities_from_tree(&tree);
+            let (scrubbed, report) = scrub(&tree, &ctx);
+
+            // Phase 1: account-wide only — filter to keep only $AccountWide subtrees.
+            let account_wide_only = retain_account_wide_only(&scrubbed);
+            let lua = serialize_to_lua(&account_wide_only);
+
+            result.insert(
+                folder.clone(),
+                AddonSettings {
+                    encoding: "lua-text".to_string(),
+                    lua,
+                    original_bytes: report.original_bytes,
+                    scrubbed_bytes: report.scrubbed_bytes,
+                    detected_identities: ctx,
+                    scrub_report: report,
+                },
+            );
+        }
+
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// Walk a scrubbed tree and return a version that retains only `$AccountWide`
+/// subtrees under account-handle keys. Everything else (per-character subtrees,
+/// world layers that contain only character data, etc.) is dropped.
+fn retain_account_wide_only(
+    tree: &crate::saved_variables::types::SvTreeNode,
+) -> crate::saved_variables::types::SvTreeNode {
+    use crate::saved_variables::types::{SvTreeNode, SvValueType};
+
+    fn filter_account_node(node: &SvTreeNode) -> SvTreeNode {
+        let new_children = node
+            .children
+            .as_ref()
+            .map(|children| {
+                children
+                    .iter()
+                    .filter(|child| child.key == "$AccountWide")
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        SvTreeNode {
+            key: node.key.clone(),
+            value_type: SvValueType::Table,
+            value: None,
+            children: Some(new_children),
+            raw_lua_value: None,
+        }
+    }
+
+    fn filter_top_var(node: &SvTreeNode) -> SvTreeNode {
+        // Walk down through Default → (world?) → @account, keeping only $AccountWide.
+        let new_children = node
+            .children
+            .as_ref()
+            .map(|children| {
+                children
+                    .iter()
+                    .map(|child| {
+                        if child.key == "Default" || child.key.contains(' ') {
+                            // Default or world layer — recurse one more level
+                            let inner = child
+                                .children
+                                .as_ref()
+                                .map(|gc| {
+                                    gc.iter()
+                                        .map(|gchild| {
+                                            if gchild.key.starts_with('@') {
+                                                filter_account_node(gchild)
+                                            } else if gchild.key.contains(' ') {
+                                                // world under Default — recurse
+                                                let accounts = gchild
+                                                    .children
+                                                    .as_ref()
+                                                    .map(|ac| {
+                                                        ac.iter()
+                                                            .filter(|a| a.key.starts_with('@'))
+                                                            .map(filter_account_node)
+                                                            .collect::<Vec<_>>()
+                                                    })
+                                                    .unwrap_or_default();
+                                                SvTreeNode {
+                                                    key: gchild.key.clone(),
+                                                    value_type: SvValueType::Table,
+                                                    value: None,
+                                                    children: Some(accounts),
+                                                    raw_lua_value: None,
+                                                }
+                                            } else {
+                                                gchild.clone()
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            SvTreeNode {
+                                key: child.key.clone(),
+                                value_type: SvValueType::Table,
+                                value: None,
+                                children: Some(inner),
+                                raw_lua_value: None,
+                            }
+                        } else if child.key.starts_with('@') {
+                            // Account key directly under top var (no Default wrapper)
+                            filter_account_node(child)
+                        } else {
+                            child.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        SvTreeNode {
+            key: node.key.clone(),
+            value_type: SvValueType::Table,
+            value: None,
+            children: Some(new_children),
+            raw_lua_value: None,
+        }
+    }
+
+    let new_children = tree
+        .children
+        .as_ref()
+        .map(|children| children.iter().map(filter_top_var).collect::<Vec<_>>())
+        .unwrap_or_default();
+    SvTreeNode {
+        key: tree.key.clone(),
+        value_type: SvValueType::Table,
+        value: None,
+        children: Some(new_children),
+        raw_lua_value: None,
+    }
+}
+
+/// Result of importing SavedVariables settings from a v2 `.esopack` file.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvImportResult {
+    /// Addons whose SV files were successfully written.
+    pub applied: Vec<String>,
+    /// Addons skipped because their SV file was not in the pack.
+    pub skipped: Vec<String>,
+    /// Addons where the import failed; contains error messages.
+    pub errors: Vec<String>,
+}
+
+/// Import SavedVariables settings from a v2 `.esopack` file.
+///
+/// For each addon in `addon_folders` that has a corresponding entry in the
+/// pack's `settings` map, substitutes identity placeholders with the real
+/// account/character identities from `ctx`, then writes the resulting Lua to
+/// the SavedVariables directory. A `.bak` copy of the existing file is created
+/// before each overwrite.
+///
+/// `ctx` must describe the *importer's* identities (not the exporter's). The
+/// substitution maps:
+///   `${ACCOUNT}` → `ctx.accounts[0]`
+///   `${ACCOUNT:N}` → `ctx.accounts[N]`
+///   `${CHAR:N}` → `ctx.characters[N]`
+///   `${CHAR_ID:N}` → `ctx.character_ids[N]`
+///   `${WORLD}` → first of `WELL_KNOWN_WORLDS` or `ctx.extra_worlds[0]`
+///
+/// Placeholder tokens that have no mapping in `ctx` are left as-is.
+#[tauri::command]
+pub async fn import_sv_settings(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    settings: HashMap<String, AddonSettings>,
+    ctx: crate::saved_variables::scrub::ScrubContext,
+    addon_folders: Vec<String>,
+) -> Result<SvImportResult, String> {
+    use crate::saved_variables::scrub::WELL_KNOWN_WORLDS;
+
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = sv_io::saved_variables_dir(&addons_dir);
+        fs::create_dir_all(&sv_dir)
+            .map_err(|e| format!("Failed to create SavedVariables directory: {}", e))?;
+
+        let mut applied = Vec::new();
+        let mut skipped = Vec::new();
+        let mut errors = Vec::new();
+
+        for folder in &addon_folders {
+            let entry = match settings.get(folder.as_str()) {
+                Some(e) => e,
+                None => {
+                    skipped.push(folder.clone());
+                    continue;
+                }
+            };
+
+            if entry.encoding != "lua-text" {
+                errors.push(format!(
+                    "{}: unsupported encoding '{}'",
+                    folder, entry.encoding
+                ));
+                continue;
+            }
+
+            let substituted = crate::saved_variables::scrub::substitute_placeholders(
+                &entry.lua,
+                &ctx,
+                WELL_KNOWN_WORLDS,
+            );
+
+            let dest = sv_dir.join(format!("{}.lua", folder));
+
+            // Create .bak before overwriting
+            if dest.is_file() {
+                let bak = dest.with_extension("lua.bak");
+                if let Err(e) = fs::copy(&dest, &bak) {
+                    errors.push(format!("{}: failed to create backup: {}", folder, e));
+                    continue;
+                }
+            }
+
+            // Atomic write
+            let tmp = sv_dir.join(format!("{}.lua.tmp", folder));
+            if let Err(e) = fs::write(&tmp, &substituted) {
+                errors.push(format!("{}: failed to write: {}", folder, e));
+                continue;
+            }
+            if dest.exists() {
+                if let Err(e) = fs::remove_file(&dest) {
+                    let _ = fs::remove_file(&tmp);
+                    errors.push(format!(
+                        "{}: failed to replace existing file: {}",
+                        folder, e
+                    ));
+                    continue;
+                }
+            }
+            if let Err(e) = fs::rename(&tmp, &dest) {
+                let _ = fs::remove_file(&tmp);
+                errors.push(format!("{}: failed to finalize write: {}", folder, e));
+                continue;
+            }
+
+            applied.push(folder.clone());
+        }
+
+        Ok(SvImportResult {
+            applied,
+            skipped,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 // ─── SavedVariables Manager ─────────────────────────────────
