@@ -288,6 +288,8 @@ export function DiscoverDetail({
               Installed: {installSuccess.installedFolders.join(", ")}
               {installSuccess.installedDeps.length > 0 &&
                 ` + deps: ${installSuccess.installedDeps.join(", ")}`}
+              {installSuccess.skippedDeps.length > 0 &&
+                ` (skipped: ${installSuccess.skippedDeps.join(", ")})`}
             </span>
             {onRemoveByEsouiId && result && (
               <button
