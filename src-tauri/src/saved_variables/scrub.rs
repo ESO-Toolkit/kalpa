@@ -936,6 +936,129 @@ fn scrub_node_override(
     }
 }
 
+/// Walk a scrubbed SV tree and keep only `$AccountWide` subtrees under each
+/// account-handle key. Per-character branches and other subtrees are dropped.
+///
+/// Must be called **after** [`scrub`] because account keys will already be
+/// templated to `${ACCOUNT}` / `${ACCOUNT:N}` and world keys to `${WORLD}`.
+/// The checks here recognise both raw (`@Author`) and templated forms.
+pub fn retain_account_wide_only(tree: &SvTreeNode) -> SvTreeNode {
+    fn filter_account_node(node: &SvTreeNode) -> SvTreeNode {
+        let new_children = node
+            .children
+            .as_ref()
+            .map(|children| {
+                children
+                    .iter()
+                    .filter(|child| child.key == "$AccountWide")
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        SvTreeNode {
+            key: node.key.clone(),
+            value_type: SvValueType::Table,
+            value: None,
+            children: Some(new_children),
+            raw_lua_value: None,
+        }
+    }
+
+    fn filter_top_var(node: &SvTreeNode) -> SvTreeNode {
+        let new_children = node
+            .children
+            .as_ref()
+            .map(|children| {
+                children
+                    .iter()
+                    .map(|child| {
+                        if child.key == "Default"
+                            || child.key.contains(' ')
+                            || child.key == "${WORLD}"
+                        {
+                            // Default or world layer — recurse one more level
+                            let inner = child
+                                .children
+                                .as_ref()
+                                .map(|gc| {
+                                    gc.iter()
+                                        .map(|gchild| {
+                                            if gchild.key.starts_with('@')
+                                                || gchild.key.starts_with("${ACCOUNT")
+                                            {
+                                                filter_account_node(gchild)
+                                            } else if gchild.key.contains(' ')
+                                                || gchild.key == "${WORLD}"
+                                            {
+                                                // world under Default — recurse
+                                                let accounts = gchild
+                                                    .children
+                                                    .as_ref()
+                                                    .map(|ac| {
+                                                        ac.iter()
+                                                            .filter(|a| {
+                                                                a.key.starts_with('@')
+                                                                    || a.key
+                                                                        .starts_with("${ACCOUNT")
+                                                            })
+                                                            .map(filter_account_node)
+                                                            .collect::<Vec<_>>()
+                                                    })
+                                                    .unwrap_or_default();
+                                                SvTreeNode {
+                                                    key: gchild.key.clone(),
+                                                    value_type: SvValueType::Table,
+                                                    value: None,
+                                                    children: Some(accounts),
+                                                    raw_lua_value: None,
+                                                }
+                                            } else {
+                                                gchild.clone()
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            SvTreeNode {
+                                key: child.key.clone(),
+                                value_type: SvValueType::Table,
+                                value: None,
+                                children: Some(inner),
+                                raw_lua_value: None,
+                            }
+                        } else if child.key.starts_with('@') || child.key.starts_with("${ACCOUNT") {
+                            // Account key directly under top var (no Default wrapper)
+                            filter_account_node(child)
+                        } else {
+                            child.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        SvTreeNode {
+            key: node.key.clone(),
+            value_type: SvValueType::Table,
+            value: None,
+            children: Some(new_children),
+            raw_lua_value: None,
+        }
+    }
+
+    let new_children = tree
+        .children
+        .as_ref()
+        .map(|children| children.iter().map(filter_top_var).collect::<Vec<_>>())
+        .unwrap_or_default();
+    SvTreeNode {
+        key: tree.key.clone(),
+        value_type: SvValueType::Table,
+        value: None,
+        children: Some(new_children),
+        raw_lua_value: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1598,6 +1721,229 @@ mod tests {
             "world not substituted: {}",
             result
         );
+    }
+
+    // ── retain_account_wide_only tests ────────────────────────────────────
+
+    fn make_leaf(key: &str) -> SvTreeNode {
+        SvTreeNode {
+            key: key.to_string(),
+            value_type: SvValueType::String,
+            value: Some(serde_json::Value::String(key.to_string())),
+            children: None,
+            raw_lua_value: None,
+        }
+    }
+
+    fn make_table(key: &str, children: Vec<SvTreeNode>) -> SvTreeNode {
+        SvTreeNode {
+            key: key.to_string(),
+            value_type: SvValueType::Table,
+            value: None,
+            children: Some(children),
+            raw_lua_value: None,
+        }
+    }
+
+    fn make_root(children: Vec<SvTreeNode>) -> SvTreeNode {
+        make_table("__root__", children)
+    }
+
+    fn child_keys(node: &SvTreeNode) -> Vec<String> {
+        node.children
+            .as_ref()
+            .map(|c| c.iter().map(|n| n.key.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Standard layout: root → MyAddonVars → Default → ${ACCOUNT} → [$AccountWide, char]
+    /// After filter: only $AccountWide should remain under ${ACCOUNT}.
+    #[test]
+    fn retain_account_wide_strips_char_data_under_templated_account() {
+        let account_node = make_table(
+            "${ACCOUNT}",
+            vec![
+                make_table("$AccountWide", vec![make_leaf("setting1")]),
+                make_table("MyChar", vec![make_leaf("charData")]),
+            ],
+        );
+        let default_node = make_table("Default", vec![account_node]);
+        let addon_var = make_table("MyAddonVars", vec![default_node]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = retain_account_wide_only(&root);
+
+        // Drill down: root → MyAddonVars → Default → ${ACCOUNT}
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        let default = &addon.children.as_ref().unwrap()[0];
+        assert_eq!(default.key, "Default");
+        let account = &default.children.as_ref().unwrap()[0];
+        assert_eq!(account.key, "${ACCOUNT}");
+        let kept = child_keys(account);
+        assert_eq!(
+            kept,
+            vec!["$AccountWide"],
+            "should keep only $AccountWide, got: {kept:?}"
+        );
+    }
+
+    /// Raw @-prefixed account key (pre-scrub form) also filtered correctly.
+    #[test]
+    fn retain_account_wide_strips_char_data_under_raw_account() {
+        let account_node = make_table(
+            "@Author",
+            vec![
+                make_table("$AccountWide", vec![make_leaf("setting1")]),
+                make_table("CharOne", vec![make_leaf("charData")]),
+            ],
+        );
+        let default_node = make_table("Default", vec![account_node]);
+        let addon_var = make_table("MyAddonVars", vec![default_node]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = retain_account_wide_only(&root);
+
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        let default = &addon.children.as_ref().unwrap()[0];
+        let account = &default.children.as_ref().unwrap()[0];
+        let kept = child_keys(account);
+        assert_eq!(kept, vec!["$AccountWide"]);
+    }
+
+    /// Direct-account layout (no Default wrapper): root → MyAddonVars → ${ACCOUNT} → [...]
+    #[test]
+    fn retain_account_wide_direct_account_no_default_wrapper() {
+        let account_node = make_table(
+            "${ACCOUNT}",
+            vec![
+                make_table("$AccountWide", vec![make_leaf("x")]),
+                make_table("SomeChar", vec![make_leaf("y")]),
+            ],
+        );
+        let addon_var = make_table("IIfA_Data", vec![account_node]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = retain_account_wide_only(&root);
+
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        let account = &addon.children.as_ref().unwrap()[0];
+        assert_eq!(account.key, "${ACCOUNT}");
+        let kept = child_keys(account);
+        assert_eq!(kept, vec!["$AccountWide"]);
+    }
+
+    /// World-first layout (e.g. pChat): root → MyVar → ${WORLD} → ${ACCOUNT} → [...]
+    #[test]
+    fn retain_account_wide_world_first_layout() {
+        let account_node = make_table(
+            "${ACCOUNT}",
+            vec![
+                make_table("$AccountWide", vec![make_leaf("wideData")]),
+                make_table("CharInWorld", vec![make_leaf("perChar")]),
+            ],
+        );
+        let world_node = make_table("${WORLD}", vec![account_node]);
+        let addon_var = make_table("pChatSavedVars", vec![world_node]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = retain_account_wide_only(&root);
+
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        // ${WORLD} should be present because it wraps an account node
+        assert_eq!(addon.children.as_ref().unwrap()[0].key, "${WORLD}");
+        let world = &addon.children.as_ref().unwrap()[0];
+        let account = &world.children.as_ref().unwrap()[0];
+        let kept = child_keys(account);
+        assert_eq!(kept, vec!["$AccountWide"]);
+    }
+
+    /// Raw world name (pre-scrub form) also handled.
+    #[test]
+    fn retain_account_wide_raw_world_name() {
+        let account_node = make_table(
+            "@Author",
+            vec![
+                make_table("$AccountWide", vec![make_leaf("x")]),
+                make_table("Char", vec![make_leaf("y")]),
+            ],
+        );
+        let world_node = make_table("NA Megaserver", vec![account_node]);
+        let addon_var = make_table("SomeVar", vec![world_node]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = retain_account_wide_only(&root);
+
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        let world = &addon.children.as_ref().unwrap()[0];
+        let account = &world.children.as_ref().unwrap()[0];
+        let kept = child_keys(account);
+        assert_eq!(kept, vec!["$AccountWide"]);
+    }
+
+    /// Addon with no $AccountWide at all: account node ends up with empty children.
+    #[test]
+    fn retain_account_wide_no_account_wide_subtree_yields_empty() {
+        let account_node = make_table(
+            "${ACCOUNT}",
+            vec![make_table("SomeChar", vec![make_leaf("charData")])],
+        );
+        let default_node = make_table("Default", vec![account_node]);
+        let addon_var = make_table("MyVar", vec![default_node]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = retain_account_wide_only(&root);
+
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        let default = &addon.children.as_ref().unwrap()[0];
+        let account = &default.children.as_ref().unwrap()[0];
+        let kept = child_keys(account);
+        assert!(
+            kept.is_empty(),
+            "no $AccountWide → empty children, got: {kept:?}"
+        );
+    }
+
+    /// Full round-trip: build a realistic tree, run scrub(), then retain_account_wide_only().
+    /// Verifies the two functions compose correctly — templated keys pass through the filter.
+    #[test]
+    fn retain_account_wide_round_trip_after_scrub() {
+        let ctx = ScrubContext {
+            accounts: vec!["@RealPlayer".to_string()],
+            characters: vec!["HeroChar".to_string()],
+            character_ids: vec![],
+            extra_worlds: vec![],
+        };
+
+        // Construct: MyVar → Default → @RealPlayer → [$AccountWide → {setting}, HeroChar → {data}]
+        let account_node = make_table(
+            "@RealPlayer",
+            vec![
+                make_table("$AccountWide", vec![make_leaf("mySetting")]),
+                make_table("HeroChar", vec![make_leaf("charSpecific")]),
+            ],
+        );
+        let tree = make_root(vec![make_table(
+            "MyVar",
+            vec![make_table("Default", vec![account_node])],
+        )]);
+
+        let (scrubbed, _report) = scrub(&tree, &ctx);
+        let filtered = retain_account_wide_only(&scrubbed);
+
+        // Drill to account level
+        let my_var = &filtered.children.as_ref().unwrap()[0];
+        let default = &my_var.children.as_ref().unwrap()[0];
+        let account = &default.children.as_ref().unwrap()[0];
+
+        // Key should be templated
+        assert!(
+            account.key.starts_with("${ACCOUNT"),
+            "account key should be templated, got: {}",
+            account.key
+        );
+        // Only $AccountWide should remain
+        let kept = child_keys(account);
+        assert_eq!(kept, vec!["$AccountWide"], "got: {kept:?}");
     }
 
     // ── Realistic-fixture report ──────────────────────────────────────────
