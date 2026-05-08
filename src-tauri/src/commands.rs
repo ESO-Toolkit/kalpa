@@ -679,12 +679,36 @@ fn scan_installed_addons_blocking(
         let _ = metadata::save_metadata(addons_dir, &store);
     }
 
-    // Check for missing dependencies and enrich with ESOUI ID
+    // Build a map of folder_name → addon_version for version constraint checking
+    let version_map: HashMap<String, Option<u32>> = addons
+        .iter()
+        .map(|a| (a.folder_name.clone(), a.addon_version))
+        .collect();
+
+    // Check for missing/outdated dependencies and enrich with ESOUI ID
     for addon in &mut addons {
         addon.missing_dependencies = addon
             .depends_on
             .iter()
             .filter(|dep| !installed.contains(&dep.name))
+            .map(|dep| dep.name.clone())
+            .collect();
+
+        addon.outdated_dependencies = addon
+            .depends_on
+            .iter()
+            .filter(|dep| {
+                let Some(min) = dep.min_version else {
+                    return false;
+                };
+                if !installed.contains(&dep.name) {
+                    return false;
+                }
+                match version_map.get(&dep.name) {
+                    Some(Some(installed_ver)) => *installed_ver < min,
+                    _ => false,
+                }
+            })
             .map(|dep| dep.name.clone())
             .collect();
 

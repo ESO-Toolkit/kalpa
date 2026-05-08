@@ -1072,7 +1072,7 @@ function App() {
             case "outdated":
               return updatesSet.has(addon.folderName);
             case "missing-deps":
-              return addon.missingDependencies.length > 0;
+              return addon.missingDependencies.length > 0 || addon.outdatedDependencies.length > 0;
             case "favorites":
               return addon.tags.includes("favorite");
             case "disabled":

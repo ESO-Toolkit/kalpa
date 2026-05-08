@@ -530,6 +530,7 @@ export function AddonDetail({
               <div className="space-y-0.5">
                 {addon.dependsOn.map((dep) => {
                   const installed = installedSet.has(dep.name);
+                  const outdated = addon.outdatedDependencies.includes(dep.name);
                   const justInstalled = justInstalledDeps.has(dep.name);
                   return (
                     <div
@@ -539,18 +540,25 @@ export function AddonDetail({
                       <span
                         className={cn(
                           "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
-                          installed
-                            ? "bg-emerald-500/15 text-emerald-400"
-                            : "bg-red-500/15 text-red-400"
+                          outdated
+                            ? "bg-amber-500/15 text-amber-400"
+                            : installed
+                              ? "bg-emerald-500/15 text-emerald-400"
+                              : "bg-red-500/15 text-red-400"
                         )}
                       >
-                        {installed ? "\u2713" : "!"}
+                        {outdated ? "!" : installed ? "\u2713" : "!"}
                       </span>
                       <div className="flex-1 min-w-0">
                         <span className="truncate block">{dep.name}</span>
                         {dep.min_version !== null && (
-                          <span className="text-[11px] text-muted-foreground/50">
-                            v{dep.min_version}+
+                          <span
+                            className={cn(
+                              "text-[11px]",
+                              outdated ? "text-amber-400/70" : "text-muted-foreground/50"
+                            )}
+                          >
+                            v{dep.min_version}+{outdated ? " (outdated)" : ""}
                           </span>
                         )}
                       </div>

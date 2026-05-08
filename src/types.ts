@@ -15,6 +15,7 @@ export interface AddonManifest {
   dependsOn: Dependency[];
   optionalDependsOn: Dependency[];
   missingDependencies: string[];
+  outdatedDependencies: string[];
   esouiId: number | null;
   tags: string[];
   esouiLastUpdate: number;

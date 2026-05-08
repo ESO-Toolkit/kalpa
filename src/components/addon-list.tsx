@@ -102,18 +102,20 @@ const AddonListItem = memo(function AddonListItem({
       id={`addon-${addon.folderName}`}
       role="option"
       aria-selected={batchMode ? isSelected : isCurrent}
-      aria-label={`${addon.title}${addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}`}
+      aria-label={`${addon.title}${addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}${addon.outdatedDependencies.length > 0 ? `, ${addon.outdatedDependencies.length} outdated dependencies` : ""}`}
       className={cn(
         "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_rgba(196,164,74,0.02)] group",
         addon.disabled
           ? "border-l-zinc-500 opacity-50"
           : addon.missingDependencies.length > 0
             ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_rgba(239,68,68,0.1)]"
-            : addon.isLibrary
-              ? "border-l-emerald-400 shadow-[inset_4px_0_12px_-4px_rgba(52,211,153,0.08)]"
-              : hasUpdate
-                ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
-                : "border-l-transparent",
+            : addon.outdatedDependencies.length > 0
+              ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
+              : addon.isLibrary
+                ? "border-l-emerald-400 shadow-[inset_4px_0_12px_-4px_rgba(52,211,153,0.08)]"
+                : hasUpdate
+                  ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
+                  : "border-l-transparent",
         isCurrent &&
           !batchMode &&
           "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]",
@@ -188,6 +190,14 @@ const AddonListItem = memo(function AddonListItem({
                 className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
               >
                 {addon.missingDependencies.length} missing
+              </Badge>
+            )}
+            {addon.outdatedDependencies.length > 0 && (
+              <Badge
+                variant="outline"
+                className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+              >
+                {addon.outdatedDependencies.length} outdated
               </Badge>
             )}
             {addon.modifiedFileCount > 0 && (
@@ -276,7 +286,9 @@ export function AddonList({
       libraries: allAddons.filter((a) => a.isLibrary).length,
       favorites: allAddons.filter((a) => a.tags.includes("favorite")).length,
       outdated: allAddons.filter((a) => updatesMap.has(a.folderName)).length,
-      "missing-deps": allAddons.filter((a) => a.missingDependencies.length > 0).length,
+      "missing-deps": allAddons.filter(
+        (a) => a.missingDependencies.length > 0 || a.outdatedDependencies.length > 0
+      ).length,
       disabled: allAddons.filter((a) => a.disabled).length,
     }),
     [allAddons, updatesMap]
