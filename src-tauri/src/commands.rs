@@ -229,34 +229,48 @@ fn resolve_transitive_deps(
         }
     }
 
-    let mut missing_deps: Vec<String> = Vec::new();
-    for folder in installed_folders {
-        let addon =
-            find_manifest(addons_dir, folder).and_then(|p| manifest::parse_manifest(folder, &p));
-        if let Some(addon) = addon {
-            for dep in &addon.depends_on {
-                if !all_installed.contains(&dep.name) && !missing_deps.contains(&dep.name) {
-                    missing_deps.push(dep.name.clone());
-                }
-            }
-        }
-    }
-
     let mut installed_deps: Vec<String> = Vec::new();
     let mut failed_deps: Vec<String> = Vec::new();
     let mut skipped_deps: Vec<String> = Vec::new();
 
-    for dep_name in &missing_deps {
-        match try_install_dep(dep_name, addons_dir, store) {
-            Ok(dep_folders) => {
-                for f in &dep_folders {
-                    all_installed.insert(f.clone());
+    // Seed with the folders we just installed; loop resolves the full chain.
+    let mut folders_to_scan: Vec<String> = installed_folders.to_vec();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    while !folders_to_scan.is_empty() {
+        let mut missing_deps: Vec<String> = Vec::new();
+        for folder in &folders_to_scan {
+            let addon = find_manifest(addons_dir, folder)
+                .and_then(|p| manifest::parse_manifest(folder, &p));
+            if let Some(addon) = addon {
+                for dep in &addon.depends_on {
+                    if !all_installed.contains(&dep.name) && seen.insert(dep.name.clone()) {
+                        missing_deps.push(dep.name.clone());
+                    }
                 }
-                installed_deps.push(dep_name.clone());
             }
-            Err("not_found") => skipped_deps.push(dep_name.clone()),
-            Err(_) => failed_deps.push(dep_name.clone()),
         }
+
+        if missing_deps.is_empty() {
+            break;
+        }
+
+        let mut newly_installed_folders: Vec<String> = Vec::new();
+        for dep_name in &missing_deps {
+            match try_install_dep(dep_name, addons_dir, store) {
+                Ok(dep_folders) => {
+                    for f in &dep_folders {
+                        all_installed.insert(f.clone());
+                        newly_installed_folders.push(f.clone());
+                    }
+                    installed_deps.push(dep_name.clone());
+                }
+                Err("not_found") => skipped_deps.push(dep_name.clone()),
+                Err(_) => failed_deps.push(dep_name.clone()),
+            }
+        }
+
+        folders_to_scan = newly_installed_folders;
     }
 
     ResolvedDeps {
