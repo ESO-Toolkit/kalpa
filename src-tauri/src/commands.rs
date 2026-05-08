@@ -207,6 +207,65 @@ fn record_installed_folders(
     }
 }
 
+struct ResolvedDeps {
+    installed_deps: Vec<String>,
+    failed_deps: Vec<String>,
+    skipped_deps: Vec<String>,
+}
+
+fn resolve_transitive_deps(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+) -> ResolvedDeps {
+    let mut all_installed: HashSet<String> = HashSet::new();
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    all_installed.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    let mut missing_deps: Vec<String> = Vec::new();
+    for folder in installed_folders {
+        let addon =
+            find_manifest(addons_dir, folder).and_then(|p| manifest::parse_manifest(folder, &p));
+        if let Some(addon) = addon {
+            for dep in &addon.depends_on {
+                if !all_installed.contains(&dep.name) && !missing_deps.contains(&dep.name) {
+                    missing_deps.push(dep.name.clone());
+                }
+            }
+        }
+    }
+
+    let mut installed_deps: Vec<String> = Vec::new();
+    let mut failed_deps: Vec<String> = Vec::new();
+    let mut skipped_deps: Vec<String> = Vec::new();
+
+    for dep_name in &missing_deps {
+        match try_install_dep(dep_name, addons_dir, store) {
+            Ok(dep_folders) => {
+                for f in &dep_folders {
+                    all_installed.insert(f.clone());
+                }
+                installed_deps.push(dep_name.clone());
+            }
+            Err("not_found") => skipped_deps.push(dep_name.clone()),
+            Err(_) => failed_deps.push(dep_name.clone()),
+        }
+    }
+
+    ResolvedDeps {
+        installed_deps,
+        failed_deps,
+        skipped_deps,
+    }
+}
+
 /// Try to auto-install a single missing dependency from ESOUI.
 /// Returns Ok(folders) on success, or Err(reason) on failure.
 fn try_install_dep(
@@ -823,54 +882,15 @@ fn install_addon_blocking(
         0, // esoui_last_update will be populated during next update check
     );
 
-    let mut all_installed: HashSet<String> = HashSet::new();
-    if let Ok(entries) = fs::read_dir(addons_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    all_installed.insert(name.to_string());
-                }
-            }
-        }
-    }
-
-    let mut missing_deps: Vec<String> = Vec::new();
-    for folder in &installed_folders {
-        let addon =
-            find_manifest(addons_dir, folder).and_then(|p| manifest::parse_manifest(folder, &p));
-        if let Some(addon) = addon {
-            for dep in &addon.depends_on {
-                if !all_installed.contains(&dep.name) && !missing_deps.contains(&dep.name) {
-                    missing_deps.push(dep.name.clone());
-                }
-            }
-        }
-    }
-
-    let mut installed_deps: Vec<String> = Vec::new();
-    let mut failed_deps: Vec<String> = Vec::new();
-    let mut skipped_deps: Vec<String> = Vec::new();
-
-    for dep_name in &missing_deps {
-        match try_install_dep(dep_name, addons_dir, &mut store) {
-            Ok(dep_folders) => {
-                for f in &dep_folders {
-                    all_installed.insert(f.clone());
-                }
-                installed_deps.push(dep_name.clone());
-            }
-            Err("not_found") => skipped_deps.push(dep_name.clone()),
-            Err(_) => failed_deps.push(dep_name.clone()),
-        }
-    }
+    let resolved = resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
 
     metadata::save_metadata(addons_dir, &store)?;
 
     Ok(InstallResult {
         installed_folders,
-        installed_deps,
-        failed_deps,
-        skipped_deps,
+        installed_deps: resolved.installed_deps,
+        failed_deps: resolved.failed_deps,
+        skipped_deps: resolved.skipped_deps,
     })
 }
 
@@ -962,12 +982,13 @@ fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<Inst
     let mut store = metadata::load_metadata(addons_dir);
     match try_install_dep(dep_name, addons_dir, &mut store) {
         Ok(folders) => {
+            let resolved = resolve_transitive_deps(addons_dir, &folders, &mut store);
             metadata::save_metadata(addons_dir, &store)?;
             Ok(InstallResult {
                 installed_folders: folders,
-                installed_deps: vec![],
-                failed_deps: vec![],
-                skipped_deps: vec![],
+                installed_deps: resolved.installed_deps,
+                failed_deps: resolved.failed_deps,
+                skipped_deps: resolved.skipped_deps,
             })
         }
         Err(reason) => Err(format!("Failed to install {}: {}", dep_name, reason)),
