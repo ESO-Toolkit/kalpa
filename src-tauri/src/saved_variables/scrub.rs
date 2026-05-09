@@ -939,13 +939,16 @@ fn scrub_node_override(
     }
 }
 
-/// Walk a scrubbed SV tree and keep only `$AccountWide` subtrees under each
-/// account-handle key. Per-character branches and other subtrees are dropped.
+/// Walk a scrubbed SV tree and strip per-character subtrees under each
+/// account-handle key. Keys starting with `${CHAR` or `${CHAR_ID` (the
+/// templated forms of character names and numeric character IDs) are dropped;
+/// everything else — `$AccountWide`, addon-specific root keys, scalar values,
+/// etc. — is preserved.
 ///
 /// Must be called **after** [`scrub`] because account keys will already be
 /// templated to `${ACCOUNT}` / `${ACCOUNT:N}` and world keys to `${WORLD}`.
 /// The checks here recognise both raw (`@Author`) and templated forms.
-pub fn retain_account_wide_only(tree: &SvTreeNode) -> SvTreeNode {
+pub fn strip_per_character_data(tree: &SvTreeNode) -> SvTreeNode {
     fn filter_account_node(node: &SvTreeNode) -> SvTreeNode {
         let new_children = node
             .children
@@ -953,7 +956,9 @@ pub fn retain_account_wide_only(tree: &SvTreeNode) -> SvTreeNode {
             .map(|children| {
                 children
                     .iter()
-                    .filter(|child| child.key == "$AccountWide")
+                    .filter(|child| {
+                        !child.key.starts_with("${CHAR") && !child.key.starts_with("${CHAR_ID")
+                    })
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -1726,7 +1731,7 @@ mod tests {
         );
     }
 
-    // ── retain_account_wide_only tests ────────────────────────────────────
+    // ── strip_per_character_data tests ────────────────────────────────────
 
     fn make_leaf(key: &str) -> SvTreeNode {
         SvTreeNode {
@@ -1759,22 +1764,22 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// Standard layout: root → MyAddonVars → Default → ${ACCOUNT} → [$AccountWide, char]
-    /// After filter: only $AccountWide should remain under ${ACCOUNT}.
+    /// Standard layout: root → MyAddonVars → Default → ${ACCOUNT} → [$AccountWide, ${CHAR:0}]
+    /// After filter: ${CHAR:0} is stripped, $AccountWide survives.
     #[test]
-    fn retain_account_wide_strips_char_data_under_templated_account() {
+    fn strip_char_data_under_templated_account() {
         let account_node = make_table(
             "${ACCOUNT}",
             vec![
                 make_table("$AccountWide", vec![make_leaf("setting1")]),
-                make_table("MyChar", vec![make_leaf("charData")]),
+                make_table("${CHAR:0}", vec![make_leaf("charData")]),
             ],
         );
         let default_node = make_table("Default", vec![account_node]);
         let addon_var = make_table("MyAddonVars", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = retain_account_wide_only(&root);
+        let filtered = strip_per_character_data(&root);
 
         // Drill down: root → MyAddonVars → Default → ${ACCOUNT}
         let addon = &filtered.children.as_ref().unwrap()[0];
@@ -1786,25 +1791,26 @@ mod tests {
         assert_eq!(
             kept,
             vec!["$AccountWide"],
-            "should keep only $AccountWide, got: {kept:?}"
+            "should strip ${{CHAR:0}}, got: {kept:?}"
         );
     }
 
-    /// Raw @-prefixed account key (pre-scrub form) also filtered correctly.
+    /// Raw @-prefixed account key (pre-scrub form) with templated char key: ${CHAR:0} stripped,
+    /// $AccountWide and any other non-char keys preserved.
     #[test]
-    fn retain_account_wide_strips_char_data_under_raw_account() {
+    fn strip_char_data_under_raw_account() {
         let account_node = make_table(
             "@Author",
             vec![
                 make_table("$AccountWide", vec![make_leaf("setting1")]),
-                make_table("CharOne", vec![make_leaf("charData")]),
+                make_table("${CHAR:0}", vec![make_leaf("charData")]),
             ],
         );
         let default_node = make_table("Default", vec![account_node]);
         let addon_var = make_table("MyAddonVars", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = retain_account_wide_only(&root);
+        let filtered = strip_per_character_data(&root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let default = &addon.children.as_ref().unwrap()[0];
@@ -1814,45 +1820,48 @@ mod tests {
     }
 
     /// Direct-account layout (no Default wrapper): root → MyAddonVars → ${ACCOUNT} → [...]
+    /// Non-$AccountWide non-char keys (e.g. addon root keys) survive; ${CHAR:N} is stripped.
     #[test]
-    fn retain_account_wide_direct_account_no_default_wrapper() {
+    fn strip_char_data_direct_account_no_default_wrapper() {
         let account_node = make_table(
             "${ACCOUNT}",
             vec![
                 make_table("$AccountWide", vec![make_leaf("x")]),
-                make_table("SomeChar", vec![make_leaf("y")]),
+                make_table("${CHAR:0}", vec![make_leaf("y")]),
+                make_table("AddonRootKey", vec![make_leaf("z")]),
             ],
         );
         let addon_var = make_table("IIfA_Data", vec![account_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = retain_account_wide_only(&root);
+        let filtered = strip_per_character_data(&root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let account = &addon.children.as_ref().unwrap()[0];
         assert_eq!(account.key, "${ACCOUNT}");
         let kept = child_keys(account);
-        assert_eq!(kept, vec!["$AccountWide"]);
+        // ${CHAR:0} stripped; $AccountWide and AddonRootKey survive
+        assert_eq!(kept, vec!["$AccountWide", "AddonRootKey"]);
     }
 
     /// World-first layout (e.g. pChat): root → MyVar → ${WORLD} → ${ACCOUNT} → [...]
+    /// ${CHAR:N} stripped; $AccountWide and other non-char keys survive.
     #[test]
-    fn retain_account_wide_world_first_layout() {
+    fn strip_char_data_world_first_layout() {
         let account_node = make_table(
             "${ACCOUNT}",
             vec![
                 make_table("$AccountWide", vec![make_leaf("wideData")]),
-                make_table("CharInWorld", vec![make_leaf("perChar")]),
+                make_table("${CHAR:0}", vec![make_leaf("perChar")]),
             ],
         );
         let world_node = make_table("${WORLD}", vec![account_node]);
         let addon_var = make_table("pChatSavedVars", vec![world_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = retain_account_wide_only(&root);
+        let filtered = strip_per_character_data(&root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
-        // ${WORLD} should be present because it wraps an account node
         assert_eq!(addon.children.as_ref().unwrap()[0].key, "${WORLD}");
         let world = &addon.children.as_ref().unwrap()[0];
         let account = &world.children.as_ref().unwrap()[0];
@@ -1860,21 +1869,21 @@ mod tests {
         assert_eq!(kept, vec!["$AccountWide"]);
     }
 
-    /// Raw world name (pre-scrub form) also handled.
+    /// Raw world name (pre-scrub form) also handled; ${CHAR_ID:N} stripped.
     #[test]
-    fn retain_account_wide_raw_world_name() {
+    fn strip_char_data_raw_world_name() {
         let account_node = make_table(
             "@Author",
             vec![
                 make_table("$AccountWide", vec![make_leaf("x")]),
-                make_table("Char", vec![make_leaf("y")]),
+                make_table("${CHAR_ID:0}", vec![make_leaf("y")]),
             ],
         );
         let world_node = make_table("NA Megaserver", vec![account_node]);
         let addon_var = make_table("SomeVar", vec![world_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = retain_account_wide_only(&root);
+        let filtered = strip_per_character_data(&root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let world = &addon.children.as_ref().unwrap()[0];
@@ -1883,18 +1892,22 @@ mod tests {
         assert_eq!(kept, vec!["$AccountWide"]);
     }
 
-    /// Addon with no $AccountWide at all: account node ends up with empty children.
+    /// Addon with only ${CHAR:N} children (no $AccountWide, no other keys):
+    /// account node ends up with empty children after stripping.
     #[test]
-    fn retain_account_wide_no_account_wide_subtree_yields_empty() {
+    fn strip_char_data_only_char_keys_yields_empty() {
         let account_node = make_table(
             "${ACCOUNT}",
-            vec![make_table("SomeChar", vec![make_leaf("charData")])],
+            vec![
+                make_table("${CHAR:0}", vec![make_leaf("charData")]),
+                make_table("${CHAR:1}", vec![make_leaf("charData2")]),
+            ],
         );
         let default_node = make_table("Default", vec![account_node]);
         let addon_var = make_table("MyVar", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = retain_account_wide_only(&root);
+        let filtered = strip_per_character_data(&root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let default = &addon.children.as_ref().unwrap()[0];
@@ -1902,14 +1915,42 @@ mod tests {
         let kept = child_keys(account);
         assert!(
             kept.is_empty(),
-            "no $AccountWide → empty children, got: {kept:?}"
+            "all ${{CHAR:N}} → empty children, got: {kept:?}"
         );
     }
 
-    /// Full round-trip: build a realistic tree, run scrub(), then retain_account_wide_only().
-    /// Verifies the two functions compose correctly — templated keys pass through the filter.
+    /// Addon with no $AccountWide but with non-char keys: those keys survive.
     #[test]
-    fn retain_account_wide_round_trip_after_scrub() {
+    fn strip_char_data_preserves_non_char_non_account_wide_keys() {
+        let account_node = make_table(
+            "${ACCOUNT}",
+            vec![
+                make_table("HarvestMapData", vec![make_leaf("pinData")]),
+                make_table("${CHAR:0}", vec![make_leaf("charData")]),
+            ],
+        );
+        let default_node = make_table("Default", vec![account_node]);
+        let addon_var = make_table("HarvestMapSavedVars", vec![default_node]);
+        let root = make_root(vec![addon_var]);
+
+        let filtered = strip_per_character_data(&root);
+
+        let addon = &filtered.children.as_ref().unwrap()[0];
+        let default = &addon.children.as_ref().unwrap()[0];
+        let account = &default.children.as_ref().unwrap()[0];
+        let kept = child_keys(account);
+        assert_eq!(
+            kept,
+            vec!["HarvestMapData"],
+            "non-char key should survive, got: {kept:?}"
+        );
+    }
+
+    /// Full round-trip: build a realistic tree, run scrub(), then strip_per_character_data().
+    /// Verifies the two functions compose correctly — templated ${CHAR:N} is stripped,
+    /// $AccountWide survives.
+    #[test]
+    fn strip_char_data_round_trip_after_scrub() {
         let ctx = ScrubContext {
             accounts: vec!["@RealPlayer".to_string()],
             characters: vec!["HeroChar".to_string()],
@@ -1931,7 +1972,7 @@ mod tests {
         )]);
 
         let (scrubbed, _report) = scrub(&tree, &ctx);
-        let filtered = retain_account_wide_only(&scrubbed);
+        let filtered = strip_per_character_data(&scrubbed);
 
         // Drill to account level
         let my_var = &filtered.children.as_ref().unwrap()[0];
@@ -1944,7 +1985,7 @@ mod tests {
             "account key should be templated, got: {}",
             account.key
         );
-        // Only $AccountWide should remain
+        // ${CHAR:0} (templated "HeroChar") stripped; only $AccountWide remains
         let kept = child_keys(account);
         assert_eq!(kept, vec!["$AccountWide"], "got: {kept:?}");
     }
@@ -1952,12 +1993,12 @@ mod tests {
     /// Default → world → account (3 levels deep): root → MyVar → Default → ${WORLD} → ${ACCOUNT} → [...]
     /// Some ESO addons use this layout (world node inside Default, not world-first).
     #[test]
-    fn retain_account_wide_default_world_account_three_levels() {
+    fn strip_char_data_default_world_account_three_levels() {
         let account_node = make_table(
             "${ACCOUNT}",
             vec![
                 make_table("$AccountWide", vec![make_leaf("deepSetting")]),
-                make_table("HeroChar", vec![make_leaf("deepChar")]),
+                make_table("${CHAR:0}", vec![make_leaf("deepChar")]),
             ],
         );
         let world_node = make_table("${WORLD}", vec![account_node]);
@@ -1965,7 +2006,7 @@ mod tests {
         let addon_var = make_table("SomeAddonVars", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = retain_account_wide_only(&root);
+        let filtered = strip_per_character_data(&root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let default = &addon.children.as_ref().unwrap()[0];

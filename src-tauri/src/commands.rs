@@ -4761,8 +4761,7 @@ pub async fn export_sv_settings(
             let ctx = detect_identities_from_tree(&tree);
             let (scrubbed, report) = scrub(&tree, &ctx);
 
-            // Phase 1: account-wide only — filter to keep only $AccountWide subtrees.
-            let account_wide_only = retain_account_wide_only(&scrubbed);
+            let account_wide_only = strip_per_character_data(&scrubbed);
             let lua = serialize_to_lua(&account_wide_only);
 
             result.insert(
@@ -4784,10 +4783,10 @@ pub async fn export_sv_settings(
     .map_err(|e| format!("Task failed: {}", e))?
 }
 
-fn retain_account_wide_only(
+fn strip_per_character_data(
     tree: &crate::saved_variables::types::SvTreeNode,
 ) -> crate::saved_variables::types::SvTreeNode {
-    crate::saved_variables::scrub::retain_account_wide_only(tree)
+    crate::saved_variables::scrub::strip_per_character_data(tree)
 }
 
 /// Result of importing SavedVariables settings from a v2 `.esopack` file.
