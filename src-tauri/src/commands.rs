@@ -4851,6 +4851,11 @@ pub async fn import_sv_settings(
         let mut errors = Vec::new();
 
         for folder in &addon_folders {
+            if let Err(e) = validate_name(folder) {
+                errors.push(format!("{}: invalid folder name: {}", folder, e));
+                continue;
+            }
+
             let entry = match settings.get(folder.as_str()) {
                 Some(e) => e,
                 None => {
