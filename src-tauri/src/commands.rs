@@ -4764,6 +4764,33 @@ pub async fn resolve_share_code(code: String) -> Result<SharedPack, String> {
 
 // ── Pack Export / Import (.esopack files) ───────────────────────────────────
 
+/// Scrubbed SavedVariables for one addon stored in an `.esopack` v2 file.
+///
+/// `encoding` is always `"lua-text"` for Phase 1. `lua` is the scrubbed Lua
+/// source with identity placeholders in place of real names/IDs. `scrub_report`
+/// is the full scrub report (drops + templated keys) for user review on import.
+/// `detected_identities` captures the `ScrubContext` used during export so the
+/// importer knows the placeholder → real-name mapping strategy.
+///
+/// `original_bytes` — serialized size before any scrubbing.
+/// `scrubbed_bytes` — size after identity scrubbing (before per-character strip).
+/// `final_bytes`    — actual size of `lua` after the per-character strip; this
+///                    is the true exported footprint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonSettings {
+    pub encoding: String,
+    pub lua: String,
+    pub original_bytes: usize,
+    pub scrubbed_bytes: usize,
+    /// Byte length of the exported `lua` string — accurate post-strip size.
+    /// Absent in files produced before this field was added; defaults to 0.
+    #[serde(default)]
+    pub final_bytes: usize,
+    pub detected_identities: crate::saved_variables::scrub::ScrubContext,
+    pub scrub_report: crate::saved_variables::scrub::ScrubReport,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EsoPackFile {
@@ -4772,6 +4799,9 @@ pub struct EsoPackFile {
     pub pack: EsoPackData,
     pub shared_at: String,
     pub shared_by: String,
+    /// v2 only: scrubbed SavedVariables keyed by addon folder name.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub settings: HashMap<String, AddonSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4836,7 +4866,7 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
         return Err("Not a valid .esopack file (wrong format field).".to_string());
     }
 
-    if pack.version != 1 {
+    if pack.version != 1 && pack.version != 2 {
         return Err(format!(
             "Unsupported .esopack version {}. Please update the app.",
             pack.version
@@ -4844,6 +4874,289 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     }
 
     Ok(pack)
+}
+
+/// Export the SavedVariables settings block for a list of addon folder names.
+///
+/// For each addon, reads the corresponding `.lua` file from the SavedVariables
+/// directory, detects identities, scrubs the tree, and returns an `AddonSettings`
+/// map keyed by addon folder name. Only `$AccountWide` subtrees are retained
+/// (per-character data is not exported in Phase 1).
+///
+/// The caller merges this map into an `EsoPackFile` and writes it with
+/// `export_pack_file`.
+#[tauri::command]
+pub async fn export_sv_settings(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    addon_folders: Vec<String>,
+) -> Result<HashMap<String, AddonSettings>, String> {
+    use crate::saved_variables::parser::parse_sv_file;
+    use crate::saved_variables::scrub::{detect_identities_from_tree, scrub};
+    use crate::saved_variables::serializer::serialize_to_lua;
+
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = sv_io::saved_variables_dir(&addons_dir);
+        let mut result: HashMap<String, AddonSettings> = HashMap::new();
+
+        for folder in &addon_folders {
+            let sv_file = sv_dir.join(format!("{}.lua", folder));
+            if !sv_file.is_file() {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&sv_file) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "export_sv_settings: failed to read {}: {}",
+                        sv_file.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let file_name = format!("{}.lua", folder);
+            let tree = match parse_sv_file(&content, &file_name) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("export_sv_settings: failed to parse {}: {}", file_name, e);
+                    continue;
+                }
+            };
+
+            let ctx = detect_identities_from_tree(&tree);
+            let (scrubbed, report) = scrub(&tree, &ctx);
+
+            let account_wide_only = strip_per_character_data(&scrubbed);
+            let lua = serialize_to_lua(&account_wide_only);
+            let final_bytes = lua.len();
+
+            result.insert(
+                folder.clone(),
+                AddonSettings {
+                    encoding: "lua-text".to_string(),
+                    lua,
+                    original_bytes: report.original_bytes,
+                    scrubbed_bytes: report.scrubbed_bytes,
+                    final_bytes,
+                    detected_identities: ctx,
+                    scrub_report: report,
+                },
+            );
+        }
+
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+fn strip_per_character_data(
+    tree: &crate::saved_variables::types::SvTreeNode,
+) -> crate::saved_variables::types::SvTreeNode {
+    crate::saved_variables::scrub::strip_per_character_data(tree)
+}
+
+/// Result of importing SavedVariables settings from a v2 `.esopack` file.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SvImportResult {
+    /// Addons whose SV files were successfully written.
+    pub applied: Vec<String>,
+    /// Addons skipped because their SV file was not in the pack.
+    pub skipped: Vec<String>,
+    /// Addons where the import failed; contains error messages.
+    pub errors: Vec<String>,
+}
+
+/// Import SavedVariables settings from a v2 `.esopack` file.
+///
+/// For each addon in `addon_folders` that has a corresponding entry in the
+/// pack's `settings` map, substitutes identity placeholders with the real
+/// account/character identities from `ctx`, then writes the resulting Lua to
+/// the SavedVariables directory. A `.bak` copy of the existing file is created
+/// before each overwrite.
+///
+/// `ctx` must describe the *importer's* identities (not the exporter's). The
+/// substitution maps:
+///   `${ACCOUNT}` → `ctx.accounts[0]`
+///   `${ACCOUNT:N}` → `ctx.accounts[N]`
+///   `${CHAR:N}` → `ctx.characters[N]`
+///   `${CHAR_ID:N}` → `ctx.character_ids[N]`
+///   `${WORLD}` → first of `WELL_KNOWN_WORLDS` or `ctx.extra_worlds[0]`
+///
+/// Placeholder tokens that have no mapping in `ctx` are left as-is.
+#[tauri::command]
+pub async fn import_sv_settings(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    settings: HashMap<String, AddonSettings>,
+    ctx: crate::saved_variables::scrub::ScrubContext,
+    addon_folders: Vec<String>,
+) -> Result<SvImportResult, String> {
+    use crate::saved_variables::scrub::WELL_KNOWN_WORLDS;
+
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = sv_io::saved_variables_dir(&addons_dir);
+        fs::create_dir_all(&sv_dir)
+            .map_err(|e| format!("Failed to create SavedVariables directory: {}", e))?;
+
+        let mut applied = Vec::new();
+        let mut skipped = Vec::new();
+        let mut errors = Vec::new();
+
+        for folder in &addon_folders {
+            if let Err(e) = validate_name(folder) {
+                errors.push(format!("{}: invalid folder name: {}", folder, e));
+                continue;
+            }
+
+            let entry = match settings.get(folder.as_str()) {
+                Some(e) => e,
+                None => {
+                    skipped.push(folder.clone());
+                    continue;
+                }
+            };
+
+            if entry.encoding != "lua-text" {
+                errors.push(format!(
+                    "{}: unsupported encoding '{}'",
+                    folder, entry.encoding
+                ));
+                continue;
+            }
+
+            let substituted = crate::saved_variables::scrub::substitute_placeholders(
+                &entry.lua,
+                &ctx,
+                WELL_KNOWN_WORLDS,
+            );
+
+            let dest = sv_dir.join(format!("{}.lua", folder));
+
+            // Create .bak before overwriting
+            if dest.is_file() {
+                let bak = dest.with_extension("lua.bak");
+                if let Err(e) = fs::copy(&dest, &bak) {
+                    errors.push(format!("{}: failed to create backup: {}", folder, e));
+                    continue;
+                }
+            }
+
+            // Atomic write
+            let tmp = sv_dir.join(format!("{}.lua.tmp", folder));
+            if let Err(e) = fs::write(&tmp, &substituted) {
+                errors.push(format!("{}: failed to write: {}", folder, e));
+                continue;
+            }
+            if dest.exists() {
+                if let Err(e) = fs::remove_file(&dest) {
+                    let _ = fs::remove_file(&tmp);
+                    errors.push(format!(
+                        "{}: failed to replace existing file: {}",
+                        folder, e
+                    ));
+                    continue;
+                }
+            }
+            if let Err(e) = fs::rename(&tmp, &dest) {
+                let _ = fs::remove_file(&tmp);
+                errors.push(format!("{}: failed to finalize write: {}", folder, e));
+                continue;
+            }
+
+            applied.push(folder.clone());
+        }
+
+        Ok(SvImportResult {
+            applied,
+            skipped,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// Detect the account/character identities present in the local SavedVariables
+/// directory. Reads any available `.lua` file that parses successfully and
+/// accumulates identities across all of them. Returns the merged `ScrubContext`.
+///
+/// The frontend passes this context to `import_sv_settings` so that
+/// placeholder tokens from a v2 `.esopack` file can be substituted with the
+/// local player's real names.
+#[tauri::command]
+pub async fn detect_local_identities(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<crate::saved_variables::scrub::ScrubContext, String> {
+    use crate::saved_variables::parser::parse_sv_file;
+    use crate::saved_variables::scrub::{detect_identities_from_tree, ScrubContext};
+
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = sv_io::saved_variables_dir(&addons_dir);
+        let mut merged = ScrubContext::default();
+
+        let entries = match fs::read_dir(&sv_dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(merged),
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+                continue;
+            }
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown.lua")
+                .to_string();
+            let tree = match parse_sv_file(&content, &file_name) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            let ctx = detect_identities_from_tree(&tree);
+            for acc in ctx.accounts {
+                if !merged.accounts.contains(&acc) {
+                    merged.accounts.push(acc);
+                }
+            }
+            for ch in ctx.characters {
+                if !merged.characters.contains(&ch) {
+                    merged.characters.push(ch);
+                }
+            }
+            for id in ctx.character_ids {
+                if !merged.character_ids.contains(&id) {
+                    merged.character_ids.push(id);
+                }
+            }
+            for w in ctx.extra_worlds {
+                if !merged.extra_worlds.contains(&w) {
+                    merged.extra_worlds.push(w);
+                }
+            }
+        }
+
+        Ok(merged)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 // ─── SavedVariables Manager ─────────────────────────────────
@@ -5140,6 +5453,60 @@ pub async fn delete_saved_variables(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
         sv_io::delete_saved_variables_blocking(&addons_dir, &file_names)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
+}
+
+/// Scrub a SavedVariables file with the templating + heuristic pipeline and
+/// return a report. Debug builds only — used to validate the scrubber against
+/// real addons before the production export/import flow ships.
+///
+/// If `ctx` is the default (no accounts/characters supplied), the command
+/// auto-detects identities from the parsed tree.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevScrubResult {
+    pub file_name: String,
+    pub original_bytes: usize,
+    pub scrubbed_bytes: usize,
+    pub detected_context: crate::saved_variables::scrub::ScrubContext,
+    pub drops: Vec<crate::saved_variables::scrub::DropEntry>,
+    pub templated_keys: Vec<crate::saved_variables::scrub::TemplateEntry>,
+    pub scrubbed_lua: String,
+}
+
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn dev_scrub_saved_variable(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    file_name: String,
+    ctx: Option<crate::saved_variables::scrub::ScrubContext>,
+) -> Result<DevScrubResult, String> {
+    validate_name(&file_name)?;
+    if !file_name.ends_with(".lua") {
+        return Err("Only .lua files can be scrubbed.".to_string());
+    }
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || -> Result<DevScrubResult, String> {
+        let response = sv_io::read_saved_variable_blocking(&addons_dir, &file_name)?;
+        let effective_ctx = ctx.unwrap_or_else(|| {
+            crate::saved_variables::scrub::detect_identities_from_tree(&response.tree)
+        });
+        let (scrubbed, report) =
+            crate::saved_variables::scrub::scrub(&response.tree, &effective_ctx);
+        let scrubbed_lua = crate::saved_variables::serializer::serialize_to_lua(&scrubbed);
+        Ok(DevScrubResult {
+            file_name,
+            original_bytes: report.original_bytes,
+            scrubbed_bytes: report.scrubbed_bytes,
+            detected_context: effective_ctx,
+            drops: report.drops,
+            templated_keys: report.templated_keys,
+            scrubbed_lua,
+        })
     })
     .await
     .map_err(|e| format!("Task failed: {}", e))?

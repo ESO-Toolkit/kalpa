@@ -308,12 +308,68 @@ export interface SharedPack {
   expiresAt: string;
 }
 
+export interface ScrubContext {
+  accounts: string[];
+  characters: string[];
+  characterIds: string[];
+  extraWorlds: string[];
+}
+
+export type DropReason =
+  | "blockedKeyHeuristic"
+  | "alwaysDropped"
+  | "stringValueContainsIdentity"
+  | "stringValueLooksLikeAccount"
+  | "overrideDisabled"
+  | "overrideDenyPath";
+
+export type TemplateKind = "account" | "accountName" | "character" | "characterId" | "world";
+
+export interface DropEntry {
+  path: string[];
+  reason: DropReason;
+  bytesRemoved: number;
+}
+
+export interface TemplateEntry {
+  path: string[];
+  kind: TemplateKind;
+  original: string;
+  placeholder: string;
+}
+
+export interface ScrubReport {
+  drops: DropEntry[];
+  templatedKeys: TemplateEntry[];
+  originalBytes: number;
+  scrubbedBytes: number;
+}
+
+export interface AddonSettings {
+  encoding: string;
+  lua: string;
+  originalBytes: number;
+  scrubbedBytes: number;
+  /** True exported size after per-character data is stripped. 0 if absent (pre-v2 files). */
+  finalBytes: number;
+  detectedIdentities: ScrubContext;
+  scrubReport: ScrubReport;
+}
+
+export interface SvImportResult {
+  applied: string[];
+  skipped: string[];
+  errors: string[];
+}
+
 export interface EsoPackFile {
   format: string;
   version: number;
   pack: EsoPackData;
   sharedAt: string;
   sharedBy: string;
+  /** v2: per-addon scrubbed SavedVariables settings (keyed by addon folder name) */
+  settings?: Record<string, AddonSettings>;
 }
 
 interface EsoPackData {

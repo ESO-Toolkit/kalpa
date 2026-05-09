@@ -54,6 +54,8 @@ export function PackDetailView({
   onRegenerateShareCode,
   onCopyToClipboard,
   onExportFile,
+  exportIncludeSettings,
+  onToggleExportSettings,
 }: {
   pack: Pack | null;
   loading: boolean;
@@ -80,6 +82,8 @@ export function PackDetailView({
   onRegenerateShareCode: () => void;
   onCopyToClipboard: (text: string, field: "code" | "link") => Promise<void>;
   onExportFile: () => void;
+  exportIncludeSettings: boolean;
+  onToggleExportSettings: () => void;
 }) {
   const [shareMode, setShareMode] = useState<ShareMode>("private-link");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -328,6 +332,17 @@ export function PackDetailView({
                 <p className="text-[11px] text-muted-foreground/50">
                   Save as a .esopack file to share on Discord, forums, or privately.
                 </p>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={exportIncludeSettings}
+                    onChange={onToggleExportSettings}
+                    className="size-3.5 accent-[#c4a44a] cursor-pointer"
+                  />
+                  <span className="text-[11px] text-muted-foreground/70">
+                    Include addon settings (v2)
+                  </span>
+                </label>
                 <Button variant="outline" size="sm" onClick={onExportFile} className="w-full">
                   <FileDownIcon className="size-3.5 mr-1.5" />
                   Export .esopack File

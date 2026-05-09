@@ -366,6 +366,9 @@ pub fn run() {
             commands::resolve_share_code,
             commands::export_pack_file,
             commands::import_pack_file,
+            commands::export_sv_settings,
+            commands::import_sv_settings,
+            commands::detect_local_identities,
             commands::fetch_roster_pack,
             commands::get_saved_variables_path,
             commands::list_saved_variables,
@@ -389,6 +392,8 @@ pub fn run() {
             commands::cancel_pending_update,
             commands::list_edit_backups,
             commands::restore_edit_backup,
+            #[cfg(debug_assertions)]
+            commands::dev_scrub_saved_variable,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
