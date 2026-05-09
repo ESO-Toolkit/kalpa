@@ -431,7 +431,15 @@ export function Packs({
           );
           if (Object.keys(exported).length > 0) {
             settings = exported;
+          } else {
+            toast.warning(
+              "No SavedVariables found for addons in this pack — exporting without settings"
+            );
           }
+        } else {
+          toast.warning(
+            "None of this pack's addons are installed locally — exporting without settings"
+          );
         }
       } catch (e) {
         toast.error(`Settings export failed: ${getTauriErrorMessage(e)}`);
@@ -535,10 +543,13 @@ export function Packs({
   }, [importedPack, installedEsouiIds]);
 
   const handleInstallImportedPack = async () => {
-    if (!importedPack || importedPackAddonsToInstall.length === 0) return;
+    if (!importedPack) return;
+    if (importedPackAddonsToInstall.length === 0 && !importedFileSettings) return;
 
     setInstalling(true);
-    setInstallProgress({ completed: 0, failed: 0, total: importedPackAddonsToInstall.length });
+    if (importedPackAddonsToInstall.length > 0) {
+      setInstallProgress({ completed: 0, failed: 0, total: importedPackAddonsToInstall.length });
+    }
 
     let completed = 0;
     let failed = 0;

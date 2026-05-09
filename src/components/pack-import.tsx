@@ -179,7 +179,9 @@ export function PackImportView({
           {hasSettings && (
             <div className="flex items-center gap-2 rounded-lg border border-[#c4a44a]/20 bg-[#c4a44a]/[0.05] px-3 py-2">
               <span className="text-[11px] text-[#c4a44a]/80">
-                Includes addon settings — will be applied after install
+                {allInstalled
+                  ? "Includes addon settings — ready to apply"
+                  : "Includes addon settings — will be applied after install"}
               </span>
             </div>
           )}
@@ -191,11 +193,20 @@ export function PackImportView({
             </div>
           )}
 
-          <Button onClick={onInstall} disabled={installing || allInstalled} className="w-full">
+          <Button
+            onClick={onInstall}
+            disabled={installing || (allInstalled && !hasSettings)}
+            className="w-full"
+          >
             {installing ? (
               <>
                 <Loader2Icon className="size-4 animate-spin mr-1.5" />
                 Installing...
+              </>
+            ) : allInstalled && hasSettings ? (
+              <>
+                <DownloadIcon className="size-4 mr-1.5" />
+                Apply Settings
               </>
             ) : allInstalled ? (
               <>
