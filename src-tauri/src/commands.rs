@@ -218,16 +218,7 @@ fn resolve_transitive_deps(
     installed_folders: &[String],
     store: &mut metadata::MetadataStore,
 ) -> ResolvedDeps {
-    let mut all_installed: HashSet<String> = HashSet::new();
-    if let Ok(entries) = fs::read_dir(addons_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    all_installed.insert(name.to_string());
-                }
-            }
-        }
-    }
+    let mut all_installed = build_installed_set(addons_dir);
 
     let mut installed_deps: Vec<String> = Vec::new();
     let mut failed_deps: Vec<String> = Vec::new();
@@ -262,6 +253,7 @@ fn resolve_transitive_deps(
                     for f in &dep_folders {
                         all_installed.insert(f.clone());
                         newly_installed_folders.push(f.clone());
+                        collect_subfolder_names(&addons_dir.join(f), &mut all_installed);
                     }
                     installed_deps.push(dep_name.clone());
                 }
@@ -306,10 +298,36 @@ fn try_install_dep(
     Ok(dep_folders)
 }
 
+/// Collect subfolder names (2 levels deep) inside a single addon folder,
+/// mirroring how ESO discovers embedded libraries within an addon.
+fn collect_subfolder_names(folder_path: &Path, out: &mut HashSet<String>) {
+    let Ok(sub_entries) = fs::read_dir(folder_path) else {
+        return;
+    };
+    for sub in sub_entries.flatten() {
+        let sub_path = sub.path();
+        if !sub_path.is_dir() {
+            continue;
+        }
+        if let Some(sub_name) = sub_path.file_name().and_then(|n| n.to_str()) {
+            out.insert(sub_name.to_string());
+        }
+        if let Ok(sub2_entries) = fs::read_dir(&sub_path) {
+            for sub2 in sub2_entries.flatten() {
+                if sub2.path().is_dir() {
+                    if let Some(sub2_name) = sub2.path().file_name().and_then(|n| n.to_str()) {
+                        out.insert(sub2_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Build the set of all "installed" names visible to ESO from the addons directory.
 ///
-/// ESO searches top-level addon folders AND their subfolders up to 2 levels deep
-/// for embedded libraries. We mirror that so dependency checks match what ESO sees.
+/// ESO scans top-level addon folders plus 2 levels of subfolders (3 levels total
+/// from the AddOns root), matching ESO's own resolution depth on PC.
 /// Disabled folders (ending in `.disabled`) are excluded.
 pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
     let Ok(entries) = fs::read_dir(addons_dir) else {
@@ -329,28 +347,7 @@ pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
             continue;
         }
         installed.insert(name);
-        if let Ok(sub_entries) = fs::read_dir(&path) {
-            for sub in sub_entries.flatten() {
-                let sub_path = sub.path();
-                if !sub_path.is_dir() {
-                    continue;
-                }
-                if let Some(sub_name) = sub_path.file_name().and_then(|n| n.to_str()) {
-                    installed.insert(sub_name.to_string());
-                }
-                if let Ok(sub2_entries) = fs::read_dir(&sub_path) {
-                    for sub2 in sub2_entries.flatten() {
-                        if sub2.path().is_dir() {
-                            if let Some(sub2_name) =
-                                sub2.path().file_name().and_then(|n| n.to_str())
-                            {
-                                installed.insert(sub2_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        collect_subfolder_names(&path, &mut installed);
     }
     installed
 }
@@ -768,7 +765,9 @@ fn scan_installed_addons_blocking(
         let _ = metadata::save_metadata(addons_dir, &store);
     }
 
-    // Build a map of folder_name → addon_version for version constraint checking
+    // Build a map of folder_name → addon_version for version constraint checking.
+    // Only covers top-level addons; bundled sub-modules in subfolders won't have
+    // entries here, so their version constraints default to satisfied.
     let version_map: HashMap<String, Option<u32>> = addons
         .iter()
         .map(|a| (a.folder_name.clone(), a.addon_version))
@@ -1235,55 +1234,15 @@ fn update_addon_blocking(
         0, // preserved from existing metadata
     );
 
-    // Check for new dependencies introduced by the update
-    let mut all_installed: HashSet<String> = HashSet::new();
-    if let Ok(entries) = fs::read_dir(addons_dir) {
-        for entry in entries.flatten() {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    all_installed.insert(name.to_string());
-                }
-            }
-        }
-    }
-
-    let mut missing_deps: Vec<String> = Vec::new();
-    for folder in &installed_folders {
-        let addon =
-            find_manifest(addons_dir, folder).and_then(|p| manifest::parse_manifest(folder, &p));
-        if let Some(addon) = addon {
-            for dep in &addon.depends_on {
-                if !all_installed.contains(&dep.name) && !missing_deps.contains(&dep.name) {
-                    missing_deps.push(dep.name.clone());
-                }
-            }
-        }
-    }
-
-    let mut installed_deps: Vec<String> = Vec::new();
-    let mut failed_deps: Vec<String> = Vec::new();
-    let mut skipped_deps: Vec<String> = Vec::new();
-
-    for dep_name in &missing_deps {
-        match try_install_dep(dep_name, addons_dir, &mut store) {
-            Ok(dep_folders) => {
-                for f in &dep_folders {
-                    all_installed.insert(f.clone());
-                }
-                installed_deps.push(dep_name.clone());
-            }
-            Err("not_found") => skipped_deps.push(dep_name.clone()),
-            Err(_) => failed_deps.push(dep_name.clone()),
-        }
-    }
+    let resolved = resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
 
     metadata::save_metadata(addons_dir, &store)?;
 
     Ok(InstallResult {
         installed_folders,
-        installed_deps,
-        failed_deps,
-        skipped_deps,
+        installed_deps: resolved.installed_deps,
+        failed_deps: resolved.failed_deps,
+        skipped_deps: resolved.skipped_deps,
     })
 }
 
@@ -2030,47 +1989,7 @@ pub async fn update_addon_with_decisions(
             0,
         );
 
-        // Check for new dependencies introduced by the update
-        let mut all_installed: HashSet<String> = HashSet::new();
-        if let Ok(entries) = fs::read_dir(&addons_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        all_installed.insert(name.to_string());
-                    }
-                }
-            }
-        }
-
-        let mut missing_deps: Vec<String> = Vec::new();
-        for folder in &installed_folders {
-            let addon = find_manifest(&addons_dir, folder)
-                .and_then(|p| manifest::parse_manifest(folder, &p));
-            if let Some(addon) = addon {
-                for dep in &addon.depends_on {
-                    if !all_installed.contains(&dep.name) && !missing_deps.contains(&dep.name) {
-                        missing_deps.push(dep.name.clone());
-                    }
-                }
-            }
-        }
-
-        let mut installed_deps: Vec<String> = Vec::new();
-        let mut failed_deps: Vec<String> = Vec::new();
-        let mut skipped_deps: Vec<String> = Vec::new();
-
-        for dep_name in &missing_deps {
-            match try_install_dep(dep_name, &addons_dir, &mut store) {
-                Ok(dep_folders) => {
-                    for f in &dep_folders {
-                        all_installed.insert(f.clone());
-                    }
-                    installed_deps.push(dep_name.clone());
-                }
-                Err("not_found") => skipped_deps.push(dep_name.clone()),
-                Err(_) => failed_deps.push(dep_name.clone()),
-            }
-        }
+        let resolved = resolve_transitive_deps(&addons_dir, &installed_folders, &mut store);
 
         metadata::save_metadata(&addons_dir, &store)?;
 
@@ -2082,9 +2001,9 @@ pub async fn update_addon_with_decisions(
 
         Ok(InstallResult {
             installed_folders,
-            installed_deps,
-            failed_deps,
-            skipped_deps,
+            installed_deps: resolved.installed_deps,
+            failed_deps: resolved.failed_deps,
+            skipped_deps: resolved.skipped_deps,
         })
     })
     .await

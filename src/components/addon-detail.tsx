@@ -574,7 +574,32 @@ export function AddonDetail({
                           </span>
                         )}
                       </div>
-                      {satisfied ? (
+                      {outdated ? (
+                        <SimpleTooltip
+                          content={
+                            isOffline
+                              ? "Updates require an internet connection"
+                              : `Update ${dep.name}`
+                          }
+                        >
+                          <button
+                            className="shrink-0 cursor-pointer rounded bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-400 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+                            onClick={() => handleInstallDep(dep.name)}
+                            disabled={installingDep === dep.name || isOffline}
+                          >
+                            {installingDep === dep.name ? (
+                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-amber-400" />
+                            ) : justInstalled ? (
+                              <span className="flex items-center gap-1 text-emerald-400">
+                                <Check className="size-3" />
+                                Updated
+                              </span>
+                            ) : (
+                              "Update"
+                            )}
+                          </button>
+                        </SimpleTooltip>
+                      ) : satisfied ? (
                         isTopLevel ? (
                           <SimpleTooltip content={`Remove ${dep.name}`}>
                             <button
