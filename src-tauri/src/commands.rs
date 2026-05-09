@@ -299,8 +299,8 @@ fn try_install_dep(
 
 /// Build the set of all "installed" names visible to ESO from the addons directory.
 ///
-/// ESO searches top-level addon folders AND their subfolders up to 2 levels deep
-/// for embedded libraries. We mirror that so dependency checks match what ESO sees.
+/// ESO scans top-level addon folders plus 2 levels of subfolders (3 levels total
+/// from the AddOns root), matching ESO's own resolution depth on PC.
 /// Disabled folders (ending in `.disabled`) are excluded.
 pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
     let Ok(entries) = fs::read_dir(addons_dir) else {
@@ -759,7 +759,9 @@ fn scan_installed_addons_blocking(
         let _ = metadata::save_metadata(addons_dir, &store);
     }
 
-    // Build a map of folder_name → addon_version for version constraint checking
+    // Build a map of folder_name → addon_version for version constraint checking.
+    // Only covers top-level addons; bundled sub-modules in subfolders won't have
+    // entries here, so their version constraints default to satisfied.
     let version_map: HashMap<String, Option<u32>> = addons
         .iter()
         .map(|a| (a.folder_name.clone(), a.addon_version))
