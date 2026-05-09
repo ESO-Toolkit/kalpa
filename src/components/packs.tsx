@@ -544,6 +544,7 @@ export function Packs({
 
   const handleInstallImportedPack = async () => {
     if (!importedPack) return;
+    if (applyingSettings) return;
     if (importedPackAddonsToInstall.length === 0 && !importedFileSettings) return;
 
     setInstalling(true);
@@ -625,12 +626,22 @@ export function Packs({
   // Flash green on successful install completion (Task D)
   const prevInstallingRef = useRef(false);
   const lastInstallFailedRef = useRef(0);
+  const hadProgressRef = useRef(false);
   useEffect(() => {
     // Track failure count while installing
     if (installing && installProgress) {
       lastInstallFailedRef.current = installProgress.failed;
+      hadProgressRef.current = true;
     }
-    if (prevInstallingRef.current && !installing && installProgress === null) {
+    if (!installing) {
+      hadProgressRef.current = false;
+    }
+    if (
+      prevInstallingRef.current &&
+      !installing &&
+      installProgress === null &&
+      hadProgressRef.current
+    ) {
       // Install just finished — only flash green if no failures
       if (lastInstallFailedRef.current === 0) {
         setInstallSucceeded(true);

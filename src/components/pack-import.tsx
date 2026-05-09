@@ -195,7 +195,7 @@ export function PackImportView({
 
           <Button
             onClick={onInstall}
-            disabled={installing || (allInstalled && !hasSettings)}
+            disabled={installing || applyingSettings || (allInstalled && !hasSettings)}
             className="w-full"
           >
             {installing ? (
