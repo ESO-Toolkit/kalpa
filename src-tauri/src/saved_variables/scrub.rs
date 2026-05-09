@@ -446,14 +446,19 @@ impl PlaceholderTable {
         if let Some(p) = self.accounts.get(key) {
             return Some((p.clone(), TemplateKind::Account));
         }
-        if let Some(p) = self.account_names.get(key) {
-            return Some((p.clone(), TemplateKind::AccountName));
-        }
+        // Characters and character IDs are checked before bare account names.
+        // A player named "Author" (char) takes priority over the bare form of
+        // account "@Author" — character keys appear far more frequently in the
+        // standard SV layout and the bare-name match is only needed for niche
+        // layouts like HarvestMap's ["account"] container.
         if let Some(p) = self.characters.get(key) {
             return Some((p.clone(), TemplateKind::Character));
         }
         if let Some(p) = self.character_ids.get(key) {
             return Some((p.clone(), TemplateKind::CharacterId));
+        }
+        if let Some(p) = self.account_names.get(key) {
+            return Some((p.clone(), TemplateKind::AccountName));
         }
         if WELL_KNOWN_WORLDS.contains(&key) || ctx.extra_worlds.iter().any(|w| w == key) {
             return Some(("${WORLD}".to_string(), TemplateKind::World));
@@ -2168,6 +2173,50 @@ mod tests {
                 .iter()
                 .any(|t| matches!(t.kind, TemplateKind::AccountName)),
             "no AccountName in report"
+        );
+    }
+
+    #[test]
+    fn character_name_wins_over_bare_account_name_collision() {
+        // When ctx.accounts = ["@Author"] and ctx.characters = ["Author"],
+        // a key "Author" in the standard layout (under @Author → ...) should
+        // template as ${CHAR:0}, not ${ACCOUNT_NAME}. Character identity takes
+        // priority because bare-name matching is only a fallback for niche
+        // HarvestMap-style containers.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["Author"] = { ["x"] = 1 },
+                        ["$AccountWide"] = { ["y"] = 2 },
+                    },
+                },
+            }"#,
+        );
+        let ctx = ScrubContext {
+            accounts: vec!["@Author".to_string()],
+            characters: vec!["Author".to_string()],
+            character_ids: vec![],
+            extra_worlds: vec![],
+        };
+        let (out, report) = scrub(&tree, &ctx);
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            serialized.contains("${CHAR:0}"),
+            "character key should win collision: {}",
+            serialized
+        );
+        assert!(
+            !serialized.contains("${ACCOUNT_NAME}"),
+            "account-name template should not win over character: {}",
+            serialized
+        );
+        assert!(
+            report
+                .templated_keys
+                .iter()
+                .any(|t| matches!(t.kind, TemplateKind::Character)),
+            "no Character entry in report"
         );
     }
 
