@@ -141,6 +141,8 @@ pub enum DropReason {
 #[serde(rename_all = "camelCase")]
 pub enum TemplateKind {
     Account,
+    /// Bare account handle (no `@` prefix), e.g. HarvestMap's `["account"]` container.
+    AccountName,
     Character,
     CharacterId,
     World,
@@ -323,6 +325,17 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
             format!("${{ACCOUNT:{}}}", i)
         };
         pairs.push((token, account.clone()));
+
+        // Bare-name token: substitute with the account handle minus its `@` prefix.
+        let bare = account.trim_start_matches('@').to_string();
+        if !bare.is_empty() {
+            let name_token = if i == 0 {
+                "${ACCOUNT_NAME}".to_string()
+            } else {
+                format!("${{ACCOUNT_NAME:{}}}", i)
+            };
+            pairs.push((name_token, bare));
+        }
     }
     for (i, character) in ctx.characters.iter().enumerate() {
         pairs.push((format!("${{CHAR:{}}}", i), character.clone()));
@@ -382,6 +395,10 @@ pub fn scrub(tree: &SvTreeNode, ctx: &ScrubContext) -> (SvTreeNode, ScrubReport)
 
 struct PlaceholderTable {
     accounts: std::collections::HashMap<String, String>,
+    /// Bare account handles (without `@`) → `${ACCOUNT_NAME:N}` token.
+    /// Derived from `accounts`: for each `@Foo`, inserts `Foo` → `${ACCOUNT_NAME:N}`.
+    /// Used to template HarvestMap-style `["account"] = { ["Foo"] = {...} }` layouts.
+    account_names: std::collections::HashMap<String, String>,
     characters: std::collections::HashMap<String, String>,
     character_ids: std::collections::HashMap<String, String>,
 }
@@ -389,6 +406,7 @@ struct PlaceholderTable {
 impl PlaceholderTable {
     fn new(ctx: &ScrubContext) -> Self {
         let mut accounts = std::collections::HashMap::new();
+        let mut account_names = std::collections::HashMap::new();
         for (i, a) in ctx.accounts.iter().enumerate() {
             let label = if i == 0 {
                 "${ACCOUNT}".to_string()
@@ -396,6 +414,17 @@ impl PlaceholderTable {
                 format!("${{ACCOUNT:{}}}", i)
             };
             accounts.insert(a.clone(), label);
+
+            // Derive bare form: "@Foo" → "Foo" → "${ACCOUNT_NAME:N}"
+            let bare = a.trim_start_matches('@');
+            if !bare.is_empty() {
+                let name_label = if i == 0 {
+                    "${ACCOUNT_NAME}".to_string()
+                } else {
+                    format!("${{ACCOUNT_NAME:{}}}", i)
+                };
+                account_names.insert(bare.to_string(), name_label);
+            }
         }
         let mut characters = std::collections::HashMap::new();
         for (i, c) in ctx.characters.iter().enumerate() {
@@ -407,6 +436,7 @@ impl PlaceholderTable {
         }
         Self {
             accounts,
+            account_names,
             characters,
             character_ids,
         }
@@ -415,6 +445,9 @@ impl PlaceholderTable {
     fn template_for_key(&self, key: &str, ctx: &ScrubContext) -> Option<(String, TemplateKind)> {
         if let Some(p) = self.accounts.get(key) {
             return Some((p.clone(), TemplateKind::Account));
+        }
+        if let Some(p) = self.account_names.get(key) {
+            return Some((p.clone(), TemplateKind::AccountName));
         }
         if let Some(p) = self.characters.get(key) {
             return Some((p.clone(), TemplateKind::Character));
@@ -2017,6 +2050,125 @@ mod tests {
         assert_eq!(account.key, "${ACCOUNT}");
         let kept = child_keys(account);
         assert_eq!(kept, vec!["$AccountWide"], "got: {kept:?}");
+    }
+
+    // ── ${ACCOUNT_NAME} bare-handle templating (HarvestMap layout) ───────
+
+    #[test]
+    fn templates_bare_account_name_key() {
+        // HarvestMap stores data under a bare handle (no @):
+        // HarvestMap_Data = { ["account"] = { ["Spike'jo"] = { ... } } }
+        // After scrub the bare key "Spike'jo" should become "${ACCOUNT_NAME}".
+        let tree = parse(
+            r#"HarvestMap_Data = {
+                ["account"] = {
+                    ["Authorbare"] = {
+                        ["nodes"] = { [1] = 1 },
+                    },
+                },
+            }"#,
+        );
+        let ctx = ScrubContext {
+            accounts: vec!["@Authorbare".to_string()],
+            characters: vec![],
+            character_ids: vec![],
+            extra_worlds: vec![],
+        };
+        let (out, report) = scrub(&tree, &ctx);
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            serialized.contains("${ACCOUNT_NAME}"),
+            "bare account name should be templated: {}",
+            serialized
+        );
+        assert!(
+            !serialized.contains("Authorbare"),
+            "raw bare account name leaked: {}",
+            serialized
+        );
+        assert!(
+            report
+                .templated_keys
+                .iter()
+                .any(|t| matches!(t.kind, TemplateKind::AccountName)),
+            "no AccountName entry in templated_keys: {:?}",
+            report.templated_keys
+        );
+    }
+
+    #[test]
+    fn substitute_placeholders_handles_account_name_tokens() {
+        let ctx = ScrubContext {
+            accounts: vec!["@RealHandle".to_string(), "@AltHandle".to_string()],
+            characters: vec![],
+            character_ids: vec![],
+            extra_worlds: vec![],
+        };
+        let lua = r#"["${ACCOUNT_NAME}"] = { } ["${ACCOUNT_NAME:1}"] = { }"#;
+        let result = substitute_placeholders(lua, &ctx, WELL_KNOWN_WORLDS);
+        assert!(
+            result.contains("RealHandle"),
+            "primary bare account not substituted: {}",
+            result
+        );
+        assert!(
+            result.contains("AltHandle"),
+            "secondary bare account not substituted: {}",
+            result
+        );
+        assert!(
+            !result.contains("${ACCOUNT_NAME}"),
+            "token not replaced: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn detect_then_scrub_templates_bare_name_in_harvestmap_layout() {
+        // End-to-end: detect_identities_from_tree finds @Author via the standard
+        // HarvestMapSavedVars variable, then scrub() templates the bare "Author"
+        // key inside HarvestMap_Data's ["account"] container.
+        let tree = parse(
+            r#"HarvestMapSavedVars = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["enabled"] = true },
+                    },
+                },
+            }
+            HarvestMap_Data = {
+                ["account"] = {
+                    ["Author"] = {
+                        ["nodes"] = { [1] = 42 },
+                    },
+                },
+            }"#,
+        );
+        let detected = detect_identities_from_tree(&tree);
+        assert!(
+            detected.accounts.contains(&"@Author".to_string()),
+            "account not detected: {:?}",
+            detected.accounts
+        );
+        let (out, report) = scrub(&tree, &detected);
+        let serialized = serialize_to_lua(&out);
+        assert!(
+            !serialized.contains(r#"["Author"]"#),
+            "bare handle leaked: {}",
+            serialized
+        );
+        assert!(
+            serialized.contains("${ACCOUNT_NAME}"),
+            "bare handle not templated: {}",
+            serialized
+        );
+        assert!(
+            report
+                .templated_keys
+                .iter()
+                .any(|t| matches!(t.kind, TemplateKind::AccountName)),
+            "no AccountName in report"
+        );
     }
 
     // ── Realistic-fixture report ──────────────────────────────────────────

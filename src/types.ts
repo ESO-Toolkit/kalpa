@@ -316,12 +316,13 @@ export interface ScrubContext {
 
 export type DropReason =
   | "blockedKeyHeuristic"
+  | "alwaysDropped"
   | "stringValueContainsIdentity"
   | "stringValueLooksLikeAccount"
   | "overrideDisabled"
   | "overrideDenyPath";
 
-export type TemplateKind = "account" | "character" | "characterId" | "world";
+export type TemplateKind = "account" | "accountName" | "character" | "characterId" | "world";
 
 export interface DropEntry {
   path: string[];
