@@ -19,7 +19,7 @@ A fast, open-source addon manager for **The Elder Scrolls Online**. Built with T
 Minion has served the ESO community well, but it hasn't kept pace with modern expectations. Kalpa is built from scratch to be **fast, lightweight, and community-driven**:
 
 - **Native performance** — Rust backend with a ~15 MB installer vs. Minion's Java runtime
-- **Automatic dependency resolution** — installs missing libraries without manual hunting
+- **Automatic dependency resolution** — installs missing libraries without manual hunting, including transitive deps and version validation
 - **Pack Hub** — share curated addon collections with the community (no other manager has this)
 - **SavedVariables manager** — view and edit addon settings directly in the app
 - **Multi-instance support** — handles native and Steam clients across NA, EU, and PTS servers
@@ -50,9 +50,9 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Pack types** — addon packs, build packs, and roster packs for different use cases
 - **Upvote system** — vote on packs to surface the best collections
 - **Share codes** — generate temporary 6-character codes to share packs with friends
-- **File export** — save packs as `.esopack` files for offline sharing
+- **File export** — save packs as `.esopack` files for offline sharing, with optional account-wide addon settings (v2 format, automatically scrubbed for privacy)
 - **Deep links** — open packs directly via `kalpa://pack/` URLs
-- **One-click install** — install all addons from a pack with a single click
+- **One-click install** — install all addons from a pack with a single click, including shared addon settings from v2 packs
 
 ### Tagging and Organization
 - **Custom tags** — create and assign your own tags to organize addons
