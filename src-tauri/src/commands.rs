@@ -253,6 +253,7 @@ fn resolve_transitive_deps(
                     for f in &dep_folders {
                         all_installed.insert(f.clone());
                         newly_installed_folders.push(f.clone());
+                        collect_subfolder_names(&addons_dir.join(f), &mut all_installed);
                     }
                     installed_deps.push(dep_name.clone());
                 }
@@ -297,6 +298,32 @@ fn try_install_dep(
     Ok(dep_folders)
 }
 
+/// Collect subfolder names (2 levels deep) inside a single addon folder,
+/// mirroring how ESO discovers embedded libraries within an addon.
+fn collect_subfolder_names(folder_path: &Path, out: &mut HashSet<String>) {
+    let Ok(sub_entries) = fs::read_dir(folder_path) else {
+        return;
+    };
+    for sub in sub_entries.flatten() {
+        let sub_path = sub.path();
+        if !sub_path.is_dir() {
+            continue;
+        }
+        if let Some(sub_name) = sub_path.file_name().and_then(|n| n.to_str()) {
+            out.insert(sub_name.to_string());
+        }
+        if let Ok(sub2_entries) = fs::read_dir(&sub_path) {
+            for sub2 in sub2_entries.flatten() {
+                if sub2.path().is_dir() {
+                    if let Some(sub2_name) = sub2.path().file_name().and_then(|n| n.to_str()) {
+                        out.insert(sub2_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Build the set of all "installed" names visible to ESO from the addons directory.
 ///
 /// ESO scans top-level addon folders plus 2 levels of subfolders (3 levels total
@@ -320,28 +347,7 @@ pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
             continue;
         }
         installed.insert(name);
-        if let Ok(sub_entries) = fs::read_dir(&path) {
-            for sub in sub_entries.flatten() {
-                let sub_path = sub.path();
-                if !sub_path.is_dir() {
-                    continue;
-                }
-                if let Some(sub_name) = sub_path.file_name().and_then(|n| n.to_str()) {
-                    installed.insert(sub_name.to_string());
-                }
-                if let Ok(sub2_entries) = fs::read_dir(&sub_path) {
-                    for sub2 in sub2_entries.flatten() {
-                        if sub2.path().is_dir() {
-                            if let Some(sub2_name) =
-                                sub2.path().file_name().and_then(|n| n.to_str())
-                            {
-                                installed.insert(sub2_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        collect_subfolder_names(&path, &mut installed);
     }
     installed
 }
