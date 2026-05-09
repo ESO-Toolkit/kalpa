@@ -4706,8 +4706,14 @@ pub struct AddonSettings {
     /// Absent in files produced before this field was added; defaults to 0.
     #[serde(default)]
     pub final_bytes: usize,
-    pub detected_identities: crate::saved_variables::scrub::ScrubContext,
-    pub scrub_report: crate::saved_variables::scrub::ScrubReport,
+    #[serde(default)]
+    pub scrub_summary: crate::saved_variables::scrub::ScrubSummary,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    pub detected_identities: Option<crate::saved_variables::scrub::ScrubContext>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    pub scrub_report: Option<crate::saved_variables::scrub::ScrubReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4862,8 +4868,9 @@ pub async fn export_sv_settings(
                     original_bytes: report.original_bytes,
                     scrubbed_bytes: report.scrubbed_bytes,
                     final_bytes,
-                    detected_identities: ctx,
-                    scrub_report: report,
+                    scrub_summary: (&report).into(),
+                    detected_identities: None,
+                    scrub_report: None,
                 },
             );
         }
@@ -4892,6 +4899,15 @@ pub struct SvImportResult {
     pub errors: Vec<String>,
 }
 
+fn has_unresolved_identity_placeholders(lua: &str) -> bool {
+    lua.contains("${ACCOUNT}")
+        || lua.contains("${ACCOUNT:")
+        || lua.contains("${ACCOUNT_NAME}")
+        || lua.contains("${ACCOUNT_NAME:")
+        || lua.contains("${CHAR:")
+        || lua.contains("${CHAR_ID:")
+}
+
 /// Import SavedVariables settings from a v2 `.esopack` file.
 ///
 /// For each addon in `addon_folders` that has a corresponding entry in the
@@ -4908,7 +4924,8 @@ pub struct SvImportResult {
 ///   `${CHAR_ID:N}` → `ctx.character_ids[N]`
 ///   `${WORLD}` → first of `WELL_KNOWN_WORLDS` or `ctx.extra_worlds[0]`
 ///
-/// Placeholder tokens that have no mapping in `ctx` are left as-is.
+/// Placeholder tokens that have no mapping in `ctx` are rejected — the
+/// import is skipped and an error is returned for that addon.
 #[tauri::command]
 pub async fn import_sv_settings(
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -4917,6 +4934,7 @@ pub async fn import_sv_settings(
     ctx: crate::saved_variables::scrub::ScrubContext,
     addon_folders: Vec<String>,
 ) -> Result<SvImportResult, String> {
+    use crate::saved_variables::parser::parse_sv_file;
     use crate::saved_variables::scrub::WELL_KNOWN_WORLDS;
 
     let addons_dir = require_allowed_path(&state, &addons_path)?;
@@ -4957,6 +4975,22 @@ pub async fn import_sv_settings(
                 &ctx,
                 WELL_KNOWN_WORLDS,
             );
+
+            // Reject if identity placeholders could not be resolved
+            if has_unresolved_identity_placeholders(&substituted) {
+                errors.push(format!(
+                    "{}: unresolved identity placeholders — launch ESO at least once to establish your identity",
+                    folder
+                ));
+                continue;
+            }
+
+            // Validate that the result is a well-formed SavedVariables file
+            let file_name = format!("{}.lua", folder);
+            if let Err(e) = parse_sv_file(&substituted, &file_name) {
+                errors.push(format!("{}: settings file failed validation: {}", folder, e));
+                continue;
+            }
 
             let dest = sv_dir.join(format!("{}.lua", folder));
 

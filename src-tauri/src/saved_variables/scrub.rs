@@ -177,6 +177,28 @@ pub struct ScrubReport {
     pub scrubbed_bytes: usize,
 }
 
+/// Privacy-safe summary of scrubbing for serialization into `.esopack` files.
+/// Contains only counts and sizes — no paths, identities, or original values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrubSummary {
+    pub drop_count: usize,
+    pub template_count: usize,
+    pub original_bytes: usize,
+    pub scrubbed_bytes: usize,
+}
+
+impl From<&ScrubReport> for ScrubSummary {
+    fn from(report: &ScrubReport) -> Self {
+        Self {
+            drop_count: report.drops.len(),
+            template_count: report.templated_keys.len(),
+            original_bytes: report.original_bytes,
+            scrubbed_bytes: report.scrubbed_bytes,
+        }
+    }
+}
+
 /// Per-addon scrub configuration supplied by the caller.
 ///
 /// Overrides are matched by `addon` (the addon folder name, case-sensitive).

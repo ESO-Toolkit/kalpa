@@ -468,7 +468,7 @@ export function Packs({
       if (settings) {
         const addonCount = Object.keys(settings).length;
         const totalDrops = Object.values(settings).reduce(
-          (sum, s) => sum + s.scrubReport.drops.length,
+          (sum, s) => sum + s.scrubSummary.dropCount,
           0
         );
         const bytesOriginal = Object.values(settings).reduce((sum, s) => sum + s.originalBytes, 0);
