@@ -4610,6 +4610,11 @@ pub async fn resolve_share_code(code: String) -> Result<SharedPack, String> {
 /// is the full scrub report (drops + templated keys) for user review on import.
 /// `detected_identities` captures the `ScrubContext` used during export so the
 /// importer knows the placeholder → real-name mapping strategy.
+///
+/// `original_bytes` — serialized size before any scrubbing.
+/// `scrubbed_bytes` — size after identity scrubbing (before per-character strip).
+/// `final_bytes`    — actual size of `lua` after the per-character strip; this
+///                    is the true exported footprint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddonSettings {
@@ -4617,6 +4622,10 @@ pub struct AddonSettings {
     pub lua: String,
     pub original_bytes: usize,
     pub scrubbed_bytes: usize,
+    /// Byte length of the exported `lua` string — accurate post-strip size.
+    /// Absent in files produced before this field was added; defaults to 0.
+    #[serde(default)]
+    pub final_bytes: usize,
     pub detected_identities: crate::saved_variables::scrub::ScrubContext,
     pub scrub_report: crate::saved_variables::scrub::ScrubReport,
 }
@@ -4763,6 +4772,7 @@ pub async fn export_sv_settings(
 
             let account_wide_only = strip_per_character_data(&scrubbed);
             let lua = serialize_to_lua(&account_wide_only);
+            let final_bytes = lua.len();
 
             result.insert(
                 folder.clone(),
@@ -4771,6 +4781,7 @@ pub async fn export_sv_settings(
                     lua,
                     original_bytes: report.original_bytes,
                     scrubbed_bytes: report.scrubbed_bytes,
+                    final_bytes,
                     detected_identities: ctx,
                     scrub_report: report,
                 },

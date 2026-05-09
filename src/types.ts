@@ -314,13 +314,44 @@ export interface ScrubContext {
   extraWorlds: string[];
 }
 
+export type DropReason =
+  | "blockedKeyHeuristic"
+  | "stringValueContainsIdentity"
+  | "stringValueLooksLikeAccount"
+  | "overrideDisabled"
+  | "overrideDenyPath";
+
+export type TemplateKind = "account" | "character" | "characterId" | "world";
+
+export interface DropEntry {
+  path: string[];
+  reason: DropReason;
+  bytesRemoved: number;
+}
+
+export interface TemplateEntry {
+  path: string[];
+  kind: TemplateKind;
+  original: string;
+  placeholder: string;
+}
+
+export interface ScrubReport {
+  drops: DropEntry[];
+  templatedKeys: TemplateEntry[];
+  originalBytes: number;
+  scrubbedBytes: number;
+}
+
 export interface AddonSettings {
   encoding: string;
   lua: string;
   originalBytes: number;
   scrubbedBytes: number;
+  /** True exported size after per-character data is stripped. 0 if absent (pre-v2 files). */
+  finalBytes: number;
   detectedIdentities: ScrubContext;
-  scrubReport: unknown;
+  scrubReport: ScrubReport;
 }
 
 export interface SvImportResult {

@@ -465,11 +465,30 @@ export function Packs({
         },
         path,
       });
-      toast.success(
-        settings
-          ? `Pack exported with settings for ${Object.keys(settings).length} addon${Object.keys(settings).length !== 1 ? "s" : ""}`
-          : "Pack exported successfully"
-      );
+      if (settings) {
+        const addonCount = Object.keys(settings).length;
+        const totalDrops = Object.values(settings).reduce(
+          (sum, s) => sum + s.scrubReport.drops.length,
+          0
+        );
+        const bytesOriginal = Object.values(settings).reduce((sum, s) => sum + s.originalBytes, 0);
+        const bytesFinal = Object.values(settings).reduce(
+          (sum, s) => sum + (s.finalBytes || s.scrubbedBytes),
+          0
+        );
+        const bytesSaved = bytesOriginal - bytesFinal;
+        const kbSaved = (bytesSaved / 1024).toFixed(1);
+        const scrubLine =
+          totalDrops > 0
+            ? `${totalDrops} sensitive entr${totalDrops !== 1 ? "ies" : "y"} removed, ${kbSaved} KB trimmed`
+            : `${kbSaved} KB trimmed`;
+        toast.success(
+          `Settings exported for ${addonCount} addon${addonCount !== 1 ? "s" : ""} — ${scrubLine}`,
+          { duration: 6000 }
+        );
+      } else {
+        toast.success("Pack exported successfully");
+      }
     } catch (e) {
       toast.error(`Failed to export pack: ${getTauriErrorMessage(e)}`);
     }
