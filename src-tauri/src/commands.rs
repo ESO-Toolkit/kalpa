@@ -4706,6 +4706,7 @@ pub struct AddonSettings {
     /// Absent in files produced before this field was added; defaults to 0.
     #[serde(default)]
     pub final_bytes: usize,
+    #[serde(default)]
     pub scrub_summary: crate::saved_variables::scrub::ScrubSummary,
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
