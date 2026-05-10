@@ -301,6 +301,20 @@ fn try_install_dep(
     Ok(dep_folders)
 }
 
+/// Extract just the `AddOnVersion` number from a manifest file without
+/// parsing the full manifest.  Returns `None` if the file can't be read
+/// or doesn't contain an `AddOnVersion` line.
+fn read_addon_version(manifest_path: &Path) -> Option<u32> {
+    let content = fs::read_to_string(manifest_path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("## AddOnVersion:") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
+}
+
 /// Collect subfolder names (2 levels deep) inside a single addon folder,
 /// mirroring how ESO discovers embedded libraries within an addon.
 fn collect_subfolder_names(folder_path: &Path, out: &mut HashSet<String>) {
@@ -768,12 +782,35 @@ fn scan_installed_addons_blocking(
     }
 
     // Build a map of folder_name → addon_version for version constraint checking.
-    // Only covers top-level addons; bundled sub-modules in subfolders won't have
-    // entries here, so their version constraints default to satisfied.
-    let version_map: HashMap<String, Option<u32>> = addons
+    let mut version_map: HashMap<String, Option<u32>> = addons
         .iter()
         .map(|a| (a.folder_name.clone(), a.addon_version))
         .collect();
+
+    // Also scan bundled sub-libraries (2 levels deep, matching ESO's resolution)
+    // and keep the MAX version per name.  This prevents false "outdated" flags
+    // when a newer copy is bundled inside another addon.
+    for addon in &addons {
+        let addon_dir = addons_dir.join(&addon.folder_name);
+        for depth_1 in fs::read_dir(&addon_dir).into_iter().flatten().flatten() {
+            let d1 = depth_1.path();
+            if !d1.is_dir() {
+                continue;
+            }
+            if let Some(name) = d1.file_name().and_then(|n| n.to_str()) {
+                if let Some(manifest) = find_manifest_in(&d1, name) {
+                    if let Some(ver) = read_addon_version(&manifest) {
+                        let entry = version_map.entry(name.to_string()).or_insert(Some(0));
+                        if let Some(cur) = entry {
+                            if ver > *cur {
+                                *cur = ver;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Check for missing/outdated dependencies and enrich with ESOUI ID
     for addon in &mut addons {
