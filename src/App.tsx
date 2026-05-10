@@ -14,6 +14,7 @@ import { RosterPackInstall } from "./components/roster-pack-install";
 import { UpdateBanner } from "./components/update-banner";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { isFilterMode } from "@/lib/addon-helpers";
 import type {
   AddonManifest,
   AuthUser,
@@ -45,20 +46,6 @@ interface PendingDeepLinkPayload {
   packId: string | null;
   shareCode: string | null;
   installPackId: string | null;
-}
-
-const VALID_FILTER_MODES: readonly FilterMode[] = [
-  "all",
-  "addons",
-  "libraries",
-  "outdated",
-  "missing-deps",
-  "favorites",
-  "disabled",
-];
-
-function isFilterMode(value: string): value is FilterMode {
-  return (VALID_FILTER_MODES as readonly string[]).includes(value);
 }
 
 function App() {

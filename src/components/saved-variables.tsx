@@ -48,6 +48,7 @@ import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getSetting, setSetting } from "@/lib/store";
 import { classifyContext, humanizeKey, getTableChildren, getLeafChildren } from "@/lib/sv-nodes";
 import { resolveEffectiveField } from "@/lib/sv-widgets";
+import { classifyFile, sizeCategory, updateTreeNode, type SizeCategory } from "@/lib/sv-helpers";
 import {
   ToggleControl,
   NumberControl,
@@ -85,15 +86,6 @@ interface SavedVariablesProps {
   onClose: () => void;
 }
 
-// ─── ESO system SV files (no addon folder, but not orphaned) ─
-const SYSTEM_SV_NAMES = new Set([
-  "ZO_Ingame",
-  "ZO_InternalIngame",
-  "ZO_Pregame",
-  "AccountSettings",
-  "GuildHistoryCache",
-]);
-
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -114,42 +106,6 @@ function formatDate(iso: string): string {
   }
 }
 
-/** Classify a SV file against the installed addons list. */
-function classifyFile(
-  f: SavedVariableFile,
-  installedFolders: Set<string>
-): "installed" | "system" | "orphaned" {
-  if (SYSTEM_SV_NAMES.has(f.addonName)) return "system";
-  // Exact match: "LibAddonMenu-2.0.lua" -> "LibAddonMenu-2.0" folder
-  if (installedFolders.has(f.addonName)) return "installed";
-  // Prefix match: "HarvestMapAD.lua" -> "HarvestMap" folder
-  // Also handles "CombatMetricsFightData.lua" -> "CombatMetrics" folder
-  // Require the folder name to be at least 4 chars to prevent short names
-  // like "Lib" from over-matching, and require the character at the boundary
-  // to be uppercase (sub-file naming convention) or non-alphanumeric.
-  for (const folder of installedFolders) {
-    if (
-      folder.length >= 4 &&
-      f.addonName.startsWith(folder) &&
-      f.addonName.length > folder.length
-    ) {
-      const boundaryChar = f.addonName[folder.length];
-      if (!boundaryChar || /[A-Z_-]/.test(boundaryChar)) {
-        return "installed";
-      }
-    }
-  }
-  return "orphaned";
-}
-
-type SizeCategory = "small" | "medium" | "large";
-
-function sizeCategory(bytes: number): SizeCategory {
-  if (bytes >= 5 * 1024 * 1024) return "large";
-  if (bytes >= 1024 * 1024) return "medium";
-  return "small";
-}
-
 const SIZE_COLORS: Record<SizeCategory, string> = {
   small: "text-emerald-400",
   medium: "text-amber-400",
@@ -161,31 +117,6 @@ const SIZE_BAR_COLORS: Record<SizeCategory, string> = {
   medium: "bg-amber-500/40",
   large: "bg-red-500/40",
 };
-
-// ─── Tree update helper ──────────────────────────────────────
-
-function updateTreeNode(
-  tree: SvTreeNode,
-  path: string[],
-  value: string | number | boolean | null,
-  depth = 0
-): SvTreeNode {
-  if (depth >= path.length || !tree.children) return tree;
-
-  const targetKey = path[depth];
-  const isLeaf = depth === path.length - 1;
-
-  return {
-    ...tree,
-    children: tree.children.map((child) => {
-      if (child.key !== targetKey) return child;
-      if (isLeaf) {
-        return { ...child, value: value };
-      }
-      return updateTreeNode(child, path, value, depth + 1);
-    }),
-  };
-}
 
 // ─── Overview Tab ───────────────────────────────────────────
 

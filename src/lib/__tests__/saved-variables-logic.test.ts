@@ -1,66 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { classifyFile, sizeCategory, updateTreeNode, SYSTEM_SV_NAMES } from "../sv-helpers";
 import type { SvTreeNode } from "../../types";
-
-// These functions are module-private in saved-variables.tsx, so we replicate them here
-// for testing. This tests the logic correctness, and if the functions were ever extracted
-// to a shared module, these tests would import from there directly.
-
-const SYSTEM_SV_NAMES = new Set([
-  "ZO_Ingame",
-  "ZO_InternalIngame",
-  "ZO_Pregame",
-  "AccountSettings",
-  "GuildHistoryCache",
-]);
-
-function classifyFile(
-  f: { addonName: string },
-  installedFolders: Set<string>
-): "installed" | "system" | "orphaned" {
-  if (SYSTEM_SV_NAMES.has(f.addonName)) return "system";
-  if (installedFolders.has(f.addonName)) return "installed";
-  for (const folder of installedFolders) {
-    if (
-      folder.length >= 4 &&
-      f.addonName.startsWith(folder) &&
-      f.addonName.length > folder.length
-    ) {
-      const boundaryChar = f.addonName[folder.length];
-      if (!boundaryChar || /[A-Z_-]/.test(boundaryChar)) {
-        return "installed";
-      }
-    }
-  }
-  return "orphaned";
-}
-
-type SizeCategory = "small" | "medium" | "large";
-function sizeCategory(bytes: number): SizeCategory {
-  if (bytes >= 5 * 1024 * 1024) return "large";
-  if (bytes >= 1024 * 1024) return "medium";
-  return "small";
-}
-
-function updateTreeNode(
-  tree: SvTreeNode,
-  path: string[],
-  value: string | number | boolean | null,
-  depth = 0
-): SvTreeNode {
-  if (depth >= path.length || !tree.children) return tree;
-  const targetKey = path[depth];
-  const isLeaf = depth === path.length - 1;
-  return {
-    ...tree,
-    children: tree.children.map((child) => {
-      if (child.key !== targetKey) return child;
-      if (isLeaf) {
-        return { ...child, value: value };
-      }
-      return updateTreeNode(child, path, value, depth + 1);
-    }),
-  };
-}
 
 // ── classifyFile ──
 
@@ -73,6 +13,15 @@ describe("classifyFile", () => {
     expect(classifyFile({ addonName: "ZO_Pregame" }, installed)).toBe("system");
     expect(classifyFile({ addonName: "AccountSettings" }, installed)).toBe("system");
     expect(classifyFile({ addonName: "GuildHistoryCache" }, installed)).toBe("system");
+  });
+
+  it("SYSTEM_SV_NAMES contains exactly the expected entries", () => {
+    expect(SYSTEM_SV_NAMES.size).toBe(5);
+    expect(SYSTEM_SV_NAMES.has("ZO_Ingame")).toBe(true);
+    expect(SYSTEM_SV_NAMES.has("ZO_InternalIngame")).toBe(true);
+    expect(SYSTEM_SV_NAMES.has("ZO_Pregame")).toBe(true);
+    expect(SYSTEM_SV_NAMES.has("AccountSettings")).toBe(true);
+    expect(SYSTEM_SV_NAMES.has("GuildHistoryCache")).toBe(true);
   });
 
   it("classifies exact addon matches", () => {
