@@ -14,7 +14,7 @@ import { RosterPackInstall } from "./components/roster-pack-install";
 import { UpdateBanner } from "./components/update-banner";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
-import { isFilterMode } from "@/lib/addon-helpers";
+import { filterAddons, isFilterMode } from "@/lib/addon-helpers";
 import type {
   AddonManifest,
   AuthUser,
@@ -1039,45 +1039,13 @@ function App() {
 
   const filteredAddons = useMemo(
     () =>
-      addons
-        .filter((addon) => {
-          if (searchQuery) {
-            const query = searchQuery.toLowerCase();
-            const matchesSearch =
-              addon.title.toLowerCase().includes(query) ||
-              addon.folderName.toLowerCase().includes(query) ||
-              addon.author.toLowerCase().includes(query) ||
-              addon.tags.some((tag) => tag.toLowerCase().includes(query));
-            if (!matchesSearch) return false;
-          }
-
-          switch (filterMode) {
-            case "addons":
-              return !addon.isLibrary;
-            case "libraries":
-              return addon.isLibrary;
-            case "outdated":
-              return updatesSet.has(addon.folderName);
-            case "missing-deps":
-              return addon.missingDependencies.length > 0 || addon.outdatedDependencies.length > 0;
-            case "favorites":
-              return addon.tags.includes("favorite");
-            case "disabled":
-              return addon.disabled;
-            default:
-              if (effectiveTagFilter) return addon.tags.includes(effectiveTagFilter);
-              return true;
-          }
-        })
-        .sort((left, right) => {
-          switch (sortMode) {
-            case "author":
-              return left.author.toLowerCase().localeCompare(right.author.toLowerCase());
-            case "name":
-            default:
-              return left.title.toLowerCase().localeCompare(right.title.toLowerCase());
-          }
-        }),
+      filterAddons(addons, {
+        searchQuery,
+        filterMode,
+        sortMode,
+        updatesSet,
+        effectiveTagFilter,
+      }),
     [effectiveTagFilter, addons, filterMode, searchQuery, sortMode, updatesSet]
   );
 
