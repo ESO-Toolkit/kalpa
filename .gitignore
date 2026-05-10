@@ -32,5 +32,10 @@ Thumbs.db
 # Plan file (working doc)
 PLAN.md
 
+# Test artifacts
+e2e/screenshots/
+test-results/
+playwright-report/
+
 # Claude Code
 .claude/

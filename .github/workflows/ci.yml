@@ -63,6 +63,9 @@ jobs:
         run: npx tsc --noEmit
         working-directory: backend/eso-packs-worker
 
+      - name: Frontend unit tests
+        run: npx vitest run
+
       - name: Build frontend
         run: npm run build
 
