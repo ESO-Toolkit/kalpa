@@ -20,9 +20,12 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 
 - **Native performance** — Rust backend with a ~15 MB installer vs. Minion's Java runtime
 - **Automatic dependency resolution** — installs missing libraries without manual hunting, including transitive deps and version validation
+- **Update conflict resolution** — see file-level diffs when an update would overwrite your local edits, and choose per-file what to keep
 - **Pack Hub** — share curated addon collections with the community (no other manager has this)
 - **SavedVariables manager** — view and edit addon settings directly in the app
+- **Addon file browser** — browse and edit addon source files without leaving the app
 - **Multi-instance support** — handles native and Steam clients across NA, EU, and PTS servers
+- **System tray** — minimizes to tray on close for a stay-out-of-the-way experience
 - **Open source** — community contributions welcome
 - **Active development** — regular updates and new features
 
@@ -34,9 +37,10 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Smart scanning** — auto-detects your ESO AddOns folder and parses every addon manifest, including embedded libraries up to 3 levels deep
 - **One-click install** — paste an ESOUI URL or addon ID to install instantly, with automatic dependency resolution
 - **Bulk updates** — check for updates on startup and update all outdated addons at once
+- **Update conflict resolution** — when an update would overwrite locally edited files, Kalpa shows a file-level diff so you can choose per-file whether to keep your changes or accept the update
 - **Safe removal** — remove addons with dependency warnings so you don't break other addons
 - **Safety Center** — see dependency warnings and conflicts at a glance before making changes
-- **ESOUI integration** — uses ESOUI's public JSON API for reliable metadata, versions, and download links
+- **ESOUI integration** — uses ESOUI's public JSON API and public pages for reliable metadata, versions, and download links
 
 ### Discovery
 - **Search ESOUI** — find new addons by keyword directly in the app
@@ -51,8 +55,13 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Upvote system** — vote on packs to surface the best collections
 - **Share codes** — generate temporary 6-character codes to share packs with friends
 - **File export** — save packs as `.esopack` files for offline sharing, with optional account-wide addon settings (v2 format, automatically scrubbed for privacy)
-- **Deep links** — open packs directly via `kalpa://pack/` URLs
+- **Deep links** — open packs directly via `kalpa://pack/` URLs, including roster pack installs from the ESO Toolkit website
 - **One-click install** — install all addons from a pack with a single click, including shared addon settings from v2 packs
+
+### Addon File Browser
+- **Browse source files** — explore the file tree of any installed addon
+- **In-app editing** — open and edit addon Lua, XML, and text files directly in Kalpa
+- **Edit backups** — automatic backups before edits so you can always restore the original
 
 ### Tagging and Organization
 - **Custom tags** — create and assign your own tags to organize addons
@@ -89,6 +98,7 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Addon list export/import** — share your installed addon list as JSON and import on another machine
 - **Deep link scheme** — `kalpa://` URLs for packs, share codes, and addon installs
 - **Auto-update** — the app checks for and installs its own updates via signed GitHub Releases
+- **System tray** — hides to the system tray on window close with a Show/Quit context menu
 - **Custom window chrome** — native-feeling desktop experience with a custom title bar
 - **Offline detection** — graceful handling when you're not connected
 - **Keyboard navigation** — navigate the addon list with arrow keys
@@ -120,6 +130,18 @@ Share curated addon collections with the community. Browse, create, vote, and in
   <img src=".screenshots/packhub-install.png" alt="Pack Hub — view pack details and install addons" width="800" />
 </p>
 
+### Backups
+
+Full and character-specific backups with safe restore and protection status.
+
+<p align="center">
+  <img src=".screenshots/backup-restore-main.png" alt="Backups — main view with protection status and backup list" width="800" />
+</p>
+<p align="center">
+  <img src=".screenshots/backup-restore-confirm.png" alt="Backups — restore confirmation with safety snapshot" width="400" />
+  <img src=".screenshots/backup-restore-custom-label.png" alt="Backups — custom label for a new backup" width="400" />
+</p>
+
 ### SavedVariables Manager
 
 Browse, edit, copy, and clean up addon settings — all from within the app.
@@ -143,6 +165,7 @@ Configure your addons folder, access tools like backups and API compatibility ch
 </p>
 <p align="center">
   <img src=".screenshots/settings-data.png" alt="Settings — data tab with addon list export and import" width="400" />
+  <img src=".screenshots/settings-dialog.png" alt="Settings — dialog view" width="400" />
 </p>
 
 ---
@@ -172,7 +195,7 @@ npm run tauri dev       # development mode
 npm run tauri build     # production build
 ```
 
-The production build outputs installers to `src-tauri/target/release/bundle/`.
+The production build outputs an NSIS installer to `src-tauri/target/release/bundle/`.
 
 ### Troubleshooting
 
@@ -192,9 +215,11 @@ The production build outputs installers to `src-tauri/target/release/bundle/`.
 | Layer | What it does |
 |---|---|
 | **Manifest parser** | Reads `.txt` and `.addon` files from each addon folder — extracts title, version, author, dependencies, API version |
+| **Manifest cache** | SQLite-backed cache for fast rescans without re-parsing every file |
 | **Dependency resolver** | Scans the full AddOns tree (up to 3 levels deep) to find installed libraries, including those embedded inside other addons |
-| **ESOUI client** | Fetches addon metadata and downloads via ESOUI's public JSON API — no private APIs or screen scraping |
+| **ESOUI client** | Fetches addon metadata via ESOUI's public JSON API and public pages — no private APIs |
 | **Metadata tracker** | Persists ESOUI IDs, versions, tags, and install dates in `kalpa.json` inside your AddOns folder |
+| **File hash tracker** | Tracks file hashes to detect local edits and power update conflict resolution |
 | **Pack Hub worker** | Cloudflare Worker + KV that powers community pack sharing, voting, and share codes |
 | **SavedVariables parser** | Reads and writes ESO's Lua-based SavedVariables files with change tracking |
 
@@ -209,6 +234,7 @@ The production build outputs installers to `src-tauri/target/release/bundle/`.
 - **HTTP**: reqwest
 - **HTML parsing**: scraper
 - **ZIP handling**: zip crate
+- **Local database**: rusqlite (bundled SQLite)
 - **SavedVariables**: Custom Lua parser
 
 ---
@@ -224,10 +250,13 @@ src/                        # React frontend
 
 src-tauri/src/              # Rust backend
   commands.rs               # All Tauri command handlers
-  esoui.rs                  # ESOUI API client
+  esoui.rs                  # ESOUI API client and HTML scraping
   manifest.rs               # ESO addon manifest parser
+  manifest_cache.rs         # SQLite-backed manifest cache
   installer.rs              # ZIP extraction and addon installation
   metadata.rs               # Metadata tracking and persistence
+  file_hashes.rs            # File hashing for update conflict detection
+  edit_backups.rs           # Backup system for addon file edits
   safe_migration.rs         # Minion migration with dry-run and snapshots
   game_instances.rs         # Multi-instance detection (native/Steam)
   saved_variables/          # SavedVariables Lua parser and editor
