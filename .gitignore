@@ -32,6 +32,9 @@ Thumbs.db
 # Plan file (working doc)
 PLAN.md
 
+# Generated types
+worker-configuration.d.ts
+
 # Test artifacts
 e2e/screenshots/
 test-results/
