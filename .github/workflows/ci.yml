@@ -53,7 +53,7 @@ jobs:
 
       - name: Rust dependency audit
         run: |
-          cargo install cargo-audit@0.22.1 --quiet
+          cargo install cargo-audit@0.22.1 --quiet --locked
           cargo audit --file src-tauri/Cargo.lock
 
       - name: Install worker dependencies
