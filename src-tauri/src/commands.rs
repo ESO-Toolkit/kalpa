@@ -279,10 +279,14 @@ fn try_install_dep(
     addons_dir: &Path,
     store: &mut metadata::MetadataStore,
 ) -> Result<Vec<String>, &'static str> {
-    let dep_id = match esoui::search_addon_by_name(dep_name) {
-        Ok(Some(id)) => id,
-        Ok(None) => return Err("not_found"),
-        Err(_) => return Err("search_failed"),
+    let dep_id = if let Some(meta) = store.addons.get(dep_name) {
+        meta.esoui_id
+    } else {
+        match esoui::search_addon_by_name(dep_name) {
+            Ok(Some(id)) => id,
+            Ok(None) => return Err("not_found"),
+            Err(_) => return Err("search_failed"),
+        }
     };
     let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
     let dep_tmp = esoui::download_addon(&dep_info.download_url).map_err(|_| "download_failed")?;
