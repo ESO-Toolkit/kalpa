@@ -24,6 +24,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
+          toolchain: "1.88.0"
           components: rustfmt, clippy
 
       - name: Rust cache
@@ -52,7 +53,7 @@ jobs:
 
       - name: Rust dependency audit
         run: |
-          cargo install cargo-audit --quiet
+          cargo install cargo-audit@0.22.1 --quiet
           cargo audit --file src-tauri/Cargo.lock
 
       - name: Install worker dependencies
