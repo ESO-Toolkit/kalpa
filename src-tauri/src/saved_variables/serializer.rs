@@ -38,7 +38,7 @@ fn serialize_value(out: &mut String, node: &SvTreeNode, depth: usize) {
                     if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
                         out.push_str(&(n as i64).to_string());
                     } else {
-                        out.push_str(&format!("{}", n));
+                        out.push_str(&format!("{n}"));
                     }
                 } else {
                     out.push_str(&v.to_string());
@@ -127,7 +127,7 @@ fn escape_lua_string(out: &mut String, s: &str) {
             0x00..=0x1F => {
                 // Other control characters: use zero-padded decimal escape
                 // to avoid ambiguity when the next character is also a digit
-                out.push_str(&format!("\\{:03}", b));
+                out.push_str(&format!("\\{b:03}"));
             }
             _ => out.push(b as char),
         }

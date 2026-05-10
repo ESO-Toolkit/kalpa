@@ -44,7 +44,7 @@ pub fn backup_user_files(
     let backup_root = backups_dir(addons_dir).join(folder_name).join(&ts);
 
     fs::create_dir_all(&backup_root)
-        .map_err(|e| format!("Failed to create backup directory: {}", e))?;
+        .map_err(|e| format!("Failed to create backup directory: {e}"))?;
 
     let addon_path = addons_dir.join(folder_name);
     let mut backed_up = Vec::new();
@@ -53,17 +53,16 @@ pub fn backup_user_files(
         let src = addon_path.join(rel_path.replace('/', "\\"));
         if !src.exists() {
             eprintln!(
-                "Warning: backup source not found for {}/{}, skipping: {}",
-                folder_name, rel_path, rel_path
+                "Warning: backup source not found for {folder_name}/{rel_path}, skipping: {rel_path}"
             );
             continue;
         }
         let dest = backup_root.join(rel_path.replace('/', "\\"));
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create backup subdirectory: {}", e))?;
+                .map_err(|e| format!("Failed to create backup subdirectory: {e}"))?;
         }
-        fs::copy(&src, &dest).map_err(|e| format!("Failed to back up {}: {}", rel_path, e))?;
+        fs::copy(&src, &dest).map_err(|e| format!("Failed to back up {rel_path}: {e}"))?;
         backed_up.push(rel_path.clone());
     }
 
@@ -132,7 +131,7 @@ pub fn restore_backup_file(
         .join(relative_path.replace('/', "\\"));
 
     if !backup_file.exists() {
-        return Err(format!("Backup file not found: {}", relative_path));
+        return Err(format!("Backup file not found: {relative_path}"));
     }
 
     let dest = addons_dir
@@ -140,10 +139,10 @@ pub fn restore_backup_file(
         .join(relative_path.replace('/', "\\"));
 
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
     }
 
-    fs::copy(&backup_file, &dest).map_err(|e| format!("Failed to restore file: {}", e))?;
+    fs::copy(&backup_file, &dest).map_err(|e| format!("Failed to restore file: {e}"))?;
 
     Ok(())
 }

@@ -145,7 +145,7 @@ fn parse_lua_quoted_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, 
                         }
                     }
                     if val > 255 {
-                        return Err(format!("Decimal escape \\{} out of range", val));
+                        return Err(format!("Decimal escape \\{val} out of range"));
                     }
                     out.push(val as u8);
                 }
@@ -198,7 +198,7 @@ fn parse_lua_long_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, St
     }
     if *pos >= chars.len() || chars[*pos] != b'[' {
         *pos = start;
-        return Err(format!("Invalid long bracket string at position {}", start));
+        return Err(format!("Invalid long bracket string at position {start}"));
     }
     *pos += 1; // skip second [
 
@@ -231,8 +231,7 @@ fn parse_lua_long_string(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, St
         *pos += 1;
     }
     Err(format!(
-        "Unterminated long bracket string starting at position {}",
-        start
+        "Unterminated long bracket string starting at position {start}"
     ))
 }
 
@@ -278,14 +277,14 @@ fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String>
         };
         let n = i64::from_str_radix(hex_part, 16)
             .map(|v| if negative { -v } else { v })
-            .map_err(|_| format!("Invalid hex number: {}", num_str))?;
+            .map_err(|_| format!("Invalid hex number: {num_str}"))?;
         serde_json::Value::Number(serde_json::Number::from(n))
     } else if let Ok(n) = num_str.parse::<f64>() {
         serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null)
     } else {
-        return Err(format!("Invalid number: {}", num_str));
+        return Err(format!("Invalid number: {num_str}"));
     };
     Ok(SvTreeNode {
         key: String::new(),
@@ -455,7 +454,7 @@ pub fn parse_sv_file(content: &str, file_name: &str) -> Result<SvTreeNode, Strin
                         children.push(node);
                     }
                     Err(e) => {
-                        return Err(format!("Parse error in {}: {}", file_name, e));
+                        return Err(format!("Parse error in {file_name}: {e}"));
                     }
                 }
             } else {

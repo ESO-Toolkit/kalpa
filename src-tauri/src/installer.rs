@@ -11,10 +11,10 @@ pub fn extract_addon_zip_selective(
     addons_dir: &Path,
     skip_files: &HashSet<String>,
 ) -> Result<Vec<String>, String> {
-    let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {}", e))?;
+    let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {e}"))?;
 
     let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
     let mut created_folders: HashSet<String> = HashSet::new();
     let mut total_extracted: u64 = 0;
@@ -22,7 +22,7 @@ pub fn extract_addon_zip_selective(
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
-            .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
+            .map_err(|e| format!("Failed to read ZIP entry: {e}"))?;
 
         if let Some(mode) = entry.unix_mode() {
             if mode & 0o170000 == 0o120000 {
@@ -49,7 +49,7 @@ pub fn extract_addon_zip_selective(
 
         if entry.is_dir() {
             fs::create_dir_all(&out_path)
-                .map_err(|e| format!("Failed to create directory {:?}: {}", out_path, e))?;
+                .map_err(|e| format!("Failed to create directory {out_path:?}: {e}"))?;
         } else {
             let declared_size = entry.size();
             if total_extracted + declared_size > MAX_EXTRACT_SIZE {
@@ -61,14 +61,14 @@ pub fn extract_addon_zip_selective(
 
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create directory {:?}: {}", parent, e))?;
+                    .map_err(|e| format!("Failed to create directory {parent:?}: {e}"))?;
             }
 
             let mut outfile = fs::File::create(&out_path)
-                .map_err(|e| format!("Failed to create file {:?}: {}", out_path, e))?;
+                .map_err(|e| format!("Failed to create file {out_path:?}: {e}"))?;
 
             let bytes_written = io::copy(&mut entry, &mut outfile)
-                .map_err(|e| format!("Failed to extract {:?}: {}", out_path, e))?;
+                .map_err(|e| format!("Failed to extract {out_path:?}: {e}"))?;
 
             total_extracted += bytes_written;
 
@@ -90,10 +90,10 @@ pub fn extract_addon_zip_selective(
 }
 
 pub fn extract_addon_zip(zip_path: &Path, addons_dir: &Path) -> Result<Vec<String>, String> {
-    let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {}", e))?;
+    let file = fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {e}"))?;
 
     let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
     let mut created_folders: HashSet<String> = HashSet::new();
     let mut total_extracted: u64 = 0;
@@ -101,7 +101,7 @@ pub fn extract_addon_zip(zip_path: &Path, addons_dir: &Path) -> Result<Vec<Strin
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
-            .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
+            .map_err(|e| format!("Failed to read ZIP entry: {e}"))?;
 
         // Skip symlink entries (check unix mode for symlink bit 0o120000)
         if let Some(mode) = entry.unix_mode() {
@@ -126,7 +126,7 @@ pub fn extract_addon_zip(zip_path: &Path, addons_dir: &Path) -> Result<Vec<Strin
 
         if entry.is_dir() {
             fs::create_dir_all(&out_path)
-                .map_err(|e| format!("Failed to create directory {:?}: {}", out_path, e))?;
+                .map_err(|e| format!("Failed to create directory {out_path:?}: {e}"))?;
         } else {
             // Check declared size against remaining budget before extracting
             let declared_size = entry.size();
@@ -140,14 +140,14 @@ pub fn extract_addon_zip(zip_path: &Path, addons_dir: &Path) -> Result<Vec<Strin
             // Ensure parent directory exists
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create directory {:?}: {}", parent, e))?;
+                    .map_err(|e| format!("Failed to create directory {parent:?}: {e}"))?;
             }
 
             let mut outfile = fs::File::create(&out_path)
-                .map_err(|e| format!("Failed to create file {:?}: {}", out_path, e))?;
+                .map_err(|e| format!("Failed to create file {out_path:?}: {e}"))?;
 
             let bytes_written = io::copy(&mut entry, &mut outfile)
-                .map_err(|e| format!("Failed to extract {:?}: {}", out_path, e))?;
+                .map_err(|e| format!("Failed to extract {out_path:?}: {e}"))?;
 
             total_extracted += bytes_written;
 
@@ -183,23 +183,23 @@ pub fn remove_addon(addons_dir: &Path, folder_name: &str) -> Result<(), String> 
     let addon_path = addons_dir.join(folder_name);
 
     if !addon_path.is_dir() {
-        return Err(format!("Addon folder not found: {}", folder_name));
+        return Err(format!("Addon folder not found: {folder_name}"));
     }
 
     // Verify the folder is actually inside the addons directory
     let canonical_addons = addons_dir
         .canonicalize()
-        .map_err(|e| format!("Failed to resolve addons path: {}", e))?;
+        .map_err(|e| format!("Failed to resolve addons path: {e}"))?;
     let canonical_addon = addon_path
         .canonicalize()
-        .map_err(|e| format!("Failed to resolve addon path: {}", e))?;
+        .map_err(|e| format!("Failed to resolve addon path: {e}"))?;
 
     if !canonical_addon.starts_with(&canonical_addons) {
         return Err("Addon path is outside the AddOns directory.".to_string());
     }
 
     fs::remove_dir_all(&addon_path)
-        .map_err(|e| format!("Failed to remove addon {}: {}", folder_name, e))?;
+        .map_err(|e| format!("Failed to remove addon {folder_name}: {e}"))?;
 
     Ok(())
 }
@@ -218,7 +218,7 @@ mod tests {
 
         let options = zip::write::SimpleFileOptions::default();
         archive
-            .start_file(format!("{}/test.txt", folder), options)
+            .start_file(format!("{folder}/test.txt"), options)
             .unwrap();
         archive.write_all(file_content.as_bytes()).unwrap();
         archive.finish().unwrap();

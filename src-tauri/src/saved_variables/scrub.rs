@@ -344,7 +344,7 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
         let token = if i == 0 {
             "${ACCOUNT}".to_string()
         } else {
-            format!("${{ACCOUNT:{}}}", i)
+            format!("${{ACCOUNT:{i}}}")
         };
         pairs.push((token, account.clone()));
 
@@ -354,16 +354,16 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
             let name_token = if i == 0 {
                 "${ACCOUNT_NAME}".to_string()
             } else {
-                format!("${{ACCOUNT_NAME:{}}}", i)
+                format!("${{ACCOUNT_NAME:{i}}}")
             };
             pairs.push((name_token, bare));
         }
     }
     for (i, character) in ctx.characters.iter().enumerate() {
-        pairs.push((format!("${{CHAR:{}}}", i), character.clone()));
+        pairs.push((format!("${{CHAR:{i}}}"), character.clone()));
     }
     for (i, id) in ctx.character_ids.iter().enumerate() {
-        pairs.push((format!("${{CHAR_ID:{}}}", i), id.clone()));
+        pairs.push((format!("${{CHAR_ID:{i}}}"), id.clone()));
     }
     let world = ctx
         .extra_worlds
@@ -433,7 +433,7 @@ impl PlaceholderTable {
             let label = if i == 0 {
                 "${ACCOUNT}".to_string()
             } else {
-                format!("${{ACCOUNT:{}}}", i)
+                format!("${{ACCOUNT:{i}}}")
             };
             accounts.insert(a.clone(), label);
 
@@ -443,18 +443,18 @@ impl PlaceholderTable {
                 let name_label = if i == 0 {
                     "${ACCOUNT_NAME}".to_string()
                 } else {
-                    format!("${{ACCOUNT_NAME:{}}}", i)
+                    format!("${{ACCOUNT_NAME:{i}}}")
                 };
                 account_names.insert(bare.to_string(), name_label);
             }
         }
         let mut characters = std::collections::HashMap::new();
         for (i, c) in ctx.characters.iter().enumerate() {
-            characters.insert(c.clone(), format!("${{CHAR:{}}}", i));
+            characters.insert(c.clone(), format!("${{CHAR:{i}}}"));
         }
         let mut character_ids = std::collections::HashMap::new();
         for (i, id) in ctx.character_ids.iter().enumerate() {
-            character_ids.insert(id.clone(), format!("${{CHAR_ID:{}}}", i));
+            character_ids.insert(id.clone(), format!("${{CHAR_ID:{i}}}"));
         }
         Self {
             accounts,
@@ -1164,13 +1164,11 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("${ACCOUNT}"),
-            "expected ${{ACCOUNT}} placeholder in:\n{}",
-            serialized
+            "expected ${{ACCOUNT}} placeholder in:\n{serialized}"
         );
         assert!(
             !serialized.contains("@Author"),
-            "raw account handle leaked: {}",
-            serialized
+            "raw account handle leaked: {serialized}"
         );
         assert!(report
             .templated_keys
@@ -1252,14 +1250,12 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             !serialized.contains("@Author"),
-            "exporter handle leaked: {}",
-            serialized
+            "exporter handle leaked: {serialized}"
         );
         // The third-party handle should also be dropped via the @-shape rule.
         assert!(
             !serialized.contains("@SomebodyElse"),
-            "third-party handle leaked: {}",
-            serialized
+            "third-party handle leaked: {serialized}"
         );
         assert!(report.drops.iter().any(|d| matches!(
             d.reason,
@@ -1391,8 +1387,7 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("ignoredAbilities"),
-            "ability ignore list should not be dropped: {}",
-            serialized
+            "ability ignore list should not be dropped: {serialized}"
         );
         assert!(serialized.contains("Critical Surge"));
     }
@@ -1513,8 +1508,7 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             !serialized.contains("Mainchar"),
-            "character name leaked via lastCharname: {}",
-            serialized
+            "character name leaked via lastCharname: {serialized}"
         );
         assert!(serialized.contains("enabled = true"));
         assert!(report
@@ -1543,8 +1537,7 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("showTooltip"),
-            "config wiped by top-level var name heuristic: {}",
-            serialized
+            "config wiped by top-level var name heuristic: {serialized}"
         );
         assert!(
             !report.drops.iter().any(|d| d.path.len() == 1),
@@ -1575,18 +1568,15 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("maxSavedFights"),
-            "scalar fight config dropped: {}",
-            serialized
+            "scalar fight config dropped: {serialized}"
         );
         assert!(
             serialized.contains("keepbossfights"),
-            "scalar fight config dropped: {}",
-            serialized
+            "scalar fight config dropped: {serialized}"
         );
         assert!(
             !serialized.contains("fightData"),
-            "fight data table should be dropped: {}",
-            serialized
+            "fight data table should be dropped: {serialized}"
         );
         assert!(report
             .drops
@@ -1667,8 +1657,7 @@ mod tests {
         // The disabled addon's variable should not appear in output.
         assert!(
             !serialized.contains("HarvestMap_Data"),
-            "disabled addon still present: {}",
-            serialized
+            "disabled addon still present: {serialized}"
         );
         assert!(report
             .drops
@@ -1708,13 +1697,11 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("keepConfig"),
-            "allowed key was dropped: {}",
-            serialized
+            "allowed key was dropped: {serialized}"
         );
         assert!(
             !serialized.contains("sensitiveTable"),
-            "denied key survived: {}",
-            serialized
+            "denied key survived: {serialized}"
         );
         // Suppress unused `ov` warning from above.
         let _ = ov;
@@ -1761,33 +1748,24 @@ mod tests {
         let result = substitute_placeholders(lua, &ctx, WELL_KNOWN_WORLDS);
         assert!(
             result.contains("@Real"),
-            "account not substituted: {}",
-            result
+            "account not substituted: {result}"
         );
         assert!(
             result.contains("@Alt"),
-            "alt account not substituted: {}",
-            result
+            "alt account not substituted: {result}"
         );
-        assert!(
-            result.contains("MyChar"),
-            "char not substituted: {}",
-            result
-        );
+        assert!(result.contains("MyChar"), "char not substituted: {result}");
         assert!(
             result.contains("AltChar"),
-            "alt char not substituted: {}",
-            result
+            "alt char not substituted: {result}"
         );
         assert!(
             result.contains("123456789012345"),
-            "char id not substituted: {}",
-            result
+            "char id not substituted: {result}"
         );
         assert!(
             result.contains("NA Megaserver"),
-            "world not substituted: {}",
-            result
+            "world not substituted: {result}"
         );
     }
 
@@ -2105,13 +2083,11 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("${ACCOUNT_NAME}"),
-            "bare account name should be templated: {}",
-            serialized
+            "bare account name should be templated: {serialized}"
         );
         assert!(
             !serialized.contains("Authorbare"),
-            "raw bare account name leaked: {}",
-            serialized
+            "raw bare account name leaked: {serialized}"
         );
         assert!(
             report
@@ -2135,18 +2111,15 @@ mod tests {
         let result = substitute_placeholders(lua, &ctx, WELL_KNOWN_WORLDS);
         assert!(
             result.contains("RealHandle"),
-            "primary bare account not substituted: {}",
-            result
+            "primary bare account not substituted: {result}"
         );
         assert!(
             result.contains("AltHandle"),
-            "secondary bare account not substituted: {}",
-            result
+            "secondary bare account not substituted: {result}"
         );
         assert!(
             !result.contains("${ACCOUNT_NAME}"),
-            "token not replaced: {}",
-            result
+            "token not replaced: {result}"
         );
     }
 
@@ -2181,13 +2154,11 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             !serialized.contains(r#"["Author"]"#),
-            "bare handle leaked: {}",
-            serialized
+            "bare handle leaked: {serialized}"
         );
         assert!(
             serialized.contains("${ACCOUNT_NAME}"),
-            "bare handle not templated: {}",
-            serialized
+            "bare handle not templated: {serialized}"
         );
         assert!(
             report
@@ -2225,13 +2196,11 @@ mod tests {
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("${CHAR:0}"),
-            "character key should win collision: {}",
-            serialized
+            "character key should win collision: {serialized}"
         );
         assert!(
             !serialized.contains("${ACCOUNT_NAME}"),
-            "account-name template should not win over character: {}",
-            serialized
+            "account-name template should not win over character: {serialized}"
         );
         assert!(
             report
@@ -2398,7 +2367,7 @@ mod tests {
 
     /// Drop-stat aggregator for the report.
     fn run_one(name: &str, lua: String, ctx: &ScrubContext) -> (usize, usize, usize, usize) {
-        let tree = parse_sv_file(&lua, &format!("{}.lua", name)).expect("parse");
+        let tree = parse_sv_file(&lua, &format!("{name}.lua")).expect("parse");
         let original_bytes = lua.len();
         let (_scrubbed, report) = scrub(&tree, ctx);
 
@@ -2417,11 +2386,8 @@ mod tests {
             }
         }
 
-        println!("\n── {} ─────────────────────────────────────────", name);
-        println!(
-            "  raw input bytes (Lua source)       : {:>10}",
-            original_bytes
-        );
+        println!("\n── {name} ─────────────────────────────────────────");
+        println!("  raw input bytes (Lua source)       : {original_bytes:>10}");
         println!(
             "  parsed re-serialized (baseline)    : {:>10}",
             report.original_bytes
@@ -2435,24 +2401,12 @@ mod tests {
         } else {
             0.0
         };
-        println!("  retained vs baseline               : {:>9.1}%", pct);
+        println!("  retained vs baseline               : {pct:>9.1}%");
         println!("  drops:");
-        println!(
-            "    blocked-key-heuristic            : {:>10} bytes",
-            by_block
-        );
-        println!(
-            "    string-value-contains-identity   : {:>10} bytes",
-            by_identity
-        );
-        println!(
-            "    string-value-looks-like-account  : {:>10} bytes",
-            by_handle
-        );
-        println!(
-            "    always-dropped                   : {:>10} bytes",
-            by_always
-        );
+        println!("    blocked-key-heuristic            : {by_block:>10} bytes");
+        println!("    string-value-contains-identity   : {by_identity:>10} bytes");
+        println!("    string-value-looks-like-account  : {by_handle:>10} bytes");
+        println!("    always-dropped                   : {by_always:>10} bytes");
         println!(
             "  templated keys                     : {:>10}",
             report.templated_keys.len()
@@ -2522,10 +2476,7 @@ mod tests {
             } else {
                 0.0
             };
-            println!(
-                "{:<32} {:>10} {:>10} {:>10} {:>7.1}%",
-                name, raw, base, post, pct
-            );
+            println!("{name:<32} {raw:>10} {base:>10} {post:>10} {pct:>7.1}%");
         }
 
         // Sanity: heavy fixtures should be heavily stripped; the config-only
@@ -2577,15 +2528,14 @@ mod tests {
             }
         };
 
-        let content =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
         let file_name = std::path::Path::new(&path)
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown.lua".to_string());
 
         let tree = parse_sv_file(&content, &file_name)
-            .unwrap_or_else(|e| panic!("parse {}: {}", file_name, e));
+            .unwrap_or_else(|e| panic!("parse {file_name}: {e}"));
 
         let detected = detect_identities_from_tree(&tree);
         println!("\n── Detected identities ──────────────────────────────────────");
@@ -2598,13 +2548,13 @@ mod tests {
         let scrubbed_lua = serialize_to_lua(&scrubbed);
 
         println!("\n── Scrub report ────────────────────────────────────────────");
-        println!("  file                 : {}", file_name);
+        println!("  file                 : {file_name}");
         println!("  raw input bytes      : {:>12}", content.len());
         println!("  parsed → reserialized: {:>12}", report.original_bytes);
         println!("  scrubbed bytes       : {:>12}", report.scrubbed_bytes);
         if report.original_bytes > 0 {
             let pct = 100.0 * report.scrubbed_bytes as f64 / report.original_bytes as f64;
-            println!("  retained vs baseline : {:>11.2}%", pct);
+            println!("  retained vs baseline : {pct:>11.2}%");
         }
         println!(
             "  templated keys       : {:>12}",
@@ -2631,7 +2581,7 @@ mod tests {
 
         println!("\n── Drop breakdown by reason ────────────────────────────────");
         for (reason, (count, bytes)) in &by_reason {
-            println!("  {:<35} {:>6} drops, {:>10} bytes", reason, count, bytes);
+            println!("  {reason:<35} {count:>6} drops, {bytes:>10} bytes");
         }
 
         // First few drop paths for spot-checking.
@@ -2651,8 +2601,8 @@ mod tests {
 
         if let Ok(out_path) = std::env::var("KALPA_SCRUB_OUT") {
             std::fs::write(&out_path, &scrubbed_lua)
-                .unwrap_or_else(|e| panic!("write {}: {}", out_path, e));
-            println!("\nScrubbed Lua written to: {}", out_path);
+                .unwrap_or_else(|e| panic!("write {out_path}: {e}"));
+            println!("\nScrubbed Lua written to: {out_path}");
         }
     }
 }

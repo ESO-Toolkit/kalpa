@@ -37,12 +37,12 @@ struct ApiImage {
 
 /// Fetch addon details from the ESOUI filedetails JSON API.
 fn fetch_file_detail(client: &reqwest::blocking::Client, id: u32) -> Result<ApiFileDetail, String> {
-    let url = format!("https://api.mmoui.com/v4/game/ESO/filedetails/{}.json", id);
+    let url = format!("https://api.mmoui.com/v4/game/ESO/filedetails/{id}.json");
     let response = client.get(&url).send().map_err(|e| {
         if e.is_connect() || e.is_timeout() {
             "Could not reach ESOUI API. Check your internet connection.".to_string()
         } else {
-            format!("ESOUI API request failed: {}", e)
+            format!("ESOUI API request failed: {e}")
         }
     })?;
 
@@ -52,19 +52,16 @@ fn fetch_file_detail(client: &reqwest::blocking::Client, id: u32) -> Result<ApiF
             404 => "Addon not found on ESOUI. It may have been removed.".to_string(),
             429 => "Too many requests to ESOUI. Please wait a moment and try again.".to_string(),
             500..=599 => "ESOUI is currently unavailable. Try again later.".to_string(),
-            _ => format!("ESOUI API returned an error (HTTP {})", status),
+            _ => format!("ESOUI API returned an error (HTTP {status})"),
         });
     }
 
     let entries: Vec<ApiFileDetail> = response
         .json()
-        .map_err(|e| format!("Failed to parse ESOUI API response: {}", e))?;
+        .map_err(|e| format!("Failed to parse ESOUI API response: {e}"))?;
 
     entries.into_iter().next().ok_or_else(|| {
-        format!(
-            "ESOUI API returned empty response for addon {}. It may have been removed.",
-            id
-        )
+        format!("ESOUI API returned empty response for addon {id}. It may have been removed.")
     })
 }
 
@@ -104,7 +101,7 @@ pub fn parse_esoui_input(input: &str) -> Result<u32, String> {
         }
     }
 
-    Err(format!("Could not parse ESOUI addon ID from: {}", input))
+    Err(format!("Could not parse ESOUI addon ID from: {input}"))
 }
 
 fn http_client() -> &'static reqwest::blocking::Client {
@@ -136,7 +133,7 @@ fn fetch_page(
         if e.is_connect() || e.is_timeout() {
             "Could not connect to ESOUI. Check your internet connection.".to_string()
         } else {
-            format!("Network error: {}", e)
+            format!("Network error: {e}")
         }
     })?;
 
@@ -146,13 +143,13 @@ fn fetch_page(
             404 => "Addon not found on ESOUI. It may have been removed.".to_string(),
             429 => "Too many requests to ESOUI. Please wait a moment and try again.".to_string(),
             500..=599 => "ESOUI is currently unavailable. Try again later.".to_string(),
-            _ => format!("ESOUI returned an error (HTTP {})", status),
+            _ => format!("ESOUI returned an error (HTTP {status})"),
         });
     }
 
     response
         .text()
-        .map_err(|e| format!("Failed to read response: {}", e))
+        .map_err(|e| format!("Failed to read response: {e}"))
 }
 
 /// Fetch basic addon info (title, version, download URL) from ESOUI JSON API.
@@ -328,7 +325,7 @@ fn format_epoch_millis(millis: u64) -> String {
 /// Scrape compatibility and created from the ESOUI fileinfo HTML page.
 /// Best-effort: returns empty strings on any failure.
 fn scrape_fileinfo_page(client: &reqwest::blocking::Client, id: u32) -> (String, String) {
-    let url = format!("https://www.esoui.com/downloads/fileinfo.php?id={}", id);
+    let url = format!("https://www.esoui.com/downloads/fileinfo.php?id={id}");
     let body = match fetch_page(client, &url, None) {
         Ok(b) => b,
         Err(_) => return (String::new(), String::new()),
@@ -629,8 +626,7 @@ pub fn browse_category(
     // ESOUI uses 1-based `page=` for paginated category listings
     let esoui_page = page + 1;
     let url = format!(
-        "https://www.esoui.com/downloads/index.php?cid={}&sb={}&so=desc&pt=f&page={}",
-        category_id, sb, esoui_page
+        "https://www.esoui.com/downloads/index.php?cid={category_id}&sb={sb}&so=desc&pt=f&page={esoui_page}"
     );
 
     let body = fetch_page(client, &url, None)?;
@@ -795,7 +791,7 @@ pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
         if e.is_connect() || e.is_timeout() {
             "Download failed. Check your internet connection.".to_string()
         } else {
-            format!("Download failed: {}", e)
+            format!("Download failed: {e}")
         }
     })?;
 
@@ -806,13 +802,13 @@ pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
         ));
     }
 
-    let mut tmp = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {}", e))?;
+    let mut tmp = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
 
     // Stream the response directly to disk instead of buffering the entire ZIP in memory.
     // reqwest::blocking::Response implements std::io::Read, so io::copy streams in chunks.
     let mut response = response;
     io::copy(&mut response, &mut tmp)
-        .map_err(|e| format!("Failed to write download to temp file: {}", e))?;
+        .map_err(|e| format!("Failed to write download to temp file: {e}"))?;
 
     Ok(tmp)
 }
@@ -926,7 +922,7 @@ fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
         if e.is_connect() || e.is_timeout() {
             "Could not reach ESOUI API. Check your internet connection.".to_string()
         } else {
-            format!("ESOUI API request failed: {}", e)
+            format!("ESOUI API request failed: {e}")
         }
     })?;
 
@@ -936,7 +932,7 @@ fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
 
     response
         .json()
-        .map_err(|e| format!("Failed to parse ESOUI API response: {}", e))
+        .map_err(|e| format!("Failed to parse ESOUI API response: {e}"))
 }
 
 fn build_filelist_lookup(entries: &[ApiFileEntry]) -> HashMap<String, ApiAddonLookup> {

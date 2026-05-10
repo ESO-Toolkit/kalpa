@@ -185,7 +185,7 @@ mod tests {
     fn write_manifest(dir: &Path, folder: &str, content: &str) -> PathBuf {
         let addon_dir = dir.join(folder);
         fs::create_dir_all(&addon_dir).unwrap();
-        let path = addon_dir.join(format!("{}.txt", folder));
+        let path = addon_dir.join(format!("{folder}.txt"));
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path

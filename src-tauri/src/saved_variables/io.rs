@@ -28,7 +28,7 @@ pub fn backups_dir(addons_dir: &Path) -> std::path::PathBuf {
 
 /// Get the file stamp (size + mtime) for overwrite protection.
 pub fn file_stamp(path: &Path) -> Result<SvFileStamp, String> {
-    let meta = fs::metadata(path).map_err(|e| format!("Failed to read file metadata: {}", e))?;
+    let meta = fs::metadata(path).map_err(|e| format!("Failed to read file metadata: {e}"))?;
     let modified_epoch_ms = meta
         .modified()
         .ok()
@@ -132,7 +132,7 @@ pub fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVaria
     }
 
     let entries =
-        fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {}", e))?;
+        fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {e}"))?;
 
     let mut files: Vec<SavedVariableFile> = Vec::new();
 
@@ -260,12 +260,12 @@ pub fn read_saved_variable_blocking(
     let file_path = sv_dir.join(file_name);
 
     if !file_path.is_file() {
-        return Err(format!("File not found: {}", file_name));
+        return Err(format!("File not found: {file_name}"));
     }
 
     const MAX_READ_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
     let meta =
-        fs::metadata(&file_path).map_err(|e| format!("Failed to read file metadata: {}", e))?;
+        fs::metadata(&file_path).map_err(|e| format!("Failed to read file metadata: {e}"))?;
     if meta.len() > MAX_READ_SIZE {
         return Err(format!(
             "{} is too large to edit ({:.1} MB). Maximum is 20 MB.",
@@ -276,7 +276,7 @@ pub fn read_saved_variable_blocking(
 
     let stamp = file_stamp(&file_path)?;
     let content =
-        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
+        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
     let tree = parser::parse_sv_file(&content, file_name)?;
 
     Ok(SvReadResponse { tree, stamp })
@@ -325,28 +325,28 @@ pub fn write_saved_variable_blocking(
 
     // Validation pass: re-parse the serialized output to ensure it's valid
     parser::parse_sv_file(&content, file_name)
-        .map_err(|e| format!("Serialization validation failed: {}. Save aborted.", e))?;
+        .map_err(|e| format!("Serialization validation failed: {e}. Save aborted."))?;
 
     // Create a .bak copy before overwriting (automatic backup)
     if file_path.is_file() {
         let bak_path = file_path.with_extension("lua.bak");
         fs::copy(&file_path, &bak_path)
-            .map_err(|e| format!("Failed to create backup before saving: {}", e))?;
+            .map_err(|e| format!("Failed to create backup before saving: {e}"))?;
     }
 
     // Write atomically via temp file + rename
-    let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
-    fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
+    fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {e}"))?;
     // On Windows, fs::rename fails if the destination exists. Remove it first.
     if file_path.exists() {
         fs::remove_file(&file_path).map_err(|e| {
             let _ = fs::remove_file(&tmp_path);
-            format!("Failed to replace existing file: {}", e)
+            format!("Failed to replace existing file: {e}")
         })?;
     }
     fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {}", e)
+        format!("Failed to finalize write: {e}")
     })?;
 
     // Return the new stamp so frontend can track for subsequent saves
@@ -371,7 +371,7 @@ fn format_sv_value(node: &SvTreeNode) -> String {
                     if n == (n as i64) as f64 {
                         format!("{}", n as i64)
                     } else {
-                        format!("{}", n)
+                        format!("{n}")
                     }
                 } else {
                     v.to_string()
@@ -382,11 +382,11 @@ fn format_sv_value(node: &SvTreeNode) -> String {
             .value
             .as_ref()
             .and_then(|v| v.as_str())
-            .map(|s| format!("\"{}\"", s))
+            .map(|s| format!("\"{s}\""))
             .unwrap_or_else(|| "\"\"".to_string()),
         SvValueType::Table => {
             let count = node.children.as_ref().map(|c| c.len()).unwrap_or(0);
-            format!("{{...}} ({} entries)", count)
+            format!("{{...}} ({count} entries)")
         }
     }
 }
@@ -476,7 +476,7 @@ pub fn preview_save(
     let file_path = sv_dir.join(file_name);
 
     let original_content = if file_path.is_file() {
-        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?
+        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?
     } else {
         return Ok(Vec::new());
     };
@@ -493,18 +493,18 @@ pub fn preview_save(
 /// Write raw Lua content (used by copy_sv_profile which manipulates raw text).
 pub fn write_raw_content(sv_dir: &Path, file_name: &str, content: &str) -> Result<(), String> {
     let file_path = sv_dir.join(file_name);
-    let tmp_path = sv_dir.join(format!("{}.tmp", file_name));
-    fs::write(&tmp_path, content).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
+    fs::write(&tmp_path, content).map_err(|e| format!("Failed to write temp file: {e}"))?;
     // On Windows, fs::rename fails if the destination exists. Remove it first.
     if file_path.exists() {
         fs::remove_file(&file_path).map_err(|e| {
             let _ = fs::remove_file(&tmp_path);
-            format!("Failed to replace existing file: {}", e)
+            format!("Failed to replace existing file: {e}")
         })?;
     }
     fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {}", e)
+        format!("Failed to finalize write: {e}")
     })
 }
 
@@ -515,10 +515,10 @@ pub fn restore_backup_file(addons_dir: &Path, file_name: &str) -> Result<SvFileS
     let bak_path = file_path.with_extension("lua.bak");
 
     if !bak_path.is_file() {
-        return Err(format!("No backup found for {}", file_name));
+        return Err(format!("No backup found for {file_name}"));
     }
 
-    fs::copy(&bak_path, &file_path).map_err(|e| format!("Failed to restore backup: {}", e))?;
+    fs::copy(&bak_path, &file_path).map_err(|e| format!("Failed to restore backup: {e}"))?;
 
     file_stamp(&file_path)
 }
@@ -538,20 +538,16 @@ pub fn delete_saved_variables_blocking(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let backup_name = format!("auto-cleanup-{}", ts);
+    let backup_name = format!("auto-cleanup-{ts}");
     let backup_dir = backups_dir(addons_dir).join(&backup_name);
-    fs::create_dir_all(&backup_dir)
-        .map_err(|e| format!("Failed to create backup folder: {}", e))?;
+    fs::create_dir_all(&backup_dir).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
     for name in file_names {
         let src = sv_dir.join(name);
         if src.is_file() {
             let dest = backup_dir.join(name);
             fs::copy(&src, &dest).map_err(|e| {
-                format!(
-                    "Backup failed for {}. No files were deleted. Error: {}",
-                    name, e
-                )
+                format!("Backup failed for {name}. No files were deleted. Error: {e}")
             })?;
         }
     }

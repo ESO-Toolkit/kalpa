@@ -102,21 +102,21 @@ mod urlencoding {
 pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
     // Bind to random port
     let listener =
-        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Failed to bind port: {}", e))?;
+        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Failed to bind port: {e}"))?;
     let port = listener
         .local_addr()
-        .map_err(|e| format!("Failed to get port: {}", e))?
+        .map_err(|e| format!("Failed to get port: {e}"))?
         .port();
 
     // Open browser to the website's app-auth page
-    let auth_url = format!("{}?port={}", APP_AUTH_URL, port);
+    let auth_url = format!("{APP_AUTH_URL}?port={port}");
 
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
             .args(["/C", "start", "", &auth_url])
             .spawn()
-            .map_err(|e| format!("Failed to open browser: {}", e))?;
+            .map_err(|e| format!("Failed to open browser: {e}"))?;
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -131,7 +131,7 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
     let start = std::time::Instant::now();
     listener
         .set_nonblocking(true)
-        .map_err(|e| format!("Failed to set nonblocking: {}", e))?;
+        .map_err(|e| format!("Failed to set nonblocking: {e}"))?;
 
     loop {
         if start.elapsed() > timeout {
@@ -187,7 +187,7 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
                 continue;
             }
             Err(e) => {
-                return Err(format!("Server error: {}", e));
+                return Err(format!("Server error: {e}"));
             }
         }
     }
@@ -217,17 +217,17 @@ pub fn validate_token(access_token: &str) -> Result<(String, String), String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+        .map_err(|e| format!("HTTP client error: {e}"))?;
 
     let query = r#"{ "query": "{ userData { currentUser { id name } } }" }"#;
 
     let response = client
         .post(USER_API)
-        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Authorization", format!("Bearer {access_token}"))
         .header("Content-Type", "application/json")
         .body(query)
         .send()
-        .map_err(|e| format!("User validation failed: {}", e))?;
+        .map_err(|e| format!("User validation failed: {e}"))?;
 
     if !response.status().is_success() {
         return Err("Token validation failed".to_string());
@@ -235,7 +235,7 @@ pub fn validate_token(access_token: &str) -> Result<(String, String), String> {
 
     let body: GraphQLResponse = response
         .json()
-        .map_err(|e| format!("Failed to parse user response: {}", e))?;
+        .map_err(|e| format!("Failed to parse user response: {e}"))?;
 
     let user = body
         .data
@@ -313,7 +313,7 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+        .map_err(|e| format!("HTTP client error: {e}"))?;
 
     let params = [
         ("grant_type", "refresh_token"),
@@ -325,7 +325,7 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
         .post("https://www.esologs.com/oauth/token")
         .form(&params)
         .send()
-        .map_err(|e| format!("Token refresh failed: {}", e))?;
+        .map_err(|e| format!("Token refresh failed: {e}"))?;
 
     if !response.status().is_success() {
         return Err("Session expired. Please sign in again.".to_string());
@@ -333,5 +333,5 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
 
     response
         .json::<CallbackTokens>()
-        .map_err(|e| format!("Failed to parse refresh response: {}", e))
+        .map_err(|e| format!("Failed to parse refresh response: {e}"))
 }

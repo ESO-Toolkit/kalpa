@@ -33,18 +33,18 @@ fn hashes_dir(addons_dir: &Path) -> std::path::PathBuf {
 }
 
 fn manifest_path(addons_dir: &Path, folder_name: &str) -> std::path::PathBuf {
-    hashes_dir(addons_dir).join(format!("{}.json", folder_name))
+    hashes_dir(addons_dir).join(format!("{folder_name}.json"))
 }
 
 fn hash_file(path: &Path) -> Result<String, String> {
     let mut file =
-        fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {}", e))?;
+        fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {e}"))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
         let n = file
             .read(&mut buf)
-            .map_err(|e| format!("Failed to read file for hashing: {}", e))?;
+            .map_err(|e| format!("Failed to read file for hashing: {e}"))?;
         if n == 0 {
             break;
         }
@@ -53,7 +53,7 @@ fn hash_file(path: &Path) -> Result<String, String> {
     Ok(hasher
         .finalize()
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect())
 }
 
@@ -63,7 +63,7 @@ fn sha256_bytes(data: &[u8]) -> String {
     hasher
         .finalize()
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect()
 }
 
@@ -78,10 +78,10 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
         hashes: &mut HashMap<String, String>,
     ) -> Result<(), String> {
         let entries = fs::read_dir(current)
-            .map_err(|e| format!("Failed to read directory {:?}: {}", current, e))?;
+            .map_err(|e| format!("Failed to read directory {current:?}: {e}"))?;
 
         for entry in entries {
-            let entry = entry.map_err(|e| format!("Failed to read dir entry: {}", e))?;
+            let entry = entry.map_err(|e| format!("Failed to read dir entry: {e}"))?;
             let path = entry.path();
 
             if path.is_dir() {
@@ -89,7 +89,7 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
             } else if path.is_file() {
                 let relative = path
                     .strip_prefix(base)
-                    .map_err(|e| format!("Path prefix error: {}", e))?;
+                    .map_err(|e| format!("Path prefix error: {e}"))?;
                 let key = relative
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -103,7 +103,7 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
     }
 
     if !addon_path.is_dir() {
-        return Err(format!("Addon path is not a directory: {:?}", addon_path));
+        return Err(format!("Addon path is not a directory: {addon_path:?}"));
     }
 
     walk(addon_path, addon_path, &mut hashes)?;
@@ -117,17 +117,17 @@ pub fn hash_zip_entries(
     folder_name: &str,
 ) -> Result<HashMap<String, String>, String> {
     let file =
-        fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP for hashing: {}", e))?;
+        fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP for hashing: {e}"))?;
     let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
-    let prefix = format!("{}/", folder_name);
+    let prefix = format!("{folder_name}/");
     let mut hashes = HashMap::new();
 
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
-            .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
+            .map_err(|e| format!("Failed to read ZIP entry: {e}"))?;
 
         if entry.is_dir() {
             continue;
@@ -146,7 +146,7 @@ pub fn hash_zip_entries(
         let mut buf = Vec::with_capacity(entry.size() as usize);
         entry
             .read_to_end(&mut buf)
-            .map_err(|e| format!("Failed to read ZIP entry {}: {}", name, e))?;
+            .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?;
 
         hashes.insert(relative, sha256_bytes(&buf));
     }
@@ -158,7 +158,7 @@ pub fn save_hash_manifest(addons_dir: &Path, manifest: &HashManifest) -> Result<
     let dir = hashes_dir(addons_dir);
     if !dir.exists() {
         fs::create_dir_all(&dir)
-            .map_err(|e| format!("Failed to create .kalpa-hashes directory: {}", e))?;
+            .map_err(|e| format!("Failed to create .kalpa-hashes directory: {e}"))?;
     }
     let path = manifest_path(addons_dir, &manifest.addon_folder);
     metadata::save_json_with_backup(&path, manifest)
@@ -257,7 +257,7 @@ pub fn record_hashes_for_folders_with_overrides(
         let mut files = match compute_addon_hashes(&addon_path) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("Warning: failed to hash addon {}: {}", folder, e);
+                eprintln!("Warning: failed to hash addon {folder}: {e}");
                 continue;
             }
         };
@@ -292,10 +292,7 @@ pub fn record_hashes_for_folders_with_overrides(
         };
 
         if let Err(e) = save_hash_manifest(addons_dir, &manifest) {
-            eprintln!(
-                "Warning: failed to save hash manifest for {}: {}",
-                folder, e
-            );
+            eprintln!("Warning: failed to save hash manifest for {folder}: {e}");
         }
     }
 }
@@ -331,7 +328,7 @@ mod tests {
 
         for (rel_path, content) in files {
             archive
-                .start_file(format!("{}/{}", folder, rel_path), options)
+                .start_file(format!("{folder}/{rel_path}"), options)
                 .unwrap();
             archive.write_all(content.as_bytes()).unwrap();
         }
@@ -500,8 +497,7 @@ mod tests {
         let modified = detect_modifications(&addons_dir, "MyAddon").unwrap();
         assert!(
             modified.contains(&"new_module.lua".to_string()),
-            "expected new_module.lua to be flagged, got: {:?}",
-            modified
+            "expected new_module.lua to be flagged, got: {modified:?}"
         );
     }
 

@@ -22,12 +22,12 @@ use tempfile::NamedTempFile;
 fn validate_addons_path(addons_path: &str) -> Result<(PathBuf, PathBuf), String> {
     let path = PathBuf::from(addons_path);
     if !path.is_dir() {
-        return Err(format!("AddOns folder not found: {}", addons_path));
+        return Err(format!("AddOns folder not found: {addons_path}"));
     }
 
     let canonical = path
         .canonicalize()
-        .map_err(|e| format!("Invalid path: {}", e))?;
+        .map_err(|e| format!("Invalid path: {e}"))?;
 
     if canonical.file_name().and_then(|n| n.to_str()) != Some("AddOns") {
         return Err("Selected directory must be the ESO AddOns folder.".to_string());
@@ -133,8 +133,7 @@ fn validate_name(name: &str) -> Result<(), String> {
     );
     if is_reserved {
         return Err(format!(
-            "\"{}\" is a Windows reserved name and cannot be used.",
-            stem
+            "\"{stem}\" is a Windows reserved name and cannot be used."
         ));
     }
 
@@ -366,11 +365,11 @@ fn read_local_version(addons_dir: &Path, folder: &str) -> String {
 
 /// Look for a manifest file inside `dir` with the given `base_name`.
 fn find_manifest_in(dir: &std::path::Path, base_name: &str) -> Option<PathBuf> {
-    let txt = dir.join(format!("{}.txt", base_name));
+    let txt = dir.join(format!("{base_name}.txt"));
     if txt.exists() {
         return Some(txt);
     }
-    let addon = dir.join(format!("{}.addon", base_name));
+    let addon = dir.join(format!("{base_name}.addon"));
     if addon.exists() {
         return Some(addon);
     }
@@ -649,10 +648,10 @@ pub async fn scan_installed_addons(
     let cache_dir = app_handle
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data dir: {}", e))?;
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
     tokio::task::spawn_blocking(move || scan_installed_addons_blocking(&addons_dir, &cache_dir))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn scan_installed_addons_blocking(
@@ -660,7 +659,7 @@ fn scan_installed_addons_blocking(
     cache_dir: &Path,
 ) -> Result<Vec<AddonManifest>, String> {
     let entries =
-        fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
+        fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {e}"))?;
 
     // Collect top-level directories first so we can process them in parallel.
     // Each entry is (base_name, path, is_disabled).
@@ -757,8 +756,7 @@ fn scan_installed_addons_blocking(
         .addons
         .keys()
         .filter(|name| {
-            !addons_dir.join(name).is_dir()
-                && !addons_dir.join(format!("{}.disabled", name)).is_dir()
+            !addons_dir.join(name).is_dir() && !addons_dir.join(format!("{name}.disabled")).is_dir()
         })
         .cloned()
         .collect();
@@ -852,7 +850,7 @@ pub async fn set_addon_tags(
         metadata::save_metadata(&addons_dir, &store)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -862,14 +860,14 @@ pub async fn resolve_esoui_addon(input: String) -> Result<EsouiAddonInfo, String
         esoui::fetch_addon_info(id)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
 pub async fn fetch_esoui_detail(esoui_id: u32) -> Result<EsouiAddonDetail, String> {
     tokio::task::spawn_blocking(move || esoui::fetch_addon_detail(esoui_id))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -879,7 +877,7 @@ pub async fn search_esoui_addons(query: String) -> Result<Vec<EsouiSearchResult>
     }
     tokio::task::spawn_blocking(move || esoui::search_esoui(&query))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -909,7 +907,7 @@ pub async fn install_addon(
         )
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn install_addon_blocking(
@@ -964,7 +962,7 @@ pub fn remove_addon(
     // If only one exists, remove that one. Handles the edge case where
     // an external tool or reinstall left both Foo/ and Foo.disabled/.
     let enabled_exists = addons_dir.join(&folder_name).is_dir();
-    let disabled_name = format!("{}.disabled", folder_name);
+    let disabled_name = format!("{folder_name}.disabled");
     let disabled_exists = addons_dir.join(&disabled_name).is_dir();
 
     if enabled_exists {
@@ -974,7 +972,7 @@ pub fn remove_addon(
         installer::remove_addon(&addons_dir, &disabled_name)?;
     }
     if !enabled_exists && !disabled_exists {
-        return Err(format!("Addon folder not found: {}", folder_name));
+        return Err(format!("Addon folder not found: {folder_name}"));
     }
 
     // Clean up metadata
@@ -995,13 +993,13 @@ pub fn disable_addon(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let src = addons_dir.join(&folder_name);
     if !src.is_dir() {
-        return Err(format!("Addon folder not found: {}", folder_name));
+        return Err(format!("Addon folder not found: {folder_name}"));
     }
-    let dst = addons_dir.join(format!("{}.disabled", folder_name));
+    let dst = addons_dir.join(format!("{folder_name}.disabled"));
     if dst.exists() {
-        return Err(format!("{} is already disabled.", folder_name));
+        return Err(format!("{folder_name} is already disabled."));
     }
-    fs::rename(&src, &dst).map_err(|e| format!("Failed to disable {}: {}", folder_name, e))
+    fs::rename(&src, &dst).map_err(|e| format!("Failed to disable {folder_name}: {e}"))
 }
 
 #[tauri::command]
@@ -1012,15 +1010,15 @@ pub fn enable_addon(
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let src = addons_dir.join(format!("{}.disabled", folder_name));
+    let src = addons_dir.join(format!("{folder_name}.disabled"));
     if !src.is_dir() {
-        return Err(format!("Disabled addon folder not found: {}", folder_name));
+        return Err(format!("Disabled addon folder not found: {folder_name}"));
     }
     let dst = addons_dir.join(&folder_name);
     if dst.exists() {
-        return Err(format!("A folder named {} already exists.", folder_name));
+        return Err(format!("A folder named {folder_name} already exists."));
     }
-    fs::rename(&src, &dst).map_err(|e| format!("Failed to enable {}: {}", folder_name, e))
+    fs::rename(&src, &dst).map_err(|e| format!("Failed to enable {folder_name}: {e}"))
 }
 
 #[tauri::command]
@@ -1032,7 +1030,7 @@ pub async fn install_dependency(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || install_dependency_blocking(&addons_dir, &dep_name))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<InstallResult, String> {
@@ -1048,7 +1046,7 @@ fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<Inst
                 skipped_deps: resolved.skipped_deps,
             })
         }
-        Err(reason) => Err(format!("Failed to install {}: {}", dep_name, reason)),
+        Err(reason) => Err(format!("Failed to install {dep_name}: {reason}")),
     }
 }
 
@@ -1060,7 +1058,7 @@ pub async fn check_for_updates(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || check_for_updates_blocking(&addons_dir))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult>, String> {
@@ -1190,7 +1188,7 @@ pub async fn update_addon(
         update_addon_blocking(&addons_dir, esoui_id, api_version.as_deref())
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn update_addon_blocking(
@@ -1288,7 +1286,7 @@ pub async fn batch_update_addons(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || batch_update_addons_blocking(&addons_dir, &updates, &app))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn batch_update_addons_blocking(
@@ -1315,7 +1313,7 @@ fn batch_update_addons_blocking(
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
         .build()
-        .map_err(|e| format!("Thread pool error: {}", e))?;
+        .map_err(|e| format!("Thread pool error: {e}"))?;
 
     struct Downloaded {
         tmp: NamedTempFile,
@@ -1477,9 +1475,9 @@ fn generate_session_id(folder_name: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let input = format!("{}-{}", folder_name, nanos);
+    let input = format!("{folder_name}-{nanos}");
     let hash = Sha256::digest(input.as_bytes());
-    hash.iter().take(16).map(|b| format!("{:02x}", b)).collect()
+    hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
 fn build_conflict_report(
@@ -1569,7 +1567,7 @@ pub async fn scan_update_conflicts(
 
         let (_, kept_path) = tmp_file
             .keep()
-            .map_err(|e| format!("Failed to persist temp ZIP: {}", e))?;
+            .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
 
         let session_id = generate_session_id(&folder_name);
 
@@ -1596,7 +1594,7 @@ pub async fn scan_update_conflicts(
         Ok(report)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[derive(Debug, Deserialize)]
@@ -1665,7 +1663,7 @@ pub async fn scan_batch_conflicts(
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(4)
             .build()
-            .map_err(|e| format!("Thread pool error: {}", e))?;
+            .map_err(|e| format!("Thread pool error: {e}"))?;
 
         struct Downloaded {
             kept_path: PathBuf,
@@ -1693,7 +1691,7 @@ pub async fn scan_batch_conflicts(
                                 );
                                 let (_, kept_path) = tmp
                                     .keep()
-                                    .map_err(|e| format!("Failed to persist temp ZIP: {}", e))?;
+                                    .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
                                 Ok(Downloaded {
                                     kept_path,
                                     esoui_id: entry.esoui_id,
@@ -1788,7 +1786,7 @@ pub async fn scan_batch_conflicts(
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[derive(Debug, Serialize)]
@@ -1817,7 +1815,7 @@ pub async fn get_conflict_diff(
                 .map_err(|_| "Failed to access pending updates".to_string())?;
             let pu = map
                 .get(&session_id)
-                .ok_or_else(|| format!("Session {} not found", session_id))?;
+                .ok_or_else(|| format!("Session {session_id} not found"))?;
             (pu.zip_path.clone(), pu.folder_name.clone())
         };
 
@@ -1826,8 +1824,8 @@ pub async fn get_conflict_diff(
             .join(&folder_name)
             .join(relative_path.replace('/', "\\"));
         let user_content = if user_file_path.exists() {
-            let bytes = fs::read(&user_file_path)
-                .map_err(|e| format!("Failed to read user file: {}", e))?;
+            let bytes =
+                fs::read(&user_file_path).map_err(|e| format!("Failed to read user file: {e}"))?;
             if bytes.iter().take(512).any(|&b| b == 0) {
                 return Ok(DiffData {
                     user_content: String::new(),
@@ -1841,17 +1839,17 @@ pub async fn get_conflict_diff(
         };
 
         // Read upstream file from ZIP
-        let file = fs::File::open(&zip_path).map_err(|e| format!("Failed to open ZIP: {}", e))?;
+        let file = fs::File::open(&zip_path).map_err(|e| format!("Failed to open ZIP: {e}"))?;
         let mut archive =
-            zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP: {}", e))?;
-        let zip_entry_name = format!("{}/{}", folder_name, relative_path);
+            zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP: {e}"))?;
+        let zip_entry_name = format!("{folder_name}/{relative_path}");
         let mut entry = archive
             .by_name(&zip_entry_name)
-            .map_err(|e| format!("File not found in ZIP: {}", e))?;
+            .map_err(|e| format!("File not found in ZIP: {e}"))?;
 
         let mut upstream_bytes = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut upstream_bytes)
-            .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
+            .map_err(|e| format!("Failed to read ZIP entry: {e}"))?;
 
         if upstream_bytes.iter().take(512).any(|&b| b == 0) {
             return Ok(DiffData {
@@ -1870,7 +1868,7 @@ pub async fn get_conflict_diff(
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[derive(Debug, Deserialize)]
@@ -1897,7 +1895,7 @@ pub async fn update_addon_with_decisions(
                 .lock()
                 .map_err(|_| "Failed to access pending updates".to_string())?;
             map.get(&session_id)
-                .ok_or_else(|| format!("Session {} not found", session_id))?
+                .ok_or_else(|| format!("Session {session_id} not found"))?
                 .clone()
         };
 
@@ -2011,7 +2009,7 @@ pub async fn update_addon_with_decisions(
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ── File browser commands ─────────────────────────────────────────────
@@ -2046,7 +2044,7 @@ pub async fn list_addon_files(
     tokio::task::spawn_blocking(move || {
         let addon_path = addons_dir.join(&folder_name);
         if !addon_path.is_dir() {
-            return Err(format!("Addon folder not found: {}", folder_name));
+            return Err(format!("Addon folder not found: {folder_name}"));
         }
 
         let manifest = file_hashes::load_hash_manifest(&addons_dir, &folder_name);
@@ -2066,15 +2064,15 @@ pub async fn list_addon_files(
             has_manifest: bool,
         ) -> Result<(), String> {
             let entries =
-                fs::read_dir(current).map_err(|e| format!("Failed to read directory: {}", e))?;
+                fs::read_dir(current).map_err(|e| format!("Failed to read directory: {e}"))?;
 
             for entry in entries {
-                let entry = entry.map_err(|e| format!("Dir entry error: {}", e))?;
+                let entry = entry.map_err(|e| format!("Dir entry error: {e}"))?;
                 let path = entry.path();
 
                 let relative = path
                     .strip_prefix(base)
-                    .map_err(|e| format!("Path prefix error: {}", e))?;
+                    .map_err(|e| format!("Path prefix error: {e}"))?;
                 let rel_str = relative
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -2141,7 +2139,7 @@ pub async fn list_addon_files(
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn validate_relative_path(relative_path: &str) -> Result<(), String> {
@@ -2162,10 +2160,10 @@ fn resolve_addon_file_path(
 
     let canonical_addons = addons_dir
         .canonicalize()
-        .map_err(|e| format!("Failed to resolve addons path: {}", e))?;
+        .map_err(|e| format!("Failed to resolve addons path: {e}"))?;
     let canonical_file = file_path
         .canonicalize()
-        .map_err(|e| format!("Failed to resolve file path: {}", e))?;
+        .map_err(|e| format!("Failed to resolve file path: {e}"))?;
 
     if !canonical_file.starts_with(&canonical_addons) {
         return Err("File path is outside the AddOns directory.".to_string());
@@ -2188,7 +2186,7 @@ pub async fn read_addon_file(
     tokio::task::spawn_blocking(move || {
         let file_path = resolve_addon_file_path(&addons_dir, &folder_name, &relative_path)?;
 
-        let bytes = fs::read(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
+        let bytes = fs::read(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
 
         if bytes.iter().take(512).any(|&b| b == 0) {
             return Err("Cannot read binary file.".to_string());
@@ -2197,7 +2195,7 @@ pub async fn read_addon_file(
         String::from_utf8(bytes).map_err(|_| "File contains invalid UTF-8.".to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -2215,7 +2213,7 @@ pub async fn write_addon_file(
     tokio::task::spawn_blocking(move || {
         let file_path = resolve_addon_file_path(&addons_dir, &folder_name, &relative_path)?;
 
-        fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {}", e))?;
+        fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {e}"))?;
 
         // Re-hash the single file and update the manifest cache
         if let Some(mut manifest) = file_hashes::load_hash_manifest(&addons_dir, &folder_name) {
@@ -2236,7 +2234,7 @@ pub async fn write_addon_file(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -2252,7 +2250,7 @@ pub async fn rescan_addon_hashes(
         file_hashes::detect_modifications(&addons_dir, &folder_name)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -2270,7 +2268,7 @@ pub async fn cancel_pending_update(
         Ok(())
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -2306,7 +2304,7 @@ pub async fn restore_edit_backup(
         )
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2355,7 +2353,7 @@ pub fn export_addon_list(
         addons: entries,
     };
 
-    serde_json::to_string_pretty(&export).map_err(|e| format!("Failed to export: {}", e))
+    serde_json::to_string_pretty(&export).map_err(|e| format!("Failed to export: {e}"))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2385,7 +2383,7 @@ pub async fn auto_link_addons(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || auto_link_addons_blocking(&addons_dir))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn auto_link_addons_blocking(addons_dir: &Path) -> Result<AutoLinkResult, String> {
@@ -2395,7 +2393,7 @@ fn auto_link_addons_blocking(addons_dir: &Path) -> Result<AutoLinkResult, String
     let mut store = metadata::load_metadata(addons_dir);
 
     let entries =
-        fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
+        fs::read_dir(addons_dir).map_err(|e| format!("Failed to read AddOns folder: {e}"))?;
 
     let mut linked: Vec<String> = Vec::new();
     let mut not_found: Vec<String> = Vec::new();
@@ -2504,13 +2502,13 @@ pub async fn import_addon_list(
     json_data: String,
 ) -> Result<ImportResult, String> {
     let export: ExportData =
-        serde_json::from_str(&json_data).map_err(|e| format!("Invalid export file: {}", e))?;
+        serde_json::from_str(&json_data).map_err(|e| format!("Invalid export file: {e}"))?;
 
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
     tokio::task::spawn_blocking(move || import_addon_list_blocking(&addons_dir, &export))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Return true if the error string indicates an HTTP 429 rate-limit response.
@@ -2589,7 +2587,7 @@ fn import_addon_list_blocking(
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
         .build()
-        .map_err(|e| format!("Thread pool error: {}", e))?;
+        .map_err(|e| format!("Thread pool error: {e}"))?;
 
     struct Downloaded {
         tmp: NamedTempFile,
@@ -2661,7 +2659,7 @@ fn import_addon_list_blocking(
 pub async fn get_esoui_categories() -> Result<Vec<EsouiCategory>, String> {
     tokio::task::spawn_blocking(esoui::fetch_categories)
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -2672,7 +2670,7 @@ pub async fn browse_esoui_category(
 ) -> Result<Vec<esoui::EsouiSearchResult>, String> {
     tokio::task::spawn_blocking(move || esoui::browse_category(category_id, page, &sort_by))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -2682,7 +2680,7 @@ pub async fn browse_esoui_popular(
 ) -> Result<esoui::BrowsePopularPage, String> {
     tokio::task::spawn_blocking(move || esoui::browse_popular(page, &sort_by))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── API Version Compatibility ───────────────────────────────
@@ -2709,7 +2707,7 @@ pub fn check_api_compatibility(
 
     let game_api_version = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)
-            .map_err(|e| format!("Failed to read AddOnSettings.txt: {}", e))?;
+            .map_err(|e| format!("Failed to read AddOnSettings.txt: {e}"))?;
         content
             .lines()
             .find(|line| line.starts_with("#Version"))
@@ -2728,7 +2726,7 @@ pub fn check_api_compatibility(
 
     // Check each addon's APIVersion against the game's version
     let entries =
-        fs::read_dir(&addons_dir).map_err(|e| format!("Failed to read AddOns folder: {}", e))?;
+        fs::read_dir(&addons_dir).map_err(|e| format!("Failed to read AddOns folder: {e}"))?;
 
     let mut outdated_addons: Vec<String> = Vec::new();
     let mut up_to_date_addons: Vec<String> = Vec::new();
@@ -2814,7 +2812,7 @@ pub fn list_backups(
 
     let mut results: Vec<BackupInfo> = Vec::new();
     let entries =
-        fs::read_dir(&backups).map_err(|e| format!("Failed to read backups folder: {}", e))?;
+        fs::read_dir(&backups).map_err(|e| format!("Failed to read backups folder: {e}"))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -2886,20 +2884,20 @@ pub fn create_backup(
     }
 
     let backups = backups_dir(&addons_dir);
-    fs::create_dir_all(&backups).map_err(|e| format!("Failed to create backups folder: {}", e))?;
+    fs::create_dir_all(&backups).map_err(|e| format!("Failed to create backups folder: {e}"))?;
 
     let backup_path = backups.join(&backup_name);
     if backup_path.exists() {
-        return Err(format!("Backup '{}' already exists.", backup_name));
+        return Err(format!("Backup '{backup_name}' already exists."));
     }
 
-    fs::create_dir_all(&backup_path).map_err(|e| format!("Failed to create backup: {}", e))?;
+    fs::create_dir_all(&backup_path).map_err(|e| format!("Failed to create backup: {e}"))?;
 
     // Copy all .lua files from SavedVariables
     let mut file_count: u32 = 0;
     let mut total_size: u64 = 0;
     let entries =
-        fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {}", e))?;
+        fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {e}"))?;
 
     let mut failed: Vec<String> = Vec::new();
     for entry in entries.flatten() {
@@ -3002,7 +3000,7 @@ pub fn restore_backup_safe(
     let backup_path = backups_dir(&addons_dir).join(&backup_name);
 
     if !backup_path.is_dir() {
-        return Err(format!("Backup '{}' not found.", backup_name));
+        return Err(format!("Backup '{backup_name}' not found."));
     }
 
     let mut safety_snapshot: Option<BackupInfo> = None;
@@ -3016,15 +3014,15 @@ pub fn restore_backup_safe(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let snapshot_name = format!("auto-before-restore-{}", now);
+            let snapshot_name = format!("auto-before-restore-{now}");
             let snapshot_path = backups_dir(&addons_dir).join(&snapshot_name);
             fs::create_dir_all(&snapshot_path)
-                .map_err(|e| format!("Failed to create safety snapshot folder: {}", e))?;
+                .map_err(|e| format!("Failed to create safety snapshot folder: {e}"))?;
 
             let mut file_count: u32 = 0;
             let mut total_size: u64 = 0;
-            let entries = fs::read_dir(&sv_dir)
-                .map_err(|e| format!("Failed to read SavedVariables: {}", e))?;
+            let entries =
+                fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {e}"))?;
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
@@ -3059,12 +3057,11 @@ pub fn restore_backup_safe(
     }
 
     fs::create_dir_all(&sv_dir)
-        .map_err(|e| format!("Failed to create SavedVariables folder: {}", e))?;
+        .map_err(|e| format!("Failed to create SavedVariables folder: {e}"))?;
 
     let mut restored: u32 = 0;
     let mut failed: Vec<String> = Vec::new();
-    let entries =
-        fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {}", e))?;
+    let entries = fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {e}"))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -3111,7 +3108,7 @@ pub fn get_backups_folder_path(
 ) -> Result<String, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let path = backups_dir(&addons_dir);
-    fs::create_dir_all(&path).map_err(|e| format!("Failed to create backups folder: {}", e))?;
+    fs::create_dir_all(&path).map_err(|e| format!("Failed to create backups folder: {e}"))?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -3126,10 +3123,10 @@ pub fn delete_backup(
     let backup_path = backups_dir(&addons_dir).join(&backup_name);
 
     if !backup_path.is_dir() {
-        return Err(format!("Backup '{}' not found.", backup_name));
+        return Err(format!("Backup '{backup_name}' not found."));
     }
 
-    fs::remove_dir_all(&backup_path).map_err(|e| format!("Failed to delete backup: {}", e))
+    fs::remove_dir_all(&backup_path).map_err(|e| format!("Failed to delete backup: {e}"))
 }
 
 // ─── Addon Profiles ──────────────────────────────────────────
@@ -3181,7 +3178,7 @@ pub fn create_profile(
     let mut store = load_profiles(&addons_dir);
 
     if store.profiles.iter().any(|p| p.name == profile_name) {
-        return Err(format!("Profile '{}' already exists.", profile_name));
+        return Err(format!("Profile '{profile_name}' already exists."));
     }
 
     // Snapshot currently enabled addons (those with manifests in the AddOns folder)
@@ -3244,7 +3241,7 @@ pub fn activate_profile(
         .iter()
         .find(|p| p.name == profile_name)
         .cloned()
-        .ok_or_else(|| format!("Profile '{}' not found.", profile_name))?;
+        .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
 
     let enabled_set: HashSet<String> = profile.enabled_addons.iter().cloned().collect();
 
@@ -3280,16 +3277,16 @@ pub fn activate_profile(
                     let new_path = addons_dir.join(&base_name);
                     match fs::rename(&path, &new_path) {
                         Ok(_) => enabled.push(base_name),
-                        Err(e) => failed.push(format!("{} (enable: {})", base_name, e)),
+                        Err(e) => failed.push(format!("{base_name} (enable: {e})")),
                     }
                 }
             } else {
                 // Should be disabled
                 if !is_disabled && find_manifest(&addons_dir, &folder_name).is_some() {
-                    let new_path = addons_dir.join(format!("{}.disabled", folder_name));
+                    let new_path = addons_dir.join(format!("{folder_name}.disabled"));
                     match fs::rename(&path, &new_path) {
                         Ok(_) => disabled.push(folder_name),
-                        Err(e) => failed.push(format!("{} (disable: {})", folder_name, e)),
+                        Err(e) => failed.push(format!("{folder_name} (disable: {e})")),
                     }
                 }
             }
@@ -3349,7 +3346,7 @@ pub fn list_characters(
     }
 
     let content = fs::read_to_string(&settings_path)
-        .map_err(|e| format!("Failed to read AddOnSettings.txt: {}", e))?;
+        .map_err(|e| format!("Failed to read AddOnSettings.txt: {e}"))?;
 
     let mut characters: Vec<CharacterInfo> = Vec::new();
     let skip_prefixes = ["Version", "Acknowledged", "AddOnsEnabled"];
@@ -3399,8 +3396,8 @@ pub fn backup_character_settings(
         return Err("SavedVariables folder not found.".to_string());
     }
 
-    let backups = backups_dir(&addons_dir).join(format!("char-{}", backup_name));
-    fs::create_dir_all(&backups).map_err(|e| format!("Failed to create backup folder: {}", e))?;
+    let backups = backups_dir(&addons_dir).join(format!("char-{backup_name}"));
+    fs::create_dir_all(&backups).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
     // Copy all SavedVariables files that contain this character's data
     let mut count: u32 = 0;
@@ -3818,7 +3815,7 @@ pub async fn list_packs(
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
-        let url = format!("{}/packs", base);
+        let url = format!("{base}/packs");
 
         let mut query_params: Vec<(&str, String)> = Vec::new();
         if let Some(t) = &pack_type {
@@ -3845,14 +3842,14 @@ pub async fn list_packs(
 
         let mut req = client.get(&url).query(&query_params);
         if let Some(token) = &access_token {
-            req = req.header("Authorization", format!("Bearer {}", token));
+            req = req.header("Authorization", format!("Bearer {token}"));
         }
 
         let response = req.send().map_err(|e| {
             if e.is_connect() || e.is_timeout() {
                 "Could not connect to Pack Hub. Check your internet connection.".to_string()
             } else {
-                format!("Network error: {}", e)
+                format!("Network error: {e}")
             }
         })?;
 
@@ -3862,7 +3859,7 @@ pub async fn list_packs(
 
         let body: PackListResponse = response
             .json()
-            .map_err(|e| format!("Failed to parse packs response: {}", e))?;
+            .map_err(|e| format!("Failed to parse packs response: {e}"))?;
 
         Ok(PackPage {
             packs: body.packs.into_iter().map(Pack::from_hub).collect(),
@@ -3870,7 +3867,7 @@ pub async fn list_packs(
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -3881,35 +3878,35 @@ pub async fn get_pack(state: tauri::State<'_, AuthState>, id: String) -> Result<
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
-        let url = format!("{}/packs/{}", base, id);
+        let url = format!("{base}/packs/{id}");
 
         let mut req = client.get(&url);
         if let Some(token) = &access_token {
-            req = req.header("Authorization", format!("Bearer {}", token));
+            req = req.header("Authorization", format!("Bearer {token}"));
         }
 
         let response = req.send().map_err(|e| {
             if e.is_connect() || e.is_timeout() {
                 "Could not connect to Pack Hub. Check your internet connection.".to_string()
             } else {
-                format!("Network error: {}", e)
+                format!("Network error: {e}")
             }
         })?;
 
         match response.status().as_u16() {
             200 => {}
-            404 => return Err(format!("Pack \"{}\" not found.", id)),
-            status => return Err(format!("Pack Hub returned HTTP {}", status)),
+            404 => return Err(format!("Pack \"{id}\" not found.")),
+            status => return Err(format!("Pack Hub returned HTTP {status}")),
         }
 
         let body: PackSingleResponse = response
             .json()
-            .map_err(|e| format!("Failed to parse pack response: {}", e))?;
+            .map_err(|e| format!("Failed to parse pack response: {e}"))?;
 
         Ok(Pack::from_hub(body.pack))
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Extract the current access token from auth state (if signed in).
@@ -3943,7 +3940,7 @@ pub async fn vote_pack(
             let guard = state
                 .0
                 .lock()
-                .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
         };
 
@@ -3956,7 +3953,7 @@ pub async fn vote_pack(
             move || auth::ensure_valid_token(&tokens)
         })
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
@@ -3964,7 +3961,7 @@ pub async fn vote_pack(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
             }
             Ok(None) => tokens.access_token.clone(),
@@ -3972,7 +3969,7 @@ pub async fn vote_pack(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
             }
         }
@@ -3981,17 +3978,17 @@ pub async fn vote_pack(
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
-        let url = format!("{}/packs/{}/vote", base, pack_id);
+        let url = format!("{base}/packs/{pack_id}/vote");
 
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .send()
             .map_err(|e| {
                 if e.is_connect() || e.is_timeout() {
                     "Could not connect to Pack Hub. Check your internet connection.".to_string()
                 } else {
-                    format!("Network error: {}", e)
+                    format!("Network error: {e}")
                 }
             })?;
 
@@ -4002,18 +3999,18 @@ pub async fn vote_pack(
             429 => return Err("Too many votes. Please wait a moment.".to_string()),
             status => {
                 let body = response.text().unwrap_or_default();
-                return Err(format!("Pack Hub returned HTTP {} — {}", status, body));
+                return Err(format!("Pack Hub returned HTTP {status} — {body}"));
             }
         }
 
         let body: VoteResponse = response
             .json()
-            .map_err(|e| format!("Failed to parse vote response: {}", e))?;
+            .map_err(|e| format!("Failed to parse vote response: {e}"))?;
 
         Ok(body)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ── Track pack install ──────────────────────────────────────────────────
@@ -4025,7 +4022,7 @@ pub async fn track_pack_install(pack_id: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
-        let url = format!("{}/packs/{}/install", base, pack_id);
+        let url = format!("{base}/packs/{pack_id}/install");
 
         // Fire-and-forget: best-effort tracking, don't block the user
         drop(client.post(&url).send());
@@ -4033,7 +4030,7 @@ pub async fn track_pack_install(pack_id: String) -> Result<(), String> {
         Ok::<(), String>(())
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ── Auth Helpers ─────────────────────────────────────────────────────────
@@ -4064,7 +4061,7 @@ pub async fn auth_login(
 ) -> Result<AuthUser, String> {
     let tokens = tokio::task::spawn_blocking(auth::login)
         .await
-        .map_err(|e| format!("Task failed: {}", e))??;
+        .map_err(|e| format!("Task failed: {e}"))??;
 
     let user = AuthUser {
         user_id: tokens.user_id.clone(),
@@ -4078,7 +4075,7 @@ pub async fn auth_login(
     *state
         .0
         .lock()
-        .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(tokens);
+        .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(tokens);
 
     Ok(user)
 }
@@ -4092,7 +4089,7 @@ pub async fn auth_logout(
     *state
         .0
         .lock()
-        .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+        .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
 
     // Clear from store
     clear_auth_tokens(&app);
@@ -4109,7 +4106,7 @@ pub async fn auth_get_user(
         let guard = state
             .0
             .lock()
-            .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+            .map_err(|e| format!("Auth lock poisoned: {e}"))?;
         guard.clone()
     };
 
@@ -4123,7 +4120,7 @@ pub async fn auth_get_user(
         move || auth::ensure_valid_token(&tokens)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
     {
         Ok(Some(new_tokens)) => {
             // Tokens were refreshed — save them
@@ -4137,7 +4134,7 @@ pub async fn auth_get_user(
             *state
                 .0
                 .lock()
-                .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
             Ok(Some(user))
         }
         Ok(None) => {
@@ -4152,7 +4149,7 @@ pub async fn auth_get_user(
             *state
                 .0
                 .lock()
-                .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
             clear_auth_tokens(&app);
             Ok(None)
         }
@@ -4196,7 +4193,7 @@ pub async fn create_pack(
             let guard = state
                 .0
                 .lock()
-                .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
         };
 
@@ -4209,7 +4206,7 @@ pub async fn create_pack(
             move || auth::ensure_valid_token(&tokens)
         })
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
@@ -4217,7 +4214,7 @@ pub async fn create_pack(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
             }
             Ok(None) => tokens.access_token.clone(),
@@ -4225,7 +4222,7 @@ pub async fn create_pack(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
             }
         }
@@ -4235,7 +4232,7 @@ pub async fn create_pack(
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
-        let url = format!("{}/packs", base);
+        let url = format!("{base}/packs");
 
         let body = serde_json::json!({
             "title": payload.title,
@@ -4249,7 +4246,7 @@ pub async fn create_pack(
 
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -4257,7 +4254,7 @@ pub async fn create_pack(
                 if e.is_connect() || e.is_timeout() {
                     "Could not connect to Pack Hub. Check your internet connection.".to_string()
                 } else {
-                    format!("Network error: {}", e)
+                    format!("Network error: {e}")
                 }
             })?;
 
@@ -4269,18 +4266,18 @@ pub async fn create_pack(
             }
             status => {
                 let body = response.text().unwrap_or_default();
-                return Err(format!("Pack Hub returned HTTP {} — {}", status, body));
+                return Err(format!("Pack Hub returned HTTP {status} — {body}"));
             }
         }
 
         let body: PackSingleResponse = response
             .json()
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
 
         Ok(Pack::from_hub(body.pack))
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4296,7 +4293,7 @@ pub async fn update_pack(
             let guard = state
                 .0
                 .lock()
-                .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
         };
 
@@ -4309,7 +4306,7 @@ pub async fn update_pack(
             move || auth::ensure_valid_token(&tokens)
         })
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
@@ -4317,7 +4314,7 @@ pub async fn update_pack(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
             }
             Ok(None) => tokens.access_token.clone(),
@@ -4325,7 +4322,7 @@ pub async fn update_pack(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
             }
         }
@@ -4348,7 +4345,7 @@ pub async fn update_pack(
 
         let response = client
             .put(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -4356,7 +4353,7 @@ pub async fn update_pack(
                 if e.is_connect() || e.is_timeout() {
                     "Could not connect to Pack Hub. Check your internet connection.".to_string()
                 } else {
-                    format!("Network error: {}", e)
+                    format!("Network error: {e}")
                 }
             })?;
 
@@ -4367,18 +4364,18 @@ pub async fn update_pack(
             404 => return Err("Pack not found.".to_string()),
             status => {
                 let body = response.text().unwrap_or_default();
-                return Err(format!("Pack Hub returned HTTP {} - {}", status, body));
+                return Err(format!("Pack Hub returned HTTP {status} - {body}"));
             }
         }
 
         let body: PackSingleResponse = response
             .json()
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
 
         Ok(Pack::from_hub(body.pack))
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4394,7 +4391,7 @@ pub async fn delete_pack(
             let guard = state
                 .0
                 .lock()
-                .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
         };
 
@@ -4407,7 +4404,7 @@ pub async fn delete_pack(
             move || auth::ensure_valid_token(&tokens)
         })
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
@@ -4415,7 +4412,7 @@ pub async fn delete_pack(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
             }
             Ok(None) => tokens.access_token.clone(),
@@ -4423,7 +4420,7 @@ pub async fn delete_pack(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
             }
         }
@@ -4432,17 +4429,17 @@ pub async fn delete_pack(
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
-        let url = format!("{}/packs/{}", base, id);
+        let url = format!("{base}/packs/{id}");
 
         let response = client
             .delete(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .send()
             .map_err(|e| {
                 if e.is_connect() || e.is_timeout() {
                     "Could not connect to Pack Hub. Check your internet connection.".to_string()
                 } else {
-                    format!("Network error: {}", e)
+                    format!("Network error: {e}")
                 }
             })?;
 
@@ -4453,12 +4450,12 @@ pub async fn delete_pack(
             404 => Err("Pack not found.".to_string()),
             status => {
                 let body = response.text().unwrap_or_default();
-                Err(format!("Pack Hub returned HTTP {} - {}", status, body))
+                Err(format!("Pack Hub returned HTTP {status} - {body}"))
             }
         }
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ── Private Sharing ─────────────────────────────────────────────────────────
@@ -4554,7 +4551,7 @@ pub async fn create_share_code(
             let guard = state
                 .0
                 .lock()
-                .map_err(|e| format!("Auth lock poisoned: {}", e))?;
+                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
         };
 
@@ -4567,7 +4564,7 @@ pub async fn create_share_code(
             move || auth::ensure_valid_token(&tokens)
         })
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
@@ -4575,7 +4572,7 @@ pub async fn create_share_code(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = Some(new_tokens);
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
             }
             Ok(None) => tokens.access_token.clone(),
@@ -4583,7 +4580,7 @@ pub async fn create_share_code(
                 *state
                     .0
                     .lock()
-                    .map_err(|e| format!("Auth lock poisoned: {}", e))? = None;
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
             }
         }
@@ -4603,7 +4600,7 @@ pub async fn create_share_code(
 
         let response = client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Authorization", format!("Bearer {access_token}"))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -4612,7 +4609,7 @@ pub async fn create_share_code(
                     "Could not connect to share service. Check your internet connection."
                         .to_string()
                 } else {
-                    format!("Network error: {}", e)
+                    format!("Network error: {e}")
                 }
             })?;
 
@@ -4626,18 +4623,18 @@ pub async fn create_share_code(
             }
             status => {
                 let body = response.text().unwrap_or_default();
-                return Err(format!("Share service returned HTTP {} — {}", status, body));
+                return Err(format!("Share service returned HTTP {status} — {body}"));
             }
         }
 
         let result: ShareCodeResponse = response
             .json()
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
 
         Ok(result)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4652,7 +4649,7 @@ pub async fn resolve_share_code(code: String) -> Result<SharedPack, String> {
             if e.is_connect() || e.is_timeout() {
                 "Could not connect to share service. Check your internet connection.".to_string()
             } else {
-                format!("Network error: {}", e)
+                format!("Network error: {e}")
             }
         })?;
 
@@ -4662,13 +4659,13 @@ pub async fn resolve_share_code(code: String) -> Result<SharedPack, String> {
             404 => return Err("Share code not found or expired.".to_string()),
             status => {
                 let body = response.text().unwrap_or_default();
-                return Err(format!("Share service returned HTTP {} — {}", status, body));
+                return Err(format!("Share service returned HTTP {status} — {body}"));
             }
         }
 
         let result: ShareResolveResponse = response
             .json()
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
 
         Ok(SharedPack {
             title: result.pack.title,
@@ -4682,7 +4679,7 @@ pub async fn resolve_share_code(code: String) -> Result<SharedPack, String> {
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ── Pack Export / Import (.esopack files) ───────────────────────────────────
@@ -4752,21 +4749,21 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     }
 
     let json = serde_json::to_string_pretty(&pack)
-        .map_err(|e| format!("Failed to serialize pack: {}", e))?;
+        .map_err(|e| format!("Failed to serialize pack: {e}"))?;
 
     // Atomic write: write to .tmp then replace destination
     let tmp_path = file_path.with_extension("esopack.tmp");
-    fs::write(&tmp_path, json).map_err(|e| format!("Failed to write file: {}", e))?;
+    fs::write(&tmp_path, json).map_err(|e| format!("Failed to write file: {e}"))?;
     // On Windows, fs::rename fails if the destination exists. Remove it first.
     if file_path.exists() {
         fs::remove_file(&file_path).map_err(|e| {
             let _ = fs::remove_file(&tmp_path);
-            format!("Failed to replace existing file: {}", e)
+            format!("Failed to replace existing file: {e}")
         })?;
     }
     fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {}", e)
+        format!("Failed to finalize write: {e}")
     })
 }
 
@@ -4786,10 +4783,10 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     }
 
     let contents =
-        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
+        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
 
     let pack: EsoPackFile =
-        serde_json::from_str(&contents).map_err(|e| format!("Invalid .esopack file: {}", e))?;
+        serde_json::from_str(&contents).map_err(|e| format!("Invalid .esopack file: {e}"))?;
 
     if pack.format != "esopack" {
         return Err("Not a valid .esopack file (wrong format field).".to_string());
@@ -4831,7 +4828,7 @@ pub async fn export_sv_settings(
         let mut result: HashMap<String, AddonSettings> = HashMap::new();
 
         for folder in &addon_folders {
-            let sv_file = sv_dir.join(format!("{}.lua", folder));
+            let sv_file = sv_dir.join(format!("{folder}.lua"));
             if !sv_file.is_file() {
                 continue;
             }
@@ -4848,11 +4845,11 @@ pub async fn export_sv_settings(
                 }
             };
 
-            let file_name = format!("{}.lua", folder);
+            let file_name = format!("{folder}.lua");
             let tree = match parse_sv_file(&content, &file_name) {
                 Ok(t) => t,
                 Err(e) => {
-                    eprintln!("export_sv_settings: failed to parse {}: {}", file_name, e);
+                    eprintln!("export_sv_settings: failed to parse {file_name}: {e}");
                     continue;
                 }
             };
@@ -4882,7 +4879,7 @@ pub async fn export_sv_settings(
         Ok(result)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn strip_per_character_data(
@@ -4946,7 +4943,7 @@ pub async fn import_sv_settings(
     tokio::task::spawn_blocking(move || {
         let sv_dir = sv_io::saved_variables_dir(&addons_dir);
         fs::create_dir_all(&sv_dir)
-            .map_err(|e| format!("Failed to create SavedVariables directory: {}", e))?;
+            .map_err(|e| format!("Failed to create SavedVariables directory: {e}"))?;
 
         let mut applied = Vec::new();
         let mut skipped = Vec::new();
@@ -4954,7 +4951,7 @@ pub async fn import_sv_settings(
 
         for folder in &addon_folders {
             if let Err(e) = validate_name(folder) {
-                errors.push(format!("{}: invalid folder name: {}", folder, e));
+                errors.push(format!("{folder}: invalid folder name: {e}"));
                 continue;
             }
 
@@ -4983,49 +4980,47 @@ pub async fn import_sv_settings(
             // Reject if identity placeholders could not be resolved
             if has_unresolved_identity_placeholders(&substituted) {
                 errors.push(format!(
-                    "{}: unresolved identity placeholders — launch ESO at least once to establish your identity",
-                    folder
+                    "{folder}: unresolved identity placeholders — launch ESO at least once to establish your identity"
                 ));
                 continue;
             }
 
             // Validate that the result is a well-formed SavedVariables file
-            let file_name = format!("{}.lua", folder);
+            let file_name = format!("{folder}.lua");
             if let Err(e) = parse_sv_file(&substituted, &file_name) {
-                errors.push(format!("{}: settings file failed validation: {}", folder, e));
+                errors.push(format!("{folder}: settings file failed validation: {e}"));
                 continue;
             }
 
-            let dest = sv_dir.join(format!("{}.lua", folder));
+            let dest = sv_dir.join(format!("{folder}.lua"));
 
             // Create .bak before overwriting
             if dest.is_file() {
                 let bak = dest.with_extension("lua.bak");
                 if let Err(e) = fs::copy(&dest, &bak) {
-                    errors.push(format!("{}: failed to create backup: {}", folder, e));
+                    errors.push(format!("{folder}: failed to create backup: {e}"));
                     continue;
                 }
             }
 
             // Atomic write
-            let tmp = sv_dir.join(format!("{}.lua.tmp", folder));
+            let tmp = sv_dir.join(format!("{folder}.lua.tmp"));
             if let Err(e) = fs::write(&tmp, &substituted) {
-                errors.push(format!("{}: failed to write: {}", folder, e));
+                errors.push(format!("{folder}: failed to write: {e}"));
                 continue;
             }
             if dest.exists() {
                 if let Err(e) = fs::remove_file(&dest) {
                     let _ = fs::remove_file(&tmp);
                     errors.push(format!(
-                        "{}: failed to replace existing file: {}",
-                        folder, e
+                        "{folder}: failed to replace existing file: {e}"
                     ));
                     continue;
                 }
             }
             if let Err(e) = fs::rename(&tmp, &dest) {
                 let _ = fs::remove_file(&tmp);
-                errors.push(format!("{}: failed to finalize write: {}", folder, e));
+                errors.push(format!("{folder}: failed to finalize write: {e}"));
                 continue;
             }
 
@@ -5039,7 +5034,7 @@ pub async fn import_sv_settings(
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Detect the account/character identities present in the local SavedVariables
@@ -5113,7 +5108,7 @@ pub async fn detect_local_identities(
         Ok(merged)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── SavedVariables Manager ─────────────────────────────────
@@ -5132,7 +5127,7 @@ pub async fn get_saved_variables_path(
         Ok(sv_dir.to_string_lossy().to_string())
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5143,7 +5138,7 @@ pub async fn list_saved_variables(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || sv_io::list_saved_variables_blocking(&addons_dir))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5161,7 +5156,7 @@ pub async fn read_saved_variable(
         sv_io::read_saved_variable_blocking(&addons_dir, &file_name)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5181,7 +5176,7 @@ pub async fn write_saved_variable(
         sv_io::write_saved_variable_blocking(&addons_dir, &file_name, &tree, &stamp)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5201,7 +5196,7 @@ pub async fn preview_sv_save(
         Ok(crate::saved_variables::SvDiffPreview { changes })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5217,7 +5212,7 @@ pub async fn restore_sv_backup(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || sv_io::restore_backup_file(&addons_dir, &file_name))
         .await
-        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ── Roster Pack Install (deep link: kalpa://install-pack/{id}) ────────────
@@ -5237,25 +5232,25 @@ pub async fn fetch_roster_pack(pack_id: String) -> Result<RosterPack, String> {
     tokio::task::spawn_blocking(move || {
         let client = pack_hub_client();
         let base = pack_hub_url();
-        let url = format!("{}/packs/{}", base, pack_id);
+        let url = format!("{base}/packs/{pack_id}");
 
         let response = client.get(&url).send().map_err(|e| {
             if e.is_connect() || e.is_timeout() {
                 "Could not connect to Pack Hub. Check your internet connection.".to_string()
             } else {
-                format!("Network error: {}", e)
+                format!("Network error: {e}")
             }
         })?;
 
         match response.status().as_u16() {
             200 => {}
-            404 => return Err(format!("Pack \"{}\" not found.", pack_id)),
-            status => return Err(format!("Pack Hub returned HTTP {}", status)),
+            404 => return Err(format!("Pack \"{pack_id}\" not found.")),
+            status => return Err(format!("Pack Hub returned HTTP {status}")),
         }
 
         let body: PackSingleResponse = response
             .json()
-            .map_err(|e| format!("Failed to parse pack response: {}", e))?;
+            .map_err(|e| format!("Failed to parse pack response: {e}"))?;
 
         let pack = Pack::from_hub(body.pack);
         Ok(RosterPack {
@@ -5265,7 +5260,7 @@ pub async fn fetch_roster_pack(pack_id: String) -> Result<RosterPack, String> {
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5305,7 +5300,7 @@ pub async fn copy_sv_profile(
         )
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5322,7 +5317,7 @@ pub async fn is_eso_running() -> Result<bool, String> {
         }
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Check for eso64.exe / eso.exe using the Windows Toolhelp32 snapshot API.
@@ -5404,7 +5399,7 @@ pub async fn delete_saved_variables(
     for name in &file_names {
         validate_name(name)?;
         if !name.ends_with(".lua") {
-            return Err(format!("Only .lua files can be deleted: {}", name));
+            return Err(format!("Only .lua files can be deleted: {name}"));
         }
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
@@ -5412,7 +5407,7 @@ pub async fn delete_saved_variables(
         sv_io::delete_saved_variables_blocking(&addons_dir, &file_names)
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Scrub a SavedVariables file with the templating + heuristic pipeline and
@@ -5466,7 +5461,7 @@ pub async fn dev_scrub_saved_variable(
         })
     })
     .await
-    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]

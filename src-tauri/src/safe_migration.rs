@@ -114,7 +114,7 @@ fn load_snapshot_store(addons_dir: &Path) -> SnapshotStore {
 
 fn save_snapshot_store(addons_dir: &Path, store: &SnapshotStore) -> Result<(), String> {
     let root = snapshots_root(addons_dir);
-    fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {}", e))?;
+    fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {e}"))?;
     metadata::save_json_with_backup(&snapshot_store_path(addons_dir), store)
 }
 
@@ -151,7 +151,7 @@ const OPS_LOG_MAX_ENTRIES: usize = 500;
 
 pub fn append_op_log(addons_dir: &Path, entry: &OpLogEntry) -> Result<(), String> {
     let root = snapshots_root(addons_dir);
-    fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {}", e))?;
+    fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {e}"))?;
     let path = ops_log_path(addons_dir);
 
     // Rotate: if the log has grown too large, trim to the most recent entries
@@ -161,18 +161,18 @@ pub fn append_op_log(addons_dir: &Path, entry: &OpLogEntry) -> Result<(), String
             // Keep the most recent half to avoid trimming on every append
             let keep_from = lines.len() - OPS_LOG_MAX_ENTRIES / 2;
             let trimmed = lines[keep_from..].join("\n");
-            let _ = fs::write(&path, format!("{}\n", trimmed));
+            let _ = fs::write(&path, format!("{trimmed}\n"));
         }
     }
 
-    let line = serde_json::to_string(entry)
-        .map_err(|e| format!("Failed to serialize log entry: {}", e))?;
+    let line =
+        serde_json::to_string(entry).map_err(|e| format!("Failed to serialize log entry: {e}"))?;
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|e| format!("Failed to open ops log: {}", e))?;
-    writeln!(file, "{}", line).map_err(|e| format!("Failed to write ops log: {}", e))?;
+        .map_err(|e| format!("Failed to open ops log: {e}"))?;
+    writeln!(file, "{line}").map_err(|e| format!("Failed to write ops log: {e}"))?;
     Ok(())
 }
 
@@ -214,7 +214,7 @@ fn is_process_running(process: KnownProcess) -> bool {
     use std::process::Command;
     let name = process.name();
     Command::new("tasklist")
-        .args(["/FI", &format!("IMAGENAME eq {}", name), "/NH"])
+        .args(["/FI", &format!("IMAGENAME eq {name}"), "/NH"])
         .output()
         .map(|o| {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -247,14 +247,14 @@ fn create_zip_snapshot(
     include_settings: bool,
 ) -> Result<SnapshotManifest, String> {
     let root = snapshots_root(addons_dir);
-    fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {}", e))?;
+    fs::create_dir_all(&root).map_err(|e| format!("Failed to create KalpaBackups: {e}"))?;
 
     let id = snapshot_id(label);
-    let archive_path = root.join(format!("{}.zip", id));
-    let tmp_path = root.join(format!("{}.zip.tmp", id));
+    let archive_path = root.join(format!("{id}.zip"));
+    let tmp_path = root.join(format!("{id}.zip.tmp"));
 
     let file = fs::File::create(&tmp_path)
-        .map_err(|e| format!("Failed to create snapshot archive: {}", e))?;
+        .map_err(|e| format!("Failed to create snapshot archive: {e}"))?;
 
     // Use a closure so we can clean up tmp_path on any failure
     let build_zip = || -> Result<(Vec<String>, u32, u64), String> {
@@ -294,11 +294,11 @@ fn create_zip_snapshot(
                 if settings_file.is_file() {
                     source_paths.push(filename.to_string());
                     let data = fs::read(&settings_file)
-                        .map_err(|e| format!("Failed to read {}: {}", filename, e))?;
+                        .map_err(|e| format!("Failed to read {filename}: {e}"))?;
                     zip.start_file(*filename, options)
-                        .map_err(|e| format!("Failed to add {} to archive: {}", filename, e))?;
+                        .map_err(|e| format!("Failed to add {filename} to archive: {e}"))?;
                     zip.write_all(&data)
-                        .map_err(|e| format!("Failed to write {} to archive: {}", filename, e))?;
+                        .map_err(|e| format!("Failed to write {filename} to archive: {e}"))?;
                     file_count += 1;
                     total_size += data.len() as u64;
                 }
@@ -306,7 +306,7 @@ fn create_zip_snapshot(
         }
 
         zip.finish()
-            .map_err(|e| format!("Failed to finalize snapshot archive: {}", e))?;
+            .map_err(|e| format!("Failed to finalize snapshot archive: {e}"))?;
 
         Ok((source_paths, file_count, total_size))
     };
@@ -331,7 +331,7 @@ fn create_zip_snapshot(
 
     // Atomic rename
     fs::rename(&tmp_path, &archive_path)
-        .map_err(|e| format!("Failed to finalize snapshot: {}", e))?;
+        .map_err(|e| format!("Failed to finalize snapshot: {e}"))?;
 
     // Record in snapshot store
     let manifest = SnapshotManifest {
@@ -372,7 +372,7 @@ fn add_dir_to_zip(
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            let zip_path = format!("{}/{}", current_prefix, name);
+            let zip_path = format!("{current_prefix}/{name}");
 
             if path.is_dir() {
                 // Skip symlinks
@@ -386,9 +386,9 @@ fn add_dir_to_zip(
                     Err(_) => continue, // Skip unreadable files (e.g. locked by another process)
                 };
                 zip.start_file(&zip_path, *options)
-                    .map_err(|e| format!("Failed to add '{}' to archive: {}", zip_path, e))?;
+                    .map_err(|e| format!("Failed to add '{zip_path}' to archive: {e}"))?;
                 zip.write_all(&data)
-                    .map_err(|e| format!("Failed to write '{}' to archive: {}", zip_path, e))?;
+                    .map_err(|e| format!("Failed to write '{zip_path}' to archive: {e}"))?;
                 file_count += 1;
                 total_size += data.len() as u64;
             }
@@ -400,13 +400,13 @@ fn add_dir_to_zip(
 
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file =
-        fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {}", e))?;
+        fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {e}"))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
         let n = file
             .read(&mut buf)
-            .map_err(|e| format!("Failed to read file for hashing: {}", e))?;
+            .map_err(|e| format!("Failed to read file for hashing: {e}"))?;
         if n == 0 {
             break;
         }
@@ -415,7 +415,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(hasher
         .finalize()
         .iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect())
 }
 
@@ -491,7 +491,7 @@ pub fn create_pre_migration_snapshot(
 pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
     let xml_path = crate::commands::find_minion_xml().ok_or("Minion installation not found.")?;
     let content =
-        fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {}", e))?;
+        fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
     let minion_addons = crate::commands::parse_minion_addons(&content);
 
     let store = metadata::load_metadata(addons_dir);
@@ -551,8 +551,8 @@ pub fn dry_run_migration(addons_dir: &Path) -> Result<DryRunResult, String> {
             }
             if !minion_folders.contains(&name) && !store.addons.contains_key(&name) {
                 // Has a manifest? Then it's a real addon
-                let manifest_path = addons_dir.join(&name).join(format!("{}.txt", name));
-                let addon_manifest = addons_dir.join(&name).join(format!("{}.addon", name));
+                let manifest_path = addons_dir.join(&name).join(format!("{name}.txt"));
+                let addon_manifest = addons_dir.join(&name).join(format!("{name}.addon"));
                 if manifest_path.exists() || addon_manifest.exists() {
                     unmanaged_on_disk.push(name);
                 }
@@ -576,7 +576,7 @@ pub fn execute_migration(addons_dir: &Path) -> Result<MigrationResult, String> {
 
     let xml_path = crate::commands::find_minion_xml().ok_or("Minion installation not found.")?;
     let content =
-        fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {}", e))?;
+        fs::read_to_string(&xml_path).map_err(|e| format!("Failed to read Minion data: {e}"))?;
     let minion_addons = crate::commands::parse_minion_addons(&content);
 
     let mut store = metadata::load_metadata(addons_dir);
@@ -654,7 +654,7 @@ pub fn create_pre_operation_snapshot(
     operation_label: &str,
 ) -> Result<SnapshotManifest, String> {
     let start = now_timestamp();
-    let label = format!("Pre-{}", operation_label);
+    let label = format!("Pre-{operation_label}");
 
     // Only snapshot SavedVariables and settings for routine operations (much faster)
     let manifest = create_zip_snapshot(&label, addons_dir, false, true, true)?;
@@ -662,7 +662,7 @@ pub fn create_pre_operation_snapshot(
     let _ = append_op_log(
         addons_dir,
         &OpLogEntry {
-            operation: format!("pre_{}_snapshot", operation_label),
+            operation: format!("pre_{operation_label}_snapshot"),
             started_at: start,
             finished_at: now_timestamp(),
             status: "success".to_string(),
@@ -702,19 +702,15 @@ pub fn check_integrity(addons_dir: &Path) -> IntegrityResult {
     for folder_name in store.addons.keys() {
         let folder = addons_dir.join(folder_name);
         if !folder.is_dir() {
-            issues.push(format!(
-                "Tracked addon '{}' folder is missing.",
-                folder_name
-            ));
+            issues.push(format!("Tracked addon '{folder_name}' folder is missing."));
             continue;
         }
         // Check manifest exists
-        let txt = folder.join(format!("{}.txt", folder_name));
-        let addon_ext = folder.join(format!("{}.addon", folder_name));
+        let txt = folder.join(format!("{folder_name}.txt"));
+        let addon_ext = folder.join(format!("{folder_name}.addon"));
         if !txt.exists() && !addon_ext.exists() {
             issues.push(format!(
-                "Tracked addon '{}' has no manifest file.",
-                folder_name
+                "Tracked addon '{folder_name}' has no manifest file."
             ));
         }
         addon_count += 1;
@@ -735,8 +731,7 @@ pub fn check_integrity(addons_dir: &Path) -> IntegrityResult {
                                         .and_then(|n| n.to_str())
                                         .unwrap_or("unknown");
                                     issues.push(format!(
-                                        "SavedVariables file '{}' is empty (possibly truncated).",
-                                        name
+                                        "SavedVariables file '{name}' is empty (possibly truncated)."
                                     ));
                                 }
                             }
@@ -773,8 +768,7 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
         return Err(format!(
             "Failed to create a safety snapshot before restoring. \
              Your current data would be unrecoverable if the restore fails. \
-             Please free disk space or create a manual snapshot first. Error: {}",
-            e
+             Please free disk space or create a manual snapshot first. Error: {e}"
         ));
     }
 
@@ -786,7 +780,7 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
         .ok_or("Snapshot not found.")?;
 
     let root = snapshots_root(addons_dir);
-    let archive_path = root.join(format!("{}.zip", snapshot_id));
+    let archive_path = root.join(format!("{snapshot_id}.zip"));
     if !archive_path.is_file() {
         return Err("Snapshot archive file not found.".to_string());
     }
@@ -802,15 +796,15 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
 
     let parent = addons_dir.parent().unwrap_or(addons_dir);
     let file = fs::File::open(&archive_path)
-        .map_err(|e| format!("Failed to open snapshot archive: {}", e))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| format!("Failed to read snapshot archive: {}", e))?;
+        .map_err(|e| format!("Failed to open snapshot archive: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to read snapshot archive: {e}"))?;
 
     let mut restored: u32 = 0;
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
-            .map_err(|e| format!("Failed to read archive entry: {}", e))?;
+            .map_err(|e| format!("Failed to read archive entry: {e}"))?;
 
         let entry_path = match entry.enclosed_name() {
             Some(p) => p.to_path_buf(),
@@ -835,19 +829,19 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
             tmp_name.push(".restore-tmp");
             let tmp_dest = dest.with_file_name(tmp_name);
             let mut out = fs::File::create(&tmp_dest)
-                .map_err(|e| format!("Failed to create restore file: {}", e))?;
+                .map_err(|e| format!("Failed to create restore file: {e}"))?;
             std::io::copy(&mut entry, &mut out)
-                .map_err(|e| format!("Failed to write restore file: {}", e))?;
+                .map_err(|e| format!("Failed to write restore file: {e}"))?;
             // On Windows, fs::rename fails if the destination exists. Remove it first.
             if dest.exists() {
                 fs::remove_file(&dest).map_err(|e| {
                     let _ = fs::remove_file(&tmp_dest);
-                    format!("Failed to replace existing file: {}", e)
+                    format!("Failed to replace existing file: {e}")
                 })?;
             }
             fs::rename(&tmp_dest, &dest).map_err(|e| {
                 let _ = fs::remove_file(&tmp_dest);
-                format!("Failed to finalize restored file: {}", e)
+                format!("Failed to finalize restored file: {e}")
             })?;
             restored += 1;
         }
@@ -863,7 +857,7 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
             snapshot_id: Some(snapshot_id.to_string()),
             files_created: vec![],
             files_modified: vec![format!("{} files restored", restored)],
-            details: format!("Restored {} files from snapshot {}", restored, snapshot_id),
+            details: format!("Restored {restored} files from snapshot {snapshot_id}"),
         },
     );
 
@@ -873,10 +867,10 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
 /// Delete a snapshot by ID.
 pub fn delete_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<(), String> {
     let root = snapshots_root(addons_dir);
-    let archive_path = root.join(format!("{}.zip", snapshot_id));
+    let archive_path = root.join(format!("{snapshot_id}.zip"));
     if archive_path.is_file() {
         fs::remove_file(&archive_path)
-            .map_err(|e| format!("Failed to delete snapshot archive: {}", e))?;
+            .map_err(|e| format!("Failed to delete snapshot archive: {e}"))?;
     }
 
     let mut store = load_snapshot_store(addons_dir);
@@ -914,7 +908,7 @@ pub fn backup_minion_config(addons_dir: &Path) -> Result<u32, String> {
     let root = snapshots_root(addons_dir);
     let dest = root.join("minion-config-backup");
     fs::create_dir_all(&dest)
-        .map_err(|e| format!("Failed to create Minion backup directory: {}", e))?;
+        .map_err(|e| format!("Failed to create Minion backup directory: {e}"))?;
 
     let mut copied: u32 = 0;
     let mut total_bytes: u64 = 0;

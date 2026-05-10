@@ -245,7 +245,7 @@ pub fn detect_all_game_instances() -> Vec<GameInstance> {
             let base_id = region.env_folder();
             let existing_count = instances
                 .iter()
-                .filter(|i| i.id == base_id || i.id.starts_with(&format!("{}-", base_id)))
+                .filter(|i| i.id == base_id || i.id.starts_with(&format!("{base_id}-")))
                 .count();
             let id = if existing_count == 0 {
                 base_id.to_string()

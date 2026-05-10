@@ -100,27 +100,27 @@ pub fn copy_sv_profile_blocking(
     let file_path = sv_dir.join(file_name);
 
     if !file_path.is_file() {
-        return Err(format!("File not found: {}", file_name));
+        return Err(format!("File not found: {file_name}"));
     }
 
     // Capture stamp before reading for overwrite protection
     let read_stamp = io::file_stamp(&file_path)?;
 
     let content =
-        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {}", e))?;
+        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
 
     // Create a .bak copy before modifying the file
     let bak_path = file_path.with_extension("lua.bak");
     fs::copy(&file_path, &bak_path)
-        .map_err(|e| format!("Failed to create backup before copy: {}", e))?;
+        .map_err(|e| format!("Failed to create backup before copy: {e}"))?;
 
     // Find the source key at depth 3 (character keys in ESO SV files).
-    let search_pattern = format!("[\"{}\"]\u{0020}=", from_key);
+    let search_pattern = format!("[\"{from_key}\"]\u{0020}=");
     let _key_start = find_key_at_depth(&content, &search_pattern, 3)
-        .ok_or_else(|| format!("Source key \"{}\" not found at expected depth.", from_key))?;
+        .ok_or_else(|| format!("Source key \"{from_key}\" not found at expected depth."))?;
 
     // If to_key already exists at the same depth, remove the old block first
-    let dest_pattern = format!("[\"{}\"]\u{0020}=", to_key);
+    let dest_pattern = format!("[\"{to_key}\"]\u{0020}=");
     let mut content = content;
     if let Some(dest_start) = find_key_at_depth(&content, &dest_pattern, 3) {
         let after_dest = dest_start + dest_pattern.len();
@@ -149,7 +149,7 @@ pub fn copy_sv_profile_blocking(
 
     // Re-search for source key after potential removal (positions may have shifted)
     let key_start = find_key_at_depth(&content, &search_pattern, 3)
-        .ok_or_else(|| format!("Source key \"{}\" not found after cleanup.", from_key))?;
+        .ok_or_else(|| format!("Source key \"{from_key}\" not found after cleanup."))?;
 
     let after_pattern = key_start + search_pattern.len();
     let brace_start = find_next_outside_strings(&content, after_pattern, b'{')
@@ -177,7 +177,7 @@ pub fn copy_sv_profile_blocking(
         .take_while(|c| c.is_whitespace())
         .collect();
 
-    let new_block = format!("\n{}[\"{}\"] = {},", indent, to_key, value_block);
+    let new_block = format!("\n{indent}[\"{to_key}\"] = {value_block},");
 
     let mut result = String::with_capacity(content.len() + new_block.len());
     result.push_str(&content[..actual_insert]);
@@ -186,7 +186,7 @@ pub fn copy_sv_profile_blocking(
 
     // Validation: re-parse the generated Lua to ensure it's syntactically valid
     parser::parse_sv_file(&result, file_name)
-        .map_err(|e| format!("Copy produced invalid Lua: {}. Operation aborted.", e))?;
+        .map_err(|e| format!("Copy produced invalid Lua: {e}. Operation aborted."))?;
 
     // Overwrite protection: reject if the file changed while we were computing
     let pre_write_stamp = io::file_stamp(&file_path)?;

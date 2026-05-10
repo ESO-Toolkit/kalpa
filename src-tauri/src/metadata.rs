@@ -64,7 +64,7 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
                             data
                         }
                         Err(e2) => {
-                            eprintln!("Backup also corrupted ({}), using defaults.", e2);
+                            eprintln!("Backup also corrupted ({e2}), using defaults.");
                             T::default()
                         }
                     },
@@ -85,7 +85,7 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
 /// then writes to a `.json.tmp` file and renames atomically.
 pub fn save_json_with_backup<T: Serialize>(path: &Path, data: &T) -> Result<(), String> {
     let json =
-        serde_json::to_string_pretty(data).map_err(|e| format!("Failed to serialize: {}", e))?;
+        serde_json::to_string_pretty(data).map_err(|e| format!("Failed to serialize: {e}"))?;
 
     // Create backup of existing file before writing (ignore if file doesn't exist)
     let bak = path.with_extension("json.bak");
@@ -93,17 +93,17 @@ pub fn save_json_with_backup<T: Serialize>(path: &Path, data: &T) -> Result<(), 
 
     // Write to temp file first, then atomically rename
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, &json).map_err(|e| format!("Failed to write temp file: {}", e))?;
+    fs::write(&tmp, &json).map_err(|e| format!("Failed to write temp file: {e}"))?;
     // On Windows, fs::rename fails if the destination exists. Remove it first.
     if path.exists() {
         fs::remove_file(path).map_err(|e| {
             let _ = fs::remove_file(&tmp);
-            format!("Failed to replace existing file: {}", e)
+            format!("Failed to replace existing file: {e}")
         })?;
     }
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        format!("Failed to finalize write: {}", e)
+        format!("Failed to finalize write: {e}")
     })
 }
 
@@ -130,7 +130,7 @@ pub fn format_timestamp(secs: u64) -> String {
         d -= year_days;
         y += 1;
         if y > 3000 {
-            return format!("9999-12-31T{:02}:{:02}:{:02}Z", hours, mins, s);
+            return format!("9999-12-31T{hours:02}:{mins:02}:{s:02}Z");
         }
     }
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
