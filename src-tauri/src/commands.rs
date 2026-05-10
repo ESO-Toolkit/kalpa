@@ -787,9 +787,10 @@ fn scan_installed_addons_blocking(
         .map(|a| (a.folder_name.clone(), a.addon_version))
         .collect();
 
-    // Also scan bundled sub-libraries (2 levels deep, matching ESO's resolution)
-    // and keep the MAX version per name.  This prevents false "outdated" flags
-    // when a newer copy is bundled inside another addon.
+    // Also scan bundled sub-libraries (2 levels deep, matching ESO's resolution
+    // depth and collect_subfolder_names) and keep the MAX version per name.
+    // This prevents false "outdated" flags when a newer copy is bundled inside
+    // another addon.
     for addon in &addons {
         let addon_dir = addons_dir.join(&addon.folder_name);
         for depth_1 in fs::read_dir(&addon_dir).into_iter().flatten().flatten() {
@@ -802,8 +803,23 @@ fn scan_installed_addons_blocking(
                     if let Some(ver) = read_addon_version(&manifest) {
                         let entry = version_map.entry(name.to_string()).or_insert(Some(0));
                         if let Some(cur) = entry {
-                            if ver > *cur {
-                                *cur = ver;
+                            *cur = (*cur).max(ver);
+                        }
+                    }
+                }
+            }
+            // Second level: scan sub-subdirectories
+            for depth_2 in fs::read_dir(&d1).into_iter().flatten().flatten() {
+                let d2 = depth_2.path();
+                if !d2.is_dir() {
+                    continue;
+                }
+                if let Some(name) = d2.file_name().and_then(|n| n.to_str()) {
+                    if let Some(manifest) = find_manifest_in(&d2, name) {
+                        if let Some(ver) = read_addon_version(&manifest) {
+                            let entry = version_map.entry(name.to_string()).or_insert(Some(0));
+                            if let Some(cur) = entry {
+                                *cur = (*cur).max(ver);
                             }
                         }
                     }
