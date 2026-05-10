@@ -31,6 +31,9 @@ jobs:
       - name: TypeScript check
         run: npx tsc --noEmit
 
+      - name: Run tests
+        run: npx vitest run
+
       - name: Verify worker name is kalpa-pack-hub
         run: |
           NAME=$(grep '^name' wrangler.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
