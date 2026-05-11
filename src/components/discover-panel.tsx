@@ -540,6 +540,7 @@ function PopularContent({
     if (!sort) return;
     setSortBy(sort as PopularSort);
     setHasMore(true);
+    pageRef.current = 0;
     onSelectResult(null);
     loadPage(0, sort as PopularSort, false);
   };
@@ -677,6 +678,7 @@ function CategoryContent({
     setSelectedCategory(id);
     setFilterText("");
     setHasMore(true);
+    pageRef.current = 0;
     onSelectResult(null);
     loadPage(id, 0, sortBy, false);
   };

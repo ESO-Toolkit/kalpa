@@ -291,6 +291,7 @@ function IntegrityTab({ addonsPath }: { addonsPath: string }) {
 
   const runCheck = async () => {
     setLoading(true);
+    setResult(null);
     try {
       const r = await invokeOrThrow<IntegrityResult>("migration_check_integrity", { addonsPath });
       setResult(r);

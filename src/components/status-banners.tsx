@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Alert, AlertAction } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { AppUpdateBanner, useAppUpdate } from "./app-update";
@@ -22,6 +22,14 @@ export function StatusBanners({
   onOpenSettings,
 }: StatusBannersProps) {
   const [offlineDismissed, setOfflineDismissed] = useState(false);
+  const prevOffline = useRef(isOffline);
+
+  useEffect(() => {
+    if (isOffline && !prevOffline.current) {
+      setOfflineDismissed(false);
+    }
+    prevOffline.current = isOffline;
+  }, [isOffline]);
 
   return (
     <>
