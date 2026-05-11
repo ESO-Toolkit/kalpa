@@ -5607,4 +5607,43 @@ mod tests {
         let max_id = "a".repeat(100);
         assert!(validate_pack_id(&max_id).is_ok());
     }
+
+    #[test]
+    fn validate_relative_path_accepts_valid() {
+        assert!(validate_relative_path("init.lua").is_ok());
+        assert!(validate_relative_path("Libs/LibAddonMenu/LAM.lua").is_ok());
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_traversal() {
+        assert!(validate_relative_path("../secret.txt").is_err());
+        assert!(validate_relative_path("foo/../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_absolute() {
+        assert!(validate_relative_path("C:\\Windows\\System32\\config").is_err());
+        assert!(validate_relative_path("/etc/passwd").is_err());
+        assert!(validate_relative_path("\\\\server\\share").is_err());
+    }
+
+    #[test]
+    fn export_pack_file_rejects_non_esopack_extension() {
+        let pack = EsoPackFile {
+            format: "esopack".to_string(),
+            version: 1,
+            pack: EsoPackData {
+                title: "Test".to_string(),
+                description: String::new(),
+                pack_type: "addon-pack".to_string(),
+                tags: vec![],
+                addons: vec![],
+            },
+            shared_at: String::new(),
+            shared_by: String::new(),
+            settings: HashMap::new(),
+        };
+        assert!(export_pack_file(pack.clone(), "C:\\test.json".to_string()).is_err());
+        assert!(export_pack_file(pack, "C:\\test.exe".to_string()).is_err());
+    }
 }

@@ -1086,4 +1086,17 @@ mod tests {
         assert!(result.contains("В процессе разработки!"));
         assert!(result.contains("If you want to help"));
     }
+
+    #[test]
+    fn download_addon_rejects_non_esoui_urls() {
+        let result = download_addon("https://evil.com/malware.zip");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only ESOUI"));
+    }
+
+    #[test]
+    fn download_addon_rejects_http_esoui() {
+        let result = download_addon("http://cdn.esoui.com/addon.zip");
+        assert!(result.is_err());
+    }
 }
