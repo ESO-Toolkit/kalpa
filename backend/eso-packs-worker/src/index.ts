@@ -1,10 +1,10 @@
 import type { Env, Pack, PackType, PackStatus, VoteResponse } from "./types";
-import { getPack, getPackIndex, putPack, putPackIndex, updatePackIndex, getVote, putVote, deleteVote } from "./kv";
+import { getPack, getPackIndex, putPack, getVote, putVote, deleteVote } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
 import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
-import { checkRateLimit } from "./rate-limit";
+export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
 // Both workers share the same Cloudflare account. kalpa-pack-hub binds
@@ -122,6 +122,12 @@ function requireAuth(request: Request, env: Env): boolean {
 async function invalidatePackListCache(url: URL): Promise<void> {
   const cacheKey = new URL("/packs", url.origin);
   await caches.default.delete(new Request(cacheKey));
+}
+
+/** Get the singleton PackIndexDO stub for atomic index mutations. */
+function getPackIndexDO(env: Env) {
+  const id = env.PACK_INDEX.idFromName("singleton");
+  return env.PACK_INDEX.get(id);
 }
 
 /** Generate a URL-safe slug from a title. */
@@ -291,10 +297,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   };
 
   await putPack(env, pack);
-
-  await updatePackIndex(env, (idx) => {
-    idx.packs.push(pack);
-  });
+  await getPackIndexDO(env).addPack(pack);
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, pack);
@@ -355,15 +358,7 @@ async function handleUpdatePack(
   };
 
   await putPack(env, pack);
-
-  await updatePackIndex(env, (idx) => {
-    const pos = idx.packs.findIndex((p) => p.id === id);
-    if (pos >= 0) {
-      idx.packs[pos] = pack;
-    } else {
-      idx.packs.push(pack);
-    }
-  });
+  await getPackIndexDO(env).updatePack(id, pack);
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, pack);
@@ -393,10 +388,7 @@ async function handleDeletePack(
   }
 
   await env.ESO_PACKS.delete(`pack:${id}`);
-
-  await updatePackIndex(env, (idx) => {
-    idx.packs = idx.packs.filter((p) => p.id !== id);
-  });
+  await getPackIndexDO(env).removePack(id);
 
   await invalidatePackListCache(url);
   await d1DeletePack(env, id);
@@ -424,7 +416,7 @@ async function handleSeed(request: Request, env: Env): Promise<Response> {
   }
 
   const index = { packs: [...SEED_PACKS] };
-  await putPackIndex(env, index);
+  await getPackIndexDO(env).replaceIndex(index);
 
   return json(request, { ok: true, seeded: SEED_PACKS.length, errors });
 }
@@ -461,13 +453,7 @@ async function handleVotePack(
   }
 
   await putPack(env, pack);
-
-  await updatePackIndex(env, (idx) => {
-    const pos = idx.packs.findIndex((p) => p.id === id);
-    if (pos >= 0) {
-      idx.packs[pos] = pack;
-    }
-  });
+  await getPackIndexDO(env).updatePack(id, pack);
 
   await invalidatePackListCache(url);
 
@@ -498,13 +484,7 @@ async function handleInstallPack(
 
   pack.install_count = (pack.install_count ?? 0) + 1;
   await putPack(env, pack);
-
-  await updatePackIndex(env, (idx) => {
-    const pos = idx.packs.findIndex((p) => p.id === id);
-    if (pos >= 0) {
-      idx.packs[pos] = pack;
-    }
-  });
+  await getPackIndexDO(env).updatePack(id, pack);
 
   await invalidatePackListCache(url);
 
@@ -589,21 +569,17 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return handleHealth(request, env);
   }
 
-  // Rate limiting (only when behind Cloudflare — CF-Connecting-IP is always set in production)
+  // Rate limiting via built-in atomic binding (skipped when no IP, i.e., in tests)
   const ip = request.headers.get("CF-Connecting-IP");
   if (ip) {
-    const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
     const isVote = pathname.endsWith("/vote") || pathname.endsWith("/install");
-    const action = isVote ? "vote" : isWrite ? "write" : "read";
-    const rateCheck = await checkRateLimit(env, ip, action);
-    if (!rateCheck.allowed) {
+    const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
+    const limiter = isVote ? env.VOTE_LIMITER : isWrite ? env.WRITE_LIMITER : env.READ_LIMITER;
+    const { success } = await limiter.limit({ key: ip });
+    if (!success) {
       return new Response(JSON.stringify({ error: "Too many requests" }), {
         status: 429,
-        headers: {
-          "Content-Type": "application/json",
-          "Retry-After": String(rateCheck.retryAfter),
-          ...corsHeaders(request),
-        },
+        headers: { "Content-Type": "application/json", ...corsHeaders(request) },
       });
     }
   }
