@@ -1191,16 +1191,22 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
         });
     }
 
-    // Phase 2: fetch download URLs for outdated addons in parallel
-    let url_map: HashMap<u32, String> = pending
-        .par_iter()
-        .filter(|p| p.has_update)
-        .filter_map(|p| {
-            esoui::fetch_addon_info(p.esoui_id)
-                .ok()
-                .map(|info| (p.esoui_id, info.download_url))
-        })
-        .collect();
+    // Phase 2: fetch download URLs for outdated addons in parallel (capped at 4 threads)
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .map_err(|e| format!("Thread pool error: {e}"))?;
+    let url_map: HashMap<u32, String> = pool.install(|| {
+        pending
+            .par_iter()
+            .filter(|p| p.has_update)
+            .filter_map(|p| {
+                esoui::fetch_addon_info(p.esoui_id)
+                    .ok()
+                    .map(|info| (p.esoui_id, info.download_url))
+            })
+            .collect()
+    });
 
     // Phase 3: assemble final results
     let results: Vec<UpdateCheckResult> = pending
@@ -4858,6 +4864,11 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
 
     if !file_path.exists() {
         return Err("File not found.".to_string());
+    }
+
+    let metadata = fs::metadata(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+    if metadata.len() > 10 * 1024 * 1024 {
+        return Err("File is too large (max 10 MB).".to_string());
     }
 
     let contents =

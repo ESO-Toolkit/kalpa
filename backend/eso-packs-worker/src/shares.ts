@@ -138,8 +138,11 @@ function validateSharePayload(data: unknown): ValidationError[] {
       if (typeof addon.esouiId !== "number" || !Number.isInteger(addon.esouiId) || addon.esouiId <= 0) {
         errors.push({ field: `addons[${i}].esouiId`, message: "esouiId must be a positive number" });
       }
-      if (typeof addon.name !== "string" || addon.name.length === 0) {
-        errors.push({ field: `addons[${i}].name`, message: "name is required" });
+      if (typeof addon.name !== "string" || addon.name.length === 0 || addon.name.length > 200) {
+        errors.push({ field: `addons[${i}].name`, message: "name is required and must be at most 200 characters" });
+      }
+      if (addon.note !== undefined && (typeof addon.note !== "string" || (addon.note as string).length > 500)) {
+        errors.push({ field: `addons[${i}].note`, message: "note must be a string of at most 500 characters" });
       }
     }
   }

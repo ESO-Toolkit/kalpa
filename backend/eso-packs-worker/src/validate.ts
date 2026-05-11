@@ -88,10 +88,16 @@ export function validatePack(pack: unknown): ValidationError[] {
           message: "esouiId must be a positive number",
         });
       }
-      if (typeof addon.name !== "string" || addon.name.length === 0) {
+      if (typeof addon.name !== "string" || addon.name.length === 0 || addon.name.length > 200) {
         errors.push({
           field: `addons[${i}].name`,
-          message: "name is required",
+          message: "name is required and must be at most 200 characters",
+        });
+      }
+      if (addon.note !== undefined && (typeof addon.note !== "string" || addon.note.length > 500)) {
+        errors.push({
+          field: `addons[${i}].note`,
+          message: "note must be a string of at most 500 characters",
         });
       }
       if (typeof addon.required !== "boolean") {
