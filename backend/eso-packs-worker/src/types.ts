@@ -83,4 +83,10 @@ export interface Env {
   ALLOW_SEED?: string;
   /** Shared D1 binding to roster-hub-db — same database roster-hub-api uses */
   ROSTER_HUB_DB?: D1Database;
+  /** Built-in atomic rate limit bindings (GA Sep 2025) */
+  READ_LIMITER: RateLimit;
+  WRITE_LIMITER: RateLimit;
+  VOTE_LIMITER: RateLimit;
+  /** Durable Object for atomic pack index mutations */
+  PACK_INDEX: DurableObjectNamespace<import("./pack-index-do").PackIndexDO>;
 }

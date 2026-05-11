@@ -65,7 +65,11 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
         >
           <h1 style={{ color: "#fff", marginBottom: 16 }}>React Error</h1>
           <p>{this.state.error.message}</p>
-          <pre style={{ marginTop: 16, fontSize: 12, opacity: 0.7 }}>{this.state.error.stack}</pre>
+          {import.meta.env.DEV && (
+            <pre style={{ marginTop: 16, fontSize: 12, opacity: 0.7 }}>
+              {this.state.error.stack}
+            </pre>
+          )}
         </div>
       );
     }

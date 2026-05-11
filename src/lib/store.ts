@@ -16,7 +16,8 @@ export async function getSetting<T>(key: string, fallback: T): Promise<T> {
     const store = await getStore();
     const val = await store.get<T>(key);
     return val ?? fallback;
-  } catch {
+  } catch (err) {
+    console.warn(`[store] Failed to read "${key}":`, err);
     return fallback;
   }
 }
@@ -25,7 +26,7 @@ export async function setSetting<T>(key: string, value: T): Promise<void> {
   try {
     const store = await getStore();
     await store.set(key, value);
-  } catch {
-    // Silently fail — settings are non-critical
+  } catch (err) {
+    console.warn(`[store] Failed to write "${key}":`, err);
   }
 }

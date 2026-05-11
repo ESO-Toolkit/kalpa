@@ -1,9 +1,10 @@
 import type { Env, Pack, PackType, PackStatus, VoteResponse } from "./types";
-import { getPack, getPackIndex, putPack, putPackIndex, getVote, putVote, deleteVote } from "./kv";
+import { getPack, getPackIndex, putPack, getVote, putVote, deleteVote } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
 import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
+export { PackIndexDO } from "./pack-index-do";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
 // Both workers share the same Cloudflare account. kalpa-pack-hub binds
@@ -123,6 +124,12 @@ async function invalidatePackListCache(url: URL): Promise<void> {
   await caches.default.delete(new Request(cacheKey));
 }
 
+/** Get the singleton PackIndexDO stub for atomic index mutations. */
+function getPackIndexDO(env: Env) {
+  const id = env.PACK_INDEX.idFromName("singleton");
+  return env.PACK_INDEX.get(id);
+}
+
 /** Generate a URL-safe slug from a title. */
 function slugify(title: string): string {
   return title
@@ -214,12 +221,12 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 async function handleGetPack(request: Request, env: Env, id: string): Promise<Response> {
   const pack = await getPack(env, id);
   if (!pack) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
   if (pack.status === "draft") {
     const user = await validateBearerToken(request);
     if (!user) {
-      return notFound(request, `Pack "${id}" not found`);
+      return notFound(request);
     }
     return json(request, { pack }, 200, 0);
   }
@@ -290,9 +297,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
   };
 
   await putPack(env, pack);
-
-  index.packs.push(pack);
-  await putPackIndex(env, index);
+  await getPackIndexDO(env).addPack(pack);
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, pack);
@@ -314,10 +319,10 @@ async function handleUpdatePack(
 
   const existing = await getPack(env, id);
   if (!existing) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
 
-  if (existing.author_id && String(user.id) !== existing.author_id) {
+  if (!existing.author_id || String(user.id) !== existing.author_id) {
     return json(request, { error: "Only the pack creator can update it" }, 403);
   }
 
@@ -353,16 +358,7 @@ async function handleUpdatePack(
   };
 
   await putPack(env, pack);
-
-  // Update index
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  const idx = index.packs.findIndex((p) => p.id === id);
-  if (idx >= 0) {
-    index.packs[idx] = pack;
-  } else {
-    index.packs.push(pack);
-  }
-  await putPackIndex(env, index);
+  await getPackIndexDO(env).updatePack(id, pack);
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, pack);
@@ -384,18 +380,15 @@ async function handleDeletePack(
 
   const existing = await getPack(env, id);
   if (!existing) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
 
-  if (existing.author_id && String(user.id) !== existing.author_id) {
+  if (!existing.author_id || String(user.id) !== existing.author_id) {
     return json(request, { error: "Only the pack creator can delete it" }, 403);
   }
 
   await env.ESO_PACKS.delete(`pack:${id}`);
-
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  index.packs = index.packs.filter((p) => p.id !== id);
-  await putPackIndex(env, index);
+  await getPackIndexDO(env).removePack(id);
 
   await invalidatePackListCache(url);
   await d1DeletePack(env, id);
@@ -423,7 +416,7 @@ async function handleSeed(request: Request, env: Env): Promise<Response> {
   }
 
   const index = { packs: [...SEED_PACKS] };
-  await putPackIndex(env, index);
+  await getPackIndexDO(env).replaceIndex(index);
 
   return json(request, { ok: true, seeded: SEED_PACKS.length, errors });
 }
@@ -437,7 +430,7 @@ async function handleVotePack(
 ): Promise<Response> {
   const pack = await getPack(env, id);
   if (!pack) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
 
   const user = await validateBearerToken(request);
@@ -460,14 +453,7 @@ async function handleVotePack(
   }
 
   await putPack(env, pack);
-
-  // Update index
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  const idx = index.packs.findIndex((p) => p.id === id);
-  if (idx >= 0) {
-    index.packs[idx] = pack;
-  }
-  await putPackIndex(env, index);
+  await getPackIndexDO(env).updatePack(id, pack);
 
   await invalidatePackListCache(url);
 
@@ -484,7 +470,7 @@ async function handleInstallPack(
 ): Promise<Response> {
   const pack = await getPack(env, id);
   if (!pack) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
 
   // Rate limit: one install track per IP per pack per hour
@@ -498,14 +484,7 @@ async function handleInstallPack(
 
   pack.install_count = (pack.install_count ?? 0) + 1;
   await putPack(env, pack);
-
-  // Update index
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  const idx = index.packs.findIndex((p) => p.id === id);
-  if (idx >= 0) {
-    index.packs[idx] = pack;
-  }
-  await putPackIndex(env, index);
+  await getPackIndexDO(env).updatePack(id, pack);
 
   await invalidatePackListCache(url);
 
@@ -558,9 +537,8 @@ export default {
     try {
       return await handleRequest(request, env);
     } catch (err) {
-      console.error(err);
-      const message = err instanceof Error ? err.message : "Internal server error";
-      return new Response(JSON.stringify({ error: message }), {
+      console.error("Unhandled error:", err);
+      return new Response(JSON.stringify({ error: "Internal server error" }), {
         status: 500,
         headers: { "Content-Type": "application/json", ...corsHeaders(request) },
       });
@@ -589,6 +567,21 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // Health check
   if (method === "GET" && pathname === "/health") {
     return handleHealth(request, env);
+  }
+
+  // Rate limiting via built-in atomic binding (skipped when no IP, i.e., in tests)
+  const ip = request.headers.get("CF-Connecting-IP");
+  if (ip) {
+    const isVote = pathname.endsWith("/vote") || pathname.endsWith("/install");
+    const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
+    const limiter = isVote ? env.VOTE_LIMITER : isWrite ? env.WRITE_LIMITER : env.READ_LIMITER;
+    const { success } = await limiter.limit({ key: ip });
+    if (!success) {
+      return new Response(JSON.stringify({ error: "Too many requests" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", ...corsHeaders(request) },
+      });
+    }
   }
 
   // GET /packs

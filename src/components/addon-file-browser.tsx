@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, useMemo, lazy, Suspense } from "react";
 import type { AddonFileTree, AddonFileEntry, EditBackupManifest } from "../types";
 import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -250,6 +250,17 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
     }
   };
 
+  const sorted = useMemo(() => {
+    if (!fileTree) return null;
+    const tree = buildTree(fileTree.files);
+    return [...tree.children.values()].sort((a, b) => {
+      const aDir = !a.entry && a.children.size > 0;
+      const bDir = !b.entry && b.children.size > 0;
+      if (aDir !== bDir) return aDir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [fileTree]);
+
   if (loadState === "loading" && !fileTree) {
     return (
       <div className="flex items-center justify-center py-12 text-muted-foreground/50 text-sm">
@@ -268,14 +279,6 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
   }
 
   if (!fileTree) return null;
-
-  const tree = buildTree(fileTree.files);
-  const sorted = [...tree.children.values()].sort((a, b) => {
-    const aDir = !a.entry && a.children.size > 0;
-    const bDir = !b.entry && b.children.size > 0;
-    if (aDir !== bDir) return aDir ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
 
   const editingEntry = editingFile
     ? fileTree.files.find((f) => f.relativePath === editingFile)
@@ -306,7 +309,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
 
       <GlassPanel variant="subtle" className="p-2">
         <div className="max-h-[300px] overflow-y-auto">
-          {sorted.map((child) => (
+          {sorted?.map((child) => (
             <FileTreeNode
               key={child.name}
               node={child}

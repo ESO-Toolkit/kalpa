@@ -1036,7 +1036,7 @@ function Breadcrumbs({
       {path.map((segment, i) => {
         const ctx = classifyContext(segment, i, knownCharacters);
         return (
-          <span key={i} className="flex items-center gap-1">
+          <span key={`${segment}-${i}`} className="flex items-center gap-1">
             <ChevronRightIcon className="size-3 text-muted-foreground/40" />
             <button
               onClick={() => onNavigate(i + 1)}
@@ -1315,7 +1315,7 @@ function EditorTab({
   }, [initialFile]);
 
   const loadFile = useCallback(
-    async (fileName: string) => {
+    async (fileName: string, signal?: { cancelled: boolean }) => {
       if (!fileName) return;
       setLoading(true);
       setDirty(false);
@@ -1326,24 +1326,29 @@ function EditorTab({
           addonsPath,
           fileName,
         });
+        if (signal?.cancelled) return;
         setTree(result.tree);
         setFileStamp(result.stamp);
       } catch (e) {
+        if (signal?.cancelled) return;
         toast.error(`Failed to read file: ${getTauriErrorMessage(e)}`);
         setTree(null);
         setFileStamp(null);
       } finally {
-        setLoading(false);
+        if (!signal?.cancelled) setLoading(false);
       }
     },
     [addonsPath]
   );
 
   useEffect(() => {
-    if (selectedFile) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      void loadFile(selectedFile);
-    }
+    if (!selectedFile) return;
+    const signal = { cancelled: false };
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadFile(selectedFile, signal);
+    return () => {
+      signal.cancelled = true;
+    };
   }, [selectedFile, loadFile]);
 
   const handleEdit = useCallback((path: string[], value: string | number | boolean | null) => {
@@ -1970,11 +1975,11 @@ function DiffPreviewDialog({
         )}
 
         <div className="flex-1 overflow-auto space-y-1.5 pr-1">
-          {changes.map((change, i) => {
+          {changes.map((change) => {
             const { setting, location } = formatChangePath(change);
             return (
               <div
-                key={i}
+                key={change.path.join(".")}
                 className={`rounded-lg border px-3 py-2 text-xs ${
                   change.changeType === "added"
                     ? "border-emerald-500/20 bg-emerald-500/[0.06] shadow-[inset_0_1px_0_rgba(34,197,94,0.04)]"

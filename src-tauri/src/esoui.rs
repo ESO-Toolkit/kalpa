@@ -2,7 +2,7 @@ use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Seek};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -38,23 +38,15 @@ struct ApiImage {
 /// Fetch addon details from the ESOUI filedetails JSON API.
 fn fetch_file_detail(client: &reqwest::blocking::Client, id: u32) -> Result<ApiFileDetail, String> {
     let url = format!("https://api.mmoui.com/v4/game/ESO/filedetails/{id}.json");
-    let response = client.get(&url).send().map_err(|e| {
-        if e.is_connect() || e.is_timeout() {
-            "Could not reach ESOUI API. Check your internet connection.".to_string()
+    let response = fetch_with_retry(client, &url).map_err(|e| {
+        if e.contains("HTTP 404") {
+            "Addon not found on ESOUI. It may have been removed.".to_string()
+        } else if e.contains("HTTP 429") {
+            "Too many requests to ESOUI. Please wait a moment and try again.".to_string()
         } else {
-            format!("ESOUI API request failed: {e}")
+            e
         }
     })?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(match status.as_u16() {
-            404 => "Addon not found on ESOUI. It may have been removed.".to_string(),
-            429 => "Too many requests to ESOUI. Please wait a moment and try again.".to_string(),
-            500..=599 => "ESOUI is currently unavailable. Try again later.".to_string(),
-            _ => format!("ESOUI API returned an error (HTTP {status})"),
-        });
-    }
 
     let entries: Vec<ApiFileDetail> = response
         .json()
@@ -785,6 +777,10 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, Str
 }
 
 pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
+    if !url.starts_with("https://cdn.esoui.com/") && !url.starts_with("https://www.esoui.com/") {
+        return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
+    }
+
     let client = http_client();
 
     let response = client.get(url).send().map_err(|e| {
@@ -795,22 +791,85 @@ pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
         }
     })?;
 
-    if !response.status().is_success() {
+    let status = response.status();
+    if !status.is_success() {
         return Err(format!(
-            "Download failed (HTTP {}). The file may have been removed from ESOUI.",
-            response.status()
+            "Download failed (HTTP {status}). The file may have been removed from ESOUI.",
         ));
     }
 
+    let expected_size = response.content_length();
+
     let mut tmp = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
 
-    // Stream the response directly to disk instead of buffering the entire ZIP in memory.
-    // reqwest::blocking::Response implements std::io::Read, so io::copy streams in chunks.
     let mut response = response;
-    io::copy(&mut response, &mut tmp)
+    let written = io::copy(&mut response, &mut tmp)
         .map_err(|e| format!("Failed to write download to temp file: {e}"))?;
 
+    if let Some(expected) = expected_size {
+        if written != expected {
+            return Err(format!(
+                "Download incomplete: received {written} bytes, expected {expected}. Try again."
+            ));
+        }
+    }
+
+    // Verify the file is a valid ZIP archive
+    tmp.as_file()
+        .seek(io::SeekFrom::Start(0))
+        .map_err(|e| format!("Failed to seek: {e}"))?;
+    zip::ZipArchive::new(tmp.as_file()).map_err(|_| {
+        "Downloaded file is not a valid ZIP archive. It may be corrupt — try again.".to_string()
+    })?;
+    tmp.as_file()
+        .seek(io::SeekFrom::Start(0))
+        .map_err(|e| format!("Failed to seek: {e}"))?;
+
     Ok(tmp)
+}
+
+fn is_transient_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || err.is_request()
+}
+
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 502 | 503 | 504)
+}
+
+/// Fetch with up to 3 retries on transient failures (timeouts, 5xx, connection errors).
+fn fetch_with_retry(
+    client: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<reqwest::blocking::Response, String> {
+    let mut last_err = String::new();
+    for attempt in 0u32..3 {
+        if attempt > 0 {
+            let delay = Duration::from_millis(500 * (1 << (attempt - 1)));
+            std::thread::sleep(delay);
+        }
+        match client.get(url).send() {
+            Ok(resp) if resp.status().is_success() => return Ok(resp),
+            Ok(resp) if is_transient_status(resp.status()) => {
+                last_err = format!("HTTP {}", resp.status());
+                continue;
+            }
+            Ok(resp) => {
+                return Err(format!("HTTP {}", resp.status()));
+            }
+            Err(e) if is_transient_error(&e) && attempt < 2 => {
+                last_err = e.to_string();
+                continue;
+            }
+            Err(e) => {
+                return Err(if e.is_connect() || e.is_timeout() {
+                    "Could not reach ESOUI. Check your internet connection.".to_string()
+                } else {
+                    format!("Request failed: {e}")
+                });
+            }
+        }
+    }
+    Err(format!("Request failed after retries: {last_err}"))
 }
 
 // ── ESOUI REST API (api.mmoui.com) ──────────────────────────────────────────
@@ -1026,5 +1085,18 @@ mod tests {
         let result = clean_description(input);
         assert!(result.contains("В процессе разработки!"));
         assert!(result.contains("If you want to help"));
+    }
+
+    #[test]
+    fn download_addon_rejects_non_esoui_urls() {
+        let result = download_addon("https://evil.com/malware.zip");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("only ESOUI"));
+    }
+
+    #[test]
+    fn download_addon_rejects_http_esoui() {
+        let result = download_addon("http://cdn.esoui.com/addon.zip");
+        assert!(result.is_err());
     }
 }

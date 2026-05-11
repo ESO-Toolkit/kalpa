@@ -31,7 +31,54 @@ pub struct AuthUser {
     pub user_name: String,
 }
 
-pub struct AuthState(pub Mutex<Option<AuthTokens>>);
+pub struct AuthState {
+    pub tokens: Mutex<Option<AuthTokens>>,
+    #[allow(dead_code)]
+    refresh_lock: Mutex<()>,
+}
+
+impl AuthState {
+    pub fn new(tokens: Option<AuthTokens>) -> Self {
+        Self {
+            tokens: Mutex::new(tokens),
+            refresh_lock: Mutex::new(()),
+        }
+    }
+
+    /// Get the current access token, refreshing if expired.
+    /// Serializes concurrent refresh attempts so only one hits the server.
+    #[allow(dead_code)]
+    pub fn get_valid_token(&self) -> Result<Option<String>, String> {
+        let _refresh_guard = self
+            .refresh_lock
+            .lock()
+            .map_err(|_| "Internal error.".to_string())?;
+
+        let tokens = {
+            let guard = self
+                .tokens
+                .lock()
+                .map_err(|_| "Internal error.".to_string())?;
+            guard.clone()
+        };
+
+        let Some(tokens) = tokens else {
+            return Ok(None);
+        };
+
+        match ensure_valid_token(&tokens)? {
+            Some(new_tokens) => {
+                let token = new_tokens.access_token.clone();
+                *self
+                    .tokens
+                    .lock()
+                    .map_err(|_| "Internal error.".to_string())? = Some(new_tokens);
+                Ok(Some(token))
+            }
+            None => Ok(Some(tokens.access_token)),
+        }
+    }
+}
 
 /// Token data received from the website's OAuth proxy.
 #[derive(Debug, Deserialize)]

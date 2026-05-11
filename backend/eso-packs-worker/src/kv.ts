@@ -16,10 +16,7 @@ export async function putPack(env: Env, pack: Pack): Promise<void> {
   await env.ESO_PACKS.put(`${PACK_PREFIX}${pack.id}`, JSON.stringify(pack));
 }
 
-export async function putPackIndex(
-  env: Env,
-  index: PackIndex,
-): Promise<void> {
+export async function putPackIndex(env: Env, index: PackIndex): Promise<void> {
   await env.ESO_PACKS.put(INDEX_KEY, JSON.stringify(index));
 }
 

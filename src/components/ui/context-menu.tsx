@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "motion/react";
 import { cn } from "@/lib/utils";
@@ -89,9 +89,9 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
     return () => document.removeEventListener("mousedown", handler);
   }, [onClose]);
 
-  // Viewport edge clamping
+  // Viewport edge clamping (useLayoutEffect prevents visible position jump)
   const [adjustedPos, setAdjustedPos] = useState(position);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!menuRef.current) return;
     const rect = menuRef.current.getBoundingClientRect();
     let { x, y } = position;

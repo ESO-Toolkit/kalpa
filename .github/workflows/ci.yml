@@ -36,6 +36,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --legacy-peer-deps
 
+      - name: npm audit
+        run: npm audit --audit-level=high
+
       - name: TypeScript check
         run: npx tsc --noEmit
 

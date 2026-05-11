@@ -160,6 +160,12 @@ export function Settings({
         setImportError("Clipboard is empty. Copy an export JSON first.");
         return;
       }
+      try {
+        JSON.parse(text);
+      } catch {
+        setImportError("Clipboard does not contain valid JSON.");
+        return;
+      }
       setImporting(true);
       const result = await invokeOrThrow<ImportResult>("import_addon_list", {
         addonsPath,

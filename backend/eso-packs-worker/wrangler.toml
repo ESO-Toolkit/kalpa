@@ -24,5 +24,36 @@ binding = "ROSTER_HUB_DB"
 database_name = "roster-hub-db"
 database_id = "22ff9f6a-ddb4-43bc-a0ef-89881124cfa2"
 
+# ── Rate limiting (built-in atomic binding, GA Sep 2025) ──────────
+[[ratelimits]]
+name = "READ_LIMITER"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[ratelimits]]
+name = "WRITE_LIMITER"
+namespace_id = "1002"
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+[[ratelimits]]
+name = "VOTE_LIMITER"
+namespace_id = "1003"
+  [ratelimits.simple]
+  limit = 20
+  period = 60
+
+# ── Durable Object for atomic pack index mutations ────────────────
+[[durable_objects.bindings]]
+name = "PACK_INDEX"
+class_name = "PackIndexDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PackIndexDO"]
+
 [observability]
 enabled = true

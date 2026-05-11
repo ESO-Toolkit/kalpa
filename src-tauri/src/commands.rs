@@ -694,7 +694,7 @@ fn scan_installed_addons_blocking(
         };
         let is_disabled = name.ends_with(".disabled");
         let base_name = if is_disabled {
-            name.strip_suffix(".disabled").unwrap().to_string()
+            name.strip_suffix(".disabled").unwrap_or(&name).to_string()
         } else {
             name
         };
@@ -1191,16 +1191,22 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
         });
     }
 
-    // Phase 2: fetch download URLs for outdated addons in parallel
-    let url_map: HashMap<u32, String> = pending
-        .par_iter()
-        .filter(|p| p.has_update)
-        .filter_map(|p| {
-            esoui::fetch_addon_info(p.esoui_id)
-                .ok()
-                .map(|info| (p.esoui_id, info.download_url))
-        })
-        .collect();
+    // Phase 2: fetch download URLs for outdated addons in parallel (capped at 4 threads)
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .map_err(|e| format!("Thread pool error: {e}"))?;
+    let url_map: HashMap<u32, String> = pool.install(|| {
+        pending
+            .par_iter()
+            .filter(|p| p.has_update)
+            .filter_map(|p| {
+                esoui::fetch_addon_info(p.esoui_id)
+                    .ok()
+                    .map(|info| (p.esoui_id, info.download_url))
+            })
+            .collect()
+    });
 
     // Phase 3: assemble final results
     let results: Vec<UpdateCheckResult> = pending
@@ -1858,6 +1864,7 @@ pub async fn get_conflict_diff(
     session_id: String,
     relative_path: String,
 ) -> Result<DiffData, String> {
+    validate_relative_path(&relative_path)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let pending_clone = pending.0.clone();
 
@@ -1939,6 +1946,9 @@ pub async fn update_addon_with_decisions(
     session_id: String,
     decisions: Vec<FileDecision>,
 ) -> Result<InstallResult, String> {
+    for d in &decisions {
+        validate_relative_path(&d.relative_path)?;
+    }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let pending_clone = pending.0.clone();
 
@@ -2199,6 +2209,12 @@ fn validate_relative_path(relative_path: &str) -> Result<(), String> {
     if relative_path.contains("..") {
         return Err("Invalid path: contains '..'".to_string());
     }
+    if Path::new(relative_path).is_absolute() {
+        return Err("Absolute paths are not allowed.".to_string());
+    }
+    if relative_path.starts_with('/') || relative_path.starts_with('\\') {
+        return Err("Path must be relative.".to_string());
+    }
     Ok(())
 }
 
@@ -2238,6 +2254,15 @@ pub async fn read_addon_file(
 
     tokio::task::spawn_blocking(move || {
         let file_path = resolve_addon_file_path(&addons_dir, &folder_name, &relative_path)?;
+
+        const MAX_EDITOR_SIZE: u64 = 5 * 1024 * 1024;
+        let meta = fs::metadata(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+        if meta.len() > MAX_EDITOR_SIZE {
+            return Err(format!(
+                "File is too large to edit ({:.1} MB). Maximum is 5 MB.",
+                meta.len() as f64 / (1024.0 * 1024.0)
+            ));
+        }
 
         let bytes = fs::read(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
 
@@ -2346,6 +2371,9 @@ pub async fn restore_edit_backup(
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     validate_relative_path(&relative_path)?;
+    if backed_up_at.contains("..") || backed_up_at.contains('/') || backed_up_at.contains('\\') {
+        return Err("Invalid backup timestamp.".to_string());
+    }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
     tokio::task::spawn_blocking(move || {
@@ -3965,7 +3993,7 @@ pub async fn get_pack(state: tauri::State<'_, AuthState>, id: String) -> Result<
 /// Extract the current access token from auth state (if signed in).
 fn get_current_token(state: &tauri::State<'_, AuthState>) -> Option<String> {
     state
-        .0
+        .tokens
         .lock()
         .ok()
         .and_then(|guard| guard.as_ref().map(|t| t.access_token.clone()))
@@ -3991,7 +4019,7 @@ pub async fn vote_pack(
     let access_token = {
         let tokens = {
             let guard = state
-                .0
+                .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
@@ -4012,7 +4040,7 @@ pub async fn vote_pack(
                 let token = new_tokens.access_token.clone();
                 save_auth_tokens(&app, &new_tokens);
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
@@ -4020,7 +4048,7 @@ pub async fn vote_pack(
             Ok(None) => tokens.access_token.clone(),
             Err(e) => {
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
@@ -4126,7 +4154,7 @@ pub async fn auth_login(
 
     // Update in-memory state
     *state
-        .0
+        .tokens
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(tokens);
 
@@ -4140,7 +4168,7 @@ pub async fn auth_logout(
 ) -> Result<(), String> {
     // Clear in-memory state
     *state
-        .0
+        .tokens
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
 
@@ -4157,7 +4185,7 @@ pub async fn auth_get_user(
 ) -> Result<Option<AuthUser>, String> {
     let tokens = {
         let guard = state
-            .0
+            .tokens
             .lock()
             .map_err(|e| format!("Auth lock poisoned: {e}"))?;
         guard.clone()
@@ -4185,7 +4213,7 @@ pub async fn auth_get_user(
             save_auth_tokens(&app, &new_tokens);
 
             *state
-                .0
+                .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
             Ok(Some(user))
@@ -4200,7 +4228,7 @@ pub async fn auth_get_user(
         Err(_) => {
             // Refresh failed — clear session
             *state
-                .0
+                .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
             clear_auth_tokens(&app);
@@ -4244,7 +4272,7 @@ pub async fn create_pack(
     let access_token = {
         let tokens = {
             let guard = state
-                .0
+                .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
@@ -4265,7 +4293,7 @@ pub async fn create_pack(
                 let token = new_tokens.access_token.clone();
                 save_auth_tokens(&app, &new_tokens);
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
@@ -4273,7 +4301,7 @@ pub async fn create_pack(
             Ok(None) => tokens.access_token.clone(),
             Err(e) => {
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
@@ -4344,7 +4372,7 @@ pub async fn update_pack(
     let access_token = {
         let tokens = {
             let guard = state
-                .0
+                .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
@@ -4365,7 +4393,7 @@ pub async fn update_pack(
                 let token = new_tokens.access_token.clone();
                 save_auth_tokens(&app, &new_tokens);
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
@@ -4373,7 +4401,7 @@ pub async fn update_pack(
             Ok(None) => tokens.access_token.clone(),
             Err(e) => {
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
@@ -4442,7 +4470,7 @@ pub async fn delete_pack(
     let access_token = {
         let tokens = {
             let guard = state
-                .0
+                .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
@@ -4463,7 +4491,7 @@ pub async fn delete_pack(
                 let token = new_tokens.access_token.clone();
                 save_auth_tokens(&app, &new_tokens);
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
@@ -4471,7 +4499,7 @@ pub async fn delete_pack(
             Ok(None) => tokens.access_token.clone(),
             Err(e) => {
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
@@ -4602,7 +4630,7 @@ pub async fn create_share_code(
     let access_token = {
         let tokens = {
             let guard = state
-                .0
+                .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))?;
             guard.clone()
@@ -4623,7 +4651,7 @@ pub async fn create_share_code(
                 let token = new_tokens.access_token.clone();
                 save_auth_tokens(&app, &new_tokens);
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
                 token
@@ -4631,7 +4659,7 @@ pub async fn create_share_code(
             Ok(None) => tokens.access_token.clone(),
             Err(e) => {
                 *state
-                    .0
+                    .tokens
                     .lock()
                     .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
                 return Err(e);
@@ -4800,6 +4828,9 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     if path.contains("..") {
         return Err("Invalid file path.".to_string());
     }
+    if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
+        return Err("Export path must have .esopack extension.".to_string());
+    }
 
     let json = serde_json::to_string_pretty(&pack)
         .map_err(|e| format!("Failed to serialize pack: {e}"))?;
@@ -4833,6 +4864,11 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
 
     if !file_path.exists() {
         return Err("File not found.".to_string());
+    }
+
+    let metadata = fs::metadata(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+    if metadata.len() > 10 * 1024 * 1024 {
+        return Err("File is too large (max 10 MB).".to_string());
     }
 
     let contents =
@@ -5581,5 +5617,44 @@ mod tests {
         assert!(validate_pack_id(&long_id).is_err());
         let max_id = "a".repeat(100);
         assert!(validate_pack_id(&max_id).is_ok());
+    }
+
+    #[test]
+    fn validate_relative_path_accepts_valid() {
+        assert!(validate_relative_path("init.lua").is_ok());
+        assert!(validate_relative_path("Libs/LibAddonMenu/LAM.lua").is_ok());
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_traversal() {
+        assert!(validate_relative_path("../secret.txt").is_err());
+        assert!(validate_relative_path("foo/../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_absolute() {
+        assert!(validate_relative_path("C:\\Windows\\System32\\config").is_err());
+        assert!(validate_relative_path("/etc/passwd").is_err());
+        assert!(validate_relative_path("\\\\server\\share").is_err());
+    }
+
+    #[test]
+    fn export_pack_file_rejects_non_esopack_extension() {
+        let pack = EsoPackFile {
+            format: "esopack".to_string(),
+            version: 1,
+            pack: EsoPackData {
+                title: "Test".to_string(),
+                description: String::new(),
+                pack_type: "addon-pack".to_string(),
+                tags: vec![],
+                addons: vec![],
+            },
+            shared_at: String::new(),
+            shared_by: String::new(),
+            settings: HashMap::new(),
+        };
+        assert!(export_pack_file(pack.clone(), "C:\\test.json".to_string()).is_err());
+        assert!(export_pack_file(pack, "C:\\test.exe".to_string()).is_err());
     }
 }

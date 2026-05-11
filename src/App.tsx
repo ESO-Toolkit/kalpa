@@ -426,6 +426,8 @@ function App() {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+
       if (event.ctrlKey && event.key === "r") {
         event.preventDefault();
         if (addonsPathRef.current && !updatingAllRef.current) {
@@ -446,6 +448,11 @@ function App() {
       }
 
       if (event.key === "Escape") {
+        const active = document.activeElement;
+        if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+          active.blur();
+          return;
+        }
         if (viewModeRef.current === "discover") {
           setViewMode("installed");
         }

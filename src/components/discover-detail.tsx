@@ -446,7 +446,7 @@ export function DiscoverDetail({
               <div className="mt-2 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
                 {detail.screenshots.map((src, i) => (
                   <button
-                    key={i}
+                    key={src}
                     onClick={() => setScreenshotIdx(i)}
                     className={cn(
                       "shrink-0 overflow-hidden rounded-lg border-2 transition-all duration-200",

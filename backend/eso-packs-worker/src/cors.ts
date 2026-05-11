@@ -1,5 +1,6 @@
 const ALLOWED_ORIGINS = [
-  "http://localhost:1420", // Tauri dev
+  "http://localhost:1420", // Tauri dev (default)
+  "http://localhost:1430", // Tauri dev (Kalpa override)
   "http://localhost:5173", // Vite dev (webapp)
   "http://localhost:3000", // Alt dev port
   "https://tauri.localhost", // Tauri production
