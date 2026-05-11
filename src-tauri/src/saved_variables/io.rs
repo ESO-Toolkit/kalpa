@@ -220,6 +220,10 @@ pub fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVaria
                     }
                 };
                 if let Ok(mut c) = cache.lock() {
+                    const MAX_CACHE_ENTRIES: usize = 200;
+                    if c.len() >= MAX_CACHE_ENTRIES {
+                        c.clear();
+                    }
                     c.insert(
                         cache_key,
                         CharKeyCacheEntry {

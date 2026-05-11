@@ -189,7 +189,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
-        .manage(auth::AuthState(Mutex::new(None)))
+        .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
         .manage(PendingDeepLink(Mutex::new(
             PendingDeepLinkPayload::default(),
@@ -285,7 +285,7 @@ pub fn run() {
                     if let Some(val) = store.get("auth_tokens") {
                         if let Ok(tokens) = serde_json::from_value::<auth::AuthTokens>(val.clone())
                         {
-                            if let Ok(mut guard) = app.state::<auth::AuthState>().0.lock() {
+                            if let Ok(mut guard) = app.state::<auth::AuthState>().tokens.lock() {
                                 *guard = Some(tokens);
                             }
                         }

@@ -1315,7 +1315,7 @@ function EditorTab({
   }, [initialFile]);
 
   const loadFile = useCallback(
-    async (fileName: string) => {
+    async (fileName: string, signal?: { cancelled: boolean }) => {
       if (!fileName) return;
       setLoading(true);
       setDirty(false);
@@ -1326,24 +1326,29 @@ function EditorTab({
           addonsPath,
           fileName,
         });
+        if (signal?.cancelled) return;
         setTree(result.tree);
         setFileStamp(result.stamp);
       } catch (e) {
+        if (signal?.cancelled) return;
         toast.error(`Failed to read file: ${getTauriErrorMessage(e)}`);
         setTree(null);
         setFileStamp(null);
       } finally {
-        setLoading(false);
+        if (!signal?.cancelled) setLoading(false);
       }
     },
     [addonsPath]
   );
 
   useEffect(() => {
-    if (selectedFile) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      void loadFile(selectedFile);
-    }
+    if (!selectedFile) return;
+    const signal = { cancelled: false };
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadFile(selectedFile, signal);
+    return () => {
+      signal.cancelled = true;
+    };
   }, [selectedFile, loadFile]);
 
   const handleEdit = useCallback((path: string[], value: string | number | boolean | null) => {
