@@ -1858,6 +1858,7 @@ pub async fn get_conflict_diff(
     session_id: String,
     relative_path: String,
 ) -> Result<DiffData, String> {
+    validate_relative_path(&relative_path)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let pending_clone = pending.0.clone();
 
@@ -1939,6 +1940,9 @@ pub async fn update_addon_with_decisions(
     session_id: String,
     decisions: Vec<FileDecision>,
 ) -> Result<InstallResult, String> {
+    for d in &decisions {
+        validate_relative_path(&d.relative_path)?;
+    }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let pending_clone = pending.0.clone();
 
@@ -2199,6 +2203,12 @@ fn validate_relative_path(relative_path: &str) -> Result<(), String> {
     if relative_path.contains("..") {
         return Err("Invalid path: contains '..'".to_string());
     }
+    if Path::new(relative_path).is_absolute() {
+        return Err("Absolute paths are not allowed.".to_string());
+    }
+    if relative_path.starts_with('/') || relative_path.starts_with('\\') {
+        return Err("Path must be relative.".to_string());
+    }
     Ok(())
 }
 
@@ -2355,6 +2365,9 @@ pub async fn restore_edit_backup(
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     validate_relative_path(&relative_path)?;
+    if backed_up_at.contains("..") || backed_up_at.contains('/') || backed_up_at.contains('\\') {
+        return Err("Invalid backup timestamp.".to_string());
+    }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
     tokio::task::spawn_blocking(move || {
@@ -4808,6 +4821,9 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
 
     if path.contains("..") {
         return Err("Invalid file path.".to_string());
+    }
+    if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
+        return Err("Export path must have .esopack extension.".to_string());
     }
 
     let json = serde_json::to_string_pretty(&pack)

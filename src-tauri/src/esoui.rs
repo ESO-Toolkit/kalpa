@@ -777,6 +777,10 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, Str
 }
 
 pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
+    if !url.starts_with("https://cdn.esoui.com/") && !url.starts_with("https://www.esoui.com/") {
+        return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
+    }
+
     let client = http_client();
 
     let response = client.get(url).send().map_err(|e| {
