@@ -9,6 +9,12 @@ updates:
         dependency-type: development
     open-pull-requests-limit: 10
 
+  - package-ecosystem: npm
+    directory: /backend/eso-packs-worker
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:

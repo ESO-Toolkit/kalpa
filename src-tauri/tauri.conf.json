@@ -27,7 +27,8 @@
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self' https://cdn-eso.mmoui.com https://*.esoui.com",
         "font-src": "'self'",
-        "connect-src": "ipc: http://ipc.localhost"
+        "connect-src": "ipc: http://ipc.localhost",
+        "frame-ancestors": "'none'"
       },
       "devCsp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' https://cdn-eso.mmoui.com https://*.esoui.com; font-src 'self'; connect-src ipc: http://ipc.localhost 'self' ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:*"
     }
