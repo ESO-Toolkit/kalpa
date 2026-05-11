@@ -42,3 +42,6 @@ playwright-report/
 
 # Claude Code
 .claude/
+
+# DeepSec scanner workspace
+.deepsec/

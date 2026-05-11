@@ -322,7 +322,7 @@ async function handleUpdatePack(
     return notFound(request);
   }
 
-  if (existing.author_id && String(user.id) !== existing.author_id) {
+  if (!existing.author_id || String(user.id) !== existing.author_id) {
     return json(request, { error: "Only the pack creator can update it" }, 403);
   }
 
@@ -383,7 +383,7 @@ async function handleDeletePack(
     return notFound(request);
   }
 
-  if (existing.author_id && String(user.id) !== existing.author_id) {
+  if (!existing.author_id || String(user.id) !== existing.author_id) {
     return json(request, { error: "Only the pack creator can delete it" }, 403);
   }
 
