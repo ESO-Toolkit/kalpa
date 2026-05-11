@@ -694,7 +694,7 @@ fn scan_installed_addons_blocking(
         };
         let is_disabled = name.ends_with(".disabled");
         let base_name = if is_disabled {
-            name.strip_suffix(".disabled").unwrap().to_string()
+            name.strip_suffix(".disabled").unwrap_or(&name).to_string()
         } else {
             name
         };
