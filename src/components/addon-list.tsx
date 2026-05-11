@@ -613,9 +613,8 @@ export function AddonList({
             <div
               ref={scrollContainerRef}
               role="listbox"
-              aria-label="Installed addons"
+              aria-label={`Installed addons, ${addons.length} items`}
               aria-roledescription="addon list"
-              aria-rowcount={addons.length}
               aria-activedescendant={
                 selectedAddon ? `addon-${selectedAddon.folderName}` : undefined
               }
