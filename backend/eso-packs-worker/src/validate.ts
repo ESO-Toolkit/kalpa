@@ -94,6 +94,12 @@ export function validatePack(pack: unknown): ValidationError[] {
           message: "name is required",
         });
       }
+      if (typeof addon.required !== "boolean") {
+        errors.push({
+          field: `addons[${i}].required`,
+          message: "required must be a boolean",
+        });
+      }
     }
   }
 

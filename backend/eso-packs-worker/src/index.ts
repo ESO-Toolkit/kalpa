@@ -1,9 +1,10 @@
 import type { Env, Pack, PackType, PackStatus, VoteResponse } from "./types";
-import { getPack, getPackIndex, putPack, putPackIndex, getVote, putVote, deleteVote } from "./kv";
+import { getPack, getPackIndex, putPack, putPackIndex, updatePackIndex, getVote, putVote, deleteVote } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
 import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
+import { checkRateLimit } from "./rate-limit";
 
 // ── D1 dual-write helpers ─────────────────────────────────────────
 // Both workers share the same Cloudflare account. kalpa-pack-hub binds
@@ -214,12 +215,12 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 async function handleGetPack(request: Request, env: Env, id: string): Promise<Response> {
   const pack = await getPack(env, id);
   if (!pack) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
   if (pack.status === "draft") {
     const user = await validateBearerToken(request);
     if (!user) {
-      return notFound(request, `Pack "${id}" not found`);
+      return notFound(request);
     }
     return json(request, { pack }, 200, 0);
   }
@@ -291,8 +292,9 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
 
   await putPack(env, pack);
 
-  index.packs.push(pack);
-  await putPackIndex(env, index);
+  await updatePackIndex(env, (idx) => {
+    idx.packs.push(pack);
+  });
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, pack);
@@ -314,7 +316,7 @@ async function handleUpdatePack(
 
   const existing = await getPack(env, id);
   if (!existing) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
 
   if (existing.author_id && String(user.id) !== existing.author_id) {
@@ -354,15 +356,14 @@ async function handleUpdatePack(
 
   await putPack(env, pack);
 
-  // Update index
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  const idx = index.packs.findIndex((p) => p.id === id);
-  if (idx >= 0) {
-    index.packs[idx] = pack;
-  } else {
-    index.packs.push(pack);
-  }
-  await putPackIndex(env, index);
+  await updatePackIndex(env, (idx) => {
+    const pos = idx.packs.findIndex((p) => p.id === id);
+    if (pos >= 0) {
+      idx.packs[pos] = pack;
+    } else {
+      idx.packs.push(pack);
+    }
+  });
 
   await invalidatePackListCache(url);
   await d1UpsertPack(env, pack);
@@ -384,7 +385,7 @@ async function handleDeletePack(
 
   const existing = await getPack(env, id);
   if (!existing) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
 
   if (existing.author_id && String(user.id) !== existing.author_id) {
@@ -393,9 +394,9 @@ async function handleDeletePack(
 
   await env.ESO_PACKS.delete(`pack:${id}`);
 
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  index.packs = index.packs.filter((p) => p.id !== id);
-  await putPackIndex(env, index);
+  await updatePackIndex(env, (idx) => {
+    idx.packs = idx.packs.filter((p) => p.id !== id);
+  });
 
   await invalidatePackListCache(url);
   await d1DeletePack(env, id);
@@ -437,7 +438,7 @@ async function handleVotePack(
 ): Promise<Response> {
   const pack = await getPack(env, id);
   if (!pack) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
 
   const user = await validateBearerToken(request);
@@ -461,13 +462,12 @@ async function handleVotePack(
 
   await putPack(env, pack);
 
-  // Update index
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  const idx = index.packs.findIndex((p) => p.id === id);
-  if (idx >= 0) {
-    index.packs[idx] = pack;
-  }
-  await putPackIndex(env, index);
+  await updatePackIndex(env, (idx) => {
+    const pos = idx.packs.findIndex((p) => p.id === id);
+    if (pos >= 0) {
+      idx.packs[pos] = pack;
+    }
+  });
 
   await invalidatePackListCache(url);
 
@@ -484,7 +484,7 @@ async function handleInstallPack(
 ): Promise<Response> {
   const pack = await getPack(env, id);
   if (!pack) {
-    return notFound(request, `Pack "${id}" not found`);
+    return notFound(request);
   }
 
   // Rate limit: one install track per IP per pack per hour
@@ -499,13 +499,12 @@ async function handleInstallPack(
   pack.install_count = (pack.install_count ?? 0) + 1;
   await putPack(env, pack);
 
-  // Update index
-  const index = (await getPackIndex(env)) ?? { packs: [] };
-  const idx = index.packs.findIndex((p) => p.id === id);
-  if (idx >= 0) {
-    index.packs[idx] = pack;
-  }
-  await putPackIndex(env, index);
+  await updatePackIndex(env, (idx) => {
+    const pos = idx.packs.findIndex((p) => p.id === id);
+    if (pos >= 0) {
+      idx.packs[pos] = pack;
+    }
+  });
 
   await invalidatePackListCache(url);
 
@@ -558,9 +557,8 @@ export default {
     try {
       return await handleRequest(request, env);
     } catch (err) {
-      console.error(err);
-      const message = err instanceof Error ? err.message : "Internal server error";
-      return new Response(JSON.stringify({ error: message }), {
+      console.error("Unhandled error:", err);
+      return new Response(JSON.stringify({ error: "Internal server error" }), {
         status: 500,
         headers: { "Content-Type": "application/json", ...corsHeaders(request) },
       });
@@ -589,6 +587,23 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // Health check
   if (method === "GET" && pathname === "/health") {
     return handleHealth(request, env);
+  }
+
+  // Rate limiting
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
+  const isVote = pathname.endsWith("/vote") || pathname.endsWith("/install");
+  const action = isVote ? "vote" : isWrite ? "write" : "read";
+  const rateCheck = await checkRateLimit(env, ip, action);
+  if (!rateCheck.allowed) {
+    return new Response(JSON.stringify({ error: "Too many requests" }), {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": String(rateCheck.retryAfter),
+        ...corsHeaders(request),
+      },
+    });
   }
 
   // GET /packs
