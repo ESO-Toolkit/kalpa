@@ -589,21 +589,23 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return handleHealth(request, env);
   }
 
-  // Rate limiting
-  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-  const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
-  const isVote = pathname.endsWith("/vote") || pathname.endsWith("/install");
-  const action = isVote ? "vote" : isWrite ? "write" : "read";
-  const rateCheck = await checkRateLimit(env, ip, action);
-  if (!rateCheck.allowed) {
-    return new Response(JSON.stringify({ error: "Too many requests" }), {
-      status: 429,
-      headers: {
-        "Content-Type": "application/json",
-        "Retry-After": String(rateCheck.retryAfter),
-        ...corsHeaders(request),
-      },
-    });
+  // Rate limiting (only when behind Cloudflare — CF-Connecting-IP is always set in production)
+  const ip = request.headers.get("CF-Connecting-IP");
+  if (ip) {
+    const isWrite = method === "POST" || method === "PUT" || method === "DELETE";
+    const isVote = pathname.endsWith("/vote") || pathname.endsWith("/install");
+    const action = isVote ? "vote" : isWrite ? "write" : "read";
+    const rateCheck = await checkRateLimit(env, ip, action);
+    if (!rateCheck.allowed) {
+      return new Response(JSON.stringify({ error: "Too many requests" }), {
+        status: 429,
+        headers: {
+          "Content-Type": "application/json",
+          "Retry-After": String(rateCheck.retryAfter),
+          ...corsHeaders(request),
+        },
+      });
+    }
   }
 
   // GET /packs
