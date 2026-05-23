@@ -791,6 +791,13 @@ pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
         }
     })?;
 
+    let final_url = response.url().as_str();
+    if !final_url.starts_with("https://cdn.esoui.com/")
+        && !final_url.starts_with("https://www.esoui.com/")
+    {
+        return Err("Download was redirected to an untrusted host.".to_string());
+    }
+
     let status = response.status();
     if !status.is_success() {
         return Err(format!(

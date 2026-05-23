@@ -1979,7 +1979,7 @@ function DiffPreviewDialog({
             const { setting, location } = formatChangePath(change);
             return (
               <div
-                key={change.path.join(".")}
+                key={change.path.join("\0")}
                 className={`rounded-lg border px-3 py-2 text-xs ${
                   change.changeType === "added"
                     ? "border-emerald-500/20 bg-emerald-500/[0.06] shadow-[inset_0_1px_0_rgba(34,197,94,0.04)]"
@@ -2131,13 +2131,11 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
     void loadFiles();
     invokeOrThrow<CharacterInfo[]>("list_characters", { addonsPath })
       .then(setCharacters)
-      .catch(() => {});
+      .catch(console.error);
   }, [loadFiles, addonsPath]);
 
   useEffect(() => {
-    invokeOrThrow<boolean>("is_eso_running")
-      .then(setEsoRunning)
-      .catch(() => {});
+    invokeOrThrow<boolean>("is_eso_running").then(setEsoRunning).catch(console.error);
   }, []);
 
   const handleSelectFile = useCallback((f: SavedVariableFile) => {

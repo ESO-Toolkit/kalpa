@@ -6,7 +6,10 @@ let storePromise: ReturnType<typeof load> | null = null;
 
 function getStore() {
   if (!storePromise) {
-    storePromise = load(STORE_PATH, { autoSave: true, defaults: {} });
+    storePromise = load(STORE_PATH, { autoSave: true, defaults: {} }).catch((err) => {
+      storePromise = null;
+      throw err;
+    });
   }
   return storePromise;
 }

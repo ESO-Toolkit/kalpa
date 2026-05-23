@@ -182,6 +182,9 @@ export function PackListView({
                     }
                   >
                     <button
+                      aria-label={
+                        authUser ? (pack.userVoted ? "Remove vote" : "Upvote") : "Sign in to vote"
+                      }
                       onClick={(e) => {
                         e.stopPropagation();
                         onVote(pack.id);

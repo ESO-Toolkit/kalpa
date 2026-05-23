@@ -789,7 +789,7 @@ export function Packs({
 
     // Track the install count and save to installed packs library
     if (completed > 0 && selectedPack) {
-      invokeResult("track_pack_install", { packId: selectedPack.id }).catch(() => {});
+      invokeResult("track_pack_install", { packId: selectedPack.id }).catch(console.error);
 
       // Save to local installed packs library
       const ref: InstalledPackRef = {
