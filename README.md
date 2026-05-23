@@ -10,7 +10,7 @@ A fast, open-source addon manager for **The Elder Scrolls Online**. Built with T
   <img src=".screenshots/main-desktop.png" alt="Kalpa — main view" width="800" />
 </p>
 
-> **Alpha Release** — Kalpa is in active development. Download the latest version from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. The app auto-updates, so you'll always be notified when a new version is available. Bug reports and feedback are welcome via [GitHub Issues](https://github.com/ESO-Toolkit/kalpa/issues).
+> **Beta Release** — Kalpa is stable and feature-complete for daily use. Download the latest version from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. The app auto-updates, so you'll always be notified when a new version is available. Bug reports and feedback are welcome via [GitHub Issues](https://github.com/ESO-Toolkit/kalpa/issues).
 
 ---
 
@@ -182,7 +182,7 @@ Download the latest installer from the [Releases](https://github.com/ESO-Toolkit
 
 **Prerequisites:**
 - [Rust](https://rustup.rs/) (stable, **MSVC** toolchain)
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) 22+
 - [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **"Desktop development with C++"** workload
 - [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (pre-installed on Windows 11)
 
