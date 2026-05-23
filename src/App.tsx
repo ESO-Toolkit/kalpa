@@ -448,8 +448,9 @@ function App() {
       if (event.key === "Escape") {
         if (viewModeRef.current === "discover") {
           setViewMode("installed");
+        } else {
+          setSelectedFolders(new Set());
         }
-        setSelectedFolders(new Set());
       }
     };
 
