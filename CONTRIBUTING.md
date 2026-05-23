@@ -22,7 +22,7 @@ npm run tauri dev
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (stable, MSVC toolchain on Windows)
-- [Node.js](https://nodejs.org/) 20+
+- [Node.js](https://nodejs.org/) 22+
 - On Windows: Visual Studio Build Tools with "Desktop development with C++"
 
 ## Development Workflow
