@@ -57,13 +57,20 @@ fn hash_file(path: &Path) -> Result<String, String> {
         .collect())
 }
 
+const MAX_HASH_BYTES: u64 = 500 * 1024 * 1024;
+
 fn stream_sha256(reader: &mut impl Read) -> Result<String, std::io::Error> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
     loop {
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
+        }
+        total += n as u64;
+        if total > MAX_HASH_BYTES {
+            return Err(std::io::Error::other("entry exceeds maximum hashable size"));
         }
         hasher.update(&buf[..n]);
     }
@@ -150,9 +157,12 @@ pub fn hash_zip_entries(
             _ => continue,
         };
 
-        let hash = stream_sha256(&mut entry)
-            .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?;
-        hashes.insert(relative, hash);
+        match stream_sha256(&mut entry) {
+            Ok(hash) => {
+                hashes.insert(relative, hash);
+            }
+            Err(_) => continue,
+        }
     }
 
     Ok(hashes)
