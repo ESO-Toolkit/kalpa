@@ -48,5 +48,17 @@ jobs:
 
             ## Install
             Download the `.exe` installer below and run it. Kalpa will auto-update when future releases are published.
+
+            **Requirements:** Windows 10 (1803+) or Windows 11; WebView2 (pre-installed on Windows 11, bootstrapped automatically on Windows 10). Kalpa is currently Windows-only — macOS and Linux are planned but not yet supported.
+
+            ## Verify your download
+            Each release ships the installer alongside a `.sig` (auto-updater signature) and `latest.json`. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
+
+            ## Known issues
+            None known — please report anything you hit.
+
+            ---
+
+            🐛 **Found a bug or have feedback?** Use the [Beta Feedback template](https://github.com/ESO-Toolkit/kalpa/issues/new?template=beta_feedback.md) so it's tagged `beta` for triage. Security issues: see [SECURITY.md](https://github.com/ESO-Toolkit/kalpa/blob/main/SECURITY.md).
           releaseDraft: false
           prerelease: false

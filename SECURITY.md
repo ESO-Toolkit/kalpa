@@ -21,6 +21,15 @@ You should receive a response within 48 hours. We will work with you to understa
 |---------|-----------|
 | 0.1.x   | Yes       |
 
+## Auditing and Dependencies
+
+The 0.1.0 beta shipped after a comprehensive security audit covering path
+validation, ZIP handling, CSP, and the Pack Hub worker. All dependencies are
+regularly checked against current CVE databases via `npm audit` and
+`cargo audit`; as of May 2026, no known vulnerabilities are present. A summary
+of the hardening measures is in the [Security & privacy](README.md#security--privacy)
+section of the README.
+
 ## Scope
 
 The following are in scope:

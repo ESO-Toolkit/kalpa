@@ -11,6 +11,8 @@ A fast, open-source addon manager for **The Elder Scrolls Online**. Built with T
 </p>
 
 > **Beta Release** — Kalpa is stable and feature-complete for daily use. Download the latest version from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. The app auto-updates, so you'll always be notified when a new version is available. Bug reports and feedback are welcome via [GitHub Issues](https://github.com/ESO-Toolkit/kalpa/issues).
+>
+> **New in this beta:** **Protected edits** preserve your local file changes across addon updates, and **`.esopack` v2** lets you share account-wide addon settings that are [automatically scrubbed of personal data](docs/settings-export.md). See [Security & privacy](#security--privacy) for the full trust story.
 
 ---
 
@@ -27,7 +29,7 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Multi-instance support** — handles native and Steam clients across NA, EU, and PTS servers
 - **System tray** — minimizes to tray on close for a stay-out-of-the-way experience
 - **Open source** — community contributions welcome
-- **Active development** — regular updates and new features
+- **Actively maintained** — regular updates, with new features and fixes shipped as the beta evolves
 
 ---
 
@@ -91,7 +93,7 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Game instance detection** — automatically finds native and Steam ESO installations
 - **Region support** — handles NA, EU, and PTS servers
 - **Setup wizard** — guided first-run setup with multi-candidate addon folder detection
-- **Minion migration** — import your existing Minion addon tracking data with dry-run preview, integrity checks, and snapshots before changes
+- **Minion migration** — import your existing Minion addon tracking data with dry-run preview, integrity checks, and snapshots before changes. Kalpa never deletes your original Minion data, so if something looks wrong you can always roll back from a backup
 
 ### Additional Features
 - **API compatibility checking** — identify addons that are outdated for the current game API version
@@ -102,6 +104,23 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Custom window chrome** — native-feeling desktop experience with a custom title bar
 - **Offline detection** — graceful handling when you're not connected
 - **Keyboard navigation** — navigate the addon list with arrow keys
+
+---
+
+## Security & privacy
+
+Kalpa is built to be trustworthy with your game files and your data:
+
+- **Allowlisted downloads** — addon downloads are restricted to ESOUI's official hosts; arbitrary URLs are rejected
+- **Hardened file handling** — every Tauri IPC command runs through centralized path validation, and ZIP extraction uses streaming hashing with recursion caps to resist zip bombs and path-traversal
+- **Locked-down webview** — a strict Content-Security-Policy with `frame-ancestors 'none'` blocks clickjacking and untrusted embedding
+- **DoS-resistant Pack Hub** — the Cloudflare Worker backend uses rate limiting and a Durable Object for atomic pack-index mutations
+- **Verified dependencies** — checked against current CVE databases; as of May 2026, `npm audit` and `cargo audit` report zero known vulnerabilities
+- **Signed auto-updates** — updates are delivered through signed GitHub Releases; see [Verify your download](docs/verify-download.md)
+
+**Privacy of shared settings:** when you export account-wide addon settings in a `.esopack` v2 pack, Kalpa automatically scrubs personal data (account handles, character names and IDs, chat logs, mail, friends/roster lists, trade history, and similar) before the file is written, and re-maps the placeholders to *your* identity on import. See [What's scrubbed in `.esopack` v2](docs/settings-export.md) for the full list of what is removed, what is kept, and the caveats.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -172,7 +191,9 @@ Configure your addons folder, access tools like backups and API compatibility ch
 
 ## Install
 
-> **Windows only** — Kalpa requires Windows 10 (version 1803+) or Windows 11. WebView2 is required at runtime and is pre-installed on Windows 11; on Windows 10, the installer will bootstrap it automatically.
+> **Windows only** — Kalpa requires Windows 10 (version 1803+) or Windows 11. WebView2 is required at runtime and is pre-installed on Windows 11; on Windows 10, the installer will bootstrap it automatically. macOS and Linux are planned but not yet supported.
+>
+> **Verifying your download:** every release ships the installer alongside a `.sig` (auto-updater signature) and `latest.json`. See [Verify your download](docs/verify-download.md) to check the integrity of the file you downloaded.
 
 ### Pre-built (recommended)
 
