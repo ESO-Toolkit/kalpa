@@ -261,6 +261,12 @@ function App() {
         );
         setSelectedAddon(updated ?? null);
       }
+      setSelectedFolders((prev) => {
+        if (prev.size === 0) return prev;
+        const validFolders = new Set(result.map((a) => a.folderName));
+        const pruned = new Set([...prev].filter((f) => validFolders.has(f)));
+        return pruned.size === prev.size ? prev : pruned;
+      });
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
@@ -664,6 +670,7 @@ function App() {
         await setSetting("addonsPath", nextPath);
         setAddonsPath(nextPath);
         setSelectedAddon(null);
+        setSelectedFolders(new Set());
         setUpdateResults([]);
         setError(null);
         setErrorShowSettings(false);
