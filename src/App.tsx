@@ -424,6 +424,13 @@ function App() {
     void initializeApp();
   }, [initializeApp]);
 
+  const handleViewModeChange = useCallback((mode: ViewMode) => {
+    setViewMode(mode);
+    if (mode === "discover") {
+      setSelectedFolders(new Set());
+    }
+  }, []);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.key === "r") {
@@ -435,13 +442,13 @@ function App() {
 
       if (event.ctrlKey && event.key === "i") {
         event.preventDefault();
-        setViewMode("discover");
+        handleViewModeChange("discover");
         setDiscoverTab("url");
       }
 
       if (event.ctrlKey && event.key === "b") {
         event.preventDefault();
-        setViewMode("discover");
+        handleViewModeChange("discover");
         setDiscoverTab("search");
       }
 
@@ -455,7 +462,7 @@ function App() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [scanAndCheck]);
+  }, [scanAndCheck, handleViewModeChange]);
 
   // Notify the user if a deep link is pending while the setup wizard is shown
   const pendingDeepLinkToastShown = useRef(false);
@@ -1150,7 +1157,7 @@ function App() {
           selectedFolders={selectedFolders}
           onToggleSelect={handleToggleSelect}
           viewMode={viewMode}
-          onViewModeChange={setViewMode}
+          onViewModeChange={handleViewModeChange}
           discoverTab={discoverTab}
           onDiscoverTabChange={setDiscoverTab}
           addonsPath={addonsPath}
