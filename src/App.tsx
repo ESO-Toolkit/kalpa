@@ -261,10 +261,17 @@ function App() {
         );
         setSelectedAddon(updated ?? null);
       }
+      setSelectedFolders((prev) => {
+        if (prev.size === 0) return prev;
+        const validFolders = new Set(result.map((a) => a.folderName));
+        const pruned = new Set([...prev].filter((f) => validFolders.has(f)));
+        return pruned.size === prev.size ? prev : pruned;
+      });
     } catch (scanError) {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
       setAddons([]);
+      setSelectedFolders(new Set());
     } finally {
       if (seq === scanSeqRef.current) {
         setLoading(false);
@@ -455,8 +462,9 @@ function App() {
         }
         if (viewModeRef.current === "discover") {
           setViewMode("installed");
+        } else {
+          setSelectedFolders(new Set());
         }
-        setSelectedFolders(new Set());
       }
     };
 
@@ -670,6 +678,7 @@ function App() {
         await setSetting("addonsPath", nextPath);
         setAddonsPath(nextPath);
         setSelectedAddon(null);
+        setSelectedFolders(new Set());
         setUpdateResults([]);
         setError(null);
         setErrorShowSettings(false);
@@ -1064,7 +1073,7 @@ function App() {
     [selectedAddon, updateResults]
   );
 
-  const batchMode = selectedFolders.size > 0;
+  const batchMode = selectedFolders.size > 0 && viewMode === "installed";
 
   const handleOpenDialog = useCallback((dialog: Exclude<ActiveDialog, null>) => {
     setActiveDialog(dialog);
