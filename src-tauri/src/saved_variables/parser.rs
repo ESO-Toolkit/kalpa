@@ -1,8 +1,18 @@
 use super::types::{SvTreeNode, SvValueType};
 
+const MAX_DEPTH: usize = 512;
+
 /// Simple recursive descent parser for ESO SavedVariables Lua files.
 /// Only handles the subset of Lua that ESO actually generates.
 pub fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+    parse_lua_value_depth(chars, pos, 0)
+}
+
+fn parse_lua_value_depth(
+    chars: &[u8],
+    pos: &mut usize,
+    depth: usize,
+) -> Result<SvTreeNode, String> {
     skip_whitespace_and_comments(chars, pos);
 
     if *pos >= chars.len() {
@@ -10,7 +20,7 @@ pub fn parse_lua_value(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, Stri
     }
 
     match chars[*pos] {
-        b'{' => parse_lua_table(chars, pos),
+        b'{' => parse_lua_table(chars, pos, depth),
         b'"' | b'\'' => parse_lua_quoted_string(chars, pos),
         b'[' if *pos + 1 < chars.len() && (chars[*pos + 1] == b'[' || chars[*pos + 1] == b'=') => {
             parse_lua_long_string(chars, pos)
@@ -295,7 +305,10 @@ fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String>
     })
 }
 
-fn parse_lua_table(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> {
+fn parse_lua_table(chars: &[u8], pos: &mut usize, depth: usize) -> Result<SvTreeNode, String> {
+    if depth >= MAX_DEPTH {
+        return Err(format!("Table nesting too deep (>{MAX_DEPTH} levels)"));
+    }
     *pos += 1; // skip {
     let mut children: Vec<SvTreeNode> = Vec::new();
     let mut index = 1u32;
@@ -313,7 +326,7 @@ fn parse_lua_table(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String> 
         // Try to parse key = value or ["key"] = value
         let key = parse_table_key(chars, pos)?;
 
-        let mut child = parse_lua_value(chars, pos)?;
+        let mut child = parse_lua_value_depth(chars, pos, depth + 1)?;
         child.key = key.unwrap_or_else(|| {
             let k = index.to_string();
             index += 1;

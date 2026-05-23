@@ -727,6 +727,10 @@ fn scrub_node(
     placeholders: &mut PlaceholderTable,
     report: &mut ScrubReport,
 ) -> Option<SvTreeNode> {
+    if path.len() >= 512 {
+        return Some(node.clone());
+    }
+
     // Block subtrees whose key name suggests sensitive data.
     //
     // Two constraints:
@@ -835,6 +839,10 @@ fn scrub_node_override(
     allow_set: &[Vec<String>],
     deny_set: &[Vec<String>],
 ) -> Option<SvTreeNode> {
+    if path.len() >= 512 {
+        return Some(node.clone());
+    }
+
     // Check deny paths first — explicit deny wins.
     if deny_set
         .iter()

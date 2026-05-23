@@ -60,6 +60,10 @@ fn serialize_value(out: &mut String, node: &SvTreeNode, depth: usize) {
 }
 
 fn serialize_table(out: &mut String, node: &SvTreeNode, depth: usize) {
+    if depth >= 512 {
+        out.push_str("{}");
+        return;
+    }
     let indent = "\t".repeat(depth);
     let child_indent = "\t".repeat(depth + 1);
 

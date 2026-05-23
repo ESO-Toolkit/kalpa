@@ -4,6 +4,45 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] — 2026-05-22
+
+### Security & Hardening
+- Harden path validation and centralize download URL allowlist
+- Deny-by-default pack ownership check in worker
+- Add native rate limiting and Durable Object for atomic pack index mutations
+- Harden auth state, file editor limits, and async cleanup
+- Add CSP `frame-ancestors` directive
+- Harden Pack Hub worker and resolve dependency vulnerabilities
+- Improve keyboard handling, accessibility, and error visibility
+
+### Features
+- `.esopack` v2 — per-addon SavedVariables export/import (Phase 1 backend)
+- Protected edits — preserve user changes across addon updates (hash infrastructure, conflict scanning, file browser, diff viewer, batch conflict flow, CodeMirror editor, backup restore)
+- Improve backup UX for non-technical users (redesigned backup & restore flow)
+- Skeleton loading states, discover detail polish, and ESOUI browse fixes
+- Auto-install new dependencies after addon updates
+- Validate dependency version constraints against installed addons
+
+### Bug Fixes
+- Filter ESOUI search summary row and deduplicate results
+- Use subfolder-aware resolution in all dependency install paths
+- Resolve transitive deps on manual dependency install
+- Show skipped deps in install success banner
+- Improve network resilience, pagination, and UI state management
+- Include bundled sub-library versions in outdated check
+- Abort restore when safety snapshot copy fails
+
+### Testing & CI
+- Add Vitest unit tests and Playwright E2E testing infrastructure
+- Add Vitest tests for Pack Hub Cloudflare Worker
+- Run worker tests in CI and before deploy
+- Pin Rust 1.88.0 and cargo-audit 0.22.1
+
+### Dependencies
+- Bump lucide-react 1.11 → 1.14, Vite 8.0, TypeScript 6.0
+- Upgrade wrangler to v4
+- Bump Rust deps: tokio, reqwest, winreg, zip
+
 ## [0.1.0-alpha.3] — 2026-05-02
 
 ### UI & Animations
