@@ -157,12 +157,9 @@ pub fn hash_zip_entries(
             _ => continue,
         };
 
-        match stream_sha256(&mut entry) {
-            Ok(hash) => {
-                hashes.insert(relative, hash);
-            }
-            Err(_) => continue,
-        }
+        let hash = stream_sha256(&mut entry)
+            .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?;
+        hashes.insert(relative, hash);
     }
 
     Ok(hashes)
