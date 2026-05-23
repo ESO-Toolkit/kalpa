@@ -271,6 +271,7 @@ function App() {
       if (seq !== scanSeqRef.current) return;
       setError(getTauriErrorMessage(scanError));
       setAddons([]);
+      setSelectedFolders(new Set());
     } finally {
       if (seq === scanSeqRef.current) {
         setLoading(false);
