@@ -4,7 +4,7 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
-## [0.1.0-alpha.8] — 2026-05-22
+## [0.1.0-alpha.8] — 2026-05-23
 
 ### Security & Hardening
 - Harden path validation and centralize download URL allowlist
