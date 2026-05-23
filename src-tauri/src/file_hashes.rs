@@ -143,8 +143,13 @@ pub fn hash_zip_entries(
             _ => continue,
         };
 
-        let mut buf = Vec::with_capacity(entry.size().min(50 * 1024 * 1024) as usize);
-        entry
+        const MAX_ENTRY_SIZE: u64 = 50 * 1024 * 1024;
+        if entry.size() > MAX_ENTRY_SIZE {
+            continue;
+        }
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        (&mut entry)
+            .take(MAX_ENTRY_SIZE)
             .read_to_end(&mut buf)
             .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?;
 
