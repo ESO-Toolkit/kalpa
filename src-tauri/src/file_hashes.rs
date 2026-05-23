@@ -57,14 +57,21 @@ fn hash_file(path: &Path) -> Result<String, String> {
         .collect())
 }
 
-fn sha256_bytes(data: &[u8]) -> String {
+fn stream_sha256(reader: &mut impl Read) -> Result<String, std::io::Error> {
     let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
-        .collect()
+        .collect())
 }
 
 /// Walk an addon folder and compute SHA-256 hashes for every file.
@@ -143,17 +150,9 @@ pub fn hash_zip_entries(
             _ => continue,
         };
 
-        const MAX_ENTRY_SIZE: u64 = 50 * 1024 * 1024;
-        if entry.size() > MAX_ENTRY_SIZE {
-            continue;
-        }
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        (&mut entry)
-            .take(MAX_ENTRY_SIZE)
-            .read_to_end(&mut buf)
+        let hash = stream_sha256(&mut entry)
             .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?;
-
-        hashes.insert(relative, sha256_bytes(&buf));
+        hashes.insert(relative, hash);
     }
 
     Ok(hashes)

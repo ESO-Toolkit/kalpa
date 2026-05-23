@@ -727,7 +727,7 @@ fn scrub_node(
     placeholders: &mut PlaceholderTable,
     report: &mut ScrubReport,
 ) -> Option<SvTreeNode> {
-    if path.len() >= 512 {
+    if path.len() > 512 {
         return Some(node.clone());
     }
 
@@ -839,7 +839,7 @@ fn scrub_node_override(
     allow_set: &[Vec<String>],
     deny_set: &[Vec<String>],
 ) -> Option<SvTreeNode> {
-    if path.len() >= 512 {
+    if path.len() > 512 {
         return Some(node.clone());
     }
 
