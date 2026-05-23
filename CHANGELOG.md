@@ -4,6 +4,17 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.1] — 2026-05-23
+
+First beta release. Graduating from alpha after comprehensive security audit, 499-test verification, and 3 rounds of independent code review.
+
+### Dependencies
+- Bump tauri 2.11.1 → 2.11.2, tauri-build 2.6.1 → 2.6.2
+- Bump lucide-react 1.14 → 1.16, @base-ui/react 1.4.1 → 1.5.0
+- Bump @fontsource-variable/geist 5.2.8 → 5.2.9
+- Bump wrangler 4.90 → 4.93, @cloudflare/workers-types
+- Bump dev-dependencies group (6 updates)
+
 ## [0.1.0-alpha.8] — 2026-05-23
 
 ### Security & Hardening
@@ -111,6 +122,8 @@ First public alpha release of **Kalpa** — an open-source desktop addon manager
 - GitHub Actions CI/CD with tag-triggered Windows release builds
 - Code of Conduct (Contributor Covenant v2.1)
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.3...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.1...HEAD
+[0.1.0-beta.1]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.8...v0.1.0-beta.1
+[0.1.0-alpha.8]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.3...v0.1.0-alpha.8
 [0.1.0-alpha.3]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.1]: https://github.com/ESO-Toolkit/kalpa/releases/tag/v0.1.0-alpha.1
