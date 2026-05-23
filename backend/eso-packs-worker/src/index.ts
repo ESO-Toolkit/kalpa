@@ -183,7 +183,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     packs = packs.filter((p) => p.tags.includes(tagFilter));
   }
 
-  const query = url.searchParams.get("q")?.toLowerCase();
+  const query = url.searchParams.get("q")?.slice(0, 200).toLowerCase();
   if (query) {
     packs = packs.filter(
       (p) =>

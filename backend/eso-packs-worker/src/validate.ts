@@ -74,10 +74,10 @@ export function validatePack(pack: unknown): ValidationError[] {
     }
   }
 
-  if (!Array.isArray(p.addons) || p.addons.length > MAX_ADDONS) {
+  if (!Array.isArray(p.addons) || p.addons.length === 0 || p.addons.length > MAX_ADDONS) {
     errors.push({
       field: "addons",
-      message: `addons must be an array with at most ${MAX_ADDONS} entries`,
+      message: `addons must be an array with 1 to ${MAX_ADDONS} entries`,
     });
   } else {
     for (let i = 0; i < p.addons.length; i++) {

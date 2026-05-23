@@ -201,6 +201,12 @@ describe("validatePack", () => {
       );
     });
 
+    it("rejects empty addons array", () => {
+      expect(validatePack(validPack({ addons: [] }))).toContainEqual(
+        expect.objectContaining({ field: "addons" }),
+      );
+    });
+
     it("rejects more than 200 addons", () => {
       const addons = Array.from({ length: 201 }, (_, i) => ({
         esouiId: i + 1,

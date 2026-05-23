@@ -34,8 +34,9 @@ fn serialize_value(out: &mut String, node: &SvTreeNode, depth: usize) {
         SvValueType::Number => {
             if let Some(v) = &node.value {
                 if let Some(n) = v.as_f64() {
-                    // Use integer representation when possible
-                    if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
+                    if n.is_nan() || n.is_infinite() {
+                        out.push('0');
+                    } else if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
                         out.push_str(&(n as i64).to_string());
                     } else {
                         out.push_str(&format!("{n}"));

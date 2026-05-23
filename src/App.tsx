@@ -379,7 +379,7 @@ function App() {
         // returning users. Fire-and-forget — does not block startup.
         invokeOrThrow<GameInstance[]>("detect_game_instances")
           .then(setKnownInstances)
-          .catch(() => {});
+          .catch(console.error);
       } catch (initError) {
         setError(
           `Could not access saved AddOns folder — it may have been moved or deleted. ${getTauriErrorMessage(initError)}`
@@ -588,7 +588,7 @@ function App() {
   const flushPendingRemovals = useCallback(() => {
     for (const [folderName, { timer }] of pendingRemovalsRef.current) {
       clearTimeout(timer);
-      void invokeOrThrow("remove_addon", { addonsPath, folderName }).catch(() => {});
+      void invokeOrThrow("remove_addon", { addonsPath, folderName }).catch(console.error);
     }
     pendingRemovalsRef.current.clear();
   }, [addonsPath]);

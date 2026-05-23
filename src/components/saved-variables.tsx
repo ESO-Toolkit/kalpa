@@ -2131,13 +2131,11 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
     void loadFiles();
     invokeOrThrow<CharacterInfo[]>("list_characters", { addonsPath })
       .then(setCharacters)
-      .catch(() => {});
+      .catch(console.error);
   }, [loadFiles, addonsPath]);
 
   useEffect(() => {
-    invokeOrThrow<boolean>("is_eso_running")
-      .then(setEsoRunning)
-      .catch(() => {});
+    invokeOrThrow<boolean>("is_eso_running").then(setEsoRunning).catch(console.error);
   }, []);
 
   const handleSelectFile = useCallback((f: SavedVariableFile) => {
