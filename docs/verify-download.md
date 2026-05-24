@@ -24,20 +24,24 @@ automatically. `gpg --verify` does not apply to this file.
 ## Verifying a fresh download manually
 
 If you download the installer directly from the
-[Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page and want
-to confirm it arrived intact:
+[Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page, you have
+two layers of assurance:
 
-1. Downloads come over **HTTPS from GitHub's release storage**, so the transfer
-   is already protected against tampering in transit.
-2. To check the file itself, compute its SHA-256 hash in PowerShell:
+1. **Transport integrity (always).** Downloads come over **HTTPS from GitHub's
+   release storage**, so the transfer is protected against tampering in transit.
+   And once installed, the auto-updater re-verifies every future update against
+   the signing key compiled into the app before applying it.
+2. **Checksum (when published).** Some releases include a **SHA-256 checksum** in
+   their notes. If one is present, you can confirm the file matches it. Compute
+   the installer's hash in PowerShell:
 
    ```powershell
    Get-FileHash .\Kalpa_<version>_x64-setup.exe -Algorithm SHA256
    ```
 
-3. Compare the output against the SHA-256 checksum published in that release's
-   notes. If the values match, the file is the one we built; if they differ,
-   delete it and download again.
+   Compare the output to the checksum in the release notes. If the values match,
+   the file is the one we built; if they differ, delete it and download again.
+   (If a release doesn't list a checksum, rely on layer 1 above.)
 
 ## Reporting a problem
 
