@@ -4,6 +4,28 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] — 2026-05-25
+
+### Bug Fixes
+- Add crash recovery for metadata writes — if the app crashes mid-save, the completed `.tmp` file is now recovered on next load instead of falling back to stale data
+- Add missing `addon.required` validation in Pack Hub share code creation
+- Log warnings instead of silently ignoring metadata save failures during scan and update check
+
+### Improvements
+- Wrap `DiscoverResultRow` in `React.memo` for smoother list scrolling
+- Add `aria-hidden` to decorative SVGs for screen reader accessibility
+
+### Documentation
+- Add "Security & privacy" section to README with full trust story
+- Add download verification guide and `.esopack` v2 settings-export documentation
+- Add beta feedback issue template
+- Expand changelog with security hardening, feature, and testing highlights
+
+### Testing & CI
+- Add worker `npm audit` to CI pipeline (was only running for frontend)
+- Add crash-recovery unit tests for metadata `.tmp` file promotion
+- Fix clippy `approx_constant` deny in parser test
+
 ## [0.1.0-beta.2] — 2026-05-23
 
 ### Bug Fixes
@@ -153,7 +175,8 @@ First public alpha release of **Kalpa** — an open-source desktop addon manager
 - GitHub Actions CI/CD with tag-triggered Windows release builds
 - Code of Conduct (Contributor Covenant v2.1)
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.2...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.3...HEAD
+[0.1.0-beta.3]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.8...v0.1.0-beta.1
 [0.1.0-alpha.8]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.3...v0.1.0-alpha.8
