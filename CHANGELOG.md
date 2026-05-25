@@ -4,6 +4,54 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] — 2026-05-25
+
+### Security Fixes
+- **Draft packs were visible to unauthenticated users** via `?status=all` — now requires auth and ownership
+- **Any authenticated user could view other users' drafts** by ID — added ownership check
+- Add pack ID validation to generic `/packs/:id` route
+- Validate `defaultEnabled` field in pack and share payloads
+- Add `DELETE /account` endpoint for user data deletion (GDPR compliance)
+- Secure token storage and observability opt-out with privacy policy link
+
+### Bug Fixes
+- Fix `BackupManifest` missing `#[serde(rename_all = "camelCase")]` — all edit backup fields were `undefined` in the frontend
+- Fix `SvTreeNode.rawLuaValue` missing from TypeScript — caused silent data corruption on round-trip SavedVariables save
+- Fix stuck loading spinner when `detect_game_instances` fails
+- Fix `decodeHtml` innerHTML-based decoder — replaced with regex to eliminate DOM dependency
+- Fix timer cleanup in discover-detail and packs to prevent setState on unmounted components
+- Fix `useCallback`/`useEffect` dependency for share code handler
+- Merge batch update progress double setState into single updater
+- Fix library addon color from emerald to violet per design system spec
+- Fix tag menu dropdown rounding (`rounded-md` → `rounded-xl`)
+- Fix custom tag input to use glass input styling
+- Gate duplicate dependents warning on `!addon.disabled`
+- Fix `BackupManifest` serde aliases for backward compatibility
+- Fix `auto_link_addons` filelist fetch moved outside MetadataLock to prevent deadlock
+
+### Rust Backend Hardening
+- Add `MetadataLock` mutex to prevent TOCTOU race conditions on `kalpa.json` (12 commands protected)
+- Narrow MetadataLock scope to exclude network I/O for better concurrency
+- Add partial extraction cleanup — removes newly-created folders on ZIP extraction failure
+- Add bounded ZIP read (5 MB cap) in conflict diff viewer to prevent OOM
+- Add recursion depth limit (32) and symlink skip in `walk_files` and `compute_addon_hashes`
+- Add retry logic to `fetch_filelist_entries` and `download_addon` for transient HTTP errors
+- `batch_remove_addons` now reports per-addon failures instead of silently dropping them
+- MD5 verification and path hardening across installer
+
+### Frontend Improvements
+- Enable `noUncheckedIndexedAccess` in TypeScript — all array/record index access is now type-safe
+- Add ErrorBoundary "Try Again" recovery button
+- Add Windows error hints for file lock (os error 32/33) and disk space (os error 112)
+- Show loading spinner in Profiles dialog instead of flashing "No profiles yet"
+
+### CI/CD
+- Align Node.js version in release workflow (20 → 22)
+- Add concurrency control and timeout-minutes to all workflow jobs
+- Add npm cache to worker deploy workflow
+- Harden CSP with explicit `object-src`, `base-uri`, `form-action` directives
+- Fix timestamp URL to HTTPS
+
 ## [0.1.0-beta.3] — 2026-05-25
 
 ### Bug Fixes
@@ -175,7 +223,8 @@ First public alpha release of **Kalpa** — an open-source desktop addon manager
 - GitHub Actions CI/CD with tag-triggered Windows release builds
 - Code of Conduct (Contributor Covenant v2.1)
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.3...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.4...HEAD
+[0.1.0-beta.4]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.3...v0.1.0-beta.4
 [0.1.0-beta.3]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.2...v0.1.0-beta.3
 [0.1.0-beta.2]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.8...v0.1.0-beta.1
