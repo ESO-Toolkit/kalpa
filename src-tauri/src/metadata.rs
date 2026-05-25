@@ -42,41 +42,62 @@ fn metadata_path(addons_path: &Path) -> std::path::PathBuf {
     addons_path.join("kalpa.json")
 }
 
-/// Load a JSON file with automatic backup recovery.
+/// Load a JSON file with automatic recovery from crash artifacts.
 ///
-/// If the primary file is corrupted, tries the `.json.bak` backup.
-/// Returns `T::default()` if both are missing or corrupted.
+/// Recovery order when the primary file is missing or corrupted:
+/// 1. `.json.tmp` — a completed write that was never renamed into place
+///    (crash between remove and rename in `save_json_with_backup`).
+/// 2. `.json.bak` — the previous good copy made before the write started.
+///
+/// Returns `T::default()` if all sources are missing or corrupted.
 pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
-    match fs::read_to_string(path) {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!(
-                    "Warning: {} corrupted ({}), trying backup...",
-                    path.display(),
-                    e
-                );
-                let bak = path.with_extension("json.bak");
-                match fs::read_to_string(&bak) {
-                    Ok(bak_content) => match serde_json::from_str(&bak_content) {
-                        Ok(data) => {
-                            eprintln!("Recovered data from backup file {}.", bak.display());
-                            data
-                        }
-                        Err(e2) => {
-                            eprintln!("Backup also corrupted ({e2}), using defaults.");
-                            T::default()
-                        }
-                    },
-                    Err(_) => {
-                        eprintln!("No backup file found, using defaults.");
-                        T::default()
-                    }
-                }
-            }
-        },
-        Err(_) => T::default(),
+    // Try the primary file first.
+    if let Ok(content) = fs::read_to_string(path) {
+        if let Ok(data) = serde_json::from_str(&content) {
+            return data;
+        }
+        eprintln!(
+            "Warning: {} corrupted, trying recovery files...",
+            path.display()
+        );
     }
+
+    // Primary missing or corrupted — try .tmp (newest data, written but not renamed).
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(content) = fs::read_to_string(&tmp) {
+        if let Ok(data) = serde_json::from_str::<T>(&content) {
+            eprintln!("Recovered data from incomplete write {}.", tmp.display());
+            // Promote the .tmp so subsequent loads hit the primary path.
+            // On Windows fs::rename can't overwrite, so remove the corrupt primary first.
+            // Best-effort: if promotion fails the data is still returned correctly;
+            // the next load will recover from .tmp again.
+            if let Err(e) = fs::remove_file(path) {
+                eprintln!(
+                    "Warning: could not remove corrupt primary {}: {e}",
+                    path.display()
+                );
+            }
+            if let Err(e) = fs::rename(&tmp, path) {
+                eprintln!(
+                    "Warning: could not promote {} to primary: {e}",
+                    tmp.display()
+                );
+            }
+            return data;
+        }
+    }
+
+    // Try .bak (previous good version).
+    let bak = path.with_extension("json.bak");
+    if let Ok(content) = fs::read_to_string(&bak) {
+        if let Ok(data) = serde_json::from_str::<T>(&content) {
+            eprintln!("Recovered data from backup file {}.", bak.display());
+            return data;
+        }
+        eprintln!("Backup also corrupted, using defaults.");
+    }
+
+    T::default()
 }
 
 /// Save data as JSON with atomic write and automatic backup.
@@ -327,6 +348,59 @@ mod tests {
         // 2024-01-01T00:00:00Z
         let ts = format_timestamp(1704067200);
         assert_eq!(ts, "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn load_recovers_from_tmp_when_primary_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.json");
+        let tmp_file = tmp.path().join("test.json.tmp");
+
+        // Simulate crash: .tmp exists (completed write) but primary was deleted
+        let mut store = MetadataStore::default();
+        record_install(
+            &mut store,
+            "CrashRecovered",
+            99,
+            "3.0.0",
+            "https://example.com",
+        );
+        let json = serde_json::to_string(&store).unwrap();
+        fs::write(&tmp_file, &json).unwrap();
+
+        // Primary does NOT exist — .tmp should be recovered and promoted
+        let loaded: MetadataStore = load_json_with_backup(&path);
+        assert_eq!(loaded.addons.len(), 1);
+        assert_eq!(loaded.addons["CrashRecovered"].esoui_id, 99);
+
+        // .tmp should be promoted to primary
+        assert!(path.exists());
+        assert!(!tmp_file.exists());
+    }
+
+    #[test]
+    fn load_recovers_from_tmp_over_corrupted_primary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.json");
+        let tmp_file = tmp.path().join("test.json.tmp");
+
+        // Simulate crash: primary is corrupted, .tmp has the latest data
+        fs::write(&path, "corrupted json{{{").unwrap();
+
+        let mut store = MetadataStore::default();
+        record_install(&mut store, "LatestData", 77, "5.0.0", "https://example.com");
+        let json = serde_json::to_string(&store).unwrap();
+        fs::write(&tmp_file, &json).unwrap();
+
+        // Should prefer .tmp (newest data) over .bak
+        let loaded: MetadataStore = load_json_with_backup(&path);
+        assert_eq!(loaded.addons.len(), 1);
+        assert_eq!(loaded.addons["LatestData"].esoui_id, 77);
+
+        // Corrupt primary should be replaced by promoted .tmp
+        assert!(path.exists());
+        let reloaded: MetadataStore = load_json_with_backup(&path);
+        assert_eq!(reloaded.addons["LatestData"].esoui_id, 77);
     }
 
     #[test]

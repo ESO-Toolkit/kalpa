@@ -116,6 +116,7 @@ export function DiscoverDetail({
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-[#c4a44a]/[0.04] blur-[60px]" />
         <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
           <svg
+            aria-hidden="true"
             xmlns="http://www.w3.org/2000/svg"
             width="40"
             height="40"

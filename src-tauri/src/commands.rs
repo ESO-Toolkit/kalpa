@@ -778,7 +778,9 @@ fn scan_installed_addons_blocking(
         for name in &stale {
             metadata::remove_entry(&mut store, name);
         }
-        let _ = metadata::save_metadata(addons_dir, &store);
+        if let Err(e) = metadata::save_metadata(addons_dir, &store) {
+            eprintln!("Warning: failed to prune stale metadata: {e}");
+        }
     }
 
     // Build a map of folder_name → addon_version for version constraint checking.
@@ -1229,7 +1231,9 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
         .collect();
 
     if metadata_changed {
-        let _ = metadata::save_metadata(addons_dir, &store);
+        if let Err(e) = metadata::save_metadata(addons_dir, &store) {
+            eprintln!("Warning: failed to save metadata after update check: {e}");
+        }
     }
 
     Ok(results)

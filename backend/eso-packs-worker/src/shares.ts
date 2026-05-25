@@ -144,6 +144,9 @@ function validateSharePayload(data: unknown): ValidationError[] {
       if (addon.note !== undefined && (typeof addon.note !== "string" || (addon.note as string).length > 500)) {
         errors.push({ field: `addons[${i}].note`, message: "note must be a string of at most 500 characters" });
       }
+      if (typeof addon.required !== "boolean") {
+        errors.push({ field: `addons[${i}].required`, message: "required must be a boolean" });
+      }
     }
   }
 
