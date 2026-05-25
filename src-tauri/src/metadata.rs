@@ -69,8 +69,20 @@ pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
             eprintln!("Recovered data from incomplete write {}.", tmp.display());
             // Promote the .tmp so subsequent loads hit the primary path.
             // On Windows fs::rename can't overwrite, so remove the corrupt primary first.
-            let _ = fs::remove_file(path);
-            let _ = fs::rename(&tmp, path);
+            // Best-effort: if promotion fails the data is still returned correctly;
+            // the next load will recover from .tmp again.
+            if let Err(e) = fs::remove_file(path) {
+                eprintln!(
+                    "Warning: could not remove corrupt primary {}: {e}",
+                    path.display()
+                );
+            }
+            if let Err(e) = fs::rename(&tmp, path) {
+                eprintln!(
+                    "Warning: could not promote {} to primary: {e}",
+                    tmp.display()
+                );
+            }
             return data;
         }
     }
@@ -336,6 +348,59 @@ mod tests {
         // 2024-01-01T00:00:00Z
         let ts = format_timestamp(1704067200);
         assert_eq!(ts, "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn load_recovers_from_tmp_when_primary_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.json");
+        let tmp_file = tmp.path().join("test.json.tmp");
+
+        // Simulate crash: .tmp exists (completed write) but primary was deleted
+        let mut store = MetadataStore::default();
+        record_install(
+            &mut store,
+            "CrashRecovered",
+            99,
+            "3.0.0",
+            "https://example.com",
+        );
+        let json = serde_json::to_string(&store).unwrap();
+        fs::write(&tmp_file, &json).unwrap();
+
+        // Primary does NOT exist — .tmp should be recovered and promoted
+        let loaded: MetadataStore = load_json_with_backup(&path);
+        assert_eq!(loaded.addons.len(), 1);
+        assert_eq!(loaded.addons["CrashRecovered"].esoui_id, 99);
+
+        // .tmp should be promoted to primary
+        assert!(path.exists());
+        assert!(!tmp_file.exists());
+    }
+
+    #[test]
+    fn load_recovers_from_tmp_over_corrupted_primary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.json");
+        let tmp_file = tmp.path().join("test.json.tmp");
+
+        // Simulate crash: primary is corrupted, .tmp has the latest data
+        fs::write(&path, "corrupted json{{{").unwrap();
+
+        let mut store = MetadataStore::default();
+        record_install(&mut store, "LatestData", 77, "5.0.0", "https://example.com");
+        let json = serde_json::to_string(&store).unwrap();
+        fs::write(&tmp_file, &json).unwrap();
+
+        // Should prefer .tmp (newest data) over .bak
+        let loaded: MetadataStore = load_json_with_backup(&path);
+        assert_eq!(loaded.addons.len(), 1);
+        assert_eq!(loaded.addons["LatestData"].esoui_id, 77);
+
+        // Corrupt primary should be replaced by promoted .tmp
+        assert!(path.exists());
+        let reloaded: MetadataStore = load_json_with_backup(&path);
+        assert_eq!(reloaded.addons["LatestData"].esoui_id, 77);
     }
 
     #[test]
