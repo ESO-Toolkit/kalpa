@@ -288,6 +288,7 @@ src-tauri/src/              # Rust backend
     io.rs                   # File I/O helpers
     types.rs                # Shared types
   auth.rs                   # Authentication
+  token_store.rs            # Secure credential storage (Windows Credential Manager)
   lib.rs                    # Module definitions and app setup
 
 backend/                    # Cloudflare Workers

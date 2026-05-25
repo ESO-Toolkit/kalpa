@@ -34,6 +34,10 @@ export async function getVote(
   return env.ESO_PACKS.get<VoteRecord>(voteKey(packId, userId), "json");
 }
 
+function userVoteKey(userId: string, packId: string): string {
+  return `user-votes:${userId}:${packId}`;
+}
+
 export async function putVote(
   env: Env,
   packId: string,
@@ -45,6 +49,7 @@ export async function putVote(
     votedAt: new Date().toISOString(),
   };
   await env.ESO_PACKS.put(voteKey(packId, userId), JSON.stringify(record));
+  await env.ESO_PACKS.put(userVoteKey(userId, packId), "1");
 }
 
 export async function deleteVote(
@@ -53,4 +58,5 @@ export async function deleteVote(
   userId: string,
 ): Promise<void> {
   await env.ESO_PACKS.delete(voteKey(packId, userId));
+  await env.ESO_PACKS.delete(userVoteKey(userId, packId));
 }

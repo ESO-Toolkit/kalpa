@@ -47,17 +47,53 @@ const HTML_ENTITIES: Record<string, string> = {
   "#39": "'",
   apos: "'",
   nbsp: " ",
+  ndash: "–",
+  mdash: "—",
+  hellip: "…",
+  laquo: "«",
+  raquo: "»",
+  lsquo: "‘",
+  rsquo: "’",
+  ldquo: "“",
+  rdquo: "”",
+  bull: "•",
+  middot: "·",
+  copy: "©",
+  reg: "®",
+  trade: "™",
+  deg: "°",
+  times: "×",
+  divide: "÷",
+  plusmn: "±",
+  micro: "µ",
+  eacute: "é",
+  egrave: "è",
+  agrave: "à",
+  aacute: "á",
+  uuml: "ü",
+  ouml: "ö",
+  auml: "ä",
+  iuml: "ï",
+  ccedil: "ç",
+  ntilde: "ñ",
+  szlig: "ß",
+  oslash: "ø",
+  aring: "å",
+  aelig: "æ",
+  Eacute: "É",
+  Agrave: "À",
+  Aacute: "Á",
+  Uuml: "Ü",
+  Ouml: "Ö",
+  Auml: "Ä",
 };
 
 export function decodeHtml(str: string): string {
-  return str.replace(
-    /&(amp|lt|gt|quot|#39|apos|nbsp|#(\d+)|#x([0-9a-fA-F]+));/g,
-    (match, name, dec, hex) => {
-      if (dec) return String.fromCharCode(Number(dec));
-      if (hex) return String.fromCharCode(parseInt(hex, 16));
-      return HTML_ENTITIES[name] ?? match;
-    }
-  );
+  return str.replace(/&(#\d+|#x[0-9a-fA-F]+|\w+);/g, (match, entity) => {
+    if (entity.startsWith("#x")) return String.fromCharCode(parseInt(entity.slice(2), 16));
+    if (entity.startsWith("#")) return String.fromCharCode(Number(entity.slice(1)));
+    return HTML_ENTITIES[entity] ?? match;
+  });
 }
 
 export function formatBytes(bytes: number): string {

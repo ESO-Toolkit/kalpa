@@ -31,7 +31,7 @@ In accordance with the Elder Scrolls Online Terms of Service, users must be at l
 When you search, browse, install, or update addons, Kalpa makes HTTPS requests to ESOUI's public API (`api.mmoui.com`, `www.esoui.com`, `cdn.esoui.com`). These requests include:
 
 - Addon IDs and search queries
-- A User-Agent header identifying the app (`Kalpa/{version}`)
+- A User-Agent header identifying the app (includes a standard browser-compatibility prefix and `Kalpa/{version}`)
 
 No personal information, auth tokens, or machine identifiers are sent to ESOUI.
 
@@ -54,7 +54,7 @@ The Pack Hub (`kalpa-pack-hub.eso-toolkit.workers.dev`) powers community addon c
 - Your IP address is stored in a rate-limiting key for **1 hour** to prevent duplicate counting, then automatically deleted
 
 **When you export a `.esopack` file with settings:**
-- SavedVariables data is scrubbed of personal information (account names, character names, character IDs are replaced with placeholders) before export
+- SavedVariables data is scrubbed of personal information (account names, character names, character IDs, and world names are replaced with placeholders) before export
 
 ### Data sent to ESO Logs
 

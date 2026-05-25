@@ -56,7 +56,10 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
       ];
       await env.ROSTER_HUB_DB.batch(tagStmts);
     } else {
-      await env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(pack.id).run();
+      await env.ROSTER_HUB_DB.batch([
+        env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(pack.id),
+        env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(pack.id),
+      ]);
     }
   } catch (err) {
     console.error(`D1 sync failed [${pack.id}]:`, err);
@@ -66,7 +69,10 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
 async function d1DeletePack(env: Env, id: string): Promise<void> {
   if (!env.ROSTER_HUB_DB) return;
   try {
-    await env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id).run();
+    await env.ROSTER_HUB_DB.batch([
+      env.ROSTER_HUB_DB.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(id),
+      env.ROSTER_HUB_DB.prepare("DELETE FROM packs WHERE id = ?").bind(id),
+    ]);
   } catch (err) {
     console.error(`D1 delete failed [${id}]:`, err);
   }
@@ -567,28 +573,29 @@ async function handleDeleteAccount(request: Request, env: Env, url: URL): Promis
   // Batch-delete from D1
   if (userPacks.length > 0 && env.ROSTER_HUB_DB) {
     try {
-      const stmts = userPacks.map((p) =>
+      const stmts = userPacks.flatMap((p) => [
+        env.ROSTER_HUB_DB!.prepare("DELETE FROM pack_tags WHERE pack_id = ?").bind(p.id),
         env.ROSTER_HUB_DB!.prepare("DELETE FROM packs WHERE id = ?").bind(p.id),
-      );
+      ]);
       await env.ROSTER_HUB_DB.batch(stmts);
     } catch (err) {
       console.error("D1 batch delete failed:", err);
     }
   }
 
-  // 2. Delete all user's votes
-  // Note: this deletes the vote KV keys but does not decrement vote_count on
-  // the packs the user voted on. The counts are denormalized aggregates and
-  // will be slightly stale — acceptable for a rare data-deletion operation.
+  // 2. Delete all user's votes via reverse index (user-votes:{userId}:{packId})
+  // Does not decrement vote_count — denormalized aggregates, acceptable for rare deletion.
   let voteCount = 0;
   let voteCursor: string | undefined;
   do {
-    const list = await env.ESO_PACKS.list({ prefix: "vote:", cursor: voteCursor });
+    const list = await env.ESO_PACKS.list({ prefix: `user-votes:${userId}:`, cursor: voteCursor });
     for (const key of list.keys) {
-      if (key.name.endsWith(`:${userId}`)) {
-        await env.ESO_PACKS.delete(key.name);
-        voteCount++;
+      const packId = key.name.slice(`user-votes:${userId}:`.length);
+      if (packId) {
+        await env.ESO_PACKS.delete(`vote:${packId}:${userId}`);
       }
+      await env.ESO_PACKS.delete(key.name);
+      voteCount++;
     }
     voteCursor = list.list_complete ? undefined : list.cursor;
   } while (voteCursor);
