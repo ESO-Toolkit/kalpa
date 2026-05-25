@@ -975,11 +975,16 @@ pub async fn install_addon(
 
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // Download outside the lock — network I/O doesn't touch kalpa.json
+        let tmp_file = esoui::download_addon(&download_url, None)?;
+
+        // Acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
         install_addon_blocking(
             &addons_dir,
+            tmp_file,
             &download_url,
             esoui_id,
             &esoui_title,
@@ -992,12 +997,12 @@ pub async fn install_addon(
 
 fn install_addon_blocking(
     addons_dir: &Path,
+    tmp_file: NamedTempFile,
     download_url: &str,
     esoui_id: u32,
     esoui_title: &str,
     esoui_version: &str,
 ) -> Result<InstallResult, String> {
-    let tmp_file = esoui::download_addon(download_url, None)?;
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
 
     file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, esoui_version);
@@ -1116,30 +1121,60 @@ pub async fn install_dependency(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // Network I/O outside the lock: search ESOUI, fetch info, download ZIP
+        let dep_id = {
+            let store = metadata::load_metadata(&addons_dir);
+            if let Some(meta) = store.addons.get(&*dep_name) {
+                meta.esoui_id
+            } else {
+                match esoui::search_addon_by_name(&dep_name) {
+                    Ok(Some(id)) => id,
+                    Ok(None) => return Err(format!("Failed to install {dep_name}: not_found")),
+                    Err(_) => return Err(format!("Failed to install {dep_name}: search_failed")),
+                }
+            }
+        };
+        let dep_info = esoui::fetch_addon_info(dep_id)
+            .map_err(|_| format!("Failed to install {dep_name}: fetch_failed"))?;
+        let dep_tmp = esoui::download_addon(&dep_info.download_url, None)
+            .map_err(|_| format!("Failed to install {dep_name}: download_failed"))?;
+
+        // Acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        install_dependency_blocking(&addons_dir, &dep_name)
+        install_dependency_blocking(&addons_dir, &dep_name, dep_id, dep_info, dep_tmp)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<InstallResult, String> {
+fn install_dependency_blocking(
+    addons_dir: &Path,
+    dep_name: &str,
+    dep_id: u32,
+    dep_info: EsouiAddonInfo,
+    dep_tmp: NamedTempFile,
+) -> Result<InstallResult, String> {
+    let dep_folders = installer::extract_addon_zip(dep_tmp.path(), addons_dir)
+        .map_err(|_| format!("Failed to install {dep_name}: extract_failed"))?;
+
+    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version);
+
     let mut store = metadata::load_metadata(addons_dir);
-    match try_install_dep(dep_name, addons_dir, &mut store) {
-        Ok(folders) => {
-            let resolved = resolve_transitive_deps(addons_dir, &folders, &mut store);
-            metadata::save_metadata(addons_dir, &store)?;
-            Ok(InstallResult {
-                installed_folders: folders,
-                installed_deps: resolved.installed_deps,
-                failed_deps: resolved.failed_deps,
-                skipped_deps: resolved.skipped_deps,
-            })
-        }
-        Err(reason) => Err(format!("Failed to install {dep_name}: {reason}")),
+    for f in &dep_folders {
+        let dep_version = read_local_version(addons_dir, f);
+        metadata::record_install(&mut store, f, dep_id, &dep_version, &dep_info.download_url);
     }
+
+    let resolved = resolve_transitive_deps(addons_dir, &dep_folders, &mut store);
+    metadata::save_metadata(addons_dir, &store)?;
+    Ok(InstallResult {
+        installed_folders: dep_folders,
+        installed_deps: resolved.installed_deps,
+        failed_deps: resolved.failed_deps,
+        skipped_deps: resolved.skipped_deps,
+    })
 }
 
 #[tauri::command]
@@ -1151,35 +1186,82 @@ pub async fn check_for_updates(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
-        let _guard = lock
-            .lock()
-            .map_err(|_| "Internal metadata lock error".to_string())?;
-        check_for_updates_blocking(&addons_dir)
+        // Phase 0: fetch the full ESOUI filelist outside the lock — big HTTP call
+        let api_lookup = esoui::fetch_filelist_lookup()?;
+
+        // Phase 1: acquire lock for metadata comparison and save
+        let pending = {
+            let _guard = lock
+                .lock()
+                .map_err(|_| "Internal metadata lock error".to_string())?;
+            check_for_updates_metadata(&addons_dir, &api_lookup)?
+        };
+        // Lock is released here
+
+        // Phase 2: fetch download URLs for outdated addons in parallel (no lock needed)
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .map_err(|e| format!("Thread pool error: {e}"))?;
+        let url_map: HashMap<u32, String> = pool.install(|| {
+            pending
+                .par_iter()
+                .filter(|p| p.has_update)
+                .filter_map(|p| {
+                    esoui::fetch_addon_info(p.esoui_id)
+                        .ok()
+                        .map(|info| (p.esoui_id, info.download_url))
+                })
+                .collect()
+        });
+
+        // Phase 3: assemble final results (pure data, no lock needed)
+        let results: Vec<UpdateCheckResult> = pending
+            .into_iter()
+            .map(|p| {
+                let download_url = if p.has_update {
+                    url_map.get(&p.esoui_id).cloned().unwrap_or(p.fallback_url)
+                } else {
+                    p.fallback_url
+                };
+                UpdateCheckResult {
+                    folder_name: p.folder_name,
+                    esoui_id: p.esoui_id,
+                    current_version: p.current_version,
+                    remote_version: p.remote_version,
+                    download_url,
+                    has_update: p.has_update,
+                }
+            })
+            .collect();
+
+        Ok(results)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult>, String> {
+struct UpdatePending {
+    folder_name: String,
+    esoui_id: u32,
+    current_version: String,
+    remote_version: String,
+    fallback_url: String,
+    has_update: bool,
+}
+
+/// Phase 1 of check_for_updates: compare local metadata against the ESOUI API
+/// lookup table. Must be called under the metadata lock.
+fn check_for_updates_metadata(
+    addons_dir: &Path,
+    api_lookup: &HashMap<String, esoui::ApiAddonLookup>,
+) -> Result<Vec<UpdatePending>, String> {
     let mut store = metadata::load_metadata(addons_dir);
     let mut metadata_changed = false;
 
-    // Single API call fetches all ~4000 addons (result is cached in-session)
-    let api_lookup = esoui::fetch_filelist_lookup()?;
-
     let folder_names: Vec<String> = store.addons.keys().cloned().collect();
 
-    // Phase 1: determine update status for each addon (sequential — mutates store)
-    struct Pending {
-        folder_name: String,
-        esoui_id: u32,
-        current_version: String,
-        remote_version: String,
-        fallback_url: String,
-        has_update: bool,
-    }
-
-    let mut pending: Vec<Pending> = Vec::new();
+    let mut pending: Vec<UpdatePending> = Vec::new();
 
     for folder_name in &folder_names {
         if !addons_dir.join(folder_name).is_dir() {
@@ -1227,7 +1309,7 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
             }
         }
 
-        pending.push(Pending {
+        pending.push(UpdatePending {
             folder_name: folder_name.clone(),
             esoui_id: meta.esoui_id,
             current_version: meta.installed_version.clone(),
@@ -1237,50 +1319,13 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
         });
     }
 
-    // Phase 2: fetch download URLs for outdated addons in parallel (capped at 4 threads)
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .map_err(|e| format!("Thread pool error: {e}"))?;
-    let url_map: HashMap<u32, String> = pool.install(|| {
-        pending
-            .par_iter()
-            .filter(|p| p.has_update)
-            .filter_map(|p| {
-                esoui::fetch_addon_info(p.esoui_id)
-                    .ok()
-                    .map(|info| (p.esoui_id, info.download_url))
-            })
-            .collect()
-    });
-
-    // Phase 3: assemble final results
-    let results: Vec<UpdateCheckResult> = pending
-        .into_iter()
-        .map(|p| {
-            let download_url = if p.has_update {
-                url_map.get(&p.esoui_id).cloned().unwrap_or(p.fallback_url)
-            } else {
-                p.fallback_url
-            };
-            UpdateCheckResult {
-                folder_name: p.folder_name,
-                esoui_id: p.esoui_id,
-                current_version: p.current_version,
-                remote_version: p.remote_version,
-                download_url,
-                has_update: p.has_update,
-            }
-        })
-        .collect();
-
     if metadata_changed {
         if let Err(e) = metadata::save_metadata(addons_dir, &store) {
             eprintln!("Warning: failed to save metadata after update check: {e}");
         }
     }
 
-    Ok(results)
+    Ok(pending)
 }
 
 #[tauri::command]
@@ -1294,10 +1339,21 @@ pub async fn update_addon(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // Network I/O outside the lock: fetch info + download ZIP
+        let info = esoui::fetch_addon_info(esoui_id)?;
+        let tmp_file = esoui::download_addon(&info.download_url, None)?;
+
+        // Acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        update_addon_blocking(&addons_dir, esoui_id, api_version.as_deref())
+        update_addon_blocking(
+            &addons_dir,
+            esoui_id,
+            api_version.as_deref(),
+            info,
+            tmp_file,
+        )
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -1307,12 +1363,10 @@ fn update_addon_blocking(
     addons_dir: &Path,
     esoui_id: u32,
     api_version: Option<&str>,
+    info: EsouiAddonInfo,
+    tmp_file: NamedTempFile,
 ) -> Result<InstallResult, String> {
-    // Fetch latest info from ESOUI
-    let info = esoui::fetch_addon_info(esoui_id)?;
-
-    // Download and extract
-    let tmp_file = esoui::download_addon(&info.download_url, None)?;
+    // Extract the downloaded ZIP
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
 
     // Store the API version (from filelist.json) when available, since
@@ -1399,20 +1453,35 @@ pub async fn batch_update_addons(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // Phase 1 (parallel): download ZIPs outside the lock — no metadata access
+        let download_results = batch_download_addons(&updates, &app)?;
+
+        // Phase 2: acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        batch_update_addons_blocking(&addons_dir, &updates, &app)
+        batch_extract_and_record(&addons_dir, download_results, updates.len(), &app)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-fn batch_update_addons_blocking(
-    addons_dir: &Path,
+struct BatchDownloaded {
+    tmp: NamedTempFile,
+    info: EsouiAddonInfo,
+    esoui_id: u32,
+    api_version: String,
+    index: usize,
+}
+
+type BatchDownloadResults = Vec<(String, Result<BatchDownloaded, String>)>;
+
+/// Phase 1 of batch_update_addons: parallel downloads without holding the
+/// metadata lock. Network I/O doesn't touch kalpa.json.
+fn batch_download_addons(
     updates: &[BatchUpdateEntry],
     app: &tauri::AppHandle,
-) -> Result<BatchUpdateResult, String> {
+) -> Result<BatchDownloadResults, String> {
     let total = updates.len();
 
     // Emit "downloading" for all addons at the start
@@ -1428,22 +1497,13 @@ fn batch_update_addons_blocking(
         );
     }
 
-    // Phase 1 (parallel): fetch addon info + download ZIPs, capped at 4 threads
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
         .build()
         .map_err(|e| format!("Thread pool error: {e}"))?;
 
-    struct Downloaded {
-        tmp: NamedTempFile,
-        info: EsouiAddonInfo,
-        esoui_id: u32,
-        api_version: String,
-        index: usize,
-    }
-
     let app_clone = app.clone();
-    let download_results: Vec<(String, Result<Downloaded, String>)> = pool.install(|| {
+    let download_results: Vec<(String, Result<BatchDownloaded, String>)> = pool.install(|| {
         updates
             .par_iter()
             .enumerate()
@@ -1459,7 +1519,7 @@ fn batch_update_addons_blocking(
                             total,
                         },
                     );
-                    Downloaded {
+                    BatchDownloaded {
                         tmp,
                         info,
                         esoui_id: entry.esoui_id,
@@ -1483,7 +1543,17 @@ fn batch_update_addons_blocking(
             .collect()
     });
 
-    // Phase 2 (sequential): extract ZIPs and record metadata
+    Ok(download_results)
+}
+
+/// Phase 2 of batch_update_addons: extract ZIPs and record metadata.
+/// Must be called under the metadata lock.
+fn batch_extract_and_record(
+    addons_dir: &Path,
+    download_results: BatchDownloadResults,
+    total: usize,
+    app: &tauri::AppHandle,
+) -> Result<BatchUpdateResult, String> {
     let mut store = metadata::load_metadata(addons_dir);
     let mut completed: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
@@ -2707,18 +2777,30 @@ pub async fn import_addon_list(
     let lock = meta_lock.0.clone();
 
     tokio::task::spawn_blocking(move || {
+        // Split into already-installed (skip) and to-install before any lock
+        let (to_skip, to_install): (Vec<_>, Vec<_>) = export
+            .addons
+            .iter()
+            .partition(|e| addons_dir.join(&e.folder_name).is_dir());
+
+        let skipped: Vec<String> = to_skip.iter().map(|e| e.folder_name.clone()).collect();
+
+        // Phase 1 (parallel): download ZIPs outside the lock — no metadata access
+        let download_results = import_download_addons(&to_install)?;
+
+        // Phase 2: acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        import_addon_list_blocking(&addons_dir, &export)
+        import_extract_and_record(&addons_dir, download_results, skipped)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Return true if the error string indicates an HTTP 429 rate-limit response.
-/// Matches both `fetch_addon_info` ("Too many requests…") and `download_addon`
-/// ("Download failed (HTTP 429)…") error formats.
+/// Matches both `fetch_addon_info` ("Too many requests...") and `download_addon`
+/// ("Download failed (HTTP 429)...") error formats.
 fn is_rate_limited(err: &str) -> bool {
     err.contains("Too many requests") || err.contains("HTTP 429")
 }
@@ -2771,51 +2853,48 @@ fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiA
     Err(last_err)
 }
 
-fn import_addon_list_blocking(
-    addons_dir: &Path,
-    export: &ExportData,
-) -> Result<ImportResult, String> {
-    let mut store = metadata::load_metadata(addons_dir);
+struct ImportDownloaded {
+    tmp: NamedTempFile,
+    info: EsouiAddonInfo,
+    esoui_id: u32,
+}
 
-    // Split into already-installed (skip) and to-install
-    let (to_skip, to_install): (Vec<_>, Vec<_>) = export
-        .addons
-        .iter()
-        .partition(|e| addons_dir.join(&e.folder_name).is_dir());
+type ImportDownloadResults = Vec<(String, Result<ImportDownloaded, String>)>;
 
-    let skipped: Vec<String> = to_skip.iter().map(|e| e.folder_name.clone()).collect();
-
-    // Phase 1 (parallel): fetch metadata + download ZIPs, capped at 4 connections.
-    // Extraction is intentionally excluded from this phase — concurrent writes to the
-    // same AddOns tree can corrupt shared folders (e.g. library bundles present in
-    // multiple addon ZIPs). Downloads are safe to parallelise; extraction is not.
+/// Phase 1 of import_addon_list: parallel downloads without the metadata lock.
+fn import_download_addons(to_install: &[&ExportEntry]) -> Result<ImportDownloadResults, String> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
         .build()
         .map_err(|e| format!("Thread pool error: {e}"))?;
 
-    struct Downloaded {
-        tmp: NamedTempFile,
-        info: EsouiAddonInfo,
-        esoui_id: u32,
-    }
-
-    let download_results: Vec<(String, Result<Downloaded, String>)> = pool.install(|| {
+    let download_results: Vec<(String, Result<ImportDownloaded, String>)> = pool.install(|| {
         to_install
             .par_iter()
             .map(|entry| {
-                let result =
-                    fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| Downloaded {
+                let result = fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| {
+                    ImportDownloaded {
                         tmp,
                         info,
                         esoui_id: entry.esoui_id,
-                    });
+                    }
+                });
                 (entry.folder_name.clone(), result)
             })
             .collect()
     });
 
-    // Phase 2 (sequential): extract ZIPs and record metadata one at a time.
+    Ok(download_results)
+}
+
+/// Phase 2 of import_addon_list: extract ZIPs and record metadata.
+/// Must be called under the metadata lock.
+fn import_extract_and_record(
+    addons_dir: &Path,
+    download_results: ImportDownloadResults,
+    skipped: Vec<String>,
+) -> Result<ImportResult, String> {
+    let mut store = metadata::load_metadata(addons_dir);
     let mut installed: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     let mut errors: HashMap<String, String> = HashMap::new();
