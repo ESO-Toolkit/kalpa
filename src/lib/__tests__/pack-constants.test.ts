@@ -44,25 +44,24 @@ describe("PACK_TYPE_ACCENT", () => {
   it("has accent styles for all pack types", () => {
     for (const type of ["addon-pack", "build-pack", "roster-pack"] as const) {
       const accent = PACK_TYPE_ACCENT[type];
-      expect(accent).toBeDefined();
-      expect(accent!.border).toBeTruthy();
-      expect(accent!.bg).toBeTruthy();
-      expect(accent!.hoverBg).toBeTruthy();
-      expect(accent!.text).toBeTruthy();
-      expect(accent!.hoverGlow).toBeTruthy();
+      expect(accent.border).toBeTruthy();
+      expect(accent.bg).toBeTruthy();
+      expect(accent.hoverBg).toBeTruthy();
+      expect(accent.text).toBeTruthy();
+      expect(accent.hoverGlow).toBeTruthy();
     }
   });
 
   it("uses ESO gold for addon-pack", () => {
-    expect(PACK_TYPE_ACCENT["addon-pack"]!.text).toContain("#c4a44a");
+    expect(PACK_TYPE_ACCENT["addon-pack"].text).toContain("#c4a44a");
   });
 
   it("uses sky for build-pack", () => {
-    expect(PACK_TYPE_ACCENT["build-pack"]!.text).toContain("sky");
+    expect(PACK_TYPE_ACCENT["build-pack"].text).toContain("sky");
   });
 
   it("uses violet for roster-pack", () => {
-    expect(PACK_TYPE_ACCENT["roster-pack"]!.text).toContain("violet");
+    expect(PACK_TYPE_ACCENT["roster-pack"].text).toContain("violet");
   });
 });
 
