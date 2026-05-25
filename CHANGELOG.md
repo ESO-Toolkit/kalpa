@@ -4,9 +4,40 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] — 2026-05-23
+
+### Bug Fixes
+- Hide batch action controls in the Discover tab and harden list selection state
+
+### Documentation
+- Mark the README as Beta and add a "Security & privacy" section
+- Document `.esopack` v2 privacy scrubbing and how to verify downloads
+- Expand the beta changelog and add a beta-feedback issue template
+
+### Internal
+- Bump CI Node.js 20 → 22 for wrangler 4.93 compatibility
+
 ## [0.1.0-beta.1] — 2026-05-23
 
-First beta release. Graduating from alpha after comprehensive security audit, 499-test verification, and 3 rounds of independent code review.
+First beta release. Graduating from alpha after a comprehensive security audit, 491-test verification, and 3 rounds of independent code review. The highlights below consolidate the headline work that made Kalpa beta-ready; see the alpha entries for per-change detail.
+
+### Security & Hardening
+- Allowlisted ESOUI download URLs and centralized path validation across all Tauri IPC commands
+- Recursion caps and streaming ZIP hashing to bound resource use during install
+- DoS-resistant Pack Hub: native rate limiting plus a Durable Object for atomic pack-index mutations
+- CSP hardening, including `frame-ancestors 'none'`
+- Dependencies verified against May 2026 CVE databases — zero `npm audit` / `cargo audit` vulnerabilities
+
+### Features
+- Protected edits — file-level diff and per-file choice when an update would overwrite your local changes, with automatic edit backups
+- `.esopack` v2 — optional account-wide addon settings in shared packs, automatically scrubbed of personal data on export and re-mapped to the importer on install (see [docs/settings-export.md](docs/settings-export.md))
+- Redesigned backup & restore UX with a protection-status indicator and an automatic safety snapshot before every restore
+- Dependency resolution — auto-install new transitive dependencies after updates and validate version constraints against installed addons
+
+### Testing & CI
+- 491 tests across Vitest (frontend + worker) and Rust unit test suites
+- Worker tests run in CI and before every deploy
+- Pinned Rust 1.88.0 and cargo-audit 0.22.1
 
 ### Dependencies
 - Bump tauri 2.11.1 → 2.11.2, tauri-build 2.6.1 → 2.6.2
@@ -122,7 +153,8 @@ First public alpha release of **Kalpa** — an open-source desktop addon manager
 - GitHub Actions CI/CD with tag-triggered Windows release builds
 - Code of Conduct (Contributor Covenant v2.1)
 
-[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.2...HEAD
+[0.1.0-beta.2]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-beta.1...v0.1.0-beta.2
 [0.1.0-beta.1]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.8...v0.1.0-beta.1
 [0.1.0-alpha.8]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.3...v0.1.0-alpha.8
 [0.1.0-alpha.3]: https://github.com/ESO-Toolkit/kalpa/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
