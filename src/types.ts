@@ -50,7 +50,13 @@ export interface UpdateCheckResult {
 export interface BatchUpdateResult {
   completed: string[];
   failed: string[];
-  errors?: Record<string, string>;
+  errors: Record<string, string>;
+}
+
+export interface BatchRemoveResult {
+  removed: string[];
+  failed: string[];
+  errors: Record<string, string>;
 }
 
 export interface ImportResult {
@@ -126,6 +132,13 @@ export interface AddonProfile {
   createdAt: string;
 }
 
+export interface ActivateProfileResult {
+  enabled: string[];
+  disabled: string[];
+  failed: string[];
+  missing: string[];
+}
+
 export interface CharacterInfo {
   server: string;
   name: string;
@@ -165,6 +178,7 @@ export interface SvTreeNode {
   valueType: "string" | "number" | "boolean" | "nil" | "table";
   value?: string | number | boolean | null;
   children?: SvTreeNode[];
+  rawLuaValue?: string;
 }
 
 export interface SvFileStamp {

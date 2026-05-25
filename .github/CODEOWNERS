@@ -1,0 +1,8 @@
+# Default owner for everything
+* @braydenpb72
+
+# Critical configuration — require explicit review
+.github/workflows/          @braydenpb72
+src-tauri/tauri.conf.json   @braydenpb72
+src-tauri/Cargo.toml        @braydenpb72
+backend/eso-packs-worker/wrangler.toml @braydenpb72

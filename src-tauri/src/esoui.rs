@@ -139,6 +139,13 @@ fn fetch_page(
         });
     }
 
+    const MAX_PAGE_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
+    if let Some(len) = response.content_length() {
+        if len > MAX_PAGE_SIZE {
+            return Err("ESOUI response too large.".to_string());
+        }
+    }
+
     response
         .text()
         .map_err(|e| format!("Failed to read response: {e}"))
@@ -776,34 +783,52 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, Str
     Ok(BrowsePopularPage { results, has_more })
 }
 
-pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
+pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTempFile, String> {
     if !url.starts_with("https://cdn.esoui.com/") && !url.starts_with("https://www.esoui.com/") {
         return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
     }
 
     let client = http_client();
 
-    let response = client.get(url).send().map_err(|e| {
-        if e.is_connect() || e.is_timeout() {
-            "Download failed. Check your internet connection.".to_string()
-        } else {
-            format!("Download failed: {e}")
+    // Retry loop for transient HTTP errors (429, 502, 503, 504)
+    const MAX_RETRIES: u32 = 2;
+    let mut last_err;
+    let response = 'retry: {
+        last_err = String::new();
+        for attempt in 0..=MAX_RETRIES {
+            let resp = client.get(url).send().map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    "Download failed. Check your internet connection.".to_string()
+                } else {
+                    format!("Download failed: {e}")
+                }
+            })?;
+
+            let final_url = resp.url().as_str();
+            if !final_url.starts_with("https://cdn.esoui.com/")
+                && !final_url.starts_with("https://www.esoui.com/")
+            {
+                return Err("Download was redirected to an untrusted host.".to_string());
+            }
+
+            let status = resp.status();
+            if status.is_success() {
+                break 'retry resp;
+            }
+
+            if is_transient_status(status) && attempt < MAX_RETRIES {
+                last_err = format!("HTTP {status}");
+                let delay = Duration::from_millis(500 * (1 << attempt));
+                std::thread::sleep(delay);
+                continue;
+            }
+
+            return Err(format!(
+                "Download failed (HTTP {status}). The file may have been removed from ESOUI.",
+            ));
         }
-    })?;
-
-    let final_url = response.url().as_str();
-    if !final_url.starts_with("https://cdn.esoui.com/")
-        && !final_url.starts_with("https://www.esoui.com/")
-    {
-        return Err("Download was redirected to an untrusted host.".to_string());
-    }
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!(
-            "Download failed (HTTP {status}). The file may have been removed from ESOUI.",
-        ));
-    }
+        return Err(format!("Download failed after retries: {last_err}"));
+    };
 
     let expected_size = response.content_length();
 
@@ -818,6 +843,25 @@ pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
             return Err(format!(
                 "Download incomplete: received {written} bytes, expected {expected}. Try again."
             ));
+        }
+    }
+
+    // Verify MD5 checksum if provided by ESOUI API
+    if let Some(expected) = expected_md5 {
+        if !expected.is_empty() {
+            use md5::{Digest, Md5};
+            tmp.as_file()
+                .seek(io::SeekFrom::Start(0))
+                .map_err(|e| format!("Failed to seek: {e}"))?;
+            let mut hasher = Md5::new();
+            io::copy(&mut tmp.as_file(), &mut hasher)
+                .map_err(|e| format!("Failed to hash download: {e}"))?;
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != expected.to_lowercase() {
+                return Err(
+                    "Download checksum mismatch — the file may be corrupt. Try again.".to_string(),
+                );
+            }
         }
     }
 
@@ -984,16 +1028,13 @@ pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String
 fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
     let client = http_client();
     let url = "https://api.mmoui.com/v4/game/ESO/filelist.json";
-    let response = client.get(url).send().map_err(|e| {
-        if e.is_connect() || e.is_timeout() {
-            "Could not reach ESOUI API. Check your internet connection.".to_string()
-        } else {
-            format!("ESOUI API request failed: {e}")
-        }
-    })?;
+    let response = fetch_with_retry(client, url)?;
 
-    if !response.status().is_success() {
-        return Err(format!("ESOUI API returned HTTP {}", response.status()));
+    const MAX_FILELIST_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+    if let Some(len) = response.content_length() {
+        if len > MAX_FILELIST_SIZE {
+            return Err("ESOUI filelist response too large.".to_string());
+        }
     }
 
     response
@@ -1096,14 +1137,14 @@ mod tests {
 
     #[test]
     fn download_addon_rejects_non_esoui_urls() {
-        let result = download_addon("https://evil.com/malware.zip");
+        let result = download_addon("https://evil.com/malware.zip", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only ESOUI"));
     }
 
     #[test]
     fn download_addon_rejects_http_esoui() {
-        let result = download_addon("http://cdn.esoui.com/addon.zip");
+        let result = download_addon("http://cdn.esoui.com/addon.zip", None);
         assert!(result.is_err());
     }
 }

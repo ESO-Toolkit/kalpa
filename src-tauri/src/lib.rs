@@ -10,6 +10,7 @@ mod manifest_cache;
 mod metadata;
 mod safe_migration;
 mod saved_variables;
+mod token_store;
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -31,6 +32,11 @@ pub struct ApprovedAddonsPath {
 }
 
 pub struct AllowedAddonsPath(pub Mutex<Option<ApprovedAddonsPath>>);
+
+/// Guards all load_metadata → modify → save_metadata sequences against
+/// concurrent access (TOCTOU). Wrap every read-modify-write cycle in
+/// `let _guard = lock.0.lock()…;` before touching the metadata store.
+pub struct MetadataLock(pub Arc<Mutex<()>>);
 
 pub struct TrayState(pub Mutex<Option<tauri::tray::TrayIcon>>);
 
@@ -189,6 +195,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
+        .manage(MetadataLock(Arc::new(Mutex::new(()))))
         .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
         .manage(PendingDeepLink(Mutex::new(
@@ -278,18 +285,13 @@ pub fn run() {
                 *guard = Some(tray);
             }
 
-            // Load saved auth tokens from store
-            {
-                use tauri_plugin_store::StoreExt;
-                if let Ok(store) = app.store("settings.json") {
-                    if let Some(val) = store.get("auth_tokens") {
-                        if let Ok(tokens) = serde_json::from_value::<auth::AuthTokens>(val.clone())
-                        {
-                            if let Ok(mut guard) = app.state::<auth::AuthState>().tokens.lock() {
-                                *guard = Some(tokens);
-                            }
-                        }
-                    }
+            // Migrate auth tokens from plaintext store to credential manager (one-time)
+            token_store::migrate_from_store(app.handle());
+
+            // Load auth tokens from secure credential manager
+            if let Some(tokens) = token_store::load_tokens() {
+                if let Ok(mut guard) = app.state::<auth::AuthState>().tokens.lock() {
+                    *guard = Some(tokens);
                 }
             }
 
@@ -360,6 +362,7 @@ pub fn run() {
             commands::create_pack,
             commands::update_pack,
             commands::delete_pack,
+            commands::delete_pack_hub_account,
             commands::vote_pack,
             commands::track_pack_install,
             commands::create_share_code,

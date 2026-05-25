@@ -38,6 +38,18 @@ export class PackIndexDO extends DurableObject<Env> {
     await this.putIndex(index);
   }
 
+  /** Remove all packs by a given author in a single read-write cycle. */
+  async removePacksByAuthor(authorId: string): Promise<number> {
+    const index = await this.getIndex();
+    const before = index.packs.length;
+    index.packs = index.packs.filter((p) => p.author_id !== authorId);
+    const removed = before - index.packs.length;
+    if (removed > 0) {
+      await this.putIndex(index);
+    }
+    return removed;
+  }
+
   async replaceIndex(index: PackIndex): Promise<void> {
     await this.putIndex(index);
   }

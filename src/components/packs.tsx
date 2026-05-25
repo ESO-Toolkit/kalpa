@@ -495,7 +495,7 @@ export function Packs({
   };
 
   // ── Import handlers ──────────────────────────────────────────────
-  const handleResolveShareCode = async (code: string) => {
+  const handleResolveShareCode = useCallback(async (code: string) => {
     const trimmed = code.trim().toUpperCase();
     if (!trimmed) return;
 
@@ -511,7 +511,7 @@ export function Packs({
     } finally {
       setResolvingCode(false);
     }
-  };
+  }, []);
 
   const handleImportFile = async () => {
     const path = await openFileDialog({
@@ -551,7 +551,7 @@ export function Packs({
       setShowImportPanel(true);
       handleResolveShareCode(initialShareCode);
     }
-  }, [initialShareCode]);
+  }, [initialShareCode, handleResolveShareCode]);
 
   // Selected addons for imported pack preview
   const importedPackAddonsToInstall = useMemo(() => {

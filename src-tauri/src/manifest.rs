@@ -63,7 +63,8 @@ fn parse_dependencies(value: &str) -> Vec<Dependency> {
 }
 
 pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonManifest> {
-    let content = fs::read_to_string(manifest_path).ok()?;
+    let bytes = fs::read(manifest_path).ok()?;
+    let content = String::from_utf8_lossy(&bytes).into_owned();
 
     let mut title = String::new();
     let mut author = String::new();

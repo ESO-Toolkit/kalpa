@@ -41,6 +41,18 @@ const ERROR_HINTS: [RegExp, string][] = [
     /permission denied \(os error 13\)|access is denied|os error 5/i,
     "Permission denied — antivirus or another program may be blocking the file.",
   ],
+  [
+    /os error 32|sharing violation/i,
+    "A file is in use by another program. Close ESO and any antivirus scanning the AddOns folder, then try again.",
+  ],
+  [
+    /os error 33|lock violation/i,
+    "A file is locked by another process. Close ESO or any other program accessing the AddOns folder.",
+  ],
+  [
+    /os error 112|no space left|not enough space/i,
+    "Not enough disk space. Free up some space and try again.",
+  ],
 ];
 
 export function getTauriErrorMessage(error: unknown): string {

@@ -1,5 +1,7 @@
 # MVP Plan
 
+> **Historical:** All phases below are complete. The app is now in beta with features far beyond the original MVP scope. This document is preserved for context on the original roadmap.
+
 Phase 1: Local client only
 
 - Scaffold the Tauri app

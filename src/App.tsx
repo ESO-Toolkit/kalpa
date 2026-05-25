@@ -20,6 +20,7 @@ import type {
   AuthUser,
   BatchConflictAddon,
   BatchConflictResult,
+  BatchRemoveResult,
   GameInstance,
   InstallResult,
   UpdateCheckResult,
@@ -193,18 +194,14 @@ function App() {
             folderName,
             phase as "downloading" | "scanning" | "extracting" | "completed" | "failed"
           );
-          return next;
-        });
-        // Keep legacy progress in sync
-        let completed = 0;
-        let failed = 0;
-        setAddonStatuses((current) => {
-          for (const s of current.values()) {
+          let completed = 0;
+          let failed = 0;
+          for (const s of next.values()) {
             if (s === "completed") completed++;
             if (s === "failed") failed++;
           }
           setUpdateProgress({ completed, failed, total, currentAddon: folderName });
-          return current;
+          return next;
         });
       }
     )
@@ -396,7 +393,15 @@ function App() {
       }
     } else {
       // No saved path — run detection and show wizard or auto-select
-      const instances = await invokeOrThrow<GameInstance[]>("detect_game_instances");
+      let instances: GameInstance[];
+      try {
+        instances = await invokeOrThrow<GameInstance[]>("detect_game_instances");
+      } catch (detectError) {
+        setError(`Could not detect game folders: ${getTauriErrorMessage(detectError)}`);
+        setSetupInstances([]);
+        setLoading(false);
+        return;
+      }
       setKnownInstances(instances);
 
       const singleClean = instances.length === 1 && !instances[0]!.isOnedrive;
@@ -725,6 +730,18 @@ function App() {
 
       if (updatingAllRef.current) return;
 
+      try {
+        const esoRunning = await invokeOrThrow<boolean>("is_eso_running");
+        if (esoRunning) {
+          toast.error(
+            "Elder Scrolls Online is running. Close it before updating addons to avoid file conflicts."
+          );
+          return;
+        }
+      } catch {
+        // Non-critical — proceed if we can't check
+      }
+
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
       setAddonStatuses(new Map());
@@ -948,13 +965,26 @@ function App() {
 
     const timer = setTimeout(() => {
       for (const fn of folderNames) pendingRemovalsRef.current.delete(fn);
-      void invokeOrThrow<string[]>("batch_remove_addons", {
+      void invokeOrThrow<BatchRemoveResult>("batch_remove_addons", {
         addonsPath,
         folderNames,
-      }).catch((e) => {
-        toast.error(`Batch remove failed: ${getTauriErrorMessage(e)}`);
-        setAddons((prev) => [...prev, ...removedAddons]);
-      });
+      })
+        .then((result) => {
+          if (result.failed.length > 0) {
+            // Restore only the addons that failed to remove
+            const failedSet = new Set(result.failed);
+            const failedAddons = removedAddons.filter((a) => failedSet.has(a.folderName));
+            setAddons((prev) => [...prev, ...failedAddons]);
+            const details = result.failed
+              .map((name) => `${name}: ${result.errors[name] ?? "unknown error"}`)
+              .join("; ");
+            toast.error(`Failed to remove ${result.failed.length} addon(s): ${details}`);
+          }
+        })
+        .catch((e) => {
+          toast.error(`Batch remove failed: ${getTauriErrorMessage(e)}`);
+          setAddons((prev) => [...prev, ...removedAddons]);
+        });
     }, 3000);
 
     for (const addon of removedAddons) {

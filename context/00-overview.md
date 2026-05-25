@@ -1,5 +1,7 @@
 # Overview
 
+> **Note:** This is an early planning document from the initial design phase. The core principles still hold, but the app has grown well beyond the scope described here. See `README.md` and `CLAUDE.md` for the current state.
+
 We are building Kalpa, an open-source ESO addon manager.
 
 Core product requirements:

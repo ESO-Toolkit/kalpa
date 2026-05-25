@@ -98,7 +98,9 @@ export function AppDialogs({
       {activeDialog === "settings" && (
         <Settings
           addonsPath={addonsPath}
+          authUser={authUser}
           knownInstances={knownInstances}
+          onAuthChange={onAuthChange}
           onPathChange={onPathChange}
           onClose={onCloseDialog}
           onRefresh={onRefresh}
