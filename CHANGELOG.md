@@ -19,7 +19,7 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [0.1.0-beta.1] — 2026-05-23
 
-First beta release. Graduating from alpha after a comprehensive security audit, 499-test verification, and 3 rounds of independent code review. The highlights below consolidate the headline work that made Kalpa beta-ready; see the alpha entries for per-change detail.
+First beta release. Graduating from alpha after a comprehensive security audit, 491-test verification, and 3 rounds of independent code review. The highlights below consolidate the headline work that made Kalpa beta-ready; see the alpha entries for per-change detail.
 
 ### Security & Hardening
 - Allowlisted ESOUI download URLs and centralized path validation across all Tauri IPC commands
@@ -35,7 +35,7 @@ First beta release. Graduating from alpha after a comprehensive security audit, 
 - Dependency resolution — auto-install new transitive dependencies after updates and validate version constraints against installed addons
 
 ### Testing & CI
-- 499 tests across Vitest unit, Playwright E2E, and Cloudflare Worker suites
+- 491 tests across Vitest (frontend + worker) and Rust unit test suites
 - Worker tests run in CI and before every deploy
 - Pinned Rust 1.88.0 and cargo-audit 0.22.1
 
