@@ -112,7 +112,7 @@ const AddonListItem = memo(function AddonListItem({
             : addon.outdatedDependencies.length > 0
               ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
               : addon.isLibrary
-                ? "border-l-emerald-400 shadow-[inset_4px_0_12px_-4px_rgba(52,211,153,0.08)]"
+                ? "border-l-violet-400 shadow-[inset_4px_0_12px_-4px_rgba(167,139,250,0.08)]"
                 : hasUpdate
                   ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
                   : "border-l-transparent",
@@ -154,7 +154,7 @@ const AddonListItem = memo(function AddonListItem({
               <span className="text-[#c4a44a] mr-1">{"\u2605"}</span>
             )}
             {addon.isLibrary && (
-              <span className="text-emerald-400 mr-1 text-[10px] font-medium uppercase tracking-wide">
+              <span className="text-violet-400 mr-1 text-[10px] font-medium uppercase tracking-wide">
                 LIB
               </span>
             )}

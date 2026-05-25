@@ -783,27 +783,45 @@ pub fn download_addon(url: &str) -> Result<NamedTempFile, String> {
 
     let client = http_client();
 
-    let response = client.get(url).send().map_err(|e| {
-        if e.is_connect() || e.is_timeout() {
-            "Download failed. Check your internet connection.".to_string()
-        } else {
-            format!("Download failed: {e}")
+    // Retry loop for transient HTTP errors (429, 502, 503, 504)
+    const MAX_RETRIES: u32 = 2;
+    let mut last_err;
+    let response = 'retry: {
+        last_err = String::new();
+        for attempt in 0..=MAX_RETRIES {
+            let resp = client.get(url).send().map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    "Download failed. Check your internet connection.".to_string()
+                } else {
+                    format!("Download failed: {e}")
+                }
+            })?;
+
+            let final_url = resp.url().as_str();
+            if !final_url.starts_with("https://cdn.esoui.com/")
+                && !final_url.starts_with("https://www.esoui.com/")
+            {
+                return Err("Download was redirected to an untrusted host.".to_string());
+            }
+
+            let status = resp.status();
+            if status.is_success() {
+                break 'retry resp;
+            }
+
+            if is_transient_status(status) && attempt < MAX_RETRIES {
+                last_err = format!("HTTP {status}");
+                let delay = Duration::from_millis(500 * (1 << attempt));
+                std::thread::sleep(delay);
+                continue;
+            }
+
+            return Err(format!(
+                "Download failed (HTTP {status}). The file may have been removed from ESOUI.",
+            ));
         }
-    })?;
-
-    let final_url = response.url().as_str();
-    if !final_url.starts_with("https://cdn.esoui.com/")
-        && !final_url.starts_with("https://www.esoui.com/")
-    {
-        return Err("Download was redirected to an untrusted host.".to_string());
-    }
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!(
-            "Download failed (HTTP {status}). The file may have been removed from ESOUI.",
-        ));
-    }
+        return Err(format!("Download failed after retries: {last_err}"));
+    };
 
     let expected_size = response.content_length();
 
@@ -984,17 +1002,7 @@ pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String
 fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
     let client = http_client();
     let url = "https://api.mmoui.com/v4/game/ESO/filelist.json";
-    let response = client.get(url).send().map_err(|e| {
-        if e.is_connect() || e.is_timeout() {
-            "Could not reach ESOUI API. Check your internet connection.".to_string()
-        } else {
-            format!("ESOUI API request failed: {e}")
-        }
-    })?;
-
-    if !response.status().is_success() {
-        return Err(format!("ESOUI API returned HTTP {}", response.status()));
-    }
+    let response = fetch_with_retry(client, url)?;
 
     response
         .json()

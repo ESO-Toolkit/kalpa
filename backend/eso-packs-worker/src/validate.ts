@@ -106,6 +106,12 @@ export function validatePack(pack: unknown): ValidationError[] {
           message: "required must be a boolean",
         });
       }
+      if (addon.defaultEnabled !== undefined && typeof addon.defaultEnabled !== "boolean") {
+        errors.push({
+          field: `addons[${i}].defaultEnabled`,
+          message: "defaultEnabled must be a boolean",
+        });
+      }
     }
   }
 

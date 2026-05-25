@@ -95,6 +95,68 @@ pub fn extract_addon_zip(zip_path: &Path, addons_dir: &Path) -> Result<Vec<Strin
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
+    // Snapshot which top-level addon folders already exist so we only
+    // clean up genuinely new directories on failure.
+    let mut pre_existing: HashSet<String> = HashSet::new();
+    for i in 0..archive.len() {
+        if let Ok(entry) = archive.by_index(i) {
+            if let Some(p) = entry.enclosed_name() {
+                if let Some(first) = p.components().next() {
+                    let folder = first.as_os_str().to_string_lossy().to_string();
+                    if addons_dir.join(&folder).is_dir() {
+                        pre_existing.insert(folder);
+                    }
+                }
+            }
+        }
+    }
+
+    let result = extract_addon_zip_inner(&mut archive, addons_dir);
+
+    if let Err(ref err_msg) = result {
+        // On failure, remove only folders that were newly created (not pre-existing)
+        // to avoid destroying the user's existing addon during a failed update.
+        if let Ok(created) = collect_zip_top_folders(&mut archive) {
+            for folder in &created {
+                if !pre_existing.contains(folder) {
+                    let folder_path = addons_dir.join(folder);
+                    if folder_path.is_dir() {
+                        eprintln!(
+                            "Cleaning up partially extracted folder {folder:?} after error: {err_msg}"
+                        );
+                        let _ = fs::remove_dir_all(&folder_path);
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Collect top-level folder names from a ZIP archive.
+fn collect_zip_top_folders(
+    archive: &mut zip::ZipArchive<fs::File>,
+) -> Result<HashSet<String>, String> {
+    let mut folders = HashSet::new();
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read ZIP entry: {e}"))?;
+        if let Some(p) = entry.enclosed_name() {
+            if let Some(first) = p.components().next() {
+                folders.insert(first.as_os_str().to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(folders)
+}
+
+/// Inner extraction logic, separated so the caller can clean up on error.
+fn extract_addon_zip_inner(
+    archive: &mut zip::ZipArchive<fs::File>,
+    addons_dir: &Path,
+) -> Result<Vec<String>, String> {
     let mut created_folders: HashSet<String> = HashSet::new();
     let mut total_extracted: u64 = 0;
 

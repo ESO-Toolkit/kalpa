@@ -110,6 +110,12 @@ export function DiscoverDetail({
     return () => window.removeEventListener("keydown", handler);
   }, [detail]);
 
+  useEffect(() => {
+    return () => {
+      if (md5TimerRef.current) clearTimeout(md5TimerRef.current);
+    };
+  }, []);
+
   if (!result) {
     return (
       <div className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8">

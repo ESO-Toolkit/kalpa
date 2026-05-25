@@ -147,6 +147,9 @@ function validateSharePayload(data: unknown): ValidationError[] {
       if (typeof addon.required !== "boolean") {
         errors.push({ field: `addons[${i}].required`, message: "required must be a boolean" });
       }
+      if (addon.defaultEnabled !== undefined && typeof addon.defaultEnabled !== "boolean") {
+        errors.push({ field: `addons[${i}].defaultEnabled`, message: "defaultEnabled must be a boolean" });
+      }
     }
   }
 

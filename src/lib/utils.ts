@@ -39,12 +39,25 @@ export function formatRelativeExpiry(iso: string): string {
   return `Expires in ~${days} day${days !== 1 ? "s" : ""}`;
 }
 
-const _htmlDecodeEl = typeof document !== "undefined" ? document.createElement("textarea") : null;
+const HTML_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  "#39": "'",
+  apos: "'",
+  nbsp: " ",
+};
 
 export function decodeHtml(str: string): string {
-  if (!_htmlDecodeEl) return str;
-  _htmlDecodeEl.innerHTML = str;
-  return _htmlDecodeEl.value;
+  return str.replace(
+    /&(amp|lt|gt|quot|#39|apos|nbsp|#(\d+)|#x([0-9a-fA-F]+));/g,
+    (match, name, dec, hex) => {
+      if (dec) return String.fromCharCode(Number(dec));
+      if (hex) return String.fromCharCode(parseInt(hex, 16));
+      return HTML_ENTITIES[name] ?? match;
+    }
+  );
 }
 
 export function formatBytes(bytes: number): string {

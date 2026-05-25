@@ -6,6 +6,7 @@ use crate::manifest::{self, AddonManifest};
 use crate::manifest_cache;
 use crate::metadata;
 use crate::AllowedAddonsPath;
+use crate::MetadataLock;
 use crate::{PendingDeepLink, PendingDeepLinkPayload};
 use rayon::prelude::*;
 use regex::Regex;
@@ -656,6 +657,7 @@ pub fn detect_game_instances() -> Vec<crate::game_instances::GameInstance> {
 pub async fn scan_installed_addons(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
 ) -> Result<Vec<AddonManifest>, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
@@ -663,9 +665,15 @@ pub async fn scan_installed_addons(
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
-    tokio::task::spawn_blocking(move || scan_installed_addons_blocking(&addons_dir, &cache_dir))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        scan_installed_addons_blocking(&addons_dir, &cache_dir)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn scan_installed_addons_blocking(
@@ -877,13 +885,18 @@ fn scan_installed_addons_blocking(
 #[tauri::command]
 pub async fn set_addon_tags(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     folder_name: String,
     tags: Vec<String>,
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
         let mut store = metadata::load_metadata(&addons_dir);
         match store.addons.get_mut(&folder_name) {
             Some(meta) => meta.tags = tags,
@@ -938,6 +951,7 @@ pub async fn search_esoui_addons(query: String) -> Result<Vec<EsouiSearchResult>
 #[tauri::command]
 pub async fn install_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     download_url: String,
     esoui_id: u32,
@@ -952,7 +966,11 @@ pub async fn install_addon(
         return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
     }
 
+    let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
         install_addon_blocking(
             &addons_dir,
             &download_url,
@@ -1007,11 +1025,16 @@ fn install_addon_blocking(
 #[tauri::command]
 pub fn remove_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     folder_name: String,
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let _guard = meta_lock
+        .0
+        .lock()
+        .map_err(|_| "Internal metadata lock error".to_string())?;
 
     // Remove both the enabled and disabled copies if they exist.
     // If only one exists, remove that one. Handles the edge case where
@@ -1079,13 +1102,20 @@ pub fn enable_addon(
 #[tauri::command]
 pub async fn install_dependency(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     dep_name: String,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || install_dependency_blocking(&addons_dir, &dep_name))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        install_dependency_blocking(&addons_dir, &dep_name)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<InstallResult, String> {
@@ -1108,12 +1138,19 @@ fn install_dependency_blocking(addons_dir: &Path, dep_name: &str) -> Result<Inst
 #[tauri::command]
 pub async fn check_for_updates(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
 ) -> Result<Vec<UpdateCheckResult>, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || check_for_updates_blocking(&addons_dir))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        check_for_updates_blocking(&addons_dir)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult>, String> {
@@ -1242,12 +1279,17 @@ fn check_for_updates_blocking(addons_dir: &Path) -> Result<Vec<UpdateCheckResult
 #[tauri::command]
 pub async fn update_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     esoui_id: u32,
     api_version: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
         update_addon_blocking(&addons_dir, esoui_id, api_version.as_deref())
     })
     .await
@@ -1342,14 +1384,21 @@ pub struct BatchUpdateProgress {
 #[tauri::command]
 pub async fn batch_update_addons(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     app: tauri::AppHandle,
     addons_path: String,
     updates: Vec<BatchUpdateEntry>,
 ) -> Result<BatchUpdateResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || batch_update_addons_blocking(&addons_dir, &updates, &app))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        batch_update_addons_blocking(&addons_dir, &updates, &app)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn batch_update_addons_blocking(
@@ -1911,7 +1960,12 @@ pub async fn get_conflict_diff(
             .by_name(&zip_entry_name)
             .map_err(|e| format!("File not found in ZIP: {e}"))?;
 
-        let mut upstream_bytes = Vec::new();
+        const MAX_DIFF_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
+        if entry.size() > MAX_DIFF_SIZE {
+            return Err("File too large for diff view (exceeds 5 MB limit).".to_string());
+        }
+
+        let mut upstream_bytes = Vec::with_capacity(entry.size().min(MAX_DIFF_SIZE) as usize);
         std::io::Read::read_to_end(&mut entry, &mut upstream_bytes)
             .map_err(|e| format!("Failed to read ZIP entry: {e}"))?;
 
@@ -1945,6 +1999,7 @@ pub struct FileDecision {
 #[tauri::command]
 pub async fn update_addon_with_decisions(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     pending: tauri::State<'_, crate::PendingUpdates>,
     addons_path: String,
     session_id: String,
@@ -1955,8 +2010,12 @@ pub async fn update_addon_with_decisions(
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let pending_clone = pending.0.clone();
+    let lock = meta_lock.0.clone();
 
     tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
         let pu = {
             let map = pending_clone
                 .lock()
@@ -2123,19 +2182,33 @@ pub async fn list_addon_files(
 
         let mut files = Vec::new();
 
+        const MAX_WALK_DEPTH: u32 = 32;
+
         fn walk_files(
             base: &Path,
             current: &Path,
             files: &mut Vec<AddonFileEntry>,
             modified_set: &HashSet<String>,
             has_manifest: bool,
+            depth: u32,
         ) -> Result<(), String> {
+            if depth > MAX_WALK_DEPTH {
+                return Err("Directory tree too deep (> 32 levels).".to_string());
+            }
+
             let entries =
                 fs::read_dir(current).map_err(|e| format!("Failed to read directory: {e}"))?;
 
             for entry in entries {
                 let entry = entry.map_err(|e| format!("Dir entry error: {e}"))?;
                 let path = entry.path();
+
+                // Skip symlinks/junctions to avoid loops
+                if let Ok(meta) = path.symlink_metadata() {
+                    if meta.file_type().is_symlink() {
+                        continue;
+                    }
+                }
 
                 let relative = path
                     .strip_prefix(base)
@@ -2177,7 +2250,7 @@ pub async fn list_addon_files(
                 });
 
                 if is_dir {
-                    walk_files(base, &path, files, modified_set, has_manifest)?;
+                    walk_files(base, &path, files, modified_set, has_manifest, depth + 1)?;
                 }
             }
             Ok(())
@@ -2189,6 +2262,7 @@ pub async fn list_addon_files(
             &mut files,
             &modified_set,
             has_manifest,
+            0,
         )?;
 
         files.sort_by(|a, b| {
@@ -2463,12 +2537,19 @@ pub struct AutoLinkResult {
 #[tauri::command]
 pub async fn auto_link_addons(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
 ) -> Result<AutoLinkResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    tokio::task::spawn_blocking(move || auto_link_addons_blocking(&addons_dir))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        auto_link_addons_blocking(&addons_dir)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 fn auto_link_addons_blocking(addons_dir: &Path) -> Result<AutoLinkResult, String> {
@@ -2554,35 +2635,61 @@ fn auto_link_addons_blocking(addons_dir: &Path) -> Result<AutoLinkResult, String
     Ok(AutoLinkResult { linked, not_found })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRemoveResult {
+    pub removed: Vec<String>,
+    pub failed: Vec<String>,
+    pub errors: HashMap<String, String>,
+}
+
 /// Batch remove multiple addons.
 #[tauri::command]
 pub fn batch_remove_addons(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     folder_names: Vec<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<BatchRemoveResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     for name in &folder_names {
         validate_name(name)?;
     }
+    let _guard = meta_lock
+        .0
+        .lock()
+        .map_err(|_| "Internal metadata lock error".to_string())?;
 
     let mut store = metadata::load_metadata(&addons_dir);
     let mut removed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut errors: HashMap<String, String> = HashMap::new();
 
     for name in &folder_names {
-        if installer::remove_addon(&addons_dir, name).is_ok() {
-            metadata::remove_entry(&mut store, name);
-            removed.push(name.clone());
+        match installer::remove_addon(&addons_dir, name) {
+            Ok(()) => {
+                metadata::remove_entry(&mut store, name);
+                removed.push(name.clone());
+            }
+            Err(e) => {
+                errors.insert(name.clone(), e);
+                failed.push(name.clone());
+            }
         }
     }
 
     metadata::save_metadata(&addons_dir, &store)?;
-    Ok(removed)
+    Ok(BatchRemoveResult {
+        removed,
+        failed,
+        errors,
+    })
 }
 
 #[tauri::command]
 pub async fn import_addon_list(
     state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
     json_data: String,
 ) -> Result<ImportResult, String> {
@@ -2590,10 +2697,16 @@ pub async fn import_addon_list(
         serde_json::from_str(&json_data).map_err(|e| format!("Invalid export file: {e}"))?;
 
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
 
-    tokio::task::spawn_blocking(move || import_addon_list_blocking(&addons_dir, &export))
-        .await
-        .map_err(|e| format!("Task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+        import_addon_list_blocking(&addons_dir, &export)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Return true if the error string indicates an HTTP 429 rate-limit response.

@@ -57,6 +57,10 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     return { error };
   }
 
+  handleRetry = () => {
+    this.setState({ error: null });
+  };
+
   render() {
     if (this.state.error) {
       return (
@@ -65,6 +69,22 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
         >
           <h1 style={{ color: "#fff", marginBottom: 16 }}>React Error</h1>
           <p>{this.state.error.message}</p>
+          <button
+            onClick={this.handleRetry}
+            style={{
+              marginTop: 16,
+              padding: "8px 20px",
+              background: "#c4a44a",
+              color: "#0b1220",
+              border: "none",
+              borderRadius: 6,
+              cursor: "pointer",
+              fontWeight: 600,
+              fontSize: 14,
+            }}
+          >
+            Try Again
+          </button>
           {import.meta.env.DEV && (
             <pre style={{ marginTop: 16, fontSize: 12, opacity: 0.7 }}>
               {this.state.error.stack}

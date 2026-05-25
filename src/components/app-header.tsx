@@ -145,7 +145,7 @@ export function AppHeader({
                 Tag
               </Button>
               {tagMenuOpen && (
-                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border border-white/[0.06] bg-[rgba(10,18,36,0.95)] backdrop-blur-xl p-1 shadow-lg">
+                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-white/[0.06] bg-[rgba(10,18,36,0.95)] backdrop-blur-xl p-1 shadow-lg">
                   {PRESET_TAGS.map((tag) => (
                     <button
                       key={tag}
@@ -187,7 +187,7 @@ export function AppHeader({
                         value={customTagInput}
                         onChange={(e) => setCustomTagInput(e.target.value)}
                         placeholder="Custom tag..."
-                        className="flex-1 min-w-0 rounded bg-white/[0.04] border border-white/[0.06] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-[#38bdf8]/40"
+                        className="flex-1 min-w-0 rounded-[10px] bg-white/[0.04] border border-white/[0.06] hover:border-white/[0.15] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-[#38bdf8]/40"
                         autoFocus
                       />
                       <button

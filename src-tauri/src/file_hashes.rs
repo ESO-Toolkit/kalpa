@@ -84,13 +84,19 @@ fn stream_sha256(reader: &mut impl Read) -> Result<String, std::io::Error> {
 /// Walk an addon folder and compute SHA-256 hashes for every file.
 /// Keys are forward-slash-normalized relative paths within the addon folder.
 pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>, String> {
+    const MAX_WALK_DEPTH: u32 = 32;
     let mut hashes = HashMap::new();
 
     fn walk(
         base: &Path,
         current: &Path,
         hashes: &mut HashMap<String, String>,
+        depth: u32,
     ) -> Result<(), String> {
+        if depth > MAX_WALK_DEPTH {
+            return Err("Directory tree too deep (> 32 levels).".to_string());
+        }
+
         let entries = fs::read_dir(current)
             .map_err(|e| format!("Failed to read directory {current:?}: {e}"))?;
 
@@ -98,8 +104,15 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
             let entry = entry.map_err(|e| format!("Failed to read dir entry: {e}"))?;
             let path = entry.path();
 
+            // Skip symlinks/junctions to avoid loops
+            if let Ok(meta) = path.symlink_metadata() {
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+            }
+
             if path.is_dir() {
-                walk(base, &path, hashes)?;
+                walk(base, &path, hashes, depth + 1)?;
             } else if path.is_file() {
                 let relative = path
                     .strip_prefix(base)
@@ -120,7 +133,7 @@ pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>
         return Err(format!("Addon path is not a directory: {addon_path:?}"));
     }
 
-    walk(addon_path, addon_path, &mut hashes)?;
+    walk(addon_path, addon_path, &mut hashes, 0)?;
     Ok(hashes)
 }
 

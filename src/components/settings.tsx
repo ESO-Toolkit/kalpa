@@ -109,7 +109,7 @@ export function Settings({
         setPath(selected);
       }
     } catch (e) {
-      toast.error(`Failed to open folder picker: ${e}`);
+      toast.error(`Failed to open folder picker: ${getTauriErrorMessage(e)}`);
     }
   };
 

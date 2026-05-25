@@ -32,6 +32,11 @@ pub struct ApprovedAddonsPath {
 
 pub struct AllowedAddonsPath(pub Mutex<Option<ApprovedAddonsPath>>);
 
+/// Guards all load_metadata → modify → save_metadata sequences against
+/// concurrent access (TOCTOU). Wrap every read-modify-write cycle in
+/// `let _guard = lock.0.lock()…;` before touching the metadata store.
+pub struct MetadataLock(pub Arc<Mutex<()>>);
+
 pub struct TrayState(pub Mutex<Option<tauri::tray::TrayIcon>>);
 
 /// Actions that can be triggered by a deep link URL.
@@ -189,6 +194,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AllowedAddonsPath(Mutex::new(None)))
+        .manage(MetadataLock(Arc::new(Mutex::new(()))))
         .manage(auth::AuthState::new(None))
         .manage(TrayState(Mutex::new(None)))
         .manage(PendingDeepLink(Mutex::new(

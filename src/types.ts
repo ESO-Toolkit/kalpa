@@ -53,6 +53,12 @@ export interface BatchUpdateResult {
   errors?: Record<string, string>;
 }
 
+export interface BatchRemoveResult {
+  removed: string[];
+  failed: string[];
+  errors: Record<string, string>;
+}
+
 export interface ImportResult {
   installed: string[];
   failed: string[];
@@ -165,6 +171,7 @@ export interface SvTreeNode {
   valueType: "string" | "number" | "boolean" | "nil" | "table";
   value?: string | number | boolean | null;
   children?: SvTreeNode[];
+  rawLuaValue?: string;
 }
 
 export interface SvFileStamp {

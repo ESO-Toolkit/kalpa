@@ -31,6 +31,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   const [activating, setActivating] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [loaded, setLoaded] = useState(false);
 
   const loadProfiles = async () => {
     try {
@@ -44,6 +45,8 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
       setActiveProfile(active);
     } catch (e) {
       toast.error(`Failed to load profiles: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setLoaded(true);
     }
   };
 
@@ -139,7 +142,11 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
         <div className="border-t border-white/[0.06]" />
 
         <div className="max-h-[300px] overflow-y-auto space-y-2">
-          {profiles.length === 0 ? (
+          {!loaded ? (
+            <div className="flex justify-center py-6">
+              <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+            </div>
+          ) : profiles.length === 0 ? (
             <Fade>
               <p className="text-sm text-muted-foreground text-center py-4">
                 No profiles yet. Save your current addon setup as a profile.

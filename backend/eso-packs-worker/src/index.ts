@@ -161,9 +161,21 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 
   let packs = index.packs;
 
-  // Status filter — default to "published"
+  // Status filter — default to "published"; draft/all require auth + ownership
   const statusFilter = url.searchParams.get("status");
-  if (statusFilter !== "all") {
+  if (statusFilter === "all" || statusFilter === "draft") {
+    const user = await validateBearerToken(request);
+    if (!user) {
+      packs = packs.filter((p) => (p.status ?? "published") === "published");
+    } else {
+      const userId = String(user.id);
+      if (statusFilter === "draft") {
+        packs = packs.filter((p) => p.author_id === userId && (p.status ?? "published") === "draft");
+      } else {
+        packs = packs.filter((p) => (p.status ?? "published") === "published" || p.author_id === userId);
+      }
+    }
+  } else {
     const target = statusFilter ?? "published";
     packs = packs.filter((p) => (p.status ?? "published") === target);
   }
@@ -225,7 +237,7 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
   }
   if (pack.status === "draft") {
     const user = await validateBearerToken(request);
-    if (!user) {
+    if (!user || String(user.id) !== pack.author_id) {
       return notFound(request);
     }
     return json(request, { pack }, 200, 0);
@@ -609,7 +621,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // /packs/:id routes
   if (pathname.startsWith("/packs/")) {
     const id = pathname.slice("/packs/".length);
-    if (!id || id.includes("/")) {
+    if (!id || id.includes("/") || !/^[a-z0-9-]+$/.test(id) || id.length > 100) {
       return notFound(request);
     }
 

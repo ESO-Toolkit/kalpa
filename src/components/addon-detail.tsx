@@ -759,7 +759,7 @@ export function AddonDetail({
           </p>
         )}
 
-        {dependents.length > 0 && (
+        {!addon.disabled && dependents.length > 0 && (
           <p className="text-xs text-amber-400/70">
             {dependents.map((d) => d.title).join(", ")}{" "}
             {dependents.length === 1 ? "depends" : "depend"} on this addon.

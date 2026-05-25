@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MAX_BACKUPS_PER_ADDON: usize = 5;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackupManifest {
     pub addon_folder: String,
     pub backed_up_at: String,
