@@ -137,7 +137,9 @@ export function PackListView({
           </Fade>
         ) : (
           packs.map((pack) => {
-            const accent = PACK_TYPE_ACCENT[pack.packType];
+            const accent =
+              PACK_TYPE_ACCENT[pack.packType as keyof typeof PACK_TYPE_ACCENT] ??
+              PACK_TYPE_ACCENT["addon-pack"];
             const pillColor = PACK_TYPE_PILL_COLOR[pack.packType] ?? "muted";
             return (
               <div

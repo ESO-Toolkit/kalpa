@@ -247,7 +247,9 @@ export function MyPacksView({
               </Fade>
             ) : (
               filteredPacks.map((pack) => {
-                const accent = PACK_TYPE_ACCENT[pack.packType];
+                const accent =
+                  PACK_TYPE_ACCENT[pack.packType as keyof typeof PACK_TYPE_ACCENT] ??
+                  PACK_TYPE_ACCENT["addon-pack"];
                 const pillColor = PACK_TYPE_PILL_COLOR[pack.packType] ?? "muted";
                 const isConfirmingDelete = confirmDeleteId === pack.id;
                 return (
@@ -453,7 +455,9 @@ export function MyPacksView({
             </Fade>
           ) : (
             installedPackRefs.map((ref) => {
-              const accent = PACK_TYPE_ACCENT[ref.packType];
+              const accent =
+                PACK_TYPE_ACCENT[ref.packType as keyof typeof PACK_TYPE_ACCENT] ??
+                PACK_TYPE_ACCENT["addon-pack"];
               const pillColor = PACK_TYPE_PILL_COLOR[ref.packType] ?? "muted";
               return (
                 <div
