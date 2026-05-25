@@ -2305,10 +2305,11 @@ dependencies = [
 
 [[package]]
 name = "kalpa"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "base64 0.22.1",
  "dirs",
+ "md-5",
  "rayon",
  "regex",
  "reqwest",
@@ -2500,6 +2501,16 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
+]
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
 ]
 
 [[package]]

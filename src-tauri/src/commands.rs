@@ -295,7 +295,8 @@ fn try_install_dep(
         }
     };
     let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
-    let dep_tmp = esoui::download_addon(&dep_info.download_url).map_err(|_| "download_failed")?;
+    let dep_tmp =
+        esoui::download_addon(&dep_info.download_url, None).map_err(|_| "download_failed")?;
     let dep_folders =
         installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
 
@@ -996,7 +997,7 @@ fn install_addon_blocking(
     esoui_title: &str,
     esoui_version: &str,
 ) -> Result<InstallResult, String> {
-    let tmp_file = esoui::download_addon(download_url)?;
+    let tmp_file = esoui::download_addon(download_url, None)?;
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
 
     file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, esoui_version);
@@ -1311,7 +1312,7 @@ fn update_addon_blocking(
     let info = esoui::fetch_addon_info(esoui_id)?;
 
     // Download and extract
-    let tmp_file = esoui::download_addon(&info.download_url)?;
+    let tmp_file = esoui::download_addon(&info.download_url, None)?;
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
 
     // Store the API version (from filelist.json) when available, since
@@ -1681,7 +1682,7 @@ pub async fn scan_update_conflicts(
 
     tokio::task::spawn_blocking(move || {
         let info = esoui::fetch_addon_info(esoui_id)?;
-        let tmp_file = esoui::download_addon(&info.download_url)?;
+        let tmp_file = esoui::download_addon(&info.download_url, None)?;
 
         let (_, kept_path) = tmp_file
             .keep()
@@ -2756,7 +2757,7 @@ fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiA
                 return Err(e);
             }
         };
-        match esoui::download_addon(&info.download_url) {
+        match esoui::download_addon(&info.download_url, None) {
             Ok(tmp) => return Ok((tmp, info)),
             Err(e) => {
                 last_err = e.clone();
@@ -4983,12 +4984,20 @@ pub struct EsoPackData {
 pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
     let file_path = PathBuf::from(&path);
 
-    if path.contains("..") {
-        return Err("Invalid file path.".to_string());
-    }
     if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
         return Err("Export path must have .esopack extension.".to_string());
     }
+    // Canonicalize the parent directory to prevent path traversal
+    let parent = file_path
+        .parent()
+        .ok_or("Invalid file path: no parent directory.")?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("Invalid directory: {e}"))?;
+    let file_name = file_path
+        .file_name()
+        .ok_or("Invalid file path: no file name.")?;
+    let file_path = canonical_parent.join(file_name);
 
     let json = serde_json::to_string_pretty(&pack)
         .map_err(|e| format!("Failed to serialize pack: {e}"))?;
@@ -5013,12 +5022,14 @@ pub fn export_pack_file(pack: EsoPackFile, path: String) -> Result<(), String> {
 pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
     let file_path = PathBuf::from(&path);
 
-    if path.contains("..") {
-        return Err("Invalid file path.".to_string());
-    }
     if file_path.extension().and_then(|e| e.to_str()) != Some("esopack") {
         return Err("Only .esopack files can be imported.".to_string());
     }
+
+    // Canonicalize to resolve any traversal components
+    let file_path = file_path
+        .canonicalize()
+        .map_err(|_| "File not found.".to_string())?;
 
     if !file_path.exists() {
         return Err("File not found.".to_string());

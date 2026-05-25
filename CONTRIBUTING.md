@@ -13,17 +13,28 @@ cd kalpa
 npm install
 ```
 
-3. Start the development server:
+3. Create a `.env.local` file with the dev server port:
+
+```bash
+echo "VITE_PORT=1430" > .env.local
+```
+
+4. Start the development server:
 
 ```bash
 npm run tauri dev
 ```
+
+The Vite dev server runs on port **1430** (configured in `.env.local` and `src-tauri/tauri.conf.json`).
 
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (stable, MSVC toolchain on Windows)
 - [Node.js](https://nodejs.org/) 22+
 - On Windows: Visual Studio Build Tools with "Desktop development with C++"
+- [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (pre-installed on Windows 11)
+
+Run `npm run check:env` to verify your prerequisites are properly configured.
 
 ## Development Workflow
 

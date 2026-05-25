@@ -281,11 +281,25 @@ src-tauri/src/              # Rust backend
   safe_migration.rs         # Minion migration with dry-run and snapshots
   game_instances.rs         # Multi-instance detection (native/Steam)
   saved_variables/          # SavedVariables Lua parser and editor
+    parser.rs               # Lua table parser
+    serializer.rs           # Lua table serializer
+    scrub.rs                # Privacy scrubbing
+    profile.rs              # SV profile management
+    io.rs                   # File I/O helpers
+    types.rs                # Shared types
   auth.rs                   # Authentication
   lib.rs                    # Module definitions and app setup
 
 backend/                    # Cloudflare Workers
   eso-packs-worker/         # Pack Hub API (packs, votes, shares)
+    src/index.ts            # Router and handlers
+    src/kv.ts               # KV read/write helpers
+    src/types.ts            # Pack types (snake_case)
+    src/validate.ts         # Input validation
+    src/shares.ts           # Share code generation/resolution
+    src/cors.ts             # CORS config
+    src/seed.ts             # Dev seed data
+    src/pack-index-do.ts    # Durable Object for atomic index mutations
 
 context/                    # Architecture and design documentation
 ```

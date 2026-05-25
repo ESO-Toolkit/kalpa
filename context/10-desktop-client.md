@@ -1,5 +1,7 @@
 # Desktop Client
 
+> **Note:** This is an early planning document. The desktop client now includes many features beyond what's listed here: profiles, backups, protected edits, saved variables manager, migration wizard, Pack Hub, character management, and more. See `CLAUDE.md` for the current architecture.
+
 Use Tauri for the desktop app unless there is a strong reason not to.
 
 Client responsibilities:
