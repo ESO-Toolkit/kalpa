@@ -5121,14 +5121,10 @@ pub fn import_pack_file(path: String) -> Result<EsoPackFile, String> {
         return Err("Only .esopack files can be imported.".to_string());
     }
 
-    // Canonicalize to resolve any traversal components
+    // Canonicalize to resolve any traversal components (also verifies existence)
     let file_path = file_path
         .canonicalize()
         .map_err(|_| "File not found.".to_string())?;
-
-    if !file_path.exists() {
-        return Err("File not found.".to_string());
-    }
 
     let metadata = fs::metadata(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
     if metadata.len() > 10 * 1024 * 1024 {
