@@ -118,7 +118,7 @@ export function UpdateBanner({
               <div className="flex items-center gap-2">
                 <div className="relative h-5 w-5">
                   {/* Spinning ring */}
-                  <svg className="h-5 w-5 -rotate-90" viewBox="0 0 20 20">
+                  <svg aria-hidden="true" className="h-5 w-5 -rotate-90" viewBox="0 0 20 20">
                     <circle
                       cx="10"
                       cy="10"

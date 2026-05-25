@@ -42,41 +42,50 @@ fn metadata_path(addons_path: &Path) -> std::path::PathBuf {
     addons_path.join("kalpa.json")
 }
 
-/// Load a JSON file with automatic backup recovery.
+/// Load a JSON file with automatic recovery from crash artifacts.
 ///
-/// If the primary file is corrupted, tries the `.json.bak` backup.
-/// Returns `T::default()` if both are missing or corrupted.
+/// Recovery order when the primary file is missing or corrupted:
+/// 1. `.json.tmp` — a completed write that was never renamed into place
+///    (crash between remove and rename in `save_json_with_backup`).
+/// 2. `.json.bak` — the previous good copy made before the write started.
+///
+/// Returns `T::default()` if all sources are missing or corrupted.
 pub fn load_json_with_backup<T: DeserializeOwned + Default>(path: &Path) -> T {
-    match fs::read_to_string(path) {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(data) => data,
-            Err(e) => {
-                eprintln!(
-                    "Warning: {} corrupted ({}), trying backup...",
-                    path.display(),
-                    e
-                );
-                let bak = path.with_extension("json.bak");
-                match fs::read_to_string(&bak) {
-                    Ok(bak_content) => match serde_json::from_str(&bak_content) {
-                        Ok(data) => {
-                            eprintln!("Recovered data from backup file {}.", bak.display());
-                            data
-                        }
-                        Err(e2) => {
-                            eprintln!("Backup also corrupted ({e2}), using defaults.");
-                            T::default()
-                        }
-                    },
-                    Err(_) => {
-                        eprintln!("No backup file found, using defaults.");
-                        T::default()
-                    }
-                }
-            }
-        },
-        Err(_) => T::default(),
+    // Try the primary file first.
+    if let Ok(content) = fs::read_to_string(path) {
+        if let Ok(data) = serde_json::from_str(&content) {
+            return data;
+        }
+        eprintln!(
+            "Warning: {} corrupted, trying recovery files...",
+            path.display()
+        );
     }
+
+    // Primary missing or corrupted — try .tmp (newest data, written but not renamed).
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(content) = fs::read_to_string(&tmp) {
+        if let Ok(data) = serde_json::from_str::<T>(&content) {
+            eprintln!("Recovered data from incomplete write {}.", tmp.display());
+            // Promote the .tmp so subsequent loads hit the primary path.
+            // On Windows fs::rename can't overwrite, so remove the corrupt primary first.
+            let _ = fs::remove_file(path);
+            let _ = fs::rename(&tmp, path);
+            return data;
+        }
+    }
+
+    // Try .bak (previous good version).
+    let bak = path.with_extension("json.bak");
+    if let Ok(content) = fs::read_to_string(&bak) {
+        if let Ok(data) = serde_json::from_str::<T>(&content) {
+            eprintln!("Recovered data from backup file {}.", bak.display());
+            return data;
+        }
+        eprintln!("Backup also corrupted, using defaults.");
+    }
+
+    T::default()
 }
 
 /// Save data as JSON with atomic write and automatic backup.

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import { toast } from "sonner";
 import type {
   BrowsePopularPage,
@@ -89,7 +89,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
   return { installingId, installedIds, install };
 }
 
-function DiscoverResultRow({
+const DiscoverResultRow = memo(function DiscoverResultRow({
   result,
   selected,
   installingId,
@@ -184,7 +184,7 @@ function DiscoverResultRow({
       )}
     </div>
   );
-}
+});
 
 const DISCOVER_TABS: [DiscoverTab, string, React.FC<{ className?: string }>][] = [
   ["search", "Search", Search],

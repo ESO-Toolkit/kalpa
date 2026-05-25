@@ -63,6 +63,10 @@ jobs:
         run: npm ci
         working-directory: backend/eso-packs-worker
 
+      - name: Worker npm audit
+        run: npm audit --audit-level=high
+        working-directory: backend/eso-packs-worker
+
       - name: Worker TypeScript check
         run: npx tsc --noEmit
         working-directory: backend/eso-packs-worker

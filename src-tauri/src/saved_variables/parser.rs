@@ -601,8 +601,8 @@ mod tests {
 
     #[test]
     fn lua_parse_float() {
-        let node = parse_value("3.14").unwrap();
-        assert_eq!(node.value, Some(serde_json::json!(3.14)));
+        let node = parse_value("2.75").unwrap();
+        assert_eq!(node.value, Some(serde_json::json!(2.75)));
     }
 
     #[test]
