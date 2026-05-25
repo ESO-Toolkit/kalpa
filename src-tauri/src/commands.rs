@@ -3703,7 +3703,7 @@ pub fn backup_character_settings(
     // (e.g. a character named "Lib" matching "LibStub" in addon code).
     // Only scan the first 10,000 lines — character names appear in the
     // first few hundred lines, so reading entire 100MB+ files is wasteful.
-    let needle = format!("[\"{}\"]", character_name);
+    let needle = format!("[\"{character_name}\"]");
     let max_lines: usize = 10_000;
     let mut count: u32 = 0;
     if let Ok(entries) = fs::read_dir(&sv_dir) {
