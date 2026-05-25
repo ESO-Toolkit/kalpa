@@ -119,26 +119,26 @@ describe("updateTreeNode", () => {
 
   it("updates a leaf node at depth 1", () => {
     const updated = updateTreeNode(tree, ["section", "enabled"], false);
-    const section = updated.children![0];
-    expect(section.children![0].value).toBe(false);
+    const section = updated.children![0]!;
+    expect(section.children![0]!.value).toBe(false);
   });
 
   it("updates a leaf node at depth 2", () => {
     const updated = updateTreeNode(tree, ["section", "nested", "deep"], "changed");
-    const deep = updated.children![0].children![2].children![0];
+    const deep = updated.children![0]!.children![2]!.children![0]!;
     expect(deep.value).toBe("changed");
   });
 
   it("does not mutate the original tree", () => {
     const updated = updateTreeNode(tree, ["section", "count"], 999);
-    expect(tree.children![0].children![1].value).toBe(10);
-    expect(updated.children![0].children![1].value).toBe(999);
+    expect(tree.children![0]!.children![1]!.value).toBe(10);
+    expect(updated.children![0]!.children![1]!.value).toBe(999);
   });
 
   it("leaves other branches untouched", () => {
     const updated = updateTreeNode(tree, ["section", "enabled"], false);
-    expect(updated.children![1].value).toBe("untouched");
-    expect(updated.children![0].children![1].value).toBe(10);
+    expect(updated.children![1]!.value).toBe("untouched");
+    expect(updated.children![0]!.children![1]!.value).toBe(10);
   });
 
   it("returns tree unchanged for empty path", () => {
@@ -148,8 +148,8 @@ describe("updateTreeNode", () => {
 
   it("returns tree unchanged for non-existent path", () => {
     const result = updateTreeNode(tree, ["nonexistent", "path"], "nope");
-    expect(result.children![0].children![0].value).toBe(true);
-    expect(result.children![1].value).toBe("untouched");
+    expect(result.children![0]!.children![0]!.value).toBe(true);
+    expect(result.children![1]!.value).toBe("untouched");
   });
 
   it("returns tree unchanged for node without children", () => {
@@ -160,11 +160,11 @@ describe("updateTreeNode", () => {
 
   it("handles updating to null value", () => {
     const updated = updateTreeNode(tree, ["section", "enabled"], null);
-    expect(updated.children![0].children![0].value).toBe(null);
+    expect(updated.children![0]!.children![0]!.value).toBe(null);
   });
 
   it("handles updating to numeric value", () => {
     const updated = updateTreeNode(tree, ["section", "enabled"], 42);
-    expect(updated.children![0].children![0].value).toBe(42);
+    expect(updated.children![0]!.children![0]!.value).toBe(42);
   });
 });

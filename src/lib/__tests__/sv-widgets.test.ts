@@ -251,10 +251,10 @@ describe("resolveEffectiveField — recursive children", () => {
     };
     const field = resolve(node, { path: ["TestAddon", "root"] });
     expect(field.children).toHaveLength(3);
-    expect(field.children![0].widget).toBe("toggle");
-    expect(field.children![1].widget).toBe("text");
-    expect(field.children![2].widget).toBe("group");
-    expect(field.children![2].children).toHaveLength(1);
-    expect(field.children![2].children![0].widget).toBe("number");
+    expect(field.children![0]!.widget).toBe("toggle");
+    expect(field.children![1]!.widget).toBe("text");
+    expect(field.children![2]!.widget).toBe("group");
+    expect(field.children![2]!.children).toHaveLength(1);
+    expect(field.children![2]!.children![0]!.widget).toBe("number");
   });
 });

@@ -54,12 +54,14 @@ function buildTree(files: AddonFileEntry[]): TreeNode {
     const parts = file.relativePath.split("/");
     let current = root;
     for (let i = 0; i < parts.length - 1; i++) {
-      if (!current.children.has(parts[i])) {
-        current.children.set(parts[i], { name: parts[i], children: new Map() });
+      const part = parts[i]!;
+      if (!current.children.has(part)) {
+        current.children.set(part, { name: part, children: new Map() });
       }
-      current = current.children.get(parts[i])!;
+      current = current.children.get(part)!;
     }
     const fileName = parts[parts.length - 1];
+    if (!fileName) continue;
     current.children.set(fileName, { name: fileName, entry: file, children: new Map() });
   }
   return root;

@@ -1,5 +1,7 @@
 // Shared constants for Pack Hub components
 
+import type { PackType } from "../types";
+
 export type PackTypeFilter = "all" | "addon-pack" | "build-pack" | "roster-pack";
 export type SortOption = "votes" | "newest" | "updated";
 export type TabMode = "browse" | "create" | "my-packs";
@@ -29,7 +31,7 @@ export const TAG_COLORS: Record<
 };
 
 export const PACK_TYPE_ACCENT: Record<
-  string,
+  PackType,
   { border: string; bg: string; hoverBg: string; text: string; hoverGlow: string }
 > = {
   "addon-pack": {

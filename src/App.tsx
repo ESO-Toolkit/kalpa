@@ -399,12 +399,12 @@ function App() {
       const instances = await invokeOrThrow<GameInstance[]>("detect_game_instances");
       setKnownInstances(instances);
 
-      const singleClean = instances.length === 1 && !instances[0].isOnedrive;
+      const singleClean = instances.length === 1 && !instances[0]!.isOnedrive;
 
       if (singleClean) {
         // One unambiguous instance with no OneDrive complication — auto-select
         try {
-          const path = instances[0].addonsPath;
+          const path = instances[0]!.addonsPath;
           setAddonsPath(path);
           await invokeOrThrow("set_addons_path", { addonsPath: path });
           await setSetting("addonsPath", path);
@@ -759,7 +759,7 @@ function App() {
 
       // Phase 2: Update non-conflicting addons sequentially
       for (let i = 0; i < noConflictAddons.length; i++) {
-        const addon = noConflictAddons[i];
+        const addon = noConflictAddons[i]!;
         setAddonStatuses((prev) => {
           const next = new Map(prev);
           next.set(addon.folderName, "extracting");

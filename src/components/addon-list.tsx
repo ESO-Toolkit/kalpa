@@ -442,25 +442,25 @@ export function AddonList({
       if (e.key === "ArrowDown") {
         e.preventDefault();
         const nextIndex = currentIndex < addons.length - 1 ? currentIndex + 1 : 0;
-        onSelect(addons[nextIndex]);
+        onSelect(addons[nextIndex]!);
         rowVirtualizer.scrollToIndex(nextIndex, { align: "auto" });
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         const prevIndex = currentIndex > 0 ? currentIndex - 1 : addons.length - 1;
-        onSelect(addons[prevIndex]);
+        onSelect(addons[prevIndex]!);
         rowVirtualizer.scrollToIndex(prevIndex, { align: "auto" });
       } else if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         if (currentIndex >= 0) {
-          onSelect(addons[currentIndex]);
+          onSelect(addons[currentIndex]!);
         }
       } else if (e.key === "Home") {
         e.preventDefault();
-        onSelect(addons[0]);
+        onSelect(addons[0]!);
         rowVirtualizer.scrollToIndex(0, { align: "start" });
       } else if (e.key === "End") {
         e.preventDefault();
-        onSelect(addons[addons.length - 1]);
+        onSelect(addons[addons.length - 1]!);
         rowVirtualizer.scrollToIndex(addons.length - 1, { align: "end" });
       }
     },
@@ -727,6 +727,7 @@ export function AddonList({
                 >
                   {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                     const addon = addons[virtualRow.index];
+                    if (!addon) return null;
                     return (
                       <div
                         key={addon.folderName}

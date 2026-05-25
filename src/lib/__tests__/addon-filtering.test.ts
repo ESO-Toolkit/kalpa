@@ -95,7 +95,7 @@ describe("filterAddons — filter modes", () => {
   it("filters libraries only", () => {
     const result = filterAddons(ADDONS, { ...baseOpts, filterMode: "libraries" });
     expect(result).toHaveLength(1);
-    expect(result[0].folderName).toBe("AddonB");
+    expect(result[0]!.folderName).toBe("AddonB");
   });
 
   it("filters outdated addons", () => {
@@ -113,19 +113,19 @@ describe("filterAddons — filter modes", () => {
   it("filters favorites", () => {
     const result = filterAddons(ADDONS, { ...baseOpts, filterMode: "favorites" });
     expect(result).toHaveLength(1);
-    expect(result[0].folderName).toBe("AddonC");
+    expect(result[0]!.folderName).toBe("AddonC");
   });
 
   it("filters disabled", () => {
     const result = filterAddons(ADDONS, { ...baseOpts, filterMode: "disabled" });
     expect(result).toHaveLength(1);
-    expect(result[0].folderName).toBe("AddonD");
+    expect(result[0]!.folderName).toBe("AddonD");
   });
 
   it("filters by custom tag", () => {
     const result = filterAddons(ADDONS, { ...baseOpts, effectiveTagFilter: "essential" });
     expect(result).toHaveLength(1);
-    expect(result[0].folderName).toBe("AddonC");
+    expect(result[0]!.folderName).toBe("AddonC");
   });
 });
 
@@ -139,25 +139,25 @@ describe("filterAddons — search", () => {
   it("searches by title (case-insensitive)", () => {
     const result = filterAddons(ADDONS, { ...baseOpts, searchQuery: "charlie" });
     expect(result).toHaveLength(1);
-    expect(result[0].title).toBe("Charlie Addon");
+    expect(result[0]!.title).toBe("Charlie Addon");
   });
 
   it("searches by folder name", () => {
     const result = filterAddons(ADDONS, { ...baseOpts, searchQuery: "AddonB" });
     expect(result).toHaveLength(1);
-    expect(result[0].folderName).toBe("AddonB");
+    expect(result[0]!.folderName).toBe("AddonB");
   });
 
   it("searches by author", () => {
     const result = filterAddons(ADDONS, { ...baseOpts, searchQuery: "gamma" });
     expect(result).toHaveLength(1);
-    expect(result[0].author).toBe("Gamma");
+    expect(result[0]!.author).toBe("Gamma");
   });
 
   it("searches by tag", () => {
     const result = filterAddons(ADDONS, { ...baseOpts, searchQuery: "essential" });
     expect(result).toHaveLength(1);
-    expect(result[0].folderName).toBe("AddonC");
+    expect(result[0]!.folderName).toBe("AddonC");
   });
 
   it("returns empty for no match", () => {
@@ -172,7 +172,7 @@ describe("filterAddons — search", () => {
       filterMode: "libraries",
     });
     expect(result).toHaveLength(1);
-    expect(result[0].isLibrary).toBe(true);
+    expect(result[0]!.isLibrary).toBe(true);
   });
 
   it("empty search returns all", () => {

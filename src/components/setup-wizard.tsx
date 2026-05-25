@@ -46,7 +46,7 @@ export function SetupWizard({ instances, onSelect }: SetupWizardProps) {
             {instances.length === 0 ? (
               <NoCandidates onSelect={onSelect} />
             ) : instances.length === 1 ? (
-              <SingleInstance instance={instances[0]} onSelect={onSelect} />
+              <SingleInstance instance={instances[0]!} onSelect={onSelect} />
             ) : (
               <MultipleInstances instances={instances} onSelect={onSelect} />
             )}

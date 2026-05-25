@@ -121,7 +121,7 @@ export function Settings({
       if (instances.length === 0) {
         toast.info("No ESO AddOns folders detected.");
       } else if (instances.length === 1) {
-        const detected = instances[0].addonsPath;
+        const detected = instances[0]!.addonsPath;
         if (detected !== addonsPath) {
           setPath(detected);
           toast.success("Found AddOns folder. Click Save to apply.");
