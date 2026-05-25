@@ -2620,19 +2620,21 @@ pub async fn auto_link_addons(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     tokio::task::spawn_blocking(move || {
+        // Fetch filelist outside the lock (network I/O)
+        let api_lookup = esoui::fetch_filelist_lookup()?;
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
-        auto_link_addons_blocking(&addons_dir)
+        auto_link_addons_blocking(&addons_dir, &api_lookup)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
-fn auto_link_addons_blocking(addons_dir: &Path) -> Result<AutoLinkResult, String> {
-    // Fetch the full ESOUI filelist in a single API call (~4000 addons).
-    let api_lookup = esoui::fetch_filelist_lookup()?;
-
+fn auto_link_addons_blocking(
+    addons_dir: &Path,
+    api_lookup: &HashMap<String, esoui::ApiAddonLookup>,
+) -> Result<AutoLinkResult, String> {
     let mut store = metadata::load_metadata(addons_dir);
 
     let entries =
