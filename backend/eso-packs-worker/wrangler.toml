@@ -56,4 +56,4 @@ tag = "v1"
 new_sqlite_classes = ["PackIndexDO"]
 
 [observability]
-enabled = true
+enabled = false

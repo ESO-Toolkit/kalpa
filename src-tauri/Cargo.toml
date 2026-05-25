@@ -43,6 +43,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+keyring = { version = "3", features = ["windows-native"] }
 
 [profile.release]
 lto = true
