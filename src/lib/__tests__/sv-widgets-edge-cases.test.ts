@@ -178,7 +178,7 @@ describe("resolveEffectiveField — context classification in children", () => {
     };
     // path = ["TestAddon"] means children are resolved at depth = 1
     const field = resolve(node, { path: ["TestAddon"] });
-    expect(field.children![0].context).toBe("account-wide");
+    expect(field.children![0]!.context).toBe("account-wide");
   });
 
   it("classifies known character names as per-character at depth 1", () => {
@@ -195,7 +195,7 @@ describe("resolveEffectiveField — context classification in children", () => {
       ],
     };
     const field = resolve(node, { path: ["TestAddon"], chars });
-    expect(field.children![0].context).toBe("per-character");
+    expect(field.children![0]!.context).toBe("per-character");
   });
 
   it("returns 'setting' context for keys at depth != 1", () => {
@@ -212,7 +212,7 @@ describe("resolveEffectiveField — context classification in children", () => {
     };
     // path = ["TestAddon", "root"] means children are at depth 2 → always "setting"
     const field = resolve(node, { path: ["TestAddon", "root"] });
-    expect(field.children![0].context).toBe("setting");
+    expect(field.children![0]!.context).toBe("setting");
   });
 });
 

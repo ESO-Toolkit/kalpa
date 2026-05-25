@@ -49,7 +49,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
         setActiveIndex((prev) => {
           const currentPos = actionItems.findIndex((a) => a.index === prev);
           const next = currentPos < actionItems.length - 1 ? currentPos + 1 : 0;
-          return actionItems[next].index;
+          return actionItems[next]!.index;
         });
       }
 
@@ -58,7 +58,7 @@ export function ContextMenu({ items, position, onClose }: ContextMenuProps) {
         setActiveIndex((prev) => {
           const currentPos = actionItems.findIndex((a) => a.index === prev);
           const next = currentPos > 0 ? currentPos - 1 : actionItems.length - 1;
-          return actionItems[next].index;
+          return actionItems[next]!.index;
         });
       }
 

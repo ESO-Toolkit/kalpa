@@ -64,7 +64,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
       characters.reduce(
         (acc, char) => {
           if (!acc[char.server]) acc[char.server] = [];
-          acc[char.server].push(char);
+          acc[char.server]!.push(char);
           return acc;
         },
         {} as Record<string, CharacterInfo[]>

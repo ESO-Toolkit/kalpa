@@ -81,7 +81,7 @@ describe("getTableChildren", () => {
     };
     const result = getTableChildren(node);
     expect(result).toHaveLength(1);
-    expect(result[0].key).toBe("subtable");
+    expect(result[0]!.key).toBe("subtable");
   });
 
   it("returns empty array for node without children", () => {

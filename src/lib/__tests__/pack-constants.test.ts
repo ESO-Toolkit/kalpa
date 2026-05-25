@@ -42,9 +42,8 @@ describe("TAG_COLORS", () => {
 
 describe("PACK_TYPE_ACCENT", () => {
   it("has accent styles for all pack types", () => {
-    for (const type of ["addon-pack", "build-pack", "roster-pack"]) {
+    for (const type of ["addon-pack", "build-pack", "roster-pack"] as const) {
       const accent = PACK_TYPE_ACCENT[type];
-      expect(accent).toBeDefined();
       expect(accent.border).toBeTruthy();
       expect(accent.bg).toBeTruthy();
       expect(accent.hoverBg).toBeTruthy();

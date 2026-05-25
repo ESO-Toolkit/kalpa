@@ -115,7 +115,7 @@ describe("sortStatuses", () => {
       ["error", "failed"],
     ]);
     const sorted = sortStatuses(statuses);
-    expect(sorted[0][0]).toBe("error");
-    expect(sorted[1][0]).toBe("success");
+    expect(sorted[0]![0]).toBe("error");
+    expect(sorted[1]![0]).toBe("success");
   });
 });

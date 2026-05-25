@@ -406,14 +406,14 @@ function SearchContent({
       if (e.key === "ArrowDown") {
         e.preventDefault();
         const next = currentIdx < results.length - 1 ? currentIdx + 1 : 0;
-        onSelectResult(results[next]);
+        onSelectResult(results[next] ?? null);
         listRef.current?.querySelectorAll("[data-result-row]")?.[next]?.scrollIntoView({
           block: "nearest",
         });
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         const prev = currentIdx > 0 ? currentIdx - 1 : results.length - 1;
-        onSelectResult(results[prev]);
+        onSelectResult(results[prev] ?? null);
         listRef.current?.querySelectorAll("[data-result-row]")?.[prev]?.scrollIntoView({
           block: "nearest",
         });
