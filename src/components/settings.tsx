@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
-import type { GameInstance, ImportResult } from "../types";
+import type { AuthUser, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -30,13 +30,16 @@ import {
   Monitor,
   Shield,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 
 type SettingsTab = "general" | "tools" | "data";
 
 interface SettingsProps {
   addonsPath: string;
+  authUser: AuthUser | null;
   knownInstances: GameInstance[];
+  onAuthChange: (user: AuthUser | null) => void;
   onPathChange: (path: string) => void;
   onClose: () => void;
   onRefresh: () => void;
@@ -56,7 +59,9 @@ const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
 
 export function Settings({
   addonsPath,
+  authUser,
   knownInstances,
+  onAuthChange,
   onPathChange,
   onClose,
   onRefresh,
@@ -78,6 +83,8 @@ export function Settings({
   const [redetecting, setRedetecting] = useState(false);
   const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
   const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
@@ -177,6 +184,24 @@ export function Settings({
       setImportError(getTauriErrorMessage(e));
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    setDeletingAccount(true);
+    try {
+      const result = await invokeOrThrow<{ packs: number; votes: number; shares: number }>(
+        "delete_pack_hub_account"
+      );
+      onAuthChange(null);
+      setDeleteConfirmOpen(false);
+      toast.success(
+        `Deleted ${result.packs} pack${result.packs !== 1 ? "s" : ""}, ${result.votes} vote${result.votes !== 1 ? "s" : ""}, and ${result.shares} share code${result.shares !== 1 ? "s" : ""}.`
+      );
+    } catch (e) {
+      toast.error(`Failed to delete account data: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setDeletingAccount(false);
     }
   };
 
@@ -499,6 +524,52 @@ export function Settings({
                     </div>
                   )}
                 </GlassPanel>
+
+                {authUser && (
+                  <GlassPanel variant="subtle" className="p-3 space-y-3">
+                    <SectionHeader>Pack Hub Data</SectionHeader>
+                    <p className="text-xs text-muted-foreground">
+                      Permanently delete all your data from the Pack Hub, including packs, votes,
+                      and share codes. This cannot be undone.
+                    </p>
+                    {!deleteConfirmOpen ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
+                        onClick={() => setDeleteConfirmOpen(true)}
+                      >
+                        <Trash2 className="size-3.5" />
+                        Delete My Pack Hub Data
+                      </Button>
+                    ) : (
+                      <div className="space-y-2 rounded-lg border border-red-500/20 bg-red-500/[0.04] p-3">
+                        <p className="text-xs font-medium text-red-400">
+                          Are you sure? This will permanently delete all your packs, votes, and
+                          share codes. You will also be signed out.
+                        </p>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            disabled={deletingAccount}
+                            onClick={handleDeleteAccount}
+                          >
+                            {deletingAccount ? "Deleting..." : "Yes, delete everything"}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={deletingAccount}
+                            onClick={() => setDeleteConfirmOpen(false)}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </GlassPanel>
+                )}
               </motion.div>
             )}
           </AnimatePresence>

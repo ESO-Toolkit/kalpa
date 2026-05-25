@@ -543,6 +543,87 @@ async function handleScheduled(env: Env): Promise<void> {
   console.log(`Backup written: ${backupKey} (${index.packs.length} packs)`);
 }
 
+// ── DELETE /account ────────────────────────────────────────────
+async function handleDeleteAccount(request: Request, env: Env, url: URL): Promise<Response> {
+  const user = await validateBearerToken(request);
+  if (!user) return unauthorized(request);
+
+  const userId = String(user.id);
+
+  // 1. Find and delete all user's packs
+  const index = await getPackIndex(env);
+  const userPacks = index?.packs.filter((p) => p.author_id === userId) ?? [];
+
+  // Delete individual pack KV entries
+  for (const pack of userPacks) {
+    await env.ESO_PACKS.delete(`pack:${pack.id}`);
+  }
+
+  // Batch-remove from DO index in a single read-write cycle
+  if (userPacks.length > 0) {
+    await getPackIndexDO(env).removePacksByAuthor(userId);
+  }
+
+  // Batch-delete from D1
+  if (userPacks.length > 0 && env.ROSTER_HUB_DB) {
+    try {
+      const stmts = userPacks.map((p) =>
+        env.ROSTER_HUB_DB!.prepare("DELETE FROM packs WHERE id = ?").bind(p.id),
+      );
+      await env.ROSTER_HUB_DB.batch(stmts);
+    } catch (err) {
+      console.error("D1 batch delete failed:", err);
+    }
+  }
+
+  // 2. Delete all user's votes
+  // Note: this deletes the vote KV keys but does not decrement vote_count on
+  // the packs the user voted on. The counts are denormalized aggregates and
+  // will be slightly stale — acceptable for a rare data-deletion operation.
+  let voteCount = 0;
+  let voteCursor: string | undefined;
+  do {
+    const list = await env.ESO_PACKS.list({ prefix: "vote:", cursor: voteCursor });
+    for (const key of list.keys) {
+      if (key.name.endsWith(`:${userId}`)) {
+        await env.ESO_PACKS.delete(key.name);
+        voteCount++;
+      }
+    }
+    voteCursor = list.list_complete ? undefined : list.cursor;
+  } while (voteCursor);
+
+  // 3. Delete all user's share codes
+  let shareCount = 0;
+  let shareCursor: string | undefined;
+  do {
+    const list = await env.ESO_PACKS.list({ prefix: `share-user:${userId}:`, cursor: shareCursor });
+    for (const key of list.keys) {
+      // Extract the share code from key format: share-user:{userId}:{code}
+      const parts = key.name.split(":");
+      const code = parts[parts.length - 1];
+      if (code) {
+        await env.ESO_PACKS.delete(`share:${code}`);
+      }
+      await env.ESO_PACKS.delete(key.name);
+      shareCount++;
+    }
+    shareCursor = list.list_complete ? undefined : list.cursor;
+  } while (shareCursor);
+
+  if (userPacks.length > 0) {
+    await invalidatePackListCache(url);
+  }
+
+  return json(request, {
+    deleted: {
+      packs: userPacks.length,
+      votes: voteCount,
+      shares: shareCount,
+    },
+  });
+}
+
 // ── Router ─────────────────────────────────────────────────────────
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -643,6 +724,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // POST /admin/seed — dev-only seeding route
   if (method === "POST" && pathname === "/admin/seed") {
     return handleSeed(request, env);
+  }
+
+  // DELETE /account — delete all user data (GDPR / data portability)
+  if (method === "DELETE" && pathname === "/account") {
+    return handleDeleteAccount(request, env, url);
   }
 
   return notFound(request);

@@ -4275,21 +4275,12 @@ pub async fn track_pack_install(pack_id: String) -> Result<(), String> {
 
 // ── Auth Helpers ─────────────────────────────────────────────────────────
 
-fn save_auth_tokens(app: &tauri::AppHandle, tokens: &AuthTokens) {
-    use tauri_plugin_store::StoreExt;
-    if let Ok(store) = app.store("settings.json") {
-        store.set(
-            "auth_tokens",
-            serde_json::to_value(tokens).unwrap_or_default(),
-        );
-    }
+fn save_auth_tokens(_app: &tauri::AppHandle, tokens: &AuthTokens) {
+    crate::token_store::save_tokens(tokens);
 }
 
-fn clear_auth_tokens(app: &tauri::AppHandle) {
-    use tauri_plugin_store::StoreExt;
-    if let Ok(store) = app.store("settings.json") {
-        let _ = store.delete("auth_tokens");
-    }
+fn clear_auth_tokens(_app: &tauri::AppHandle) {
+    crate::token_store::clear_tokens();
 }
 
 // ── Auth Commands ────────────────────────────────────────────────────────
@@ -4696,6 +4687,110 @@ pub async fn delete_pack(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+// ── Delete Account Data ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAccountSummary {
+    pub packs: u64,
+    pub votes: u64,
+    pub shares: u64,
+}
+
+#[tauri::command]
+pub async fn delete_pack_hub_account(
+    state: tauri::State<'_, AuthState>,
+    app: tauri::AppHandle,
+) -> Result<DeleteAccountSummary, String> {
+    let access_token = {
+        let tokens = {
+            let guard = state
+                .tokens
+                .lock()
+                .map_err(|e| format!("Auth lock poisoned: {e}"))?;
+            guard.clone()
+        };
+
+        let Some(tokens) = tokens else {
+            return Err("Not signed in. Please sign in first.".to_string());
+        };
+
+        match tokio::task::spawn_blocking({
+            let tokens = tokens.clone();
+            move || auth::ensure_valid_token(&tokens)
+        })
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+        {
+            Ok(Some(new_tokens)) => {
+                let token = new_tokens.access_token.clone();
+                save_auth_tokens(&app, &new_tokens);
+                *state
+                    .tokens
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(new_tokens);
+                token
+            }
+            Ok(None) => tokens.access_token.clone(),
+            Err(e) => {
+                *state
+                    .tokens
+                    .lock()
+                    .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
+                return Err(e);
+            }
+        }
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        let client = pack_hub_client();
+        let base = pack_hub_url();
+        let url = format!("{base}/account");
+
+        let response = client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .send()
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    "Could not connect to Pack Hub. Check your internet connection.".to_string()
+                } else {
+                    format!("Network error: {e}")
+                }
+            })?;
+
+        match response.status().as_u16() {
+            200 => {
+                #[derive(Deserialize)]
+                struct Resp {
+                    deleted: DeleteAccountSummary,
+                }
+                let body: Resp = response
+                    .json()
+                    .map_err(|e| format!("Invalid response: {e}"))?;
+
+                Ok(body.deleted)
+            }
+            401 => Err("Session expired. Please sign in again.".to_string()),
+            status => {
+                let body = response.text().unwrap_or_default();
+                Err(format!("Pack Hub returned HTTP {status} - {body}"))
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))??;
+
+    // Sign the user out after successful deletion
+    *state
+        .tokens
+        .lock()
+        .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
+    clear_auth_tokens(&app);
+
+    Ok(result)
 }
 
 // ── Private Sharing ─────────────────────────────────────────────────────────
