@@ -305,7 +305,7 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     install_count: 0,
     created_at: now,
     updated_at: now,
-    status: (input.status as PackStatus) ?? "draft",
+    status: "draft",
   };
 
   await putPack(env, pack);

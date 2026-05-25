@@ -13,8 +13,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tempfile::NamedTempFile;
 
@@ -247,7 +249,11 @@ fn resolve_transitive_deps(
         }
 
         let mut newly_installed_folders: Vec<String> = Vec::new();
-        for dep_name in &missing_deps {
+        for (i, dep_name) in missing_deps.iter().enumerate() {
+            // Throttle between ESOUI requests to avoid hammering the server
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(200));
+            }
             match try_install_dep(dep_name, addons_dir, store) {
                 Ok(dep_folders) => {
                     for f in &dep_folders {
@@ -3422,6 +3428,7 @@ pub struct ActivateProfileResult {
     pub enabled: Vec<String>,
     pub disabled: Vec<String>,
     pub failed: Vec<String>,
+    pub missing: Vec<String>,
 }
 
 #[tauri::command]
@@ -3446,6 +3453,7 @@ pub fn activate_profile(
     let mut disabled: Vec<String> = Vec::new();
     let mut enabled: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
+    let mut seen_on_disk: HashSet<String> = HashSet::new();
 
     if let Ok(entries) = fs::read_dir(&addons_dir) {
         for entry in entries.flatten() {
@@ -3469,6 +3477,8 @@ pub fn activate_profile(
                 .unwrap_or(&folder_name)
                 .to_string();
 
+            seen_on_disk.insert(base_name.clone());
+
             if enabled_set.contains(&base_name) {
                 // Should be enabled
                 if is_disabled {
@@ -3491,6 +3501,14 @@ pub fn activate_profile(
         }
     }
 
+    // Report addons referenced in the profile that no longer exist on disk
+    let missing: Vec<String> = profile
+        .enabled_addons
+        .iter()
+        .filter(|name| !seen_on_disk.contains(name.as_str()))
+        .cloned()
+        .collect();
+
     store.active_profile = Some(profile_name);
     save_profiles(&addons_dir, &store)?;
 
@@ -3498,6 +3516,7 @@ pub fn activate_profile(
         enabled,
         disabled,
         failed,
+        missing,
     })
 }
 
@@ -3597,20 +3616,42 @@ pub fn backup_character_settings(
     let backups = backups_dir(&addons_dir).join(format!("char-{backup_name}"));
     fs::create_dir_all(&backups).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
-    // Copy all SavedVariables files that contain this character's data
+    // Copy all SavedVariables files that contain this character's data.
+    // Search within bracket-quote delimiters to avoid false positives
+    // (e.g. a character named "Lib" matching "LibStub" in addon code).
+    // Only scan the first 10,000 lines — character names appear in the
+    // first few hundred lines, so reading entire 100MB+ files is wasteful.
+    let needle = format!("[\"{}\"]", character_name);
+    let max_lines: usize = 10_000;
     let mut count: u32 = 0;
     if let Ok(entries) = fs::read_dir(&sv_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
-                // Check if file mentions this character
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if content.contains(&character_name) {
-                        if let Some(name) = path.file_name() {
-                            let dest = backups.join(name);
-                            if fs::copy(&path, &dest).is_ok() {
-                                count += 1;
-                            }
+                let file = match fs::File::open(&path) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let reader = BufReader::new(file);
+                let mut found = false;
+                for (i, line_result) in reader.lines().enumerate() {
+                    if i >= max_lines {
+                        break;
+                    }
+                    let line = match line_result {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    if line.contains(&needle) {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    if let Some(name) = path.file_name() {
+                        let dest = backups.join(name);
+                        if fs::copy(&path, &dest).is_ok() {
+                            count += 1;
                         }
                     }
                 }

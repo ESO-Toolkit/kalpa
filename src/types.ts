@@ -50,7 +50,7 @@ export interface UpdateCheckResult {
 export interface BatchUpdateResult {
   completed: string[];
   failed: string[];
-  errors?: Record<string, string>;
+  errors: Record<string, string>;
 }
 
 export interface BatchRemoveResult {
@@ -130,6 +130,13 @@ export interface AddonProfile {
   name: string;
   enabledAddons: string[];
   createdAt: string;
+}
+
+export interface ActivateProfileResult {
+  enabled: string[];
+  disabled: string[];
+  failed: string[];
+  missing: string[];
 }
 
 export interface CharacterInfo {

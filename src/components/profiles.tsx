@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "motion/react";
-import type { AddonProfile } from "../types";
+import type { AddonProfile, ActivateProfileResult } from "../types";
 import {
   Dialog,
   DialogContent,
@@ -77,11 +77,10 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   const handleActivate = async (name: string) => {
     setActivating(name);
     try {
-      const result = await invokeOrThrow<{
-        enabled: string[];
-        disabled: string[];
-        failed: string[];
-      }>("activate_profile", { addonsPath, profileName: name });
+      const result = await invokeOrThrow<ActivateProfileResult>("activate_profile", {
+        addonsPath,
+        profileName: name,
+      });
       const parts: string[] = [];
       if (result.enabled.length > 0) parts.push(`${result.enabled.length} enabled`);
       if (result.disabled.length > 0) parts.push(`${result.disabled.length} disabled`);
@@ -91,6 +90,11 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
       if (result.failed.length > 0) {
         toast.error(
           `Failed to rename ${result.failed.length} addon(s): ${result.failed.join(", ")}`
+        );
+      }
+      if (result.missing.length > 0) {
+        toast.info(
+          `${result.missing.length} addon(s) from this profile are no longer installed: ${result.missing.join(", ")}`
         );
       }
       setActiveProfile(name);

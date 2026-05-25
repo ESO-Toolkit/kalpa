@@ -23,6 +23,7 @@ import {
   Check,
   Copy,
   Trash2,
+  Search,
 } from "lucide-react";
 
 interface DiscoverDetailProps {
@@ -121,22 +122,11 @@ export function DiscoverDetail({
       <div className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-[#c4a44a]/[0.04] blur-[60px]" />
         <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
-          <svg
+          <Search
             aria-hidden="true"
-            xmlns="http://www.w3.org/2000/svg"
-            width="40"
-            height="40"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="text-muted-foreground/30"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.3-4.3" />
-          </svg>
+            className="size-10 text-muted-foreground/30"
+            strokeWidth={1.2}
+          />
         </div>
         <div className="relative text-center">
           <p className="font-heading text-sm font-medium text-foreground/70">Discover Addons</p>

@@ -644,7 +644,7 @@ export function AddonList({
                         </p>
                       </div>
                       <button
-                        className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/[0.08] hover:text-foreground transition-colors"
+                        className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/[0.08] hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none"
                         onClick={() => {
                           onSearchChange("");
                           onFilterChange("all");

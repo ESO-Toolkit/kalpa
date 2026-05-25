@@ -11,7 +11,7 @@ const glassPanelVariants = cva(
         default:
           "bg-[rgba(15,23,42,0.66)] border border-white/[0.06] shadow-[0_4px_16px_rgba(0,0,0,0.2)]",
         subtle:
-          "bg-white/[0.02] border border-white/[0.05] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:border-white/[0.07] transition-colors duration-200",
+          "bg-white/[0.02] border border-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:border-white/[0.07] transition-colors duration-200",
       },
     },
     defaultVariants: { variant: "default" },

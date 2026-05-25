@@ -730,6 +730,18 @@ function App() {
 
       if (updatingAllRef.current) return;
 
+      try {
+        const esoRunning = await invokeOrThrow<boolean>("is_eso_running");
+        if (esoRunning) {
+          toast.error(
+            "Elder Scrolls Online is running. Close it before updating addons to avoid file conflicts."
+          );
+          return;
+        }
+      } catch {
+        // Non-critical — proceed if we can't check
+      }
+
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
       setAddonStatuses(new Map());

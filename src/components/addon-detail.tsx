@@ -21,7 +21,7 @@ import { getSetting } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { ExternalLink, Trash2, Check, Power, Files } from "lucide-react";
+import { ExternalLink, Trash2, Check, Power, Files, FileText } from "lucide-react";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { AnimatedCheckmark } from "@/components/ui/animated-checkmark";
 import { AddonFileBrowser } from "@/components/addon-file-browser";
@@ -106,25 +106,11 @@ export function AddonDetail({
         {/* Ambient glow behind icon */}
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-[#c4a44a]/[0.04] blur-[60px]" />
         <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
-          <svg
+          <FileText
             aria-hidden="true"
-            xmlns="http://www.w3.org/2000/svg"
-            width="40"
-            height="40"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="text-muted-foreground/30"
-          >
-            <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-            <polyline points="14 2 14 8 20 8" />
-            <line x1="16" y1="13" x2="8" y2="13" />
-            <line x1="16" y1="17" x2="8" y2="17" />
-            <line x1="10" y1="9" x2="8" y2="9" />
-          </svg>
+            className="size-10 text-muted-foreground/30"
+            strokeWidth={1.2}
+          />
         </div>
         <div className="relative text-center">
           <p className="font-heading text-sm font-medium text-foreground/70">No addon selected</p>
