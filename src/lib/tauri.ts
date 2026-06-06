@@ -65,6 +65,12 @@ export function getTauriErrorMessage(error: unknown): string {
     return "Something went wrong";
   }
 
+  // The backend already emits a fully-formed, user-facing explanation for
+  // Controlled Folder Access blocks (with the exact Windows steps). Pass it
+  // through verbatim — it also contains "os error 5", which would otherwise
+  // match the generic permission hint below and discard the useful guidance.
+  if (/controlled folder access/i.test(raw)) return raw;
+
   // Return a friendlier message if we match a known pattern
   for (const [pattern, hint] of ERROR_HINTS) {
     if (pattern.test(raw)) return hint;

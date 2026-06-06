@@ -29,6 +29,14 @@ describe("getTauriErrorMessage", () => {
     );
   });
 
+  it("passes through the Controlled Folder Access message even though it contains os error 5", () => {
+    const cfa =
+      'Windows blocked Kalpa from writing to your AddOns folder ("..."). ' +
+      "This is usually Controlled Folder Access (ransomware protection). " +
+      "To fix it: open Windows Security → ... add Kalpa. (Underlying error: Access is denied. (os error 5))";
+    expect(getTauriErrorMessage(cfa)).toBe(cfa);
+  });
+
   it("returns friendly message for ESOUI rate limit", () => {
     expect(getTauriErrorMessage("Too many requests to ESOUI")).toBe(
       "ESOUI rate limit reached. Wait a moment and try again."
