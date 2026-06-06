@@ -2267,7 +2267,7 @@ fn extract_streamed_downloads(
 
         let skip_files: HashSet<String> = kept_files
             .iter()
-            .map(|p| format!("{}/{}", folder_name, p))
+            .map(|p| format!("{folder_name}/{p}"))
             .collect();
 
         let extract_result = if skip_files.is_empty() {
