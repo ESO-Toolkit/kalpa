@@ -88,8 +88,11 @@ export function CfaGuidanceDialog({
         </ol>
 
         {exePath && (
-          <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] p-2">
-            <code className="flex-1 truncate font-mono text-xs text-foreground/70" title={exePath}>
+          <div className="flex min-w-0 items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.03] p-2">
+            <code
+              className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/70"
+              title={exePath}
+            >
               {exePath}
             </code>
             <Button variant="ghost" size="icon-sm" onClick={copyPath} aria-label="Copy path">
