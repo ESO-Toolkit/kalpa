@@ -142,15 +142,19 @@ export function RosterPackInstall({
   );
 
   const handleInstall = useCallback(async () => {
+    if (installing) return;
     if (addonsToInstall.length === 0) {
       toast.info("All selected addons are already installed.");
       return;
     }
 
-    if (!(await ensureEsoNotBlocking())) return;
-
+    // Claim busy before the async ESO check so a double-click can't start two loops.
     cancelledRef.current = false;
     setInstalling(true);
+    if (!(await ensureEsoNotBlocking())) {
+      setInstalling(false);
+      return;
+    }
     setInstallProgress({ completed: 0, failed: 0, total: addonsToInstall.length });
 
     let completed = 0;
@@ -219,7 +223,7 @@ export function RosterPackInstall({
     if (failed > 0) {
       toast.error(`${failed} addon${failed !== 1 ? "s" : ""} failed to install`);
     }
-  }, [addonsToInstall, addonsPath, onRefresh, ensureEsoNotBlocking]);
+  }, [addonsToInstall, addonsPath, onRefresh, ensureEsoNotBlocking, installing]);
 
   const handleCancel = useCallback(() => {
     if (installing) {

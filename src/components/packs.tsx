@@ -566,11 +566,16 @@ export function Packs({
   const handleInstallImportedPack = async () => {
     if (!importedPack) return;
     if (applyingSettings) return;
+    if (installing) return;
     if (importedPackAddonsToInstall.length === 0 && !importedFileSettings) return;
 
-    if (importedPackAddonsToInstall.length > 0 && !(await ensureEsoNotBlocking())) return;
-
+    // Claim busy before the async ESO check so a double-click can't start two loops.
     setInstalling(true);
+    if (importedPackAddonsToInstall.length > 0 && !(await ensureEsoNotBlocking())) {
+      setInstalling(false);
+      return;
+    }
+
     if (importedPackAddonsToInstall.length > 0) {
       setInstallProgress({ completed: 0, failed: 0, total: importedPackAddonsToInstall.length });
     }
@@ -729,15 +734,19 @@ export function Packs({
 
   const handleInstallPack = async () => {
     if (!selectedPack) return;
+    if (installing) return;
     if (newAddonsToInstall.length === 0) {
       toast.info("All selected addons are already installed.");
       return;
     }
 
-    if (!(await ensureEsoNotBlocking())) return;
-
+    // Claim busy before the async ESO check so a double-click can't start two loops.
     setConfirmInstall(false);
     setInstalling(true);
+    if (!(await ensureEsoNotBlocking())) {
+      setInstalling(false);
+      return;
+    }
     setInstallProgress({ completed: 0, failed: 0, total: newAddonsToInstall.length });
 
     let completed = 0;
