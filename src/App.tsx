@@ -778,10 +778,15 @@ function App() {
       const total = noConflictAddons.length + conflictingAddons.length + scanFailed.length;
       const completed: string[] = [];
       const failed: string[] = [...scanFailed];
-      // Collect per-addon failure reasons so we can surface them instead of a bare count.
+      // Collect per-addon failure reasons so we can surface them instead of a
+      // bare count. Scan-phase errors come back as raw backend strings in
+      // `data.errors` (the command resolved ok), so they never pass through
+      // invokeResult's mapper — normalize them here so scan failures get the
+      // same friendly/permission/CFA guidance as extraction failures.
       const failureReasons = new Map<string, string>();
       for (const name of scanFailed) {
-        failureReasons.set(name, scanErrors?.[name] ?? "unknown error");
+        const raw = scanErrors?.[name];
+        failureReasons.set(name, raw ? getTauriErrorMessage(raw) : "unknown error");
       }
 
       // Phase 2: Update non-conflicting addons sequentially
