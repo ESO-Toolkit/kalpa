@@ -898,11 +898,19 @@ function App() {
           // must be normalized to one canonical label — otherwise a batch-wide
           // CFA block would repeat the full multi-sentence instructions once
           // per addon. Names per group are bounded with an overflow count.
+          // Collapse the permission-denied family to one hedged label. The
+          // backend message embeds a per-file path, so without this every
+          // addon would fragment into its own group. The label mirrors the
+          // backend's hedge (CFA is the likely — not certain — cause) so we
+          // don't send read-only/permission/antivirus failures down a
+          // CFA-only path. Keeps the "controlled folder access" substring so
+          // the tauri.ts passthrough still recognizes it.
           const canonicalReason = (reason: string): string =>
             /controlled folder access/i.test(reason)
-              ? "Windows ransomware protection is blocking Kalpa. Allow it in " +
-                "Windows Security → Virus & threat protection → Ransomware protection → " +
-                "Allow an app through Controlled folder access."
+              ? "Windows blocked Kalpa from writing — most often Controlled Folder Access " +
+                "(ransomware protection), but possibly read-only files or antivirus. Fix the " +
+                "common case in Windows Security → Virus & threat protection → Ransomware " +
+                "protection → Allow an app through Controlled folder access."
               : reason;
 
           const byReason = new Map<string, string[]>();
