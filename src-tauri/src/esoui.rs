@@ -850,13 +850,31 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
     if let Some(expected) = expected_md5 {
         if !expected.is_empty() {
             use md5::{Digest, Md5};
+            use std::io::Read;
             tmp.as_file()
                 .seek(io::SeekFrom::Start(0))
                 .map_err(|e| format!("Failed to seek: {e}"))?;
             let mut hasher = Md5::new();
-            io::copy(&mut tmp.as_file(), &mut hasher)
-                .map_err(|e| format!("Failed to hash download: {e}"))?;
-            let actual = format!("{:x}", hasher.finalize());
+            // md-5 0.11 (digest 0.11) dropped the `io::Write` impl on the hasher,
+            // so feed it in chunks via `update` instead of `io::copy`.
+            let mut file = tmp.as_file();
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Failed to hash download: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            // digest 0.11 output no longer implements `LowerHex`; hex-encode by hand.
+            let digest = hasher.finalize();
+            let mut actual = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                use std::fmt::Write as _;
+                let _ = write!(actual, "{byte:02x}");
+            }
             if actual != expected.to_lowercase() {
                 return Err(
                     "Download checksum mismatch — the file may be corrupt. Try again.".to_string(),
