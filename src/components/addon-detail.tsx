@@ -127,8 +127,14 @@ export function AddonDetail({
 
   const handleUpdate = async () => {
     if (!updateResult || !addon.esouiId) return;
-    if (!(await ensureEsoNotBlocking())) return;
+    if (updating) return;
+    // Set the busy guard before the async ESO check so a fast double-click can't
+    // enter twice; clear it if the user cancels the warning.
     setUpdating(true);
+    if (!(await ensureEsoNotBlocking())) {
+      setUpdating(false);
+      return;
+    }
     setUpdateError(null);
     setConflictReport(null);
     try {
@@ -194,6 +200,12 @@ export function AddonDetail({
   const handleConflictResolve = async (decisions: FileDecision[]) => {
     if (!conflictReport || !updateResult) return;
     setUpdating(true);
+    // Re-check here too: ESO may have launched after the initial scan while the
+    // conflict panel was open, so the earlier handleUpdate gate can be stale.
+    if (!(await ensureEsoNotBlocking())) {
+      setUpdating(false);
+      return;
+    }
     setUpdateError(null);
     try {
       await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
@@ -340,8 +352,11 @@ export function AddonDetail({
             sessionId={pendingConflict.sessionId}
             addonsPath={addonsPath}
             onResolve={async (decisions) => {
-              if (!(await ensureEsoNotBlocking())) return;
               setUpdating(true);
+              if (!(await ensureEsoNotBlocking())) {
+                setUpdating(false);
+                return;
+              }
               try {
                 await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
                   addonsPath,
