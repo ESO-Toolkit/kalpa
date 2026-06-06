@@ -50,6 +50,8 @@ interface AddonDetailProps {
   isOffline?: boolean;
   pendingConflict?: BatchConflictAddon;
   onConflictResolved?: (folderName: string) => void;
+  /** Gate run before any update write — warns when ESO is running. Returns false to cancel. */
+  ensureEsoNotBlocking: () => Promise<boolean>;
 }
 
 export function AddonDetail({
@@ -65,6 +67,7 @@ export function AddonDetail({
   isOffline,
   pendingConflict,
   onConflictResolved,
+  ensureEsoNotBlocking,
 }: AddonDetailProps) {
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -124,6 +127,7 @@ export function AddonDetail({
 
   const handleUpdate = async () => {
     if (!updateResult || !addon.esouiId) return;
+    if (!(await ensureEsoNotBlocking())) return;
     setUpdating(true);
     setUpdateError(null);
     setConflictReport(null);
@@ -336,6 +340,7 @@ export function AddonDetail({
             sessionId={pendingConflict.sessionId}
             addonsPath={addonsPath}
             onResolve={async (decisions) => {
+              if (!(await ensureEsoNotBlocking())) return;
               setUpdating(true);
               try {
                 await invokeOrThrow<InstallResult>("update_addon_with_decisions", {

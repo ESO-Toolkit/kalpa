@@ -118,6 +118,9 @@ function App() {
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
   // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
   const esoRunningResolveRef = useRef<((proceed: boolean) => void) | null>(null);
+  // The single in-flight ESO-running prompt. Concurrent update paths share this one
+  // promise instead of each opening a dialog and clobbering the resolver.
+  const esoRunningPromptRef = useRef<Promise<boolean> | null>(null);
   // Set synchronously at the start of a batch update to block overlapping calls during
   // the async preamble (game check + confirm dialog), before `updatingAll` state lands.
   const batchPreflightRef = useRef(false);
@@ -582,10 +585,38 @@ function App() {
     [addonsPath]
   );
 
+  // Shared gate for every addon-update write path. Returns true to proceed.
+  // Updating while ESO runs is safe on disk — the game just won't see the changes
+  // until /reloadui or relog — so we warn (unless suppressed) instead of blocking.
+  // Concurrent callers share one prompt so a second can't strand the first's resolver.
+  const ensureEsoNotBlocking = useCallback(async (): Promise<boolean> => {
+    let esoRunning: boolean;
+    try {
+      esoRunning = await invokeOrThrow<boolean>("is_eso_running");
+    } catch {
+      return true; // Non-critical — proceed if we can't check.
+    }
+    if (!esoRunning) return true;
+    if (await getSetting<boolean>("suppressEsoRunningWarning", false)) return true;
+
+    // A prompt is already open — join its decision instead of opening another.
+    if (esoRunningPromptRef.current) return esoRunningPromptRef.current;
+
+    const prompt = new Promise<boolean>((resolve) => {
+      esoRunningResolveRef.current = resolve;
+      setEsoRunningPromptOpen(true);
+    }).finally(() => {
+      esoRunningPromptRef.current = null;
+    });
+    esoRunningPromptRef.current = prompt;
+    return prompt;
+  }, []);
+
   const handleSingleUpdate = useCallback(
     async (folderName: string) => {
       const ur = updateResults.find((r) => r.folderName === folderName && r.hasUpdate);
       if (!ur) return;
+      if (!(await ensureEsoNotBlocking())) return;
       try {
         await invokeOrThrow("update_addon", {
           addonsPath,
@@ -598,7 +629,7 @@ function App() {
         toast.error(`Update failed: ${getTauriErrorMessage(e)}`);
       }
     },
-    [addonsPath, updateResults, srAnnounce, handleAddonUpdated]
+    [addonsPath, updateResults, srAnnounce, handleAddonUpdated, ensureEsoNotBlocking]
   );
 
   const pendingRemovalsRef = useRef<
@@ -744,25 +775,9 @@ function App() {
       if (batchPreflightRef.current) return;
       batchPreflightRef.current = true;
 
-      try {
-        const esoRunning = await invokeOrThrow<boolean>("is_eso_running");
-        if (esoRunning) {
-          // Updating while ESO runs is safe on disk — the game just won't see the
-          // changes until /reloadui or relog. Warn (unless suppressed) instead of blocking.
-          const suppressed = await getSetting<boolean>("suppressEsoRunningWarning", false);
-          if (!suppressed) {
-            const proceed = await new Promise<boolean>((resolve) => {
-              esoRunningResolveRef.current = resolve;
-              setEsoRunningPromptOpen(true);
-            });
-            if (!proceed) {
-              batchPreflightRef.current = false;
-              return;
-            }
-          }
-        }
-      } catch {
-        // Non-critical — proceed if we can't check
+      if (!(await ensureEsoNotBlocking())) {
+        batchPreflightRef.current = false;
+        return;
       }
 
       // Hand off from the preflight latch to the in-progress latch synchronously, so the
@@ -945,7 +960,7 @@ function App() {
 
       await scanAddons(path);
     },
-    [scanAddons, srAnnounce]
+    [ensureEsoNotBlocking, scanAddons, srAnnounce]
   );
 
   useEffect(() => {
@@ -1255,6 +1270,7 @@ function App() {
             onAddonUpdated={handleAddonUpdated}
             onTagsChange={handleTagsChange}
             isOffline={isOffline}
+            ensureEsoNotBlocking={ensureEsoNotBlocking}
             pendingConflict={
               selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
             }
