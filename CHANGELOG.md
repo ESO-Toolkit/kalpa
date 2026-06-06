@@ -4,6 +4,21 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.5] — 2026-06-06
+
+### Features
+- **Update while ESO is running** — addon batch updates no longer hard-block when the game is open. A confirm dialog explains that files will update but ESO won't see changes until `/reloadui` or a relog (the same workflow Minion uses). Includes a "Don't show again" option and a "Warn when ESO is running" toggle in Settings.
+- **Controlled Folder Access guidance** — when Windows Controlled Folder Access (CFA) silently blocks Kalpa from writing to the AddOns folder, a glass modal now explains the cause with numbered remediation steps, a copy-path button for `kalpa.exe`, and a one-click "Open Windows Security" button. Shown proactively before Update All when a block is detected, and as a fallback after a failure.
+
+### Bug Fixes
+- **Surface per-addon update failures** — batch updates previously reported only "Updated 0 addons, N failed" with no explanation. Failures are now captured per addon (scan and decision phases) and shown grouped by cause with affected addon names in the summary toast.
+- Map `PermissionDenied` write errors to an actionable message naming CFA as the likely cause plus exact Windows Security steps, instead of a raw `Access is denied (os error 5)`.
+- Distinguish CFA-blocked writes from corrupt-archive errors during extraction.
+- Claim busy state before the ESO-running check in pack/roster installs to close double-submit and stale-gate gaps.
+- Prevent overlapping batch updates during the ESO-running preamble; reset the opt-out checkbox between prompts.
+- Stream Update All through a single batched command (one metadata write).
+- Prevent CFA modal content from overflowing.
+
 ## [0.1.0-beta.4] — 2026-05-25
 
 ### Security Fixes
