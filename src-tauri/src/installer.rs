@@ -16,8 +16,9 @@ fn describe_write_error(path: &Path, e: &io::Error) -> String {
     if e.kind() == io::ErrorKind::PermissionDenied {
         format!(
             "Windows blocked Kalpa from writing to your AddOns folder ({path:?}). \
-             This is usually Controlled Folder Access (ransomware protection). \
-             To fix it: open Windows Security → Virus & threat protection → \
+             This is most often Controlled Folder Access (ransomware protection), \
+             but can also be a read-only file, restrictive permissions, or antivirus. \
+             To fix the common case: open Windows Security → Virus & threat protection → \
              Ransomware protection → Allow an app through Controlled folder access, \
              then add Kalpa. (Underlying error: {e})"
         )

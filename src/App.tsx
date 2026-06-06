@@ -892,20 +892,28 @@ function App() {
           );
           console.error(`Update failures (${failed.length}):\n${reasonLines.join("\n")}`);
 
-          // Build the user-visible detail. Group addons by their failure
-          // reason — "reason: AddonA, AddonB" — so the cause and the affected
-          // addons both stay visible even when several share one reason (e.g.
-          // Controlled Folder Access blocking every extraction). Names per
-          // group are bounded with an overflow count to keep the toast compact.
+          // Build the user-visible detail by grouping addons under a stable
+          // label for their cause, then listing the affected addon names.
+          // Controlled Folder Access messages embed the per-file path, so they
+          // must be normalized to one canonical label — otherwise a batch-wide
+          // CFA block would repeat the full multi-sentence instructions once
+          // per addon. Names per group are bounded with an overflow count.
+          const canonicalReason = (reason: string): string =>
+            /controlled folder access/i.test(reason)
+              ? "Windows ransomware protection is blocking Kalpa. Allow it in " +
+                "Windows Security → Virus & threat protection → Ransomware protection → " +
+                "Allow an app through Controlled folder access."
+              : reason;
+
           const byReason = new Map<string, string[]>();
           for (const name of failed) {
-            const reason = failureReasons.get(name) ?? "unknown error";
+            const reason = canonicalReason(failureReasons.get(name) ?? "unknown error");
             const names = byReason.get(reason) ?? [];
             names.push(name);
             byReason.set(reason, names);
           }
           const MAX_NAMES = 5;
-          const detail = [...byReason.entries()]
+          let detail = [...byReason.entries()]
             .map(([reason, names]) => {
               const shown = names.slice(0, MAX_NAMES).join(", ");
               const overflow = names.length - Math.min(names.length, MAX_NAMES);
@@ -913,6 +921,12 @@ function App() {
               return `${reason}\n${nameList}`;
             })
             .join("\n\n");
+          // Hard cap so a pathological batch can't produce an enormous toast;
+          // the full per-addon detail is always in the console above.
+          const MAX_DETAIL = 600;
+          if (detail.length > MAX_DETAIL) {
+            detail = detail.slice(0, MAX_DETAIL - 1).trimEnd() + "…";
+          }
           toast.warning(msg, { description: detail });
         } else if (conflictCount > 0) {
           toast.info(msg);
