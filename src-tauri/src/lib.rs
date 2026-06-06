@@ -390,6 +390,7 @@ pub fn run() {
             commands::scan_batch_conflicts,
             commands::get_conflict_diff,
             commands::update_addon_with_decisions,
+            commands::update_batch_with_decisions,
             commands::list_addon_files,
             commands::read_addon_file,
             commands::write_addon_file,

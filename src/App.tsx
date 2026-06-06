@@ -20,10 +20,9 @@ import type {
   AddonManifest,
   AuthUser,
   BatchConflictAddon,
-  BatchConflictResult,
   BatchRemoveResult,
   GameInstance,
-  InstallResult,
+  StreamingBatchResult,
   UpdateCheckResult,
   WriteAccessStatus,
   EsouiSearchResult,
@@ -773,9 +772,19 @@ function App() {
         operationLabel: "update-all",
       });
 
-      // Phase 1: Scan all addons for conflicts (downloads ZIPs in parallel on Rust side)
-      const scanResult = await invokeResult<BatchConflictResult>("scan_batch_conflicts", {
+      // Resolve the conflict policy up front so the backend can auto-resolve
+      // conflicts inline (keep_mine / take_update) and only defer the "ask"
+      // case back to us for the interactive modal.
+      const policy = await getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask");
+
+      // Single streaming call: parallel downloads, extract-as-each-finishes,
+      // one kalpa.json load/save and one dependency-resolution pass for the
+      // whole batch. Replaces the old scan-all → per-addon-decision loop, which
+      // re-locked and re-saved metadata once per addon (the source of the
+      // last-addon lag).
+      const batch = await invokeResult<StreamingBatchResult>("update_batch_with_decisions", {
         addonsPath: path,
+        conflictPolicy: policy,
         updates: updates.map((u) => ({
           esouiId: u.esouiId,
           folderName: u.folderName,
@@ -783,113 +792,27 @@ function App() {
         })),
       });
 
-      if (!scanResult.ok) {
+      if (!batch.ok) {
         setUpdatingAll(false);
         setUpdateProgress(null);
-        toast.error(`Batch update failed: ${scanResult.error}`);
+        toast.error(`Batch update failed: ${batch.error}`);
         srAnnounce("Batch update failed");
         return;
       }
 
-      const {
-        noConflictAddons,
-        conflictingAddons,
-        failed: scanFailed,
-        errors: scanErrors,
-      } = scanResult.data;
-      const total = noConflictAddons.length + conflictingAddons.length + scanFailed.length;
-      const completed: string[] = [];
-      const failed: string[] = [...scanFailed];
-      // Collect per-addon failure reasons so we can surface them instead of a
-      // bare count. Scan-phase errors come back as raw backend strings in
-      // `data.errors` (the command resolved ok), so they never pass through
-      // invokeResult's mapper — normalize them here so scan failures get the
-      // same friendly/permission/CFA guidance as extraction failures.
+      const { completed, failed, errors: batchErrors, conflicts: remainingConflicts } = batch.data;
+
+      // Final progress reflects the streamed batch-update-progress events; the
+      // count here is just for the summary toast below.
+
+      // Collect per-addon failure reasons. Backend errors come back as raw
+      // strings (the command resolved ok), so they bypass invokeResult's
+      // mapper — normalize them here so extraction/download failures get the
+      // same friendly/permission/CFA guidance the UI already applies.
       const failureReasons = new Map<string, string>();
-      for (const name of scanFailed) {
-        const raw = scanErrors?.[name];
+      for (const name of failed) {
+        const raw = batchErrors?.[name];
         failureReasons.set(name, raw ? getTauriErrorMessage(raw) : "unknown error");
-      }
-
-      // Phase 2: Update non-conflicting addons sequentially
-      for (let i = 0; i < noConflictAddons.length; i++) {
-        const addon = noConflictAddons[i]!;
-        setAddonStatuses((prev) => {
-          const next = new Map(prev);
-          next.set(addon.folderName, "extracting");
-          return next;
-        });
-
-        const keepDecisions = addon.autoKeptFiles.map((p) => ({
-          relativePath: p,
-          action: "keep_mine" as const,
-        }));
-        const result = await invokeResult<InstallResult>("update_addon_with_decisions", {
-          addonsPath: path,
-          sessionId: addon.sessionId,
-          decisions: keepDecisions,
-        });
-
-        if (result.ok) {
-          completed.push(addon.folderName);
-          setAddonStatuses((prev) => {
-            const next = new Map(prev);
-            next.set(addon.folderName, "completed");
-            return next;
-          });
-        } else {
-          failed.push(addon.folderName);
-          failureReasons.set(addon.folderName, result.error ?? "unknown error");
-          setAddonStatuses((prev) => {
-            const next = new Map(prev);
-            next.set(addon.folderName, "failed");
-            return next;
-          });
-        }
-
-        setUpdateProgress({
-          completed: completed.length,
-          failed: failed.length,
-          total,
-          currentAddon: addon.folderName,
-        });
-      }
-
-      // Handle conflicting addons based on user's policy preference
-      const remainingConflicts: typeof conflictingAddons = [];
-      if (conflictingAddons.length > 0) {
-        const policy = await getSetting<"ask" | "keep_mine" | "take_update">(
-          "conflictPolicy",
-          "ask"
-        );
-
-        if (policy !== "ask") {
-          for (const ca of conflictingAddons) {
-            const autoDecisions = [
-              ...ca.autoKeptFiles.map((p) => ({
-                relativePath: p,
-                action: "keep_mine" as const,
-              })),
-              ...ca.conflicts.map((c) => ({
-                relativePath: c.relativePath,
-                action: policy as "keep_mine" | "take_update",
-              })),
-            ];
-            const result = await invokeResult<InstallResult>("update_addon_with_decisions", {
-              addonsPath: path,
-              sessionId: ca.sessionId,
-              decisions: autoDecisions,
-            });
-            if (result.ok) {
-              completed.push(ca.folderName);
-            } else {
-              failed.push(ca.folderName);
-              failureReasons.set(ca.folderName, result.error ?? "unknown error");
-            }
-          }
-        } else {
-          remainingConflicts.push(...conflictingAddons);
-        }
       }
 
       setUpdatingAll(false);
