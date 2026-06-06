@@ -886,20 +886,28 @@ function App() {
         if (conflictCount > 0)
           msg += `, ${conflictCount} need${conflictCount === 1 ? "s" : ""} your attention`;
         if (failed.length > 0) {
-          // Log every failure reason so the cause is visible (console + toast detail).
+          // Full per-addon reasons to the console for diagnosis.
           const reasonLines = failed.map(
             (name) => `${name}: ${failureReasons.get(name) ?? "unknown error"}`
           );
           console.error(`Update failures (${failed.length}):\n${reasonLines.join("\n")}`);
-          // Group identical reasons — when every addon fails the same way, show it once.
-          const counts = new Map<string, number>();
-          for (const name of failed) {
-            const reason = failureReasons.get(name) ?? "unknown error";
-            counts.set(reason, (counts.get(reason) ?? 0) + 1);
+
+          // Build the user-visible detail. Preserve the addon→reason mapping
+          // (so distinct failures stay attributable), but when every addon
+          // failed for the same reason, collapse to that reason once.
+          const uniqueReasons = new Set(
+            failed.map((name) => failureReasons.get(name) ?? "unknown error")
+          );
+          let detail: string;
+          if (uniqueReasons.size === 1) {
+            detail = [...uniqueReasons][0]!;
+          } else {
+            // Show bounded `addon: reason` lines plus an overflow count.
+            const MAX_SHOWN = 5;
+            const shown = reasonLines.slice(0, MAX_SHOWN);
+            const overflow = failed.length - shown.length;
+            detail = shown.join("\n") + (overflow > 0 ? `\n…and ${overflow} more` : "");
           }
-          const detail = [...counts.entries()]
-            .map(([reason, n]) => (n > 1 ? `${reason} (×${n})` : reason))
-            .join("; ");
           toast.warning(msg, { description: detail });
         } else if (conflictCount > 0) {
           toast.info(msg);
