@@ -14,6 +14,7 @@ import { SetupWizard } from "./components/setup-wizard";
 import { StatusBanners } from "./components/status-banners";
 import { RosterPackInstall } from "./components/roster-pack-install";
 import { UpdateBanner } from "./components/update-banner";
+import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { filterAddons, isFilterMode } from "@/lib/addon-helpers";
@@ -21,11 +22,11 @@ import type {
   AddonManifest,
   AuthUser,
   BatchConflictAddon,
-  BatchConflictResult,
   BatchRemoveResult,
   GameInstance,
-  InstallResult,
+  StreamingBatchResult,
   UpdateCheckResult,
+  WriteAccessStatus,
   EsouiSearchResult,
   SortMode,
   FilterMode,
@@ -76,6 +77,11 @@ function App() {
   >(new Map());
   const [pendingConflicts, setPendingConflicts] = useState<Map<string, BatchConflictAddon>>(
     new Map()
+  );
+  // Controlled Folder Access / write-access guidance dialog. `exePath` is the
+  // Kalpa executable the user must allow through Windows ransomware protection.
+  const [cfaDialog, setCfaDialog] = useState<{ exePath: string; permissionDenied: boolean } | null>(
+    null
   );
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
@@ -781,6 +787,22 @@ function App() {
         return;
       }
 
+      // Proactively check that Kalpa can write to the AddOns folder. When
+      // Windows Controlled Folder Access (or read-only/AV) blocks writes, every
+      // update would fail; surface the guidance up front instead of after 14
+      // failures. Fails open — a detection hiccup never blocks the update.
+      const access = await invokeResult<WriteAccessStatus>("check_addons_write_access", {
+        addonsPath: path,
+      });
+      if (access.ok && access.data.blocked) {
+        batchPreflightRef.current = false;
+        setCfaDialog({
+          exePath: access.data.exePath,
+          permissionDenied: access.data.permissionDenied,
+        });
+        return;
+      }
+
       // Hand off from the preflight latch to the in-progress latch synchronously, so the
       // `updatingAllRef` guard above covers the gap until the `updatingAll` state lands.
       updatingAllRef.current = true;
@@ -794,9 +816,19 @@ function App() {
         operationLabel: "update-all",
       });
 
-      // Phase 1: Scan all addons for conflicts (downloads ZIPs in parallel on Rust side)
-      const scanResult = await invokeResult<BatchConflictResult>("scan_batch_conflicts", {
+      // Resolve the conflict policy up front so the backend can auto-resolve
+      // conflicts inline (keep_mine / take_update) and only defer the "ask"
+      // case back to us for the interactive modal.
+      const policy = await getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask");
+
+      // Single streaming call: parallel downloads, extract-as-each-finishes,
+      // one kalpa.json load/save and one dependency-resolution pass for the
+      // whole batch. Replaces the old scan-all → per-addon-decision loop, which
+      // re-locked and re-saved metadata once per addon (the source of the
+      // last-addon lag).
+      const batch = await invokeResult<StreamingBatchResult>("update_batch_with_decisions", {
         addonsPath: path,
+        conflictPolicy: policy,
         updates: updates.map((u) => ({
           esouiId: u.esouiId,
           folderName: u.folderName,
@@ -804,96 +836,27 @@ function App() {
         })),
       });
 
-      if (!scanResult.ok) {
+      if (!batch.ok) {
         setUpdatingAll(false);
         setUpdateProgress(null);
-        toast.error(`Batch update failed: ${scanResult.error}`);
+        toast.error(`Batch update failed: ${batch.error}`);
         srAnnounce("Batch update failed");
         return;
       }
 
-      const { noConflictAddons, conflictingAddons, failed: scanFailed } = scanResult.data;
-      const total = noConflictAddons.length + conflictingAddons.length + scanFailed.length;
-      const completed: string[] = [];
-      const failed: string[] = [...scanFailed];
+      const { completed, failed, errors: batchErrors, conflicts: remainingConflicts } = batch.data;
 
-      // Phase 2: Update non-conflicting addons sequentially
-      for (let i = 0; i < noConflictAddons.length; i++) {
-        const addon = noConflictAddons[i]!;
-        setAddonStatuses((prev) => {
-          const next = new Map(prev);
-          next.set(addon.folderName, "extracting");
-          return next;
-        });
+      // Final progress reflects the streamed batch-update-progress events; the
+      // count here is just for the summary toast below.
 
-        const keepDecisions = addon.autoKeptFiles.map((p) => ({
-          relativePath: p,
-          action: "keep_mine" as const,
-        }));
-        const result = await invokeResult<InstallResult>("update_addon_with_decisions", {
-          addonsPath: path,
-          sessionId: addon.sessionId,
-          decisions: keepDecisions,
-        });
-
-        if (result.ok) {
-          completed.push(addon.folderName);
-          setAddonStatuses((prev) => {
-            const next = new Map(prev);
-            next.set(addon.folderName, "completed");
-            return next;
-          });
-        } else {
-          failed.push(addon.folderName);
-          setAddonStatuses((prev) => {
-            const next = new Map(prev);
-            next.set(addon.folderName, "failed");
-            return next;
-          });
-        }
-
-        setUpdateProgress({
-          completed: completed.length,
-          failed: failed.length,
-          total,
-          currentAddon: addon.folderName,
-        });
-      }
-
-      // Handle conflicting addons based on user's policy preference
-      const remainingConflicts: typeof conflictingAddons = [];
-      if (conflictingAddons.length > 0) {
-        const policy = await getSetting<"ask" | "keep_mine" | "take_update">(
-          "conflictPolicy",
-          "ask"
-        );
-
-        if (policy !== "ask") {
-          for (const ca of conflictingAddons) {
-            const autoDecisions = [
-              ...ca.autoKeptFiles.map((p) => ({
-                relativePath: p,
-                action: "keep_mine" as const,
-              })),
-              ...ca.conflicts.map((c) => ({
-                relativePath: c.relativePath,
-                action: policy as "keep_mine" | "take_update",
-              })),
-            ];
-            const result = await invokeResult<InstallResult>("update_addon_with_decisions", {
-              addonsPath: path,
-              sessionId: ca.sessionId,
-              decisions: autoDecisions,
-            });
-            if (result.ok) {
-              completed.push(ca.folderName);
-            } else {
-              failed.push(ca.folderName);
-            }
-          }
-        } else {
-          remainingConflicts.push(...conflictingAddons);
-        }
+      // Collect per-addon failure reasons. Backend errors come back as raw
+      // strings (the command resolved ok), so they bypass invokeResult's
+      // mapper — normalize them here so extraction/download failures get the
+      // same friendly/permission/CFA guidance the UI already applies.
+      const failureReasons = new Map<string, string>();
+      for (const name of failed) {
+        const raw = batchErrors?.[name];
+        failureReasons.set(name, raw ? getTauriErrorMessage(raw) : "unknown error");
       }
 
       setUpdatingAll(false);
@@ -917,7 +880,74 @@ function App() {
         if (conflictCount > 0)
           msg += `, ${conflictCount} need${conflictCount === 1 ? "s" : ""} your attention`;
         if (failed.length > 0) {
-          toast.warning(msg);
+          // Full per-addon reasons to the console for diagnosis.
+          const reasonLines = failed.map(
+            (name) => `${name}: ${failureReasons.get(name) ?? "unknown error"}`
+          );
+          console.error(`Update failures (${failed.length}):\n${reasonLines.join("\n")}`);
+
+          // Build the user-visible detail by grouping addons under a stable
+          // label for their cause, then listing the affected addon names.
+          // Controlled Folder Access messages embed the per-file path, so they
+          // must be normalized to one canonical label — otherwise a batch-wide
+          // CFA block would repeat the full multi-sentence instructions once
+          // per addon. Names per group are bounded with an overflow count.
+          // Collapse the permission-denied family to one hedged label. The
+          // backend message embeds a per-file path, so without this every
+          // addon would fragment into its own group. The label mirrors the
+          // backend's hedge (CFA is the likely — not certain — cause) so we
+          // don't send read-only/permission/antivirus failures down a
+          // CFA-only path. Keeps the "controlled folder access" substring so
+          // the tauri.ts passthrough still recognizes it.
+          const canonicalReason = (reason: string): string =>
+            /controlled folder access/i.test(reason)
+              ? "Windows blocked Kalpa from writing — most often Controlled Folder Access " +
+                "(ransomware protection), but possibly read-only files or antivirus. Fix the " +
+                "common case in Windows Security → Virus & threat protection → Ransomware " +
+                "protection → Allow an app through Controlled folder access."
+              : reason;
+
+          const byReason = new Map<string, string[]>();
+          for (const name of failed) {
+            const reason = canonicalReason(failureReasons.get(name) ?? "unknown error");
+            const names = byReason.get(reason) ?? [];
+            names.push(name);
+            byReason.set(reason, names);
+          }
+          const MAX_NAMES = 5;
+          let detail = [...byReason.entries()]
+            .map(([reason, names]) => {
+              const shown = names.slice(0, MAX_NAMES).join(", ");
+              const overflow = names.length - Math.min(names.length, MAX_NAMES);
+              const nameList = overflow > 0 ? `${shown} +${overflow} more` : shown;
+              return `${reason}\n${nameList}`;
+            })
+            .join("\n\n");
+          // Hard cap so a pathological batch can't produce an enormous toast;
+          // the full per-addon detail is always in the console above.
+          const MAX_DETAIL = 600;
+          if (detail.length > MAX_DETAIL) {
+            detail = detail.slice(0, MAX_DETAIL - 1).trimEnd() + "…";
+          }
+          toast.warning(msg, { description: detail });
+
+          // If any failure was a write/permission block (CFA et al.), surface
+          // the rich guidance dialog as a fallback — the proactive probe may
+          // have passed but extraction still hit a protected file. Fetch the
+          // exe path so the dialog can name the app to allow.
+          const hasCfaFailure = [...failureReasons.values()].some((r) =>
+            /controlled folder access/i.test(r)
+          );
+          if (hasCfaFailure) {
+            const access = await invokeResult<WriteAccessStatus>("check_addons_write_access", {
+              addonsPath: path,
+            });
+            // Only open if not already showing (proactive probe may have set it).
+            setCfaDialog(
+              (prev) =>
+                prev ?? { exePath: access.ok ? access.data.exePath : "", permissionDenied: true }
+            );
+          }
         } else if (conflictCount > 0) {
           toast.info(msg);
         } else {
@@ -1339,6 +1369,15 @@ function App() {
             esoRunningResolveRef.current = null;
           }}
         />
+
+        {cfaDialog && (
+          <CfaGuidanceDialog
+            open
+            onClose={() => setCfaDialog(null)}
+            exePath={cfaDialog.exePath}
+            permissionDenied={cfaDialog.permissionDenied}
+          />
+        )}
       </div>
     </EsoRunningProvider>
   );

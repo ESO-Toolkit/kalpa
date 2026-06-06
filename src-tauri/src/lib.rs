@@ -306,6 +306,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::set_addons_path,
+            commands::check_addons_write_access,
+            commands::open_ransomware_protection_settings,
             commands::detect_addons_folder,
             commands::detect_addons_folders,
             commands::scan_installed_addons,
@@ -388,6 +390,7 @@ pub fn run() {
             commands::scan_batch_conflicts,
             commands::get_conflict_diff,
             commands::update_addon_with_decisions,
+            commands::update_batch_with_decisions,
             commands::list_addon_files,
             commands::read_addon_file,
             commands::write_addon_file,

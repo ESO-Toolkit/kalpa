@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tempfile::NamedTempFile;
@@ -1976,6 +1976,413 @@ pub async fn scan_batch_conflicts(
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+// ── Streaming batch update (download→extract overlap, single metadata write) ──
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingBatchResult {
+    /// Addons that were extracted and recorded in this call.
+    pub completed: Vec<String>,
+    /// Addons that failed to download or extract.
+    pub failed: Vec<String>,
+    /// Per-addon raw error strings (carry the CFA substring for the UI to group).
+    pub errors: HashMap<String, String>,
+    /// Conflicting addons left for the interactive "ask" flow (zips kept pending).
+    pub conflicts: Vec<BatchConflictAddon>,
+    /// Transitive deps auto-installed once for the whole batch.
+    pub installed_deps: Vec<String>,
+    pub failed_deps: Vec<String>,
+    pub skipped_deps: Vec<String>,
+}
+
+/// One downloaded addon handed from a download worker to the extractor. The
+/// folder name and index travel alongside on the channel, so they aren't
+/// duplicated here.
+struct StreamedDownload {
+    zip: NamedTempFile,
+    info: EsouiAddonInfo,
+    esoui_id: u32,
+    api_version: String,
+}
+
+/// Update all addons in a single IPC call with a streaming pipeline:
+/// downloads run in parallel and each completed download is extracted as soon as
+/// it arrives, while the rest are still downloading. The metadata store is
+/// loaded once, mutated in memory across every addon, dependency-resolved once
+/// over the union of installed folders, and saved once — eliminating the N×
+/// load/save/dep-resolve churn of the per-addon path.
+///
+/// `conflict_policy` controls how user-modified files are handled:
+/// - `"keep_mine"` / `"take_update"`: conflicts are auto-resolved inline.
+/// - `"ask"` (or anything else): conflicting addons are NOT extracted; their
+///   zips are kept in `PendingUpdates` and returned for the interactive modal,
+///   exactly like `scan_batch_conflicts` + `update_addon_with_decisions`.
+#[tauri::command]
+pub async fn update_batch_with_decisions(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
+    pending: tauri::State<'_, crate::PendingUpdates>,
+    app: tauri::AppHandle,
+    addons_path: String,
+    updates: Vec<BatchUpdateEntry>,
+    conflict_policy: String,
+) -> Result<StreamingBatchResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
+    let pending = pending.0.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let t_start = std::time::Instant::now();
+        let total = updates.len();
+
+        // Emit "downloading" for every addon up front so the UI shows progress
+        // immediately, before the first byte lands.
+        for (i, entry) in updates.iter().enumerate() {
+            let _ = app.emit(
+                "batch-update-progress",
+                BatchUpdateProgress {
+                    folder_name: entry.folder_name.clone(),
+                    phase: "downloading".to_string(),
+                    index: i,
+                    total,
+                },
+            );
+        }
+
+        let auto_resolve = conflict_policy == "keep_mine" || conflict_policy == "take_update";
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(download_thread_count(total))
+            .build()
+            .map_err(|e| format!("Thread pool error: {e}"))?;
+
+        // Channel: download workers (producers) → extractor (single consumer).
+        // The extractor owns the metadata lock, so writes never race. The folder
+        // name rides alongside so the extractor can report errors even when the
+        // download itself failed (no StreamedDownload to read it from).
+        let (tx, rx) =
+            std::sync::mpsc::channel::<(usize, String, Result<StreamedDownload, String>)>();
+
+        // Hold the metadata lock for the whole extract phase. Acquire it before
+        // spawning downloads so a concurrent per-addon op can't interleave.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+
+        // Run the parallel downloads on a dedicated OS thread, NOT inside the
+        // rayon pool's scope on this thread. The consumer below blocks on
+        // `rx.recv()`, which a rayon worker cannot reclaim — if the consumer ran
+        // on a pool worker it would occupy a slot, and for a single-addon batch
+        // (`num_threads(1)`) it would deadlock outright (the lone worker blocked
+        // on the channel, the download task never scheduled). Driving downloads
+        // from a separate thread keeps all N pool threads free for downloading
+        // and the consumer free to drain the channel.
+        let app_dl = app.clone();
+        let producer = std::thread::spawn(move || {
+            pool.install(move || {
+                updates
+                    .par_iter()
+                    .enumerate()
+                    .for_each_with(tx, |tx, (i, entry)| {
+                        let result =
+                            fetch_and_download_with_retry(entry.esoui_id).map(|(zip, info)| {
+                                StreamedDownload {
+                                    zip,
+                                    info,
+                                    esoui_id: entry.esoui_id,
+                                    api_version: entry.api_version.clone(),
+                                }
+                            });
+                        let phase = if result.is_ok() {
+                            "extracting"
+                        } else {
+                            "failed"
+                        };
+                        let _ = app_dl.emit(
+                            "batch-update-progress",
+                            BatchUpdateProgress {
+                                folder_name: entry.folder_name.clone(),
+                                phase: phase.to_string(),
+                                index: i,
+                                total,
+                            },
+                        );
+                        let _ = tx.send((i, entry.folder_name.clone(), result));
+                    });
+                // tx dropped here → the consumer's rx loop ends once drained.
+            });
+        });
+
+        // Consumer: extract each download as it arrives, on THIS thread, holding
+        // the metadata lock. `rx.iter()` blocks until a download is ready and
+        // ends when the producer drops its sender.
+        let extract_outcome = extract_streamed_downloads(
+            &addons_dir,
+            &app,
+            total,
+            auto_resolve,
+            &conflict_policy,
+            &pending,
+            rx,
+        );
+
+        // The producer has finished sending by the time the channel drained;
+        // join so the thread isn't detached. A producer panic is intentionally
+        // swallowed — fetch_and_download_with_retry returns Result rather than
+        // panicking, so a panic here would be a bug, and the consumer has
+        // already produced a complete result from whatever it received.
+        let _ = producer.join();
+
+        let elapsed = t_start.elapsed();
+        eprintln!(
+            "[batch-update] {} addons: {} completed, {} failed, {} conflicts in {:.2}s",
+            total,
+            extract_outcome.completed.len(),
+            extract_outcome.failed.len(),
+            extract_outcome.conflicts.len(),
+            elapsed.as_secs_f64(),
+        );
+
+        Ok(extract_outcome)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Pick a download parallelism that scales with the batch but stays polite to
+/// ESOUI. Small batches don't need 4 threads; large ones benefit from a few
+/// more. Capped at 6 to avoid hammering the server.
+fn download_thread_count(addon_count: usize) -> usize {
+    addon_count.clamp(1, 6)
+}
+
+/// Consumer side of the streaming pipeline. Holds the metadata store in memory,
+/// extracts each download as it arrives, resolves all transitive deps once at
+/// the end, and saves the store once.
+fn extract_streamed_downloads(
+    addons_dir: &Path,
+    app: &tauri::AppHandle,
+    total: usize,
+    auto_resolve: bool,
+    conflict_policy: &str,
+    pending: &Arc<Mutex<HashMap<String, crate::PendingUpdate>>>,
+    rx: std::sync::mpsc::Receiver<(usize, String, Result<StreamedDownload, String>)>,
+) -> StreamingBatchResult {
+    let mut store = metadata::load_metadata(addons_dir);
+    let mut completed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut errors: HashMap<String, String> = HashMap::new();
+    let mut conflicts: Vec<BatchConflictAddon> = Vec::new();
+    // Union of all folders extracted this batch — dep-resolved once at the end.
+    let mut all_installed_folders: Vec<String> = Vec::new();
+
+    let emit_phase = |folder: &str, phase: &str, index: usize| {
+        let _ = app.emit(
+            "batch-update-progress",
+            BatchUpdateProgress {
+                folder_name: folder.to_string(),
+                phase: phase.to_string(),
+                index,
+                total,
+            },
+        );
+    };
+
+    for (index, folder_name, result) in rx.iter() {
+        let dl = match result {
+            Ok(dl) => dl,
+            Err(e) => {
+                // "failed" already emitted by the download worker.
+                errors.insert(folder_name.clone(), e);
+                failed.push(folder_name);
+                continue;
+            }
+        };
+
+        let session_id = generate_session_id(&folder_name);
+        let report = match build_conflict_report(
+            addons_dir,
+            &folder_name,
+            dl.zip.path(),
+            &dl.api_version,
+            &session_id,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                emit_phase(&folder_name, "failed", index);
+                errors.insert(folder_name.clone(), e);
+                failed.push(folder_name);
+                continue;
+            }
+        };
+
+        let has_conflicts = !report.conflicts.is_empty();
+
+        // "ask" policy with real conflicts → defer to the interactive modal.
+        // Persist the zip so the frontend can diff and resolve it later.
+        if has_conflicts && !auto_resolve {
+            let (_, kept_path) = match dl.zip.keep() {
+                Ok(kept) => kept,
+                Err(e) => {
+                    emit_phase(&folder_name, "failed", index);
+                    errors.insert(
+                        folder_name.clone(),
+                        format!("Failed to persist temp ZIP: {e}"),
+                    );
+                    failed.push(folder_name);
+                    continue;
+                }
+            };
+            if let Ok(mut map) = pending.lock() {
+                map.insert(
+                    session_id.clone(),
+                    crate::PendingUpdate {
+                        zip_path: kept_path,
+                        folder_name: folder_name.clone(),
+                        esoui_id: dl.esoui_id,
+                        update_version: dl.api_version.clone(),
+                    },
+                );
+            }
+            conflicts.push(BatchConflictAddon {
+                session_id: report.session_id,
+                folder_name: report.folder_name,
+                update_version: report.update_version,
+                conflicts: report.conflicts,
+                auto_kept_files: report.auto_kept_files,
+            });
+            // No progress emit: the addon is "pending review", not done/failed.
+            continue;
+        }
+
+        // Build the keep/skip set. Always honor auto-kept files (user edits we
+        // never overwrite). Under "keep_mine" also skip the conflicting files;
+        // under "take_update" let them be overwritten (the new bytes win).
+        let mut kept_files: Vec<String> = report.auto_kept_files.clone();
+        if has_conflicts && conflict_policy == "keep_mine" {
+            kept_files.extend(report.conflicts.iter().map(|c| c.relative_path.clone()));
+        }
+
+        let skip_files: HashSet<String> = kept_files
+            .iter()
+            .map(|p| format!("{folder_name}/{p}"))
+            .collect();
+
+        let extract_result = if skip_files.is_empty() {
+            installer::extract_addon_zip(dl.zip.path(), addons_dir)
+        } else {
+            installer::extract_addon_zip_selective(dl.zip.path(), addons_dir, &skip_files)
+        };
+
+        let installed_folders = match extract_result {
+            Ok(folders) => folders,
+            Err(e) => {
+                emit_phase(&folder_name, "failed", index);
+                errors.insert(folder_name.clone(), e);
+                failed.push(folder_name);
+                continue;
+            }
+        };
+
+        // For kept files, store the upstream hash as the new baseline so the
+        // user's edit stays detectable on the next update (matches the
+        // per-addon path's hash_overrides behavior).
+        let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
+            None
+        } else {
+            file_hashes::hash_zip_entries(dl.zip.path(), &folder_name)
+                .ok()
+                .map(|zip_hashes| {
+                    kept_files
+                        .iter()
+                        .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
+                        .collect::<HashMap<String, String>>()
+                })
+                .filter(|m| !m.is_empty())
+        };
+
+        file_hashes::record_hashes_for_folders_with_overrides(
+            addons_dir,
+            &installed_folders,
+            dl.esoui_id,
+            &dl.api_version,
+            hash_overrides.as_ref(),
+        );
+
+        // Drop stale metadata entries for this esoui_id whose folders were
+        // renamed/removed by the new release.
+        let old_folders: Vec<String> = store
+            .addons
+            .iter()
+            .filter(|(_, m)| m.esoui_id == dl.esoui_id)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for old in &old_folders {
+            if !installed_folders.contains(old) {
+                metadata::remove_entry(&mut store, old);
+            }
+        }
+
+        record_installed_folders(
+            &mut store,
+            addons_dir,
+            &installed_folders,
+            dl.esoui_id,
+            &dl.api_version,
+            &dl.info.title,
+            &dl.info.download_url,
+            0,
+        );
+
+        for f in &installed_folders {
+            if !all_installed_folders.contains(f) {
+                all_installed_folders.push(f.clone());
+            }
+        }
+
+        emit_phase(&folder_name, "completed", index);
+        completed.push(folder_name);
+    }
+
+    // Resolve every dependency once over the union of installed folders. The
+    // resolver dedups via its own seen/all_installed sets, so a single pass over
+    // the whole batch produces the same end state as N per-addon passes.
+    let resolved = if all_installed_folders.is_empty() {
+        ResolvedDeps {
+            installed_deps: Vec::new(),
+            failed_deps: Vec::new(),
+            skipped_deps: Vec::new(),
+        }
+    } else {
+        resolve_transitive_deps(addons_dir, &all_installed_folders, &mut store)
+    };
+
+    if let Err(e) = metadata::save_metadata(addons_dir, &store) {
+        // The files were extracted, but kalpa.json didn't persist — so Kalpa
+        // can't track these versions/hashes (next update would misbehave).
+        // Don't report success silently: move every "completed" addon into
+        // "failed" with the save error so the UI surfaces it. The frontend only
+        // looks up errors for names in `failed`, so the reason must be keyed by
+        // each affected folder.
+        let reason = format!("Update applied but could not be saved to kalpa.json: {e}");
+        eprintln!("[batch-update] metadata save failed: {e}");
+        for folder in completed.drain(..) {
+            errors.insert(folder.clone(), reason.clone());
+            failed.push(folder);
+        }
+    }
+
+    StreamingBatchResult {
+        completed,
+        failed,
+        errors,
+        conflicts,
+        installed_deps: resolved.installed_deps,
+        failed_deps: resolved.failed_deps,
+        skipped_deps: resolved.skipped_deps,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -5919,9 +6326,141 @@ pub fn update_tray_tooltip(
     Ok(())
 }
 
+// ── Controlled Folder Access / write-access detection ──────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteAccessStatus {
+    /// True when Kalpa cannot write into the AddOns folder.
+    pub blocked: bool,
+    /// True when the block looks like a permission denial (the common cause
+    /// being Windows Controlled Folder Access). Lets the UI hedge the message.
+    pub permission_denied: bool,
+    /// Absolute path to this Kalpa executable, so the UI can show the user
+    /// exactly which app to allow through Controlled Folder Access. Empty if
+    /// it cannot be determined.
+    pub exe_path: String,
+}
+
+/// Probe whether Kalpa (this process) can actually write into the AddOns
+/// folder by creating and removing a tiny temp file. This is the correct
+/// detector for Controlled Folder Access because CFA gates on the *writing
+/// process* — checking Defender config would require admin and would not tell
+/// us whether Kalpa specifically is exempted. The probe also naturally covers
+/// read-only/ACL/antivirus blocks, and self-resolves once access is granted.
+///
+/// Fails open: if the directory is missing or any non-permission error occurs,
+/// we report `blocked: false` so a detection hiccup never gates the app.
+#[tauri::command]
+pub async fn check_addons_write_access(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<WriteAccessStatus, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        let exe_path = std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        if !addons_dir.is_dir() {
+            return WriteAccessStatus {
+                blocked: false,
+                permission_denied: false,
+                exe_path,
+            };
+        }
+
+        // Probe inside an existing addon subfolder, not the AddOns root.
+        // Controlled Folder Access has been observed to permit a write to the
+        // root while still blocking writes into nested addon folders — which
+        // is exactly where extraction writes. A root-only probe therefore
+        // reports "writable" when real updates will fail. Pick the first
+        // subdirectory; fall back to the root only if there are none.
+        let probe_dir = fs::read_dir(&addons_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .find(|e| e.path().is_dir())
+                    .map(|e| e.path())
+            })
+            .unwrap_or_else(|| addons_dir.clone());
+
+        // Best-effort write probe. Note a known limitation: some Controlled
+        // Folder Access configurations permit a process to create (and even
+        // overwrite) its *own* new file while still blocking modification of
+        // pre-existing files — which is what extraction does. On such configs
+        // this probe cannot replicate the block without overwriting the user's
+        // real addon files, so it returns `blocked: false` and we rely on the
+        // post-failure guidance instead. The probe only ever trips on
+        // PermissionDenied, so it can false-negative (degrades to the failure
+        // path) but never false-positive (never aborts a healthy update).
+        let probe = probe_dir.join(".kalpa-write-probe");
+        match fs::write(&probe, b"") {
+            Ok(()) => {
+                let _ = fs::remove_file(&probe);
+                WriteAccessStatus {
+                    blocked: false,
+                    permission_denied: false,
+                    exe_path,
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&probe);
+                // CFA can surface as PermissionDenied; treat that as the
+                // actionable "blocked" case. Other errors (e.g. the parent
+                // briefly unavailable) fail open to avoid false alarms.
+                let permission_denied = e.kind() == std::io::ErrorKind::PermissionDenied;
+                WriteAccessStatus {
+                    blocked: permission_denied,
+                    permission_denied,
+                    exe_path,
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))
+}
+
+/// Open the Windows Security "Ransomware protection" page, where the user can
+/// allow Kalpa through Controlled Folder Access. Windows-only; the deep link
+/// is a fixed constant (no interpolation).
+#[tauri::command]
+pub fn open_ransomware_protection_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        // `cmd /c start "" "<uri>"` reliably hands the custom URI scheme to the
+        // shell handler that opens Windows Security.
+        Command::new("cmd")
+            .args(["/C", "start", "", "windowsdefender://RansomwareProtection"])
+            .spawn()
+            .map_err(|e| format!("Failed to open Windows Security: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Windows Security is only available on Windows.".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_thread_count_scales_and_clamps() {
+        // A single-addon batch must still get at least one thread. (The
+        // streaming consumer runs on its own thread, so num_threads(1) is safe,
+        // but 0 would panic when building the pool.)
+        assert_eq!(download_thread_count(1), 1);
+        assert_eq!(download_thread_count(3), 3);
+        // Capped so a huge batch never hammers ESOUI with too many connections.
+        assert_eq!(download_thread_count(50), 6);
+        // Defensive: an empty batch never yields a zero-thread pool.
+        assert_eq!(download_thread_count(0), 1);
+    }
 
     #[test]
     fn validate_pack_id_accepts_valid_ids() {

@@ -503,6 +503,29 @@ export interface BatchConflictResult {
   errors: Record<string, string>;
 }
 
+/// Result of the streaming `update_batch_with_decisions` command: a single IPC
+/// call that downloads in parallel, extracts as each download finishes, and
+/// writes kalpa.json once. Addons with unresolved ("ask") conflicts come back
+/// in `conflicts` for the interactive modal; everything else is already applied.
+export interface StreamingBatchResult {
+  completed: string[];
+  failed: string[];
+  errors: Record<string, string>;
+  conflicts: BatchConflictAddon[];
+  installedDeps: string[];
+  failedDeps: string[];
+  skippedDeps: string[];
+}
+
+export interface WriteAccessStatus {
+  /** True when Kalpa cannot write into the AddOns folder. */
+  blocked: boolean;
+  /** True when the block is a permission denial (most often Controlled Folder Access). */
+  permissionDenied: boolean;
+  /** Absolute path to the Kalpa executable, to show which app to allow. */
+  exePath: string;
+}
+
 export interface AddonFileEntry {
   relativePath: string;
   isDirectory: boolean;
