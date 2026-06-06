@@ -232,7 +232,14 @@ export function AddonDetail({
   };
 
   const handleInstallDep = async (depName: string) => {
+    if (installingDep) return;
     setInstallingDep(depName);
+    // Installing/updating a dependency also writes to the AddOns folder, so it needs
+    // the same ESO-running gate — the game won't load it until /reloadui either way.
+    if (!(await ensureEsoNotBlocking())) {
+      setInstallingDep(null);
+      return;
+    }
     try {
       const result = await invokeOrThrow<InstallResult>("install_dependency", {
         addonsPath,
