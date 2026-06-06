@@ -16,6 +16,7 @@ import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { RosterPackSkeleton } from "@/components/ui/skeletons";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn, decodeHtml } from "@/lib/utils";
 import {
   DownloadIcon,
@@ -62,6 +63,7 @@ export function RosterPackInstall({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [addonStates, setAddonStates] = useState<AddonInstallState[]>([]);
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState<{
     completed: number;
@@ -145,6 +147,8 @@ export function RosterPackInstall({
       return;
     }
 
+    if (!(await ensureEsoNotBlocking())) return;
+
     cancelledRef.current = false;
     setInstalling(true);
     setInstallProgress({ completed: 0, failed: 0, total: addonsToInstall.length });
@@ -215,7 +219,7 @@ export function RosterPackInstall({
     if (failed > 0) {
       toast.error(`${failed} addon${failed !== 1 ? "s" : ""} failed to install`);
     }
-  }, [addonsToInstall, addonsPath, onRefresh]);
+  }, [addonsToInstall, addonsPath, onRefresh, ensureEsoNotBlocking]);
 
   const handleCancel = useCallback(() => {
     if (installing) {

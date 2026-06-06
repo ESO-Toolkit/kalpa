@@ -18,6 +18,7 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { Tabs, TabsList, TabsTrigger, TabsContent, TabsIndicator } from "@/components/ui/tabs";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getSetting } from "@/lib/store";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
@@ -50,8 +51,6 @@ interface AddonDetailProps {
   isOffline?: boolean;
   pendingConflict?: BatchConflictAddon;
   onConflictResolved?: (folderName: string) => void;
-  /** Gate run before any update write — warns when ESO is running. Returns false to cancel. */
-  ensureEsoNotBlocking: () => Promise<boolean>;
 }
 
 export function AddonDetail({
@@ -67,8 +66,8 @@ export function AddonDetail({
   isOffline,
   pendingConflict,
   onConflictResolved,
-  ensureEsoNotBlocking,
 }: AddonDetailProps) {
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateSuccess, setUpdateSuccess] = useState(false);

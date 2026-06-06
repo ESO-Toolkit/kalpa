@@ -9,6 +9,7 @@ import { AppDialogs } from "./components/app-dialogs";
 import { AppHeader } from "./components/app-header";
 import { DiscoverDetail } from "./components/discover-detail";
 import { EsoRunningDialog } from "./components/eso-running-dialog";
+import { EsoRunningProvider } from "@/lib/eso-running-context";
 import { SetupWizard } from "./components/setup-wizard";
 import { StatusBanners } from "./components/status-banners";
 import { RosterPackInstall } from "./components/roster-pack-install";
@@ -1167,178 +1168,179 @@ function App() {
   }
 
   return (
-    <div className="relative flex h-screen flex-col">
-      <div className="sr-only" aria-live="assertive" aria-atomic="true" role="status">
-        {srAnnouncement}
-      </div>
-      <AppBackground />
-
-      <AppHeader
-        addonsCount={addons.length}
-        batchMode={batchMode}
-        batchDisabling={batchDisabling}
-        checkingUpdates={checkingUpdates}
-        loading={loading}
-        selectedCount={selectedFolders.size}
-        updatingAll={updatingAll}
-        isOffline={isOffline}
-        onBatchCancel={() => setSelectedFolders(new Set())}
-        onBatchDisable={() => void handleBatchDisable()}
-        onBatchRemove={() => void handleBatchRemove()}
-        onBatchTag={handleBatchTag}
-        onBatchUpdate={() => void handleBatchUpdate()}
-        onOpenPacks={() => setActiveDialog("packs")}
-        onOpenSavedVars={() => setActiveDialog("saved-variables")}
-        onOpenSettings={() => setActiveDialog("settings")}
-        onRefresh={handleRefresh}
-      />
-
-      <StatusBanners
-        error={error}
-        isOffline={isOffline}
-        appUpdateState={appUpdateState}
-        onDownload={downloadAndInstall}
-        onRestart={restartApp}
-        onOpenSettings={errorShowSettings ? () => setActiveDialog("settings") : undefined}
-      />
-
-      <UpdateBanner
-        availableCount={updatesAvailable.length}
-        updatingAll={updatingAll}
-        updateProgress={updateProgress}
-        addonStatuses={addonStatuses}
-        onUpdateAll={handleUpdateAll}
-        isOffline={isOffline}
-      />
-
-      {pendingConflicts.size > 0 && (
-        <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs text-amber-400">
-          <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-          {pendingConflicts.size} addon{pendingConflicts.size !== 1 ? "s" : ""} need your attention
-          — click one to review your edited files
+    <EsoRunningProvider value={ensureEsoNotBlocking}>
+      <div className="relative flex h-screen flex-col">
+        <div className="sr-only" aria-live="assertive" aria-atomic="true" role="status">
+          {srAnnouncement}
         </div>
-      )}
+        <AppBackground />
 
-      <div className="flex flex-1 overflow-hidden">
-        <AddonList
-          addons={filteredAddons}
-          allAddons={addons}
-          selectedAddon={selectedAddon}
-          onSelect={setSelectedAddon}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
+        <AppHeader
+          addonsCount={addons.length}
+          batchMode={batchMode}
+          batchDisabling={batchDisabling}
+          checkingUpdates={checkingUpdates}
           loading={loading}
-          updateResults={updateResults}
-          sortMode={sortMode}
-          onSortChange={handleSortChange}
-          filterMode={filterMode}
-          onFilterChange={handleFilterChange}
-          activeTagFilter={effectiveTagFilter}
-          onActiveTagFilterChange={setActiveTagFilter}
-          selectedFolders={selectedFolders}
-          onToggleSelect={handleToggleSelect}
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          discoverTab={discoverTab}
-          onDiscoverTabChange={setDiscoverTab}
-          addonsPath={addonsPath}
-          onInstalled={handleRefresh}
-          onSelectDiscoverResult={setSelectedDiscoverResult}
-          selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
-          installedEsouiIds={installedEsouiIds}
+          selectedCount={selectedFolders.size}
+          updatingAll={updatingAll}
           isOffline={isOffline}
-          onUpdateAddon={(fn) => void handleSingleUpdate(fn)}
-          onRemoveAddon={(fn) => void handleSingleRemove(fn)}
-          onToggleDisable={handleToggleDisable}
-          onOpenFolder={(fn) => void handleOpenFolder(fn)}
-          onToggleFavorite={handleTagsChange}
-        />
-
-        {viewMode === "installed" ? (
-          <AddonDetail
-            key={selectedAddon?.folderName ?? "none"}
-            addon={selectedAddon}
-            installedAddons={addons}
-            addonsPath={addonsPath}
-            onRemove={() => {
-              setSelectedAddon(null);
-              handleRefresh();
-            }}
-            onRemoveAddon={handleSingleRemove}
-            onToggleDisable={handleToggleDisable}
-            updateResult={selectedUpdateResult}
-            onAddonUpdated={handleAddonUpdated}
-            onTagsChange={handleTagsChange}
-            isOffline={isOffline}
-            ensureEsoNotBlocking={ensureEsoNotBlocking}
-            pendingConflict={
-              selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
-            }
-            onConflictResolved={(folderName) => {
-              setPendingConflicts((prev) => {
-                const next = new Map(prev);
-                next.delete(folderName);
-                return next;
-              });
-              handleAddonUpdated(
-                updateResults.find((r) => r.folderName === folderName)?.esouiId ?? 0
-              );
-            }}
-          />
-        ) : (
-          <DiscoverDetail
-            key={selectedDiscoverResult?.id ?? "none"}
-            result={selectedDiscoverResult}
-            addonsPath={addonsPath}
-            onInstalled={handleRefresh}
-            onRemoveByEsouiId={handleRemoveByEsouiId}
-            installedEsouiIds={installedEsouiIds}
-            isOffline={isOffline}
-          />
-        )}
-      </div>
-
-      {rosterPackInstallId && addonsPath && (
-        <RosterPackInstall
-          packId={rosterPackInstallId}
-          addonsPath={addonsPath}
-          installedAddons={addons}
-          onClose={() => setRosterPackInstallId(null)}
+          onBatchCancel={() => setSelectedFolders(new Set())}
+          onBatchDisable={() => void handleBatchDisable()}
+          onBatchRemove={() => void handleBatchRemove()}
+          onBatchTag={handleBatchTag}
+          onBatchUpdate={() => void handleBatchUpdate()}
+          onOpenPacks={() => setActiveDialog("packs")}
+          onOpenSavedVars={() => setActiveDialog("saved-variables")}
+          onOpenSettings={() => setActiveDialog("settings")}
           onRefresh={handleRefresh}
         />
-      )}
 
-      <AppDialogs
-        activeDialog={activeDialog}
-        addons={addons}
-        addonsPath={addonsPath}
-        authUser={authUser}
-        deepLinkPackId={deepLinkPackId}
-        deepLinkShareCode={deepLinkShareCode}
-        knownInstances={knownInstances}
-        onAuthChange={setAuthUser}
-        onCheckForAppUpdate={() => void checkForAppUpdate(false)}
-        onCloseDialog={handleCloseDialog}
-        onPathChange={(path) => void handlePathChange(path)}
-        onRefresh={handleRefresh}
-        onShowDialog={handleOpenDialog}
-      />
+        <StatusBanners
+          error={error}
+          isOffline={isOffline}
+          appUpdateState={appUpdateState}
+          onDownload={downloadAndInstall}
+          onRestart={restartApp}
+          onOpenSettings={errorShowSettings ? () => setActiveDialog("settings") : undefined}
+        />
 
-      <EsoRunningDialog
-        open={esoRunningPromptOpen}
-        onConfirm={(dontAskAgain) => {
-          setEsoRunningPromptOpen(false);
-          if (dontAskAgain) void setSetting("suppressEsoRunningWarning", true);
-          esoRunningResolveRef.current?.(true);
-          esoRunningResolveRef.current = null;
-        }}
-        onCancel={() => {
-          setEsoRunningPromptOpen(false);
-          esoRunningResolveRef.current?.(false);
-          esoRunningResolveRef.current = null;
-        }}
-      />
-    </div>
+        <UpdateBanner
+          availableCount={updatesAvailable.length}
+          updatingAll={updatingAll}
+          updateProgress={updateProgress}
+          addonStatuses={addonStatuses}
+          onUpdateAll={handleUpdateAll}
+          isOffline={isOffline}
+        />
+
+        {pendingConflicts.size > 0 && (
+          <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs text-amber-400">
+            <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+            {pendingConflicts.size} addon{pendingConflicts.size !== 1 ? "s" : ""} need your
+            attention — click one to review your edited files
+          </div>
+        )}
+
+        <div className="flex flex-1 overflow-hidden">
+          <AddonList
+            addons={filteredAddons}
+            allAddons={addons}
+            selectedAddon={selectedAddon}
+            onSelect={setSelectedAddon}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            loading={loading}
+            updateResults={updateResults}
+            sortMode={sortMode}
+            onSortChange={handleSortChange}
+            filterMode={filterMode}
+            onFilterChange={handleFilterChange}
+            activeTagFilter={effectiveTagFilter}
+            onActiveTagFilterChange={setActiveTagFilter}
+            selectedFolders={selectedFolders}
+            onToggleSelect={handleToggleSelect}
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            discoverTab={discoverTab}
+            onDiscoverTabChange={setDiscoverTab}
+            addonsPath={addonsPath}
+            onInstalled={handleRefresh}
+            onSelectDiscoverResult={setSelectedDiscoverResult}
+            selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
+            installedEsouiIds={installedEsouiIds}
+            isOffline={isOffline}
+            onUpdateAddon={(fn) => void handleSingleUpdate(fn)}
+            onRemoveAddon={(fn) => void handleSingleRemove(fn)}
+            onToggleDisable={handleToggleDisable}
+            onOpenFolder={(fn) => void handleOpenFolder(fn)}
+            onToggleFavorite={handleTagsChange}
+          />
+
+          {viewMode === "installed" ? (
+            <AddonDetail
+              key={selectedAddon?.folderName ?? "none"}
+              addon={selectedAddon}
+              installedAddons={addons}
+              addonsPath={addonsPath}
+              onRemove={() => {
+                setSelectedAddon(null);
+                handleRefresh();
+              }}
+              onRemoveAddon={handleSingleRemove}
+              onToggleDisable={handleToggleDisable}
+              updateResult={selectedUpdateResult}
+              onAddonUpdated={handleAddonUpdated}
+              onTagsChange={handleTagsChange}
+              isOffline={isOffline}
+              pendingConflict={
+                selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
+              }
+              onConflictResolved={(folderName) => {
+                setPendingConflicts((prev) => {
+                  const next = new Map(prev);
+                  next.delete(folderName);
+                  return next;
+                });
+                handleAddonUpdated(
+                  updateResults.find((r) => r.folderName === folderName)?.esouiId ?? 0
+                );
+              }}
+            />
+          ) : (
+            <DiscoverDetail
+              key={selectedDiscoverResult?.id ?? "none"}
+              result={selectedDiscoverResult}
+              addonsPath={addonsPath}
+              onInstalled={handleRefresh}
+              onRemoveByEsouiId={handleRemoveByEsouiId}
+              installedEsouiIds={installedEsouiIds}
+              isOffline={isOffline}
+            />
+          )}
+        </div>
+
+        {rosterPackInstallId && addonsPath && (
+          <RosterPackInstall
+            packId={rosterPackInstallId}
+            addonsPath={addonsPath}
+            installedAddons={addons}
+            onClose={() => setRosterPackInstallId(null)}
+            onRefresh={handleRefresh}
+          />
+        )}
+
+        <AppDialogs
+          activeDialog={activeDialog}
+          addons={addons}
+          addonsPath={addonsPath}
+          authUser={authUser}
+          deepLinkPackId={deepLinkPackId}
+          deepLinkShareCode={deepLinkShareCode}
+          knownInstances={knownInstances}
+          onAuthChange={setAuthUser}
+          onCheckForAppUpdate={() => void checkForAppUpdate(false)}
+          onCloseDialog={handleCloseDialog}
+          onPathChange={(path) => void handlePathChange(path)}
+          onRefresh={handleRefresh}
+          onShowDialog={handleOpenDialog}
+        />
+
+        <EsoRunningDialog
+          open={esoRunningPromptOpen}
+          onConfirm={(dontAskAgain) => {
+            setEsoRunningPromptOpen(false);
+            if (dontAskAgain) void setSetting("suppressEsoRunningWarning", true);
+            esoRunningResolveRef.current?.(true);
+            esoRunningResolveRef.current = null;
+          }}
+          onCancel={() => {
+            setEsoRunningPromptOpen(false);
+            esoRunningResolveRef.current?.(false);
+            esoRunningResolveRef.current = null;
+          }}
+        />
+      </div>
+    </EsoRunningProvider>
   );
 }
 

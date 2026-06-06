@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn, decodeHtml } from "@/lib/utils";
 import { PackageIcon, DownloadIcon, ArrowLeftIcon, Loader2Icon, ImportIcon } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -121,6 +122,7 @@ export function Packs({
   const [exportIncludeSettings, setExportIncludeSettings] = useState(false);
 
   // Installation — selected addons (esouiId set)
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState<{
     completed: number;
@@ -566,6 +568,8 @@ export function Packs({
     if (applyingSettings) return;
     if (importedPackAddonsToInstall.length === 0 && !importedFileSettings) return;
 
+    if (importedPackAddonsToInstall.length > 0 && !(await ensureEsoNotBlocking())) return;
+
     setInstalling(true);
     if (importedPackAddonsToInstall.length > 0) {
       setInstallProgress({ completed: 0, failed: 0, total: importedPackAddonsToInstall.length });
@@ -729,6 +733,8 @@ export function Packs({
       toast.info("All selected addons are already installed.");
       return;
     }
+
+    if (!(await ensureEsoNotBlocking())) return;
 
     setConfirmInstall(false);
     setInstalling(true);

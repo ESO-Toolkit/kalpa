@@ -38,7 +38,7 @@ export function EsoRunningDialog({ open, onConfirm, onCancel }: EsoRunningDialog
         <DialogHeader>
           <DialogTitle>ESO is running</DialogTitle>
           <DialogDescription>
-            Addon files will be updated on disk, but Elder Scrolls Online won&apos;t see the changes
+            Addon files will be written to disk, but Elder Scrolls Online won&apos;t see the changes
             until you type <code>/reloadui</code> in chat or relog.
           </DialogDescription>
         </DialogHeader>

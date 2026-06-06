@@ -396,7 +396,7 @@ export function Settings({
                     <div>
                       <p className="text-sm font-medium text-white/90">Warn when ESO is running</p>
                       <p className="text-xs text-muted-foreground">
-                        Remind me to /reloadui before updating addons while the game is open
+                        Remind me to /reloadui after changing addons while the game is open
                       </p>
                     </div>
                   </label>
