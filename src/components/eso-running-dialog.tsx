@@ -21,8 +21,19 @@ interface EsoRunningDialogProps {
 export function EsoRunningDialog({ open, onConfirm, onCancel }: EsoRunningDialogProps) {
   const [dontAskAgain, setDontAskAgain] = useState(false);
 
+  // The component stays mounted between prompts, so clear the opt-out as the dialog
+  // closes — otherwise a previously-checked box would carry into a fresh prompt.
+  const handleConfirm = () => {
+    setDontAskAgain(false);
+    onConfirm(dontAskAgain);
+  };
+  const handleCancel = () => {
+    setDontAskAgain(false);
+    onCancel();
+  };
+
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
+    <Dialog open={open} onOpenChange={(next) => !next && handleCancel()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>ESO is running</DialogTitle>
@@ -38,10 +49,10 @@ export function EsoRunningDialog({ open, onConfirm, onCancel }: EsoRunningDialog
         </label>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onCancel}>
+          <Button variant="outline" onClick={handleCancel}>
             Cancel
           </Button>
-          <Button onClick={() => onConfirm(dontAskAgain)}>Update anyway</Button>
+          <Button onClick={handleConfirm}>Update anyway</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
