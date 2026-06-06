@@ -892,22 +892,27 @@ function App() {
           );
           console.error(`Update failures (${failed.length}):\n${reasonLines.join("\n")}`);
 
-          // Build the user-visible detail. Preserve the addon→reason mapping
-          // (so distinct failures stay attributable), but when every addon
-          // failed for the same reason, collapse to that reason once.
-          const uniqueReasons = new Set(
-            failed.map((name) => failureReasons.get(name) ?? "unknown error")
-          );
-          let detail: string;
-          if (uniqueReasons.size === 1) {
-            detail = [...uniqueReasons][0]!;
-          } else {
-            // Show bounded `addon: reason` lines plus an overflow count.
-            const MAX_SHOWN = 5;
-            const shown = reasonLines.slice(0, MAX_SHOWN);
-            const overflow = failed.length - shown.length;
-            detail = shown.join("\n") + (overflow > 0 ? `\n…and ${overflow} more` : "");
+          // Build the user-visible detail. Group addons by their failure
+          // reason — "reason: AddonA, AddonB" — so the cause and the affected
+          // addons both stay visible even when several share one reason (e.g.
+          // Controlled Folder Access blocking every extraction). Names per
+          // group are bounded with an overflow count to keep the toast compact.
+          const byReason = new Map<string, string[]>();
+          for (const name of failed) {
+            const reason = failureReasons.get(name) ?? "unknown error";
+            const names = byReason.get(reason) ?? [];
+            names.push(name);
+            byReason.set(reason, names);
           }
+          const MAX_NAMES = 5;
+          const detail = [...byReason.entries()]
+            .map(([reason, names]) => {
+              const shown = names.slice(0, MAX_NAMES).join(", ");
+              const overflow = names.length - Math.min(names.length, MAX_NAMES);
+              const nameList = overflow > 0 ? `${shown} +${overflow} more` : shown;
+              return `${reason}\n${nameList}`;
+            })
+            .join("\n\n");
           toast.warning(msg, { description: detail });
         } else if (conflictCount > 0) {
           toast.info(msg);

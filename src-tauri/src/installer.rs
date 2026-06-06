@@ -86,7 +86,7 @@ pub fn extract_addon_zip_selective(
                 fs::File::create(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
 
             let bytes_written = io::copy(&mut entry, &mut outfile)
-                .map_err(|e| format!("Failed to extract {out_path:?}: {e}"))?;
+                .map_err(|e| describe_write_error(&out_path, &e))?;
 
             total_extracted += bytes_written;
 
@@ -225,7 +225,7 @@ fn extract_addon_zip_inner(
                 fs::File::create(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
 
             let bytes_written = io::copy(&mut entry, &mut outfile)
-                .map_err(|e| format!("Failed to extract {out_path:?}: {e}"))?;
+                .map_err(|e| describe_write_error(&out_path, &e))?;
 
             total_extracted += bytes_written;
 
