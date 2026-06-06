@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
@@ -43,6 +44,7 @@ export function DiscoverDetail({
   installedEsouiIds,
   isOffline,
 }: DiscoverDetailProps) {
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const [detail, setDetail] = useState<EsouiAddonDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -140,7 +142,12 @@ export function DiscoverDetail({
 
   const handleInstall = async (downloadUrl?: string) => {
     if (!result) return;
+    if (installingId === result.id) return;
     setInstallingId(result.id);
+    if (!(await ensureEsoNotBlocking())) {
+      setInstallingId(null);
+      return;
+    }
     setInstallSuccess(null);
     try {
       let url = downloadUrl;

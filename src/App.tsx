@@ -8,6 +8,8 @@ import { AppBackground } from "./components/app-background";
 import { AppDialogs } from "./components/app-dialogs";
 import { AppHeader } from "./components/app-header";
 import { DiscoverDetail } from "./components/discover-detail";
+import { EsoRunningDialog } from "./components/eso-running-dialog";
+import { EsoRunningProvider } from "@/lib/eso-running-context";
 import { SetupWizard } from "./components/setup-wizard";
 import { StatusBanners } from "./components/status-banners";
 import { RosterPackInstall } from "./components/roster-pack-install";
@@ -59,6 +61,7 @@ function App() {
   const [errorShowSettings, setErrorShowSettings] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
+  const [esoRunningPromptOpen, setEsoRunningPromptOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [updateResults, setUpdateResults] = useState<UpdateCheckResult[]>([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -120,6 +123,14 @@ function App() {
   const viewModeRef = useRef<ViewMode>("installed");
   const updatingAllRef = useRef(false);
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
+  // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
+  const esoRunningResolveRef = useRef<((proceed: boolean) => void) | null>(null);
+  // The single in-flight ESO-running prompt. Concurrent update paths share this one
+  // promise instead of each opening a dialog and clobbering the resolver.
+  const esoRunningPromptRef = useRef<Promise<boolean> | null>(null);
+  // Set synchronously at the start of a batch update to block overlapping calls during
+  // the async preamble (game check + confirm dialog), before `updatingAll` state lands.
+  const batchPreflightRef = useRef(false);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
 
@@ -581,10 +592,38 @@ function App() {
     [addonsPath]
   );
 
+  // Shared gate for every addon-update write path. Returns true to proceed.
+  // Updating while ESO runs is safe on disk — the game just won't see the changes
+  // until /reloadui or relog — so we warn (unless suppressed) instead of blocking.
+  // Concurrent callers share one prompt so a second can't strand the first's resolver.
+  const ensureEsoNotBlocking = useCallback(async (): Promise<boolean> => {
+    let esoRunning: boolean;
+    try {
+      esoRunning = await invokeOrThrow<boolean>("is_eso_running");
+    } catch {
+      return true; // Non-critical — proceed if we can't check.
+    }
+    if (!esoRunning) return true;
+    if (await getSetting<boolean>("suppressEsoRunningWarning", false)) return true;
+
+    // A prompt is already open — join its decision instead of opening another.
+    if (esoRunningPromptRef.current) return esoRunningPromptRef.current;
+
+    const prompt = new Promise<boolean>((resolve) => {
+      esoRunningResolveRef.current = resolve;
+      setEsoRunningPromptOpen(true);
+    }).finally(() => {
+      esoRunningPromptRef.current = null;
+    });
+    esoRunningPromptRef.current = prompt;
+    return prompt;
+  }, []);
+
   const handleSingleUpdate = useCallback(
     async (folderName: string) => {
       const ur = updateResults.find((r) => r.folderName === folderName && r.hasUpdate);
       if (!ur) return;
+      if (!(await ensureEsoNotBlocking())) return;
       try {
         await invokeOrThrow("update_addon", {
           addonsPath,
@@ -597,7 +636,7 @@ function App() {
         toast.error(`Update failed: ${getTauriErrorMessage(e)}`);
       }
     },
-    [addonsPath, updateResults, srAnnounce, handleAddonUpdated]
+    [addonsPath, updateResults, srAnnounce, handleAddonUpdated, ensureEsoNotBlocking]
   );
 
   const pendingRemovalsRef = useRef<
@@ -736,16 +775,16 @@ function App() {
 
       if (updatingAllRef.current) return;
 
-      try {
-        const esoRunning = await invokeOrThrow<boolean>("is_eso_running");
-        if (esoRunning) {
-          toast.error(
-            "Elder Scrolls Online is running. Close it before updating addons to avoid file conflicts."
-          );
-          return;
-        }
-      } catch {
-        // Non-critical — proceed if we can't check
+      // Claim the preflight slot synchronously (before any await) so two rapid calls
+      // can't both pass the game check / confirm dialog and start overlapping batches
+      // against the same AddOns folder. Cleared on every preamble exit and once the
+      // `updatingAll` state guard takes over below.
+      if (batchPreflightRef.current) return;
+      batchPreflightRef.current = true;
+
+      if (!(await ensureEsoNotBlocking())) {
+        batchPreflightRef.current = false;
+        return;
       }
 
       // Proactively check that Kalpa can write to the AddOns folder. When
@@ -756,6 +795,7 @@ function App() {
         addonsPath: path,
       });
       if (access.ok && access.data.blocked) {
+        batchPreflightRef.current = false;
         setCfaDialog({
           exePath: access.data.exePath,
           permissionDenied: access.data.permissionDenied,
@@ -763,6 +803,10 @@ function App() {
         return;
       }
 
+      // Hand off from the preflight latch to the in-progress latch synchronously, so the
+      // `updatingAllRef` guard above covers the gap until the `updatingAll` state lands.
+      updatingAllRef.current = true;
+      batchPreflightRef.current = false;
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
       setAddonStatuses(new Map());
@@ -947,7 +991,7 @@ function App() {
 
       await scanAddons(path);
     },
-    [scanAddons, srAnnounce]
+    [ensureEsoNotBlocking, scanAddons, srAnnounce]
   );
 
   useEffect(() => {
@@ -1154,170 +1198,188 @@ function App() {
   }
 
   return (
-    <div className="relative flex h-screen flex-col">
-      <div className="sr-only" aria-live="assertive" aria-atomic="true" role="status">
-        {srAnnouncement}
-      </div>
-      <AppBackground />
-
-      <AppHeader
-        addonsCount={addons.length}
-        batchMode={batchMode}
-        batchDisabling={batchDisabling}
-        checkingUpdates={checkingUpdates}
-        loading={loading}
-        selectedCount={selectedFolders.size}
-        updatingAll={updatingAll}
-        isOffline={isOffline}
-        onBatchCancel={() => setSelectedFolders(new Set())}
-        onBatchDisable={() => void handleBatchDisable()}
-        onBatchRemove={() => void handleBatchRemove()}
-        onBatchTag={handleBatchTag}
-        onBatchUpdate={() => void handleBatchUpdate()}
-        onOpenPacks={() => setActiveDialog("packs")}
-        onOpenSavedVars={() => setActiveDialog("saved-variables")}
-        onOpenSettings={() => setActiveDialog("settings")}
-        onRefresh={handleRefresh}
-      />
-
-      <StatusBanners
-        error={error}
-        isOffline={isOffline}
-        appUpdateState={appUpdateState}
-        onDownload={downloadAndInstall}
-        onRestart={restartApp}
-        onOpenSettings={errorShowSettings ? () => setActiveDialog("settings") : undefined}
-      />
-
-      <UpdateBanner
-        availableCount={updatesAvailable.length}
-        updatingAll={updatingAll}
-        updateProgress={updateProgress}
-        addonStatuses={addonStatuses}
-        onUpdateAll={handleUpdateAll}
-        isOffline={isOffline}
-      />
-
-      {pendingConflicts.size > 0 && (
-        <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs text-amber-400">
-          <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-          {pendingConflicts.size} addon{pendingConflicts.size !== 1 ? "s" : ""} need your attention
-          — click one to review your edited files
+    <EsoRunningProvider value={ensureEsoNotBlocking}>
+      <div className="relative flex h-screen flex-col">
+        <div className="sr-only" aria-live="assertive" aria-atomic="true" role="status">
+          {srAnnouncement}
         </div>
-      )}
+        <AppBackground />
 
-      <div className="flex flex-1 overflow-hidden">
-        <AddonList
-          addons={filteredAddons}
-          allAddons={addons}
-          selectedAddon={selectedAddon}
-          onSelect={setSelectedAddon}
-          searchQuery={searchQuery}
-          onSearchChange={setSearchQuery}
+        <AppHeader
+          addonsCount={addons.length}
+          batchMode={batchMode}
+          batchDisabling={batchDisabling}
+          checkingUpdates={checkingUpdates}
           loading={loading}
-          updateResults={updateResults}
-          sortMode={sortMode}
-          onSortChange={handleSortChange}
-          filterMode={filterMode}
-          onFilterChange={handleFilterChange}
-          activeTagFilter={effectiveTagFilter}
-          onActiveTagFilterChange={setActiveTagFilter}
-          selectedFolders={selectedFolders}
-          onToggleSelect={handleToggleSelect}
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          discoverTab={discoverTab}
-          onDiscoverTabChange={setDiscoverTab}
-          addonsPath={addonsPath}
-          onInstalled={handleRefresh}
-          onSelectDiscoverResult={setSelectedDiscoverResult}
-          selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
-          installedEsouiIds={installedEsouiIds}
+          selectedCount={selectedFolders.size}
+          updatingAll={updatingAll}
           isOffline={isOffline}
-          onUpdateAddon={(fn) => void handleSingleUpdate(fn)}
-          onRemoveAddon={(fn) => void handleSingleRemove(fn)}
-          onToggleDisable={handleToggleDisable}
-          onOpenFolder={(fn) => void handleOpenFolder(fn)}
-          onToggleFavorite={handleTagsChange}
+          onBatchCancel={() => setSelectedFolders(new Set())}
+          onBatchDisable={() => void handleBatchDisable()}
+          onBatchRemove={() => void handleBatchRemove()}
+          onBatchTag={handleBatchTag}
+          onBatchUpdate={() => void handleBatchUpdate()}
+          onOpenPacks={() => setActiveDialog("packs")}
+          onOpenSavedVars={() => setActiveDialog("saved-variables")}
+          onOpenSettings={() => setActiveDialog("settings")}
+          onRefresh={handleRefresh}
         />
 
-        {viewMode === "installed" ? (
-          <AddonDetail
-            key={selectedAddon?.folderName ?? "none"}
-            addon={selectedAddon}
-            installedAddons={addons}
-            addonsPath={addonsPath}
-            onRemove={() => {
-              setSelectedAddon(null);
-              handleRefresh();
-            }}
-            onRemoveAddon={handleSingleRemove}
-            onToggleDisable={handleToggleDisable}
-            updateResult={selectedUpdateResult}
-            onAddonUpdated={handleAddonUpdated}
-            onTagsChange={handleTagsChange}
-            isOffline={isOffline}
-            pendingConflict={
-              selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
-            }
-            onConflictResolved={(folderName) => {
-              setPendingConflicts((prev) => {
-                const next = new Map(prev);
-                next.delete(folderName);
-                return next;
-              });
-              handleAddonUpdated(
-                updateResults.find((r) => r.folderName === folderName)?.esouiId ?? 0
-              );
-            }}
-          />
-        ) : (
-          <DiscoverDetail
-            key={selectedDiscoverResult?.id ?? "none"}
-            result={selectedDiscoverResult}
+        <StatusBanners
+          error={error}
+          isOffline={isOffline}
+          appUpdateState={appUpdateState}
+          onDownload={downloadAndInstall}
+          onRestart={restartApp}
+          onOpenSettings={errorShowSettings ? () => setActiveDialog("settings") : undefined}
+        />
+
+        <UpdateBanner
+          availableCount={updatesAvailable.length}
+          updatingAll={updatingAll}
+          updateProgress={updateProgress}
+          addonStatuses={addonStatuses}
+          onUpdateAll={handleUpdateAll}
+          isOffline={isOffline}
+        />
+
+        {pendingConflicts.size > 0 && (
+          <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs text-amber-400">
+            <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+            {pendingConflicts.size} addon{pendingConflicts.size !== 1 ? "s" : ""} need your
+            attention — click one to review your edited files
+          </div>
+        )}
+
+        <div className="flex flex-1 overflow-hidden">
+          <AddonList
+            addons={filteredAddons}
+            allAddons={addons}
+            selectedAddon={selectedAddon}
+            onSelect={setSelectedAddon}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            loading={loading}
+            updateResults={updateResults}
+            sortMode={sortMode}
+            onSortChange={handleSortChange}
+            filterMode={filterMode}
+            onFilterChange={handleFilterChange}
+            activeTagFilter={effectiveTagFilter}
+            onActiveTagFilterChange={setActiveTagFilter}
+            selectedFolders={selectedFolders}
+            onToggleSelect={handleToggleSelect}
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            discoverTab={discoverTab}
+            onDiscoverTabChange={setDiscoverTab}
             addonsPath={addonsPath}
             onInstalled={handleRefresh}
-            onRemoveByEsouiId={handleRemoveByEsouiId}
+            onSelectDiscoverResult={setSelectedDiscoverResult}
+            selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
             installedEsouiIds={installedEsouiIds}
             isOffline={isOffline}
+            onUpdateAddon={(fn) => void handleSingleUpdate(fn)}
+            onRemoveAddon={(fn) => void handleSingleRemove(fn)}
+            onToggleDisable={handleToggleDisable}
+            onOpenFolder={(fn) => void handleOpenFolder(fn)}
+            onToggleFavorite={handleTagsChange}
+          />
+
+          {viewMode === "installed" ? (
+            <AddonDetail
+              key={selectedAddon?.folderName ?? "none"}
+              addon={selectedAddon}
+              installedAddons={addons}
+              addonsPath={addonsPath}
+              onRemove={() => {
+                setSelectedAddon(null);
+                handleRefresh();
+              }}
+              onRemoveAddon={handleSingleRemove}
+              onToggleDisable={handleToggleDisable}
+              updateResult={selectedUpdateResult}
+              onAddonUpdated={handleAddonUpdated}
+              onTagsChange={handleTagsChange}
+              isOffline={isOffline}
+              pendingConflict={
+                selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
+              }
+              onConflictResolved={(folderName) => {
+                setPendingConflicts((prev) => {
+                  const next = new Map(prev);
+                  next.delete(folderName);
+                  return next;
+                });
+                handleAddonUpdated(
+                  updateResults.find((r) => r.folderName === folderName)?.esouiId ?? 0
+                );
+              }}
+            />
+          ) : (
+            <DiscoverDetail
+              key={selectedDiscoverResult?.id ?? "none"}
+              result={selectedDiscoverResult}
+              addonsPath={addonsPath}
+              onInstalled={handleRefresh}
+              onRemoveByEsouiId={handleRemoveByEsouiId}
+              installedEsouiIds={installedEsouiIds}
+              isOffline={isOffline}
+            />
+          )}
+        </div>
+
+        {rosterPackInstallId && addonsPath && (
+          <RosterPackInstall
+            packId={rosterPackInstallId}
+            addonsPath={addonsPath}
+            installedAddons={addons}
+            onClose={() => setRosterPackInstallId(null)}
+            onRefresh={handleRefresh}
+          />
+        )}
+
+        <AppDialogs
+          activeDialog={activeDialog}
+          addons={addons}
+          addonsPath={addonsPath}
+          authUser={authUser}
+          deepLinkPackId={deepLinkPackId}
+          deepLinkShareCode={deepLinkShareCode}
+          knownInstances={knownInstances}
+          onAuthChange={setAuthUser}
+          onCheckForAppUpdate={() => void checkForAppUpdate(false)}
+          onCloseDialog={handleCloseDialog}
+          onPathChange={(path) => void handlePathChange(path)}
+          onRefresh={handleRefresh}
+          onShowDialog={handleOpenDialog}
+        />
+
+        <EsoRunningDialog
+          open={esoRunningPromptOpen}
+          onConfirm={(dontAskAgain) => {
+            setEsoRunningPromptOpen(false);
+            if (dontAskAgain) void setSetting("suppressEsoRunningWarning", true);
+            esoRunningResolveRef.current?.(true);
+            esoRunningResolveRef.current = null;
+          }}
+          onCancel={() => {
+            setEsoRunningPromptOpen(false);
+            esoRunningResolveRef.current?.(false);
+            esoRunningResolveRef.current = null;
+          }}
+        />
+
+        {cfaDialog && (
+          <CfaGuidanceDialog
+            open
+            onClose={() => setCfaDialog(null)}
+            exePath={cfaDialog.exePath}
+            permissionDenied={cfaDialog.permissionDenied}
           />
         )}
       </div>
-
-      {rosterPackInstallId && addonsPath && (
-        <RosterPackInstall
-          packId={rosterPackInstallId}
-          addonsPath={addonsPath}
-          installedAddons={addons}
-          onClose={() => setRosterPackInstallId(null)}
-          onRefresh={handleRefresh}
-        />
-      )}
-
-      <AppDialogs
-        activeDialog={activeDialog}
-        addons={addons}
-        addonsPath={addonsPath}
-        authUser={authUser}
-        deepLinkPackId={deepLinkPackId}
-        deepLinkShareCode={deepLinkShareCode}
-        knownInstances={knownInstances}
-        onAuthChange={setAuthUser}
-        onCheckForAppUpdate={() => void checkForAppUpdate(false)}
-        onCloseDialog={handleCloseDialog}
-        onPathChange={(path) => void handlePathChange(path)}
-        onRefresh={handleRefresh}
-        onShowDialog={handleOpenDialog}
-      />
-      {cfaDialog && (
-        <CfaGuidanceDialog
-          open
-          onClose={() => setCfaDialog(null)}
-          exePath={cfaDialog.exePath}
-          permissionDenied={cfaDialog.permissionDenied}
-        />
-      )}
-    </div>
+    </EsoRunningProvider>
   );
 }
 

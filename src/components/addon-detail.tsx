@@ -18,6 +18,7 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { Tabs, TabsList, TabsTrigger, TabsContent, TabsIndicator } from "@/components/ui/tabs";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getSetting } from "@/lib/store";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
 import { SimpleTooltip } from "@/components/ui/tooltip";
@@ -66,6 +67,7 @@ export function AddonDetail({
   pendingConflict,
   onConflictResolved,
 }: AddonDetailProps) {
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateSuccess, setUpdateSuccess] = useState(false);
@@ -124,7 +126,14 @@ export function AddonDetail({
 
   const handleUpdate = async () => {
     if (!updateResult || !addon.esouiId) return;
+    if (updating) return;
+    // Set the busy guard before the async ESO check so a fast double-click can't
+    // enter twice; clear it if the user cancels the warning.
     setUpdating(true);
+    if (!(await ensureEsoNotBlocking())) {
+      setUpdating(false);
+      return;
+    }
     setUpdateError(null);
     setConflictReport(null);
     try {
@@ -190,6 +199,12 @@ export function AddonDetail({
   const handleConflictResolve = async (decisions: FileDecision[]) => {
     if (!conflictReport || !updateResult) return;
     setUpdating(true);
+    // Re-check here too: ESO may have launched after the initial scan while the
+    // conflict panel was open, so the earlier handleUpdate gate can be stale.
+    if (!(await ensureEsoNotBlocking())) {
+      setUpdating(false);
+      return;
+    }
     setUpdateError(null);
     try {
       await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
@@ -216,7 +231,14 @@ export function AddonDetail({
   };
 
   const handleInstallDep = async (depName: string) => {
+    if (installingDep) return;
     setInstallingDep(depName);
+    // Installing/updating a dependency also writes to the AddOns folder, so it needs
+    // the same ESO-running gate — the game won't load it until /reloadui either way.
+    if (!(await ensureEsoNotBlocking())) {
+      setInstallingDep(null);
+      return;
+    }
     try {
       const result = await invokeOrThrow<InstallResult>("install_dependency", {
         addonsPath,
@@ -337,6 +359,10 @@ export function AddonDetail({
             addonsPath={addonsPath}
             onResolve={async (decisions) => {
               setUpdating(true);
+              if (!(await ensureEsoNotBlocking())) {
+                setUpdating(false);
+                return;
+              }
               try {
                 await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
                   addonsPath,

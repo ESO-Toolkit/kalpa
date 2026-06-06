@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 import {
   Download,
@@ -50,6 +51,7 @@ interface DiscoverPanelProps {
 }
 
 function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedIds: Set<number>) {
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const [installingId, setInstallingId] = useState<number | null>(null);
   const [sessionInstalledIds, setSessionInstalledIds] = useState<Set<number>>(new Set());
 
@@ -63,6 +65,10 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
   const install = useCallback(
     async (id: number) => {
       setInstallingId(id);
+      if (!(await ensureEsoNotBlocking())) {
+        setInstallingId(null);
+        return;
+      }
       try {
         const info = await invokeOrThrow<EsouiAddonInfo>("resolve_esoui_addon", {
           input: String(id),
@@ -83,7 +89,7 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
         setInstallingId(null);
       }
     },
-    [addonsPath, onInstalled]
+    [addonsPath, onInstalled, ensureEsoNotBlocking]
   );
 
   return { installingId, installedIds, install };
@@ -811,6 +817,7 @@ function UrlContent({
   onInstalled: () => void;
   installedEsouiIds: Set<number>;
 }) {
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const [input, setInput] = useState("");
   const [state, setState] = useState<
     "idle" | "resolving" | "resolved" | "installing" | "installed" | "error"
@@ -838,6 +845,10 @@ function UrlContent({
   const handleInstall = async () => {
     if (!addonInfo) return;
     setState("installing");
+    if (!(await ensureEsoNotBlocking())) {
+      setState("resolved");
+      return;
+    }
     setError(null);
     try {
       const installResult = await invokeOrThrow<InstallResult>("install_addon", {

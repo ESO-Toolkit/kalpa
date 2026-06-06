@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn, decodeHtml } from "@/lib/utils";
 import { PackageIcon, DownloadIcon, ArrowLeftIcon, Loader2Icon, ImportIcon } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -121,6 +122,7 @@ export function Packs({
   const [exportIncludeSettings, setExportIncludeSettings] = useState(false);
 
   // Installation — selected addons (esouiId set)
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState<{
     completed: number;
@@ -564,9 +566,16 @@ export function Packs({
   const handleInstallImportedPack = async () => {
     if (!importedPack) return;
     if (applyingSettings) return;
+    if (installing) return;
     if (importedPackAddonsToInstall.length === 0 && !importedFileSettings) return;
 
+    // Claim busy before the async ESO check so a double-click can't start two loops.
     setInstalling(true);
+    if (importedPackAddonsToInstall.length > 0 && !(await ensureEsoNotBlocking())) {
+      setInstalling(false);
+      return;
+    }
+
     if (importedPackAddonsToInstall.length > 0) {
       setInstallProgress({ completed: 0, failed: 0, total: importedPackAddonsToInstall.length });
     }
@@ -725,13 +734,19 @@ export function Packs({
 
   const handleInstallPack = async () => {
     if (!selectedPack) return;
+    if (installing) return;
     if (newAddonsToInstall.length === 0) {
       toast.info("All selected addons are already installed.");
       return;
     }
 
+    // Claim busy before the async ESO check so a double-click can't start two loops.
     setConfirmInstall(false);
     setInstalling(true);
+    if (!(await ensureEsoNotBlocking())) {
+      setInstalling(false);
+      return;
+    }
     setInstallProgress({ completed: 0, failed: 0, total: newAddonsToInstall.length });
 
     let completed = 0;
