@@ -5962,7 +5962,33 @@ pub async fn check_addons_write_access(
                 exe_path,
             };
         }
-        let probe = addons_dir.join(".kalpa-write-probe");
+
+        // Probe inside an existing addon subfolder, not the AddOns root.
+        // Controlled Folder Access has been observed to permit a write to the
+        // root while still blocking writes into nested addon folders — which
+        // is exactly where extraction writes. A root-only probe therefore
+        // reports "writable" when real updates will fail. Pick the first
+        // subdirectory; fall back to the root only if there are none.
+        let probe_dir = fs::read_dir(&addons_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .find(|e| e.path().is_dir())
+                    .map(|e| e.path())
+            })
+            .unwrap_or_else(|| addons_dir.clone());
+
+        // Best-effort write probe. Note a known limitation: some Controlled
+        // Folder Access configurations permit a process to create (and even
+        // overwrite) its *own* new file while still blocking modification of
+        // pre-existing files — which is what extraction does. On such configs
+        // this probe cannot replicate the block without overwriting the user's
+        // real addon files, so it returns `blocked: false` and we rely on the
+        // post-failure guidance instead. The probe only ever trips on
+        // PermissionDenied, so it can false-negative (degrades to the failure
+        // path) but never false-positive (never aborts a healthy update).
+        let probe = probe_dir.join(".kalpa-write-probe");
         match fs::write(&probe, b"") {
             Ok(()) => {
                 let _ = fs::remove_file(&probe);
@@ -5973,6 +5999,7 @@ pub async fn check_addons_write_access(
                 }
             }
             Err(e) => {
+                let _ = fs::remove_file(&probe);
                 // CFA can surface as PermissionDenied; treat that as the
                 // actionable "blocked" case. Other errors (e.g. the parent
                 // briefly unavailable) fail open to avoid false alarms.
