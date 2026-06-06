@@ -27,6 +27,19 @@ fn describe_write_error(path: &Path, e: &io::Error) -> String {
     }
 }
 
+/// Describe an error from streaming a ZIP entry to disk (`io::copy`). A
+/// permission denial here is still a blocked write (surface the CFA guidance),
+/// but any other failure is most likely a corrupt/truncated archive on the
+/// read side — so give extraction context rather than a misleading
+/// "failed to write" message.
+fn describe_extract_error(path: &Path, e: &io::Error) -> String {
+    if e.kind() == io::ErrorKind::PermissionDenied {
+        describe_write_error(path, e)
+    } else {
+        format!("Failed to extract {path:?} (the archive may be corrupt): {e}")
+    }
+}
+
 pub fn extract_addon_zip_selective(
     zip_path: &Path,
     addons_dir: &Path,
@@ -87,7 +100,7 @@ pub fn extract_addon_zip_selective(
                 fs::File::create(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
 
             let bytes_written = io::copy(&mut entry, &mut outfile)
-                .map_err(|e| describe_write_error(&out_path, &e))?;
+                .map_err(|e| describe_extract_error(&out_path, &e))?;
 
             total_extracted += bytes_written;
 
@@ -226,7 +239,7 @@ fn extract_addon_zip_inner(
                 fs::File::create(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
 
             let bytes_written = io::copy(&mut entry, &mut outfile)
-                .map_err(|e| describe_write_error(&out_path, &e))?;
+                .map_err(|e| describe_extract_error(&out_path, &e))?;
 
             total_extracted += bytes_written;
 
@@ -302,6 +315,22 @@ mod tests {
         let err = io::Error::from(io::ErrorKind::NotFound);
         let msg = describe_write_error(Path::new("/tmp/x"), &err);
         assert!(msg.starts_with("Failed to write"));
+        assert!(!msg.contains("Controlled Folder Access"));
+    }
+
+    #[test]
+    fn extract_permission_denied_still_explains_cfa() {
+        let err = io::Error::from(io::ErrorKind::PermissionDenied);
+        let msg = describe_extract_error(Path::new("C:/x/Foo"), &err);
+        assert!(msg.contains("Controlled Folder Access"));
+    }
+
+    #[test]
+    fn extract_non_permission_errors_mention_corruption() {
+        let err = io::Error::from(io::ErrorKind::UnexpectedEof);
+        let msg = describe_extract_error(Path::new("/tmp/x"), &err);
+        assert!(msg.contains("Failed to extract"));
+        assert!(msg.contains("corrupt"));
         assert!(!msg.contains("Controlled Folder Access"));
     }
 
