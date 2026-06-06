@@ -118,6 +118,9 @@ function App() {
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
   // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
   const esoRunningResolveRef = useRef<((proceed: boolean) => void) | null>(null);
+  // Set synchronously at the start of a batch update to block overlapping calls during
+  // the async preamble (game check + confirm dialog), before `updatingAll` state lands.
+  const batchPreflightRef = useRef(false);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
 
@@ -734,9 +737,12 @@ function App() {
 
       if (updatingAllRef.current) return;
 
-      // A confirm dialog from a prior call is still awaiting input — don't start a
-      // second batch, or its resolver would clobber the pending one and strand it.
-      if (esoRunningResolveRef.current) return;
+      // Claim the preflight slot synchronously (before any await) so two rapid calls
+      // can't both pass the game check / confirm dialog and start overlapping batches
+      // against the same AddOns folder. Cleared on every preamble exit and once the
+      // `updatingAll` state guard takes over below.
+      if (batchPreflightRef.current) return;
+      batchPreflightRef.current = true;
 
       try {
         const esoRunning = await invokeOrThrow<boolean>("is_eso_running");
@@ -749,13 +755,20 @@ function App() {
               esoRunningResolveRef.current = resolve;
               setEsoRunningPromptOpen(true);
             });
-            if (!proceed) return;
+            if (!proceed) {
+              batchPreflightRef.current = false;
+              return;
+            }
           }
         }
       } catch {
         // Non-critical — proceed if we can't check
       }
 
+      // Hand off from the preflight latch to the in-progress latch synchronously, so the
+      // `updatingAllRef` guard above covers the gap until the `updatingAll` state lands.
+      updatingAllRef.current = true;
+      batchPreflightRef.current = false;
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
       setAddonStatuses(new Map());
