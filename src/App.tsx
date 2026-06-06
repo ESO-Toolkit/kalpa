@@ -12,6 +12,7 @@ import { SetupWizard } from "./components/setup-wizard";
 import { StatusBanners } from "./components/status-banners";
 import { RosterPackInstall } from "./components/roster-pack-install";
 import { UpdateBanner } from "./components/update-banner";
+import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { filterAddons, isFilterMode } from "@/lib/addon-helpers";
@@ -24,6 +25,7 @@ import type {
   GameInstance,
   InstallResult,
   UpdateCheckResult,
+  WriteAccessStatus,
   EsouiSearchResult,
   SortMode,
   FilterMode,
@@ -73,6 +75,11 @@ function App() {
   >(new Map());
   const [pendingConflicts, setPendingConflicts] = useState<Map<string, BatchConflictAddon>>(
     new Map()
+  );
+  // Controlled Folder Access / write-access guidance dialog. `exePath` is the
+  // Kalpa executable the user must allow through Windows ransomware protection.
+  const [cfaDialog, setCfaDialog] = useState<{ exePath: string; permissionDenied: boolean } | null>(
+    null
   );
   const [sortMode, setSortMode] = useState<SortMode>("name");
   const [filterMode, setFilterMode] = useState<FilterMode>("all");
@@ -742,6 +749,21 @@ function App() {
         // Non-critical — proceed if we can't check
       }
 
+      // Proactively check that Kalpa can write to the AddOns folder. When
+      // Windows Controlled Folder Access (or read-only/AV) blocks writes, every
+      // update would fail; surface the guidance up front instead of after 14
+      // failures. Fails open — a detection hiccup never blocks the update.
+      const access = await invokeResult<WriteAccessStatus>("check_addons_write_access", {
+        addonsPath: path,
+      });
+      if (access.ok && access.data.blocked) {
+        setCfaDialog({
+          exePath: access.data.exePath,
+          permissionDenied: access.data.permissionDenied,
+        });
+        return;
+      }
+
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
       setAddonStatuses(new Map());
@@ -941,6 +963,24 @@ function App() {
             detail = detail.slice(0, MAX_DETAIL - 1).trimEnd() + "…";
           }
           toast.warning(msg, { description: detail });
+
+          // If any failure was a write/permission block (CFA et al.), surface
+          // the rich guidance dialog as a fallback — the proactive probe may
+          // have passed but extraction still hit a protected file. Fetch the
+          // exe path so the dialog can name the app to allow.
+          const hasCfaFailure = [...failureReasons.values()].some((r) =>
+            /controlled folder access/i.test(r)
+          );
+          if (hasCfaFailure) {
+            const access = await invokeResult<WriteAccessStatus>("check_addons_write_access", {
+              addonsPath: path,
+            });
+            // Only open if not already showing (proactive probe may have set it).
+            setCfaDialog(
+              (prev) =>
+                prev ?? { exePath: access.ok ? access.data.exePath : "", permissionDenied: true }
+            );
+          }
         } else if (conflictCount > 0) {
           toast.info(msg);
         } else {
@@ -1346,6 +1386,14 @@ function App() {
         onRefresh={handleRefresh}
         onShowDialog={handleOpenDialog}
       />
+      {cfaDialog && (
+        <CfaGuidanceDialog
+          open
+          onClose={() => setCfaDialog(null)}
+          exePath={cfaDialog.exePath}
+          permissionDenied={cfaDialog.permissionDenied}
+        />
+      )}
     </div>
   );
 }

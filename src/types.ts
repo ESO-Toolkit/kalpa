@@ -503,6 +503,15 @@ export interface BatchConflictResult {
   errors: Record<string, string>;
 }
 
+export interface WriteAccessStatus {
+  /** True when Kalpa cannot write into the AddOns folder. */
+  blocked: boolean;
+  /** True when the block is a permission denial (most often Controlled Folder Access). */
+  permissionDenied: boolean;
+  /** Absolute path to the Kalpa executable, to show which app to allow. */
+  exePath: string;
+}
+
 export interface AddonFileEntry {
   relativePath: string;
   isDirectory: boolean;

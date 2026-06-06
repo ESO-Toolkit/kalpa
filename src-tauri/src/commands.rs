@@ -5919,6 +5919,98 @@ pub fn update_tray_tooltip(
     Ok(())
 }
 
+// ── Controlled Folder Access / write-access detection ──────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteAccessStatus {
+    /// True when Kalpa cannot write into the AddOns folder.
+    pub blocked: bool,
+    /// True when the block looks like a permission denial (the common cause
+    /// being Windows Controlled Folder Access). Lets the UI hedge the message.
+    pub permission_denied: bool,
+    /// Absolute path to this Kalpa executable, so the UI can show the user
+    /// exactly which app to allow through Controlled Folder Access. Empty if
+    /// it cannot be determined.
+    pub exe_path: String,
+}
+
+/// Probe whether Kalpa (this process) can actually write into the AddOns
+/// folder by creating and removing a tiny temp file. This is the correct
+/// detector for Controlled Folder Access because CFA gates on the *writing
+/// process* — checking Defender config would require admin and would not tell
+/// us whether Kalpa specifically is exempted. The probe also naturally covers
+/// read-only/ACL/antivirus blocks, and self-resolves once access is granted.
+///
+/// Fails open: if the directory is missing or any non-permission error occurs,
+/// we report `blocked: false` so a detection hiccup never gates the app.
+#[tauri::command]
+pub async fn check_addons_write_access(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<WriteAccessStatus, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        let exe_path = std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        if !addons_dir.is_dir() {
+            return WriteAccessStatus {
+                blocked: false,
+                permission_denied: false,
+                exe_path,
+            };
+        }
+        let probe = addons_dir.join(".kalpa-write-probe");
+        match fs::write(&probe, b"") {
+            Ok(()) => {
+                let _ = fs::remove_file(&probe);
+                WriteAccessStatus {
+                    blocked: false,
+                    permission_denied: false,
+                    exe_path,
+                }
+            }
+            Err(e) => {
+                // CFA can surface as PermissionDenied; treat that as the
+                // actionable "blocked" case. Other errors (e.g. the parent
+                // briefly unavailable) fail open to avoid false alarms.
+                let permission_denied = e.kind() == std::io::ErrorKind::PermissionDenied;
+                WriteAccessStatus {
+                    blocked: permission_denied,
+                    permission_denied,
+                    exe_path,
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))
+}
+
+/// Open the Windows Security "Ransomware protection" page, where the user can
+/// allow Kalpa through Controlled Folder Access. Windows-only; the deep link
+/// is a fixed constant (no interpolation).
+#[tauri::command]
+pub fn open_ransomware_protection_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        // `cmd /c start "" "<uri>"` reliably hands the custom URI scheme to the
+        // shell handler that opens Windows Security.
+        Command::new("cmd")
+            .args(["/C", "start", "", "windowsdefender://RansomwareProtection"])
+            .spawn()
+            .map_err(|e| format!("Failed to open Windows Security: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Windows Security is only available on Windows.".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
