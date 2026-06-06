@@ -769,10 +769,20 @@ function App() {
         return;
       }
 
-      const { noConflictAddons, conflictingAddons, failed: scanFailed } = scanResult.data;
+      const {
+        noConflictAddons,
+        conflictingAddons,
+        failed: scanFailed,
+        errors: scanErrors,
+      } = scanResult.data;
       const total = noConflictAddons.length + conflictingAddons.length + scanFailed.length;
       const completed: string[] = [];
       const failed: string[] = [...scanFailed];
+      // Collect per-addon failure reasons so we can surface them instead of a bare count.
+      const failureReasons = new Map<string, string>();
+      for (const name of scanFailed) {
+        failureReasons.set(name, scanErrors?.[name] ?? "unknown error");
+      }
 
       // Phase 2: Update non-conflicting addons sequentially
       for (let i = 0; i < noConflictAddons.length; i++) {
@@ -802,6 +812,7 @@ function App() {
           });
         } else {
           failed.push(addon.folderName);
+          failureReasons.set(addon.folderName, result.error ?? "unknown error");
           setAddonStatuses((prev) => {
             const next = new Map(prev);
             next.set(addon.folderName, "failed");
@@ -846,6 +857,7 @@ function App() {
               completed.push(ca.folderName);
             } else {
               failed.push(ca.folderName);
+              failureReasons.set(ca.folderName, result.error ?? "unknown error");
             }
           }
         } else {
@@ -874,7 +886,21 @@ function App() {
         if (conflictCount > 0)
           msg += `, ${conflictCount} need${conflictCount === 1 ? "s" : ""} your attention`;
         if (failed.length > 0) {
-          toast.warning(msg);
+          // Log every failure reason so the cause is visible (console + toast detail).
+          const reasonLines = failed.map(
+            (name) => `${name}: ${failureReasons.get(name) ?? "unknown error"}`
+          );
+          console.error(`Update failures (${failed.length}):\n${reasonLines.join("\n")}`);
+          // Group identical reasons — when every addon fails the same way, show it once.
+          const counts = new Map<string, number>();
+          for (const name of failed) {
+            const reason = failureReasons.get(name) ?? "unknown error";
+            counts.set(reason, (counts.get(reason) ?? 0) + 1);
+          }
+          const detail = [...counts.entries()]
+            .map(([reason, n]) => (n > 1 ? `${reason} (×${n})` : reason))
+            .join("; ");
+          toast.warning(msg, { description: detail });
         } else if (conflictCount > 0) {
           toast.info(msg);
         } else {
