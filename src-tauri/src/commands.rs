@@ -2128,8 +2128,11 @@ pub async fn update_batch_with_decisions(
             rx,
         );
 
-        // Producer has finished sending by the time the channel drained, but
-        // join to surface panics and avoid a detached thread.
+        // The producer has finished sending by the time the channel drained;
+        // join so the thread isn't detached. A producer panic is intentionally
+        // swallowed — fetch_and_download_with_retry returns Result rather than
+        // panicking, so a panic here would be a bug, and the consumer has
+        // already produced a complete result from whatever it received.
         let _ = producer.join();
 
         let elapsed = t_start.elapsed();
