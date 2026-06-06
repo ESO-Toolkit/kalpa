@@ -79,6 +79,7 @@ export function Settings({
   const [importError, setImportError] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [autoUpdate, setAutoUpdate] = useState(false);
+  const [warnEsoRunning, setWarnEsoRunning] = useState(true);
   const [minionDetected, setMinionDetected] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
   const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
@@ -88,6 +89,7 @@ export function Settings({
 
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
+    void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) => setWarnEsoRunning(!s));
     void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
       setConflictPolicy
     );
@@ -375,6 +377,26 @@ export function Settings({
                       <p className="text-sm font-medium text-white/90">Auto-update on launch</p>
                       <p className="text-xs text-muted-foreground">
                         Automatically update all addons when Kalpa starts
+                      </p>
+                    </div>
+                  </label>
+                </GlassPanel>
+
+                {/* Warn when ESO is running */}
+                <GlassPanel variant="subtle" className="p-3">
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <Checkbox
+                      checked={warnEsoRunning}
+                      onCheckedChange={(checked) => {
+                        const value = checked === true;
+                        setWarnEsoRunning(value);
+                        setSetting("suppressEsoRunningWarning", !value);
+                      }}
+                    />
+                    <div>
+                      <p className="text-sm font-medium text-white/90">Warn when ESO is running</p>
+                      <p className="text-xs text-muted-foreground">
+                        Remind me to /reloadui after changing addons while the game is open
                       </p>
                     </div>
                   </label>
