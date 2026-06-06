@@ -6,6 +6,26 @@ use std::path::Path;
 /// Maximum total extracted size (500 MB) to guard against ZIP bombs.
 const MAX_EXTRACT_SIZE: u64 = 500 * 1024 * 1024;
 
+/// Turn a filesystem write error into a user-facing message. When the OS
+/// reports permission denied (Windows `os error 5` / Unix `PermissionDenied`),
+/// the most common cause on Windows is the AddOns folder living under
+/// `Documents`, which Windows Defender's **Controlled Folder Access**
+/// (ransomware protection) blocks apps from writing to. Surface that
+/// explanation with concrete steps instead of a raw "Access is denied".
+fn describe_write_error(path: &Path, e: &io::Error) -> String {
+    if e.kind() == io::ErrorKind::PermissionDenied {
+        format!(
+            "Windows blocked Kalpa from writing to your AddOns folder ({path:?}). \
+             This is usually Controlled Folder Access (ransomware protection). \
+             To fix it: open Windows Security → Virus & threat protection → \
+             Ransomware protection → Allow an app through Controlled folder access, \
+             then add Kalpa. (Underlying error: {e})"
+        )
+    } else {
+        format!("Failed to write {path:?}: {e}")
+    }
+}
+
 pub fn extract_addon_zip_selective(
     zip_path: &Path,
     addons_dir: &Path,
@@ -48,8 +68,7 @@ pub fn extract_addon_zip_selective(
         }
 
         if entry.is_dir() {
-            fs::create_dir_all(&out_path)
-                .map_err(|e| format!("Failed to create directory {out_path:?}: {e}"))?;
+            fs::create_dir_all(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
         } else {
             let declared_size = entry.size();
             if total_extracted + declared_size > MAX_EXTRACT_SIZE {
@@ -60,12 +79,11 @@ pub fn extract_addon_zip_selective(
             }
 
             if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create directory {parent:?}: {e}"))?;
+                fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
             }
 
-            let mut outfile = fs::File::create(&out_path)
-                .map_err(|e| format!("Failed to create file {out_path:?}: {e}"))?;
+            let mut outfile =
+                fs::File::create(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
 
             let bytes_written = io::copy(&mut entry, &mut outfile)
                 .map_err(|e| format!("Failed to extract {out_path:?}: {e}"))?;
@@ -187,8 +205,7 @@ fn extract_addon_zip_inner(
         }
 
         if entry.is_dir() {
-            fs::create_dir_all(&out_path)
-                .map_err(|e| format!("Failed to create directory {out_path:?}: {e}"))?;
+            fs::create_dir_all(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
         } else {
             // Check declared size against remaining budget before extracting
             let declared_size = entry.size();
@@ -201,12 +218,11 @@ fn extract_addon_zip_inner(
 
             // Ensure parent directory exists
             if let Some(parent) = out_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create directory {parent:?}: {e}"))?;
+                fs::create_dir_all(parent).map_err(|e| describe_write_error(parent, &e))?;
             }
 
-            let mut outfile = fs::File::create(&out_path)
-                .map_err(|e| format!("Failed to create file {out_path:?}: {e}"))?;
+            let mut outfile =
+                fs::File::create(&out_path).map_err(|e| describe_write_error(&out_path, &e))?;
 
             let bytes_written = io::copy(&mut entry, &mut outfile)
                 .map_err(|e| format!("Failed to extract {out_path:?}: {e}"))?;
@@ -271,6 +287,22 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;
+
+    #[test]
+    fn permission_denied_mentions_controlled_folder_access() {
+        let err = io::Error::from(io::ErrorKind::PermissionDenied);
+        let msg = describe_write_error(Path::new("C:/Users/x/Documents/AddOns/Foo"), &err);
+        assert!(msg.contains("Controlled Folder Access"));
+        assert!(msg.contains("Allow an app"));
+    }
+
+    #[test]
+    fn other_write_errors_stay_generic() {
+        let err = io::Error::from(io::ErrorKind::NotFound);
+        let msg = describe_write_error(Path::new("/tmp/x"), &err);
+        assert!(msg.starts_with("Failed to write"));
+        assert!(!msg.contains("Controlled Folder Access"));
+    }
 
     /// Create a simple valid ZIP with one folder and one file.
     fn create_test_zip(dir: &Path, zip_name: &str, folder: &str, file_content: &str) -> PathBuf {
