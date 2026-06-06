@@ -8,6 +8,7 @@ import { AppBackground } from "./components/app-background";
 import { AppDialogs } from "./components/app-dialogs";
 import { AppHeader } from "./components/app-header";
 import { DiscoverDetail } from "./components/discover-detail";
+import { EsoRunningDialog } from "./components/eso-running-dialog";
 import { SetupWizard } from "./components/setup-wizard";
 import { StatusBanners } from "./components/status-banners";
 import { RosterPackInstall } from "./components/roster-pack-install";
@@ -58,6 +59,7 @@ function App() {
   const [errorShowSettings, setErrorShowSettings] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
+  const [esoRunningPromptOpen, setEsoRunningPromptOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [updateResults, setUpdateResults] = useState<UpdateCheckResult[]>([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -114,6 +116,8 @@ function App() {
   const viewModeRef = useRef<ViewMode>("installed");
   const updatingAllRef = useRef(false);
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
+  // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
+  const esoRunningResolveRef = useRef<((proceed: boolean) => void) | null>(null);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
 
@@ -730,13 +734,23 @@ function App() {
 
       if (updatingAllRef.current) return;
 
+      // A confirm dialog from a prior call is still awaiting input — don't start a
+      // second batch, or its resolver would clobber the pending one and strand it.
+      if (esoRunningResolveRef.current) return;
+
       try {
         const esoRunning = await invokeOrThrow<boolean>("is_eso_running");
         if (esoRunning) {
-          toast.error(
-            "Elder Scrolls Online is running. Close it before updating addons to avoid file conflicts."
-          );
-          return;
+          // Updating while ESO runs is safe on disk — the game just won't see the
+          // changes until /reloadui or relog. Warn (unless suppressed) instead of blocking.
+          const suppressed = await getSetting<boolean>("suppressEsoRunningWarning", false);
+          if (!suppressed) {
+            const proceed = await new Promise<boolean>((resolve) => {
+              esoRunningResolveRef.current = resolve;
+              setEsoRunningPromptOpen(true);
+            });
+            if (!proceed) return;
+          }
         }
       } catch {
         // Non-critical — proceed if we can't check
@@ -1279,6 +1293,21 @@ function App() {
         onPathChange={(path) => void handlePathChange(path)}
         onRefresh={handleRefresh}
         onShowDialog={handleOpenDialog}
+      />
+
+      <EsoRunningDialog
+        open={esoRunningPromptOpen}
+        onConfirm={(dontAskAgain) => {
+          setEsoRunningPromptOpen(false);
+          if (dontAskAgain) void setSetting("suppressEsoRunningWarning", true);
+          esoRunningResolveRef.current?.(true);
+          esoRunningResolveRef.current = null;
+        }}
+        onCancel={() => {
+          setEsoRunningPromptOpen(false);
+          esoRunningResolveRef.current?.(false);
+          esoRunningResolveRef.current = null;
+        }}
       />
     </div>
   );
