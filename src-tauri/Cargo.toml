@@ -39,7 +39,7 @@ sha2 = "0.11"
 md-5 = "0.11"
 # "bundled" statically compiles SQLite (~1-2MB binary size increase) to avoid
 # depending on a system SQLite installation. Worth it for portable releases.
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
