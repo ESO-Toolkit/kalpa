@@ -4,6 +4,23 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.6] — 2026-06-06
+
+### Dependencies
+A maintenance release rolling up batched dependency updates. No user-facing behavior changes.
+
+- **`md-5` 0.10 → 0.11** — the bump pulls `digest` 0.11, which dropped the `io::Write` impl and `LowerHex` output; the download checksum verification in `esoui.rs` was adapted to chunked `update()` + manual hex encoding (verified against known MD5 vectors).
+- **`react` / `react-dom` 19.2.6 → 19.2.7** (kept in lockstep to satisfy the exact-version peer requirement)
+- **`@tanstack/react-virtual` 3.13.24 → 3.14.2**
+- **`lucide-react` 1.16.0 → 1.17.0**
+- **`motion` 12.38.0 → 12.40.0**
+- **`@uiw/react-codemirror` and `@uiw/codemirror-themes` 4.25.9 → 4.25.10**
+- **Worker (`backend/eso-packs-worker`)**: `wrangler` 4.94 → 4.98, `@cloudflare/workers-types` and `@cloudflare/vitest-pool-workers`, `vitest` 4.1.6 → 4.1.8
+- **CI**: `actions/checkout` 6.0.2 → 6.0.3
+- **Dev dependencies**: grouped bump across `@types/node`, `eslint`, `shadcn`, `typescript-eslint`, `vite`, `vitest`, and `@types/react`
+
+> **Deferred:** `rusqlite` 0.39 → 0.40 ([#120](https://github.com/ESO-Toolkit/kalpa/pull/120)) is held back — it pulls a newer `libsqlite3-sys` whose build script uses the `cfg_select` macro, which requires a rustc newer than our pinned `1.88.0`. It will land alongside an intentional Rust toolchain bump.
+
 ## [0.1.0-beta.5] — 2026-06-06
 
 ### Features
