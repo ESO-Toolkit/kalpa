@@ -155,14 +155,26 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     url.searchParams.has("author");
   const cache = caches.default;
 
-  if (!hasFilters && !url.searchParams.has("page") && !url.searchParams.has("sort")) {
+  // Only the default landing view is cacheable: no filters, page 1, and the
+  // client's default sort. The client always sends sort=votes&page=1 for that
+  // view (pack-constants.ts), so match that exact request shape for both the
+  // read and the write below — otherwise the keys never align and we either
+  // never hit or cache a non-canonical response.
+  const sortParam = url.searchParams.get("sort");
+  const pageParam = url.searchParams.get("page");
+  const isDefaultView =
+    !hasFilters &&
+    (pageParam === null || pageParam === "1") &&
+    (sortParam === null || sortParam === "votes");
+
+  if (isDefaultView) {
     const cached = await cache.match(request);
     if (cached) return cached;
   }
 
   const index = await getPackIndex(env);
   if (!index) {
-    return json(request, { packs: [], page: 1, sort: "latest" }, 200, 30);
+    return json(request, { packs: [], page: 1, sort: sortParam ?? "updated" }, 200, 30);
   }
 
   let packs = index.packs;
@@ -210,14 +222,17 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
     );
   }
 
-  // Sort
-  const sort = url.searchParams.get("sort") ?? "latest";
-  if (sort === "popular") {
+  // Sort. The client (pack-constants.ts SortOption) sends votes|newest|updated;
+  // popular/installs are kept for backward compatibility.
+  const sort = sortParam ?? "updated";
+  if (sort === "votes" || sort === "popular") {
     packs.sort((a, b) => b.vote_count - a.vote_count);
   } else if (sort === "installs") {
     packs.sort((a, b) => b.install_count - a.install_count);
+  } else if (sort === "newest") {
+    packs.sort((a, b) => b.created_at.localeCompare(a.created_at));
   } else {
-    // "latest" — sort by updated_at descending
+    // "updated" (and default) — sort by updated_at descending
     packs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
 
@@ -228,7 +243,7 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 
   const response = json(request, { packs: paginated, page, sort }, 200, 30);
 
-  if (!hasFilters && page === 1 && sort === "latest" && request.method === "GET") {
+  if (isDefaultView && request.method === "GET") {
     cache.put(request, response.clone()).catch(console.error);
   }
 
