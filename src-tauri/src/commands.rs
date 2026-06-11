@@ -1035,7 +1035,7 @@ fn install_addon_blocking(
 }
 
 #[tauri::command]
-pub fn remove_addon(
+pub async fn remove_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
@@ -1043,34 +1043,38 @@ pub fn remove_addon(
 ) -> Result<(), String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let _guard = meta_lock
-        .0
-        .lock()
-        .map_err(|_| "Internal metadata lock error".to_string())?;
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
 
-    // Remove both the enabled and disabled copies if they exist.
-    // If only one exists, remove that one. Handles the edge case where
-    // an external tool or reinstall left both Foo/ and Foo.disabled/.
-    let enabled_exists = addons_dir.join(&folder_name).is_dir();
-    let disabled_name = format!("{folder_name}.disabled");
-    let disabled_exists = addons_dir.join(&disabled_name).is_dir();
+        // Remove both the enabled and disabled copies if they exist.
+        // If only one exists, remove that one. Handles the edge case where
+        // an external tool or reinstall left both Foo/ and Foo.disabled/.
+        let enabled_exists = addons_dir.join(&folder_name).is_dir();
+        let disabled_name = format!("{folder_name}.disabled");
+        let disabled_exists = addons_dir.join(&disabled_name).is_dir();
 
-    if enabled_exists {
-        installer::remove_addon(&addons_dir, &folder_name)?;
-    }
-    if disabled_exists {
-        installer::remove_addon(&addons_dir, &disabled_name)?;
-    }
-    if !enabled_exists && !disabled_exists {
-        return Err(format!("Addon folder not found: {folder_name}"));
-    }
+        if enabled_exists {
+            installer::remove_addon(&addons_dir, &folder_name)?;
+        }
+        if disabled_exists {
+            installer::remove_addon(&addons_dir, &disabled_name)?;
+        }
+        if !enabled_exists && !disabled_exists {
+            return Err(format!("Addon folder not found: {folder_name}"));
+        }
 
-    // Clean up metadata
-    let mut store = metadata::load_metadata(&addons_dir);
-    metadata::remove_entry(&mut store, &folder_name);
-    metadata::save_metadata(&addons_dir, &store)?;
+        // Clean up metadata
+        let mut store = metadata::load_metadata(&addons_dir);
+        metadata::remove_entry(&mut store, &folder_name);
+        metadata::save_metadata(&addons_dir, &store)?;
 
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -3131,7 +3135,7 @@ pub struct BatchRemoveResult {
 
 /// Batch remove multiple addons.
 #[tauri::command]
-pub fn batch_remove_addons(
+pub async fn batch_remove_addons(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     addons_path: String,
@@ -3141,35 +3145,39 @@ pub fn batch_remove_addons(
     for name in &folder_names {
         validate_name(name)?;
     }
-    let _guard = meta_lock
-        .0
-        .lock()
-        .map_err(|_| "Internal metadata lock error".to_string())?;
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
 
-    let mut store = metadata::load_metadata(&addons_dir);
-    let mut removed: Vec<String> = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
-    let mut errors: HashMap<String, String> = HashMap::new();
+        let mut store = metadata::load_metadata(&addons_dir);
+        let mut removed: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        let mut errors: HashMap<String, String> = HashMap::new();
 
-    for name in &folder_names {
-        match installer::remove_addon(&addons_dir, name) {
-            Ok(()) => {
-                metadata::remove_entry(&mut store, name);
-                removed.push(name.clone());
-            }
-            Err(e) => {
-                errors.insert(name.clone(), e);
-                failed.push(name.clone());
+        for name in &folder_names {
+            match installer::remove_addon(&addons_dir, name) {
+                Ok(()) => {
+                    metadata::remove_entry(&mut store, name);
+                    removed.push(name.clone());
+                }
+                Err(e) => {
+                    errors.insert(name.clone(), e);
+                    failed.push(name.clone());
+                }
             }
         }
-    }
 
-    metadata::save_metadata(&addons_dir, &store)?;
-    Ok(BatchRemoveResult {
-        removed,
-        failed,
-        errors,
+        metadata::save_metadata(&addons_dir, &store)?;
+        Ok(BatchRemoveResult {
+            removed,
+            failed,
+            errors,
+        })
     })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -3387,78 +3395,83 @@ pub struct ApiCompatInfo {
 }
 
 #[tauri::command]
-pub fn check_api_compatibility(
+pub async fn check_api_compatibility(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<ApiCompatInfo, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    // Read the game's current API version from AddOnSettings.txt
-    let settings_path = addons_dir
-        .parent()
-        .map(|p| p.join("AddOnSettings.txt"))
-        .ok_or("Could not find AddOnSettings.txt.")?;
+    tokio::task::spawn_blocking(move || {
+        // Read the game's current API version from AddOnSettings.txt
+        let settings_path = addons_dir
+            .parent()
+            .map(|p| p.join("AddOnSettings.txt"))
+            .ok_or("Could not find AddOnSettings.txt.")?;
 
-    let game_api_version = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)
-            .map_err(|e| format!("Failed to read AddOnSettings.txt: {e}"))?;
-        content
-            .lines()
-            .find(|line| line.starts_with("#Version"))
-            .and_then(|line| line.strip_prefix("#Version").map(|s| s.trim()))
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0)
-    } else {
-        return Err(
-            "AddOnSettings.txt not found. Make sure you've launched ESO at least once.".to_string(),
-        );
-    };
-
-    if game_api_version == 0 {
-        return Err("Could not determine game API version.".to_string());
-    }
-
-    // Check each addon's APIVersion against the game's version
-    let entries =
-        fs::read_dir(&addons_dir).map_err(|e| format!("Failed to read AddOns folder: {e}"))?;
-
-    let mut outdated_addons: Vec<String> = Vec::new();
-    let mut up_to_date_addons: Vec<String> = Vec::new();
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let folder_name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(name) => name.to_string(),
-            None => continue,
+        let game_api_version = if settings_path.exists() {
+            let content = fs::read_to_string(&settings_path)
+                .map_err(|e| format!("Failed to read AddOnSettings.txt: {e}"))?;
+            content
+                .lines()
+                .find(|line| line.starts_with("#Version"))
+                .and_then(|line| line.strip_prefix("#Version").map(|s| s.trim()))
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0)
+        } else {
+            return Err(
+                "AddOnSettings.txt not found. Make sure you've launched ESO at least once."
+                    .to_string(),
+            );
         };
 
-        let manifest = find_manifest(&addons_dir, &folder_name)
-            .and_then(|p| manifest::parse_manifest(&folder_name, &p));
+        if game_api_version == 0 {
+            return Err("Could not determine game API version.".to_string());
+        }
 
-        if let Some(m) = manifest {
-            if m.api_version.is_empty() {
+        // Check each addon's APIVersion against the game's version
+        let entries =
+            fs::read_dir(&addons_dir).map_err(|e| format!("Failed to read AddOns folder: {e}"))?;
+
+        let mut outdated_addons: Vec<String> = Vec::new();
+        let mut up_to_date_addons: Vec<String> = Vec::new();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
                 continue;
             }
-            // Addon is compatible if any of its API versions matches the game's
-            let compatible = m.api_version.contains(&game_api_version);
-            if compatible {
-                up_to_date_addons.push(m.title);
-            } else {
-                outdated_addons.push(m.title);
+            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+
+            let manifest = find_manifest(&addons_dir, &folder_name)
+                .and_then(|p| manifest::parse_manifest(&folder_name, &p));
+
+            if let Some(m) = manifest {
+                if m.api_version.is_empty() {
+                    continue;
+                }
+                // Addon is compatible if any of its API versions matches the game's
+                let compatible = m.api_version.contains(&game_api_version);
+                if compatible {
+                    up_to_date_addons.push(m.title);
+                } else {
+                    outdated_addons.push(m.title);
+                }
             }
         }
-    }
 
-    outdated_addons.sort();
-    up_to_date_addons.sort();
+        outdated_addons.sort();
+        up_to_date_addons.sort();
 
-    Ok(ApiCompatInfo {
-        game_api_version,
-        outdated_addons,
-        up_to_date_addons,
+        Ok(ApiCompatInfo {
+            game_api_version,
+            outdated_addons,
+            up_to_date_addons,
+        })
     })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── SavedVariables Backup & Restore ─────────────────────────
@@ -3564,83 +3577,88 @@ pub fn list_backups(
 }
 
 #[tauri::command]
-pub fn create_backup(
+pub async fn create_backup(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     backup_name: String,
 ) -> Result<BackupInfo, String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let sv_dir = saved_variables_dir(&addons_dir);
-    if !sv_dir.is_dir() {
-        return Err("SavedVariables folder not found.".to_string());
-    }
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = saved_variables_dir(&addons_dir);
+        if !sv_dir.is_dir() {
+            return Err("SavedVariables folder not found.".to_string());
+        }
 
-    let backups = backups_dir(&addons_dir);
-    fs::create_dir_all(&backups).map_err(|e| format!("Failed to create backups folder: {e}"))?;
+        let backups = backups_dir(&addons_dir);
+        fs::create_dir_all(&backups)
+            .map_err(|e| format!("Failed to create backups folder: {e}"))?;
 
-    let backup_path = backups.join(&backup_name);
-    if backup_path.exists() {
-        return Err(format!("Backup '{backup_name}' already exists."));
-    }
+        let backup_path = backups.join(&backup_name);
+        if backup_path.exists() {
+            return Err(format!("Backup '{backup_name}' already exists."));
+        }
 
-    fs::create_dir_all(&backup_path).map_err(|e| format!("Failed to create backup: {e}"))?;
+        fs::create_dir_all(&backup_path).map_err(|e| format!("Failed to create backup: {e}"))?;
 
-    // Copy all .lua files from SavedVariables
-    let mut file_count: u32 = 0;
-    let mut total_size: u64 = 0;
-    let entries =
-        fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {e}"))?;
+        // Copy all .lua files from SavedVariables
+        let mut file_count: u32 = 0;
+        let mut total_size: u64 = 0;
+        let entries =
+            fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {e}"))?;
 
-    let mut failed: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name() {
-                let dest = backup_path.join(name);
-                match fs::copy(&path, &dest) {
-                    Ok(_) => {
-                        file_count += 1;
-                        total_size += fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-                    }
-                    Err(e) => {
-                        failed.push(format!("{}: {}", name.to_string_lossy(), e));
+        let mut failed: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name() {
+                    let dest = backup_path.join(name);
+                    match fs::copy(&path, &dest) {
+                        Ok(_) => {
+                            file_count += 1;
+                            total_size += fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                        }
+                        Err(e) => {
+                            failed.push(format!("{}: {}", name.to_string_lossy(), e));
+                        }
                     }
                 }
             }
         }
-    }
 
-    if !failed.is_empty() {
-        return Err(format!(
-            "Backup incomplete — {} file(s) failed to copy: {}",
-            failed.len(),
-            failed.join(", ")
-        ));
-    }
+        if !failed.is_empty() {
+            return Err(format!(
+                "Backup incomplete — {} file(s) failed to copy: {}",
+                failed.len(),
+                failed.join(", ")
+            ));
+        }
 
-    let created_at_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let created_at = metadata::format_timestamp(created_at_epoch);
+        let created_at_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let created_at = metadata::format_timestamp(created_at_epoch);
 
-    let kind = if backup_name.starts_with("char-") {
-        BackupKind::Character
-    } else if backup_name.starts_with("auto-before-restore-") {
-        BackupKind::AutoBeforeRestore
-    } else {
-        BackupKind::Manual
-    };
+        let kind = if backup_name.starts_with("char-") {
+            BackupKind::Character
+        } else if backup_name.starts_with("auto-before-restore-") {
+            BackupKind::AutoBeforeRestore
+        } else {
+            BackupKind::Manual
+        };
 
-    Ok(BackupInfo {
-        name: backup_name,
-        created_at,
-        created_at_epoch,
-        file_count,
-        total_size,
-        kind,
+        Ok(BackupInfo {
+            name: backup_name,
+            created_at,
+            created_at_epoch,
+            file_count,
+            total_size,
+            kind,
+        })
     })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3682,13 +3700,14 @@ fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
 /// timestamped "auto-before-restore-…" snapshot so the restore can be undone.
 /// If the user has no current SavedVariables, the snapshot step is skipped.
 #[tauri::command]
-pub fn restore_backup_safe(
+pub async fn restore_backup_safe(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     backup_name: String,
 ) -> Result<SafeRestoreResult, String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
     let sv_dir = saved_variables_dir(&addons_dir);
     let backup_path = backups_dir(&addons_dir).join(&backup_name);
 
@@ -3791,6 +3810,9 @@ pub fn restore_backup_safe(
         restored_files: restored,
         safety_snapshot,
     })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Return the absolute path to the kalpa-backups folder so the UI can reveal it.
@@ -3921,92 +3943,96 @@ pub struct ActivateProfileResult {
 }
 
 #[tauri::command]
-pub fn activate_profile(
+pub async fn activate_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     profile_name: String,
 ) -> Result<ActivateProfileResult, String> {
     validate_name(&profile_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let mut store = load_profiles(&addons_dir);
+    tokio::task::spawn_blocking(move || {
+        let mut store = load_profiles(&addons_dir);
 
-    let profile = store
-        .profiles
-        .iter()
-        .find(|p| p.name == profile_name)
-        .cloned()
-        .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
+        let profile = store
+            .profiles
+            .iter()
+            .find(|p| p.name == profile_name)
+            .cloned()
+            .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
 
-    let enabled_set: HashSet<String> = profile.enabled_addons.iter().cloned().collect();
+        let enabled_set: HashSet<String> = profile.enabled_addons.iter().cloned().collect();
 
-    let mut disabled: Vec<String> = Vec::new();
-    let mut enabled: Vec<String> = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
-    let mut seen_on_disk: HashSet<String> = HashSet::new();
+        let mut disabled: Vec<String> = Vec::new();
+        let mut enabled: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        let mut seen_on_disk: HashSet<String> = HashSet::new();
 
-    if let Ok(entries) = fs::read_dir(&addons_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-
-            // Skip non-addon folders and our own files
-            if folder_name.starts_with("kalpa-") {
-                continue;
-            }
-
-            let is_disabled = folder_name.ends_with(".disabled");
-            let base_name = folder_name
-                .strip_suffix(".disabled")
-                .unwrap_or(&folder_name)
-                .to_string();
-
-            seen_on_disk.insert(base_name.clone());
-
-            if enabled_set.contains(&base_name) {
-                // Should be enabled
-                if is_disabled {
-                    let new_path = addons_dir.join(&base_name);
-                    match fs::rename(&path, &new_path) {
-                        Ok(_) => enabled.push(base_name),
-                        Err(e) => failed.push(format!("{base_name} (enable: {e})")),
-                    }
+        if let Ok(entries) = fs::read_dir(&addons_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
                 }
-            } else {
-                // Should be disabled
-                if !is_disabled && find_manifest(&addons_dir, &folder_name).is_some() {
-                    let new_path = addons_dir.join(format!("{folder_name}.disabled"));
-                    match fs::rename(&path, &new_path) {
-                        Ok(_) => disabled.push(folder_name),
-                        Err(e) => failed.push(format!("{folder_name} (disable: {e})")),
+                let folder_name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(name) => name.to_string(),
+                    None => continue,
+                };
+
+                // Skip non-addon folders and our own files
+                if folder_name.starts_with("kalpa-") {
+                    continue;
+                }
+
+                let is_disabled = folder_name.ends_with(".disabled");
+                let base_name = folder_name
+                    .strip_suffix(".disabled")
+                    .unwrap_or(&folder_name)
+                    .to_string();
+
+                seen_on_disk.insert(base_name.clone());
+
+                if enabled_set.contains(&base_name) {
+                    // Should be enabled
+                    if is_disabled {
+                        let new_path = addons_dir.join(&base_name);
+                        match fs::rename(&path, &new_path) {
+                            Ok(_) => enabled.push(base_name),
+                            Err(e) => failed.push(format!("{base_name} (enable: {e})")),
+                        }
+                    }
+                } else {
+                    // Should be disabled
+                    if !is_disabled && find_manifest(&addons_dir, &folder_name).is_some() {
+                        let new_path = addons_dir.join(format!("{folder_name}.disabled"));
+                        match fs::rename(&path, &new_path) {
+                            Ok(_) => disabled.push(folder_name),
+                            Err(e) => failed.push(format!("{folder_name} (disable: {e})")),
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Report addons referenced in the profile that no longer exist on disk
-    let missing: Vec<String> = profile
-        .enabled_addons
-        .iter()
-        .filter(|name| !seen_on_disk.contains(name.as_str()))
-        .cloned()
-        .collect();
+        // Report addons referenced in the profile that no longer exist on disk
+        let missing: Vec<String> = profile
+            .enabled_addons
+            .iter()
+            .filter(|name| !seen_on_disk.contains(name.as_str()))
+            .cloned()
+            .collect();
 
-    store.active_profile = Some(profile_name);
-    save_profiles(&addons_dir, &store)?;
+        store.active_profile = Some(profile_name);
+        save_profiles(&addons_dir, &store)?;
 
-    Ok(ActivateProfileResult {
-        enabled,
-        disabled,
-        failed,
-        missing,
+        Ok(ActivateProfileResult {
+            enabled,
+            disabled,
+            failed,
+            missing,
+        })
     })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4266,13 +4292,17 @@ pub fn migration_check_preconditions(
 }
 
 #[tauri::command]
-pub fn migration_create_snapshot(
+pub async fn migration_create_snapshot(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     include_addons: bool,
 ) -> Result<safe_migration::SnapshotManifest, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::create_pre_migration_snapshot(&addons_dir, include_addons)
+    tokio::task::spawn_blocking(move || {
+        safe_migration::create_pre_migration_snapshot(&addons_dir, include_addons)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -4334,14 +4364,18 @@ pub fn delete_snapshot(
 }
 
 #[tauri::command]
-pub fn create_pre_operation_snapshot(
+pub async fn create_pre_operation_snapshot(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     operation_label: String,
 ) -> Result<safe_migration::SnapshotManifest, String> {
     validate_name(&operation_label)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::create_pre_operation_snapshot(&addons_dir, &operation_label)
+    tokio::task::spawn_blocking(move || {
+        safe_migration::create_pre_operation_snapshot(&addons_dir, &operation_label)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
