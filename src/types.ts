@@ -79,6 +79,29 @@ export interface ImportResult {
   errors?: Record<string, string>;
 }
 
+export interface PackInstallEntry {
+  esouiId: number;
+  label?: string;
+}
+
+export interface PackInstallResult {
+  installed: number[];
+  failed: number[];
+  installedFolders: string[];
+  installedDeps: string[];
+  failedDeps: string[];
+  skippedDeps: string[];
+  errors?: Record<number, string>;
+}
+
+export interface PackInstallProgress {
+  esouiId: number;
+  label: string;
+  phase: "downloading" | "extracting" | "completed" | "failed";
+  index: number;
+  total: number;
+}
+
 export interface EsouiSearchResult {
   id: number;
   title: string;

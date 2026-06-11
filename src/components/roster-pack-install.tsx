@@ -15,7 +15,8 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { RosterPackSkeleton } from "@/components/ui/skeletons";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
-import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { runBatchPackInstall } from "@/lib/pack-install";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn, decodeHtml } from "@/lib/utils";
 import {
@@ -28,13 +29,7 @@ import {
   RefreshCwIcon,
   StopCircleIcon,
 } from "lucide-react";
-import type {
-  RosterPack,
-  PackAddonEntry,
-  EsouiAddonInfo,
-  InstallResult,
-  AddonManifest,
-} from "../types";
+import type { RosterPack, PackAddonEntry, AddonManifest } from "../types";
 
 interface RosterPackInstallProps {
   packId: string;
@@ -157,61 +152,41 @@ export function RosterPackInstall({
     }
     setInstallProgress({ completed: 0, failed: 0, total: addonsToInstall.length });
 
-    let completed = 0;
-    let failed = 0;
-
-    for (const item of addonsToInstall) {
-      if (cancelledRef.current) break;
-
-      setAddonStates((prev) =>
-        prev.map((s) =>
-          s.addon.esouiId === item.addon.esouiId ? { ...s, status: "installing" } : s
-        )
-      );
-
-      const info = await invokeResult<EsouiAddonInfo>("resolve_esoui_addon", {
-        input: String(item.addon.esouiId),
-      });
-
-      if (cancelledRef.current) break;
-
-      if (!info.ok) {
-        failed++;
+    // One batch command instead of resolve+install per addon. The
+    // pack-install-progress events drive the per-addon status pills.
+    const result = await runBatchPackInstall(
+      addonsPath,
+      addonsToInstall.map((item) => ({ esouiId: item.addon.esouiId, label: item.addon.name })),
+      setInstallProgress,
+      (event) => {
+        const status: AddonStatus =
+          event.phase === "completed"
+            ? "installed"
+            : event.phase === "failed"
+              ? "failed"
+              : "installing";
         setAddonStates((prev) =>
-          prev.map((s) => (s.addon.esouiId === item.addon.esouiId ? { ...s, status: "failed" } : s))
-        );
-        setInstallProgress({ completed, failed, total: addonsToInstall.length });
-        continue;
-      }
-
-      const result = await invokeResult<InstallResult>("install_addon", {
-        addonsPath,
-        downloadUrl: info.data.downloadUrl,
-        esouiId: item.addon.esouiId,
-        esouiTitle: info.data.title,
-        esouiVersion: info.data.version,
-      });
-
-      if (cancelledRef.current) break;
-
-      if (result.ok) {
-        completed++;
-        setAddonStates((prev) =>
-          prev.map((s) =>
-            s.addon.esouiId === item.addon.esouiId ? { ...s, status: "installed" } : s
-          )
-        );
-      } else {
-        failed++;
-        setAddonStates((prev) =>
-          prev.map((s) => (s.addon.esouiId === item.addon.esouiId ? { ...s, status: "failed" } : s))
+          prev.map((s) => (s.addon.esouiId === event.esouiId ? { ...s, status } : s))
         );
       }
-
-      setInstallProgress({ completed, failed, total: addonsToInstall.length });
-    }
+    );
 
     if (cancelledRef.current) return;
+
+    const completed = result?.installed.length ?? 0;
+    const failed = result?.failed.length ?? addonsToInstall.length;
+
+    // If the command failed wholesale, mark any still-pending rows as failed.
+    if (!result) {
+      const targetIds = new Set(addonsToInstall.map((item) => item.addon.esouiId));
+      setAddonStates((prev) =>
+        prev.map((s) =>
+          targetIds.has(s.addon.esouiId) && s.status !== "installed"
+            ? { ...s, status: "failed" }
+            : s
+        )
+      );
+    }
 
     setInstalling(false);
     setInstallProgress(null);
