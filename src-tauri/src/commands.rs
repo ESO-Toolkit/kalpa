@@ -1673,17 +1673,28 @@ fn generate_session_id(folder_name: &str) -> String {
     hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
+/// Build a conflict report for one addon folder against a downloaded ZIP, and
+/// return the ZIP hash map alongside it so an immediately-following extraction
+/// can reuse it as the new hash baseline instead of re-hashing the folder.
+///
+/// The on-disk hash pass is skipped entirely when no stored manifest exists:
+/// with `stored == None`, every file resolves to `user_modified == false`
+/// regardless of its disk hash (see the match below), so the disk hashes cannot
+/// affect the report — and roughly two-thirds of installed addons have no
+/// `.kalpa-hashes` manifest yet, making this the common case.
 fn build_conflict_report(
     addons_dir: &Path,
     folder_name: &str,
     zip_path: &Path,
     update_version: &str,
     session_id: &str,
-) -> Result<ConflictReport, String> {
+) -> Result<(ConflictReport, HashMap<String, String>), String> {
     let stored = file_hashes::load_hash_manifest(addons_dir, folder_name);
     let addon_path = addons_dir.join(folder_name);
 
-    let disk_hashes = if addon_path.is_dir() {
+    // Only hash the folder from disk when there is a baseline to compare against.
+    // Without one, `user_modified` is always false, so the disk pass is dead work.
+    let disk_hashes = if stored.is_some() && addon_path.is_dir() {
         file_hashes::compute_addon_hashes(&addon_path)?
     } else {
         HashMap::new()
@@ -1732,14 +1743,16 @@ fn build_conflict_report(
     auto_kept_files.sort();
     conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-    Ok(ConflictReport {
+    let report = ConflictReport {
         session_id: session_id.to_string(),
         folder_name: folder_name.to_string(),
         update_version: update_version.to_string(),
         safe_files,
         auto_kept_files,
         conflicts,
-    })
+    };
+
+    Ok((report, zip_hashes))
 }
 
 #[tauri::command]
@@ -1764,7 +1777,10 @@ pub async fn scan_update_conflicts(
 
         let session_id = generate_session_id(&folder_name);
 
-        let report = build_conflict_report(
+        // The ZIP hash map isn't reused here: extraction happens later in a
+        // separate `update_addon_with_decisions` invocation, after the user
+        // resolves conflicts, by which point this map is long gone.
+        let (report, _zip_hashes) = build_conflict_report(
             &addons_dir,
             &folder_name,
             &kept_path,
@@ -1936,7 +1952,9 @@ pub async fn scan_batch_conflicts(
                             errors.insert(folder_name.clone(), e);
                             failed.push(folder_name);
                         }
-                        Ok(report) => {
+                        // ZIP map unused: extraction is deferred to the
+                        // interactive `update_addon_with_decisions` call.
+                        Ok((report, _zip_hashes)) => {
                             if let Ok(mut map) = pending_clone.lock() {
                                 map.insert(
                                     session_id.clone(),
@@ -2206,7 +2224,9 @@ fn extract_streamed_downloads(
         };
 
         let session_id = generate_session_id(&folder_name);
-        let report = match build_conflict_report(
+        // Keep the ZIP hash map: this addon is extracted right below, so the map
+        // doubles as the new hash baseline (no second decompression to re-hash).
+        let (report, zip_hashes) = match build_conflict_report(
             addons_dir,
             &folder_name,
             dl.zip.path(),
@@ -2291,25 +2311,28 @@ fn extract_streamed_downloads(
         };
 
         // For kept files, store the upstream hash as the new baseline so the
-        // user's edit stays detectable on the next update (matches the
-        // per-addon path's hash_overrides behavior).
+        // user's edit stays detectable on the next update. The ZIP hashes were
+        // already computed for the conflict report above — reuse them here
+        // instead of decompressing the ZIP a second time.
         let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
             None
         } else {
-            file_hashes::hash_zip_entries(dl.zip.path(), &folder_name)
-                .ok()
-                .map(|zip_hashes| {
-                    kept_files
-                        .iter()
-                        .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
-                        .collect::<HashMap<String, String>>()
-                })
-                .filter(|m| !m.is_empty())
+            let overrides: HashMap<String, String> = kept_files
+                .iter()
+                .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
+                .collect();
+            (!overrides.is_empty()).then_some(overrides)
         };
 
-        file_hashes::record_hashes_for_folders_with_overrides(
+        // Record the baseline straight from the ZIP hash map (plus a disk pass
+        // over only the files the ZIP didn't provide), rather than re-hashing
+        // the whole freshly extracted folder.
+        file_hashes::record_hashes_with_zip_baseline(
             addons_dir,
+            dl.zip.path(),
             &installed_folders,
+            &folder_name,
+            &zip_hashes,
             dl.esoui_id,
             &dl.api_version,
             hash_overrides.as_ref(),
@@ -2548,22 +2571,19 @@ pub async fn update_addon_with_decisions(
             )?;
         }
 
-        // For kept files, get the upstream hashes from the ZIP.
-        // These become the stored baseline so the user's edit stays
+        // Hash the ZIP once. This map becomes the new baseline after extraction
+        // (reused by record_hashes_with_zip_baseline), and also supplies the
+        // upstream hashes for kept "keep_mine" files so the user's edit stays
         // detectable on the next update cycle.
+        let zip_hashes = file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?;
         let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
             None
         } else {
-            let zip_hashes = file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?;
             let overrides: HashMap<String, String> = kept_files
                 .iter()
                 .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
                 .collect();
-            if overrides.is_empty() {
-                None
-            } else {
-                Some(overrides)
-            }
+            (!overrides.is_empty()).then_some(overrides)
         };
 
         // Extract with selective skipping
@@ -2573,9 +2593,14 @@ pub async fn update_addon_with_decisions(
             installer::extract_addon_zip_selective(&pu.zip_path, &addons_dir, &skip_files)?
         };
 
-        file_hashes::record_hashes_for_folders_with_overrides(
+        // Record the baseline from the ZIP hash map (plus a disk pass over only
+        // the files the ZIP didn't provide), rather than re-hashing the folder.
+        file_hashes::record_hashes_with_zip_baseline(
             &addons_dir,
+            &pu.zip_path,
             &installed_folders,
+            &pu.folder_name,
+            &zip_hashes,
             pu.esoui_id,
             &pu.update_version,
             hash_overrides.as_ref(),
