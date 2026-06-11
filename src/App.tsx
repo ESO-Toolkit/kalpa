@@ -22,7 +22,9 @@ import type {
   AddonManifest,
   AuthUser,
   BatchConflictAddon,
+  BatchEnableResult,
   BatchRemoveResult,
+  BatchTagResult,
   GameInstance,
   StreamingBatchResult,
   UpdateCheckResult,
@@ -1093,67 +1095,113 @@ function App() {
   const handleBatchDisable = useCallback(async () => {
     if (selectedFolders.size === 0) return;
 
-    setBatchDisabling(true);
-    let disabled = 0;
-    let enabled = 0;
-    let failed = 0;
+    // Each selected addon toggles to the opposite of its current state.
+    const entries = Array.from(selectedFolders)
+      .map((folderName) => {
+        const addon = addons.find((a) => a.folderName === folderName);
+        return addon ? { folderName, enable: addon.disabled } : null;
+      })
+      .filter((e): e is { folderName: string; enable: boolean } => e !== null);
 
-    for (const folderName of selectedFolders) {
-      const addon = addons.find((a) => a.folderName === folderName);
-      if (!addon) continue;
-      const command = addon.disabled ? "enable_addon" : "disable_addon";
-      const result = await invokeResult(command, { addonsPath, folderName });
-      if (result.ok) {
-        if (addon.disabled) enabled++;
-        else disabled++;
-      } else {
-        failed++;
-      }
+    if (entries.length === 0) {
+      setSelectedFolders(new Set());
+      return;
     }
 
-    setBatchDisabling(false);
+    setBatchDisabling(true);
+    try {
+      // One command instead of one invoke per addon — single metadata lock.
+      const result = await invokeOrThrow<BatchEnableResult>("batch_set_enabled", {
+        addonsPath,
+        entries,
+      });
 
-    const parts: string[] = [];
-    if (disabled > 0) parts.push(`disabled ${disabled}`);
-    if (enabled > 0) parts.push(`enabled ${enabled}`);
-    if (failed > 0) parts.push(`${failed} failed`);
-    toast.success(parts.join(", "));
+      const parts: string[] = [];
+      if (result.disabled.length > 0) parts.push(`disabled ${result.disabled.length}`);
+      if (result.enabled.length > 0) parts.push(`enabled ${result.enabled.length}`);
+      if (result.failed.length > 0) parts.push(`${result.failed.length} failed`);
+      if (parts.length > 0) toast.success(parts.join(", "));
 
-    setSelectedFolders(new Set());
-    handleRefresh();
-  }, [addons, addonsPath, handleRefresh, selectedFolders]);
+      // Patch the successfully toggled addons in place instead of a full rescan.
+      const toggled = new Map<string, boolean>();
+      for (const folderName of result.enabled) toggled.set(folderName, false);
+      for (const folderName of result.disabled) toggled.set(folderName, true);
+      if (toggled.size > 0) {
+        setAddons((prev) =>
+          prev.map((addon) =>
+            toggled.has(addon.folderName)
+              ? { ...addon, disabled: toggled.get(addon.folderName)! }
+              : addon
+          )
+        );
+        setSelectedAddon((prev) =>
+          prev && toggled.has(prev.folderName)
+            ? { ...prev, disabled: toggled.get(prev.folderName)! }
+            : prev
+        );
+      }
+    } catch (batchError) {
+      toast.error(`Failed to update addons: ${getTauriErrorMessage(batchError)}`);
+    } finally {
+      setBatchDisabling(false);
+      setSelectedFolders(new Set());
+    }
+  }, [addons, addonsPath, selectedFolders]);
 
   const handleBatchTag = useCallback(
     async (tag: string) => {
       if (selectedFolders.size === 0) return;
 
-      let applied = 0;
-      for (const folderName of selectedFolders) {
-        const addon = addons.find((a) => a.folderName === folderName);
-        if (!addon) continue;
-        if (addon.tags.includes(tag)) continue;
-        try {
-          await invokeOrThrow("set_addon_tags", {
-            addonsPath,
-            folderName,
-            tags: [...addon.tags, tag],
-          });
-          applied++;
-        } catch {
-          // skip individual failures
-        }
-      }
+      // Compute the new tag set per addon; skip ones that already have the tag.
+      const entries = Array.from(selectedFolders)
+        .map((folderName) => {
+          const addon = addons.find((a) => a.folderName === folderName);
+          if (!addon || addon.tags.includes(tag)) return null;
+          return { folderName, tags: [...addon.tags, tag] };
+        })
+        .filter((e): e is { folderName: string; tags: string[] } => e !== null);
 
-      if (applied > 0) {
-        toast.success(`Tagged ${applied} addon${applied !== 1 ? "s" : ""} as "${tag}"`);
-      } else {
+      if (entries.length === 0) {
         toast.info(`All selected addons already have the "${tag}" tag`);
+        setSelectedFolders(new Set());
+        return;
       }
 
-      setSelectedFolders(new Set());
-      handleRefresh();
+      try {
+        // One command instead of one invoke per addon — single metadata lock.
+        const result = await invokeOrThrow<BatchTagResult>("batch_set_tags", {
+          addonsPath,
+          entries,
+        });
+
+        if (result.updated.length > 0) {
+          toast.success(
+            `Tagged ${result.updated.length} addon${result.updated.length !== 1 ? "s" : ""} as "${tag}"`
+          );
+        }
+
+        // Patch the tagged addons in place instead of a full rescan.
+        const tagged = new Map(entries.map((e) => [e.folderName, e.tags]));
+        const updatedSet = new Set(result.updated);
+        setAddons((prev) =>
+          prev.map((addon) =>
+            updatedSet.has(addon.folderName)
+              ? { ...addon, tags: tagged.get(addon.folderName)! }
+              : addon
+          )
+        );
+        setSelectedAddon((prev) =>
+          prev && updatedSet.has(prev.folderName)
+            ? { ...prev, tags: tagged.get(prev.folderName)! }
+            : prev
+        );
+      } catch (batchError) {
+        toast.error(`Failed to tag addons: ${getTauriErrorMessage(batchError)}`);
+      } finally {
+        setSelectedFolders(new Set());
+      }
     },
-    [addons, addonsPath, handleRefresh, selectedFolders]
+    [addons, addonsPath, selectedFolders]
   );
 
   const filteredAddons = useMemo(
