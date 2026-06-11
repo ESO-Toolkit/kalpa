@@ -5,11 +5,14 @@ const INDEX_KEY = "index:packs";
 const VOTE_PREFIX = "vote:";
 
 export async function getPackIndex(env: Env): Promise<PackIndex | null> {
-  return env.ESO_PACKS.get<PackIndex>(INDEX_KEY, "json");
+  // cacheTtl lets the KV edge cache serve the index for 60s. The Cache API is a
+  // no-op on workers.dev, so this is the only read cache that actually applies.
+  return env.ESO_PACKS.get<PackIndex>(INDEX_KEY, { type: "json", cacheTtl: 60 });
 }
 
 export async function getPack(env: Env, id: string): Promise<Pack | null> {
-  return env.ESO_PACKS.get<Pack>(`${PACK_PREFIX}${id}`, "json");
+  // Pack detail is far more stable than the index; cache for 300s.
+  return env.ESO_PACKS.get<Pack>(`${PACK_PREFIX}${id}`, { type: "json", cacheTtl: 300 });
 }
 
 export async function putPack(env: Env, pack: Pack): Promise<void> {

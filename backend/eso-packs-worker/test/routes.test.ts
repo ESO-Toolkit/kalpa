@@ -155,6 +155,46 @@ describe("GET /packs", () => {
     expect(body.packs[0].id).toBe("high");
   });
 
+  it("sorts by votes (client default) by vote_count desc", async () => {
+    // Use distinct updated_at to prove it is NOT falling through to updated_at order.
+    await putPackIndex(e, {
+      packs: [
+        makePack("low", { vote_count: 1, updated_at: "2025-12-01T00:00:00.000Z" }),
+        makePack("high", { vote_count: 10, updated_at: "2025-01-01T00:00:00.000Z" }),
+      ],
+    });
+
+    const res = await call(new Request(`${BASE}/packs?sort=votes`));
+    const body = await res.json<{ packs: Array<{ id: string }> }>();
+    expect(body.packs[0].id).toBe("high");
+  });
+
+  it("sorts by newest by created_at desc", async () => {
+    await putPackIndex(e, {
+      packs: [
+        makePack("older", { created_at: "2025-01-01T00:00:00.000Z" }),
+        makePack("newer", { created_at: "2025-06-01T00:00:00.000Z" }),
+      ],
+    });
+
+    const res = await call(new Request(`${BASE}/packs?sort=newest`));
+    const body = await res.json<{ packs: Array<{ id: string }> }>();
+    expect(body.packs[0].id).toBe("newer");
+  });
+
+  it("sorts by installs by install_count desc", async () => {
+    await putPackIndex(e, {
+      packs: [
+        makePack("few", { install_count: 2 }),
+        makePack("many", { install_count: 99 }),
+      ],
+    });
+
+    const res = await call(new Request(`${BASE}/packs?sort=installs`));
+    const body = await res.json<{ packs: Array<{ id: string }> }>();
+    expect(body.packs[0].id).toBe("many");
+  });
+
   it("paginates results", async () => {
     const packs = Array.from({ length: 25 }, (_, i) => makePack(`p-${i}`));
     await putPackIndex(e, { packs });
