@@ -1209,40 +1209,24 @@ pub async fn check_for_updates(
         };
         // Lock is released here
 
-        // Phase 2: fetch download URLs for outdated addons in parallel (no lock needed)
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .build()
-            .map_err(|e| format!("Thread pool error: {e}"))?;
-        let url_map: HashMap<u32, String> = pool.install(|| {
-            pending
-                .par_iter()
-                .filter(|p| p.has_update)
-                .filter_map(|p| {
-                    esoui::fetch_addon_info(p.esoui_id)
-                        .ok()
-                        .map(|info| (p.esoui_id, info.download_url))
-                })
-                .collect()
-        });
-
-        // Phase 3: assemble final results (pure data, no lock needed)
+        // Phase 2: assemble final results (pure data, no lock needed).
+        //
+        // download_url is filled from the stored fallback_url. We deliberately
+        // do NOT make a filedetails request per pending update here: the field
+        // is never read by the frontend, and every update path
+        // (update_addon / update_batch_with_decisions) re-resolves the real
+        // download URL via fetch_addon_info itself. Pre-fetching it added one
+        // uncached HTTPS request per pending update to every startup/refresh —
+        // most painful on patch day when everything has an update.
         let results: Vec<UpdateCheckResult> = pending
             .into_iter()
-            .map(|p| {
-                let download_url = if p.has_update {
-                    url_map.get(&p.esoui_id).cloned().unwrap_or(p.fallback_url)
-                } else {
-                    p.fallback_url
-                };
-                UpdateCheckResult {
-                    folder_name: p.folder_name,
-                    esoui_id: p.esoui_id,
-                    current_version: p.current_version,
-                    remote_version: p.remote_version,
-                    download_url,
-                    has_update: p.has_update,
-                }
+            .map(|p| UpdateCheckResult {
+                folder_name: p.folder_name,
+                esoui_id: p.esoui_id,
+                current_version: p.current_version,
+                remote_version: p.remote_version,
+                download_url: p.fallback_url,
+                has_update: p.has_update,
             })
             .collect();
 
