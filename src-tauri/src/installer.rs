@@ -50,13 +50,6 @@ pub fn extract_addon_zip_selective(
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
-    // Match skip paths case-insensitively: the skip set is built from the
-    // caller's (disk) folder name, but ZIP entries carry the archive's own
-    // casing, which can differ if an upstream author re-cased the folder. A
-    // case-sensitive miss here would overwrite a file the user chose to keep.
-    // Lowercase the set once up front so the per-entry check stays O(1).
-    let skip_lower: HashSet<String> = skip_files.iter().map(|s| s.to_lowercase()).collect();
-
     let mut created_folders: HashSet<String> = HashSet::new();
     let mut total_extracted: u64 = 0;
 
@@ -77,7 +70,7 @@ pub fn extract_addon_zip_selective(
         };
 
         let key = relative_path.to_string_lossy().replace('\\', "/");
-        if skip_lower.contains(&key.to_lowercase()) {
+        if skip_files.contains(&key) {
             continue;
         }
 
@@ -448,45 +441,5 @@ mod tests {
         let mut folders = extract_addon_zip(&zip_path, &addons_dir).unwrap();
         folders.sort();
         assert_eq!(folders, vec!["AddonA".to_string(), "AddonB".to_string()]);
-    }
-
-    #[test]
-    fn selective_skip_is_case_insensitive() {
-        // skip_files is built from the caller's (disk) folder casing, but the
-        // ZIP carries its own casing. A "keep_mine" file must still be skipped
-        // even when the two disagree, or the user's edit gets overwritten.
-        let tmp = tempfile::tempdir().unwrap();
-        let addons_dir = tmp.path().join("AddOns");
-        fs::create_dir_all(&addons_dir).unwrap();
-
-        // ZIP folder is lowercase "myaddon"; skip set uses "MyAddon".
-        let zip_path = tmp.path().join("u.zip");
-        let file = fs::File::create(&zip_path).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        let options = zip::write::SimpleFileOptions::default();
-        archive.start_file("myaddon/keep.lua", options).unwrap();
-        archive.write_all(b"UPSTREAM").unwrap();
-        archive.start_file("myaddon/other.lua", options).unwrap();
-        archive.write_all(b"other").unwrap();
-        archive.finish().unwrap();
-
-        // Pre-seed the user's edited file on disk so we can prove it survives.
-        fs::create_dir_all(addons_dir.join("myaddon")).unwrap();
-        fs::write(addons_dir.join("myaddon/keep.lua"), "USER EDIT").unwrap();
-
-        let mut skip = HashSet::new();
-        skip.insert("MyAddon/keep.lua".to_string()); // disk-cased folder name
-
-        extract_addon_zip_selective(&zip_path, &addons_dir, &skip).unwrap();
-
-        // keep.lua was skipped (user's bytes intact); other.lua extracted.
-        assert_eq!(
-            fs::read_to_string(addons_dir.join("myaddon/keep.lua")).unwrap(),
-            "USER EDIT"
-        );
-        assert_eq!(
-            fs::read_to_string(addons_dir.join("myaddon/other.lua")).unwrap(),
-            "other"
-        );
     }
 }

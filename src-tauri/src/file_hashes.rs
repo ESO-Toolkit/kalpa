@@ -187,27 +187,6 @@ pub fn compute_baseline_with_zip(
     Ok(hashes)
 }
 
-/// Strip a leading `<folder>/` prefix from a forward-slash ZIP entry path,
-/// matching the folder segment CASE-INSENSITIVELY but returning the remainder
-/// with its ORIGINAL casing.
-///
-/// ESO addon folders are created on disk verbatim from the ZIP's top-level
-/// folder name, so disk and ZIP casing normally agree. They can diverge only if
-/// an upstream author changes the folder's casing between releases, while the
-/// caller still passes the previously-installed (disk) folder name. Matching the
-/// folder segment case-insensitively keeps conflict detection and kept-file
-/// overrides working across such a rename; preserving the remainder's casing
-/// keeps the relative keys identical to what the disk walk produces (Windows is
-/// case-insensitive, so a file can't exist under two casings at once).
-fn strip_folder_prefix_ci<'a>(name: &'a str, folder_name: &str) -> Option<&'a str> {
-    let slash = name.find('/')?;
-    let (zip_folder, rest) = (&name[..slash], &name[slash + 1..]);
-    if rest.is_empty() || !zip_folder.eq_ignore_ascii_case(folder_name) {
-        return None;
-    }
-    Some(rest)
-}
-
 /// Hash files inside a ZIP that belong to a specific addon folder, without extracting.
 /// Keys are forward-slash-normalized relative paths (excluding the top-level folder prefix).
 pub fn hash_zip_entries(
@@ -219,6 +198,7 @@ pub fn hash_zip_entries(
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
+    let prefix = format!("{folder_name}/");
     let mut hashes = HashMap::new();
 
     for i in 0..archive.len() {
@@ -235,9 +215,9 @@ pub fn hash_zip_entries(
             None => continue,
         };
 
-        let relative = match strip_folder_prefix_ci(&name, folder_name) {
-            Some(r) => r.to_string(),
-            None => continue,
+        let relative = match name.strip_prefix(&prefix) {
+            Some(r) if !r.is_empty() => r.to_string(),
+            _ => continue,
         };
 
         let hash = stream_sha256(&mut entry)
@@ -750,45 +730,6 @@ mod tests {
         let hashes = hash_zip_entries(&zip_path, "AddonA").unwrap();
         assert_eq!(hashes.len(), 1);
         assert!(hashes.contains_key("init.lua"));
-    }
-
-    #[test]
-    fn hash_zip_entries_matches_folder_case_insensitively() {
-        // Upstream re-cased the top-level folder ("myAddon/") but the caller
-        // still passes the previously-installed name ("MyAddon"). The folder
-        // segment must match case-insensitively; the relative key keeps its
-        // original casing.
-        let tmp = tempfile::tempdir().unwrap();
-        let zip_path = create_test_zip(
-            tmp.path(),
-            "u.zip",
-            "myAddon",
-            &[("init.lua", "x"), ("Sub/Mixed.lua", "y")],
-        );
-
-        let hashes = hash_zip_entries(&zip_path, "MyAddon").unwrap();
-        assert_eq!(hashes.len(), 2);
-        assert_eq!(hashes["init.lua"], sha256_hex("x"));
-        // Remainder casing is preserved (only the folder segment is folded).
-        assert_eq!(hashes["Sub/Mixed.lua"], sha256_hex("y"));
-    }
-
-    #[test]
-    fn strip_folder_prefix_ci_behaviors() {
-        assert_eq!(
-            strip_folder_prefix_ci("MyAddon/init.lua", "myaddon"),
-            Some("init.lua")
-        );
-        assert_eq!(
-            strip_folder_prefix_ci("myaddon/Sub/F.lua", "MyAddon"),
-            Some("Sub/F.lua")
-        );
-        // Folder-only entry (no remainder) is rejected.
-        assert_eq!(strip_folder_prefix_ci("MyAddon/", "MyAddon"), None);
-        // Different folder is rejected.
-        assert_eq!(strip_folder_prefix_ci("Other/init.lua", "MyAddon"), None);
-        // No slash at all is rejected.
-        assert_eq!(strip_folder_prefix_ci("init.lua", "MyAddon"), None);
     }
 
     // ── ZIP-baseline recording (the perf refactor) ──────────────────────
