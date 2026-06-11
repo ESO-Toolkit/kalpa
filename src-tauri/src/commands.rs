@@ -300,7 +300,8 @@ fn try_install_dep(
     let dep_folders =
         installer::extract_addon_zip(dep_tmp.path(), addons_dir).map_err(|_| "extract_failed")?;
 
-    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version);
+    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
+        .map_err(|_| "hash_record_failed")?;
 
     for f in &dep_folders {
         let dep_version = read_local_version(addons_dir, f);
@@ -1005,7 +1006,12 @@ fn install_addon_blocking(
 ) -> Result<InstallResult, String> {
     let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
 
-    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, esoui_version);
+    file_hashes::record_hashes_for_folders(
+        addons_dir,
+        &installed_folders,
+        esoui_id,
+        esoui_version,
+    )?;
 
     let mut store = metadata::load_metadata(addons_dir);
 
@@ -1163,7 +1169,8 @@ fn install_dependency_blocking(
     let dep_folders = installer::extract_addon_zip(dep_tmp.path(), addons_dir)
         .map_err(|_| format!("Failed to install {dep_name}: extract_failed"))?;
 
-    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version);
+    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
+        .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
 
     let mut store = metadata::load_metadata(addons_dir);
     for f in &dep_folders {
@@ -1379,7 +1386,7 @@ fn update_addon_blocking(
     // the two sources returned slightly different version strings.
     let version = api_version.unwrap_or(&info.version);
 
-    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version);
+    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
 
     // Clean up any old metadata entries for the same esoui_id
     // that aren't in the newly extracted folders (handles addon renames).
@@ -1587,12 +1594,29 @@ fn batch_extract_and_record(
                 Ok(installed_folders) => {
                     let version = &dl.api_version;
 
-                    file_hashes::record_hashes_for_folders(
+                    if let Err(e) = file_hashes::record_hashes_for_folders(
                         addons_dir,
                         &installed_folders,
                         dl.esoui_id,
                         version,
-                    );
+                    ) {
+                        // Files are on disk, but the hash baseline didn't persist.
+                        // Don't record this addon in metadata — leaving metadata
+                        // pointing at a folder with no baseline would let the next
+                        // update silently clobber user edits. Surface it as failed.
+                        let _ = app.emit(
+                            "batch-update-progress",
+                            BatchUpdateProgress {
+                                folder_name: folder_name.clone(),
+                                phase: "failed".to_string(),
+                                index: dl.index,
+                                total,
+                            },
+                        );
+                        errors.insert(folder_name.clone(), e);
+                        failed.push(folder_name);
+                        continue;
+                    }
 
                     // Clean up old metadata entries for this esoui_id
                     // that aren't in the newly extracted folders (handles renames)
@@ -1673,17 +1697,28 @@ fn generate_session_id(folder_name: &str) -> String {
     hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
+/// Build a conflict report for one addon folder against a downloaded ZIP, and
+/// return the ZIP hash map alongside it so an immediately-following extraction
+/// can reuse it as the new hash baseline instead of re-hashing the folder.
+///
+/// The on-disk hash pass is skipped entirely when no stored manifest exists:
+/// with `stored == None`, every file resolves to `user_modified == false`
+/// regardless of its disk hash (see the match below), so the disk hashes cannot
+/// affect the report — and roughly two-thirds of installed addons have no
+/// `.kalpa-hashes` manifest yet, making this the common case.
 fn build_conflict_report(
     addons_dir: &Path,
     folder_name: &str,
     zip_path: &Path,
     update_version: &str,
     session_id: &str,
-) -> Result<ConflictReport, String> {
+) -> Result<(ConflictReport, HashMap<String, String>), String> {
     let stored = file_hashes::load_hash_manifest(addons_dir, folder_name);
     let addon_path = addons_dir.join(folder_name);
 
-    let disk_hashes = if addon_path.is_dir() {
+    // Only hash the folder from disk when there is a baseline to compare against.
+    // Without one, `user_modified` is always false, so the disk pass is dead work.
+    let disk_hashes = if stored.is_some() && addon_path.is_dir() {
         file_hashes::compute_addon_hashes(&addon_path)?
     } else {
         HashMap::new()
@@ -1732,14 +1767,16 @@ fn build_conflict_report(
     auto_kept_files.sort();
     conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-    Ok(ConflictReport {
+    let report = ConflictReport {
         session_id: session_id.to_string(),
         folder_name: folder_name.to_string(),
         update_version: update_version.to_string(),
         safe_files,
         auto_kept_files,
         conflicts,
-    })
+    };
+
+    Ok((report, zip_hashes))
 }
 
 #[tauri::command]
@@ -1764,7 +1801,10 @@ pub async fn scan_update_conflicts(
 
         let session_id = generate_session_id(&folder_name);
 
-        let report = build_conflict_report(
+        // The ZIP hash map isn't reused here: extraction happens later in a
+        // separate `update_addon_with_decisions` invocation, after the user
+        // resolves conflicts, by which point this map is long gone.
+        let (report, _zip_hashes) = build_conflict_report(
             &addons_dir,
             &folder_name,
             &kept_path,
@@ -1936,7 +1976,9 @@ pub async fn scan_batch_conflicts(
                             errors.insert(folder_name.clone(), e);
                             failed.push(folder_name);
                         }
-                        Ok(report) => {
+                        // ZIP map unused: extraction is deferred to the
+                        // interactive `update_addon_with_decisions` call.
+                        Ok((report, _zip_hashes)) => {
                             if let Ok(mut map) = pending_clone.lock() {
                                 map.insert(
                                     session_id.clone(),
@@ -2206,7 +2248,9 @@ fn extract_streamed_downloads(
         };
 
         let session_id = generate_session_id(&folder_name);
-        let report = match build_conflict_report(
+        // Keep the ZIP hash map: this addon is extracted right below, so the map
+        // doubles as the new hash baseline (no second decompression to re-hash).
+        let (report, zip_hashes) = match build_conflict_report(
             addons_dir,
             &folder_name,
             dl.zip.path(),
@@ -2291,29 +2335,40 @@ fn extract_streamed_downloads(
         };
 
         // For kept files, store the upstream hash as the new baseline so the
-        // user's edit stays detectable on the next update (matches the
-        // per-addon path's hash_overrides behavior).
+        // user's edit stays detectable on the next update. The ZIP hashes were
+        // already computed for the conflict report above — reuse them here
+        // instead of decompressing the ZIP a second time.
         let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
             None
         } else {
-            file_hashes::hash_zip_entries(dl.zip.path(), &folder_name)
-                .ok()
-                .map(|zip_hashes| {
-                    kept_files
-                        .iter()
-                        .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
-                        .collect::<HashMap<String, String>>()
-                })
-                .filter(|m| !m.is_empty())
+            let overrides: HashMap<String, String> = kept_files
+                .iter()
+                .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
+                .collect();
+            (!overrides.is_empty()).then_some(overrides)
         };
 
-        file_hashes::record_hashes_for_folders_with_overrides(
+        // Record the baseline straight from the ZIP hash map (plus a disk pass
+        // over only the files the ZIP didn't provide), rather than re-hashing
+        // the whole freshly extracted folder. If the baseline can't be recorded,
+        // don't write metadata for this addon: a folder tracked in metadata but
+        // missing its hash baseline would let the next update silently overwrite
+        // user edits. Surface it as a failed addon instead.
+        if let Err(e) = file_hashes::record_hashes_with_zip_baseline(
             addons_dir,
+            dl.zip.path(),
             &installed_folders,
+            &folder_name,
+            &zip_hashes,
             dl.esoui_id,
             &dl.api_version,
             hash_overrides.as_ref(),
-        );
+        ) {
+            emit_phase(&folder_name, "failed", index);
+            errors.insert(folder_name.clone(), e);
+            failed.push(folder_name);
+            continue;
+        }
 
         // Drop stale metadata entries for this esoui_id whose folders were
         // renamed/removed by the new release.
@@ -2513,117 +2568,154 @@ pub async fn update_addon_with_decisions(
                 .clone()
         };
 
-        let kept_files: Vec<String> = decisions
-            .iter()
-            .filter(|d| d.action == "keep_mine")
-            .map(|d| d.relative_path.clone())
-            .collect();
+        // Run the fallible work in a helper so that, once the session is claimed,
+        // the pending entry and kept temp ZIP are cleaned up whether that work
+        // succeeds OR fails. The temp ZIP was `.keep()`-ed (no auto-delete), so an
+        // early `?` return inside the helper (backup, hashing, extraction,
+        // recording, metadata save) would otherwise orphan it and leave a stale
+        // pending entry that blocks re-resolving the conflict.
+        //
+        // The only exits before this point are the lock-poisoned and
+        // session-not-found errors above, where there is nothing to clean up: no
+        // `pu` was obtained and the session either never existed or wasn't ours to
+        // remove. Validation failures before `spawn_blocking` likewise leave the
+        // session intact on purpose, so the user can retry or cancel it.
+        let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions);
 
-        // Collect files to skip during extraction (full ZIP path with folder prefix)
-        let skip_files: HashSet<String> = kept_files
-            .iter()
-            .map(|p| format!("{}/{}", pu.folder_name, p))
-            .collect();
-
-        // Collect files to back up (user chose "take_update" on their edited files)
-        let files_to_backup: Vec<String> = decisions
-            .iter()
-            .filter(|d| d.action == "take_update")
-            .map(|d| d.relative_path.clone())
-            .collect();
-
-        // Get current version from hash manifest for backup metadata
-        let from_version = file_hashes::load_hash_manifest(&addons_dir, &pu.folder_name)
-            .map(|m| m.installed_version)
-            .unwrap_or_default();
-
-        // Back up files before overwriting
-        if !files_to_backup.is_empty() {
-            crate::edit_backups::backup_user_files(
-                &addons_dir,
-                &pu.folder_name,
-                &files_to_backup,
-                &from_version,
-                &pu.update_version,
-            )?;
-        }
-
-        // For kept files, get the upstream hashes from the ZIP.
-        // These become the stored baseline so the user's edit stays
-        // detectable on the next update cycle.
-        let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
-            None
-        } else {
-            let zip_hashes = file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?;
-            let overrides: HashMap<String, String> = kept_files
-                .iter()
-                .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
-                .collect();
-            if overrides.is_empty() {
-                None
-            } else {
-                Some(overrides)
-            }
+        // Delete the kept temp ZIP first, then drop the pending entry. If the
+        // delete genuinely fails (e.g. another process briefly holds the file),
+        // keep the entry so `cancel_pending_update` can retry cleanup later. A
+        // file that's already gone counts as removed.
+        let removed = match fs::remove_file(&pu.zip_path) {
+            Ok(()) => true,
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
         };
-
-        // Extract with selective skipping
-        let installed_folders = if skip_files.is_empty() {
-            installer::extract_addon_zip(&pu.zip_path, &addons_dir)?
-        } else {
-            installer::extract_addon_zip_selective(&pu.zip_path, &addons_dir, &skip_files)?
-        };
-
-        file_hashes::record_hashes_for_folders_with_overrides(
-            &addons_dir,
-            &installed_folders,
-            pu.esoui_id,
-            &pu.update_version,
-            hash_overrides.as_ref(),
-        );
-
-        // Update metadata
-        let mut store = metadata::load_metadata(&addons_dir);
-        let old_folders: Vec<String> = store
-            .addons
-            .iter()
-            .filter(|(_, m)| m.esoui_id == pu.esoui_id)
-            .map(|(name, _)| name.clone())
-            .collect();
-        for old in &old_folders {
-            if !installed_folders.contains(old) {
-                metadata::remove_entry(&mut store, old);
+        if removed {
+            if let Ok(mut map) = pending_clone.lock() {
+                map.remove(&session_id);
             }
         }
-        record_installed_folders(
-            &mut store,
-            &addons_dir,
-            &installed_folders,
-            pu.esoui_id,
-            &pu.update_version,
-            &pu.folder_name,
-            "",
-            0,
-        );
 
-        let resolved = resolve_transitive_deps(&addons_dir, &installed_folders, &mut store);
-
-        metadata::save_metadata(&addons_dir, &store)?;
-
-        // Clean up pending state and temp file
-        if let Ok(mut map) = pending_clone.lock() {
-            map.remove(&session_id);
-        }
-        let _ = fs::remove_file(&pu.zip_path);
-
-        Ok(InstallResult {
-            installed_folders,
-            installed_deps: resolved.installed_deps,
-            failed_deps: resolved.failed_deps,
-            skipped_deps: resolved.skipped_deps,
-        })
+        outcome
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Extract a pending conflict-resolved update and record its new hash baseline.
+/// Separated from the command so the caller can clean up the pending session and
+/// temp ZIP regardless of whether this succeeds or fails.
+fn update_with_decisions_inner(
+    addons_dir: &Path,
+    pu: &crate::PendingUpdate,
+    decisions: &[FileDecision],
+) -> Result<InstallResult, String> {
+    let kept_files: Vec<String> = decisions
+        .iter()
+        .filter(|d| d.action == "keep_mine")
+        .map(|d| d.relative_path.clone())
+        .collect();
+
+    // Collect files to skip during extraction (full ZIP path with folder prefix)
+    let skip_files: HashSet<String> = kept_files
+        .iter()
+        .map(|p| format!("{}/{}", pu.folder_name, p))
+        .collect();
+
+    // Collect files to back up (user chose "take_update" on their edited files)
+    let files_to_backup: Vec<String> = decisions
+        .iter()
+        .filter(|d| d.action == "take_update")
+        .map(|d| d.relative_path.clone())
+        .collect();
+
+    // Get current version from hash manifest for backup metadata
+    let from_version = file_hashes::load_hash_manifest(addons_dir, &pu.folder_name)
+        .map(|m| m.installed_version)
+        .unwrap_or_default();
+
+    // Back up files before overwriting
+    if !files_to_backup.is_empty() {
+        crate::edit_backups::backup_user_files(
+            addons_dir,
+            &pu.folder_name,
+            &files_to_backup,
+            &from_version,
+            &pu.update_version,
+        )?;
+    }
+
+    // Hash the ZIP once. This map becomes the new baseline after extraction
+    // (reused by record_hashes_with_zip_baseline), and also supplies the
+    // upstream hashes for kept "keep_mine" files so the user's edit stays
+    // detectable on the next update cycle.
+    let zip_hashes = file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?;
+    let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
+        None
+    } else {
+        let overrides: HashMap<String, String> = kept_files
+            .iter()
+            .filter_map(|p| zip_hashes.get(p).map(|h| (p.clone(), h.clone())))
+            .collect();
+        (!overrides.is_empty()).then_some(overrides)
+    };
+
+    // Extract with selective skipping
+    let installed_folders = if skip_files.is_empty() {
+        installer::extract_addon_zip(&pu.zip_path, addons_dir)?
+    } else {
+        installer::extract_addon_zip_selective(&pu.zip_path, addons_dir, &skip_files)?
+    };
+
+    // Record the baseline from the ZIP hash map (plus a disk pass over only
+    // the files the ZIP didn't provide), rather than re-hashing the folder.
+    // Fail the update if it can't persist: saving metadata without a hash
+    // baseline would let the next update silently overwrite the user's edits.
+    file_hashes::record_hashes_with_zip_baseline(
+        addons_dir,
+        &pu.zip_path,
+        &installed_folders,
+        &pu.folder_name,
+        &zip_hashes,
+        pu.esoui_id,
+        &pu.update_version,
+        hash_overrides.as_ref(),
+    )?;
+
+    // Update metadata
+    let mut store = metadata::load_metadata(addons_dir);
+    let old_folders: Vec<String> = store
+        .addons
+        .iter()
+        .filter(|(_, m)| m.esoui_id == pu.esoui_id)
+        .map(|(name, _)| name.clone())
+        .collect();
+    for old in &old_folders {
+        if !installed_folders.contains(old) {
+            metadata::remove_entry(&mut store, old);
+        }
+    }
+    record_installed_folders(
+        &mut store,
+        addons_dir,
+        &installed_folders,
+        pu.esoui_id,
+        &pu.update_version,
+        &pu.folder_name,
+        "",
+        0,
+    );
+
+    let resolved = resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
+
+    metadata::save_metadata(addons_dir, &store)?;
+
+    Ok(InstallResult {
+        installed_folders,
+        installed_deps: resolved.installed_deps,
+        failed_deps: resolved.failed_deps,
+        skipped_deps: resolved.skipped_deps,
+    })
 }
 
 // ── File browser commands ─────────────────────────────────────────────
