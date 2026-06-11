@@ -327,6 +327,8 @@ pub fn run() {
             commands::import_addon_list,
             commands::auto_link_addons,
             commands::batch_remove_addons,
+            commands::batch_set_tags,
+            commands::batch_set_enabled,
             commands::get_esoui_categories,
             commands::browse_esoui_category,
             commands::browse_esoui_popular,

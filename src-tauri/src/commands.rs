@@ -3257,6 +3257,173 @@ pub async fn batch_remove_addons(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTagEntry {
+    pub folder_name: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTagResult {
+    pub updated: Vec<String>,
+    pub failed: Vec<String>,
+    pub errors: HashMap<String, String>,
+}
+
+/// Set tags on multiple addons in one pass: a single metadata load, one loop,
+/// one save. Mirrors batch_remove_addons so the whole batch takes the metadata
+/// lock once instead of N times (one set_addon_tags call each).
+#[tauri::command]
+pub async fn batch_set_tags(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
+    addons_path: String,
+    entries: Vec<BatchTagEntry>,
+) -> Result<BatchTagResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    for entry in &entries {
+        validate_name(&entry.folder_name)?;
+    }
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+
+        let mut store = metadata::load_metadata(&addons_dir);
+        let mut updated: Vec<String> = Vec::new();
+
+        for entry in entries {
+            match store.addons.get_mut(&entry.folder_name) {
+                Some(meta) => meta.tags = entry.tags,
+                None => {
+                    // Create a minimal entry for untracked addons so tags persist,
+                    // matching set_addon_tags.
+                    store.addons.insert(
+                        entry.folder_name.clone(),
+                        metadata::AddonMetadata {
+                            esoui_id: 0,
+                            installed_version: String::new(),
+                            download_url: String::new(),
+                            installed_at: String::new(),
+                            tags: entry.tags,
+                            esoui_last_update: 0,
+                        },
+                    );
+                }
+            }
+            updated.push(entry.folder_name);
+        }
+
+        metadata::save_metadata(&addons_dir, &store)?;
+        Ok(BatchTagResult {
+            updated,
+            failed: Vec::new(),
+            errors: HashMap::new(),
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchEnableEntry {
+    pub folder_name: String,
+    /// Target state: true = enable (rename .disabled -> base), false = disable.
+    pub enable: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchEnableResult {
+    pub enabled: Vec<String>,
+    pub disabled: Vec<String>,
+    pub failed: Vec<String>,
+    pub errors: HashMap<String, String>,
+}
+
+/// Enable or disable multiple addons in one pass. Enable/disable is a folder
+/// rename (no metadata), but the whole batch takes the metadata lock once to
+/// serialize with other addon operations, mirroring batch_remove_addons.
+#[tauri::command]
+pub async fn batch_set_enabled(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
+    addons_path: String,
+    entries: Vec<BatchEnableEntry>,
+) -> Result<BatchEnableResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    for entry in &entries {
+        validate_name(&entry.folder_name)?;
+    }
+    let lock = meta_lock.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+
+        let mut enabled: Vec<String> = Vec::new();
+        let mut disabled: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        let mut errors: HashMap<String, String> = HashMap::new();
+
+        for entry in &entries {
+            let folder_name = &entry.folder_name;
+            let result = if entry.enable {
+                // Rename Foo.disabled -> Foo (matches enable_addon).
+                let src = addons_dir.join(format!("{folder_name}.disabled"));
+                let dst = addons_dir.join(folder_name);
+                if !src.is_dir() {
+                    Err(format!("Disabled addon folder not found: {folder_name}"))
+                } else if dst.exists() {
+                    Err(format!("A folder named {folder_name} already exists."))
+                } else {
+                    fs::rename(&src, &dst)
+                        .map_err(|e| format!("Failed to enable {folder_name}: {e}"))
+                }
+            } else {
+                // Rename Foo -> Foo.disabled (matches disable_addon).
+                let src = addons_dir.join(folder_name);
+                let dst = addons_dir.join(format!("{folder_name}.disabled"));
+                if !src.is_dir() {
+                    Err(format!("Addon folder not found: {folder_name}"))
+                } else if dst.exists() {
+                    Err(format!("{folder_name} is already disabled."))
+                } else {
+                    fs::rename(&src, &dst)
+                        .map_err(|e| format!("Failed to disable {folder_name}: {e}"))
+                }
+            };
+
+            match result {
+                Ok(()) => {
+                    if entry.enable {
+                        enabled.push(folder_name.clone());
+                    } else {
+                        disabled.push(folder_name.clone());
+                    }
+                }
+                Err(e) => {
+                    errors.insert(folder_name.clone(), e);
+                    failed.push(folder_name.clone());
+                }
+            }
+        }
+
+        Ok(BatchEnableResult {
+            enabled,
+            disabled,
+            failed,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 #[tauri::command]
 pub async fn import_addon_list(
     state: tauri::State<'_, AllowedAddonsPath>,

@@ -59,6 +59,19 @@ export interface BatchRemoveResult {
   errors: Record<string, string>;
 }
 
+export interface BatchTagResult {
+  updated: string[];
+  failed: string[];
+  errors: Record<string, string>;
+}
+
+export interface BatchEnableResult {
+  enabled: string[];
+  disabled: string[];
+  failed: string[];
+  errors: Record<string, string>;
+}
+
 export interface ImportResult {
   installed: string[];
   failed: string[];
