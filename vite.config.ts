@@ -4,6 +4,14 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
 
 export default defineConfig(({ mode }) => {
+  // Vite respects a pre-existing NODE_ENV even for `vite build`. If the shell
+  // has NODE_ENV=development, a `vite build` still emits a "production" bundle
+  // but with dev-mode React (StrictMode double-rendering, +280 kB of eager JS).
+  // Pin it so production builds always tree-shake to the minified React runtime.
+  if (mode === "production") {
+    process.env.NODE_ENV = "production";
+  }
+
   const env = loadEnv(mode, process.cwd(), "");
   const host = process.env.TAURI_DEV_HOST;
   // Port is read from .env.local (VITE_PORT). If changed here, also update
