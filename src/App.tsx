@@ -371,8 +371,26 @@ function App() {
   );
 
   const initializeApp = useCallback(async () => {
-    const savedSort = await getSetting<SortMode>("sortMode", "name");
-    const savedFilter = await getSetting<string>("filterMode", "all");
+    // Restoring the signed-in user only feeds the header avatar and can cost
+    // up to two sequential 15 s HTTPS round trips (auth.rs). Fire it without
+    // awaiting so it never blocks the addon scan.
+    void invokeResult<AuthUser | null>("auth_get_user").then((authResult) => {
+      if (authResult.ok) {
+        setAuthUser(authResult.data ?? null);
+      } else {
+        toast.error(`Could not restore sign-in: ${authResult.error}`);
+      }
+    });
+
+    // These settings reads are independent — fetch them in one batch instead
+    // of four sequential awaits.
+    const [savedSort, savedFilter, savedPath, autoUpdate] = await Promise.all([
+      getSetting<SortMode>("sortMode", "name"),
+      getSetting<string>("filterMode", "all"),
+      getSetting<string>("addonsPath", ""),
+      getSetting<boolean>("autoUpdate", false),
+    ]);
+
     const normalizedFilter = isFilterMode(savedFilter) ? savedFilter : "all";
     setSortMode(savedSort);
     setFilterMode(normalizedFilter);
@@ -380,23 +398,14 @@ function App() {
       void setSetting("filterMode", normalizedFilter);
     }
 
-    const authResult = await invokeResult<AuthUser | null>("auth_get_user");
-    if (authResult.ok) {
-      setAuthUser(authResult.data ?? null);
-    } else {
-      toast.error(`Could not restore sign-in: ${authResult.error}`);
-    }
-
-    const savedPath = await getSetting<string>("addonsPath", "");
-
     if (savedPath) {
       // Saved path exists — use it directly
       try {
         setAddonsPath(savedPath);
         await invokeOrThrow("set_addons_path", { addonsPath: savedPath });
-        await scanAddons(savedPath);
-        const autoUpdate = await getSetting<boolean>("autoUpdate", false);
-        await checkForUpdates(savedPath, autoUpdate, false);
+        // Scan (disk) and update check (metadata + network) touch different
+        // state and locks, so run them concurrently instead of in series.
+        await Promise.all([scanAddons(savedPath), checkForUpdates(savedPath, autoUpdate, false)]);
         void runAutoLink(savedPath);
         // Populate knownInstances so the Settings instance switcher works for
         // returning users. Fire-and-forget — does not block startup.
@@ -431,10 +440,9 @@ function App() {
           const path = instances[0]!.addonsPath;
           setAddonsPath(path);
           await invokeOrThrow("set_addons_path", { addonsPath: path });
-          await setSetting("addonsPath", path);
-          await scanAddons(path);
-          const autoUpdate = await getSetting<boolean>("autoUpdate", false);
-          await checkForUpdates(path, autoUpdate, false);
+          void setSetting("addonsPath", path);
+          // Scan and update check are independent — run concurrently.
+          await Promise.all([scanAddons(path), checkForUpdates(path, autoUpdate, false)]);
           void runAutoLink(path);
         } catch (initError) {
           setError(`Could not access detected AddOns folder. ${getTauriErrorMessage(initError)}`);
