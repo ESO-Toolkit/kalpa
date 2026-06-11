@@ -622,7 +622,7 @@ export function AddonList({
               onKeyDown={handleListKeyDown}
               className="flex-1 overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-inset"
             >
-              {loading ? (
+              {loading && addons.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground">
                   <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
                 </div>
