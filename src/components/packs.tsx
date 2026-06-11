@@ -4,8 +4,6 @@ import type {
   Pack,
   PackPage,
   PackAddonEntry,
-  InstallResult,
-  EsouiAddonInfo,
   AddonManifest,
   AuthUser,
   ShareCodeResponse,
@@ -16,6 +14,7 @@ import type {
   ScrubContext,
   SvImportResult,
 } from "../types";
+import { runBatchPackInstall } from "@/lib/pack-install";
 import { getSetting, setSetting } from "@/lib/store";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import type { PackTypeFilter, SortOption, TabMode } from "./pack-constants";
@@ -576,48 +575,26 @@ export function Packs({
       return;
     }
 
-    if (importedPackAddonsToInstall.length > 0) {
-      setInstallProgress({ completed: 0, failed: 0, total: importedPackAddonsToInstall.length });
+    const total = importedPackAddonsToInstall.length;
+    if (total > 0) {
+      setInstallProgress({ completed: 0, failed: 0, total });
     }
 
-    let completed = 0;
-    let failed = 0;
-    const installed: string[] = [];
+    const result = await runBatchPackInstall(
+      addonsPath,
+      importedPackAddonsToInstall.map((a) => ({ esouiId: a.esouiId, label: a.name })),
+      setInstallProgress
+    );
 
-    for (const addon of importedPackAddonsToInstall) {
-      const info = await invokeResult<EsouiAddonInfo>("resolve_esoui_addon", {
-        input: String(addon.esouiId),
-      });
-      if (!info.ok) {
-        failed++;
-        setInstallProgress({ completed, failed, total: importedPackAddonsToInstall.length });
-        continue;
-      }
-
-      const result = await invokeResult<InstallResult>("install_addon", {
-        addonsPath,
-        downloadUrl: info.data.downloadUrl,
-        esouiId: addon.esouiId,
-        esouiTitle: info.data.title,
-        esouiVersion: info.data.version,
-      });
-
-      if (result.ok) {
-        completed++;
-        installed.push(...result.data.installedFolders);
-      } else {
-        failed++;
-      }
-
-      setInstallProgress({ completed, failed, total: importedPackAddonsToInstall.length });
-    }
+    const installedCount = result?.installed.length ?? 0;
+    const failed = result?.failed.length ?? total;
 
     setInstalling(false);
     setInstallProgress(null);
 
-    if (installed.length > 0) {
+    if (installedCount > 0) {
       onRefresh();
-      toast.success(`Installed ${installed.length} addon${installed.length !== 1 ? "s" : ""}`);
+      toast.success(`Installed ${installedCount} addon${installedCount !== 1 ? "s" : ""}`);
     }
     if (failed > 0) {
       toast.error(`${failed} addon${failed !== 1 ? "s" : ""} failed to install`);
@@ -749,40 +726,17 @@ export function Packs({
     }
     setInstallProgress({ completed: 0, failed: 0, total: newAddonsToInstall.length });
 
-    let completed = 0;
-    let failed = 0;
-    const failedNames: string[] = [];
-    let totalDepsInstalled = 0;
+    const result = await runBatchPackInstall(
+      addonsPath,
+      newAddonsToInstall.map((a) => ({ esouiId: a.esouiId, label: a.name })),
+      setInstallProgress
+    );
 
-    for (const addon of newAddonsToInstall) {
-      const info = await invokeResult<EsouiAddonInfo>("resolve_esoui_addon", {
-        input: String(addon.esouiId),
-      });
-      if (!info.ok) {
-        failed++;
-        failedNames.push(addon.name);
-        setInstallProgress({ completed, failed, total: newAddonsToInstall.length });
-        continue;
-      }
-
-      const install = await invokeResult<InstallResult>("install_addon", {
-        addonsPath,
-        downloadUrl: info.data.downloadUrl,
-        esouiId: addon.esouiId,
-        esouiTitle: info.data.title,
-        esouiVersion: info.data.version,
-      });
-
-      if (install.ok) {
-        completed++;
-        totalDepsInstalled += install.data.installedDeps.length;
-      } else {
-        failed++;
-        failedNames.push(addon.name);
-      }
-
-      setInstallProgress({ completed, failed, total: newAddonsToInstall.length });
-    }
+    const completed = result?.installed.length ?? 0;
+    const failedIds = result?.failed ?? newAddonsToInstall.map((a) => a.esouiId);
+    const totalDepsInstalled = result?.installedDeps.length ?? 0;
+    const nameById = new Map(newAddonsToInstall.map((a) => [a.esouiId, a.name]));
+    const failedNames = failedIds.map((id) => nameById.get(id) ?? String(id));
 
     setInstalling(false);
     setInstallProgress(null);
@@ -792,9 +746,9 @@ export function Packs({
         ? ` (+${totalDepsInstalled} dependenc${totalDepsInstalled !== 1 ? "ies" : "y"})`
         : "";
 
-    if (failed > 0) {
+    if (failedNames.length > 0) {
       toast.warning(
-        `Installed ${completed} addon${completed !== 1 ? "s" : ""}${depNote}, ${failed} failed: ${failedNames.join(", ")}`
+        `Installed ${completed} addon${completed !== 1 ? "s" : ""}${depNote}, ${failedNames.length} failed: ${failedNames.join(", ")}`
       );
     } else {
       toast.success(

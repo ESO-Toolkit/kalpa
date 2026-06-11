@@ -3598,6 +3598,224 @@ fn import_extract_and_record(
     })
 }
 
+// ─── Batch Pack Install ──────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackInstallEntry {
+    pub esoui_id: u32,
+    /// Display label for progress events (addon title); falls back to the id.
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackInstallProgress {
+    pub esoui_id: u32,
+    pub label: String,
+    /// "downloading" | "extracting" | "completed" | "failed"
+    pub phase: String,
+    pub index: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackInstallResult {
+    /// esoui_ids that installed successfully.
+    pub installed: Vec<u32>,
+    /// esoui_ids that failed to download or extract.
+    pub failed: Vec<u32>,
+    /// Folders written by the installed pack addons (excludes transitive deps).
+    pub installed_folders: Vec<String>,
+    /// Transitive dependencies auto-installed across the whole pack.
+    pub installed_deps: Vec<String>,
+    pub failed_deps: Vec<String>,
+    pub skipped_deps: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub errors: HashMap<u32, String>,
+}
+
+struct PackDownloaded {
+    tmp: NamedTempFile,
+    info: EsouiAddonInfo,
+    esoui_id: u32,
+    label: String,
+}
+
+/// Install a pack's addons in one pass: parallel download (4-way with 429
+/// backoff) outside the lock, then a single locked extract+record phase with
+/// ONE transitive-dependency resolution over the union of installed folders
+/// and ONE metadata save. Mirrors import_addon_list, plus per-addon streaming
+/// progress on the "pack-install-progress" event so the three pack UIs can
+/// reflect download/extract/completed/failed per addon.
+#[tauri::command]
+pub async fn batch_install_pack_addons(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    meta_lock: tauri::State<'_, MetadataLock>,
+    app: tauri::AppHandle,
+    addons_path: String,
+    entries: Vec<PackInstallEntry>,
+) -> Result<PackInstallResult, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let lock = meta_lock.0.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let total = entries.len();
+        let label_for = |e: &PackInstallEntry| {
+            if e.label.is_empty() {
+                e.esoui_id.to_string()
+            } else {
+                e.label.clone()
+            }
+        };
+
+        // Phase 1 (parallel, no lock): download every addon's ZIP, emitting
+        // progress per addon. Network I/O does not touch kalpa.json.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .map_err(|e| format!("Thread pool error: {e}"))?;
+
+        let app_dl = app.clone();
+        let download_results: Vec<(usize, Result<PackDownloaded, String>)> = pool.install(|| {
+            entries
+                .par_iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let label = label_for(entry);
+                    let _ = app_dl.emit(
+                        "pack-install-progress",
+                        PackInstallProgress {
+                            esoui_id: entry.esoui_id,
+                            label: label.clone(),
+                            phase: "downloading".to_string(),
+                            index: i,
+                            total,
+                        },
+                    );
+                    let result =
+                        fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| {
+                            PackDownloaded {
+                                tmp,
+                                info,
+                                esoui_id: entry.esoui_id,
+                                label: label.clone(),
+                            }
+                        });
+                    if result.is_err() {
+                        let _ = app_dl.emit(
+                            "pack-install-progress",
+                            PackInstallProgress {
+                                esoui_id: entry.esoui_id,
+                                label,
+                                phase: "failed".to_string(),
+                                index: i,
+                                total,
+                            },
+                        );
+                    }
+                    (i, result)
+                })
+                .collect()
+        });
+
+        // Phase 2 (locked): extract + record under a single lock, collect the
+        // union of installed folders, resolve transitive deps once, save once.
+        let _guard = lock
+            .lock()
+            .map_err(|_| "Internal metadata lock error".to_string())?;
+
+        let mut store = metadata::load_metadata(&addons_dir);
+        let mut installed: Vec<u32> = Vec::new();
+        let mut failed: Vec<u32> = Vec::new();
+        let mut errors: HashMap<u32, String> = HashMap::new();
+        let mut union_folders: Vec<String> = Vec::new();
+
+        for (index, result) in download_results {
+            // esoui_id/label are carried in the Ok payload; on Err we still
+            // need them, so recover from the original entries by index.
+            match result {
+                Err(e) => {
+                    let esoui_id = entries[index].esoui_id;
+                    errors.insert(esoui_id, e);
+                    failed.push(esoui_id);
+                }
+                Ok(dl) => {
+                    let _ = app.emit(
+                        "pack-install-progress",
+                        PackInstallProgress {
+                            esoui_id: dl.esoui_id,
+                            label: dl.label.clone(),
+                            phase: "extracting".to_string(),
+                            index,
+                            total,
+                        },
+                    );
+                    match installer::extract_addon_zip(dl.tmp.path(), &addons_dir) {
+                        Err(e) => {
+                            errors.insert(dl.esoui_id, e);
+                            failed.push(dl.esoui_id);
+                            let _ = app.emit(
+                                "pack-install-progress",
+                                PackInstallProgress {
+                                    esoui_id: dl.esoui_id,
+                                    label: dl.label.clone(),
+                                    phase: "failed".to_string(),
+                                    index,
+                                    total,
+                                },
+                            );
+                        }
+                        Ok(folders) => {
+                            record_installed_folders(
+                                &mut store,
+                                &addons_dir,
+                                &folders,
+                                dl.esoui_id,
+                                &dl.info.version,
+                                &dl.info.title,
+                                &dl.info.download_url,
+                                0,
+                            );
+                            union_folders.extend(folders.iter().cloned());
+                            installed.push(dl.esoui_id);
+                            let _ = app.emit(
+                                "pack-install-progress",
+                                PackInstallProgress {
+                                    esoui_id: dl.esoui_id,
+                                    label: dl.label.clone(),
+                                    phase: "completed".to_string(),
+                                    index,
+                                    total,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // One transitive-dependency pass over everything the pack installed.
+        let resolved = resolve_transitive_deps(&addons_dir, &union_folders, &mut store);
+
+        metadata::save_metadata(&addons_dir, &store)?;
+
+        Ok(PackInstallResult {
+            installed,
+            failed,
+            installed_folders: union_folders,
+            installed_deps: resolved.installed_deps,
+            failed_deps: resolved.failed_deps,
+            skipped_deps: resolved.skipped_deps,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // ─── Category Browsing ───────────────────────────────────────
 
 #[tauri::command]
