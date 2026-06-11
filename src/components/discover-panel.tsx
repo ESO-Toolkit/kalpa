@@ -98,8 +98,9 @@ function useAddonInstall(addonsPath: string, onInstalled: () => void, persistedI
 const DiscoverResultRow = memo(function DiscoverResultRow({
   result,
   selected,
-  installingId,
-  installedIds,
+  isInstalling,
+  anyInstalling,
+  installed,
   onSelect,
   onInstall,
   showMeta = false,
@@ -107,15 +108,15 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
 }: {
   result: EsouiSearchResult;
   selected: boolean;
-  installingId: number | null;
-  installedIds: Set<number>;
-  onSelect: () => void;
-  onInstall: () => void;
+  isInstalling: boolean;
+  anyInstalling: boolean;
+  installed: boolean;
+  onSelect: (result: EsouiSearchResult) => void;
+  onInstall: (id: number) => void;
   showMeta?: boolean;
   rank?: number;
 }) {
-  const isInstalling = installingId === result.id;
-  const isInstalled = installedIds.has(result.id);
+  const isInstalled = installed;
 
   return (
     <div
@@ -124,7 +125,7 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
         selected &&
           "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]"
       )}
-      onClick={onSelect}
+      onClick={() => onSelect(result)}
     >
       <div className="flex items-center gap-2.5">
         {rank != null && (
@@ -145,9 +146,9 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
           variant={isInstalled ? "ghost" : "default"}
           onClick={(e) => {
             e.stopPropagation();
-            onInstall();
+            onInstall(result.id);
           }}
-          disabled={installingId !== null}
+          disabled={anyInstalling}
           className={cn(
             "shrink-0 transition-all",
             isInstalling || isInstalled ? "opacity-100" : "opacity-0 group-hover:opacity-100"
@@ -475,10 +476,11 @@ function SearchContent({
               <DiscoverResultRow
                 result={r}
                 selected={selectedResultId === r.id}
-                installingId={installingId}
-                installedIds={installedIds}
-                onSelect={() => onSelectResult(r)}
-                onInstall={() => onInstall(r.id)}
+                isInstalling={installingId === r.id}
+                anyInstalling={installingId !== null}
+                installed={installedIds.has(r.id)}
+                onSelect={onSelectResult}
+                onInstall={onInstall}
                 showMeta
               />
             </div>
@@ -598,10 +600,11 @@ function PopularContent({
                 key={r.id}
                 result={r}
                 selected={selectedResultId === r.id}
-                installingId={installingId}
-                installedIds={installedIds}
-                onSelect={() => onSelectResult(r)}
-                onInstall={() => onInstall(r.id)}
+                isInstalling={installingId === r.id}
+                anyInstalling={installingId !== null}
+                installed={installedIds.has(r.id)}
+                onSelect={onSelectResult}
+                onInstall={onInstall}
                 showMeta
                 rank={idx + 1}
               />
@@ -790,10 +793,11 @@ function CategoryContent({
                 key={r.id}
                 result={r}
                 selected={selectedResultId === r.id}
-                installingId={installingId}
-                installedIds={installedIds}
-                onSelect={() => onSelectResult(r)}
-                onInstall={() => onInstall(r.id)}
+                isInstalling={installingId === r.id}
+                anyInstalling={installingId !== null}
+                installed={installedIds.has(r.id)}
+                onSelect={onSelectResult}
+                onInstall={onInstall}
                 showMeta
               />
             ))}
