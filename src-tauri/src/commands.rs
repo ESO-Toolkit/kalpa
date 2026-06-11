@@ -2568,17 +2568,33 @@ pub async fn update_addon_with_decisions(
                 .clone()
         };
 
-        // Run the fallible work in a closure so the pending session and temp ZIP
-        // are cleaned up on EVERY exit path. The temp ZIP was `.keep()`-ed, so it
-        // has no auto-delete; an early `?` return below (backup, hashing,
-        // extraction, recording, or metadata save) would otherwise orphan it and
-        // leave a stale pending entry that blocks re-resolving the conflict.
+        // Run the fallible work in a helper so that, once the session is claimed,
+        // the pending entry and kept temp ZIP are cleaned up whether that work
+        // succeeds OR fails. The temp ZIP was `.keep()`-ed (no auto-delete), so an
+        // early `?` return inside the helper (backup, hashing, extraction,
+        // recording, metadata save) would otherwise orphan it and leave a stale
+        // pending entry that blocks re-resolving the conflict.
+        //
+        // The only exits before this point are the lock-poisoned and
+        // session-not-found errors above, where there is nothing to clean up: no
+        // `pu` was obtained and the session either never existed or wasn't ours to
+        // remove. Validation failures before `spawn_blocking` likewise leave the
+        // session intact on purpose, so the user can retry or cancel it.
         let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions);
 
-        if let Ok(mut map) = pending_clone.lock() {
-            map.remove(&session_id);
+        // Delete the kept temp ZIP first, then drop the pending entry. If the
+        // delete genuinely fails (e.g. another process briefly holds the file),
+        // keep the entry so `cancel_pending_update` can retry cleanup later. A
+        // file that's already gone counts as removed.
+        let removed = match fs::remove_file(&pu.zip_path) {
+            Ok(()) => true,
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        };
+        if removed {
+            if let Ok(mut map) = pending_clone.lock() {
+                map.remove(&session_id);
+            }
         }
-        let _ = fs::remove_file(&pu.zip_path);
 
         outcome
     })

@@ -210,6 +210,17 @@ pub fn hash_zip_entries(
             continue;
         }
 
+        // Skip symlink entries, exactly as `extract_addon_zip*` does. Otherwise a
+        // symlink entry would be hashed here but never written to disk, so a
+        // symlink whose path collides with a real on-disk file would record the
+        // symlink's payload hash as that file's baseline — a false mismatch on the
+        // next scan.
+        if let Some(mode) = entry.unix_mode() {
+            if mode & 0o170000 == 0o120000 {
+                continue;
+            }
+        }
+
         let name = match entry.enclosed_name() {
             Some(p) => p.to_string_lossy().replace('\\', "/"),
             None => continue,
@@ -460,23 +471,26 @@ fn write_folder_manifest(
     timestamp: &str,
     hash_overrides: Option<&HashMap<String, String>>,
 ) -> Result<(), String> {
-    // For kept files, replace the recorded hash with the upstream ZIP hash so
-    // the user's edit remains detectable on the next update.
+    // For kept files, record the upstream ZIP hash as the baseline so the user's
+    // change stays detectable on the next update. This is inserted
+    // UNCONDITIONALLY: a kept file the user *deleted* (auto-kept because upstream
+    // didn't touch it) is absent from `files`, but it still needs its upstream
+    // hash stored — otherwise the next scan finds no baseline entry, treats the
+    // path as untracked, and silently re-extracts the file the user removed.
     if let Some(overrides) = hash_overrides {
         for (path, upstream_hash) in overrides {
-            if files.contains_key(path) {
-                files.insert(path.clone(), upstream_hash.clone());
-            }
+            files.insert(path.clone(), upstream_hash.clone());
         }
     }
 
-    let modified_files: Vec<String> = if let Some(ov) = hash_overrides {
-        ov.keys()
-            .filter(|k| files.contains_key(*k))
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
+    // Every kept file is, by definition, a user modification (edit or deletion).
+    let modified_files: Vec<String> = match hash_overrides {
+        Some(ov) => {
+            let mut m: Vec<String> = ov.keys().cloned().collect();
+            m.sort();
+            m
+        }
+        None => Vec::new(),
     };
 
     let manifest = HashManifest {
@@ -1192,5 +1206,81 @@ mod tests {
         assert!(load_hash_manifest(&addons_dir, "GoodAddon").is_some());
         assert!(load_hash_manifest(&addons_dir, "GhostAddon").is_none());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn record_with_zip_baseline_kept_deletion_stores_upstream_hash() {
+        // A user DELETED a file that upstream still ships. The conflict scan
+        // auto-keeps the deletion and selective extraction skips re-creating it,
+        // so the file is absent from disk during baseline recording. The override
+        // must still be stored (upstream hash) so the next scan keeps detecting
+        // the deletion — otherwise the file would be silently re-extracted.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        // settings.lua is NOT on disk (user deleted it; extraction skipped it).
+        create_addon_dir(&addons_dir, "MyAddon", &[("init.lua", "code")]);
+        let zip = create_test_zip(
+            tmp.path(),
+            "u.zip",
+            "MyAddon",
+            &[("init.lua", "code"), ("settings.lua", "UPSTREAM")],
+        );
+        let zip_hashes = hash_zip_entries(&zip, "MyAddon").unwrap();
+
+        // The kept deletion's override carries the upstream hash.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "settings.lua".to_string(),
+            zip_hashes["settings.lua"].clone(),
+        );
+
+        record_hashes_with_zip_baseline(
+            &addons_dir,
+            &zip,
+            &["MyAddon".to_string()],
+            "MyAddon",
+            &zip_hashes,
+            7,
+            "2.0",
+            Some(&overrides),
+        )
+        .unwrap();
+
+        let m = load_hash_manifest(&addons_dir, "MyAddon").unwrap();
+        // The deleted-but-kept file IS in the baseline with the upstream hash...
+        assert_eq!(m.files.get("settings.lua"), Some(&sha256_hex("UPSTREAM")));
+        // ...and is flagged as a user modification so the deletion stays tracked.
+        assert!(m.modified_files.contains(&"settings.lua".to_string()));
+        // The on-disk file is still recorded normally.
+        assert_eq!(m.files["init.lua"], sha256_hex("code"));
+    }
+
+    #[test]
+    fn hash_zip_entries_skips_symlink_entries() {
+        // A symlink ZIP entry must not be hashed: the extractor skips writing it,
+        // so hashing it would record a baseline for a path whose real on-disk
+        // bytes differ, producing a false "modified" flag next scan.
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("sym.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+
+        // A normal file...
+        archive.start_file("MyAddon/real.lua", opts).unwrap();
+        archive.write_all(b"real").unwrap();
+
+        // ...and a real symlink entry (sets the 0o120000 symlink mode bits).
+        archive
+            .add_symlink("MyAddon/link.lua", "../target", opts)
+            .unwrap();
+        archive.finish().unwrap();
+
+        let hashes = hash_zip_entries(&zip_path, "MyAddon").unwrap();
+        assert!(hashes.contains_key("real.lua"));
+        assert!(
+            !hashes.contains_key("link.lua"),
+            "symlink entry must be skipped, like extraction does"
+        );
     }
 }
