@@ -2935,18 +2935,19 @@ pub async fn write_addon_file(
 
         fs::write(&file_path, &content).map_err(|e| format!("Failed to write file: {e}"))?;
 
-        // Re-hash the single file and update the manifest cache
+        // Re-hash only the file we just wrote — compute_addon_hashes would walk
+        // the entire addon folder (0.7-1.5 s per Ctrl+S on large addons) just to
+        // read back one entry. Compare it against the stored baseline to keep the
+        // modified_files cache current.
         if let Some(mut manifest) = file_hashes::load_hash_manifest(&addons_dir, &folder_name) {
-            let new_hash = file_hashes::compute_addon_hashes(&addons_dir.join(&folder_name))?;
-            if let Some(hash) = new_hash.get(&relative_path.replace('\\', "/")) {
-                let key = relative_path.replace('\\', "/");
-                let is_modified = manifest.files.get(&key).map(|h| h != hash).unwrap_or(true);
-                if is_modified && !manifest.modified_files.contains(&key) {
-                    manifest.modified_files.push(key);
-                    manifest.modified_files.sort();
-                } else if !is_modified {
-                    manifest.modified_files.retain(|f| f != &key);
-                }
+            let key = relative_path.replace('\\', "/");
+            let hash = file_hashes::hash_file(&file_path)?;
+            let is_modified = manifest.files.get(&key).map(|h| h != &hash).unwrap_or(true);
+            if is_modified && !manifest.modified_files.contains(&key) {
+                manifest.modified_files.push(key);
+                manifest.modified_files.sort();
+            } else if !is_modified {
+                manifest.modified_files.retain(|f| f != &key);
             }
             file_hashes::save_hash_manifest(&addons_dir, &manifest)?;
         }

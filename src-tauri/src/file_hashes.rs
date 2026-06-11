@@ -36,7 +36,10 @@ fn manifest_path(addons_dir: &Path, folder_name: &str) -> std::path::PathBuf {
     hashes_dir(addons_dir).join(format!("{folder_name}.json"))
 }
 
-fn hash_file(path: &Path) -> Result<String, String> {
+/// Compute the SHA-256 hex digest of a single file, streamed in 8 KiB chunks.
+/// Public so callers that edit one file (e.g. the addon file editor) can
+/// re-hash just that file instead of walking the whole addon folder.
+pub fn hash_file(path: &Path) -> Result<String, String> {
     let mut file =
         fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {e}"))?;
     let mut hasher = Sha256::new();
@@ -565,6 +568,21 @@ mod tests {
         for hash in hashes.values() {
             assert_eq!(hash.len(), 64);
         }
+    }
+
+    #[test]
+    fn hash_file_matches_compute_addon_hashes_entry() {
+        // The addon file editor relies on hash_file(single) producing the same
+        // digest that compute_addon_hashes(folder) records for that file.
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "local greeting = 'hello'";
+        let addon_path = create_addon_dir(tmp.path(), "Editable", &[("core.lua", content)]);
+
+        let folder_hashes = compute_addon_hashes(&addon_path).unwrap();
+        let single = hash_file(&addon_path.join("core.lua")).unwrap();
+
+        assert_eq!(single.len(), 64);
+        assert_eq!(single, folder_hashes["core.lua"]);
     }
 
     #[test]
