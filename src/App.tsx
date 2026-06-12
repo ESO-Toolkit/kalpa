@@ -572,12 +572,23 @@ function App() {
       const result = await invokeResult(command, { addonsPath, folderName });
       if (result.ok) {
         toast.success(currentlyDisabled ? `Enabled ${folderName}` : `Disabled ${folderName}`);
-        handleRefresh();
+        // Patch the toggled addon's `disabled` flag in place rather than
+        // triggering a full disk rescan + network update check (which blanks
+        // the list and loses scroll position). Mirrors handleTagsChange.
+        const nowDisabled = !currentlyDisabled;
+        setAddons((prev) =>
+          prev.map((addon) =>
+            addon.folderName === folderName ? { ...addon, disabled: nowDisabled } : addon
+          )
+        );
+        setSelectedAddon((prev) =>
+          prev?.folderName === folderName ? { ...prev, disabled: nowDisabled } : prev
+        );
       } else {
         toast.error(result.error);
       }
     },
-    [addonsPath, handleRefresh]
+    [addonsPath]
   );
 
   const handleAddonUpdated = useCallback(
