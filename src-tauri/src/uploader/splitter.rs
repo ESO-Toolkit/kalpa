@@ -38,7 +38,17 @@ fn copy_range(src: &Path, dst: &Path, start: u64, end: u64) -> Result<(), String
             .read(&mut buf[..want])
             .map_err(|e| format!("Read: {e}"))?;
         if n == 0 {
-            break; // file shrank underneath us; stop cleanly
+            // The source shrank/rotated mid-copy (e.g. /reloadui+relog on the
+            // active log). A short copy would be a silently-truncated, corrupt
+            // session file — fail loudly and remove the partial output rather
+            // than report success.
+            let _ = writer.flush();
+            drop(writer);
+            let _ = std::fs::remove_file(dst);
+            return Err(format!(
+                "Source log shrank during copy ({remaining} bytes missing) — \
+                 it may have been rotated. Try again."
+            ));
         }
         writer
             .write_all(&buf[..n])
@@ -89,23 +99,4 @@ pub fn split_by_session(source_path: &str, out_dir: &str) -> Result<Vec<String>,
         written.push(dst.to_string_lossy().into_owned());
     }
     Ok(written)
-}
-
-/// Extract a single byte range (e.g. one session selected in the UI) to a file.
-pub fn extract_range(
-    source_path: &str,
-    out_path: &str,
-    start: u64,
-    end: u64,
-) -> Result<String, String> {
-    let src = Path::new(source_path);
-    if !src.is_file() {
-        return Err(format!("Source log not found: {source_path}"));
-    }
-    let dst = Path::new(out_path);
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Create output dir: {e}"))?;
-    }
-    copy_range(src, dst, start, end)?;
-    Ok(dst.to_string_lossy().into_owned())
 }

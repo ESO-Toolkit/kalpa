@@ -194,6 +194,9 @@ impl LogUploadTransport for CliTransport {
         if opts.real_time {
             cmd.arg("--enable-real-time-uploading");
         }
+        if opts.include_entire_file {
+            cmd.arg("--include-entire-file");
+        }
 
         let status = cmd
             .status()

@@ -406,7 +406,6 @@ pub fn run() {
             uploader::commands::uploader_detect_path,
             uploader::commands::uploader_list_logs,
             uploader::commands::uploader_preflight,
-            uploader::commands::uploader_scan_fights,
             uploader::commands::uploader_split_to_disk,
             uploader::commands::uploader_transport_info,
             uploader::commands::uploader_upload_log,

@@ -44,6 +44,9 @@ export interface LogPreflight {
   sizeBytes: number;
   sessions: LogSession[];
   totalFights: number;
+  /** Per-fight summaries from the single preflight scan. Empty for very large
+   *  logs (see recommendSplit) to bound the IPC payload. */
+  fights: FightSummary[];
   recommendSplit: boolean;
 }
 
@@ -92,6 +95,8 @@ export interface UploadDispatch {
 }
 
 // Live event stream (tagged union mirroring the Rust `LiveEvent` enum).
+// Fights are UI-only: the whole log is uploaded once to the official uploader
+// with real-time enabled, so there is no per-fight upload status.
 export type LiveEvent =
   | { type: "started"; file: string; startOffset: number }
   | {
@@ -101,8 +106,6 @@ export type LiveEvent =
       bossName: string | null;
       durationMs: number;
     }
-  | { type: "fightStatus"; index: number; status: string }
-  | { type: "report"; code: string; url: string }
   | { type: "sessionReset" }
   | { type: "warning"; message: string }
   | { type: "stopped"; reason: string };
@@ -116,14 +119,14 @@ export type UploaderStatus =
   | "attention"
   | "retrying";
 
-/** A single fight as tracked in the live dashboard UI. */
+/** A single fight detected during a live session (UI timeline entry). The
+ *  whole log uploads once to the official uploader, so there is no per-fight
+ *  upload status — detection means the official uploader is streaming it. */
 export interface LiveFight {
   index: number;
   zoneName: string | null;
   bossName: string | null;
   durationMs: number;
-  status: "queued" | "uploading" | "uploaded" | "failed";
-  error?: string;
 }
 
 export const REGION_OPTIONS: { id: number; label: string }[] = [

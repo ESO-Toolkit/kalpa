@@ -33,18 +33,21 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
-import type {
-  FightSummary,
-  LiveEvent,
-  LiveFight,
-  LogFileInfo,
-  LogPathDetection,
-  LogPreflight,
-  ReportRef,
-  TransportInfo,
-  UploaderStatus,
-  UploadOptions,
-  UploadRecord,
+import {
+  REGION_OPTIONS,
+  type FightSummary,
+  type LiveEvent,
+  type LiveFight,
+  type LogFileInfo,
+  type LogPathDetection,
+  type LogPreflight,
+  type ReportRef,
+  type TransportInfo,
+  type UploaderStatus,
+  type UploadDispatch,
+  type UploadOptions,
+  type UploadRecord,
+  type Visibility,
 } from "@/types/uploader";
 import { StatusPill, WhatGetsUploaded, compactBytes, relativeFromMs } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
@@ -69,14 +72,33 @@ const DEFAULT_OPTIONS: UploadOptions = {
 
 const OPTIONS_KEY = "kalpa.uploader.options";
 
+const VALID_REGIONS = new Set(REGION_OPTIONS.map((r) => r.id));
+const VALID_VISIBILITY = new Set<Visibility>(["public", "unlisted", "private"]);
+
+/** Load persisted options, validating each field so a corrupt/out-of-range
+ *  localStorage value (e.g. an invalid region id, which is a u8 in Rust and
+ *  would silently produce a bad upload) can't poison the upload. */
 function loadSavedOptions(): UploadOptions {
   try {
     const raw = localStorage.getItem(OPTIONS_KEY);
-    if (raw) return { ...DEFAULT_OPTIONS, ...JSON.parse(raw) };
+    if (!raw) return DEFAULT_OPTIONS;
+    const parsed = JSON.parse(raw) as Partial<UploadOptions>;
+    return {
+      region: VALID_REGIONS.has(parsed.region as number)
+        ? (parsed.region as number)
+        : DEFAULT_OPTIONS.region,
+      guildId: typeof parsed.guildId === "string" ? parsed.guildId : null,
+      visibility: VALID_VISIBILITY.has(parsed.visibility as Visibility)
+        ? (parsed.visibility as Visibility)
+        : DEFAULT_OPTIONS.visibility,
+      description: typeof parsed.description === "string" ? parsed.description : null,
+      realTime: typeof parsed.realTime === "boolean" ? parsed.realTime : false,
+      includeEntireFile:
+        typeof parsed.includeEntireFile === "boolean" ? parsed.includeEntireFile : false,
+    };
   } catch {
-    /* ignore */
+    return DEFAULT_OPTIONS;
   }
-  return DEFAULT_OPTIONS;
 }
 
 export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: UploaderWorkspaceProps) {
@@ -88,6 +110,9 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   const [preflight, setPreflight] = useState<LogPreflight | null>(null);
   const [fights, setFights] = useState<FightSummary[]>([]);
   const [scanning, setScanning] = useState(false);
+  // Monotonic token guarding against an out-of-order async scan result
+  // overwriting the currently-selected log's fights.
+  const selectTokenRef = useRef(0);
   const [options, setOptions] = useState<UploadOptions>(loadSavedOptions);
   const [transport, setTransport] = useState<TransportInfo | null>(null);
   const [history, setHistory] = useState<UploadRecord[]>([]);
@@ -99,7 +124,6 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   const [liveFights, setLiveFights] = useState<LiveFight[]>([]);
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
-  const liveChannelRef = useRef<Channel<LiveEvent> | null>(null);
 
   // Persist options whenever they change.
   useEffect(() => {
@@ -172,21 +196,25 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   };
 
   const handleSelectLog = useCallback(async (path: string) => {
+    // Guard against a slow scan of a previously-selected log resolving after a
+    // newer selection and overwriting its results.
+    const token = ++selectTokenRef.current;
     setSelectedLog(path);
     setPreflight(null);
     setFights([]);
     setScanning(true);
     try {
+      // A single preflight scan returns both the counts and (unless the log is
+      // huge) the fight list — no second scan needed.
       const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
+      if (selectTokenRef.current !== token) return;
       setPreflight(pre);
-      // Only pull the full fight list if it's not enormous; preflight already
-      // has the counts so the UI is never blank.
-      const f = await invokeOrThrow<FightSummary[]>("uploader_scan_fights", { filePath: path });
-      setFights(f);
+      setFights(pre.fights);
     } catch (e) {
+      if (selectTokenRef.current !== token) return;
       toast.error(`Couldn't read that log: ${getTauriErrorMessage(e)}`);
     } finally {
-      setScanning(false);
+      if (selectTokenRef.current === token) setScanning(false);
     }
   }, []);
 
@@ -194,11 +222,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     if (!selectedLog) return;
     setUploading(true);
     try {
-      const dispatch = await invokeOrThrow<{
-        handedOff: boolean;
-        detail: string;
-        report: ReportRef | null;
-      }>("uploader_upload_log", {
+      const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
         filePath: selectedLog,
         options,
         preferCli: transport?.officialUploaderInstalled ?? false,
@@ -218,22 +242,16 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
 
   const handleSplit = async () => {
     if (!selectedLog) return;
-    const outDir = await openDialog({
-      directory: true,
-      title: "Where should the split logs go?",
-    });
-    if (typeof outDir !== "string") return;
     setSplitting(true);
     try {
+      // Split files go to an app-owned folder (the destination isn't
+      // caller-controlled); we reveal the result so the user can find them.
       const written = await invokeOrThrow<string[]>("uploader_split_to_disk", {
         filePath: selectedLog,
-        outDir,
       });
       toast.success(
         `Split into ${written.length} session file${written.length === 1 ? "" : "s"}.`,
-        {
-          duration: 7000,
-        }
+        { duration: 7000 }
       );
       try {
         const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
@@ -255,62 +273,39 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     }
     const sessionId = `live-${Date.now()}`;
     const channel = new Channel<LiveEvent>();
-    liveChannelRef.current = channel;
     setLiveFights([]);
     setLiveReport(null);
     setLiveStatus("watching");
 
+    // The watcher emits UI-only fight-detection events; the actual upload is the
+    // single whole-file handoff performed by uploader_start_live below.
     channel.onmessage = (ev) => {
       switch (ev.type) {
         case "started":
           setLiveStatus("watching");
           break;
         case "fightDetected": {
-          // Upsert by index: a fight that failed and is being retried arrives
-          // again with the same index, so update its row rather than duplicate.
           const detected = ev;
           setLiveFights((prev) => {
-            const next: LiveFight = {
-              index: detected.index,
-              zoneName: detected.zoneName,
-              bossName: detected.bossName,
-              durationMs: detected.durationMs,
-              status: "queued",
-            };
-            const existing = prev.findIndex((f) => f.index === detected.index);
-            if (existing === -1) return [...prev, next];
-            const copy = [...prev];
-            copy[existing] = next;
-            return copy;
+            if (prev.some((f) => f.index === detected.index)) return prev;
+            return [
+              ...prev,
+              {
+                index: detected.index,
+                zoneName: detected.zoneName,
+                bossName: detected.bossName,
+                durationMs: detected.durationMs,
+              },
+            ];
           });
-          setLiveStatus("uploading");
           break;
         }
-        case "fightStatus":
-          setLiveFights((prev) =>
-            prev.map((f) =>
-              f.index === ev.index
-                ? {
-                    ...f,
-                    status: ev.status.startsWith("failed")
-                      ? "failed"
-                      : (ev.status as LiveFight["status"]),
-                    error: ev.status.startsWith("failed")
-                      ? ev.status.replace(/^failed:\s*/, "")
-                      : undefined,
-                  }
-                : f
-            )
-          );
-          break;
-        case "report":
-          setLiveReport({ code: ev.code, url: ev.url });
-          break;
         case "sessionReset":
           toast.info("A new logging session started — continuing to watch.");
+          setLiveFights([]);
           break;
         case "warning":
-          setLiveStatus("retrying");
+          // Non-fatal (e.g. transient read retry); surface quietly.
           break;
         case "stopped":
           setLiveStatus("idle");
@@ -319,7 +314,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     };
 
     try {
-      await invokeOrThrow("uploader_start_live", {
+      const dispatch = await invokeOrThrow<UploadDispatch>("uploader_start_live", {
         sessionId,
         filePath: selectedLog,
         options,
@@ -327,7 +322,12 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
         channel,
       });
       setLiveSessionId(sessionId);
-      toast.success("Live logging started.");
+      if (dispatch?.report) setLiveReport(dispatch.report);
+      toast.success(
+        dispatch?.handedOff
+          ? "Live logging started in the ESO Logs Uploader."
+          : "Live logging started."
+      );
     } catch (e) {
       setLiveStatus("attention");
       toast.error(`Couldn't start live logging: ${getTauriErrorMessage(e)}`);
@@ -795,7 +795,6 @@ function LiveDashboard({
   onStop: () => void;
   onCopyLink: (url: string) => void;
 }) {
-  const uploaded = liveFights.filter((f) => f.status === "uploaded").length;
   return (
     <GlassPanel variant="primary" className="space-y-3 p-4">
       <div className="flex items-center justify-between gap-3">
@@ -818,6 +817,13 @@ function LiveDashboard({
           </Button>
         )}
       </div>
+
+      {running && (
+        <p className="text-xs text-muted-foreground">
+          The ESO Logs Uploader is streaming this log in real time. Fights appear below as they
+          finish; leave it running for the rest of your session.
+        </p>
+      )}
 
       {liveReport && (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] px-3 py-2">
@@ -851,7 +857,7 @@ function LiveDashboard({
         <div className="text-sm text-muted-foreground" role="status" aria-live="polite">
           {liveFights.length === 0
             ? "Watching for combat… start a fight in-game and it'll appear here."
-            : `Uploaded ${uploaded} of ${liveFights.length} fight${liveFights.length === 1 ? "" : "s"}.`}
+            : `${liveFights.length} fight${liveFights.length === 1 ? "" : "s"} detected this session.`}
         </div>
       )}
 

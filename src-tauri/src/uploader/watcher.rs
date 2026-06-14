@@ -1,9 +1,16 @@
-//! Live folder/file watcher for streaming uploads during a raid.
+//! Live fight detector for the uploader's live dashboard.
 //!
 //! Tails the active `Encounter.log` by byte offset (the game only appends), so
-//! it never re-reads the whole file. New bytes are scanned for completed fights
-//! (`BEGIN_COMBAT`…`END_COMBAT`); each completed fight is emitted to the
-//! frontend via a Tauri [`Channel`] and queued for the transport.
+//! it never re-reads the whole file, and emits a [`LiveEvent`] to the frontend
+//! whenever a fight (`BEGIN_COMBAT`…`END_COMBAT`) completes. This drives the
+//! per-fight timeline in the UI **only** — it does not upload.
+//!
+//! The actual live upload is performed once per session by handing the whole
+//! `Encounter.log` to the official ESO Logs uploader with real-time uploading
+//! enabled (see `commands::uploader_start_live`). A single fight slice has no
+//! `BEGIN_LOG` header or actor/ability context, so it is not independently
+//! uploadable; the official uploader tails the full file itself. Decoupling
+//! detection from upload keeps this loop cheap and correct.
 //!
 //! Watching is built on `notify` with a short polling fallback because Windows
 //! `ReadDirectoryChangesW` modify events for a single appended file can coalesce
@@ -22,7 +29,7 @@ use tauri::ipc::Channel;
 
 use super::scanner;
 
-/// 64 MiB cap on a single incremental read, guarding against a corrupt size.
+/// 64 MiB cap on a single incremental read, bounding memory per pass.
 const MAX_READ: u64 = 64 * 1024 * 1024;
 /// Poll fallback cadence — short enough to feel live, light on IO.
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
@@ -33,33 +40,31 @@ const POLL_INTERVAL: Duration = Duration::from_millis(400);
 pub enum LiveEvent {
     /// Watching started; reports the file and starting byte offset.
     Started { file: String, start_offset: u64 },
-    /// A fight finished and is queued for upload.
+    /// A fight finished (UI timeline entry).
     FightDetected {
         index: usize,
         zone_name: Option<String>,
         boss_name: Option<String>,
         duration_ms: u64,
     },
-    /// A fight's upload changed state.
-    FightStatus { index: usize, status: String },
-    /// The report code became known (surface the link immediately).
-    Report { code: String, url: String },
     /// The log was truncated or a new session began.
     SessionReset,
-    /// A non-fatal warning (e.g. transient read failure, retrying).
+    /// A non-fatal warning (e.g. transient read failure, oversized fight).
     Warning { message: String },
     /// Watching stopped (user-initiated or fatal error).
     Stopped { reason: String },
 }
 
-/// Handle controlling a running live watcher; dropping it stops the thread.
+/// Handle controlling a running live watcher. Both [`stop`](Self::stop) and
+/// `Drop` signal the thread and join it, so the notify watcher and file handle
+/// are released deterministically.
 pub struct LiveWatchHandle {
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl LiveWatchHandle {
-    pub fn stop(&self) {
+    fn shutdown(&self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Ok(mut guard) = self.thread.lock() {
             if let Some(handle) = guard.take() {
@@ -67,19 +72,26 @@ impl LiveWatchHandle {
             }
         }
     }
+
+    /// Signal the watcher to stop and wait for its thread to exit.
+    pub fn stop(&self) {
+        self.shutdown();
+    }
 }
 
 impl Drop for LiveWatchHandle {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.shutdown();
     }
 }
 
-/// Read `[start, end)` from a file into a UTF-8 string, bounded by [`MAX_READ`].
-fn read_range(path: &Path, start: u64, end: u64) -> Result<String, String> {
+/// Read `[start, end)` from a file into a raw byte buffer, bounded by
+/// [`MAX_READ`]. Returns raw bytes so callers track offsets from true byte
+/// lengths (never from a lossily-decoded string).
+fn read_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>, String> {
     use std::io::{Read, Seek, SeekFrom};
     if end <= start {
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
     let len = end - start;
     if len > MAX_READ {
@@ -90,37 +102,19 @@ fn read_range(path: &Path, start: u64, end: u64) -> Result<String, String> {
         .map_err(|e| format!("seek: {e}"))?;
     let mut buf = vec![0u8; len as usize];
     f.read_exact(&mut buf).map_err(|e| format!("read: {e}"))?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok(buf)
 }
 
-/// Callback the watcher invokes for each completed fight: given the byte range
-/// in the source file, the implementor extracts + uploads it. Returns an
-/// optional report code once known.
-pub type OnFight = Box<dyn Fn(FightRange) -> Result<Option<String>, String> + Send + 'static>;
-
-/// A completed fight located in the source file, ready to extract & upload.
-#[derive(Debug, Clone)]
-pub struct FightRange {
-    pub index: usize,
-    pub start_offset: u64,
-    pub end_offset: u64,
-    pub zone_name: Option<String>,
-    pub boss_name: Option<String>,
-    pub start_ms: u64,
-    pub end_ms: u64,
-}
-
-/// Start tailing `file_path`. `start_offset` is where to begin (0 to include
-/// the whole existing file, or its current length to only catch new fights).
+/// Start tailing `file_path` for fight detection. `start_offset` is where to
+/// begin (0 to enumerate fights already in the file, or its current length to
+/// only surface fights logged after Start).
 ///
-/// For each completed fight, `on_fight` is called (off the event-detection hot
-/// path is not required — fights are infrequent) and `channel` receives a
-/// [`LiveEvent`]. Returns a handle to stop watching.
+/// Each completed fight emits a [`LiveEvent::FightDetected`] on `channel`.
+/// Returns a handle that stops and joins the thread on drop.
 pub fn start_live_watch(
     file_path: &str,
     start_offset: u64,
     channel: Channel<LiveEvent>,
-    on_fight: OnFight,
 ) -> Result<LiveWatchHandle, String> {
     let path = PathBuf::from(file_path);
     if !path.is_file() {
@@ -129,15 +123,14 @@ pub fn start_live_watch(
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
-    let file_string = file_path.to_string();
 
     let _ = channel.send(LiveEvent::Started {
-        file: file_string.clone(),
+        file: file_path.to_string(),
         start_offset,
     });
 
     let thread = thread::spawn(move || {
-        tail_loop(path, start_offset, stop_thread, channel, on_fight);
+        tail_loop(path, start_offset, stop_thread, channel);
     });
 
     Ok(LiveWatchHandle {
@@ -146,15 +139,10 @@ pub fn start_live_watch(
     })
 }
 
-/// The tailing loop: wait for change → read new bytes → scan for completed
-/// fights in the accumulated buffer → emit & dispatch each.
-fn tail_loop(
-    path: PathBuf,
-    start_offset: u64,
-    stop: Arc<AtomicBool>,
-    channel: Channel<LiveEvent>,
-    on_fight: OnFight,
-) {
+/// The tailing loop: wait for a change → read new bytes → scan for completed
+/// fights → emit each. `consumed` advances only past dispatched fights so a
+/// fight spanning two reads is found once its `END_COMBAT` arrives.
+fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: Channel<LiveEvent>) {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher = match RecommendedWatcher::new(
         move |res| {
@@ -179,9 +167,6 @@ fn tail_loop(
         }
     }
 
-    // `consumed` is the byte offset of everything we've fully turned into fights.
-    // We re-scan from `consumed` each time so a fight split across reads is found
-    // once its END_COMBAT arrives. Completed fights advance `consumed` past them.
     let mut consumed = start_offset;
     let mut next_index = 0usize;
     let mut last_poll = Instant::now();
@@ -230,8 +215,7 @@ fn tail_loop(
             continue;
         }
 
-        // Cap each pass to MAX_READ; a very large catch-up will progress over
-        // multiple iterations.
+        // Cap each pass to MAX_READ; catch-up progresses over multiple passes.
         let read_end = size.min(consumed + MAX_READ);
         let chunk = match read_range(&path, consumed, read_end) {
             Ok(c) => c,
@@ -244,86 +228,43 @@ fn tail_loop(
             }
         };
 
-        // Find completed fights within the chunk and dispatch each. We compute
-        // absolute offsets by adding `consumed` to the chunk-relative offsets.
-        // `next_index` is the index of the next *successfully uploaded* fight.
-        // Re-scanning from `consumed` after a failure re-surfaces the same
-        // fight with the same index, so a retry updates the existing UI row
-        // rather than appending a duplicate.
-        let completed = scan_chunk_fights(&chunk, consumed);
+        // Detect completed fights in the chunk; offsets are chunk-relative + base.
+        let completed = scanner::scan_chunk_for_fights(&chunk, consumed);
         let mut advanced_to = consumed;
         for fr in completed {
-            let mut fr = fr;
-            fr.index = next_index;
-
             let _ = channel.send(LiveEvent::FightDetected {
-                index: fr.index,
+                index: next_index,
                 zone_name: fr.zone_name.clone(),
                 boss_name: fr.boss_name.clone(),
                 duration_ms: fr.end_ms.saturating_sub(fr.start_ms),
             });
-            let _ = channel.send(LiveEvent::FightStatus {
-                index: fr.index,
-                status: "uploading".into(),
-            });
-
-            let end_offset = fr.end_offset;
-            match on_fight(fr.clone()) {
-                Ok(report_code) => {
-                    let _ = channel.send(LiveEvent::FightStatus {
-                        index: fr.index,
-                        status: "uploaded".into(),
-                    });
-                    if let Some(code) = report_code {
-                        let _ = channel.send(LiveEvent::Report {
-                            url: report_url(&code),
-                            code,
-                        });
-                    }
-                    advanced_to = end_offset;
-                    next_index += 1;
-                }
-                Err(e) => {
-                    let _ = channel.send(LiveEvent::FightStatus {
-                        index: fr.index,
-                        status: format!("failed: {e}"),
-                    });
-                    // Don't advance past a failed fight or bump the index; it
-                    // will be retried (same index) on the next change once
-                    // conditions improve. Advancing only on success also avoids
-                    // a tight retry loop.
-                    break;
-                }
-            }
+            next_index += 1;
+            advanced_to = fr.end_offset;
         }
-        // Advance `consumed` only past dispatched fights. Trailing partial data
-        // (an in-progress fight) is re-scanned next pass.
+
         if advanced_to > consumed {
             consumed = advanced_to;
         } else if read_end == size {
-            // No completed fight and we've caught up to EOF — keep `consumed`
-            // where it is so the in-progress fight is re-scanned with more data.
+            // Caught up to EOF with an in-progress (unterminated) fight — keep
+            // `consumed` so the partial fight is re-scanned once more arrives.
+        } else {
+            // Full MAX_READ window, not at EOF, no completed fight: a single
+            // fight exceeds the read cap. Force progress so we don't livelock,
+            // skipping the oversized fight (the official uploader still handles
+            // the whole file). Re-anchor at the last newline so we never split
+            // mid-line and lose a boundary token.
+            let skip_to = match chunk.iter().rposition(|b| *b == b'\n') {
+                Some(nl) => consumed + nl as u64 + 1,
+                None => read_end, // no newline in 64 MiB — advance past the block
+            };
+            let _ = channel.send(LiveEvent::Warning {
+                message: "A single fight exceeded the read window and was skipped \
+                          in the live timeline; the full log still uploads."
+                    .into(),
+            });
+            consumed = skip_to.max(consumed + 1);
         }
     }
-}
-
-/// Scan a freshly-read chunk for *completed* fights, returning absolute byte
-/// ranges (chunk offsets shifted by `base`). Reuses the same boundary logic as
-/// the full-file scanner via a tiny inline pass to avoid duplicating offsets.
-fn scan_chunk_fights(chunk: &str, base: u64) -> Vec<FightRange> {
-    let result = scanner::scan_chunk_for_fights(chunk, base);
-    result
-        .into_iter()
-        .map(|f| FightRange {
-            index: 0,
-            start_offset: f.start_offset,
-            end_offset: f.end_offset,
-            zone_name: f.zone_name,
-            boss_name: f.boss_name,
-            start_ms: f.start_ms,
-            end_ms: f.end_ms,
-        })
-        .collect()
 }
 
 /// Build the public report URL from a report code.

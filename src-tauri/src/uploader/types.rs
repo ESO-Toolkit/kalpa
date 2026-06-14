@@ -88,6 +88,10 @@ pub struct LogPreflight {
     pub size_bytes: u64,
     pub sessions: Vec<LogSession>,
     pub total_fights: usize,
+    /// The per-fight summaries from the single preflight scan. Empty for very
+    /// large logs (see `recommend_split`) to bound the IPC payload — the counts
+    /// in `sessions`/`total_fights` still drive the UI in that case.
+    pub fights: Vec<FightSummary>,
     /// True if the file exceeds the size at which we recommend splitting.
     pub recommend_split: bool,
 }

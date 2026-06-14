@@ -1,8 +1,10 @@
 //! Streaming, byte-offset-aware scanner for ESO `Encounter.log` files.
 //!
 //! ESO combat logs are append-only and can reach multiple gigabytes, so this
-//! scanner never loads the whole file into memory. It reads in fixed-size
-//! buffers, tracks the exact byte offset of every line, and detects:
+//! scanner never holds the whole file in memory. It reads line by line, folding
+//! boundary detection directly into the read loop so only running state
+//! (O(sessions + fights)) is retained — line content is dropped each iteration.
+//! It detects:
 //!
 //! * **Sessions** — bounded by `BEGIN_LOG` lines. The game appends to one file
 //!   across play sessions; each `/encounterlog` re-enable writes a fresh
@@ -16,6 +18,12 @@
 //! `ZONE_CHANGED` and `UNIT_ADDED` for naming. Field counts are variable (due to
 //! `<unitState>` expansion and bracketed arrays), so we deliberately avoid full
 //! CSV parsing — we split only what we need.
+//!
+//! **Byte-offset discipline:** all offsets are tracked from raw byte counts, not
+//! from decoded-string lengths. A corrupt byte decoded lossily to U+FFFD is 3
+//! bytes in a `String` but 1 byte on disk, so deriving offsets from a decoded
+//! string would misalign every subsequent range. Content is decoded lossily
+//! only for field parsing, never for offset math.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -25,21 +33,9 @@ use super::types::{FightSummary, LogSession};
 /// Files larger than this get a "recommend split" hint in the UI.
 pub const SPLIT_RECOMMEND_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 
-/// A line as seen by the scanner, with its byte position in the file.
-struct ScannedLine {
-    /// Byte offset of the first byte of the line.
-    offset: u64,
-    /// Byte offset just past the line terminator (start of the next line).
-    next_offset: u64,
-    /// The line type token (second comma-separated field), uppercased ASCII.
-    line_type: String,
-    /// The raw line content without the trailing newline, borrowed-free.
-    raw: String,
-}
-
 /// Parse the leading relative-ms value (first comma-separated token) of a line.
-fn parse_rel_ms(raw: &str) -> u64 {
-    raw.split(',')
+fn parse_rel_ms(line: &str) -> u64 {
+    line.split(',')
         .next()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0)
@@ -49,61 +45,43 @@ fn parse_rel_ms(raw: &str) -> u64 {
 /// Naive split is fine here because the fields we read (line type, version,
 /// zone/unit names) never themselves contain an embedded unquoted comma before
 /// the index we want for these specific line types.
-fn field(raw: &str, idx: usize) -> Option<&str> {
-    raw.split(',').nth(idx).map(|s| s.trim().trim_matches('"'))
+fn field(line: &str, idx: usize) -> Option<&str> {
+    line.split(',').nth(idx).map(|s| s.trim().trim_matches('"'))
 }
 
-/// Extract the line-type token (field index 1).
-fn line_type_of(raw: &str) -> String {
-    field(raw, 1).unwrap_or("").to_ascii_uppercase()
+/// The line types we care about for boundary/naming detection.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineType {
+    BeginLog,
+    EndLog,
+    ZoneChanged,
+    UnitAdded,
+    BeginCombat,
+    EndCombat,
+    Other,
 }
 
-/// Iterate the file line by line, yielding [`ScannedLine`] with exact offsets.
-///
-/// Uses `read_until(b'\n')` so byte offsets account for `\r\n` vs `\n`
-/// transparently: `next_offset` is always the start of the following line.
-fn scan_lines(path: &str) -> Result<Vec<ScannedLine>, String> {
-    let file = File::open(path).map_err(|e| map_io_error(&e, path))?;
-    let mut reader = BufReader::with_capacity(1 << 20, file); // 1 MiB buffer
-
-    let mut lines = Vec::new();
-    let mut offset: u64 = 0;
-    let mut buf: Vec<u8> = Vec::with_capacity(512);
-
-    loop {
-        buf.clear();
-        let n = reader
-            .read_until(b'\n', &mut buf)
-            .map_err(|e| format!("Failed to read log: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        let next_offset = offset + n as u64;
-
-        // Strip the trailing \n and optional \r for content; offsets are intact.
-        let mut end = n;
-        if end > 0 && buf[end - 1] == b'\n' {
-            end -= 1;
-        }
-        if end > 0 && buf[end - 1] == b'\r' {
-            end -= 1;
-        }
-        // Lossy is safe: ESO logs are UTF-8 but a corrupt tail shouldn't abort.
-        let raw = String::from_utf8_lossy(&buf[..end]).into_owned();
-
-        if !raw.is_empty() {
-            let line_type = line_type_of(&raw);
-            lines.push(ScannedLine {
-                offset,
-                next_offset,
-                line_type,
-                raw,
-            });
-        }
-        offset = next_offset;
+/// Classify a line by its type token (field index 1) without allocating —
+/// compares case-insensitively against the known tokens.
+fn classify(line: &str) -> LineType {
+    let Some(tok) = field(line, 1) else {
+        return LineType::Other;
+    };
+    if tok.eq_ignore_ascii_case("BEGIN_LOG") {
+        LineType::BeginLog
+    } else if tok.eq_ignore_ascii_case("END_LOG") {
+        LineType::EndLog
+    } else if tok.eq_ignore_ascii_case("ZONE_CHANGED") {
+        LineType::ZoneChanged
+    } else if tok.eq_ignore_ascii_case("UNIT_ADDED") {
+        LineType::UnitAdded
+    } else if tok.eq_ignore_ascii_case("BEGIN_COMBAT") {
+        LineType::BeginCombat
+    } else if tok.eq_ignore_ascii_case("END_COMBAT") {
+        LineType::EndCombat
+    } else {
+        LineType::Other
     }
-
-    Ok(lines)
 }
 
 /// Translate common IO errors into the friendly, project-consistent strings the
@@ -126,61 +104,59 @@ pub struct ScanResult {
     pub fights: Vec<FightSummary>,
 }
 
-/// Scan an entire log file into sessions and fights.
+/// Running boundary-detection state, shared by the full-file and chunk scanners.
 ///
-/// Single pass, O(lines) time, O(sessions + fights) memory — line content is
-/// dropped as we go.
-pub fn scan_file(path: &str) -> Result<ScanResult, String> {
-    let lines = scan_lines(path)?;
-    Ok(scan_parsed(&lines))
+/// Feeding lines (with their absolute byte offsets) drives session and fight
+/// detection. Only O(sessions + fights) memory is held; line content is not
+/// retained between calls.
+#[derive(Default)]
+struct Detector {
+    sessions: Vec<LogSession>,
+    fights: Vec<FightSummary>,
+    session_open: bool,
+    session_fight_count: usize,
+    /// (start_offset, rel_ms) of an open `BEGIN_COMBAT` awaiting its `END_COMBAT`.
+    fight_start: Option<(u64, u64)>,
+    pending_zone: Option<String>,
+    pending_boss: Option<String>,
 }
 
-/// Core boundary detection over already-scanned lines (kept separate so it can
-/// be unit-tested without touching the filesystem).
-fn scan_parsed(lines: &[ScannedLine]) -> ScanResult {
-    let mut sessions: Vec<LogSession> = Vec::new();
-    let mut fights: Vec<FightSummary> = Vec::new();
-
-    // Per-session running state.
-    let mut session_open = false;
-    let mut session_fight_count = 0usize;
-
-    // Per-fight running state.
-    let mut fight_start: Option<(u64, u64)> = None; // (offset, rel_ms)
-    let mut pending_zone: Option<String> = None;
-    let mut pending_boss: Option<String> = None;
-
-    let close_session = |sessions: &mut Vec<LogSession>, end_offset: u64, fc: usize| {
-        if let Some(last) = sessions.last_mut() {
+impl Detector {
+    fn close_session(&mut self, end_offset: u64) {
+        if let Some(last) = self.sessions.last_mut() {
             last.end_offset = end_offset;
-            last.fight_count = fc;
+            last.fight_count = self.session_fight_count;
             last.size_bytes = end_offset.saturating_sub(last.start_offset);
         }
-    };
+    }
 
-    for line in lines {
-        match line.line_type.as_str() {
-            "BEGIN_LOG" => {
-                // Close the previous session at this line's start.
-                if session_open {
-                    close_session(&mut sessions, line.offset, session_fight_count);
+    /// Feed one line. `offset` is the line's first byte; `next_offset` is the
+    /// start of the following line (i.e. one past the line terminator).
+    fn feed(&mut self, line: &str, offset: u64, next_offset: u64) {
+        match classify(line) {
+            LineType::BeginLog => {
+                if self.session_open {
+                    self.close_session(offset);
                 }
-                session_open = true;
-                session_fight_count = 0;
-                fight_start = None;
+                self.session_open = true;
+                self.session_fight_count = 0;
+                self.fight_start = None;
+                self.pending_zone = None;
+                self.pending_boss = None;
 
-                let start_time_ms = field(&line.raw, 2)
+                let start_time_ms = field(line, 2)
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(0);
-                let log_version = field(&line.raw, 3).unwrap_or("").to_string();
-                let realm = field(&line.raw, 4)
+                let log_version = field(line, 3).unwrap_or("").to_string();
+                let realm = field(line, 4)
                     .map(|s| s.to_string())
                     .filter(|s| !s.is_empty());
 
-                sessions.push(LogSession {
-                    index: sessions.len(),
-                    start_offset: line.offset,
-                    end_offset: line.next_offset,
+                let index = self.sessions.len();
+                self.sessions.push(LogSession {
+                    index,
+                    start_offset: offset,
+                    end_offset: next_offset,
                     start_time_ms,
                     log_version,
                     realm,
@@ -188,145 +164,161 @@ fn scan_parsed(lines: &[ScannedLine]) -> ScanResult {
                     size_bytes: 0,
                 });
             }
-            "END_LOG" => {
-                if session_open {
-                    close_session(&mut sessions, line.next_offset, session_fight_count);
-                    session_open = false;
+            LineType::EndLog => {
+                if self.session_open {
+                    self.close_session(next_offset);
+                    self.session_open = false;
                 }
             }
-            "ZONE_CHANGED" => {
-                // ZONE_CHANGED, id, "name", difficulty
-                pending_zone = field(&line.raw, 3)
+            LineType::ZoneChanged => {
+                self.pending_zone = field(line, 3)
                     .map(|s| s.to_string())
                     .filter(|s| !s.is_empty());
             }
-            "UNIT_ADDED" => {
-                // A boss unit: UNIT_ADDED has isBoss="T" and a name field.
-                // Layout: ..., unitType, ..., monsterId, isBoss, classId, ...,
-                // name(field 10), displayName(11). We detect isBoss heuristically.
-                if line.raw.contains(",T,") {
-                    if let Some(name) = field(&line.raw, 10).filter(|s| !s.is_empty()) {
-                        // Only adopt as boss name if this looks like a monster
-                        // (no @display-name handle in the name field).
-                        if !name.starts_with('@') {
-                            pending_boss = Some(name.to_string());
-                        }
+            LineType::UnitAdded => {
+                // A boss unit has isBoss="T"; name is field 10. Skip @handles
+                // (player display names) so we only adopt monster names.
+                if line.contains(",T,") {
+                    if let Some(name) =
+                        field(line, 10).filter(|s| !s.is_empty() && !s.starts_with('@'))
+                    {
+                        self.pending_boss = Some(name.to_string());
                     }
                 }
             }
-            "BEGIN_COMBAT" => {
-                fight_start = Some((line.offset, parse_rel_ms(&line.raw)));
+            LineType::BeginCombat => {
+                self.fight_start = Some((offset, parse_rel_ms(line)));
             }
-            "END_COMBAT" => {
-                if let Some((start_offset, start_ms)) = fight_start.take() {
-                    fights.push(FightSummary {
-                        index: fights.len(),
+            LineType::EndCombat => {
+                if let Some((start_offset, start_ms)) = self.fight_start.take() {
+                    let index = self.fights.len();
+                    self.fights.push(FightSummary {
+                        index,
                         start_offset,
-                        end_offset: line.next_offset,
+                        end_offset: next_offset,
                         start_ms,
-                        end_ms: parse_rel_ms(&line.raw),
-                        zone_name: pending_zone.clone(),
-                        boss_name: pending_boss.take(),
+                        end_ms: parse_rel_ms(line),
+                        zone_name: self.pending_zone.clone(),
+                        boss_name: self.pending_boss.take(),
                     });
-                    session_fight_count += 1;
+                    self.session_fight_count += 1;
                 }
             }
-            _ => {}
+            LineType::Other => {}
         }
     }
 
-    // Close a session left open at EOF (the common case for an active log).
-    if session_open {
-        let end = lines.last().map(|l| l.next_offset).unwrap_or(0);
-        close_session(&mut sessions, end, session_fight_count);
+    fn finish(mut self, eof_offset: u64) -> ScanResult {
+        if self.session_open {
+            self.close_session(eof_offset);
+        }
+        ScanResult {
+            sessions: self.sessions,
+            fights: self.fights,
+        }
     }
-
-    ScanResult { sessions, fights }
 }
 
-/// Scan an in-memory chunk for *completed* fights only (BEGIN_COMBAT followed
-/// by END_COMBAT), returning [`FightSummary`] with byte offsets shifted by
-/// `base` (the chunk's absolute offset in the file). Used by the live watcher,
-/// which reads incremental chunks rather than the whole file.
+/// Strip a trailing `\n` and optional `\r` from a raw line buffer, returning the
+/// content byte slice (offsets are computed from the full buffer, not this).
+fn line_content(buf: &[u8]) -> &[u8] {
+    let mut end = buf.len();
+    if end > 0 && buf[end - 1] == b'\n' {
+        end -= 1;
+    }
+    if end > 0 && buf[end - 1] == b'\r' {
+        end -= 1;
+    }
+    &buf[..end]
+}
+
+/// Scan an entire log file into sessions and fights in a single streaming pass.
 ///
-/// `index` is left at 0 — the caller assigns running indices.
-pub fn scan_chunk_for_fights(chunk: &str, base: u64) -> Vec<FightSummary> {
-    let mut fights = Vec::new();
+/// O(lines) time, O(sessions + fights) memory — each line's content is decoded,
+/// classified, and dropped before the next read.
+pub fn scan_file(path: &str) -> Result<ScanResult, String> {
+    let file = File::open(path).map_err(|e| map_io_error(&e, path))?;
+    let mut reader = BufReader::with_capacity(1 << 20, file); // 1 MiB buffer
+
+    let mut detector = Detector::default();
     let mut offset: u64 = 0;
+    let mut buf: Vec<u8> = Vec::with_capacity(512);
 
-    let mut fight_start: Option<(u64, u64)> = None;
-    let mut pending_zone: Option<String> = None;
-    let mut pending_boss: Option<String> = None;
-
-    for raw_line in chunk.split_inclusive('\n') {
-        let n = raw_line.len() as u64;
-        let next_offset = offset + n;
-        let trimmed = raw_line.trim_end_matches(['\n', '\r']);
-        if trimmed.is_empty() {
-            offset = next_offset;
-            continue;
+    loop {
+        buf.clear();
+        // `read_until(b'\n')` makes offsets account for `\r\n` vs `\n`: the byte
+        // count `n` always includes the terminator, so `next_offset` is the
+        // start of the following line.
+        let n = reader
+            .read_until(b'\n', &mut buf)
+            .map_err(|e| format!("Failed to read log: {e}"))?;
+        if n == 0 {
+            break;
         }
-        match line_type_of(trimmed).as_str() {
-            "ZONE_CHANGED" => {
-                pending_zone = field(trimmed, 3)
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.is_empty());
-            }
-            "UNIT_ADDED" => {
-                if trimmed.contains(",T,") {
-                    if let Some(name) =
-                        field(trimmed, 10).filter(|s| !s.is_empty() && !s.starts_with('@'))
-                    {
-                        pending_boss = Some(name.to_string());
-                    }
-                }
-            }
-            "BEGIN_COMBAT" => {
-                fight_start = Some((base + offset, parse_rel_ms(trimmed)));
-            }
-            "END_COMBAT" => {
-                if let Some((start_offset, start_ms)) = fight_start.take() {
-                    fights.push(FightSummary {
-                        index: 0,
-                        start_offset,
-                        end_offset: base + next_offset,
-                        start_ms,
-                        end_ms: parse_rel_ms(trimmed),
-                        zone_name: pending_zone.clone(),
-                        boss_name: pending_boss.take(),
-                    });
-                }
-            }
-            _ => {}
+        let next_offset = offset + n as u64;
+        let content = line_content(&buf);
+        if !content.is_empty() {
+            // Lossy decode for field parsing only — offsets came from raw bytes.
+            let line = String::from_utf8_lossy(content);
+            detector.feed(&line, offset, next_offset);
         }
         offset = next_offset;
     }
 
-    fights
+    Ok(detector.finish(offset))
+}
+
+/// Scan an in-memory raw byte chunk for *completed* fights only (`BEGIN_COMBAT`
+/// followed by `END_COMBAT`), returning [`FightSummary`] with byte offsets
+/// shifted by `base` (the chunk's absolute offset in the file). Used by the live
+/// watcher, which reads incremental chunks rather than the whole file.
+///
+/// Takes raw bytes (not a `&str`) so offsets are tracked from true byte lengths;
+/// each line is decoded lossily only for field parsing. `index` is left at 0 —
+/// the caller assigns running indices.
+pub fn scan_chunk_for_fights(chunk: &[u8], base: u64) -> Vec<FightSummary> {
+    let mut detector = Detector {
+        // Treat the chunk as already inside an open session so fights are
+        // recorded; we only consume `detector.fights` below.
+        session_open: true,
+        ..Default::default()
+    };
+    let mut offset: u64 = 0;
+
+    for raw_line in chunk.split_inclusive(|b| *b == b'\n') {
+        let n = raw_line.len() as u64;
+        let next_offset = offset + n;
+        let content = line_content(raw_line);
+        if !content.is_empty() {
+            let line = String::from_utf8_lossy(content);
+            detector.feed(&line, base + offset, base + next_offset);
+        }
+        offset = next_offset;
+    }
+
+    detector.fights
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn lines_from(text: &str) -> Vec<ScannedLine> {
-        let mut out = Vec::new();
-        let mut offset = 0u64;
-        for raw_line in text.split_inclusive('\n') {
+    /// Run the streaming detector over an in-memory string (test helper).
+    fn scan_text(text: &str) -> ScanResult {
+        let bytes = text.as_bytes();
+        let mut detector = Detector::default();
+        let mut offset: u64 = 0;
+        for raw_line in bytes.split_inclusive(|b| *b == b'\n') {
             let n = raw_line.len() as u64;
             let next_offset = offset + n;
-            let trimmed = raw_line.trim_end_matches(['\n', '\r']);
-            if !trimmed.is_empty() {
-                out.push(ScannedLine {
-                    offset,
-                    next_offset,
-                    line_type: line_type_of(trimmed),
-                    raw: trimmed.to_string(),
-                });
+            let content = line_content(raw_line);
+            if !content.is_empty() {
+                let line = String::from_utf8_lossy(content);
+                detector.feed(&line, offset, next_offset);
             }
             offset = next_offset;
         }
-        out
+        detector.finish(offset)
     }
 
     #[test]
@@ -336,7 +328,7 @@ mod tests {
                    200,BEGIN_COMBAT\n\
                    5200,END_COMBAT\n\
                    5300,END_LOG\n";
-        let r = scan_parsed(&lines_from(log));
+        let r = scan_text(log);
         assert_eq!(r.sessions.len(), 1);
         assert_eq!(r.sessions[0].fight_count, 1);
         assert_eq!(r.sessions[0].log_version, "15");
@@ -353,7 +345,7 @@ mod tests {
                    10,BEGIN_COMBAT\n20,END_COMBAT\n\
                    0,BEGIN_LOG,1700000900000,15,\"NA\",\"en\",\"10.0\"\n\
                    10,BEGIN_COMBAT\n20,END_COMBAT\n30,BEGIN_COMBAT\n40,END_COMBAT\n";
-        let r = scan_parsed(&lines_from(log));
+        let r = scan_text(log);
         assert_eq!(r.sessions.len(), 2);
         assert_eq!(r.sessions[0].fight_count, 1);
         assert_eq!(r.sessions[1].fight_count, 2);
@@ -365,10 +357,30 @@ mod tests {
     #[test]
     fn byte_offsets_are_contiguous_and_cover_fights() {
         let log = "0,BEGIN_LOG,1,15,\"NA\",\"en\",\"x\"\n50,BEGIN_COMBAT\n99,END_COMBAT\n";
-        let r = scan_parsed(&lines_from(log));
+        let r = scan_text(log);
         let f = &r.fights[0];
         // The fight range must lie inside the session range.
         assert!(f.start_offset >= r.sessions[0].start_offset);
         assert!(f.end_offset <= r.sessions[0].end_offset);
+    }
+
+    #[test]
+    fn chunk_scanner_tracks_raw_byte_offsets_with_invalid_utf8() {
+        // A line with an invalid UTF-8 byte (0xFF) before the fight. If offsets
+        // were derived from the lossy String (U+FFFD = 3 bytes), the fight
+        // offsets would drift; from raw bytes they stay correct.
+        let mut chunk: Vec<u8> = Vec::new();
+        chunk.extend_from_slice(b"0,ZONE_CHANGED,1,\"Bad");
+        chunk.push(0xFF); // invalid byte
+        chunk.extend_from_slice(b"name\",NORMAL\n");
+        let begin_at = chunk.len() as u64;
+        chunk.extend_from_slice(b"10,BEGIN_COMBAT\n");
+        chunk.extend_from_slice(b"20,END_COMBAT\n");
+
+        let fights = scan_chunk_for_fights(&chunk, 0);
+        assert_eq!(fights.len(), 1);
+        // start_offset must equal the true byte position of BEGIN_COMBAT.
+        assert_eq!(fights[0].start_offset, begin_at);
+        assert_eq!(fights[0].end_offset, chunk.len() as u64);
     }
 }
