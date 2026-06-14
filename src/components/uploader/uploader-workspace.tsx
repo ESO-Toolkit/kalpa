@@ -126,6 +126,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   const [liveFights, setLiveFights] = useState<LiveFight[]>([]);
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
+  const [starting, setStarting] = useState(false);
   // Holds the in-flight live session id from before the start await resolves, so
   // unmounting mid-await still stops the backend watcher (state hasn't landed).
   const liveSessionIdRef = useRef<string | null>(null);
@@ -286,8 +287,11 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     try {
       // Split files go to an app-owned folder (the destination isn't
       // caller-controlled); we reveal the result so the user can find them.
+      // Pass the preflight's sessions so the backend doesn't re-scan the whole
+      // multi-GB file (re-scanning only as a fallback if we have none).
       const written = await invokeOrThrow<string[]>("uploader_split_to_disk", {
         filePath: selectedLog,
+        sessions: preflight?.sessions ?? null,
       });
       toast.success(
         `Split into ${written.length} session file${written.length === 1 ? "" : "s"}.`,
@@ -311,6 +315,11 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
       toast.error("Pick the active Encounter.log first.");
       return;
     }
+    // Guard re-entry: `liveSessionId` only lands after the await (which includes
+    // a process spawn), so without this a double-click would start two backend
+    // watchers and orphan one.
+    if (starting || liveSessionId) return;
+    setStarting(true);
     const sessionId = `live-${Date.now()}`;
     // Record the id before the await so unmount cleanup can stop the backend
     // watcher even if the dialog closes before the await resolves.
@@ -381,8 +390,14 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           : "Live logging started."
       );
     } catch (e) {
+      // Start failed (e.g. uploader not installed): reset the gate and refs so a
+      // trailing event can't be processed and the next attempt starts clean.
+      liveActiveRef.current = false;
+      liveSessionIdRef.current = null;
       setLiveStatus("attention");
       toast.error(`Couldn't start live logging: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setStarting(false);
     }
   };
 
@@ -490,6 +505,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
               <Preflight
                 preflight={preflight}
                 scanning={scanning}
+                scanningSizeBytes={logs.find((l) => l.path === selectedLog)?.sizeBytes ?? null}
                 onSplit={handleSplit}
                 splitting={splitting}
               />
@@ -535,6 +551,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
             ) : (
               <LiveDashboard
                 running={liveSessionId !== null}
+                starting={starting}
                 canStart={!!selectedLog}
                 liveFights={liveFights}
                 liveReport={liveReport}
@@ -703,19 +720,25 @@ function LogPicker({
 function Preflight({
   preflight,
   scanning,
+  scanningSizeBytes,
   onSplit,
   splitting,
 }: {
   preflight: LogPreflight | null;
   scanning: boolean;
+  scanningSizeBytes: number | null;
   onSplit: () => void;
   splitting: boolean;
 }) {
   if (scanning && !preflight) {
+    // Surface the known file size so a long scan of a multi-GB log reads as
+    // expected work, not a hang.
+    const sizeHint = scanningSizeBytes ? ` (${compactBytes(scanningSizeBytes)})` : "";
+    const big = (scanningSizeBytes ?? 0) > 256 * 1024 * 1024;
     return (
       <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-muted-foreground">
         <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-        Scanning the log…
+        Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
       </div>
     );
   }
@@ -852,6 +875,7 @@ function ManualActions({
 
 function LiveDashboard({
   running,
+  starting,
   canStart,
   liveFights,
   liveReport,
@@ -860,6 +884,7 @@ function LiveDashboard({
   onCopyLink,
 }: {
   running: boolean;
+  starting: boolean;
   canStart: boolean;
   liveFights: LiveFight[];
   liveReport: ReportRef | null;
@@ -883,9 +908,9 @@ function LiveDashboard({
             Stop
           </Button>
         ) : (
-          <Button size="sm" onClick={onStart} disabled={!canStart}>
+          <Button size="sm" onClick={onStart} disabled={!canStart || starting}>
             <Radio className="size-3.5" />
-            Start live logging
+            {starting ? "Starting…" : "Start live logging"}
           </Button>
         )}
       </div>

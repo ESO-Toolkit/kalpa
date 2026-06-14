@@ -71,10 +71,17 @@ fn session_file_name(stem: &str, session: &LogSession) -> String {
 
 /// Split `source_path` into one file per logging session inside `out_dir`.
 ///
+/// `sessions` may be supplied from a prior preflight scan to avoid a second full
+/// pass over a multi-GB file; pass `None` to scan here.
+///
 /// Returns the paths of the files written, in session order. Sessions with no
 /// fights are still written (they may contain useful context), but the caller
 /// can filter on the [`LogSession::fight_count`] it already has from a preflight.
-pub fn split_by_session(source_path: &str, out_dir: &str) -> Result<Vec<String>, String> {
+pub fn split_by_session(
+    source_path: &str,
+    out_dir: &str,
+    sessions: Option<Vec<LogSession>>,
+) -> Result<Vec<String>, String> {
     let src = Path::new(source_path);
     if !src.is_file() {
         return Err(format!("Source log not found: {source_path}"));
@@ -82,7 +89,10 @@ pub fn split_by_session(source_path: &str, out_dir: &str) -> Result<Vec<String>,
     let out = PathBuf::from(out_dir);
     std::fs::create_dir_all(&out).map_err(|e| format!("Create output dir: {e}"))?;
 
-    let sessions = scanner::scan_file(source_path)?.sessions;
+    let sessions = match sessions {
+        Some(s) if !s.is_empty() => s,
+        _ => scanner::scan_file(source_path)?.sessions,
+    };
     if sessions.is_empty() {
         return Err("No logging sessions found in this file.".into());
     }

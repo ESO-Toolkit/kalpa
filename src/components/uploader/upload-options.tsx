@@ -107,6 +107,9 @@ export function UploadOptionsControl({
             );
           })}
         </div>
+        <p className="text-[11px] text-muted-foreground/80">
+          You'll confirm visibility in the ESO Logs Uploader before the report goes live.
+        </p>
       </div>
     </div>
   );

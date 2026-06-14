@@ -187,8 +187,11 @@ impl LogUploadTransport for CliTransport {
             .arg("--region")
             .arg(opts.region.to_string());
 
+        // Guild ids are numeric; anything else (a value with spaces, quotes, or
+        // a leading `-`) could be mis-parsed by the uploader into extra flags,
+        // so fall back to Personal Logs (`null`) rather than forward it.
         match &opts.guild_id {
-            Some(g) if !g.is_empty() => {
+            Some(g) if !g.is_empty() && g.len() <= 32 && g.chars().all(|c| c.is_ascii_digit()) => {
                 cmd.arg("--guild").arg(g);
             }
             _ => {

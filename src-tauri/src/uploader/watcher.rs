@@ -175,6 +175,10 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
     let mut consumed = start_offset;
     let mut next_index = 0usize;
     let mut last_poll = Instant::now();
+    // Whether the bytes before `consumed` are inside an open session. Starting
+    // at offset 0 (include-entire-file) the first chunk begins with the session
+    // header, so it's NOT yet open; tailing from EOF we're already mid-session.
+    let mut session_open = start_offset != 0;
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -184,23 +188,24 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
             return;
         }
 
-        // Block briefly for an FS event, else fall through to poll.
-        match rx.recv_timeout(POLL_INTERVAL) {
+        // Wait for an FS event or the poll interval. We watch the parent dir
+        // non-recursively, so events arrive for sibling files too. Read when an
+        // event names our file, OR whenever the poll deadline has elapsed — the
+        // latter keeps the fallback authoritative even when sibling-file churn
+        // (OneDrive, AV, other logs) keeps waking us with non-matching events
+        // while our own Modify event was coalesced/dropped (the exact Windows
+        // case the poll exists to cover).
+        let event_for_us = match rx.recv_timeout(POLL_INTERVAL) {
             Ok(Ok(ev)) => {
-                if !matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                    continue;
-                }
-                if !ev.paths.iter().any(|p| p == &path) {
-                    continue;
-                }
+                matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_))
+                    && ev.paths.iter().any(|p| p == &path)
             }
-            Ok(Err(_)) => continue,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_poll.elapsed() < POLL_INTERVAL {
-                    continue;
-                }
-            }
+            Ok(Err(_)) => false,
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if !event_for_us && last_poll.elapsed() < POLL_INTERVAL {
+            continue;
         }
         last_poll = Instant::now();
 
@@ -209,11 +214,14 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
             Err(_) => continue,
         };
 
-        // Truncation / new session detection.
+        // Truncation / new session detection. After a reset the file starts
+        // fresh, so the next chunk's leading BEGIN_LOG is the session header,
+        // not a mid-stream re-enable — flag it so we don't double-emit a reset.
         if size < consumed {
             let _ = channel.send(LiveEvent::SessionReset);
             consumed = 0;
             next_index = 0;
+            session_open = false;
             continue;
         }
         if size == consumed {
@@ -233,8 +241,10 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
             }
         };
 
-        // Detect completed fights and boundary signals in the chunk.
-        let scan = scanner::scan_chunk_for_fights(&chunk, consumed);
+        // Detect completed fights and boundary signals in the chunk. Once we've
+        // read any data, subsequent chunks are mid-session.
+        let scan = scanner::scan_chunk_for_fights(&chunk, consumed, session_open);
+        session_open = true;
 
         // A mid-chunk BEGIN_LOG (a /encounterlog re-enable) starts a new session
         // in the same growing file. Dispatch any fights that completed *before*

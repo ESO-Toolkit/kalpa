@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::Channel;
@@ -19,10 +20,20 @@ use super::watcher::{LiveEvent, LiveWatchHandle};
 use super::{discovery, scanner, splitter, transport, watcher};
 use crate::AllowedAddonsPath;
 
+/// A live session slot. A session is registered as `Starting` *before* the
+/// (blocking) uploader handoff so a concurrent stop/unmount during that window
+/// is observed; it transitions to `Running` once the watcher thread exists.
+enum LiveSlot {
+    /// Start is in flight. `cancelled` is set if a stop arrives before the
+    /// watcher is registered, so the start can abort cleanly.
+    Starting(Arc<AtomicBool>),
+    Running(LiveWatchHandle),
+}
+
 /// Managed state: active live-watch sessions keyed by session id.
 #[derive(Default)]
 pub struct UploaderState {
-    pub live_sessions: Arc<Mutex<HashMap<String, LiveWatchHandle>>>,
+    live_sessions: Mutex<HashMap<String, LiveSlot>>,
 }
 
 // ── Path confinement ─────────────────────────────────────────────────────────
@@ -60,9 +71,12 @@ fn logs_root(allowed: &State<'_, AllowedAddonsPath>) -> Result<PathBuf, String> 
     Ok(logs.canonicalize().unwrap_or(logs))
 }
 
-/// Validate that `path` is a `.log` file confined to the ESO Logs directory.
-/// Canonicalizes to resolve symlinks/junctions and rejects UNC/verbatim paths.
-fn confine_log_path(allowed: &State<'_, AllowedAddonsPath>, path: &str) -> Result<(), String> {
+/// Validate that `path` is a `.log` file confined to the ESO Logs directory and
+/// return the **canonical** path. Callers must do all subsequent IO on the
+/// returned path (not the raw caller string) so the bytes opened are the ones
+/// that passed confinement — closing the check-then-open (TOCTOU) window where a
+/// junction/symlink could be repointed between validation and use.
+fn confine_log_path(allowed: &State<'_, AllowedAddonsPath>, path: &str) -> Result<PathBuf, String> {
     let p = Path::new(path);
 
     if has_unc_or_verbatim_prefix(p) {
@@ -86,7 +100,7 @@ fn confine_log_path(allowed: &State<'_, AllowedAddonsPath>, path: &str) -> Resul
     if !canonical.starts_with(&root) {
         return Err("Log files must live in your ESO Logs folder.".into());
     }
-    Ok(())
+    Ok(canonical)
 }
 
 /// App-owned output root for split files: `<app_data>/uploader-splits`.
@@ -154,12 +168,13 @@ pub async fn uploader_preflight(
     allowed: State<'_, AllowedAddonsPath>,
     file_path: String,
 ) -> Result<LogPreflight, String> {
-    confine_log_path(&allowed, &file_path)?;
+    let safe = confine_log_path(&allowed, &file_path)?;
+    let safe = safe.to_string_lossy().into_owned();
     tokio::task::spawn_blocking(move || {
-        let size_bytes = std::fs::metadata(&file_path)
+        let size_bytes = std::fs::metadata(&safe)
             .map_err(|e| format!("Failed to read file: {e}"))?
             .len();
-        let scan = scanner::scan_file(&file_path)?;
+        let scan = scanner::scan_file(&safe)?;
         let total_fights = scan.fights.len();
         let recommend_split = size_bytes > scanner::SPLIT_RECOMMEND_BYTES;
         // Avoid shipping a huge fight list over IPC for oversized logs; the
@@ -192,14 +207,19 @@ pub async fn uploader_split_to_disk(
     app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
     file_path: String,
+    sessions: Option<Vec<LogSession>>,
 ) -> Result<Vec<String>, String> {
-    confine_log_path(&allowed, &file_path)?;
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
     let out_root = split_output_root(&app)?;
     // Each split goes in its own timestamped subfolder so repeated splits of
     // different logs don't collide.
     let out_dir = out_root.join(format!("split-{}", now_ms()));
     let out_str = out_dir.to_string_lossy().into_owned();
-    tokio::task::spawn_blocking(move || splitter::split_by_session(&file_path, &out_str))
+    // Reuse the preflight's sessions (the UI passes them) to avoid a second full
+    // scan of a multi-GB file; fall back to scanning when not supplied.
+    tokio::task::spawn_blocking(move || splitter::split_by_session(&safe, &out_str, sessions))
         .await
         .map_err(|e| format!("Task failed: {e}"))?
 }
@@ -252,9 +272,11 @@ pub async fn uploader_upload_log(
     prefer_cli: bool,
     fight_count: Option<usize>,
 ) -> Result<UploadDispatch, String> {
-    confine_log_path(&allowed, &file_path)?;
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
 
-    let file_name = Path::new(&file_path)
+    let file_name = Path::new(&safe)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("Encounter.log")
@@ -264,7 +286,7 @@ pub async fn uploader_upload_log(
     let fight_count = match fight_count {
         Some(c) => c,
         None => {
-            let scan_path = file_path.clone();
+            let scan_path = safe.clone();
             tokio::task::spawn_blocking(move || {
                 scanner::scan_file(&scan_path)
                     .map(|s| s.fights.len())
@@ -278,7 +300,7 @@ pub async fn uploader_upload_log(
     let record_id = super::history::next_record_id(now_ms(), &file_name);
     let mut record = UploadRecord {
         id: record_id.clone(),
-        source_path: file_path.clone(),
+        source_path: safe.clone(),
         file_name,
         created_at_ms: now_ms(),
         status: UploadStatus::Uploading,
@@ -297,7 +319,7 @@ pub async fn uploader_upload_log(
     let mut opts = options.clone();
     opts.real_time = false;
     opts.include_entire_file = false;
-    let dispatch_path = file_path.clone();
+    let dispatch_path = safe.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         let t = transport::select_transport(prefer_cli);
         t.upload_file(&dispatch_path, &opts)
@@ -368,9 +390,11 @@ pub async fn uploader_start_live(
     prefer_cli: bool,
     channel: Channel<LiveEvent>,
 ) -> Result<UploadDispatch, String> {
-    confine_log_path(&allowed, &file_path)?;
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
 
-    let file_name = Path::new(&file_path)
+    let file_name = Path::new(&safe)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("Encounter.log")
@@ -388,10 +412,28 @@ pub async fn uploader_start_live(
         );
     }
 
+    // Register a Starting slot BEFORE the blocking handoff so a stop/unmount
+    // during that window is observed and the watcher is never orphaned. Replace
+    // (and stop) any existing slot under this id.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let prev = {
+        let mut sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        sessions.insert(
+            session_id.clone(),
+            LiveSlot::Starting(Arc::clone(&cancelled)),
+        )
+    };
+    if let Some(prev) = prev {
+        stop_slot(prev);
+    }
+
     // Hand the whole file to the official uploader once, with real-time on.
     let mut live_opts = options.clone();
     live_opts.real_time = true;
-    let dispatch_path = file_path.clone();
+    let dispatch_path = safe.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         // The uploader is installed, so the CLI transport is the right one;
         // `prefer_cli` is honored but we never fall back to GUI handoff here.
@@ -399,9 +441,16 @@ pub async fn uploader_start_live(
         t.upload_file(&dispatch_path, &live_opts)
     })
     .await
-    .map_err(|e| format!("Task failed: {e}"))?;
+    .map_err(|e| format!("Task failed: {e}"));
 
-    // A failed launch is fatal for the session; a handoff is the expected path.
+    // On any failure (or task panic), vacate our Starting slot so it can't leak.
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            remove_own_slot(&state, &session_id, &cancelled);
+            return Err(e);
+        }
+    };
     let (report, handed_off, detail) = match outcome {
         Ok(transport::UploadOutcome::Completed { report_code }) => (
             report_code.map(|code| ReportRef {
@@ -412,14 +461,17 @@ pub async fn uploader_start_live(
             "Live logging started.".to_string(),
         ),
         Ok(transport::UploadOutcome::HandedOff { detail }) => (None, true, detail),
-        Err(e) => return Err(e),
+        Err(e) => {
+            remove_own_slot(&state, &session_id, &cancelled);
+            return Err(e);
+        }
     };
 
     // Record the live session in history so a report link can be attached later.
     let record_id = super::history::next_record_id(now_ms(), &session_id);
     let record = UploadRecord {
         id: record_id,
-        source_path: file_path.clone(),
+        source_path: safe.clone(),
         file_name,
         created_at_ms: now_ms(),
         status: UploadStatus::Live,
@@ -436,23 +488,33 @@ pub async fn uploader_start_live(
     let start_offset = if options.include_entire_file {
         0
     } else {
-        std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0)
+        std::fs::metadata(&safe).map(|m| m.len()).unwrap_or(0)
     };
 
-    let handle = watcher::start_live_watch(&file_path, start_offset, channel)?;
+    let handle = watcher::start_live_watch(&safe, start_offset, channel)?;
 
-    // Replace any prior handle under the same id. Take the old one out under the
-    // lock, then drop the guard BEFORE joining its thread (join can take up to a
-    // poll interval) so unrelated session commands aren't serialized behind it.
-    let prev = {
+    // Promote Starting → Running, unless a stop arrived mid-start (cancelled set,
+    // or our slot was replaced/removed): in that case stop the just-started
+    // watcher immediately so nothing is orphaned.
+    let promote = {
         let mut sessions = state
             .live_sessions
             .lock()
             .map_err(|_| "Live session lock poisoned")?;
-        sessions.insert(session_id, handle)
+        let still_ours = matches!(
+            sessions.get(&session_id),
+            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, &cancelled)
+        );
+        if still_ours && !cancelled.load(Ordering::SeqCst) {
+            sessions.insert(session_id, LiveSlot::Running(handle));
+            None
+        } else {
+            // Leave any newer slot alone; just stop our now-unwanted watcher.
+            Some(handle)
+        }
     };
-    if let Some(prev) = prev {
-        prev.stop();
+    if let Some(handle) = promote {
+        handle.stop();
     }
 
     Ok(UploadDispatch {
@@ -462,19 +524,47 @@ pub async fn uploader_start_live(
     })
 }
 
-/// Stop a running live watch (the official uploader keeps its own session).
+/// Stop a slot's watcher (if it has one). `Starting` slots have no thread yet,
+/// but their cancel flag is set so the in-flight start aborts on promotion.
+fn stop_slot(slot: LiveSlot) {
+    match slot {
+        LiveSlot::Starting(cancelled) => cancelled.store(true, Ordering::SeqCst),
+        LiveSlot::Running(handle) => handle.stop(),
+    }
+}
+
+/// Remove our own Starting slot on a failed start, but only if it's still ours
+/// (a newer start under the same id may have replaced it).
+fn remove_own_slot(
+    state: &State<'_, UploaderState>,
+    session_id: &str,
+    cancelled: &Arc<AtomicBool>,
+) {
+    if let Ok(mut sessions) = state.live_sessions.lock() {
+        let ours = matches!(
+            sessions.get(session_id),
+            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, cancelled)
+        );
+        if ours {
+            sessions.remove(session_id);
+        }
+    }
+}
+
+/// Stop a running (or starting) live watch (the official uploader keeps its own
+/// session running regardless).
 #[tauri::command]
 pub fn uploader_stop_live(
     state: State<'_, UploaderState>,
     session_id: String,
 ) -> Result<(), String> {
-    let handle = state
+    let slot = state
         .live_sessions
         .lock()
         .map_err(|_| "Live session lock poisoned")?
         .remove(&session_id);
-    if let Some(h) = handle {
-        h.stop();
+    if let Some(slot) = slot {
+        stop_slot(slot);
     }
     Ok(())
 }

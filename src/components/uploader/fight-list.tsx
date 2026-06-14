@@ -32,7 +32,9 @@ export function FightList({ fights, emptyHint }: { fights: FightRow[]; emptyHint
   }
 
   return (
-    <ul className="space-y-1.5" aria-label="Detected fights">
+    // Cap the height and scroll: a dense progression night can produce hundreds
+    // of fights, which would otherwise grow the dialog unbounded.
+    <ul className="max-h-64 space-y-1.5 overflow-y-auto" aria-label="Detected fights">
       {fights.map((f) => (
         <li
           key={f.index}

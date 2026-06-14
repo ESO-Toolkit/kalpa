@@ -303,11 +303,16 @@ pub struct ChunkScan {
 ///
 /// Takes raw bytes (not a `&str`) so offsets are tracked from true byte lengths;
 /// each line is decoded lossily only for field parsing.
-pub fn scan_chunk_for_fights(chunk: &[u8], base: u64) -> ChunkScan {
+///
+/// `session_already_open` distinguishes a chunk read from *inside* an ongoing
+/// session (true — a leading `BEGIN_LOG` is a mid-stream `/encounterlog`
+/// re-enable → `new_session_at`) from one read at the *start* of a fresh file
+/// (false — a leading `BEGIN_LOG` is just the session header, not a re-enable).
+/// The watcher passes `false` right after a truncation reset to avoid a spurious
+/// second `SessionReset`.
+pub fn scan_chunk_for_fights(chunk: &[u8], base: u64, session_already_open: bool) -> ChunkScan {
     let mut detector = Detector {
-        // Treat the chunk as already inside an open session so fights are
-        // recorded and a later BEGIN_LOG registers as a *new* session.
-        session_open: true,
+        session_open: session_already_open,
         ..Default::default()
     };
     let mut offset: u64 = 0;
@@ -408,7 +413,7 @@ mod tests {
         chunk.extend_from_slice(b"10,BEGIN_COMBAT\n");
         chunk.extend_from_slice(b"20,END_COMBAT\n");
 
-        let scan = scan_chunk_for_fights(&chunk, 0);
+        let scan = scan_chunk_for_fights(&chunk, 0, true);
         assert_eq!(scan.fights.len(), 1);
         // start_offset must equal the true byte position of BEGIN_COMBAT.
         assert_eq!(scan.fights[0].start_offset, begin_at);
@@ -422,7 +427,7 @@ mod tests {
         // watcher must re-anchor here, not treat it as oversized.
         let chunk = b"5,ZONE_CHANGED,1,\"Cloudrest\",VETERAN\n100,BEGIN_COMBAT\n";
         let begin_at = chunk.iter().position(|&b| b == b'\n').unwrap() as u64 + 1;
-        let scan = scan_chunk_for_fights(chunk, 0);
+        let scan = scan_chunk_for_fights(chunk, 0, true);
         assert!(scan.fights.is_empty());
         assert_eq!(scan.open_fight_start, Some(begin_at));
     }
@@ -436,10 +441,25 @@ mod tests {
         // new_session_at is the offset just PAST the BEGIN_LOG line, so the next
         // read starts after it and the boundary isn't re-detected (no 1-byte crawl).
         let expected = (prefix.len() + begin_line.len()) as u64;
-        let scan = scan_chunk_for_fights(&chunk, 0);
+        // session_already_open = true: the chunk is read from inside an ongoing
+        // session, so the embedded BEGIN_LOG is a mid-stream re-enable.
+        let scan = scan_chunk_for_fights(&chunk, 0, true);
         assert_eq!(scan.new_session_at, Some(expected));
         // Both fights are still detected within the chunk (the watcher uses the
         // boundary to split pre/post-session dispatch).
         assert_eq!(scan.fights.len(), 2);
+    }
+
+    #[test]
+    fn fresh_file_begin_log_is_header_not_a_new_session() {
+        // Reading from the start of a fresh/rotated file: the leading BEGIN_LOG
+        // is the session header, not a mid-stream re-enable, so it must NOT
+        // report new_session_at (which would cause a spurious second reset).
+        let chunk =
+            "0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"x\"\n5,BEGIN_COMBAT\n15,END_COMBAT\n"
+                .as_bytes();
+        let scan = scan_chunk_for_fights(chunk, 0, false);
+        assert_eq!(scan.new_session_at, None);
+        assert_eq!(scan.fights.len(), 1);
     }
 }

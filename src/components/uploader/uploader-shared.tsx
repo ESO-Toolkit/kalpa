@@ -126,7 +126,7 @@ export function WhatGetsUploaded() {
             <Swords className="mt-0.5 size-3.5 shrink-0 text-sky-400/80" aria-hidden />
             <span>
               <span className="text-foreground/80">What's uploaded:</span> combat events, character
-              and ability data, and timestamps from the fights you choose.
+              and ability data, and timestamps from your session log.
             </span>
           </div>
           <div className="flex items-start gap-2">
