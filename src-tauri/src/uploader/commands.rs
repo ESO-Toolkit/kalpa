@@ -122,6 +122,41 @@ fn split_output_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Keep at most this many `split-*` output folders; older ones are pruned.
+const KEEP_SPLIT_FOLDERS: usize = 3;
+
+/// Remove the oldest `split-*` folders, keeping the `keep` most recent. Split
+/// output is full-byte copies of (multi-GB) logs; without pruning, repeated
+/// splits would accumulate in app data forever. Best-effort: errors are logged,
+/// never propagated, and the prune runs before a new split so the just-created
+/// folder is always retained. Mirrors `prune_auto_snapshots` in commands.rs.
+fn prune_split_folders(root: &Path, keep: usize) {
+    let prefix = "split-";
+    let mut dirs: Vec<_> = match std::fs::read_dir(root) {
+        Ok(rd) => rd
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix) && e.path().is_dir())
+            .collect(),
+        Err(_) => return,
+    };
+    if dirs.len() <= keep {
+        return;
+    }
+    // Names embed epoch-ms timestamps (constant 13-digit width through year
+    // 2286), so lexicographic order == chronological order.
+    dirs.sort_by_key(|e| e.file_name());
+    let to_remove = dirs.len() - keep;
+    for entry in dirs.into_iter().take(to_remove) {
+        if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+            eprintln!(
+                "Warning: failed to prune old split folder {:?}: {}",
+                entry.path(),
+                e
+            );
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -226,6 +261,9 @@ pub async fn uploader_split_to_disk(
         .to_string_lossy()
         .into_owned();
     let out_root = split_output_root(&app)?;
+    // Prune old split folders before creating the new one so the total stays at
+    // KEEP_SPLIT_FOLDERS (these hold full multi-GB copies — see prune_split_folders).
+    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
     // Each split goes in its own timestamped subfolder so repeated splits of
     // different logs don't collide.
     let out_dir = out_root.join(format!("split-{}", now_ms()));
@@ -490,13 +528,23 @@ pub async fn uploader_start_live(
     };
 
     // Record the live session in history so a report link can be attached later.
+    // The id ends with `-{session_id}` so `uploader_stop_live` can settle exactly
+    // this record (see history::settle_live / next_record_id). If a stop arrived
+    // during the blocking handoff above, the uploader is already launched (we
+    // can't recall it), but the persisted record should reflect that the user
+    // cancelled rather than showing a stuck `Live` badge forever.
+    let cancelled_during_start = cancelled.load(Ordering::SeqCst);
     let record_id = super::history::next_record_id(now_ms(), &session_id);
     let record = UploadRecord {
         id: record_id,
         source_path: safe.clone(),
         file_name,
         created_at_ms: now_ms(),
-        status: UploadStatus::Live,
+        status: if cancelled_during_start {
+            UploadStatus::Cancelled
+        } else {
+            UploadStatus::Live
+        },
         mode: UploadMode::Live,
         visibility: options.visibility,
         fight_count: 0,
@@ -583,11 +631,16 @@ fn remove_own_slot(
 }
 
 /// Stop a running (or starting) live watch (the official uploader keeps its own
-/// session running regardless).
+/// session running regardless). `fight_count` is the number of fights the UI
+/// observed this session, recorded onto the settled history record so it doesn't
+/// show a stale `Live / 0 fights` badge. `fight_count` defaults to 0 when the
+/// caller doesn't supply it (e.g. an unmount-driven best-effort stop).
 #[tauri::command]
 pub fn uploader_stop_live(
+    app: tauri::AppHandle,
     state: State<'_, UploaderState>,
     session_id: String,
+    fight_count: Option<usize>,
 ) -> Result<(), String> {
     let slot = state
         .live_sessions
@@ -597,6 +650,10 @@ pub fn uploader_stop_live(
     if let Some(slot) = slot {
         stop_slot(slot);
     }
+    // Settle the matching history record (Live → Completed, with the observed
+    // fight count) so the panel reflects reality immediately rather than waiting
+    // for the next-launch reconcile. Best-effort: a missing record is fine.
+    let _ = super::history::settle_live(&app, &session_id, fight_count.unwrap_or(0));
     Ok(())
 }
 

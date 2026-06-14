@@ -74,6 +74,11 @@ const DEFAULT_OPTIONS: UploadOptions = {
 
 const OPTIONS_KEY = "kalpa.uploader.options";
 
+/** Max live fights kept in React state / the DOM at once. A long raid night can
+ *  produce hundreds of fights; we keep a rolling window of the most recent ones
+ *  (full history lives on esologs.com) and report the true total separately. */
+const MAX_LIVE_FIGHTS = 150;
+
 const VALID_REGIONS = new Set(REGION_OPTIONS.map((r) => r.id));
 const VALID_VISIBILITY = new Set<Visibility>(["public", "unlisted", "private"]);
 
@@ -123,7 +128,14 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
 
   // Live-mode state
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
+  // Rendered fights are capped to a rolling window (most-recent MAX_LIVE_FIGHTS)
+  // so a multi-hour raid can't grow this array / the DOM without bound. The
+  // truthful "N detected" count lives in `liveFightCount`, which only counts up.
   const [liveFights, setLiveFights] = useState<LiveFight[]>([]);
+  const [liveFightCount, setLiveFightCount] = useState(0);
+  // Mirror of the count so the empty-deps unmount cleanup can report the true
+  // fight total to the backend without re-subscribing on every fight.
+  const liveFightCountRef = useRef(0);
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
   const [starting, setStarting] = useState(false);
@@ -221,7 +233,10 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
       liveActiveRef.current = false; // drop any late channel events
       const id = liveSessionIdRef.current;
       if (id) {
-        void invokeOrThrow("uploader_stop_live", { sessionId: id }).catch(() => {});
+        void invokeOrThrow("uploader_stop_live", {
+          sessionId: id,
+          fightCount: liveFightCountRef.current,
+        }).catch(() => {});
       }
     };
   }, []);
@@ -330,6 +345,8 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     liveSessionIdRef.current = sessionId;
     const channel = new Channel<LiveEvent>();
     setLiveFights([]);
+    setLiveFightCount(0);
+    liveFightCountRef.current = 0;
     setLiveReport(null);
     setLiveStatus("watching");
     liveActiveRef.current = true;
@@ -348,7 +365,13 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           const detected = ev;
           setLiveFights((prev) => {
             if (prev.some((f) => f.index === detected.index)) return prev;
-            return [
+            // Bump the truthful total only when this is a genuinely new fight
+            // (not a re-delivered duplicate within the window).
+            setLiveFightCount((c) => {
+              liveFightCountRef.current = c + 1;
+              return c + 1;
+            });
+            const next = [
               ...prev,
               {
                 index: detected.index,
@@ -357,12 +380,17 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
                 durationMs: detected.durationMs,
               },
             ];
+            // Keep only the most recent MAX_LIVE_FIGHTS so a long session can't
+            // grow state/DOM without bound.
+            return next.length > MAX_LIVE_FIGHTS ? next.slice(-MAX_LIVE_FIGHTS) : next;
           });
           break;
         }
         case "sessionReset":
           toast.info("A new logging session started — continuing to watch.");
           setLiveFights([]);
+          setLiveFightCount(0);
+          liveFightCountRef.current = 0;
           break;
         case "fightSkipped":
           // A genuinely oversized fight; surface once. The full log still uploads.
@@ -416,14 +444,17 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   const handleStopLive = async () => {
     if (!liveSessionId) return;
     try {
-      await invokeOrThrow("uploader_stop_live", { sessionId: liveSessionId });
+      await invokeOrThrow("uploader_stop_live", {
+        sessionId: liveSessionId,
+        fightCount: liveFightCountRef.current,
+      });
     } catch {
       /* best-effort */
     }
     liveActiveRef.current = false; // stop processing any trailing events
     liveSessionIdRef.current = null;
     setLiveSessionId(null);
-    setLiveStatus(liveFights.length > 0 ? "upToDate" : "idle");
+    setLiveStatus(liveFightCount > 0 ? "upToDate" : "idle");
     await refreshHistory();
   };
 
@@ -579,6 +610,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
                 starting={starting}
                 canStart={!!selectedLog}
                 liveFights={liveFights}
+                liveFightCount={liveFightCount}
                 liveReport={liveReport}
                 onStart={handleStartLive}
                 onStop={handleStopLive}
@@ -903,6 +935,7 @@ function LiveDashboard({
   starting,
   canStart,
   liveFights,
+  liveFightCount,
   liveReport,
   onStart,
   onStop,
@@ -912,6 +945,7 @@ function LiveDashboard({
   starting: boolean;
   canStart: boolean;
   liveFights: LiveFight[];
+  liveFightCount: number;
   liveReport: ReportRef | null;
   onStart: () => void;
   onStop: () => void;
@@ -977,9 +1011,12 @@ function LiveDashboard({
 
       {running && (
         <div className="text-sm text-muted-foreground" role="status" aria-live="polite">
-          {liveFights.length === 0
+          {liveFightCount === 0
             ? "Watching for combat… start a fight in-game and it'll appear here."
-            : `${liveFights.length} fight${liveFights.length === 1 ? "" : "s"} detected this session.`}
+            : `${liveFightCount} fight${liveFightCount === 1 ? "" : "s"} detected this session.` +
+              (liveFightCount > liveFights.length
+                ? ` Showing the latest ${liveFights.length}.`
+                : "")}
         </div>
       )}
 

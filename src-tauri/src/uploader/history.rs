@@ -105,6 +105,37 @@ pub fn upsert(app: &tauri::AppHandle, record: UploadRecord) -> Result<(), String
     save_json_with_backup(&path, &file)
 }
 
+/// Settle the live record for a session when the user stops live mode.
+///
+/// `uploader_start_live` writes a `Live` record whose id ends with
+/// `-{session_id}` (see [`next_record_id`]). On stop we can't observe the
+/// official uploader's outcome, but we *do* know the session ended and how many
+/// fights the UI saw, so flip the record to `Completed` and record that count
+/// rather than leaving a perpetual red `Live / 0 fights` badge until the next
+/// `reconcile_stale` at startup. Idempotent and a no-op if the record is gone.
+pub fn settle_live(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    fight_count: usize,
+) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    let suffix = format!("-{session_id}");
+    let mut changed = false;
+    for r in &mut file.records {
+        if r.id.ends_with(&suffix) && matches!(r.status, UploadStatus::Live) {
+            r.status = UploadStatus::Completed;
+            r.fight_count = fight_count;
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
 /// Delete a record by id, then persist (serialized with other mutations).
 pub fn remove(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;
