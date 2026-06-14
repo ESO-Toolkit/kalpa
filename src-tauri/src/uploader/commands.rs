@@ -275,7 +275,7 @@ pub async fn uploader_upload_log(
         }
     };
 
-    let record_id = format!("{}-{}", now_ms(), file_name);
+    let record_id = super::history::next_record_id(now_ms(), &file_name);
     let mut record = UploadRecord {
         id: record_id.clone(),
         source_path: file_path.clone(),
@@ -290,7 +290,13 @@ pub async fn uploader_upload_log(
     };
     let _ = super::history::upsert(&app, record.clone());
 
-    let opts = options.clone();
+    // Force one-shot semantics: the persisted options blob may carry live-only
+    // flags (real_time / include_entire_file) left over from a prior live
+    // session, which would otherwise turn this manual upload into a fire-and-
+    // forget real-time launch.
+    let mut opts = options.clone();
+    opts.real_time = false;
+    opts.include_entire_file = false;
     let dispatch_path = file_path.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         let t = transport::select_transport(prefer_cli);
@@ -370,11 +376,25 @@ pub async fn uploader_start_live(
         .unwrap_or("Encounter.log")
         .to_string();
 
+    // Live mode genuinely requires the official uploader: only it can stream a
+    // running log in real time (a lone fight slice has no BEGIN_LOG header). The
+    // GUI-handoff fallback would just open a download page while Kalpa shows a
+    // convincing-but-fake live timeline — so refuse rather than no-op.
+    if transport::find_official_uploader().is_none() {
+        return Err(
+            "Live logging needs the ESO Logs Uploader installed. Install \
+                    it, or use \"Upload a Log\" after your session instead."
+                .into(),
+        );
+    }
+
     // Hand the whole file to the official uploader once, with real-time on.
     let mut live_opts = options.clone();
     live_opts.real_time = true;
     let dispatch_path = file_path.clone();
     let outcome = tokio::task::spawn_blocking(move || {
+        // The uploader is installed, so the CLI transport is the right one;
+        // `prefer_cli` is honored but we never fall back to GUI handoff here.
         let t = transport::select_transport(prefer_cli);
         t.upload_file(&dispatch_path, &live_opts)
     })
@@ -396,7 +416,7 @@ pub async fn uploader_start_live(
     };
 
     // Record the live session in history so a report link can be attached later.
-    let record_id = format!("{}-{}", now_ms(), session_id);
+    let record_id = super::history::next_record_id(now_ms(), &session_id);
     let record = UploadRecord {
         id: record_id,
         source_path: file_path.clone(),
@@ -421,12 +441,17 @@ pub async fn uploader_start_live(
 
     let handle = watcher::start_live_watch(&file_path, start_offset, channel)?;
 
-    // Stop any prior handle reused under the same id before replacing it.
-    let mut sessions = state
-        .live_sessions
-        .lock()
-        .map_err(|_| "Live session lock poisoned")?;
-    if let Some(prev) = sessions.insert(session_id, handle) {
+    // Replace any prior handle under the same id. Take the old one out under the
+    // lock, then drop the guard BEFORE joining its thread (join can take up to a
+    // poll interval) so unrelated session commands aren't serialized behind it.
+    let prev = {
+        let mut sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        sessions.insert(session_id, handle)
+    };
+    if let Some(prev) = prev {
         prev.stop();
     }
 
@@ -473,27 +498,28 @@ pub fn uploader_attach_report(
     id: String,
     report_url: String,
 ) -> Result<(), String> {
-    // Only accept esologs.com report URLs.
     let trimmed = report_url.trim();
-    let is_report = (trimmed.starts_with("https://www.esologs.com/reports/")
-        || trimmed.starts_with("https://esologs.com/reports/"))
-        && trimmed.len() < 256;
-    if !is_report {
+    if trimmed.len() >= 256 {
         return Err("Enter a valid esologs.com report link.".into());
     }
+    // Strip the known report prefix and validate the remaining code is a plain
+    // alphanumeric report id — rejecting query/fragment/traversal segments.
+    let code = trimmed
+        .strip_prefix("https://www.esologs.com/reports/")
+        .or_else(|| trimmed.strip_prefix("https://esologs.com/reports/"))
+        .map(|rest| rest.trim_end_matches('/'))
+        .filter(|code| !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric()))
+        .ok_or_else(|| "Enter a valid esologs.com report link.".to_string())?;
 
     let mut records = super::history::load(&app);
     let Some(record) = records.iter_mut().find(|r| r.id == id) else {
         return Err("Upload record not found.".into());
     };
-    let code = trimmed
-        .rsplit('/')
-        .find(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string();
+    // Build the canonical URL from the validated code (matches the other two
+    // ReportRef construction sites).
     record.report = Some(ReportRef {
-        code,
-        url: trimmed.to_string(),
+        url: watcher::report_url(code),
+        code: code.to_string(),
     });
     let updated = record.clone();
     super::history::upsert(&app, updated)

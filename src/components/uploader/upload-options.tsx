@@ -45,13 +45,15 @@ export function UploadOptionsControl({
     <div className="space-y-4">
       <div className="space-y-2">
         <SectionHeader>Region</SectionHeader>
-        <div className="flex gap-2" role="radiogroup" aria-label="Region">
+        {/* Plain toggle buttons (aria-pressed) rather than a radiogroup: a true
+            radiogroup implies roving-tabindex arrow-key nav we don't implement,
+            so aria-pressed matches the actual Tab+Enter behavior (and ModeTab). */}
+        <div className="flex gap-2" role="group" aria-label="Region">
           {REGION_OPTIONS.map((r) => (
             <button
               key={r.id}
               type="button"
-              role="radio"
-              aria-checked={options.region === r.id}
+              aria-pressed={options.region === r.id}
               disabled={disabled}
               onClick={() => onChange({ ...options, region: r.id })}
               className={cn(
@@ -72,7 +74,7 @@ export function UploadOptionsControl({
         <SectionHeader>Visibility</SectionHeader>
         <div
           className="grid grid-cols-1 gap-2 sm:grid-cols-3"
-          role="radiogroup"
+          role="group"
           aria-label="Report visibility"
         >
           {VISIBILITY_TIERS.map(({ value, label, hint, Icon }) => {
@@ -81,8 +83,7 @@ export function UploadOptionsControl({
               <button
                 key={value}
                 type="button"
-                role="radio"
-                aria-checked={active}
+                aria-pressed={active}
                 disabled={disabled}
                 onClick={() => onChange({ ...options, visibility: value })}
                 className={cn(

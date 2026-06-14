@@ -144,9 +144,11 @@ impl Detector {
                     self.close_session(offset);
                     // A new BEGIN_LOG while already in a session = a fresh
                     // logging session appended to the same file. Record the
-                    // first such boundary for the chunk scanner.
+                    // first such boundary for the chunk scanner, anchored just
+                    // PAST the BEGIN_LOG line so re-reading from it doesn't
+                    // re-detect the same boundary (avoids a 1-byte crawl).
                     if self.new_session_at.is_none() {
-                        self.new_session_at = Some(offset);
+                        self.new_session_at = Some(next_offset);
                     }
                 }
                 self.session_open = true;
@@ -289,8 +291,10 @@ pub struct ChunkScan {
     /// window is captured on the next pass (rather than being mistaken for an
     /// oversized fight and skipped).
     pub open_fight_start: Option<u64>,
-    /// Absolute byte offset of the first mid-chunk `BEGIN_LOG` (a `/encounterlog`
-    /// re-enable). The watcher emits a session reset and re-indexes from here.
+    /// Absolute byte offset just *past* the first mid-chunk `BEGIN_LOG` line (a
+    /// `/encounterlog` re-enable). The watcher emits a session reset, re-indexes
+    /// from 0, and re-anchors here — past the boundary line, so it isn't
+    /// re-detected on the next pass.
     pub new_session_at: Option<u64>,
 }
 
@@ -424,24 +428,18 @@ mod tests {
     }
 
     #[test]
-    fn chunk_scanner_reports_new_session_on_mid_chunk_begin_log() {
+    fn chunk_scanner_reports_new_session_past_begin_log_line() {
         // A /encounterlog re-enable appends a fresh BEGIN_LOG to the same file.
-        let chunk = b"10,BEGIN_COMBAT\n20,END_COMBAT\n0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"x\"\n5,BEGIN_COMBAT\n15,END_COMBAT\n";
-        let new_at = chunk
-            .windows(b"BEGIN_LOG".len())
-            .position(|w| w == b"BEGIN_LOG")
-            .map(|p| {
-                // back up to the start of that line
-                chunk[..p]
-                    .iter()
-                    .rposition(|&b| b == b'\n')
-                    .map(|nl| nl + 1)
-                    .unwrap_or(0)
-            })
-            .unwrap() as u64;
-        let scan = scan_chunk_for_fights(chunk, 0);
-        assert_eq!(scan.new_session_at, Some(new_at));
-        // Both fights are still detected within the chunk.
+        let begin_line = "0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"x\"\n";
+        let prefix = "10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let chunk = format!("{prefix}{begin_line}5,BEGIN_COMBAT\n15,END_COMBAT\n").into_bytes();
+        // new_session_at is the offset just PAST the BEGIN_LOG line, so the next
+        // read starts after it and the boundary isn't re-detected (no 1-byte crawl).
+        let expected = (prefix.len() + begin_line.len()) as u64;
+        let scan = scan_chunk_for_fights(&chunk, 0);
+        assert_eq!(scan.new_session_at, Some(expected));
+        // Both fights are still detected within the chunk (the watcher uses the
+        // boundary to split pre/post-session dispatch).
         assert_eq!(scan.fights.len(), 2);
     }
 }

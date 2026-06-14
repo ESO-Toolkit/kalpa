@@ -5,15 +5,33 @@
 //! (`metadata::save_json_with_backup`) so a crash mid-write can't corrupt it.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use super::types::UploadRecord;
+use super::types::{UploadRecord, UploadStatus};
 use crate::metadata::{load_json_with_backup, save_json_with_backup};
 
 /// Cap the stored history so the file can't grow unbounded.
 const MAX_RECORDS: usize = 200;
+
+/// Serializes every load→mutate→save cycle so concurrent commands (e.g. an
+/// async upload mid-await vs. a sync attach-report) can't lose a record to a
+/// last-writer-wins race.
+static MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+/// Monotonic suffix making record ids unique even within the same millisecond.
+static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Build a unique history record id: `{now_ms}-{counter}-{label}`. The counter
+/// disambiguates two records created in the same millisecond (which would
+/// otherwise collide and overwrite under upsert's id match).
+pub fn next_record_id(now_ms: u64, label: &str) -> String {
+    let n = ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{now_ms}-{n}-{label}")
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct HistoryFile {
@@ -40,9 +58,37 @@ pub fn load(app: &tauri::AppHandle) -> Vec<UploadRecord> {
     file.records
 }
 
-/// Insert or update a record (matched by `id`), then persist.
+/// Reconcile records left in a transient state by a previous run.
+///
+/// Uploads hand off to the official uploader, whose progress we don't observe,
+/// so a record stuck in `Uploading`/`Live` from before a crash/quit can never
+/// resolve on its own. Settle them to `Completed` once at startup so the history
+/// panel doesn't show a perpetual "Uploading"/"Live" badge.
+pub fn reconcile_stale(app: &tauri::AppHandle) {
+    let Ok(path) = history_path(app) else {
+        return;
+    };
+    let Ok(_guard) = MUTATION_LOCK.lock() else {
+        return;
+    };
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut changed = false;
+    for r in &mut file.records {
+        if matches!(r.status, UploadStatus::Uploading | UploadStatus::Live) {
+            r.status = UploadStatus::Completed;
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = save_json_with_backup(&path, &file);
+    }
+}
+
+/// Insert or update a record (matched by `id`), then persist. The whole
+/// read-modify-write is serialized so concurrent callers can't lose records.
 pub fn upsert(app: &tauri::AppHandle, record: UploadRecord) -> Result<(), String> {
     let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
     let mut file: HistoryFile = load_json_with_backup(&path);
 
     if let Some(existing) = file.records.iter_mut().find(|r| r.id == record.id) {
@@ -59,9 +105,10 @@ pub fn upsert(app: &tauri::AppHandle, record: UploadRecord) -> Result<(), String
     save_json_with_backup(&path, &file)
 }
 
-/// Delete a record by id, then persist.
+/// Delete a record by id, then persist (serialized with other mutations).
 pub fn remove(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
     let mut file: HistoryFile = load_json_with_backup(&path);
     let before = file.records.len();
     file.records.retain(|r| r.id != id);

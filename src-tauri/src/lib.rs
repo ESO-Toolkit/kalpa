@@ -297,6 +297,10 @@ pub fn run() {
                 }
             }
 
+            // Settle any upload-history records left in a transient state by a
+            // previous run (uploads hand off, so we never observe completion).
+            uploader::history::reconcile_stale(app.handle());
+
             Ok(())
         })
         .on_window_event(|window, event| {

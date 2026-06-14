@@ -87,6 +87,14 @@ pub fn split_by_session(source_path: &str, out_dir: &str) -> Result<Vec<String>,
         return Err("No logging sessions found in this file.".into());
     }
 
+    // The active Encounter.log may still be growing as ESO appends. Snapshot the
+    // length and clamp every copy to it, so a session whose `end_offset` reached
+    // the (moving) EOF is copied only up to bytes that definitely existed —
+    // never a torn read past the snapshot.
+    let snapshot_len = std::fs::metadata(src)
+        .map_err(|e| format!("Failed to stat source: {e}"))?
+        .len();
+
     let stem = src
         .file_stem()
         .and_then(|s| s.to_str())
@@ -94,8 +102,12 @@ pub fn split_by_session(source_path: &str, out_dir: &str) -> Result<Vec<String>,
 
     let mut written = Vec::with_capacity(sessions.len());
     for session in &sessions {
+        let end = session.end_offset.min(snapshot_len);
+        if end <= session.start_offset {
+            continue; // session lies entirely past the snapshot (shouldn't happen)
+        }
         let dst = out.join(session_file_name(stem, session));
-        copy_range(src, &dst, session.start_offset, session.end_offset)?;
+        copy_range(src, &dst, session.start_offset, end)?;
         written.push(dst.to_string_lossy().into_owned());
     }
     Ok(written)

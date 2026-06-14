@@ -129,6 +129,9 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   // Holds the in-flight live session id from before the start await resolves, so
   // unmounting mid-await still stops the backend watcher (state hasn't landed).
   const liveSessionIdRef = useRef<string | null>(null);
+  // Gate for the live channel handler: late events queued during the ~poll
+  // shutdown window must not fire setState/toast after stop or unmount.
+  const liveActiveRef = useRef(false);
 
   // Current selection, mirrored to a ref so loadLogs can reconcile it without
   // being re-created on every selection change.
@@ -200,7 +203,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
       } catch (e) {
         if (!cancelled) toast.error(getTauriErrorMessage(e));
       }
-      await refreshHistory();
+      if (!cancelled) await refreshHistory();
     })();
     return () => {
       cancelled = true;
@@ -212,6 +215,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   // is still torn down. Empty deps: this must run only on final unmount.
   useEffect(() => {
     return () => {
+      liveActiveRef.current = false; // drop any late channel events
       const id = liveSessionIdRef.current;
       if (id) {
         void invokeOrThrow("uploader_stop_live", { sessionId: id }).catch(() => {});
@@ -315,10 +319,14 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     setLiveFights([]);
     setLiveReport(null);
     setLiveStatus("watching");
+    liveActiveRef.current = true;
 
     // The watcher emits UI-only fight-detection events; the actual upload is the
     // single whole-file handoff performed by uploader_start_live below.
     channel.onmessage = (ev) => {
+      // Drop events that arrive after the session was stopped or the dialog
+      // closed (the backend keeps emitting for up to one poll interval).
+      if (!liveActiveRef.current) return;
       switch (ev.type) {
         case "started":
           setLiveStatus("watching");
@@ -385,6 +393,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     } catch {
       /* best-effort */
     }
+    liveActiveRef.current = false; // stop processing any trailing events
     liveSessionIdRef.current = null;
     setLiveSessionId(null);
     setLiveStatus(liveFights.length > 0 ? "upToDate" : "idle");
@@ -446,7 +455,12 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
             <div className="grid grid-cols-2 gap-2">
               <ModeTab
                 active={mode === "manual"}
-                onClick={() => setMode("manual")}
+                onClick={() => {
+                  // Leaving Live unmounts its only Stop control, so stop the
+                  // session first rather than orphaning the watcher.
+                  if (liveSessionId) void handleStopLive();
+                  setMode("manual");
+                }}
                 Icon={Upload}
                 title="Upload a Log"
                 hint="Send a finished log after your session."
@@ -513,7 +527,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
             {/* Action area */}
             {mode === "manual" ? (
               <ManualActions
-                canUpload={!!selectedLog && !uploading}
+                canUpload={!!selectedLog && !uploading && liveSessionId === null}
                 uploading={uploading}
                 transport={transport}
                 onUpload={handleManualUpload}
@@ -750,6 +764,8 @@ function LiveToggles({
   onChange: (next: UploadOptions) => void;
   disabled?: boolean;
 }) {
+  // Note: live mode is definitionally real-time (the official uploader tails the
+  // running file), so there is no real-time toggle — it would be a no-op.
   return (
     <div className="mt-4 space-y-2 border-t border-white/[0.06] pt-4">
       <SectionHeader>Live Options</SectionHeader>
@@ -758,14 +774,7 @@ function LiveToggles({
         disabled={disabled}
         onChange={(v) => onChange({ ...options, includeEntireFile: v })}
         label="Include earlier fights"
-        hint="Upload fights already in the log, not just new ones."
-      />
-      <Toggle
-        checked={options.realTime}
-        disabled={disabled}
-        onChange={(v) => onChange({ ...options, realTime: v })}
-        label="Real-time streaming"
-        hint="Stream events as they happen so spectators see fights live (uses more bandwidth)."
+        hint="Also upload fights already in the log, not just new ones."
       />
     </div>
   );

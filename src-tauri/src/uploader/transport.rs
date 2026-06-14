@@ -200,31 +200,23 @@ impl LogUploadTransport for CliTransport {
         }
 
         if opts.real_time {
-            // A real-time uploader stays running for the whole session, so we
-            // must NOT wait on it — `spawn` and treat it as a handoff. Blocking
-            // on `status()` here would hang the live-start command forever.
             cmd.arg("--enable-real-time-uploading");
-            cmd.spawn()
-                .map_err(|e| format!("Failed to start the ESO Logs Uploader: {e}"))?;
-            Ok(UploadOutcome::HandedOff {
-                detail: "Live logging started in the ESO Logs Uploader.".into(),
-            })
-        } else {
-            // One-shot upload: the process exits when done, so we can wait and
-            // report success/failure.
-            let status = cmd
-                .status()
-                .map_err(|e| format!("Failed to run the ESO Logs Uploader CLI: {e}"))?;
-            if status.success() {
-                Ok(UploadOutcome::Completed { report_code: None })
-            } else {
-                Err(format!(
-                    "The ESO Logs Uploader exited with status {}. Try the manual \
-                     handoff instead.",
-                    status.code().unwrap_or(-1)
-                ))
-            }
         }
+
+        // Spawn and hand off rather than blocking on `status()`. Waiting would
+        // hang for the whole session in real-time mode, and even for a one-shot
+        // it can block minutes on a multi-GB log with the UI frozen — and we
+        // can't observe a report code from the CLI exit anyway. The official
+        // uploader window shows the user real progress.
+        cmd.spawn()
+            .map_err(|e| format!("Failed to start the ESO Logs Uploader: {e}"))?;
+        Ok(UploadOutcome::HandedOff {
+            detail: if opts.real_time {
+                "Live logging started in the ESO Logs Uploader.".into()
+            } else {
+                "Uploading in the ESO Logs Uploader — watch its window for progress.".into()
+            },
+        })
     }
 }
 

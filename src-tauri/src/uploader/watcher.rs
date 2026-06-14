@@ -237,10 +237,20 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
         let scan = scanner::scan_chunk_for_fights(&chunk, consumed);
 
         // A mid-chunk BEGIN_LOG (a /encounterlog re-enable) starts a new session
-        // in the same growing file. Reset the UI timeline and re-index from 0,
-        // then re-anchor just past that boundary so the new session's fights are
-        // scanned cleanly on the next pass.
+        // in the same growing file. Dispatch any fights that completed *before*
+        // the boundary (they belong to the closing session) so they aren't lost
+        // from the timeline, then reset the UI, re-index from 0, and re-anchor
+        // just past the boundary (new_session_at is already its next_offset).
         if let Some(new_at) = scan.new_session_at {
+            for fr in scan.fights.iter().filter(|f| f.end_offset <= new_at) {
+                let _ = channel.send(LiveEvent::FightDetected {
+                    index: next_index,
+                    zone_name: fr.zone_name.clone(),
+                    boss_name: fr.boss_name.clone(),
+                    duration_ms: fr.end_ms.saturating_sub(fr.start_ms),
+                });
+                next_index += 1;
+            }
             let _ = channel.send(LiveEvent::SessionReset);
             next_index = 0;
             consumed = new_at.max(consumed + 1);
