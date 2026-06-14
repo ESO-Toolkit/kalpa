@@ -551,6 +551,18 @@ function App() {
     }
   }, [scanAndCheck]);
 
+  // True when any of the given folders is declared as a dependency by another
+  // installed addon. missing/outdatedDependencies are computed by the backend
+  // against the *enabled* folder set, so the in-place disabled-flag patch can't
+  // recompute them — when a dependency's enabled state changes we must rescan to
+  // keep dependents' "N missing" badges correct. Returns false in the common
+  // case (toggling a non-dependency addon), preserving the no-rescan perf win.
+  const togglingAffectsDependencies = useCallback(
+    (toggledFolders: Set<string>) =>
+      addons.some((addon) => addon.dependsOn.some((dep) => toggledFolders.has(dep.name))),
+    [addons]
+  );
+
   const handleTagsChange = useCallback(
     async (folderName: string, tags: string[]) => {
       try {
@@ -584,11 +596,17 @@ function App() {
         setSelectedAddon((prev) =>
           prev?.folderName === folderName ? { ...prev, disabled: nowDisabled } : prev
         );
+        // If this addon is a dependency of another, its enabled-state change
+        // affects dependents' missing/outdated badges, which only the backend
+        // can recompute — rescan to keep them accurate.
+        if (togglingAffectsDependencies(new Set([folderName]))) {
+          void scanAddons(addonsPathRef.current);
+        }
       } else {
         toast.error(result.error);
       }
     },
-    [addonsPath]
+    [addonsPath, togglingAffectsDependencies, scanAddons]
   );
 
   const handleAddonUpdated = useCallback(
@@ -1158,6 +1176,12 @@ function App() {
             ? { ...prev, disabled: toggled.get(prev.folderName)! }
             : prev
         );
+        // Rescan if any toggled addon is a dependency of another, so dependents'
+        // missing/outdated badges stay accurate (the backend recomputes them
+        // against the enabled folder set; the in-place patch cannot).
+        if (togglingAffectsDependencies(new Set(toggled.keys()))) {
+          void scanAddons(addonsPathRef.current);
+        }
       }
     } catch (batchError) {
       toast.error(`Failed to update addons: ${getTauriErrorMessage(batchError)}`);
@@ -1165,7 +1189,7 @@ function App() {
       setBatchDisabling(false);
       setSelectedFolders(new Set());
     }
-  }, [addons, addonsPath, selectedFolders]);
+  }, [addons, addonsPath, selectedFolders, togglingAffectsDependencies, scanAddons]);
 
   const handleBatchTag = useCallback(
     async (tag: string) => {
