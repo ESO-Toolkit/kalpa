@@ -4,6 +4,25 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.7] — 2026-06-14
+
+A correctness and data-integrity hardening release following the recent performance work. An audit of the batched install/update/toggle paths surfaced several cases where the speedups skipped a safety step; these fixes restore the guarantees while keeping the performance gains.
+
+### Bug Fixes
+
+- **Pack installs now record an edit-protection baseline.** `batch_install_pack_addons` and the addon-list import path extracted addons and recorded them in `kalpa.json` but never wrote a `.kalpa-hashes` baseline. Without it, the next update saw every file as unmodified and would silently overwrite a user's edits — the exact case the hash system exists to prevent. Both paths now record the baseline after extraction and fail the addon (rather than tracking it unprotected) if the baseline can't be written, matching the invariant the update paths already enforce. ([#159](https://github.com/ESO-Toolkit/kalpa/pull/159))
+- **Surface metadata-save failures during install instead of reporting a blanket failure.** If `kalpa.json` couldn't be saved after addons were extracted (e.g. Controlled Folder Access, read-only or full disk), the whole batch was reported as failed with no list refresh — even though the addons were on disk. The installed addons are now moved into the failed set with the save error, partial state is surfaced, and the addon list refreshes whenever anything reached disk. ([#159](https://github.com/ESO-Toolkit/kalpa/pull/159))
+- **Install result reconciliation.** Per-addon status pills in the roster pack installer now reconcile against the command's authoritative result rather than trusting the streamed progress events alone, so a late save failure no longer leaves green "installed" pills next to a "failed" toast. ([#159](https://github.com/ESO-Toolkit/kalpa/pull/159))
+- **Dependency badges refresh when toggling a depended-on addon.** Enabling/disabling an addon patched its own state in place but left other addons' "N missing dependencies" badges stale, so disabling a shared library (e.g. LibAddonMenu-2.0) left dependents looking healthy until a manual refresh. A toggle now rescans only when the toggled addon is actually a dependency of another installed addon, keeping the badges accurate without paying the rescan cost in the common case. ([#159](https://github.com/ESO-Toolkit/kalpa/pull/159))
+
+### Pack Hub (Worker)
+
+- **Stop reverting pack edits via stale-cached counter writes.** Voting or installing a pack read the whole pack through a 300s edge-cached path, bumped one counter, and wrote the entire object back — so a vote or install landing shortly after an author edited their pack could silently roll that edit back, and concurrent votes could be lost. Counter updates now run inside the pack-index Durable Object against a fresh, single-threaded read that touches only the counter; the other mutating paths read fresh. ([#160](https://github.com/ESO-Toolkit/kalpa/pull/160))
+
+### CI
+
+- **Scope the worker npm audit to production dependencies** (`--omit=dev`). The worker ships no runtime dependencies; the audit was failing on an unfixable `esbuild` advisory pulled in only by dev/test tooling that never reaches the deployed worker. ([#158](https://github.com/ESO-Toolkit/kalpa/pull/158))
+
 ## [0.1.0-beta.6] — 2026-06-06
 
 ### Dependencies
