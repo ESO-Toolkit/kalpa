@@ -8,9 +8,40 @@
 use crate::auth::AuthTokens;
 
 const SERVICE: &str = "kalpa";
+/// Legacy single-entry key (raw JSON). Read for back-compat; never written to
+/// by the chunked format. New data uses `auth_tokens.count` + `auth_tokens.{N}`.
 const USER: &str = "auth_tokens";
 
 // ── Windows implementation (real credential manager) ────────────────────
+//
+// Windows Credential Manager caps a credential blob at 2560 bytes of UTF-16
+// (≈1280 ASCII chars). An ESO Logs access+refresh JWT pair serialized to JSON
+// far exceeds that, so a single `set_password` of the whole token JSON fails —
+// which broke login, refresh, AND migration (they all funnel through
+// `save_tokens`). We base64-encode the JSON (→ pure ASCII, exactly 2 UTF-16
+// bytes per char) and split it into fixed-size chunks across multiple
+// credential entries, well under the limit.
+
+#[cfg(windows)]
+use base64::{engine::general_purpose::STANDARD, Engine};
+
+/// Sentinel: decimal chunk count. Its presence marks the chunked format.
+#[cfg(windows)]
+const COUNT_KEY: &str = "auth_tokens.count";
+/// Chunk N is stored under `auth_tokens.{N}`.
+#[cfg(windows)]
+const CHUNK_PREFIX: &str = "auth_tokens";
+/// Upper bound on chunks read/swept (sanity cap; ~64 KB of base64 max).
+#[cfg(windows)]
+const MAX_CHUNKS: usize = 64;
+/// Base64 chars per chunk → 2000 UTF-16 bytes, a ~28% margin under 2560.
+#[cfg(windows)]
+const CHUNK_LEN: usize = 1000;
+
+#[cfg(windows)]
+fn entry(user: &str) -> Option<keyring::Entry> {
+    keyring::Entry::new(SERVICE, user).ok()
+}
 
 #[cfg(windows)]
 pub fn save_tokens(tokens: &AuthTokens) {
@@ -21,33 +52,87 @@ pub fn save_tokens(tokens: &AuthTokens) {
             return;
         }
     };
-    let entry = match keyring::Entry::new(SERVICE, USER) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("[token_store] failed to create keyring entry: {e}");
+    // base64 → pure ASCII so each char is exactly 2 UTF-16 bytes; chunk by byte
+    // count, which (ASCII) equals char count.
+    let b64 = STANDARD.encode(json.as_bytes());
+    let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK_LEN).collect();
+
+    // Wipe any prior chunks/count/legacy entry first, so a shorter new token
+    // set can't leave orphan high-index chunks behind.
+    clear_tokens();
+
+    for (i, c) in chunks.iter().enumerate() {
+        // base64 output is valid ASCII, so this never fails.
+        let s = match std::str::from_utf8(c) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("[token_store] chunk {i} not valid ascii (unexpected)");
+                return;
+            }
+        };
+        let Some(e) = entry(&format!("{CHUNK_PREFIX}.{i}")) else {
+            eprintln!("[token_store] failed to create keyring entry for chunk {i}");
+            return;
+        };
+        if let Err(err) = e.set_password(s) {
+            eprintln!("[token_store] failed to save chunk {i}: {err}");
             return;
         }
-    };
-    if let Err(e) = entry.set_password(&json) {
-        eprintln!("[token_store] failed to save tokens: {e}");
+    }
+
+    // Write the count LAST — it's the commit point. A crash before this leaves
+    // no valid sentinel, so a half-written set is never read back as valid.
+    if let Some(e) = entry(COUNT_KEY) {
+        if let Err(err) = e.set_password(&chunks.len().to_string()) {
+            eprintln!("[token_store] failed to save token count: {err}");
+        }
     }
 }
 
 #[cfg(windows)]
 pub fn load_tokens() -> Option<AuthTokens> {
-    let entry = keyring::Entry::new(SERVICE, USER).ok()?;
-    let json = entry.get_password().ok()?;
+    // New chunked format: keyed on the presence of the count sentinel.
+    if let Some(count_entry) = entry(COUNT_KEY) {
+        if let Ok(count_str) = count_entry.get_password() {
+            let n: usize = count_str.trim().parse().ok()?;
+            if n == 0 || n > MAX_CHUNKS {
+                return None;
+            }
+            let mut b64 = String::new();
+            for i in 0..n {
+                // Any missing chunk = corrupt/partial → fail closed.
+                let part = entry(&format!("{CHUNK_PREFIX}.{i}"))?.get_password().ok()?;
+                b64.push_str(&part);
+            }
+            let bytes = STANDARD.decode(b64.as_bytes()).ok()?;
+            let json = String::from_utf8(bytes).ok()?;
+            return serde_json::from_str(&json).ok();
+        }
+    }
+
+    // Legacy single-entry format (raw JSON, pre-chunking). Lets already-migrated
+    // small-token users keep working; they heal to chunked on the next save.
+    let json = entry(USER)?.get_password().ok()?;
     serde_json::from_str(&json).ok()
 }
 
 #[cfg(windows)]
 pub fn clear_tokens() {
-    let entry = match keyring::Entry::new(SERVICE, USER) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    // delete_credential returns Err if no credential exists — that is fine
-    let _ = entry.delete_credential();
+    // Best-effort sweep regardless of the recorded count, so orphan chunks from
+    // a previously-larger token set are removed too. delete_credential on a
+    // nonexistent entry returns Err — ignored.
+    for i in 0..MAX_CHUNKS {
+        if let Some(e) = entry(&format!("{CHUNK_PREFIX}.{i}")) {
+            let _ = e.delete_credential();
+        }
+    }
+    if let Some(e) = entry(COUNT_KEY) {
+        let _ = e.delete_credential();
+    }
+    if let Some(e) = entry(USER) {
+        // legacy single-entry
+        let _ = e.delete_credential();
+    }
 }
 
 #[cfg(windows)]
@@ -69,25 +154,16 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
         Err(_) => return, // corrupt data, skip
     };
 
-    // Write to credential manager first; only delete from store on success.
-    let json = match serde_json::to_string(&tokens) {
-        Ok(j) => j,
-        Err(_) => return,
-    };
-    let entry = match keyring::Entry::new(SERVICE, USER) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("[token_store] migration: failed to create keyring entry: {e}");
-            return; // leave store intact so tokens are not lost
-        }
-    };
-    if let Err(e) = entry.set_password(&json) {
-        eprintln!("[token_store] migration: failed to save tokens: {e}");
-        return; // leave store intact
+    // Use the chunked save path (the old inline single-entry write overflowed
+    // the 2560-byte credential limit and left plaintext behind). Verify the
+    // round-trip via load_tokens before discarding the plaintext copy, so a
+    // failed write never loses the user's tokens.
+    save_tokens(&tokens);
+    if load_tokens().is_some() {
+        let _ = store.delete("auth_tokens");
+    } else {
+        eprintln!("[token_store] migration: verify failed, leaving plaintext intact");
     }
-
-    // Credential manager write succeeded — remove plaintext copy
-    let _ = store.delete("auth_tokens");
 }
 
 // ── Non-Windows stubs ───────────────────────────────────────────────────
