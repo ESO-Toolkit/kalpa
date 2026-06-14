@@ -154,7 +154,10 @@ pub async fn uploader_list_logs(
     if !canonical.starts_with(&root) {
         return Err("Only your ESO Logs folder can be listed.".into());
     }
-    tokio::task::spawn_blocking(move || discovery::list_log_files(&logs_dir))
+    // Enumerate the canonical path (not the raw caller string) so the directory
+    // read targets exactly what passed confinement — see confine_log_path.
+    let dir = canonical.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || discovery::list_log_files(&dir))
         .await
         .map_err(|e| format!("Task failed: {e}"))?
 }
@@ -283,17 +286,21 @@ pub async fn uploader_upload_log(
         .to_string();
 
     // Use the preflight count if the UI supplied it; only re-scan as a fallback.
+    // The count is for the history record only and never gates the upload, so a
+    // scan failure degrades to 0 — but we log it rather than swallowing silently.
     let fight_count = match fight_count {
         Some(c) => c,
         None => {
             let scan_path = safe.clone();
-            tokio::task::spawn_blocking(move || {
-                scanner::scan_file(&scan_path)
-                    .map(|s| s.fights.len())
-                    .unwrap_or(0)
-            })
-            .await
-            .unwrap_or(0)
+            tokio::task::spawn_blocking(move || scanner::scan_file(&scan_path))
+                .await
+                .map_err(|e| format!("Fight-count task failed: {e}"))
+                .and_then(|r| r)
+                .map(|s| s.fights.len())
+                .unwrap_or_else(|e| {
+                    eprintln!("[uploader] fight count scan failed: {e}");
+                    0
+                })
         }
     };
 
@@ -387,7 +394,6 @@ pub async fn uploader_start_live(
     session_id: String,
     file_path: String,
     options: UploadOptions,
-    prefer_cli: bool,
     channel: Channel<LiveEvent>,
 ) -> Result<UploadDispatch, String> {
     let safe = confine_log_path(&allowed, &file_path)?
@@ -431,14 +437,20 @@ pub async fn uploader_start_live(
     }
 
     // Hand the whole file to the official uploader once, with real-time on.
+    // Live MUST use the CLI transport (which passes --enable-real-time-uploading);
+    // the GUI handoff would open the uploader in one-shot mode while we show a
+    // fake "LIVE" timeline. We already confirmed the uploader is installed above,
+    // but detection can still fail (e.g. removed between the check and here), in
+    // which case we error rather than silently falling back to a one-shot launch.
     let mut live_opts = options.clone();
     live_opts.real_time = true;
     let dispatch_path = safe.clone();
-    let outcome = tokio::task::spawn_blocking(move || {
-        // The uploader is installed, so the CLI transport is the right one;
-        // `prefer_cli` is honored but we never fall back to GUI handoff here.
-        let t = transport::select_transport(prefer_cli);
-        t.upload_file(&dispatch_path, &live_opts)
+    let outcome = tokio::task::spawn_blocking(move || match transport::CliTransport::detect() {
+        Some(cli) => {
+            use transport::LogUploadTransport;
+            cli.upload_file(&dispatch_path, &live_opts)
+        }
+        None => Err("The ESO Logs Uploader could not be launched for live logging.".to_string()),
     })
     .await
     .map_err(|e| format!("Task failed: {e}"));

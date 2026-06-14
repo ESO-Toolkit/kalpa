@@ -318,6 +318,14 @@ pub fn scan_chunk_for_fights(chunk: &[u8], base: u64, session_already_open: bool
     let mut offset: u64 = 0;
 
     for raw_line in chunk.split_inclusive(|b| *b == b'\n') {
+        // A trailing segment without a terminating '\n' is a not-yet-complete
+        // line (the live read frequently lands mid-line while ESO appends).
+        // Feeding it would misclassify a partially-flushed `…,BEGIN_LOG` or
+        // `…,END_COMBAT` as a real boundary. Leave it unconsumed — the watcher
+        // keeps `consumed` here and re-scans once the newline arrives.
+        if raw_line.last() != Some(&b'\n') {
+            break;
+        }
         let n = raw_line.len() as u64;
         let next_offset = offset + n;
         let content = line_content(raw_line);
@@ -460,6 +468,21 @@ mod tests {
                 .as_bytes();
         let scan = scan_chunk_for_fights(chunk, 0, false);
         assert_eq!(scan.new_session_at, None);
+        assert_eq!(scan.fights.len(), 1);
+    }
+
+    #[test]
+    fn partial_trailing_line_is_not_classified_as_a_boundary() {
+        // The live read often ends mid-line while ESO appends. A partially
+        // flushed BEGIN_LOG must NOT fire a (spurious) new-session signal until
+        // its terminating newline arrives.
+        let chunk = b"10,BEGIN_COMBAT\n20,END_COMBAT\n30,BEGIN_LOG,1700001000000,15";
+        let scan = scan_chunk_for_fights(chunk, 0, true);
+        assert_eq!(
+            scan.new_session_at, None,
+            "partial BEGIN_LOG must be deferred"
+        );
+        // The complete fight before the partial line is still detected.
         assert_eq!(scan.fights.len(), 1);
     }
 }

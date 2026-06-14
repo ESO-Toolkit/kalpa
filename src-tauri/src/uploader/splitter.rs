@@ -89,14 +89,6 @@ pub fn split_by_session(
     let out = PathBuf::from(out_dir);
     std::fs::create_dir_all(&out).map_err(|e| format!("Create output dir: {e}"))?;
 
-    let sessions = match sessions {
-        Some(s) if !s.is_empty() => s,
-        _ => scanner::scan_file(source_path)?.sessions,
-    };
-    if sessions.is_empty() {
-        return Err("No logging sessions found in this file.".into());
-    }
-
     // The active Encounter.log may still be growing as ESO appends. Snapshot the
     // length and clamp every copy to it, so a session whose `end_offset` reached
     // the (moving) EOF is copied only up to bytes that definitely existed —
@@ -104,6 +96,25 @@ pub fn split_by_session(
     let snapshot_len = std::fs::metadata(src)
         .map_err(|e| format!("Failed to stat source: {e}"))?
         .len();
+
+    let sessions = match sessions {
+        Some(s) if !s.is_empty() => {
+            // Caller-supplied offsets are from preflight time. If the file is now
+            // shorter than the sessions' max end, it rotated/truncated since —
+            // the stale offsets would carve garbage from the new file, so re-scan
+            // for a consistent list rather than trusting them.
+            let max_end = s.iter().map(|x| x.end_offset).max().unwrap_or(0);
+            if snapshot_len < max_end {
+                scanner::scan_file(source_path)?.sessions
+            } else {
+                s
+            }
+        }
+        _ => scanner::scan_file(source_path)?.sessions,
+    };
+    if sessions.is_empty() {
+        return Err("No logging sessions found in this file.".into());
+    }
 
     let stem = src
         .file_stem()

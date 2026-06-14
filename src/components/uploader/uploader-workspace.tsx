@@ -127,6 +127,8 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
   const [starting, setStarting] = useState(false);
+  // Synchronous re-entry guard for start-live (state updates lag a frame).
+  const startingRef = useRef(false);
   // Holds the in-flight live session id from before the start await resolves, so
   // unmounting mid-await still stops the backend watcher (state hasn't landed).
   const liveSessionIdRef = useRef<string | null>(null);
@@ -315,10 +317,12 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
       toast.error("Pick the active Encounter.log first.");
       return;
     }
-    // Guard re-entry: `liveSessionId` only lands after the await (which includes
-    // a process spawn), so without this a double-click would start two backend
-    // watchers and orphan one.
-    if (starting || liveSessionId) return;
+    // Guard re-entry SYNCHRONOUSLY via a ref: `starting`/`liveSessionId` state
+    // doesn't update until the next render, so two clicks in one frame would
+    // both pass a state-only check and start two backend watchers (orphaning
+    // one). The ref flips immediately.
+    if (startingRef.current || liveSessionId) return;
+    startingRef.current = true;
     setStarting(true);
     const sessionId = `live-${Date.now()}`;
     // Record the id before the await so unmount cleanup can stop the backend
@@ -379,7 +383,6 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
         sessionId,
         filePath: selectedLog,
         options,
-        preferCli: transport?.officialUploaderInstalled ?? false,
         channel,
       });
       setLiveSessionId(sessionId);
@@ -397,6 +400,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
       setLiveStatus("attention");
       toast.error(`Couldn't start live logging: ${getTauriErrorMessage(e)}`);
     } finally {
+      startingRef.current = false;
       setStarting(false);
     }
   };
@@ -543,7 +547,13 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
             {/* Action area */}
             {mode === "manual" ? (
               <ManualActions
-                canUpload={!!selectedLog && !uploading && liveSessionId === null}
+                canUpload={
+                  !!selectedLog &&
+                  !uploading &&
+                  !scanning &&
+                  preflight !== null &&
+                  liveSessionId === null
+                }
                 uploading={uploading}
                 transport={transport}
                 onUpload={handleManualUpload}

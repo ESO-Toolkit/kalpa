@@ -114,8 +114,11 @@ pub fn list_log_files(logs_dir: &str) -> Result<Vec<LogFileInfo>, String> {
             continue;
         };
         let modified_at_ms = modified_ms(&meta);
-        let is_active =
-            modified_at_ms > 0 && now.saturating_sub(modified_at_ms) < ACTIVE_WINDOW_SECS * 1000;
+        // Guard against a future-dated mtime (clock skew / VM resume): otherwise
+        // `now.saturating_sub` underflows to 0 and a long-idle log reads "active".
+        let is_active = modified_at_ms > 0
+            && modified_at_ms <= now
+            && now.saturating_sub(modified_at_ms) < ACTIVE_WINDOW_SECS * 1000;
 
         files.push(LogFileInfo {
             path: path.to_string_lossy().into_owned(),
