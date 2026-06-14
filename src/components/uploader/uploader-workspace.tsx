@@ -12,6 +12,7 @@ import {
   CloudUpload,
   FileText,
   FolderSearch,
+  Link as LinkIcon,
   Radio,
   RefreshCw,
   Scissors,
@@ -27,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
@@ -124,6 +126,24 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   const [liveFights, setLiveFights] = useState<LiveFight[]>([]);
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
+  // Holds the in-flight live session id from before the start await resolves, so
+  // unmounting mid-await still stops the backend watcher (state hasn't landed).
+  const liveSessionIdRef = useRef<string | null>(null);
+
+  // Current selection, mirrored to a ref so loadLogs can reconcile it without
+  // being re-created on every selection change.
+  const selectedLogRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedLogRef.current = selectedLog;
+  }, [selectedLog]);
+
+  const clearSelection = useCallback(() => {
+    selectTokenRef.current++; // drop any in-flight scan result
+    setSelectedLog(null);
+    setPreflight(null);
+    setFights([]);
+    setScanning(false);
+  }, []);
 
   // Persist options whenever they change.
   useEffect(() => {
@@ -143,14 +163,23 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     }
   }, []);
 
-  const loadLogs = useCallback(async (dir: string) => {
-    try {
-      const files = await invokeOrThrow<LogFileInfo[]>("uploader_list_logs", { logsDir: dir });
-      setLogs(files);
-    } catch (e) {
-      toast.error(`Couldn't list logs: ${getTauriErrorMessage(e)}`);
-    }
-  }, []);
+  const loadLogs = useCallback(
+    async (dir: string) => {
+      try {
+        const files = await invokeOrThrow<LogFileInfo[]>("uploader_list_logs", { logsDir: dir });
+        setLogs(files);
+        // If the previously-selected log is gone (rotated/deleted on relog or a
+        // patch), drop the stale selection so its preflight can't be acted on.
+        const sel = selectedLogRef.current;
+        if (sel && !files.some((f) => f.path === sel)) {
+          clearSelection();
+        }
+      } catch (e) {
+        toast.error(`Couldn't list logs: ${getTauriErrorMessage(e)}`);
+      }
+    },
+    [clearSelection]
+  );
 
   // Initial detection + transport + history.
   useEffect(() => {
@@ -178,18 +207,22 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     };
   }, [loadLogs, refreshHistory]);
 
-  // Stop any live session if the workspace unmounts.
+  // Stop any live session when the workspace unmounts. Reads the ref (set
+  // before the start await) so a session started but not yet reflected in state
+  // is still torn down. Empty deps: this must run only on final unmount.
   useEffect(() => {
     return () => {
-      if (liveSessionId) {
-        void invokeOrThrow("uploader_stop_live", { sessionId: liveSessionId }).catch(() => {});
+      const id = liveSessionIdRef.current;
+      if (id) {
+        void invokeOrThrow("uploader_stop_live", { sessionId: id }).catch(() => {});
       }
     };
-  }, [liveSessionId]);
+  }, []);
 
   const handlePickFolder = async () => {
     const picked = await openDialog({ directory: true, title: "Select your ESO Logs folder" });
-    if (typeof picked === "string") {
+    if (typeof picked === "string" && picked !== logsDir) {
+      clearSelection(); // switching folders invalidates the current selection
       setLogsDir(picked);
       void loadLogs(picked);
     }
@@ -226,6 +259,9 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
         filePath: selectedLog,
         options,
         preferCli: transport?.officialUploaderInstalled ?? false,
+        // Reuse the preflight's count so the backend doesn't re-scan a multi-GB
+        // log just to fill the history record.
+        fightCount: preflight?.totalFights ?? null,
       });
       if (dispatch.report) {
         toast.success("Upload complete — report ready.");
@@ -272,6 +308,9 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
       return;
     }
     const sessionId = `live-${Date.now()}`;
+    // Record the id before the await so unmount cleanup can stop the backend
+    // watcher even if the dialog closes before the await resolves.
+    liveSessionIdRef.current = sessionId;
     const channel = new Channel<LiveEvent>();
     setLiveFights([]);
     setLiveReport(null);
@@ -304,8 +343,13 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           toast.info("A new logging session started — continuing to watch.");
           setLiveFights([]);
           break;
+        case "fightSkipped":
+          // A genuinely oversized fight; surface once. The full log still uploads.
+          toast.info(ev.reason);
+          break;
         case "warning":
-          // Non-fatal (e.g. transient read retry); surface quietly.
+          // Transient (e.g. a read retry) — log but don't toast, as these recur.
+          console.warn("[uploader] live watcher:", ev.message);
           break;
         case "stopped":
           setLiveStatus("idle");
@@ -341,6 +385,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     } catch {
       /* best-effort */
     }
+    liveSessionIdRef.current = null;
     setLiveSessionId(null);
     setLiveStatus(liveFights.length > 0 ? "upToDate" : "idle");
     await refreshHistory();
@@ -350,6 +395,19 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     void navigator.clipboard.writeText(url);
     toast.success("Report link copied.");
   };
+
+  const handleAttachReport = useCallback(
+    async (id: string, reportUrl: string) => {
+      try {
+        await invokeOrThrow("uploader_attach_report", { id, reportUrl });
+        toast.success("Report link saved.");
+        await refreshHistory();
+      } catch (e) {
+        toast.error(getTauriErrorMessage(e));
+      }
+    },
+    [refreshHistory]
+  );
 
   // The headline status pill reflects live state if a session is running,
   // otherwise manual upload state.
@@ -473,7 +531,12 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
             )}
 
             {/* History */}
-            <HistoryPanel history={history} onCopyLink={copyLink} onRefresh={refreshHistory} />
+            <HistoryPanel
+              history={history}
+              onCopyLink={copyLink}
+              onRefresh={refreshHistory}
+              onAttachReport={handleAttachReport}
+            />
           </div>
         )}
       </DialogContent>
@@ -873,12 +936,26 @@ function HistoryPanel({
   history,
   onCopyLink,
   onRefresh,
+  onAttachReport,
 }: {
   history: UploadRecord[];
   onCopyLink: (url: string) => void;
   onRefresh: () => void;
+  onAttachReport: (id: string, url: string) => Promise<void>;
 }) {
+  const [attachingId, setAttachingId] = useState<string | null>(null);
+  const [linkDraft, setLinkDraft] = useState("");
+
   if (history.length === 0) return null;
+
+  const submitLink = async (id: string) => {
+    const url = linkDraft.trim();
+    if (!url) return;
+    await onAttachReport(id, url);
+    setAttachingId(null);
+    setLinkDraft("");
+  };
+
   return (
     <GlassPanel variant="subtle" className="p-3">
       <div className="mb-2 flex items-center justify-between">
@@ -896,28 +973,67 @@ function HistoryPanel({
         {history.slice(0, 8).map((r) => (
           <li
             key={r.id}
-            className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2"
+            className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2"
           >
-            <div className="min-w-0">
-              <div className="truncate text-sm text-foreground/90">{r.fileName}</div>
-              <div className="text-xs text-muted-foreground">
-                {relativeFromMs(r.createdAtMs)} · {r.fightCount} fight
-                {r.fightCount === 1 ? "" : "s"} · {r.visibility}
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-sm text-foreground/90">{r.fileName}</div>
+                <div className="text-xs text-muted-foreground">
+                  {relativeFromMs(r.createdAtMs)} · {r.fightCount} fight
+                  {r.fightCount === 1 ? "" : "s"} · {r.visibility}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <StatusBadge status={r.status} />
+                {r.report ? (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => onCopyLink(r.report!.url)}
+                    aria-label="Copy report link"
+                  >
+                    <Copy className="size-3.5" />
+                  </Button>
+                ) : (
+                  // Handed-off uploads finish in the official uploader, so we
+                  // can't observe the report code — let the user paste it in.
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setAttachingId(attachingId === r.id ? null : r.id);
+                      setLinkDraft("");
+                    }}
+                  >
+                    <LinkIcon className="size-3.5" />
+                    Add link
+                  </Button>
+                )}
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              <StatusBadge status={r.status} />
-              {r.report && (
+            {attachingId === r.id && (
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  value={linkDraft}
+                  onChange={(e) => setLinkDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void submitLink(r.id);
+                    if (e.key === "Escape") setAttachingId(null);
+                  }}
+                  placeholder="https://www.esologs.com/reports/…"
+                  aria-label="ESO Logs report link"
+                  autoFocus
+                  className="h-8 text-xs"
+                />
                 <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => onCopyLink(r.report!.url)}
-                  aria-label="Copy report link"
+                  size="sm"
+                  onClick={() => void submitLink(r.id)}
+                  disabled={!linkDraft.trim()}
                 >
-                  <Copy className="size-3.5" />
+                  Save
                 </Button>
-              )}
-            </div>
+              </div>
+            )}
           </li>
         ))}
       </ul>

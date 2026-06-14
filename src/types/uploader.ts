@@ -107,6 +107,7 @@ export type LiveEvent =
       durationMs: number;
     }
   | { type: "sessionReset" }
+  | { type: "fightSkipped"; reason: string }
   | { type: "warning"; message: string }
   | { type: "stopped"; reason: string };
 

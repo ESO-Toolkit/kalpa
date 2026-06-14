@@ -49,7 +49,12 @@ pub enum LiveEvent {
     },
     /// The log was truncated or a new session began.
     SessionReset,
-    /// A non-fatal warning (e.g. transient read failure, oversized fight).
+    /// A fight was too large to track in the timeline and was skipped (the full
+    /// log still uploads). Distinct from `Warning` so the UI can surface this
+    /// one meaningful event without being flooded by transient read retries.
+    FightSkipped { reason: String },
+    /// A non-fatal warning (e.g. transient read retry). The UI may log but
+    /// should not toast these, as they can recur frequently.
     Warning { message: String },
     /// Watching stopped (user-initiated or fatal error).
     Stopped { reason: String },
@@ -228,10 +233,22 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
             }
         };
 
-        // Detect completed fights in the chunk; offsets are chunk-relative + base.
-        let completed = scanner::scan_chunk_for_fights(&chunk, consumed);
+        // Detect completed fights and boundary signals in the chunk.
+        let scan = scanner::scan_chunk_for_fights(&chunk, consumed);
+
+        // A mid-chunk BEGIN_LOG (a /encounterlog re-enable) starts a new session
+        // in the same growing file. Reset the UI timeline and re-index from 0,
+        // then re-anchor just past that boundary so the new session's fights are
+        // scanned cleanly on the next pass.
+        if let Some(new_at) = scan.new_session_at {
+            let _ = channel.send(LiveEvent::SessionReset);
+            next_index = 0;
+            consumed = new_at.max(consumed + 1);
+            continue;
+        }
+
         let mut advanced_to = consumed;
-        for fr in completed {
+        for fr in scan.fights {
             let _ = channel.send(LiveEvent::FightDetected {
                 index: next_index,
                 zone_name: fr.zone_name.clone(),
@@ -243,25 +260,43 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
         }
 
         if advanced_to > consumed {
+            // Advance past the last completed fight. Any open fight after it is
+            // re-scanned next pass from the new `consumed`.
             consumed = advanced_to;
         } else if read_end == size {
             // Caught up to EOF with an in-progress (unterminated) fight — keep
             // `consumed` so the partial fight is re-scanned once more arrives.
+        } else if let Some(open_start) = scan.open_fight_start {
+            if open_start > consumed {
+                // A fight began partway through the window but its END_COMBAT
+                // landed past the read cap. Re-anchor to its BEGIN_COMBAT so the
+                // next (fresh) window can capture the whole fight — this is the
+                // common case, NOT an oversized fight.
+                consumed = open_start;
+            } else {
+                // The open fight started at/before `consumed` and a full
+                // MAX_READ window still held no END_COMBAT: the fight body alone
+                // exceeds the read cap. Skip it (the official uploader still
+                // streams the whole file) and report it distinctly so the UI can
+                // surface this one meaningful skip without spamming.
+                let skip_to = match chunk.iter().rposition(|b| *b == b'\n') {
+                    Some(nl) => consumed + nl as u64 + 1,
+                    None => read_end,
+                };
+                let _ = channel.send(LiveEvent::FightSkipped {
+                    reason: "A single fight was too large to track in the live \
+                             timeline; the full log still uploads."
+                        .into(),
+                });
+                consumed = skip_to.max(consumed + 1);
+            }
         } else {
-            // Full MAX_READ window, not at EOF, no completed fight: a single
-            // fight exceeds the read cap. Force progress so we don't livelock,
-            // skipping the oversized fight (the official uploader still handles
-            // the whole file). Re-anchor at the last newline so we never split
-            // mid-line and lose a boundary token.
+            // Full non-EOF window with no fight and no open boundary at all —
+            // genuinely unparseable; advance to the last newline to make progress.
             let skip_to = match chunk.iter().rposition(|b| *b == b'\n') {
                 Some(nl) => consumed + nl as u64 + 1,
-                None => read_end, // no newline in 64 MiB — advance past the block
+                None => read_end,
             };
-            let _ = channel.send(LiveEvent::Warning {
-                message: "A single fight exceeded the read window and was skipped \
-                          in the live timeline; the full log still uploads."
-                    .into(),
-            });
             consumed = skip_to.max(consumed + 1);
         }
     }

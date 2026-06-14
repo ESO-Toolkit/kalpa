@@ -47,19 +47,23 @@ pub trait LogUploadTransport: Send + Sync {
 // ── Locating the official uploader ───────────────────────────────────────────
 
 /// Candidate install locations for the official ESO Logs / Archon uploader on
-/// Windows. The app historically installs per-user under LocalAppData.
+/// Windows.
+///
+/// Program Files (admin-only writable) is searched **before** the per-user
+/// LocalAppData (Electron/Squirrel default) so a binary planted in the
+/// user-writable LocalAppData cannot shadow a legitimately-installed uploader.
 fn official_uploader_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    // Per-user (Squirrel/Electron default) and Program Files installs.
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     let pf = std::env::var_os("ProgramFiles").map(PathBuf::from);
     let pf86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
 
     // Both the legacy "ESO Logs Uploader" and the rebranded "Archon" app.
     let exe_names = ["ESO Logs Uploader.exe", "Archon.exe", "ESO Logs.exe"];
     let app_dirs = ["ESO Logs Uploader", "Archon", "eso-logs-uploader"];
 
-    for base in [local, pf, pf86].into_iter().flatten() {
+    // Order matters: admin-writable Program Files first, then per-user.
+    for base in [pf, pf86, local].into_iter().flatten() {
         for app in app_dirs {
             for exe in exe_names {
                 out.push(base.join(app).join(exe));
@@ -191,25 +195,35 @@ impl LogUploadTransport for CliTransport {
                 cmd.arg("--guild").arg("null");
             }
         }
-        if opts.real_time {
-            cmd.arg("--enable-real-time-uploading");
-        }
         if opts.include_entire_file {
             cmd.arg("--include-entire-file");
         }
 
-        let status = cmd
-            .status()
-            .map_err(|e| format!("Failed to run the ESO Logs Uploader CLI: {e}"))?;
-
-        if status.success() {
-            Ok(UploadOutcome::Completed { report_code: None })
+        if opts.real_time {
+            // A real-time uploader stays running for the whole session, so we
+            // must NOT wait on it — `spawn` and treat it as a handoff. Blocking
+            // on `status()` here would hang the live-start command forever.
+            cmd.arg("--enable-real-time-uploading");
+            cmd.spawn()
+                .map_err(|e| format!("Failed to start the ESO Logs Uploader: {e}"))?;
+            Ok(UploadOutcome::HandedOff {
+                detail: "Live logging started in the ESO Logs Uploader.".into(),
+            })
         } else {
-            Err(format!(
-                "The ESO Logs Uploader exited with status {}. Try the manual \
-                 handoff instead.",
-                status.code().unwrap_or(-1)
-            ))
+            // One-shot upload: the process exits when done, so we can wait and
+            // report success/failure.
+            let status = cmd
+                .status()
+                .map_err(|e| format!("Failed to run the ESO Logs Uploader CLI: {e}"))?;
+            if status.success() {
+                Ok(UploadOutcome::Completed { report_code: None })
+            } else {
+                Err(format!(
+                    "The ESO Logs Uploader exited with status {}. Try the manual \
+                     handoff instead.",
+                    status.code().unwrap_or(-1)
+                ))
+            }
         }
     }
 }

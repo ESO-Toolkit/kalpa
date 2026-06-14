@@ -239,6 +239,10 @@ pub struct UploadDispatch {
 
 /// Dispatch a prepared log to the official uploader. `prefer_cli` uses the CLI
 /// transport when available; otherwise opens the uploader UI with the file.
+///
+/// `fight_count` is supplied by the UI from the preflight it already ran, so we
+/// don't re-scan a multi-GB log just to fill the history record. If omitted
+/// (`None`) we fall back to a scan.
 #[tauri::command]
 pub async fn uploader_upload_log(
     app: tauri::AppHandle,
@@ -246,6 +250,7 @@ pub async fn uploader_upload_log(
     file_path: String,
     options: UploadOptions,
     prefer_cli: bool,
+    fight_count: Option<usize>,
 ) -> Result<UploadDispatch, String> {
     confine_log_path(&allowed, &file_path)?;
 
@@ -255,15 +260,20 @@ pub async fn uploader_upload_log(
         .unwrap_or("Encounter.log")
         .to_string();
 
-    // Count fights for the history record (single streaming scan).
-    let scan_path = file_path.clone();
-    let fight_count = tokio::task::spawn_blocking(move || {
-        scanner::scan_file(&scan_path)
-            .map(|s| s.fights.len())
+    // Use the preflight count if the UI supplied it; only re-scan as a fallback.
+    let fight_count = match fight_count {
+        Some(c) => c,
+        None => {
+            let scan_path = file_path.clone();
+            tokio::task::spawn_blocking(move || {
+                scanner::scan_file(&scan_path)
+                    .map(|s| s.fights.len())
+                    .unwrap_or(0)
+            })
+            .await
             .unwrap_or(0)
-    })
-    .await
-    .unwrap_or(0);
+        }
+    };
 
     let record_id = format!("{}-{}", now_ms(), file_name);
     let mut record = UploadRecord {
@@ -351,7 +361,7 @@ pub async fn uploader_start_live(
     options: UploadOptions,
     prefer_cli: bool,
     channel: Channel<LiveEvent>,
-) -> Result<(), String> {
+) -> Result<UploadDispatch, String> {
     confine_log_path(&allowed, &file_path)?;
 
     let file_name = Path::new(&file_path)
@@ -372,20 +382,23 @@ pub async fn uploader_start_live(
     .map_err(|e| format!("Task failed: {e}"))?;
 
     // A failed launch is fatal for the session; a handoff is the expected path.
-    let report = match outcome {
-        Ok(transport::UploadOutcome::Completed { report_code }) => {
+    let (report, handed_off, detail) = match outcome {
+        Ok(transport::UploadOutcome::Completed { report_code }) => (
             report_code.map(|code| ReportRef {
                 url: watcher::report_url(&code),
                 code,
-            })
-        }
-        Ok(transport::UploadOutcome::HandedOff { .. }) => None,
+            }),
+            false,
+            "Live logging started.".to_string(),
+        ),
+        Ok(transport::UploadOutcome::HandedOff { detail }) => (None, true, detail),
         Err(e) => return Err(e),
     };
 
-    // Record the live session in history.
+    // Record the live session in history so a report link can be attached later.
+    let record_id = format!("{}-{}", now_ms(), session_id);
     let record = UploadRecord {
-        id: format!("{}-{}", now_ms(), session_id),
+        id: record_id,
         source_path: file_path.clone(),
         file_name,
         created_at_ms: now_ms(),
@@ -393,7 +406,7 @@ pub async fn uploader_start_live(
         mode: UploadMode::Live,
         visibility: options.visibility,
         fight_count: 0,
-        report,
+        report: report.clone(),
         error: None,
     };
     let _ = super::history::upsert(&app, record);
@@ -416,7 +429,12 @@ pub async fn uploader_start_live(
     if let Some(prev) = sessions.insert(session_id, handle) {
         prev.stop();
     }
-    Ok(())
+
+    Ok(UploadDispatch {
+        handed_off,
+        detail,
+        report,
+    })
 }
 
 /// Stop a running live watch (the official uploader keeps its own session).

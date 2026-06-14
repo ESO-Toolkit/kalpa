@@ -119,6 +119,11 @@ struct Detector {
     fight_start: Option<(u64, u64)>,
     pending_zone: Option<String>,
     pending_boss: Option<String>,
+    /// Chunk-scan only: absolute offset of the first `BEGIN_LOG` seen *after*
+    /// the chunk started in an already-open session (a `/encounterlog`
+    /// re-enable mid-tail). Lets the watcher detect a new session without a
+    /// file shrink. Unused by the full-file scan.
+    new_session_at: Option<u64>,
 }
 
 impl Detector {
@@ -137,6 +142,12 @@ impl Detector {
             LineType::BeginLog => {
                 if self.session_open {
                     self.close_session(offset);
+                    // A new BEGIN_LOG while already in a session = a fresh
+                    // logging session appended to the same file. Record the
+                    // first such boundary for the chunk scanner.
+                    if self.new_session_at.is_none() {
+                        self.new_session_at = Some(offset);
+                    }
                 }
                 self.session_open = true;
                 self.session_fight_count = 0;
@@ -268,18 +279,30 @@ pub fn scan_file(path: &str) -> Result<ScanResult, String> {
     Ok(detector.finish(offset))
 }
 
-/// Scan an in-memory raw byte chunk for *completed* fights only (`BEGIN_COMBAT`
-/// followed by `END_COMBAT`), returning [`FightSummary`] with byte offsets
-/// shifted by `base` (the chunk's absolute offset in the file). Used by the live
-/// watcher, which reads incremental chunks rather than the whole file.
+/// Result of scanning an incremental chunk for the live watcher.
+pub struct ChunkScan {
+    /// Fights that *completed* (BEGIN_COMBAT…END_COMBAT) within the chunk, with
+    /// absolute byte offsets. `index` is 0 — the caller assigns running indices.
+    pub fights: Vec<FightSummary>,
+    /// Absolute byte offset of an open `BEGIN_COMBAT` whose `END_COMBAT` was not
+    /// in the chunk. The watcher re-anchors here so a fight straddling the read
+    /// window is captured on the next pass (rather than being mistaken for an
+    /// oversized fight and skipped).
+    pub open_fight_start: Option<u64>,
+    /// Absolute byte offset of the first mid-chunk `BEGIN_LOG` (a `/encounterlog`
+    /// re-enable). The watcher emits a session reset and re-indexes from here.
+    pub new_session_at: Option<u64>,
+}
+
+/// Scan an in-memory raw byte chunk for completed fights, plus the boundary
+/// signals the live watcher needs (open-fight start, new-session start).
 ///
 /// Takes raw bytes (not a `&str`) so offsets are tracked from true byte lengths;
-/// each line is decoded lossily only for field parsing. `index` is left at 0 —
-/// the caller assigns running indices.
-pub fn scan_chunk_for_fights(chunk: &[u8], base: u64) -> Vec<FightSummary> {
+/// each line is decoded lossily only for field parsing.
+pub fn scan_chunk_for_fights(chunk: &[u8], base: u64) -> ChunkScan {
     let mut detector = Detector {
         // Treat the chunk as already inside an open session so fights are
-        // recorded; we only consume `detector.fights` below.
+        // recorded and a later BEGIN_LOG registers as a *new* session.
         session_open: true,
         ..Default::default()
     };
@@ -296,7 +319,11 @@ pub fn scan_chunk_for_fights(chunk: &[u8], base: u64) -> Vec<FightSummary> {
         offset = next_offset;
     }
 
-    detector.fights
+    ChunkScan {
+        fights: detector.fights,
+        open_fight_start: detector.fight_start.map(|(off, _)| off),
+        new_session_at: detector.new_session_at,
+    }
 }
 
 #[cfg(test)]
@@ -377,10 +404,44 @@ mod tests {
         chunk.extend_from_slice(b"10,BEGIN_COMBAT\n");
         chunk.extend_from_slice(b"20,END_COMBAT\n");
 
-        let fights = scan_chunk_for_fights(&chunk, 0);
-        assert_eq!(fights.len(), 1);
+        let scan = scan_chunk_for_fights(&chunk, 0);
+        assert_eq!(scan.fights.len(), 1);
         // start_offset must equal the true byte position of BEGIN_COMBAT.
-        assert_eq!(fights[0].start_offset, begin_at);
-        assert_eq!(fights[0].end_offset, chunk.len() as u64);
+        assert_eq!(scan.fights[0].start_offset, begin_at);
+        assert_eq!(scan.fights[0].end_offset, chunk.len() as u64);
+        assert_eq!(scan.open_fight_start, None);
+    }
+
+    #[test]
+    fn chunk_scanner_reports_open_fight_start_for_straddling_fight() {
+        // A fight whose BEGIN_COMBAT is in the chunk but END_COMBAT is not: the
+        // watcher must re-anchor here, not treat it as oversized.
+        let chunk = b"5,ZONE_CHANGED,1,\"Cloudrest\",VETERAN\n100,BEGIN_COMBAT\n";
+        let begin_at = chunk.iter().position(|&b| b == b'\n').unwrap() as u64 + 1;
+        let scan = scan_chunk_for_fights(chunk, 0);
+        assert!(scan.fights.is_empty());
+        assert_eq!(scan.open_fight_start, Some(begin_at));
+    }
+
+    #[test]
+    fn chunk_scanner_reports_new_session_on_mid_chunk_begin_log() {
+        // A /encounterlog re-enable appends a fresh BEGIN_LOG to the same file.
+        let chunk = b"10,BEGIN_COMBAT\n20,END_COMBAT\n0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"x\"\n5,BEGIN_COMBAT\n15,END_COMBAT\n";
+        let new_at = chunk
+            .windows(b"BEGIN_LOG".len())
+            .position(|w| w == b"BEGIN_LOG")
+            .map(|p| {
+                // back up to the start of that line
+                chunk[..p]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map(|nl| nl + 1)
+                    .unwrap_or(0)
+            })
+            .unwrap() as u64;
+        let scan = scan_chunk_for_fights(chunk, 0);
+        assert_eq!(scan.new_session_at, Some(new_at));
+        // Both fights are still detected within the chunk.
+        assert_eq!(scan.fights.len(), 2);
     }
 }

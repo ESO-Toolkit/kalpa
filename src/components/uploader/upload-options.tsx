@@ -45,11 +45,13 @@ export function UploadOptionsControl({
     <div className="space-y-4">
       <div className="space-y-2">
         <SectionHeader>Region</SectionHeader>
-        <div className="flex gap-2">
+        <div className="flex gap-2" role="radiogroup" aria-label="Region">
           {REGION_OPTIONS.map((r) => (
             <button
               key={r.id}
               type="button"
+              role="radio"
+              aria-checked={options.region === r.id}
               disabled={disabled}
               onClick={() => onChange({ ...options, region: r.id })}
               className={cn(
@@ -59,7 +61,6 @@ export function UploadOptionsControl({
                   ? "border-sky-400/40 bg-sky-400/[0.06] text-foreground"
                   : "border-white/[0.06] bg-white/[0.02] text-muted-foreground hover:border-white/[0.12]"
               )}
-              aria-pressed={options.region === r.id}
             >
               {r.label}
             </button>
