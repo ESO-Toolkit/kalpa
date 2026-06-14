@@ -64,8 +64,14 @@ jobs:
         run: npm ci
         working-directory: backend/eso-packs-worker
 
+      # --omit=dev: the worker's only high-severity advisories are in dev/test
+      # tooling (esbuild, via @cloudflare/vitest-pool-workers and wrangler),
+      # which never ships to Cloudflare. Even the latest Cloudflare tooling
+      # still pins the flagged esbuild, so there is no upstream fix to bump to.
+      # Auditing production dependencies still catches anything that would
+      # actually run in the deployed worker.
       - name: Worker npm audit
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
         working-directory: backend/eso-packs-worker
 
       - name: Worker TypeScript check
