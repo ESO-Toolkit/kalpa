@@ -2347,6 +2347,7 @@ version = "0.1.0-beta.7"
 dependencies = [
  "base64 0.22.1",
  "dirs",
+ "dunce",
  "keyring",
  "md-5",
  "notify",

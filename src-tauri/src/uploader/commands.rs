@@ -38,15 +38,21 @@ pub struct UploaderState {
 
 // ── Path confinement ─────────────────────────────────────────────────────────
 
-/// Reject Windows UNC / verbatim path prefixes (`\\server\share`, `\\?\…`),
-/// which can trigger outbound SMB auth (NetNTLM credential theft) and bypass
-/// normal drive-rooted assumptions.
+/// Reject Windows UNC path prefixes (`\\server\share`, `\\?\UNC\…`), which can
+/// trigger outbound SMB auth (NetNTLM credential theft). `VerbatimDisk`
+/// (`\\?\C:\…`) is deliberately *allowed*: it is a harmless drive-rooted form and
+/// is exactly what `std::fs::canonicalize` emits on Windows. We canonicalize with
+/// `dunce` below so confined paths stay in drive-letter form, but a stray
+/// verbatim-disk prefix arriving from the frontend must not be rejected — that
+/// was the bug that broke every log selection. The non-verbatim `Verbatim(_)`
+/// arm covers device namespaces (`\\?\GLOBALROOT\…`, `\\.\…`) which are not
+/// legitimate log locations.
 fn has_unc_or_verbatim_prefix(p: &Path) -> bool {
     matches!(p.components().next(), Some(Component::Prefix(prefix)) if {
         use std::path::Prefix::*;
         matches!(
             prefix.kind(),
-            Verbatim(_) | VerbatimUNC(_, _) | VerbatimDisk(_) | UNC(_, _)
+            Verbatim(_) | VerbatimUNC(_, _) | UNC(_, _)
         )
     })
 }
@@ -67,8 +73,9 @@ fn logs_root(allowed: &State<'_, AllowedAddonsPath>) -> Result<PathBuf, String> 
         .ok_or_else(|| "Could not resolve the Logs directory.".to_string())?;
     // Canonicalize if it exists; otherwise return the expected path (the dir may
     // not exist yet until logging is enabled — containment checks below still
-    // compare against this lexical root).
-    Ok(logs.canonicalize().unwrap_or(logs))
+    // compare against this lexical root). `dunce` keeps the result in drive-letter
+    // form so it prefix-matches the (also dunce-canonicalized) file paths.
+    Ok(dunce::canonicalize(&logs).unwrap_or(logs))
 }
 
 /// Validate that `path` is a `.log` file confined to the ESO Logs directory and
@@ -93,9 +100,10 @@ fn confine_log_path(allowed: &State<'_, AllowedAddonsPath>, path: &str) -> Resul
     }
 
     let root = logs_root(allowed)?;
-    // The file must exist to be read; canonicalize resolves symlinks/`..`.
-    let canonical = p
-        .canonicalize()
+    // The file must exist to be read; canonicalize resolves symlinks/`..`. Use
+    // `dunce` so the canonical form is drive-letter (not verbatim `\\?\`), keeping
+    // it consistent with `root` and safe to round-trip back through the frontend.
+    let canonical = dunce::canonicalize(p)
         .map_err(|_| "That log file could not be found in your Logs folder.".to_string())?;
     if !canonical.starts_with(&root) {
         return Err("Log files must live in your ESO Logs folder.".into());
@@ -148,8 +156,7 @@ pub async fn uploader_list_logs(
     if has_unc_or_verbatim_prefix(requested) {
         return Err("Network and special paths are not allowed.".into());
     }
-    let canonical = requested
-        .canonicalize()
+    let canonical = dunce::canonicalize(requested)
         .map_err(|_| "That folder could not be found.".to_string())?;
     if !canonical.starts_with(&root) {
         return Err("Only your ESO Logs folder can be listed.".into());

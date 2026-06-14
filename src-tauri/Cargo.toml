@@ -42,6 +42,12 @@ md-5 = "0.11"
 rusqlite = { version = "0.39", features = ["bundled"] }
 # File watching for the live log uploader (tails the active Encounter.log).
 notify = "8"
+# Drive-letter canonicalization that avoids Windows verbatim (`\\?\`) prefixes.
+# The uploader round-trips canonical paths through the frontend and back into its
+# own confinement check; std's canonicalize() emits verbatim paths that the check
+# then rejects. dunce::canonicalize keeps paths in drive-letter form. Already in
+# the lock file as a transitive dep, so this adds no new compilation.
+dunce = "1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

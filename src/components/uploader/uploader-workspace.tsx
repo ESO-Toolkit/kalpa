@@ -457,8 +457,13 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
+      {/* Cap height to the viewport and lay the dialog out as a flex column so the
+          header stays pinned while the body scrolls. Without this the shared
+          DialogContent (overflow-hidden, no max-height, vertically centered)
+          lets tall content spill off the top and bottom of the screen with no
+          way to reach it. */}
+      <DialogContent className="flex max-h-[90vh] flex-col gap-0 overflow-hidden sm:max-w-2xl">
+        <DialogHeader className="shrink-0">
           <div className="flex items-center justify-between gap-3">
             <DialogTitle className="flex items-center gap-2">
               <CloudUpload className="size-5 text-[#c4a44a]" aria-hidden />
@@ -475,7 +480,9 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
         {!isLoggedIn ? (
           <LoggedOut onOpenSettings={onOpenSettings} />
         ) : (
-          <div className="space-y-4">
+          // -mr-2 pr-2 keeps the scrollbar off the content's right edge; pt-4
+          // restores the gap the header used to provide via the grid.
+          <div className="-mr-2 space-y-4 overflow-y-auto pr-2 pt-4">
             <WhatGetsUploaded />
 
             {/* Mode tabs */}
