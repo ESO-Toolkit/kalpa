@@ -592,8 +592,13 @@ export function Packs({
     setInstalling(false);
     setInstallProgress(null);
 
-    if (installedCount > 0) {
+    // Refresh whenever anything reached disk, not only when tracking succeeded:
+    // a save failure leaves addons extracted but untracked, and the list must
+    // still re-scan to surface them.
+    if (installedCount > 0 || (result?.installedFolders.length ?? 0) > 0) {
       onRefresh();
+    }
+    if (installedCount > 0) {
       toast.success(`Installed ${installedCount} addon${installedCount !== 1 ? "s" : ""}`);
     }
     if (failed > 0) {
