@@ -204,6 +204,15 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
             Err(mpsc::RecvTimeoutError::Timeout) => false,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
+        // Re-check the stop flag after the (up to POLL_INTERVAL) wait and before
+        // a potentially large read, so a stop requested while backfilling a big
+        // static file is observed within one window, not after a full read+scan.
+        if stop.load(Ordering::SeqCst) {
+            let _ = channel.send(LiveEvent::Stopped {
+                reason: "Live logging stopped.".into(),
+            });
+            return;
+        }
         if !event_for_us && last_poll.elapsed() < POLL_INTERVAL {
             continue;
         }

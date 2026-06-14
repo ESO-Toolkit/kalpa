@@ -373,7 +373,15 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           console.warn("[uploader] live watcher:", ev.message);
           break;
         case "stopped":
-          setLiveStatus("idle");
+          // A `stopped` event while we still consider the session active means
+          // the watcher died on its own (e.g. it couldn't watch the folder) —
+          // a user-initiated stop already cleared liveActiveRef. Tear the
+          // session down so the UI doesn't stay stuck "LIVE", and surface why.
+          liveActiveRef.current = false;
+          liveSessionIdRef.current = null;
+          setLiveSessionId(null);
+          setLiveStatus("attention");
+          if (ev.reason && !/stopped\.?$/i.test(ev.reason)) toast.error(ev.reason);
           break;
       }
     };

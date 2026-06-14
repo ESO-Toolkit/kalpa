@@ -50,8 +50,13 @@ pub trait LogUploadTransport: Send + Sync {
 /// Windows.
 ///
 /// Program Files (admin-only writable) is searched **before** the per-user
-/// LocalAppData (Electron/Squirrel default) so a binary planted in the
-/// user-writable LocalAppData cannot shadow a legitimately-installed uploader.
+/// LocalAppData so an admin install is preferred when both exist. Note the
+/// official Archon/ESO Logs app is an Electron/Squirrel per-user install under
+/// `%LOCALAPPDATA%\Programs`, so on a typical machine the resolved path IS
+/// user-writable — this ordering does not by itself prevent a planted binary
+/// from being the only match. A planting attacker already has user-level code
+/// execution; full hardening (Authenticode/publisher verification before
+/// spawning) is a possible future improvement.
 fn official_uploader_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let pf = std::env::var_os("ProgramFiles").map(PathBuf::from);

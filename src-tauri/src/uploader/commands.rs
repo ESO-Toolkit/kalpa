@@ -180,9 +180,12 @@ pub async fn uploader_preflight(
         let scan = scanner::scan_file(&safe)?;
         let total_fights = scan.fights.len();
         let recommend_split = size_bytes > scanner::SPLIT_RECOMMEND_BYTES;
-        // Avoid shipping a huge fight list over IPC for oversized logs; the
-        // counts still drive the UI, and the user splits before reviewing.
-        let fights = if recommend_split {
+        // Don't ship a huge fight list over IPC: bound by fight COUNT (a dense
+        // sub-512-MiB log can still hold thousands of fights, which would be a
+        // ~MB payload + thousands of DOM rows). `total_fights` still drives the
+        // count pills, so omitting the list is safe.
+        const MAX_SHIPPED_FIGHTS: usize = 500;
+        let fights = if recommend_split || total_fights > MAX_SHIPPED_FIGHTS {
             Vec::new()
         } else {
             scan.fights
@@ -497,13 +500,22 @@ pub async fn uploader_start_live(
 
     // The UI timeline starts from the current EOF unless the user asked to
     // backfill earlier fights.
-    let start_offset = if options.include_entire_file {
-        0
-    } else {
-        std::fs::metadata(&safe).map(|m| m.len()).unwrap_or(0)
-    };
+    // The UI timeline always starts at the current EOF. We deliberately do NOT
+    // replay the whole file through the watcher when `include_entire_file` is
+    // set — that would feed a multi-GB backlog through the tail loop just to
+    // populate a display timeline. The official uploader already got the
+    // --include-entire-file flag and handles the real historical upload itself.
+    let start_offset = std::fs::metadata(&safe).map(|m| m.len()).unwrap_or(0);
 
-    let handle = watcher::start_live_watch(&safe, start_offset, channel)?;
+    // Mirror the other fallible arms: vacate our Starting slot on failure (the
+    // file can be rotated/deleted during the handoff above) so it doesn't leak.
+    let handle = match watcher::start_live_watch(&safe, start_offset, channel) {
+        Ok(h) => h,
+        Err(e) => {
+            remove_own_slot(&state, &session_id, &cancelled);
+            return Err(e);
+        }
+    };
 
     // Promote Starting → Running, unless a stop arrived mid-start (cancelled set,
     // or our slot was replaced/removed): in that case stop the just-started
