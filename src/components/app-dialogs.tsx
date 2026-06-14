@@ -16,6 +16,9 @@ const MigrationWizard = lazy(() =>
 const SafetyCenter = lazy(() =>
   import("./safety-center").then((m) => ({ default: m.SafetyCenter }))
 );
+const UploaderWorkspace = lazy(() =>
+  import("./uploader/uploader-workspace").then((m) => ({ default: m.UploaderWorkspace }))
+);
 
 type ActiveDialog =
   | "settings"
@@ -27,6 +30,7 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "log-upload"
   | null;
 
 interface AppDialogsProps {
@@ -119,6 +123,14 @@ export function AppDialogs({
 
       {activeDialog === "safety-center" && (
         <SafetyCenter addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
+      )}
+
+      {activeDialog === "log-upload" && (
+        <UploaderWorkspace
+          authUser={authUser}
+          onClose={onCloseDialog}
+          onOpenSettings={() => onShowDialog("settings")}
+        />
       )}
     </Suspense>
   );

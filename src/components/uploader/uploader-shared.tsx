@@ -1,0 +1,150 @@
+// Shared presentational pieces for the uploader workspace: the glanceable
+// status pill, the "what gets uploaded" privacy summary, and small helpers.
+
+import { useState } from "react";
+import {
+  Activity,
+  CheckCircle2,
+  ChevronDown,
+  CircleDashed,
+  Loader2,
+  RefreshCw,
+  ShieldQuestion,
+  Swords,
+  Lock,
+} from "lucide-react";
+import { InfoPill } from "@/components/ui/info-pill";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { cn } from "@/lib/utils";
+import type { UploaderStatus } from "@/types/uploader";
+
+/** Map the uploader status to its pill color, label, and icon. */
+export function StatusPill({ status }: { status: UploaderStatus }) {
+  const map: Record<
+    UploaderStatus,
+    {
+      color: "muted" | "sky" | "emerald" | "amber" | "red";
+      label: string;
+      Icon: typeof Activity;
+      spin?: boolean;
+    }
+  > = {
+    idle: { color: "muted", label: "Idle", Icon: CircleDashed },
+    watching: { color: "sky", label: "Watching", Icon: Activity },
+    uploading: { color: "sky", label: "Uploading", Icon: Loader2, spin: true },
+    upToDate: { color: "emerald", label: "Up to date", Icon: CheckCircle2 },
+    retrying: { color: "amber", label: "Retrying", Icon: RefreshCw, spin: true },
+    attention: { color: "red", label: "Needs attention", Icon: ShieldQuestion },
+  };
+  const { color, label, Icon, spin } = map[status];
+  return (
+    // role=status so screen readers announce status changes (text + icon, not
+    // color alone — the app is always dark).
+    <InfoPill color={color} role="status" aria-live="polite" className="gap-1.5 px-2.5 py-1">
+      <Icon className={cn("size-3.5", spin && "animate-spin")} aria-hidden />
+      {label}
+    </InfoPill>
+  );
+}
+
+/** Format a byte-count compactly (kept local to avoid import churn). */
+export function compactBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** Format a millisecond duration as `m:ss` or `s.s s`. */
+export function formatDuration(ms: number): string {
+  if (ms <= 0) return "0s";
+  const totalSec = ms / 1000;
+  if (totalSec < 60) return `${totalSec.toFixed(totalSec < 10 ? 1 : 0)}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = Math.round(totalSec % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** Relative time from an epoch-ms timestamp. */
+export function relativeFromMs(ms: number): string {
+  if (!ms) return "unknown";
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) {
+    const m = Math.floor(diff / 60_000);
+    return `${m} min${m === 1 ? "" : "s"} ago`;
+  }
+  if (diff < 86_400_000) {
+    const h = Math.floor(diff / 3_600_000);
+    return `${h} hour${h === 1 ? "" : "s"} ago`;
+  }
+  return new Date(ms).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+/**
+ * A layered-notice privacy summary: a scannable headline that expands to the
+ * specifics. No existing uploader surfaces this — it's a deliberate trust
+ * differentiator. Frames the upload honestly as "this is your log".
+ */
+export function WhatGetsUploaded() {
+  const [open, setOpen] = useState(false);
+  return (
+    <GlassPanel variant="subtle" className="overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 p-3 text-left"
+        aria-expanded={open}
+      >
+        <span className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Lock className="size-3.5 text-emerald-400/80" aria-hidden />
+          This report is built from your <code className="text-foreground/80">
+            Encounter.log
+          </code>{" "}
+          and is owned by your ESO Logs account.
+        </span>
+        <ChevronDown
+          className={cn(
+            "size-4 shrink-0 text-muted-foreground transition-transform duration-200",
+            open && "rotate-180"
+          )}
+          aria-hidden
+        />
+      </button>
+      {open && (
+        <div className="space-y-2 border-t border-white/[0.06] p-3 text-xs text-muted-foreground">
+          <div className="flex items-start gap-2">
+            <Swords className="mt-0.5 size-3.5 shrink-0 text-sky-400/80" aria-hidden />
+            <span>
+              <span className="text-foreground/80">What's uploaded:</span> combat events, character
+              and ability data, and timestamps from the fights you choose.
+            </span>
+          </div>
+          <div className="flex items-start gap-2">
+            <ShieldQuestion className="mt-0.5 size-3.5 shrink-0 text-emerald-400/80" aria-hidden />
+            <span>
+              <span className="text-foreground/80">What's never uploaded:</span> your account
+              password, chat, or anything outside the combat log.
+            </span>
+          </div>
+          <div className="flex items-start gap-2">
+            <Lock className="mt-0.5 size-3.5 shrink-0 text-violet-400/80" aria-hidden />
+            <span>
+              You control visibility (public, unlisted, or private) and can delete a report from ESO
+              Logs at any time.
+            </span>
+          </div>
+        </div>
+      )}
+    </GlassPanel>
+  );
+}

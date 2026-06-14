@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  CloudUpload,
   FileSliders,
   MinusIcon,
   PackageIcon,
@@ -37,6 +38,7 @@ interface AppHeaderProps {
   onOpenPacks: () => void;
   onOpenSavedVars: () => void;
   onOpenSettings: () => void;
+  onOpenLogUpload: () => void;
   onRefresh: () => void;
 }
 
@@ -57,6 +59,7 @@ export function AppHeader({
   onOpenPacks,
   onOpenSavedVars,
   onOpenSettings,
+  onOpenLogUpload,
   onRefresh,
 }: AppHeaderProps) {
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
@@ -254,6 +257,16 @@ export function AppHeader({
                 aria-label="Saved Vars"
               >
                 <FileSliders />
+              </Button>
+            </SimpleTooltip>
+            <SimpleTooltip content="Upload to ESO Logs" side="bottom">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onOpenLogUpload}
+                aria-label="Upload to ESO Logs"
+              >
+                <CloudUpload />
               </Button>
             </SimpleTooltip>
             <SimpleTooltip content="Settings" side="bottom">
