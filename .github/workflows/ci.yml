@@ -65,7 +65,12 @@ jobs:
         working-directory: backend/eso-packs-worker
 
       - name: Worker npm audit
-        run: npm audit --audit-level=high
+        # The worker has zero runtime dependencies; --omit=dev audits only what
+        # actually ships. Without it the audit fails on an unfixable esbuild
+        # advisory pulled in transitively by dev-only tooling
+        # (@cloudflare/vitest-pool-workers, wrangler), which never reaches the
+        # deployed worker. Upstream has no non-breaking fix.
+        run: npm audit --audit-level=high --omit=dev
         working-directory: backend/eso-packs-worker
 
       - name: Worker TypeScript check
