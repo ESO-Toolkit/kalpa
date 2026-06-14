@@ -305,8 +305,8 @@ async function handleCreatePack(request: Request, env: Env, url: URL): Promise<R
     ? input.id
     : slugify(input.title as string);
 
-  // Ensure unique
-  const existing = await getPack(env, id);
+  // Ensure unique (fresh read so a recently-created id isn't missed)
+  const existing = await getPack(env, id, { fresh: true });
   if (existing) {
     id = `${id}-${Date.now().toString(36)}`;
   }
@@ -350,7 +350,9 @@ async function handleUpdatePack(
     return unauthorized(request);
   }
 
-  const existing = await getPack(env, id);
+  // Fresh read: this handler carries vote_count/install_count forward from
+  // `existing`, so a stale cached snapshot would revert recent counter changes.
+  const existing = await getPack(env, id, { fresh: true });
   if (!existing) {
     return notFound(request);
   }
@@ -411,7 +413,9 @@ async function handleDeletePack(
     return unauthorized(request);
   }
 
-  const existing = await getPack(env, id);
+  // Fresh read so a just-created pack isn't seen as missing and ownership is
+  // checked against current data.
+  const existing = await getPack(env, id, { fresh: true });
   if (!existing) {
     return notFound(request);
   }
@@ -474,23 +478,27 @@ async function handleVotePack(
 
   const existingVote = await getVote(env, id, userId);
   let voted: boolean;
+  let delta: number;
 
   if (existingVote) {
     await deleteVote(env, id, userId);
-    pack.vote_count = Math.max(0, (pack.vote_count ?? 0) - 1);
     voted = false;
+    delta = -1;
   } else {
     await putVote(env, id, userId);
-    pack.vote_count = (pack.vote_count ?? 0) + 1;
     voted = true;
+    delta = 1;
   }
 
-  await putPack(env, pack);
-  await getPackIndexDO(env).updatePack(id, pack);
+  // Mutate the counter inside the DO (fresh, single-threaded) so we neither
+  // lose concurrent votes nor revert a recent author edit by writing back a
+  // stale cached snapshot. The DO also syncs the per-pack KV detail.
+  const updated = await getPackIndexDO(env).bumpPackCounter(id, "vote_count", delta, pack);
 
   await invalidatePackListCache(url);
 
-  const response: VoteResponse = { voted, voteCount: pack.vote_count };
+  const voteCount = updated?.vote_count ?? Math.max(0, (pack.vote_count ?? 0) + delta);
+  const response: VoteResponse = { voted, voteCount };
   return json(request, response);
 }
 
@@ -515,13 +523,15 @@ async function handleInstallPack(
   }
   await env.ESO_PACKS.put(rateLimitKey, "1", { expirationTtl: 3600 });
 
-  pack.install_count = (pack.install_count ?? 0) + 1;
-  await putPack(env, pack);
-  await getPackIndexDO(env).updatePack(id, pack);
+  // Increment inside the DO (fresh, single-threaded) instead of writing back a
+  // possibly-stale cached snapshot, which would lose concurrent installs and
+  // revert recent author edits. The DO also syncs the per-pack KV detail.
+  const updated = await getPackIndexDO(env).bumpPackCounter(id, "install_count", 1, pack);
 
   await invalidatePackListCache(url);
 
-  return json(request, { installCount: pack.install_count });
+  const installCount = updated?.install_count ?? (pack.install_count ?? 0) + 1;
+  return json(request, { installCount });
 }
 
 // ── GET /health ────────────────────────────────────────────────────
