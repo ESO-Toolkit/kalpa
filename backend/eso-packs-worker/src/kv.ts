@@ -10,9 +10,19 @@ export async function getPackIndex(env: Env): Promise<PackIndex | null> {
   return env.ESO_PACKS.get<PackIndex>(INDEX_KEY, { type: "json", cacheTtl: 60 });
 }
 
-export async function getPack(env: Env, id: string): Promise<Pack | null> {
-  // Pack detail is far more stable than the index; cache for 300s.
-  return env.ESO_PACKS.get<Pack>(`${PACK_PREFIX}${id}`, { type: "json", cacheTtl: 300 });
+export async function getPack(
+  env: Env,
+  id: string,
+  opts?: { fresh?: boolean },
+): Promise<Pack | null> {
+  // The public detail view tolerates staleness and is cached at the edge for
+  // 300s. Callers that read-modify-write the whole pack object back (update,
+  // delete, the create-time uniqueness check) pass { fresh: true } to minimize
+  // the stale window — KV's floor is 30s, so a truly fresh read is impossible;
+  // counter mutations (vote/install) must therefore go through the Durable
+  // Object (bumpPackCounter), which reads the index with no cacheTtl.
+  const cacheTtl = opts?.fresh ? 30 : 300;
+  return env.ESO_PACKS.get<Pack>(`${PACK_PREFIX}${id}`, { type: "json", cacheTtl });
 }
 
 export async function putPack(env: Env, pack: Pack): Promise<void> {
