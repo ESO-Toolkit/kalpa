@@ -186,13 +186,33 @@ export function RosterPackInstall({
             : s
         )
       );
+    } else {
+      // Reconcile pills against the authoritative result rather than trusting
+      // the streamed progress events alone. The backend emits "completed" per
+      // addon BEFORE the single kalpa.json save; if that save fails it moves
+      // every installed id into `failed`, so a row can be green here yet absent
+      // from result.installed. Demote those rows so the pills match the toast.
+      const failedIds = new Set(result.failed);
+      const installedIds = new Set(result.installed);
+      setAddonStates((prev) =>
+        prev.map((s) => {
+          if (failedIds.has(s.addon.esouiId)) return { ...s, status: "failed" };
+          if (installedIds.has(s.addon.esouiId)) return { ...s, status: "installed" };
+          return s;
+        })
+      );
     }
 
     setInstalling(false);
     setInstallProgress(null);
 
-    if (completed > 0) {
+    // Refresh whenever anything was extracted to disk — not just when an addon
+    // was successfully tracked. On a save failure addons land on disk but
+    // `installed` is empty, and the main list must still re-scan to surface them.
+    if (completed > 0 || (result?.installedFolders.length ?? 0) > 0) {
       onRefresh();
+    }
+    if (completed > 0) {
       toast.success(`Installed ${completed} addon${completed !== 1 ? "s" : ""}`);
     }
     if (failed > 0) {

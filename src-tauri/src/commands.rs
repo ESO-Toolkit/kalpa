@@ -3572,6 +3572,22 @@ fn import_extract_and_record(
                     failed.push(folder_name);
                 }
                 Ok(folders) => {
+                    // Record the modification baseline before tracking the install,
+                    // so the next update can detect user edits instead of silently
+                    // overwriting them. Treat a baseline failure as a failed import
+                    // rather than leaving metadata pointing at a folder with no
+                    // baseline (mirrors install_addon_blocking / try_install_dep).
+                    if let Err(e) = file_hashes::record_hashes_for_folders(
+                        addons_dir,
+                        &folders,
+                        dl.esoui_id,
+                        &dl.info.version,
+                    ) {
+                        errors.insert(folder_name.clone(), e);
+                        failed.push(folder_name);
+                        continue;
+                    }
+
                     record_installed_folders(
                         &mut store,
                         addons_dir,
@@ -3588,7 +3604,16 @@ fn import_extract_and_record(
         }
     }
 
-    metadata::save_metadata(addons_dir, &store)?;
+    if let Err(e) = metadata::save_metadata(addons_dir, &store) {
+        // Files extracted but kalpa.json didn't persist — surface partial state
+        // instead of discarding the result with a blanket error.
+        let reason = format!("Imported but could not be saved to kalpa.json: {e}");
+        eprintln!("[import] metadata save failed: {e}");
+        for folder_name in installed.drain(..) {
+            errors.insert(folder_name.clone(), reason.clone());
+            failed.push(folder_name);
+        }
+    }
 
     Ok(ImportResult {
         installed,
@@ -3769,6 +3794,35 @@ pub async fn batch_install_pack_addons(
                             );
                         }
                         Ok(folders) => {
+                            // Record the modification baseline BEFORE tracking the
+                            // install in metadata. Without it, the next update sees
+                            // stored=None, treats every file as unmodified, and would
+                            // silently overwrite the user's edits — the exact failure
+                            // the hash system prevents. If the baseline can't persist,
+                            // treat the addon as failed rather than leaving metadata
+                            // pointing at a folder with no baseline (mirrors
+                            // install_addon_blocking and try_install_dep).
+                            if let Err(e) = file_hashes::record_hashes_for_folders(
+                                &addons_dir,
+                                &folders,
+                                dl.esoui_id,
+                                &dl.info.version,
+                            ) {
+                                errors.insert(dl.esoui_id, e);
+                                failed.push(dl.esoui_id);
+                                let _ = app.emit(
+                                    "pack-install-progress",
+                                    PackInstallProgress {
+                                        esoui_id: dl.esoui_id,
+                                        label: dl.label.clone(),
+                                        phase: "failed".to_string(),
+                                        index,
+                                        total,
+                                    },
+                                );
+                                continue;
+                            }
+
                             record_installed_folders(
                                 &mut store,
                                 &addons_dir,
@@ -3800,7 +3854,20 @@ pub async fn batch_install_pack_addons(
         // One transitive-dependency pass over everything the pack installed.
         let resolved = resolve_transitive_deps(&addons_dir, &union_folders, &mut store);
 
-        metadata::save_metadata(&addons_dir, &store)?;
+        if let Err(e) = metadata::save_metadata(&addons_dir, &store) {
+            // The addons were extracted to disk, but kalpa.json didn't persist
+            // (e.g. Windows Controlled Folder Access, read-only or full disk).
+            // Don't discard the whole result and report a blanket failure: move
+            // every installed addon into `failed` with the save error so the UI
+            // surfaces partial state, and still return Ok so the frontend can
+            // refresh. Mirrors update_batch_with_decisions' save handling.
+            let reason = format!("Installed but could not be saved to kalpa.json: {e}");
+            eprintln!("[pack-install] metadata save failed: {e}");
+            for esoui_id in installed.drain(..) {
+                errors.insert(esoui_id, reason.clone());
+                failed.push(esoui_id);
+            }
+        }
 
         Ok(PackInstallResult {
             installed,
