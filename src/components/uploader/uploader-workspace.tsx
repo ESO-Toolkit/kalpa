@@ -468,6 +468,15 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
         options,
         channel,
       });
+      // The start can resolve Ok AFTER a stop / switch-to-Manual / superseding
+      // start ran during the await (handleStopLive already fired
+      // uploader_stop_live for this id and cleared the ref). If this start is no
+      // longer the current one, do NOT resurrect it: applying the result would
+      // set liveSessionId (showing a LIVE session) while liveSessionIdRef is null,
+      // so the visible Stop button — which keys off the ref — would no-op, leaving
+      // an unclearable phantom session. The backend stop already cancelled/will
+      // settle it, so just drop the stale result silently.
+      if (liveSessionIdRef.current !== sessionId) return;
       setLiveSessionId(sessionId);
       if (dispatch?.report) setLiveReport(dispatch.report);
       toast.success(
