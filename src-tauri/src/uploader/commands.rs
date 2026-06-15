@@ -676,6 +676,10 @@ pub fn uploader_stop_live(
 
 #[tauri::command]
 pub fn uploader_list_history(app: tauri::AppHandle) -> Vec<UploadRecord> {
+    // Settle any records left in a transient state by a previous run before the
+    // panel renders. Deferred from startup to first uploader use and run at most
+    // once per process (see history::reconcile_stale_once).
+    super::history::reconcile_stale_once(&app);
     super::history::load(&app)
 }
 

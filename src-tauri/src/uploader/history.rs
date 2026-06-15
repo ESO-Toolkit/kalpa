@@ -58,12 +58,29 @@ pub fn load(app: &tauri::AppHandle) -> Vec<UploadRecord> {
     file.records
 }
 
+/// Runs [`reconcile_stale`] at most once per process, lazily.
+static RECONCILE_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// Reconcile stale records exactly once per process, on first uploader use.
+///
+/// The reconcile is purely cosmetic — it settles `Uploading`/`Live` badges left
+/// over from a previous run before the history panel renders — and its only
+/// observable consumer is [`load`] via `uploader_list_history`. Deferring it
+/// here (instead of running it eagerly in `setup()`) means a user who never
+/// opens the uploader pays no history read/parse at startup, while a user who
+/// does still sees settled badges, since the panel calls `uploader_list_history`
+/// on open. Idempotent and cheap on every call after the first.
+pub fn reconcile_stale_once(app: &tauri::AppHandle) {
+    RECONCILE_ONCE.call_once(|| reconcile_stale(app));
+}
+
 /// Reconcile records left in a transient state by a previous run.
 ///
 /// Uploads hand off to the official uploader, whose progress we don't observe,
 /// so a record stuck in `Uploading`/`Live` from before a crash/quit can never
-/// resolve on its own. Settle them to `Completed` once at startup so the history
-/// panel doesn't show a perpetual "Uploading"/"Live" badge.
+/// resolve on its own. Settle them to `Completed` so the history panel doesn't
+/// show a perpetual "Uploading"/"Live" badge. Invoked once per process via
+/// [`reconcile_stale_once`].
 pub fn reconcile_stale(app: &tauri::AppHandle) {
     let Ok(path) = history_path(app) else {
         return;
@@ -112,7 +129,8 @@ pub fn upsert(app: &tauri::AppHandle, record: UploadRecord) -> Result<(), String
 /// official uploader's outcome, but we *do* know the session ended and how many
 /// fights the UI saw, so flip the record to `Completed` and record that count
 /// rather than leaving a perpetual red `Live / 0 fights` badge until the next
-/// `reconcile_stale` at startup. Idempotent and a no-op if the record is gone.
+/// `reconcile_stale` runs (on the next uploader open). Idempotent and a no-op if
+/// the record is gone.
 pub fn settle_live(
     app: &tauri::AppHandle,
     session_id: &str,

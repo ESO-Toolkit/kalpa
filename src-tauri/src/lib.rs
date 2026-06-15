@@ -297,9 +297,11 @@ pub fn run() {
                 }
             }
 
-            // Settle any upload-history records left in a transient state by a
-            // previous run (uploads hand off, so we never observe completion).
-            uploader::history::reconcile_stale(app.handle());
+            // Note: settling upload-history records left in a transient state by
+            // a previous run is deferred to first use of the uploader (see
+            // `uploader_list_history`), so a user who never opens the uploader
+            // pays no history read/parse at startup. It still runs at most once
+            // per process, before the history panel first renders.
 
             Ok(())
         })

@@ -95,24 +95,35 @@ impl Drop for LiveWatchHandle {
     }
 }
 
-/// Read `[start, end)` from a file into a raw byte buffer, bounded by
-/// [`MAX_READ`]. Returns raw bytes so callers track offsets from true byte
-/// lengths (never from a lossily-decoded string).
-fn read_range(path: &Path, start: u64, end: u64) -> Result<Vec<u8>, String> {
+/// Read `[start, end)` from a file into the caller-owned `buf`, bounded by
+/// [`MAX_READ`], and return the number of bytes read. `buf` is resized to
+/// exactly that length, so the valid bytes are `&buf[..len]`.
+///
+/// The caller hands in a buffer that lives for the whole tail loop so this
+/// never allocates per pass — it grows to the session's high-water mark once
+/// and is reused. Offsets are still tracked from true byte lengths (the raw
+/// bytes), never from a lossily-decoded string.
+fn read_range(path: &Path, start: u64, end: u64, buf: &mut Vec<u8>) -> Result<usize, String> {
     use std::io::{Read, Seek, SeekFrom};
     if end <= start {
-        return Ok(Vec::new());
+        buf.clear();
+        return Ok(0);
     }
     let len = end - start;
     if len > MAX_READ {
         return Err(format!("incremental read too large: {len} bytes"));
     }
+    let len = len as usize;
     let mut f = std::fs::File::open(path).map_err(|e| format!("open: {e}"))?;
     f.seek(SeekFrom::Start(start))
         .map_err(|e| format!("seek: {e}"))?;
-    let mut buf = vec![0u8; len as usize];
-    f.read_exact(&mut buf).map_err(|e| format!("read: {e}"))?;
-    Ok(buf)
+    // `resize` reuses existing capacity; it only zero-fills bytes beyond the
+    // current high-water mark, and those are immediately overwritten by the
+    // read below.
+    buf.resize(len, 0);
+    f.read_exact(&mut buf[..len])
+        .map_err(|e| format!("read: {e}"))?;
+    Ok(len)
 }
 
 /// Start tailing `file_path` for fight detection. `start_offset` is where to
@@ -187,6 +198,11 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
     // at offset 0 (include-entire-file) the first chunk begins with the session
     // header, so it's NOT yet open; tailing from EOF we're already mid-session.
     let mut session_open = start_offset != 0;
+    // Read buffer reused across every pass: it grows to the session's
+    // high-water mark once instead of allocating a fresh Vec per read, so a
+    // multi-hour raid does no per-pass heap churn (and the worst-case 64 MiB
+    // catch-up window is allocated at most once).
+    let mut read_buf: Vec<u8> = Vec::new();
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -259,8 +275,8 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
 
         // Cap each pass to MAX_READ; catch-up progresses over multiple passes.
         let read_end = size.min(consumed + MAX_READ);
-        let chunk = match read_range(&path, consumed, read_end) {
-            Ok(c) => c,
+        let n = match read_range(&path, consumed, read_end, &mut read_buf) {
+            Ok(n) => n,
             Err(e) => {
                 consecutive_failures += 1;
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
@@ -278,10 +294,13 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
                 continue;
             }
         };
+        // The valid bytes are the prefix `read_buf` was just resized to; the
+        // buffer's spare capacity past `n` holds stale bytes from prior passes.
+        let chunk = &read_buf[..n];
 
         // Detect completed fights and boundary signals in the chunk. Once we've
         // read any data, subsequent chunks are mid-session.
-        let scan = scanner::scan_chunk_for_fights(&chunk, consumed, session_open);
+        let scan = scanner::scan_chunk_for_fights(chunk, consumed, session_open);
         session_open = true;
 
         // A mid-chunk BEGIN_LOG (a /encounterlog re-enable) starts a new session
