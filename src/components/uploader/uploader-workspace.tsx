@@ -543,10 +543,19 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     } catch {
       /* best-effort */
     }
-    liveActiveRef.current = false; // stop processing any trailing events
-    liveSessionIdRef.current = null;
-    setLiveSessionId(null);
-    setLiveStatus(liveFightCount > 0 ? "upToDate" : "idle");
+    // Only clear the live refs/state if WE are still the current session. The
+    // await above can take a while (it joins the watcher thread + settles history
+    // I/O); during it the watcher's own `stopped` event can clear state, re-enable
+    // Start, and the user can begin a NEW session. Clobbering the refs/state
+    // unconditionally here would orphan that new session (its start result gets
+    // dropped by the session guard, its channel events ignored) with no visible
+    // Stop. If a newer session replaced ours, leave it alone.
+    if (liveSessionIdRef.current === id) {
+      liveActiveRef.current = false; // stop processing any trailing events
+      liveSessionIdRef.current = null;
+      setLiveSessionId(null);
+      setLiveStatus(liveFightCount > 0 ? "upToDate" : "idle");
+    }
     if (wasRunning) {
       // Be honest: Kalpa stopped its own tracking, but it can't stop the separate
       // official uploader — it may still be streaming until the user stops it.
