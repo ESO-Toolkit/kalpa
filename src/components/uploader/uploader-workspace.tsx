@@ -382,9 +382,16 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     // The watcher emits UI-only fight-detection events; the actual upload is the
     // single whole-file handoff performed by uploader_start_live below.
     channel.onmessage = (ev) => {
-      // Drop events that arrive after the session was stopped or the dialog
-      // closed (the backend keeps emitting for up to one poll interval).
-      if (!liveActiveRef.current) return;
+      // Drop events that don't belong to the CURRENT session. The global
+      // liveActiveRef alone is not enough: a previous session's queued event
+      // (e.g. the watcher's trailing `Stopped`, delivery to React lagging) can
+      // arrive after a NEW session already set liveActiveRef=true and a new
+      // liveSessionIdRef. Without this per-session check, that stale event would
+      // contaminate the new session — clearing its timeline or, in the `stopped`
+      // arm, calling uploader_stop_live for the new id. This closure captures its
+      // own `sessionId`, so gate on it (which also covers the stopped/closed case
+      // the liveActiveRef check used to handle, since the ref is nulled on stop).
+      if (!liveActiveRef.current || liveSessionIdRef.current !== sessionId) return;
       switch (ev.type) {
         case "started":
           setLiveStatus("watching");
@@ -429,33 +436,29 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           console.warn("[uploader] live watcher:", ev.message);
           break;
         case "stopped": {
-          // A `stopped` event while we still consider the session active means
-          // the watcher thread died on its own (lost folder access, couldn't
-          // keep reading the log, etc.) — a user-initiated stop already cleared
-          // liveActiveRef before this could run. Beyond tearing down the UI, the
-          // backend still holds the now-dead `Running` slot and the history
-          // record is still `Live`, and nothing else settles them until the
-          // next-launch reconcile. Drive the existing stop path so the slot is
-          // evicted and the record settled immediately. Capture the id + count
-          // FIRST, before we null the ref, or the invoke would have nothing to
-          // settle (the ref is set before the start await, so it holds the id
-          // even if `liveSessionId` state hasn't landed yet).
-          const stoppedId = liveSessionIdRef.current;
+          // A `stopped` event that passes the session guard above means THIS
+          // session's watcher thread died on its own (lost folder access,
+          // couldn't keep reading the log, etc.) — a user-initiated stop already
+          // cleared liveActiveRef/the ref before this could run. Beyond tearing
+          // down the UI, the backend still holds the now-dead `Running` slot and
+          // the history record is still `Live`, and nothing else settles them
+          // until the next-launch reconcile. Drive the existing stop path so the
+          // slot is evicted and the record settled immediately. Use this
+          // closure's own `sessionId` (the guard proved it is the current one) so
+          // we never settle some other session's id.
           const stoppedFightCount = liveFightCountRef.current;
           liveActiveRef.current = false;
           liveSessionIdRef.current = null;
           setLiveSessionId(null);
           setLiveStatus("attention");
           if (ev.reason && !/stopped\.?$/i.test(ev.reason)) toast.error(ev.reason);
-          if (stoppedId) {
-            // Best-effort: evicts the dead `Running` slot (stop_slot_in_map) and
-            // settles the `Live` record to `Completed` (settle_live). Both are
-            // idempotent, so this is safe even if the record was already settled.
-            void invokeOrThrow("uploader_stop_live", {
-              sessionId: stoppedId,
-              fightCount: stoppedFightCount,
-            }).catch(() => {});
-          }
+          // Best-effort: evicts the dead `Running` slot (stop_slot_in_map) and
+          // settles the `Live` record to `Completed` (settle_live). Both are
+          // idempotent, so this is safe even if the record was already settled.
+          void invokeOrThrow("uploader_stop_live", {
+            sessionId,
+            fightCount: stoppedFightCount,
+          }).catch(() => {});
           break;
         }
       }

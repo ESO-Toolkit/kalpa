@@ -115,25 +115,35 @@ pub fn save_tokens(tokens: &AuthTokens) {
     }
 }
 
+/// Load tokens from the chunked format ONLY (count sentinel + chunks), with no
+/// legacy single-entry fallback. Used by migration to confirm the chunked save
+/// actually committed — `load_tokens` would otherwise satisfy a verify by
+/// falling back to the very legacy plaintext entry the migration is about to
+/// delete, even when the chunked write failed.
+#[cfg(windows)]
+fn load_chunked_tokens() -> Option<AuthTokens> {
+    let count_entry = entry(COUNT_KEY)?;
+    let count_str = count_entry.get_password().ok()?;
+    let n: usize = count_str.trim().parse().ok()?;
+    if n == 0 || n > MAX_CHUNKS {
+        return None;
+    }
+    let mut b64 = String::new();
+    for i in 0..n {
+        // Any missing chunk = corrupt/partial → fail closed.
+        let part = entry(&format!("{CHUNK_PREFIX}.{i}"))?.get_password().ok()?;
+        b64.push_str(&part);
+    }
+    let bytes = STANDARD.decode(b64.as_bytes()).ok()?;
+    let json = String::from_utf8(bytes).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
 #[cfg(windows)]
 pub fn load_tokens() -> Option<AuthTokens> {
     // New chunked format: keyed on the presence of the count sentinel.
-    if let Some(count_entry) = entry(COUNT_KEY) {
-        if let Ok(count_str) = count_entry.get_password() {
-            let n: usize = count_str.trim().parse().ok()?;
-            if n == 0 || n > MAX_CHUNKS {
-                return None;
-            }
-            let mut b64 = String::new();
-            for i in 0..n {
-                // Any missing chunk = corrupt/partial → fail closed.
-                let part = entry(&format!("{CHUNK_PREFIX}.{i}"))?.get_password().ok()?;
-                b64.push_str(&part);
-            }
-            let bytes = STANDARD.decode(b64.as_bytes()).ok()?;
-            let json = String::from_utf8(bytes).ok()?;
-            return serde_json::from_str(&json).ok();
-        }
+    if let Some(tokens) = load_chunked_tokens() {
+        return Some(tokens);
     }
 
     // Legacy single-entry format (raw JSON, pre-chunking). Lets already-migrated
@@ -181,11 +191,15 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
     };
 
     // Use the chunked save path (the old inline single-entry write overflowed
-    // the 2560-byte credential limit and left plaintext behind). Verify the
-    // round-trip via load_tokens before discarding the plaintext copy, so a
-    // failed write never loses the user's tokens.
+    // the 2560-byte credential limit and left plaintext behind). Verify via the
+    // CHUNKED loader (not load_tokens) before discarding the plaintext copy:
+    // load_tokens would fall back to the legacy plaintext entry that still
+    // exists here and report success even if the chunked write failed (save
+    // clears the count sentinel before writing chunks), which would delete the
+    // plaintext while no committed copy exists. load_chunked_tokens confirms the
+    // chunked set actually committed, so a failed write never loses the tokens.
     save_tokens(&tokens);
-    if load_tokens().is_some() {
+    if load_chunked_tokens().is_some() {
         let _ = store.delete("auth_tokens");
     } else {
         eprintln!("[token_store] migration: verify failed, leaving plaintext intact");
