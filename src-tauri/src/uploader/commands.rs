@@ -157,6 +157,19 @@ fn prune_split_folders(root: &Path, keep: usize) {
     }
 }
 
+/// Validate user-supplied upload options before they reach the official
+/// uploader's CLI. `region` is the one user-controlled argv integer with no
+/// downstream allowlist (the transport forwards it verbatim), so a buggy/
+/// compromised webview could pass an unsupported value; reject anything but the
+/// two real megaservers. Mirrors the numeric `guild_id` allowlist in transport.
+fn validate_upload_options(opts: &UploadOptions) -> Result<(), String> {
+    // 1 = NA/US, 2 = EU. These are the only meaningful Personal Logs regions.
+    if !matches!(opts.region, 1 | 2) {
+        return Err("Unsupported region (choose NA or EU).".into());
+    }
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -323,6 +336,7 @@ pub async fn uploader_upload_log(
     prefer_cli: bool,
     fight_count: Option<usize>,
 ) -> Result<UploadDispatch, String> {
+    validate_upload_options(&options)?;
     let safe = confine_log_path(&allowed, &file_path)?
         .to_string_lossy()
         .into_owned();
@@ -444,6 +458,7 @@ pub async fn uploader_start_live(
     options: UploadOptions,
     channel: Channel<LiveEvent>,
 ) -> Result<UploadDispatch, String> {
+    validate_upload_options(&options)?;
     let safe = confine_log_path(&allowed, &file_path)?
         .to_string_lossy()
         .into_owned();

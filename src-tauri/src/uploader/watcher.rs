@@ -33,6 +33,11 @@ use super::scanner;
 const MAX_READ: u64 = 64 * 1024 * 1024;
 /// Poll fallback cadence — short enough to feel live, light on IO.
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
+/// Give up after this many consecutive stat/read failures (~the active log was
+/// deleted/renamed/replaced-by-a-dir, or a permanent AV/CFA/share lock). At a
+/// ~400ms cadence this is ~12s of unbroken failure before we tear the session
+/// down rather than spinning forever while the UI shows a stuck "LIVE".
+const MAX_CONSECUTIVE_FAILURES: u32 = 30;
 
 /// Events streamed to the frontend over the live-session [`Channel`].
 #[derive(Clone, Serialize)]
@@ -175,6 +180,9 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
     let mut consumed = start_offset;
     let mut next_index = 0usize;
     let mut last_poll = Instant::now();
+    // Consecutive stat/read failures; reset on any successful pass. Past
+    // MAX_CONSECUTIVE_FAILURES we stop instead of zombie-looping (L1).
+    let mut consecutive_failures: u32 = 0;
     // Whether the bytes before `consumed` are inside an open session. Starting
     // at offset 0 (include-entire-file) the first chunk begins with the session
     // header, so it's NOT yet open; tailing from EOF we're already mid-session.
@@ -220,8 +228,20 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
 
         let size = match std::fs::metadata(&path) {
             Ok(m) => m.len(),
-            Err(_) => continue,
+            Err(e) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    let _ = channel.send(LiveEvent::Stopped {
+                        reason: format!("Lost access to the log file (stopped watching): {e}"),
+                    });
+                    return;
+                }
+                continue;
+            }
         };
+        // A successful stat means the file is reachable; clear any failure streak
+        // (an idle file that never grows must not eventually trip the limit).
+        consecutive_failures = 0;
 
         // Truncation / new session detection. After a reset the file starts
         // fresh, so the next chunk's leading BEGIN_LOG is the session header,
@@ -242,6 +262,15 @@ fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: C
         let chunk = match read_range(&path, consumed, read_end) {
             Ok(c) => c,
             Err(e) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    let _ = channel.send(LiveEvent::Stopped {
+                        reason: format!(
+                            "Could not keep reading the log file (stopped watching): {e}"
+                        ),
+                    });
+                    return;
+                }
                 // Transient (e.g. sharing violation while ESO flushes) — retry.
                 let _ = channel.send(LiveEvent::Warning {
                     message: format!("Read retry: {e}"),

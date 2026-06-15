@@ -74,6 +74,19 @@ const DEFAULT_OPTIONS: UploadOptions = {
 
 const OPTIONS_KEY = "kalpa.uploader.options";
 
+/** Open a report URL in the user's browser, surfacing failures instead of
+ *  swallowing them. The opener plugin rejects a URL outside the capability's
+ *  allow-scope (now includes esologs.com/reports/*); a rejection should toast,
+ *  not vanish into an unhandled promise. */
+async function openReportUrl(url: string): Promise<void> {
+  try {
+    const m = await import("@tauri-apps/plugin-opener");
+    await m.openUrl(url);
+  } catch {
+    toast.error("Couldn't open the report — copy the link and open it manually.");
+  }
+}
+
 /** Max live fights kept in React state / the DOM at once. A long raid night can
  *  produce hundreds of fights; we keep a rolling window of the most recent ones
  *  (full history lives on esologs.com) and report the true total separately. */
@@ -113,6 +126,9 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   const [detection, setDetection] = useState<LogPathDetection | null>(null);
   const [logsDir, setLogsDir] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogFileInfo[]>([]);
+  // Distinguish "folder read failed" from "folder is genuinely empty" so the
+  // empty state doesn't misreport an access error as "No log files found" (L17).
+  const [listError, setListError] = useState<string | null>(null);
   const [selectedLog, setSelectedLog] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<LogPreflight | null>(null);
   const [fights, setFights] = useState<FightSummary[]>([]);
@@ -186,6 +202,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
       try {
         const files = await invokeOrThrow<LogFileInfo[]>("uploader_list_logs", { logsDir: dir });
         setLogs(files);
+        setListError(null);
         // If the previously-selected log is gone (rotated/deleted on relog or a
         // patch), drop the stale selection so its preflight can't be acted on.
         const sel = selectedLogRef.current;
@@ -193,7 +210,12 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           clearSelection();
         }
       } catch (e) {
-        toast.error(`Couldn't list logs: ${getTauriErrorMessage(e)}`);
+        const msg = getTauriErrorMessage(e);
+        // Record the failure so the empty state can show the real reason instead
+        // of "No log files found"; also clear any stale list from a prior folder.
+        setListError(msg);
+        setLogs([]);
+        toast.error(`Couldn't list logs: ${msg}`);
       }
     },
     [clearSelection]
@@ -242,11 +264,17 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   }, []);
 
   const handlePickFolder = async () => {
-    const picked = await openDialog({ directory: true, title: "Select your ESO Logs folder" });
-    if (typeof picked === "string" && picked !== logsDir) {
-      clearSelection(); // switching folders invalidates the current selection
-      setLogsDir(picked);
-      void loadLogs(picked);
+    // The folder picker is the documented manual recovery when auto-detection
+    // fails; an OS dialog error must surface, not silently no-op.
+    try {
+      const picked = await openDialog({ directory: true, title: "Select your ESO Logs folder" });
+      if (typeof picked === "string" && picked !== logsDir) {
+        clearSelection(); // switching folders invalidates the current selection
+        setLogsDir(picked);
+        void loadLogs(picked);
+      }
+    } catch (e) {
+      toast.error(`Couldn't open the folder picker: ${getTauriErrorMessage(e)}`);
     }
   };
 
@@ -458,10 +486,17 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     await refreshHistory();
   };
 
-  const copyLink = (url: string) => {
-    void navigator.clipboard.writeText(url);
-    toast.success("Report link copied.");
-  };
+  const copyLink = useCallback(async (url: string) => {
+    // Await the write and gate the toast on success: a rejected clipboard write
+    // (permission/focus/policy) must not show a false "copied" or leak an
+    // unhandled rejection. Matches the await-in-try/catch convention elsewhere.
+    try {
+      await navigator.clipboard.writeText(url);
+      toast.success("Report link copied.");
+    } catch {
+      toast.error("Couldn't copy the link — copy it manually.");
+    }
+  }, []);
 
   const handleAttachReport = useCallback(
     async (id: string, reportUrl: string) => {
@@ -544,6 +579,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
               detection={detection}
               logsDir={logsDir}
               logs={logs}
+              listError={listError}
               selectedLog={selectedLog}
               onSelect={handleSelectLog}
               onRefresh={() => logsDir && loadLogs(logsDir)}
@@ -695,6 +731,7 @@ function LogPicker({
   detection,
   logsDir,
   logs,
+  listError,
   selectedLog,
   onSelect,
   onRefresh,
@@ -703,6 +740,7 @@ function LogPicker({
   detection: LogPathDetection | null;
   logsDir: string | null;
   logs: LogFileInfo[];
+  listError: string | null;
   selectedLog: string | null;
   onSelect: (path: string) => void;
   onRefresh: () => void;
@@ -730,7 +768,12 @@ function LogPicker({
         <div className="mb-2 text-xs text-amber-400/90">{detection?.message}</div>
       )}
 
-      {logs.length === 0 ? (
+      {listError ? (
+        <div className="rounded-lg border border-dashed border-red-400/30 bg-red-400/[0.04] p-4 text-center text-sm text-red-300/90">
+          Couldn't read this folder — check it's accessible and try Refresh.
+          <div className="mt-1 text-xs text-muted-foreground">{listError}</div>
+        </div>
+      ) : logs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-white/[0.08] p-4 text-center text-sm text-muted-foreground">
           {detection && !detection.encounterLogExists
             ? "No Encounter.log yet. Type /encounterlog in chat (or use a logging addon) to start recording."
@@ -949,7 +992,7 @@ function LiveDashboard({
   liveReport: ReportRef | null;
   onStart: () => void;
   onStop: () => void;
-  onCopyLink: (url: string) => void;
+  onCopyLink: (url: string) => void | Promise<void>;
 }) {
   return (
     <GlassPanel variant="primary" className="space-y-3 p-4">
@@ -990,7 +1033,7 @@ function LiveDashboard({
             <Button
               variant="ghost"
               size="icon-sm"
-              onClick={() => onCopyLink(liveReport.url)}
+              onClick={() => void onCopyLink(liveReport.url)}
               aria-label="Copy link"
             >
               <Copy className="size-3.5" />
@@ -998,9 +1041,7 @@ function LiveDashboard({
             <Button
               variant="ghost"
               size="icon-sm"
-              onClick={() => {
-                void import("@tauri-apps/plugin-opener").then((m) => m.openUrl(liveReport.url));
-              }}
+              onClick={() => void openReportUrl(liveReport.url)}
               aria-label="Open report"
             >
               <ExternalLink className="size-3.5" />
@@ -1035,7 +1076,7 @@ function HistoryPanel({
   onAttachReport,
 }: {
   history: UploadRecord[];
-  onCopyLink: (url: string) => void;
+  onCopyLink: (url: string) => void | Promise<void>;
   onRefresh: () => void;
   onAttachReport: (id: string, url: string) => Promise<void>;
 }) {
@@ -1085,7 +1126,7 @@ function HistoryPanel({
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    onClick={() => onCopyLink(r.report!.url)}
+                    onClick={() => void onCopyLink(r.report!.url)}
                     aria-label="Copy report link"
                   >
                     <Copy className="size-3.5" />

@@ -59,6 +59,45 @@ fn copy_range(src: &Path, dst: &Path, start: u64, end: u64) -> Result<(), String
     Ok(())
 }
 
+/// Cheaply verify that the supplied preflight offsets still describe THIS file
+/// (not a different one written after a truncate-and-regrow). Reads the first
+/// session's leading bytes and confirms they are a `BEGIN_LOG` line carrying the
+/// same `start_time_ms` the preflight recorded. A truncate-to-0-then-regrow can
+/// leave `snapshot_len >= max_end` (so the length check passes) while the byte
+/// boundaries now point at unrelated data — this catches that case. Returns
+/// false on any read error or mismatch so the caller falls back to a re-scan.
+fn offsets_still_valid(src: &Path, first: &LogSession) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = File::open(src) else {
+        return false;
+    };
+    if f.seek(SeekFrom::Start(first.start_offset)).is_err() {
+        return false;
+    }
+    // A BEGIN_LOG line is short; 512 bytes is ample to cover the timestamp field.
+    let mut buf = [0u8; 512];
+    let n = match f.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let head = &buf[..n];
+    // First line only (BEGIN_LOG lines are `0,BEGIN_LOG,<start_time_ms>,…`).
+    let line_end = head.iter().position(|b| *b == b'\n').unwrap_or(head.len());
+    let Ok(line) = std::str::from_utf8(&head[..line_end]) else {
+        return false;
+    };
+    let mut fields = line.split(',');
+    // field[0] is a relative time offset, field[1] the event name.
+    if fields.next().is_none() {
+        return false;
+    }
+    if !matches!(fields.next(), Some(name) if name.eq_ignore_ascii_case("BEGIN_LOG")) {
+        return false;
+    }
+    // field[2] is the absolute start time; it must match the preflight value.
+    matches!(fields.next(), Some(ts) if ts.trim() == first.start_time_ms.to_string())
+}
+
 /// Produce a stable, filesystem-safe name for a session's split file.
 fn session_file_name(stem: &str, session: &LogSession) -> String {
     // Anchor on the absolute start time so names are sortable and unique.
@@ -99,12 +138,16 @@ pub fn split_by_session(
 
     let sessions = match sessions {
         Some(s) if !s.is_empty() => {
-            // Caller-supplied offsets are from preflight time. If the file is now
-            // shorter than the sessions' max end, it rotated/truncated since —
-            // the stale offsets would carve garbage from the new file, so re-scan
-            // for a consistent list rather than trusting them.
+            // Caller-supplied offsets are from preflight time. They're only safe
+            // to trust if the file hasn't been rewritten since:
+            //  - shorter than the sessions' max end  → it shrank/rotated; OR
+            //  - a truncate-to-0-then-regrow past max_end leaves the length check
+            //    passing while the byte boundaries now point at unrelated data.
+            // Re-scan for a consistent list unless the length is still ≥ the max
+            // end AND the first session's bytes still classify as the same
+            // BEGIN_LOG (same start_time_ms) the preflight recorded.
             let max_end = s.iter().map(|x| x.end_offset).max().unwrap_or(0);
-            if snapshot_len < max_end {
+            if snapshot_len < max_end || !offsets_still_valid(src, &s[0]) {
                 scanner::scan_file(source_path)?.sessions
             } else {
                 s
@@ -121,9 +164,21 @@ pub fn split_by_session(
         .and_then(|s| s.to_str())
         .unwrap_or("Encounter");
 
+    let last_index = sessions.len() - 1;
     let mut written = Vec::with_capacity(sessions.len());
-    for session in &sessions {
-        let end = session.end_offset.min(snapshot_len);
+    for (i, session) in sessions.iter().enumerate() {
+        // Completed sessions end at a real BEGIN_LOG/END_LOG boundary that never
+        // moves, so their stale `end_offset` is correct (clamped to the snapshot
+        // for safety). The FINAL session may still be open and growing: its
+        // preflight `end_offset` was the EOF at scan time, so anything ESO
+        // appended since would be silently dropped. Extend it to the current EOF
+        // (snapshot_len) so those later fights are included (L3).
+        let end = if i == last_index {
+            session.end_offset.max(snapshot_len)
+        } else {
+            session.end_offset
+        }
+        .min(snapshot_len);
         if end <= session.start_offset {
             continue; // session lies entirely past the snapshot (shouldn't happen)
         }

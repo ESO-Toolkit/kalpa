@@ -57,10 +57,12 @@ pub fn save_tokens(tokens: &AuthTokens) {
     let b64 = STANDARD.encode(json.as_bytes());
     let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK_LEN).collect();
 
-    // Wipe any prior chunks/count/legacy entry first, so a shorter new token
-    // set can't leave orphan high-index chunks behind.
-    clear_tokens();
-
+    // Crash-safe ordering: write the new chunks (overwriting same-index slots),
+    // THEN flip the count sentinel as the single commit point, THEN sweep
+    // orphans. We deliberately do NOT clear first — an interrupted save must
+    // leave the PRIOR committed set intact (the old count still points at old,
+    // still-present chunks) rather than wiping a perfectly good token set and
+    // forcing a re-login if we crash mid-write.
     for (i, c) in chunks.iter().enumerate() {
         // base64 output is valid ASCII, so this never fails.
         let s = match std::str::from_utf8(c) {
@@ -75,17 +77,31 @@ pub fn save_tokens(tokens: &AuthTokens) {
             return;
         };
         if let Err(err) = e.set_password(s) {
+            // Abort without touching the count: the old set is still committed.
             eprintln!("[token_store] failed to save chunk {i}: {err}");
             return;
         }
     }
 
-    // Write the count LAST — it's the commit point. A crash before this leaves
-    // no valid sentinel, so a half-written set is never read back as valid.
+    // Commit point: flip the count to the new chunk total. Until this succeeds,
+    // load_tokens still reads back the previous valid set.
     if let Some(e) = entry(COUNT_KEY) {
         if let Err(err) = e.set_password(&chunks.len().to_string()) {
             eprintln!("[token_store] failed to save token count: {err}");
+            return;
         }
+    }
+
+    // Post-commit cleanup (best-effort): remove orphan high-index chunks left by
+    // a previously-larger token set, plus the legacy single-entry blob. Failures
+    // here don't affect correctness — load_tokens only reads chunks 0..count.
+    for i in chunks.len()..MAX_CHUNKS {
+        if let Some(e) = entry(&format!("{CHUNK_PREFIX}.{i}")) {
+            let _ = e.delete_credential();
+        }
+    }
+    if let Some(e) = entry(USER) {
+        let _ = e.delete_credential();
     }
 }
 
