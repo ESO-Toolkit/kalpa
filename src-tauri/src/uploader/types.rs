@@ -106,12 +106,16 @@ pub enum Visibility {
 }
 
 impl Visibility {
-    /// The numeric reportVisibilityId the ESO Logs uploader uses.
-    pub fn as_id(self) -> u8 {
+    /// The numeric `reportVisibilityId` the official uploader's
+    /// `--report-visibility` flag expects. Verified against the installed app
+    /// (app.asar v8.20.113): "Public = 0, Private = 1, Unlisted = 2". Getting
+    /// this wrong is a privacy bug (e.g. mapping Private to 0 would upload it as
+    /// Public), so the values must match the uploader's table exactly.
+    pub fn as_report_visibility_id(self) -> u8 {
         match self {
-            Visibility::Public => 1,
+            Visibility::Public => 0,
+            Visibility::Private => 1,
             Visibility::Unlisted => 2,
-            Visibility::Private => 0,
         }
     }
 }
@@ -200,4 +204,21 @@ pub enum UploadMode {
     Manual,
     Live,
     SplitOnly,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Privacy-critical: these ids are forwarded verbatim to the official
+    // uploader's --report-visibility flag, whose own table is Public=0,
+    // Private=1, Unlisted=2 (verified against the installed app.asar). A swap
+    // here would upload reports more openly than the user chose (e.g. Private
+    // leaking as Public), so pin the exact values.
+    #[test]
+    fn report_visibility_ids_match_the_uploader_table() {
+        assert_eq!(Visibility::Public.as_report_visibility_id(), 0);
+        assert_eq!(Visibility::Private.as_report_visibility_id(), 1);
+        assert_eq!(Visibility::Unlisted.as_report_visibility_id(), 2);
+    }
 }

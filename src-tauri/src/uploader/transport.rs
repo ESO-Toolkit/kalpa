@@ -204,6 +204,14 @@ impl CliTransport {
                 cmd.arg("--guild").arg("null");
             }
         }
+        // Forward the user's report visibility. Without this the uploader uses
+        // its own default/last-used visibility, so a user who picked Private
+        // could have the report uploaded more openly — a privacy bug. The id
+        // mapping is the uploader's own (Public=0, Private=1, Unlisted=2),
+        // verified against the installed app.asar (see as_report_visibility_id).
+        cmd.arg("--report-visibility")
+            .arg(opts.visibility.as_report_visibility_id().to_string());
+
         if opts.include_entire_file {
             // The official uploader's flag is `--include-entire-file-in-report`;
             // it silently ignores unknown flags, so the old `--include-entire-file`

@@ -160,6 +160,10 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   // Holds the in-flight live session id from before the start await resolves, so
   // unmounting mid-await still stops the backend watcher (state hasn't landed).
   const liveSessionIdRef = useRef<string | null>(null);
+  // Mirrors "a session was actually running (handed off to the uploader)" for the
+  // empty-deps unmount cleanup, which can't read `liveSessionId` state (stale
+  // closure). Lets the close path show the same handoff reminder as Stop.
+  const liveWasRunningRef = useRef(false);
   // Gate for the live channel handler: late events queued during the ~poll
   // shutdown window must not fire setState/toast after stop or unmount.
   const liveActiveRef = useRef(false);
@@ -247,14 +251,28 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     };
   }, [loadLogs, refreshHistory]);
 
-  // Stop any live session when the workspace unmounts. Reads the ref (set
-  // before the start await) so a session started but not yet reflected in state
-  // is still torn down. Empty deps: this must run only on final unmount.
+  // Stop any live session when the workspace unmounts (e.g. the dialog is
+  // closed). Reads the ref (set before the start await) so a session started but
+  // not yet reflected in state is still torn down. Empty deps: this must run
+  // only on final unmount.
+  //
+  // `liveWasRunningRef` tracks whether a session was actually running (handed off
+  // to the official uploader). This unmount path bypasses handleStopLive, so it
+  // must carry the same honest reminder itself — closing the dialog stops Kalpa's
+  // tracking but NOT the separate uploader. The reminder is fired here (not only
+  // in handleStopLive) because the close/unmount is a real teardown path. Sonner's
+  // <Toaster> is mounted globally (main.tsx), so a toast survives this unmount.
   useEffect(() => {
     return () => {
       liveActiveRef.current = false; // drop any late channel events
       const id = liveSessionIdRef.current;
       if (id) {
+        if (liveWasRunningRef.current) {
+          toast.info(
+            "Closed live tracking in Kalpa. The ESO Logs Uploader may still be uploading — stop it in its own window to end the live report.",
+            { duration: 8000 }
+          );
+        }
         void invokeOrThrow("uploader_stop_live", {
           sessionId: id,
           fightCount: liveFightCountRef.current,
@@ -449,6 +467,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           const stoppedFightCount = liveFightCountRef.current;
           liveActiveRef.current = false;
           liveSessionIdRef.current = null;
+          liveWasRunningRef.current = false; // settled; don't re-warn on close
           setLiveSessionId(null);
           setLiveStatus("attention");
           if (ev.reason && !/stopped\.?$/i.test(ev.reason)) toast.error(ev.reason);
@@ -480,6 +499,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
       // an unclearable phantom session. The backend stop already cancelled/will
       // settle it, so just drop the stale result silently.
       if (liveSessionIdRef.current !== sessionId) return;
+      liveWasRunningRef.current = true; // handed off; the uploader is now streaming
       setLiveSessionId(sessionId);
       if (dispatch?.report) setLiveReport(dispatch.report);
       toast.success(
@@ -511,8 +531,10 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     if (!id) return;
     // Was this session actually running (handed off to the uploader), vs still
     // starting? Only a running session left the official uploader streaming, so
-    // only then do we remind the user it keeps going.
-    const wasRunning = liveSessionId !== null;
+    // only then do we remind the user it keeps going. Clear the ref so a later
+    // dialog-close can't re-warn for an already-stopped session.
+    const wasRunning = liveWasRunningRef.current;
+    liveWasRunningRef.current = false;
     try {
       await invokeOrThrow("uploader_stop_live", {
         sessionId: id,
