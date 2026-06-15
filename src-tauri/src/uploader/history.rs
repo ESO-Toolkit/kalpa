@@ -155,6 +155,33 @@ pub fn settle_live(
     save_json_with_backup(&path, &file)
 }
 
+/// Settle a specific start record (matched by exact `id`) that lost ownership
+/// mid-start to a stop/supersede.
+///
+/// `uploader_start_live` writes its `Live` record AFTER snapshotting the cancel
+/// flag, so a stop landing in that gap runs `settle_live` before the record
+/// exists (nothing to match) and leaves a stale `Live` badge. When the start
+/// then detects it lost ownership at promotion, it calls this to settle its own
+/// just-written record to `Cancelled` — by exact id, so it can't touch a newer
+/// session's record. Only flips a still-transient (`Live`/`Uploading`) record;
+/// idempotent and a no-op if the record was already settled or removed.
+pub fn settle_started(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut changed = false;
+    for r in &mut file.records {
+        if r.id == id && matches!(r.status, UploadStatus::Live | UploadStatus::Uploading) {
+            r.status = UploadStatus::Cancelled;
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
 /// Delete a record by id, then persist (serialized with other mutations).
 pub fn remove(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;

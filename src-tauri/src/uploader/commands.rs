@@ -660,7 +660,7 @@ pub async fn uploader_start_live(
     let cancelled_during_start = cancelled.load(Ordering::SeqCst);
     let record_id = super::history::next_record_id(now_ms(), &session_id);
     let record = UploadRecord {
-        id: record_id,
+        id: record_id.clone(),
         source_path: safe.clone(),
         file_name,
         created_at_ms: now_ms(),
@@ -709,7 +709,7 @@ pub async fn uploader_start_live(
             Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, &cancelled)
         );
         if still_ours && !cancelled.load(Ordering::SeqCst) {
-            sessions.insert(session_id, LiveSlot::Running(handle));
+            sessions.insert(session_id.clone(), LiveSlot::Running(handle));
             None
         } else {
             // Leave any newer slot alone; just stop our now-unwanted watcher.
@@ -718,6 +718,14 @@ pub async fn uploader_start_live(
     };
     if let Some(handle) = promote {
         handle.stop();
+        // We lost ownership (a stop/supersede arrived mid-start). The `Live`
+        // record we wrote above won't be settled by `uploader_stop_live`'s
+        // `settle_live` if that stop ran BEFORE our `upsert` (no record existed
+        // yet to match). Settle it ourselves now by id so the panel can't show a
+        // perpetual `Live` badge for a session whose watcher we just stopped —
+        // and because `reconcile_stale_once` has already run this process, nothing
+        // else would settle it until the next launch.
+        let _ = super::history::settle_started(&app, &record_id);
     }
 
     Ok(UploadDispatch {
