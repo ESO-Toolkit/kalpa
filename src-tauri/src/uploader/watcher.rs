@@ -142,6 +142,26 @@ pub fn start_live_watch(
         return Err(format!("File does not exist: {file_path}"));
     }
 
+    // Construct the filesystem watcher SYNCHRONOUSLY, before spawning the thread,
+    // so a setup failure (watcher creation or registering the parent dir) returns
+    // `Err` to the caller — which settles the history record and never promotes a
+    // dead session. Previously this happened inside the thread, where a failure
+    // could only emit `LiveEvent::Stopped` while the command had already returned
+    // `Ok` and marked the record `Live`, leaving it stale with no watcher.
+    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = RecommendedWatcher::new(
+        move |res| {
+            let _ = tx.send(res);
+        },
+        Config::default().with_poll_interval(POLL_INTERVAL),
+    )
+    .map_err(|e| format!("Could not start file watcher: {e}"))?;
+    if let Some(parent) = path.parent() {
+        watcher
+            .watch(parent, RecursiveMode::NonRecursive)
+            .map_err(|e| format!("Could not watch the logs folder: {e}"))?;
+    }
+
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
 
@@ -151,7 +171,9 @@ pub fn start_live_watch(
     });
 
     let thread = thread::spawn(move || {
-        tail_loop(path, start_offset, stop_thread, channel);
+        // Move the already-constructed watcher into the thread so it stays alive
+        // for the whole tail loop (dropping it would stop notifications).
+        tail_loop(path, start_offset, stop_thread, channel, watcher, rx);
     });
 
     Ok(LiveWatchHandle {
@@ -163,31 +185,17 @@ pub fn start_live_watch(
 /// The tailing loop: wait for a change → read new bytes → scan for completed
 /// fights → emit each. `consumed` advances only past dispatched fights so a
 /// fight spanning two reads is found once its `END_COMBAT` arrives.
-fn tail_loop(path: PathBuf, start_offset: u64, stop: Arc<AtomicBool>, channel: Channel<LiveEvent>) {
-    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
-    let mut watcher = match RecommendedWatcher::new(
-        move |res| {
-            let _ = tx.send(res);
-        },
-        Config::default().with_poll_interval(POLL_INTERVAL),
-    ) {
-        Ok(w) => w,
-        Err(e) => {
-            let _ = channel.send(LiveEvent::Stopped {
-                reason: format!("Could not start file watcher: {e}"),
-            });
-            return;
-        }
-    };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = watcher.watch(parent, RecursiveMode::NonRecursive) {
-            let _ = channel.send(LiveEvent::Stopped {
-                reason: format!("Could not watch the logs folder: {e}"),
-            });
-            return;
-        }
-    }
-
+fn tail_loop(
+    path: PathBuf,
+    start_offset: u64,
+    stop: Arc<AtomicBool>,
+    channel: Channel<LiveEvent>,
+    // The watcher is constructed in `start_live_watch` (so setup failures surface
+    // synchronously) and moved in here purely to keep it alive — dropping it ends
+    // notifications. `_watcher` is intentionally unused beyond that.
+    _watcher: RecommendedWatcher,
+    rx: mpsc::Receiver<notify::Result<Event>>,
+) {
     let mut consumed = start_offset;
     let mut next_index = 0usize;
     let mut last_poll = Instant::now();
