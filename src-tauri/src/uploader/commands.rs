@@ -598,12 +598,23 @@ pub async fn uploader_start_live(
     let dispatch_path = safe.clone();
     let launch_cancelled = Arc::clone(&cancelled);
     let outcome = tokio::task::spawn_blocking(move || {
+        // Fast-path: skip the (fallible, ~54-stat) detection entirely if already
+        // cancelled.
         if launch_cancelled.load(Ordering::SeqCst) {
             return Err(LIVE_CANCELLED_BEFORE_LAUNCH.to_string());
         }
         match transport::CliTransport::detect() {
             Some(cli) => {
                 use transport::LogUploadTransport;
+                // AUTHORITATIVE pre-launch check: `detect()` above does its own
+                // filesystem path-probing, during which a stop/supersede can set
+                // `cancelled`. Re-load here so the cancel check is the LAST thing
+                // before `upload_file` — the true irreducible same-thread instant.
+                // A stop ordered before this load aborts with no process spawned;
+                // only a stop after it is the unrecallable "during handoff" case.
+                if launch_cancelled.load(Ordering::SeqCst) {
+                    return Err(LIVE_CANCELLED_BEFORE_LAUNCH.to_string());
+                }
                 cli.upload_file(&dispatch_path, &live_opts)
             }
             None => {
