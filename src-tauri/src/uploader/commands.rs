@@ -498,18 +498,23 @@ pub async fn uploader_start_live(
     // during that window is observed and the watcher is never orphaned. Replace
     // (and stop) any existing slot under this id.
     let cancelled = Arc::new(AtomicBool::new(false));
-    let prev = {
+    let prev_running = {
         let mut sessions = state
             .live_sessions
             .lock()
             .map_err(|_| "Live session lock poisoned")?;
-        sessions.insert(
+        let prev = sessions.insert(
             session_id.clone(),
             LiveSlot::Starting(Arc::clone(&cancelled)),
-        )
+        );
+        // Cancel a replaced slot WHILE still holding the lock: if it was a
+        // `Starting`, its flag must be set before it leaves the map so its own
+        // in-flight start can't observe "slot replaced, flag still false" and
+        // launch anyway. Defer a `Running` watcher join until after unlock.
+        prev.and_then(begin_stop_slot_locked)
     };
-    if let Some(prev) = prev {
-        stop_slot(prev);
+    if let Some(handle) = prev_running {
+        handle.stop();
     }
 
     // Settle any prior-run stale records BEFORE we write this process's `Live`
@@ -564,10 +569,12 @@ pub async fn uploader_start_live(
     // releases it before this `spawn_blocking` is scheduled — a stop can still
     // arrive in that gap and set `cancelled`. So the AUTHORITATIVE pre-launch
     // check is the `cancelled.load` INSIDE the closure, on the blocking thread,
-    // as the last act before `upload_file`: `stop_slot` sets the flag
-    // synchronously, so any stop ordered before this load aborts the launch with
-    // no external process started. A stop ordered after it is the documented,
-    // unrecallable "stop during handoff" case (settled to `Cancelled` below).
+    // as the last act before `upload_file`. `uploader_stop_live` and the
+    // supersede path publish the cancel flag via `begin_stop_slot_locked` WHILE
+    // holding the session lock (before the slot leaves the map), so any stop
+    // ordered before this load is observed and aborts the launch with no external
+    // process started. A stop ordered after it is the documented, unrecallable
+    // "stop during handoff" case (settled to `Cancelled` below).
     // This makes the cancel check atomic with the launch without holding a lock
     // across the await.
     let mut live_opts = options.clone();
@@ -697,12 +704,24 @@ pub async fn uploader_start_live(
     })
 }
 
-/// Stop a slot's watcher (if it has one). `Starting` slots have no thread yet,
-/// but their cancel flag is set so the in-flight start aborts on promotion.
-fn stop_slot(slot: LiveSlot) {
+/// Begin stopping a slot **while the session lock is still held**, returning any
+/// `Running` watcher handle for the caller to join *after* releasing the lock.
+///
+/// For a `Starting` slot this stores the cancel flag synchronously, which is the
+/// load-bearing part: the flag MUST be published before the slot is removed from
+/// or replaced in `live_sessions`, so an in-flight start's pre-launch
+/// `cancelled.load` can never observe "slot gone, flag still false" and launch
+/// the uploader after a stop/supersede. For a `Running` slot there is no flag to
+/// set; its handle is returned because `handle.stop()` joins a thread and must
+/// not run under the lock.
+#[must_use = "the returned Running handle must be stopped after the lock is released"]
+fn begin_stop_slot_locked(slot: LiveSlot) -> Option<LiveWatchHandle> {
     match slot {
-        LiveSlot::Starting(cancelled) => cancelled.store(true, Ordering::SeqCst),
-        LiveSlot::Running(handle) => handle.stop(),
+        LiveSlot::Starting(cancelled) => {
+            cancelled.store(true, Ordering::SeqCst);
+            None
+        }
+        LiveSlot::Running(handle) => Some(handle),
     }
 }
 
@@ -736,13 +755,22 @@ pub fn uploader_stop_live(
     session_id: String,
     fight_count: Option<usize>,
 ) -> Result<(), String> {
-    let slot = state
-        .live_sessions
-        .lock()
-        .map_err(|_| "Live session lock poisoned")?
-        .remove(&session_id);
-    if let Some(slot) = slot {
-        stop_slot(slot);
+    // Remove the slot AND publish its cancel flag under the same lock hold: for
+    // a `Starting` slot the flag must be set before the slot leaves the map, so
+    // an in-flight start's pre-launch `cancelled.load` can't see "slot gone, flag
+    // still false" and launch the uploader after this stop. Only a `Running`
+    // watcher's join is deferred until after the lock is released.
+    let running = {
+        let mut sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        sessions
+            .remove(&session_id)
+            .and_then(begin_stop_slot_locked)
+    };
+    if let Some(handle) = running {
+        handle.stop();
     }
     // Settle the matching history record (Live → Completed, with the observed
     // fight count) so the panel reflects reality immediately rather than waiting
