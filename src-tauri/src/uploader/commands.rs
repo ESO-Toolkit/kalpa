@@ -518,6 +518,33 @@ pub async fn uploader_start_live(
     // `Once` keeps this at most once per process.
     super::history::reconcile_stale_once(&app);
 
+    // If a stop/unmount (or a superseding start under the same id) arrived while
+    // we were registering or reconciling, bail BEFORE launching the external
+    // uploader. Without this, a cancel during reconcile would still fire the
+    // real-time handoff — and once the official uploader is launched we can't
+    // recall it (see the `cancelled_during_start` note below, which only handles
+    // a stop during the handoff itself). Checking here keeps a known-cancelled
+    // start from ever touching the uploader, and avoids a duplicate handoff when
+    // a newer start replaced our slot. `still_ours` mirrors the promote step:
+    // our slot must still be the exact `Starting(cancelled)` we inserted.
+    let aborted_before_handoff = {
+        let sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        let still_ours = matches!(
+            sessions.get(&session_id),
+            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, &cancelled)
+        );
+        !still_ours || cancelled.load(Ordering::SeqCst)
+    };
+    if aborted_before_handoff {
+        // Remove only our own slot (a newer start may have replaced it; leave
+        // that one alone) and return without launching the uploader or watcher.
+        remove_own_slot(&state, &session_id, &cancelled);
+        return Err("Live logging was cancelled before it started.".into());
+    }
+
     // Hand the whole file to the official uploader once, with real-time on.
     // Live MUST use the CLI transport (which passes --enable-real-time-uploading);
     // the GUI handoff would open the uploader in one-shot mode while we show a
