@@ -170,16 +170,17 @@ impl CliTransport {
     }
 }
 
-impl LogUploadTransport for CliTransport {
-    fn name(&self) -> &'static str {
-        "Official Uploader (CLI)"
-    }
-
-    fn is_available(&self) -> bool {
-        self.exe.is_file()
-    }
-
-    fn upload_file(&self, log_path: &str, opts: &UploadOptions) -> Result<UploadOutcome, String> {
+impl CliTransport {
+    /// Build the fully-prepared launch command (all validation + argv done), so
+    /// the only thing left for the caller is `spawn()`. Kept separate from the
+    /// spawn so a caller can insert a final cancellation check *immediately*
+    /// before launch with no intervening fallible/filesystem work — see
+    /// [`Self::upload_file_cancellable`].
+    fn prepare_command(
+        &self,
+        log_path: &str,
+        opts: &UploadOptions,
+    ) -> Result<std::process::Command, String> {
         if !Path::new(log_path).is_file() {
             return Err(format!("Prepared log not found: {log_path}"));
         }
@@ -210,21 +211,76 @@ impl LogUploadTransport for CliTransport {
         if opts.real_time {
             cmd.arg("--enable-real-time-uploading");
         }
+        Ok(cmd)
+    }
 
-        // Spawn and hand off rather than blocking on `status()`. Waiting would
-        // hang for the whole session in real-time mode, and even for a one-shot
-        // it can block minutes on a multi-GB log with the UI frozen — and we
-        // can't observe a report code from the CLI exit anyway. The official
-        // uploader window shows the user real progress.
-        cmd.spawn()
-            .map_err(|e| format!("Failed to start the ESO Logs Uploader: {e}"))?;
-        Ok(UploadOutcome::HandedOff {
+    fn handed_off_outcome(opts: &UploadOptions) -> UploadOutcome {
+        UploadOutcome::HandedOff {
             detail: if opts.real_time {
                 "Live logging started in the ESO Logs Uploader.".into()
             } else {
                 "Uploading in the ESO Logs Uploader — watch its window for progress.".into()
             },
-        })
+        }
+    }
+
+    /// Like [`LogUploadTransport::upload_file`], but runs `should_abort` as the
+    /// **last** thing before `spawn()` — after all path validation and argv
+    /// construction — so a cancellation that lands during command preparation is
+    /// honored and no external process is launched. `should_abort` returning
+    /// `true` yields [`LaunchAborted`] without spawning. This shrinks the
+    /// unrecallable "stop during launch" window to the irreducible instruction
+    /// gap between the check and `spawn()` (an OS process launch can never be
+    /// made truly atomic with a flag read).
+    pub fn upload_file_cancellable(
+        &self,
+        log_path: &str,
+        opts: &UploadOptions,
+        should_abort: &dyn Fn() -> bool,
+    ) -> Result<Result<UploadOutcome, String>, LaunchAborted> {
+        let mut cmd = match self.prepare_command(log_path, opts) {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(e)),
+        };
+
+        // FINAL pre-launch check — the last statement before spawn, with no
+        // fallible work after it.
+        if should_abort() {
+            return Err(LaunchAborted);
+        }
+        // Spawn and hand off rather than blocking on `status()`. Waiting would
+        // hang for the whole session in real-time mode, and even for a one-shot
+        // it can block minutes on a multi-GB log with the UI frozen — and we
+        // can't observe a report code from the CLI exit anyway. The official
+        // uploader window shows the user real progress.
+        match cmd.spawn() {
+            Ok(_) => Ok(Ok(Self::handed_off_outcome(opts))),
+            Err(e) => Ok(Err(format!("Failed to start the ESO Logs Uploader: {e}"))),
+        }
+    }
+}
+
+/// Returned by [`CliTransport::upload_file_cancellable`] when the final
+/// pre-launch check aborted the launch: no external process was spawned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchAborted;
+
+impl LogUploadTransport for CliTransport {
+    fn name(&self) -> &'static str {
+        "Official Uploader (CLI)"
+    }
+
+    fn is_available(&self) -> bool {
+        self.exe.is_file()
+    }
+
+    fn upload_file(&self, log_path: &str, opts: &UploadOptions) -> Result<UploadOutcome, String> {
+        // The trait (manual) path has no cancellation source, so it never aborts.
+        match self.upload_file_cancellable(log_path, opts, &|| false) {
+            Ok(result) => result,
+            // unreachable: `should_abort` is always false here.
+            Err(LaunchAborted) => Err("Upload was cancelled.".into()),
+        }
     }
 }
 

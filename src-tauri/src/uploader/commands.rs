@@ -583,16 +583,18 @@ pub async fn uploader_start_live(
     //
     // The `aborted_before_handoff` check above runs under the lock but then
     // releases it before this `spawn_blocking` is scheduled — a stop can still
-    // arrive in that gap and set `cancelled`. So the AUTHORITATIVE pre-launch
-    // check is the `cancelled.load` INSIDE the closure, on the blocking thread,
-    // as the last act before `upload_file`. `uploader_stop_live` and the
-    // supersede path publish the cancel flag via `stop_slot_in_map` (which stores
-    // it WHILE the slot is still in the map, before removing it), so any stop
-    // ordered before this load is observed and aborts the launch with no external
-    // process started. A stop ordered after it is the documented, unrecallable
-    // "stop during handoff" case (settled to `Cancelled` below).
-    // This makes the cancel check atomic with the launch without holding a lock
-    // across the await.
+    // arrive in that gap and set `cancelled`. The AUTHORITATIVE pre-launch check
+    // is therefore pushed all the way down into the transport: we hand
+    // `upload_file_cancellable` a `should_abort` closure that reads `cancelled`,
+    // and it runs that check as the LAST statement before `cmd.spawn()`, after
+    // all detection, path validation and argv construction. So any stop ordered
+    // before that final read aborts with no external process spawned; only a stop
+    // ordered after it (the irreducible instruction gap before `spawn`, which an
+    // OS process launch can never be made atomic with) is the documented,
+    // unrecallable "stop during handoff" case (settled to `Cancelled` below).
+    // `uploader_stop_live` and the supersede path publish the flag via
+    // `stop_slot_in_map` (stored while the slot is still mapped), so the read here
+    // observes it.
     let mut live_opts = options.clone();
     live_opts.real_time = true;
     let dispatch_path = safe.clone();
@@ -605,17 +607,11 @@ pub async fn uploader_start_live(
         }
         match transport::CliTransport::detect() {
             Some(cli) => {
-                use transport::LogUploadTransport;
-                // AUTHORITATIVE pre-launch check: `detect()` above does its own
-                // filesystem path-probing, during which a stop/supersede can set
-                // `cancelled`. Re-load here so the cancel check is the LAST thing
-                // before `upload_file` — the true irreducible same-thread instant.
-                // A stop ordered before this load aborts with no process spawned;
-                // only a stop after it is the unrecallable "during handoff" case.
-                if launch_cancelled.load(Ordering::SeqCst) {
-                    return Err(LIVE_CANCELLED_BEFORE_LAUNCH.to_string());
+                let should_abort = || launch_cancelled.load(Ordering::SeqCst);
+                match cli.upload_file_cancellable(&dispatch_path, &live_opts, &should_abort) {
+                    Ok(result) => result,
+                    Err(transport::LaunchAborted) => Err(LIVE_CANCELLED_BEFORE_LAUNCH.to_string()),
                 }
-                cli.upload_file(&dispatch_path, &live_opts)
             }
             None => {
                 Err("The ESO Logs Uploader could not be launched for live logging.".to_string())
