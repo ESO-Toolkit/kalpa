@@ -205,7 +205,11 @@ impl CliTransport {
             }
         }
         if opts.include_entire_file {
-            cmd.arg("--include-entire-file");
+            // The official uploader's flag is `--include-entire-file-in-report`;
+            // it silently ignores unknown flags, so the old `--include-entire-file`
+            // was a no-op (verified against the installed app.asar v8.20.113 flag
+            // table). Use the real name so "include earlier fights" takes effect.
+            cmd.arg("--include-entire-file-in-report");
         }
 
         if opts.real_time {

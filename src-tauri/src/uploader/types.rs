@@ -185,6 +185,13 @@ pub enum UploadStatus {
     Completed,
     Failed,
     Cancelled,
+    /// A live session the user stopped *tracking* in Kalpa. The official ESO
+    /// Logs uploader runs as a separate app Kalpa can't stop (no programmatic
+    /// stop exists, and the spawned PID is a self-exiting launcher), so it may
+    /// still be streaming the log. `Completed` would falsely claim the upload
+    /// finished and `Cancelled` would falsely claim Kalpa stopped it; this is the
+    /// honest terminal state — "handed off, may still be uploading."
+    HandedOff,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -92,9 +92,21 @@ pub fn reconcile_stale(app: &tauri::AppHandle) {
     let mut file: HistoryFile = load_json_with_backup(&path);
     let mut changed = false;
     for r in &mut file.records {
-        if matches!(r.status, UploadStatus::Uploading | UploadStatus::Live) {
-            r.status = UploadStatus::Completed;
-            changed = true;
+        match r.status {
+            // A leftover live session: the official uploader may well still be
+            // streaming, so settle to the honest `HandedOff` (not `Completed`,
+            // which would claim the upload finished).
+            UploadStatus::Live => {
+                r.status = UploadStatus::HandedOff;
+                changed = true;
+            }
+            // A leftover manual upload handed off to the official UI — we never
+            // observe its outcome, so `Completed` is the established semantic.
+            UploadStatus::Uploading => {
+                r.status = UploadStatus::Completed;
+                changed = true;
+            }
+            _ => {}
         }
     }
     if changed {
@@ -126,12 +138,12 @@ pub fn upsert(app: &tauri::AppHandle, record: UploadRecord) -> Result<(), String
 /// Settle the live record for a session when the user stops live mode.
 ///
 /// `uploader_start_live` writes a `Live` record whose id ends with
-/// `-{session_id}` (see [`next_record_id`]). On stop we can't observe the
-/// official uploader's outcome, but we *do* know the session ended and how many
-/// fights the UI saw, so flip the record to `Completed` and record that count
-/// rather than leaving a perpetual red `Live / 0 fights` badge until the next
-/// `reconcile_stale` runs (on the next uploader open). Idempotent and a no-op if
-/// the record is gone.
+/// `-{session_id}` (see [`next_record_id`]). On stop we can't observe — or stop —
+/// the official uploader (it runs as a separate app and may still be streaming),
+/// so flip the record to the honest `HandedOff` (not `Completed`, which would
+/// claim the upload finished) and record the fight count the UI saw, rather than
+/// leaving a perpetual red `Live` badge until the next `reconcile_stale`.
+/// Idempotent and a no-op if the record is gone.
 pub fn settle_live(
     app: &tauri::AppHandle,
     session_id: &str,
@@ -150,17 +162,17 @@ pub fn settle_live(
 /// unit-tested without a Tauri `AppHandle`.
 ///
 /// Flips every record whose id ends with `-{session_id}` and is still `Live` to
-/// `Completed`, stamping `fight_count`. Returns whether anything changed so the
+/// `HandedOff`, stamping `fight_count`. Returns whether anything changed so the
 /// caller can skip the disk write on a no-op — which makes a re-settle (e.g. the
 /// watcher dying and the user also stopping) idempotent: once a record is
-/// `Completed` this matches nothing, so a later call neither rewrites the status
+/// `HandedOff` this matches nothing, so a later call neither rewrites the status
 /// nor overwrites the first-settle `fight_count`.
 fn apply_settle_live(records: &mut [UploadRecord], session_id: &str, fight_count: usize) -> bool {
     let suffix = format!("-{session_id}");
     let mut changed = false;
     for r in records.iter_mut() {
         if r.id.ends_with(&suffix) && matches!(r.status, UploadStatus::Live) {
-            r.status = UploadStatus::Completed;
+            r.status = UploadStatus::HandedOff;
             r.fight_count = fight_count;
             changed = true;
         }
@@ -228,10 +240,10 @@ mod tests {
         }
     }
 
-    // The settling rule the watcher-died path runs (uploader_stop_live →
-    // settle_live → apply_settle_live): the dead session's still-`Live` record
-    // is flipped to `Completed` with the observed fight count, and only that
-    // session's transient records are touched.
+    // The settling rule the stop / watcher-died path runs (uploader_stop_live →
+    // settle_live → apply_settle_live): the session's still-`Live` record is
+    // flipped to `HandedOff` (the official uploader may still be streaming) with
+    // the observed fight count, and only that session's records are touched.
     #[test]
     fn settles_live_record_for_session_and_stamps_count() {
         let sid = "live-1700000000000";
@@ -242,7 +254,7 @@ mod tests {
             rec(&format!("1700000000006-2-{sid}"), UploadStatus::Completed), // already done
         ];
         assert!(apply_settle_live(&mut recs, sid, 7));
-        assert_eq!(recs[0].status, UploadStatus::Completed);
+        assert_eq!(recs[0].status, UploadStatus::HandedOff);
         assert_eq!(recs[0].fight_count, 7);
         assert_eq!(recs[1].status, UploadStatus::Live); // untouched: other session
         assert_eq!(recs[2].fight_count, 0); // untouched: already Completed
@@ -256,7 +268,9 @@ mod tests {
         let sid = "live-42";
         let mut recs = vec![rec(&format!("1-0-{sid}"), UploadStatus::Live)];
         assert!(apply_settle_live(&mut recs, sid, 3));
+        assert_eq!(recs[0].status, UploadStatus::HandedOff);
         assert!(!apply_settle_live(&mut recs, sid, 99));
         assert_eq!(recs[0].fight_count, 3); // first settle wins; not overwritten
+        assert_eq!(recs[0].status, UploadStatus::HandedOff); // and status unchanged
     }
 }

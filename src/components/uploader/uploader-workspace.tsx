@@ -509,6 +509,10 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     // Running watcher with no visible Stop control.
     const id = liveSessionIdRef.current;
     if (!id) return;
+    // Was this session actually running (handed off to the uploader), vs still
+    // starting? Only a running session left the official uploader streaming, so
+    // only then do we remind the user it keeps going.
+    const wasRunning = liveSessionId !== null;
     try {
       await invokeOrThrow("uploader_stop_live", {
         sessionId: id,
@@ -521,6 +525,14 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     liveSessionIdRef.current = null;
     setLiveSessionId(null);
     setLiveStatus(liveFightCount > 0 ? "upToDate" : "idle");
+    if (wasRunning) {
+      // Be honest: Kalpa stopped its own tracking, but it can't stop the separate
+      // official uploader — it may still be streaming until the user stops it.
+      toast.info(
+        "Stopped tracking in Kalpa. The ESO Logs Uploader may still be uploading — stop it in its own window to end the live report.",
+        { duration: 8000 }
+      );
+    }
     await refreshHistory();
   };
 
@@ -1049,7 +1061,7 @@ function LiveDashboard({
         </div>
         {running ? (
           <Button variant="outline" size="sm" onClick={onStop}>
-            Stop
+            Stop tracking
           </Button>
         ) : (
           <Button size="sm" onClick={onStart} disabled={!canStart || starting}>
@@ -1061,8 +1073,10 @@ function LiveDashboard({
 
       {running && (
         <p className="text-xs text-muted-foreground">
-          The ESO Logs Uploader is streaming this log in real time. Fights appear below as they
-          finish; leave it running for the rest of your session.
+          The ESO Logs Uploader is streaming this log in real time in its own window — Kalpa just
+          shows the fights here. <span className="text-amber-400/90">Stop tracking</span> ends this
+          timeline, but the uploader keeps going: to actually stop uploading, stop it in the ESO
+          Logs Uploader window and turn off in-game logging.
         </p>
       )}
 
@@ -1229,8 +1243,14 @@ function StatusBadge({ status }: { status: UploadRecord["status"] }) {
       return <InfoPill color="sky">Uploading</InfoPill>;
     case "live":
       return <InfoPill color="red">Live</InfoPill>;
+    case "handedOff":
+      // The official uploader may still be streaming this one — neutral, not a
+      // green "Done" that would imply the upload finished.
+      return <InfoPill color="amber">Handed off</InfoPill>;
     case "failed":
       return <InfoPill color="red">Failed</InfoPill>;
+    case "cancelled":
+      return <InfoPill color="muted">Cancelled</InfoPill>;
     default:
       return <InfoPill color="muted">{status}</InfoPill>;
   }

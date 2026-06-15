@@ -66,7 +66,17 @@ export interface ReportRef {
   url: string;
 }
 
-export type UploadStatus = "queued" | "uploading" | "live" | "completed" | "failed" | "cancelled";
+export type UploadStatus =
+  | "queued"
+  | "uploading"
+  | "live"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  // A live session the user stopped tracking in Kalpa; the official ESO Logs
+  // uploader runs separately and may still be streaming. See the Rust
+  // UploadStatus::HandedOff doc.
+  | "handedOff";
 
 export type UploadMode = "manual" | "live" | "splitOnly";
 
