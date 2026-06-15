@@ -503,15 +503,17 @@ pub async fn uploader_start_live(
             .live_sessions
             .lock()
             .map_err(|_| "Live session lock poisoned")?;
-        let prev = sessions.insert(
+        // Cancel any existing slot under this id FIRST — `stop_slot_in_map` sets a
+        // replaced `Starting` slot's flag before removing it, so that slot's own
+        // in-flight start can't observe "slot replaced, flag still false" and
+        // launch anyway. THEN insert our new slot. Defer a `Running` join to after
+        // unlock.
+        let prev_running = stop_slot_in_map(&mut sessions, &session_id);
+        sessions.insert(
             session_id.clone(),
             LiveSlot::Starting(Arc::clone(&cancelled)),
         );
-        // Cancel a replaced slot WHILE still holding the lock: if it was a
-        // `Starting`, its flag must be set before it leaves the map so its own
-        // in-flight start can't observe "slot replaced, flag still false" and
-        // launch anyway. Defer a `Running` watcher join until after unlock.
-        prev.and_then(begin_stop_slot_locked)
+        prev_running
     };
     if let Some(handle) = prev_running {
         handle.stop();
@@ -570,8 +572,8 @@ pub async fn uploader_start_live(
     // arrive in that gap and set `cancelled`. So the AUTHORITATIVE pre-launch
     // check is the `cancelled.load` INSIDE the closure, on the blocking thread,
     // as the last act before `upload_file`. `uploader_stop_live` and the
-    // supersede path publish the cancel flag via `begin_stop_slot_locked` WHILE
-    // holding the session lock (before the slot leaves the map), so any stop
+    // supersede path publish the cancel flag via `stop_slot_in_map` (which stores
+    // it WHILE the slot is still in the map, before removing it), so any stop
     // ordered before this load is observed and aborts the launch with no external
     // process started. A stop ordered after it is the documented, unrecallable
     // "stop during handoff" case (settled to `Cancelled` below).
@@ -704,24 +706,31 @@ pub async fn uploader_start_live(
     })
 }
 
-/// Begin stopping a slot **while the session lock is still held**, returning any
-/// `Running` watcher handle for the caller to join *after* releasing the lock.
+/// Stop whatever slot is under `key`, **while the session lock is held**, and
+/// return any `Running` watcher handle for the caller to join *after* releasing
+/// the lock (a `handle.stop()` joins a thread and must not run under the lock).
 ///
-/// For a `Starting` slot this stores the cancel flag synchronously, which is the
-/// load-bearing part: the flag MUST be published before the slot is removed from
-/// or replaced in `live_sessions`, so an in-flight start's pre-launch
-/// `cancelled.load` can never observe "slot gone, flag still false" and launch
-/// the uploader after a stop/supersede. For a `Running` slot there is no flag to
-/// set; its handle is returned because `handle.stop()` joins a thread and must
-/// not run under the lock.
+/// The load-bearing detail is ORDER: for a `Starting` slot the cancel flag is
+/// stored *while the slot is still in the map*, BEFORE it is removed. The
+/// in-flight start's pre-launch check (`cancelled.load` in the handoff closure)
+/// is lock-free, so holding the map lock does not by itself serialize against it
+/// — only the store-before-remove order does. With this order, that load either
+/// happens after the store (sees `true` → aborts) or before it (a genuinely
+/// concurrent stop, the documented unrecallable case); it can never see "slot
+/// gone, flag still false" and launch after an observable stop. Storing after
+/// the removal (the previous bug) left exactly that window.
 #[must_use = "the returned Running handle must be stopped after the lock is released"]
-fn begin_stop_slot_locked(slot: LiveSlot) -> Option<LiveWatchHandle> {
-    match slot {
-        LiveSlot::Starting(cancelled) => {
-            cancelled.store(true, Ordering::SeqCst);
-            None
-        }
-        LiveSlot::Running(handle) => Some(handle),
+fn stop_slot_in_map(
+    sessions: &mut HashMap<String, LiveSlot>,
+    key: &str,
+) -> Option<LiveWatchHandle> {
+    // Set a Starting slot's flag in place FIRST (while still mapped), then remove.
+    if let Some(LiveSlot::Starting(cancelled)) = sessions.get(key) {
+        cancelled.store(true, Ordering::SeqCst);
+    }
+    match sessions.remove(key) {
+        Some(LiveSlot::Running(handle)) => Some(handle),
+        _ => None,
     }
 }
 
@@ -755,19 +764,17 @@ pub fn uploader_stop_live(
     session_id: String,
     fight_count: Option<usize>,
 ) -> Result<(), String> {
-    // Remove the slot AND publish its cancel flag under the same lock hold: for
-    // a `Starting` slot the flag must be set before the slot leaves the map, so
-    // an in-flight start's pre-launch `cancelled.load` can't see "slot gone, flag
-    // still false" and launch the uploader after this stop. Only a `Running`
-    // watcher's join is deferred until after the lock is released.
+    // Publish a `Starting` slot's cancel flag BEFORE removing it (handled inside
+    // `stop_slot_in_map`), under the lock, so an in-flight start's lock-free
+    // pre-launch `cancelled.load` can't see "slot gone, flag still false" and
+    // launch the uploader after this stop. Only a `Running` watcher's join is
+    // deferred until after the lock is released.
     let running = {
         let mut sessions = state
             .live_sessions
             .lock()
             .map_err(|_| "Live session lock poisoned")?;
-        sessions
-            .remove(&session_id)
-            .and_then(begin_stop_slot_locked)
+        stop_slot_in_map(&mut sessions, &session_id)
     };
     if let Some(handle) = running {
         handle.stop();
