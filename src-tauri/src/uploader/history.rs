@@ -63,13 +63,14 @@ static RECONCILE_ONCE: std::sync::Once = std::sync::Once::new();
 
 /// Reconcile stale records exactly once per process, on first uploader use.
 ///
-/// The reconcile is purely cosmetic — it settles `Uploading`/`Live` badges left
-/// over from a previous run before the history panel renders — and its only
-/// observable consumer is [`load`] via `uploader_list_history`. Deferring it
-/// here (instead of running it eagerly in `setup()`) means a user who never
-/// opens the uploader pays no history read/parse at startup, while a user who
-/// does still sees settled badges, since the panel calls `uploader_list_history`
-/// on open. Idempotent and cheap on every call after the first.
+/// Deferred from the eager `setup()` hook so a user who never opens the uploader
+/// pays no history read/parse at startup. It must run before this process writes
+/// any transient (`Uploading`/`Live`) record, because [`reconcile_stale`] can't
+/// distinguish a leftover record from a current one — so it is invoked at the
+/// top of `uploader_start_live` and `uploader_upload_log` (which create those
+/// records) as well as from `uploader_list_history` (which displays them). The
+/// `Once` makes all of those collapse to a single reconcile per process.
+/// Idempotent and cheap on every call after the first.
 pub fn reconcile_stale_once(app: &tauri::AppHandle) {
     RECONCILE_ONCE.call_once(|| reconcile_stale(app));
 }
