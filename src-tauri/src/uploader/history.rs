@@ -140,19 +140,32 @@ pub fn settle_live(
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
     let mut file: HistoryFile = load_json_with_backup(&path);
+    if !apply_settle_live(&mut file.records, session_id, fight_count) {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
+/// The pure settling rule [`settle_live`] applies, factored out so it can be
+/// unit-tested without a Tauri `AppHandle`.
+///
+/// Flips every record whose id ends with `-{session_id}` and is still `Live` to
+/// `Completed`, stamping `fight_count`. Returns whether anything changed so the
+/// caller can skip the disk write on a no-op — which makes a re-settle (e.g. the
+/// watcher dying and the user also stopping) idempotent: once a record is
+/// `Completed` this matches nothing, so a later call neither rewrites the status
+/// nor overwrites the first-settle `fight_count`.
+fn apply_settle_live(records: &mut [UploadRecord], session_id: &str, fight_count: usize) -> bool {
     let suffix = format!("-{session_id}");
     let mut changed = false;
-    for r in &mut file.records {
+    for r in records.iter_mut() {
         if r.id.ends_with(&suffix) && matches!(r.status, UploadStatus::Live) {
             r.status = UploadStatus::Completed;
             r.fight_count = fight_count;
             changed = true;
         }
     }
-    if !changed {
-        return Ok(());
-    }
-    save_json_with_backup(&path, &file)
+    changed
 }
 
 /// Settle a specific start record (matched by exact `id`) that lost ownership
@@ -193,4 +206,57 @@ pub fn remove(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
         return Ok(()); // nothing to do
     }
     save_json_with_backup(&path, &file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::uploader::types::{UploadMode, Visibility};
+
+    fn rec(id: &str, status: UploadStatus) -> UploadRecord {
+        UploadRecord {
+            id: id.into(),
+            source_path: "x".into(),
+            file_name: "Encounter.log".into(),
+            created_at_ms: 0,
+            status,
+            mode: UploadMode::Live,
+            visibility: Visibility::Private,
+            fight_count: 0,
+            report: None,
+            error: None,
+        }
+    }
+
+    // The settling rule the watcher-died path runs (uploader_stop_live →
+    // settle_live → apply_settle_live): the dead session's still-`Live` record
+    // is flipped to `Completed` with the observed fight count, and only that
+    // session's transient records are touched.
+    #[test]
+    fn settles_live_record_for_session_and_stamps_count() {
+        let sid = "live-1700000000000";
+        // Record ids follow next_record_id: "{now_ms}-{counter}-{session_id}".
+        let mut recs = vec![
+            rec(&format!("1700000000005-0-{sid}"), UploadStatus::Live),
+            rec("1700000000005-1-live-OTHER", UploadStatus::Live), // different session
+            rec(&format!("1700000000006-2-{sid}"), UploadStatus::Completed), // already done
+        ];
+        assert!(apply_settle_live(&mut recs, sid, 7));
+        assert_eq!(recs[0].status, UploadStatus::Completed);
+        assert_eq!(recs[0].fight_count, 7);
+        assert_eq!(recs[1].status, UploadStatus::Live); // untouched: other session
+        assert_eq!(recs[2].fight_count, 0); // untouched: already Completed
+    }
+
+    // The double-settle guard: a watcher death AND a user/unmount stop can both
+    // drive settle_live for the same session. The second call must be a no-op —
+    // not flip status again, and crucially not overwrite the first count.
+    #[test]
+    fn re_settle_is_idempotent_noop() {
+        let sid = "live-42";
+        let mut recs = vec![rec(&format!("1-0-{sid}"), UploadStatus::Live)];
+        assert!(apply_settle_live(&mut recs, sid, 3));
+        assert!(!apply_settle_live(&mut recs, sid, 99));
+        assert_eq!(recs[0].fight_count, 3); // first settle wins; not overwritten
+    }
 }

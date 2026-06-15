@@ -234,7 +234,22 @@ fn tail_loop(
             }
             Ok(Err(_)) => false,
             Err(mpsc::RecvTimeoutError::Timeout) => false,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // The notify backend's sender dropped — its worker thread
+                // terminated, typically because the watched logs folder was
+                // deleted/renamed or lost access. No further FS events can ever
+                // arrive, so this session is dead. Emit `Stopped` (like the other
+                // fatal exits below) rather than a silent `break`: otherwise the
+                // frontend never learns, and the backend's `Running` slot + the
+                // `Live` history record stay stuck until the next-launch reconcile
+                // (this process already ran `reconcile_stale_once`). The reason is
+                // worded to NOT end in "stopped" so the UI surfaces it (the
+                // frontend suppresses only the plain `…stopped.` user-stop text).
+                let _ = channel.send(LiveEvent::Stopped {
+                    reason: "Lost connection to the folder watcher (stopped watching).".into(),
+                });
+                return;
+            }
         };
         // Re-check the stop flag after the (up to POLL_INTERVAL) wait and before
         // a potentially large read, so a stop requested while backfilling a big

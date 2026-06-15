@@ -428,17 +428,36 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           // Transient (e.g. a read retry) — log but don't toast, as these recur.
           console.warn("[uploader] live watcher:", ev.message);
           break;
-        case "stopped":
+        case "stopped": {
           // A `stopped` event while we still consider the session active means
-          // the watcher died on its own (e.g. it couldn't watch the folder) —
-          // a user-initiated stop already cleared liveActiveRef. Tear the
-          // session down so the UI doesn't stay stuck "LIVE", and surface why.
+          // the watcher thread died on its own (lost folder access, couldn't
+          // keep reading the log, etc.) — a user-initiated stop already cleared
+          // liveActiveRef before this could run. Beyond tearing down the UI, the
+          // backend still holds the now-dead `Running` slot and the history
+          // record is still `Live`, and nothing else settles them until the
+          // next-launch reconcile. Drive the existing stop path so the slot is
+          // evicted and the record settled immediately. Capture the id + count
+          // FIRST, before we null the ref, or the invoke would have nothing to
+          // settle (the ref is set before the start await, so it holds the id
+          // even if `liveSessionId` state hasn't landed yet).
+          const stoppedId = liveSessionIdRef.current;
+          const stoppedFightCount = liveFightCountRef.current;
           liveActiveRef.current = false;
           liveSessionIdRef.current = null;
           setLiveSessionId(null);
           setLiveStatus("attention");
           if (ev.reason && !/stopped\.?$/i.test(ev.reason)) toast.error(ev.reason);
+          if (stoppedId) {
+            // Best-effort: evicts the dead `Running` slot (stop_slot_in_map) and
+            // settles the `Live` record to `Completed` (settle_live). Both are
+            // idempotent, so this is safe even if the record was already settled.
+            void invokeOrThrow("uploader_stop_live", {
+              sessionId: stoppedId,
+              fightCount: stoppedFightCount,
+            }).catch(() => {});
+          }
           break;
+        }
       }
     };
 
