@@ -57,12 +57,20 @@ pub fn save_tokens(tokens: &AuthTokens) {
     let b64 = STANDARD.encode(json.as_bytes());
     let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK_LEN).collect();
 
-    // Crash-safe ordering: write the new chunks (overwriting same-index slots),
-    // THEN flip the count sentinel as the single commit point, THEN sweep
-    // orphans. We deliberately do NOT clear first — an interrupted save must
-    // leave the PRIOR committed set intact (the old count still points at old,
-    // still-present chunks) rather than wiping a perfectly good token set and
-    // forcing a re-login if we crash mid-write.
+    // Fail-closed ordering: invalidate the count sentinel FIRST, then write the
+    // new chunks (overwriting same-index slots), then flip the count to the new
+    // total as the single commit point, then sweep orphans. Invalidating first
+    // is what makes a mid-write crash safe: overwriting a slot in place destroys
+    // the old chunk there, so a crash between slots would otherwise leave the old
+    // count pointing at a base64 splice of old+new chunks — which `load_tokens`
+    // decodes to garbage. With the sentinel cleared up front, a mid-write crash
+    // leaves NO valid count, so `load_tokens` cleanly falls back (legacy entry or
+    // None → a re-login) instead of reading a corrupt token set. We cannot keep
+    // the prior set recoverable without an atomic multi-key write (the credential
+    // store has none); clean fail-closed is the correct minimal guarantee.
+    if let Some(e) = entry(COUNT_KEY) {
+        let _ = e.delete_credential();
+    }
     for (i, c) in chunks.iter().enumerate() {
         // base64 output is valid ASCII, so this never fails.
         let s = match std::str::from_utf8(c) {
@@ -77,14 +85,16 @@ pub fn save_tokens(tokens: &AuthTokens) {
             return;
         };
         if let Err(err) = e.set_password(s) {
-            // Abort without touching the count: the old set is still committed.
+            // Abort before committing the count. The sentinel was already cleared
+            // above, so load_tokens fails closed (legacy/None → re-login) rather
+            // than reading a half-written set.
             eprintln!("[token_store] failed to save chunk {i}: {err}");
             return;
         }
     }
 
-    // Commit point: flip the count to the new chunk total. Until this succeeds,
-    // load_tokens still reads back the previous valid set.
+    // Commit point: flip the count to the new chunk total. Until this succeeds
+    // there is no valid count (it was cleared above), so load_tokens fails closed.
     if let Some(e) = entry(COUNT_KEY) {
         if let Err(err) = e.set_password(&chunks.len().to_string()) {
             eprintln!("[token_store] failed to save token count: {err}");

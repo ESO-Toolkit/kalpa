@@ -45,21 +45,27 @@ pub struct UploaderState {
 
 // ── Path confinement ─────────────────────────────────────────────────────────
 
-/// Reject Windows UNC path prefixes (`\\server\share`, `\\?\UNC\…`), which can
-/// trigger outbound SMB auth (NetNTLM credential theft). `VerbatimDisk`
-/// (`\\?\C:\…`) is deliberately *allowed*: it is a harmless drive-rooted form and
-/// is exactly what `std::fs::canonicalize` emits on Windows. We canonicalize with
-/// `dunce` below so confined paths stay in drive-letter form, but a stray
-/// verbatim-disk prefix arriving from the frontend must not be rejected — that
-/// was the bug that broke every log selection. The non-verbatim `Verbatim(_)`
-/// arm covers device namespaces (`\\?\GLOBALROOT\…`, `\\.\…`) which are not
-/// legitimate log locations.
+/// Reject Windows UNC and device-namespace path prefixes, which can trigger
+/// outbound SMB auth (NetNTLM credential theft) or reach raw devices. The
+/// dangerous forms are `\\server\share` (`UNC`), `\\?\UNC\…` (`VerbatimUNC`),
+/// `\\?\GLOBALROOT\…` (`Verbatim`), and the entire `\\.\…` device namespace
+/// (`DeviceNS`: `\\.\UNC\…`, `\\.\C:\…`, `\\.\PhysicalDrive0`, `\\.\pipe\…`).
+/// `\\.\UNC\host\share\…` in particular makes `dunce::canonicalize` (below)
+/// attempt SMB name resolution *before* the containment check can reject it, so
+/// it must be blocked here at the prefix.
+///
+/// `VerbatimDisk` (`\\?\C:\…`) is deliberately *allowed*: it is a harmless
+/// drive-rooted form and is exactly what `std::fs::canonicalize` emits on
+/// Windows. We canonicalize with `dunce` below so confined paths stay in
+/// drive-letter form, but a stray verbatim-disk prefix arriving from the
+/// frontend must not be rejected — that was the bug that broke every log
+/// selection.
 fn has_unc_or_verbatim_prefix(p: &Path) -> bool {
     matches!(p.components().next(), Some(Component::Prefix(prefix)) if {
         use std::path::Prefix::*;
         matches!(
             prefix.kind(),
-            Verbatim(_) | VerbatimUNC(_, _) | UNC(_, _)
+            Verbatim(_) | VerbatimUNC(_, _) | UNC(_, _) | DeviceNS(_)
         )
     })
 }
@@ -691,13 +697,32 @@ pub async fn uploader_start_live(
     let handle = match watcher::start_live_watch(&safe, start_offset, channel) {
         Ok(h) => h,
         Err(e) => {
+            // The local fight-timeline watcher failed to start (the log can be
+            // rotated/deleted, or the folder watch can fail, between the handoff
+            // above and here). We have no watcher handle to track, so vacate our
+            // own slot regardless.
             remove_own_slot(&state, &session_id, &cancelled);
-            // We already wrote a `Live` record above; this failure exits before
-            // promotion, so without settling it here the panel would show a stale
-            // `Live` badge with no watcher (and `reconcile_stale_once` already ran
-            // this process). Settle our exact record so it can't get stuck. (The
-            // official uploader may already be streaming — only Kalpa's local
-            // timeline failed — so this is a terminal settle, not an upload error.)
+            if handed_off {
+                // The official uploader was ALREADY launched and is streaming —
+                // only Kalpa's in-app timeline is unavailable. Reporting this as a
+                // start *failure* would be wrong (the upload is live and can't be
+                // recalled) and, worse, the UI resets its gate on error and a
+                // retry would spawn a SECOND real-time uploader against the same
+                // log. So return degraded SUCCESS and leave the record `Live`
+                // (it genuinely is) — there is no watcher to go stale, and a real
+                // stop or next-launch reconcile will settle it.
+                eprintln!("[uploader] live timeline watcher failed (upload still running): {e}");
+                return Ok(UploadDispatch {
+                    handed_off,
+                    detail: "Live logging started in the ESO Logs Uploader. The in-app \
+                             fight timeline is unavailable for this session."
+                        .into(),
+                    report,
+                });
+            }
+            // Nothing was launched (no handoff): settle our just-written `Live`
+            // record so it can't get stuck with no watcher (reconcile_stale_once
+            // already ran this process), and surface the failure.
             let _ = super::history::settle_started(&app, &record_id);
             return Err(e);
         }

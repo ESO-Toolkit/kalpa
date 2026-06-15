@@ -278,9 +278,15 @@ fn tail_loop(
                 continue;
             }
         };
-        // A successful stat means the file is reachable; clear any failure streak
-        // (an idle file that never grows must not eventually trip the limit).
-        consecutive_failures = 0;
+        // NOTE: do NOT clear `consecutive_failures` here. A successful stat does
+        // not prove the file is *readable* — `metadata` reads the directory entry
+        // while `read_range` opens a handle, so a permanent open/read failure
+        // (AV/CFA/deny-read share lock) can recur while stats keep succeeding. If
+        // we reset on stat, that read-failure streak would oscillate 0→1→0 and
+        // never reach MAX_CONSECUTIVE_FAILURES, so the session would never stop.
+        // The streak is reset only after a successful READ (below). An idle file
+        // that never grows never attempts a read (the `size == consumed`
+        // short-circuit), so it can't trip the limit either.
 
         // Truncation / new session detection. After a reset the file starts
         // fresh, so the next chunk's leading BEGIN_LOG is the session header,
@@ -317,6 +323,10 @@ fn tail_loop(
                 continue;
             }
         };
+        // A successful read clears the failure streak (covers every post-read
+        // path below, including the mid-chunk new-session `continue`). Stat-only
+        // failures still self-terminate via the metadata arm above.
+        consecutive_failures = 0;
         // The valid bytes are the prefix `read_buf` was just resized to; the
         // buffer's spare capacity past `n` holds stale bytes from prior passes.
         let chunk = &read_buf[..n];

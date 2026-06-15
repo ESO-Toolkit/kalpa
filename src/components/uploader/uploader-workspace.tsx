@@ -489,10 +489,17 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
   };
 
   const handleStopLive = async () => {
-    if (!liveSessionId) return;
+    // Read the session id from the REF, not state: a start sets the ref before
+    // the start await resolves but sets `liveSessionId` state only after. Using
+    // the ref lets us stop a session that is still starting (e.g. the user
+    // switches to Manual mid-start) — the backend turns this into a cancel of
+    // the in-flight Starting slot, so the start aborts instead of orphaning a
+    // Running watcher with no visible Stop control.
+    const id = liveSessionIdRef.current;
+    if (!id) return;
     try {
       await invokeOrThrow("uploader_stop_live", {
-        sessionId: liveSessionId,
+        sessionId: id,
         fightCount: liveFightCountRef.current,
       });
     } catch {
@@ -576,8 +583,12 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
                 active={mode === "manual"}
                 onClick={() => {
                   // Leaving Live unmounts its only Stop control, so stop the
-                  // session first rather than orphaning the watcher.
-                  if (liveSessionId) void handleStopLive();
+                  // session first rather than orphaning the watcher. Check the
+                  // REF (not `liveSessionId` state): a session that is still
+                  // starting has its id in the ref before state lands, and
+                  // handleStopLive now keys off the ref too, so this also cancels
+                  // an in-flight start.
+                  if (liveSessionIdRef.current) void handleStopLive();
                   setMode("manual");
                 }}
                 Icon={Upload}
