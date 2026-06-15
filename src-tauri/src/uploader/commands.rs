@@ -692,6 +692,13 @@ pub async fn uploader_start_live(
         Ok(h) => h,
         Err(e) => {
             remove_own_slot(&state, &session_id, &cancelled);
+            // We already wrote a `Live` record above; this failure exits before
+            // promotion, so without settling it here the panel would show a stale
+            // `Live` badge with no watcher (and `reconcile_stale_once` already ran
+            // this process). Settle our exact record so it can't get stuck. (The
+            // official uploader may already be streaming — only Kalpa's local
+            // timeline failed — so this is a terminal settle, not an upload error.)
+            let _ = super::history::settle_started(&app, &record_id);
             return Err(e);
         }
     };
