@@ -266,13 +266,24 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     return () => {
       liveActiveRef.current = false; // drop any late channel events
       const id = liveSessionIdRef.current;
+      // Clear the refs AFTER capturing the id. This is load-bearing for an
+      // in-flight start: handleStartLive's success/error arms gate on
+      // `liveSessionIdRef.current === sessionId`, so leaving the ref set would let
+      // a start that resolves after this unmount pass its guard and run its
+      // success arm (setState + a "live started" toast) on an unmounted
+      // component. Nulling it makes that stale start drop silently.
+      liveSessionIdRef.current = null;
+      liveWasRunningRef.current = false;
       if (id) {
-        if (liveWasRunningRef.current) {
-          toast.info(
-            "Closed live tracking in Kalpa. The ESO Logs Uploader may still be uploading — stop it in its own window to end the live report.",
-            { duration: 8000 }
-          );
-        }
+        // Warn whenever a live session was active at close — including an
+        // in-flight start (`id` set but not yet promoted): the official uploader
+        // may already have been launched, and we can't tell from here.
+        // Over-warning ("it may still be uploading") is the safe, honest default
+        // vs. silently leaving an upload running.
+        toast.info(
+          "Closed live tracking in Kalpa. The ESO Logs Uploader may still be uploading — stop it in its own window to end the live report.",
+          { duration: 8000 }
+        );
         void invokeOrThrow("uploader_stop_live", {
           sessionId: id,
           fightCount: liveFightCountRef.current,
@@ -508,6 +519,11 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
           : "Live logging started."
       );
     } catch (e) {
+      // Only act on the failure if THIS start is still current. If a stop /
+      // unmount / superseding start replaced us during the await, clearing the
+      // refs/status here would clobber that newer session (and toast on an
+      // unmounted component); mirror the success arm's guard.
+      if (liveSessionIdRef.current !== sessionId) return;
       // Start failed (e.g. uploader not installed): reset the gate and refs so a
       // trailing event can't be processed and the next attempt starts clean.
       liveActiveRef.current = false;
