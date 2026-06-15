@@ -46,6 +46,7 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "log-upload"
   | null;
 
 interface PendingDeepLinkPayload {
@@ -1313,6 +1314,7 @@ function App() {
           onOpenPacks={() => setActiveDialog("packs")}
           onOpenSavedVars={() => setActiveDialog("saved-variables")}
           onOpenSettings={() => setActiveDialog("settings")}
+          onOpenLogUpload={() => setActiveDialog("log-upload")}
           onRefresh={handleRefresh}
         />
 

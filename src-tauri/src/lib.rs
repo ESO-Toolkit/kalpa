@@ -11,6 +11,7 @@ mod metadata;
 mod safe_migration;
 mod saved_variables;
 mod token_store;
+pub mod uploader;
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -202,6 +203,7 @@ pub fn run() {
             PendingDeepLinkPayload::default(),
         )))
         .manage(PendingUpdates(Arc::new(Mutex::new(HashMap::new()))))
+        .manage(uploader::commands::UploaderState::default())
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
@@ -294,6 +296,10 @@ pub fn run() {
                     *guard = Some(tokens);
                 }
             }
+
+            // Settle any upload-history records left in a transient state by a
+            // previous run (uploads hand off, so we never observe completion).
+            uploader::history::reconcile_stale(app.handle());
 
             Ok(())
         })
@@ -401,6 +407,17 @@ pub fn run() {
             commands::cancel_pending_update,
             commands::list_edit_backups,
             commands::restore_edit_backup,
+            uploader::commands::uploader_detect_path,
+            uploader::commands::uploader_list_logs,
+            uploader::commands::uploader_preflight,
+            uploader::commands::uploader_split_to_disk,
+            uploader::commands::uploader_transport_info,
+            uploader::commands::uploader_upload_log,
+            uploader::commands::uploader_start_live,
+            uploader::commands::uploader_stop_live,
+            uploader::commands::uploader_list_history,
+            uploader::commands::uploader_delete_history,
+            uploader::commands::uploader_attach_report,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])

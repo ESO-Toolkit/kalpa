@@ -24,6 +24,12 @@
         },
         {
           "url": "https://esotk.com"
+        },
+        {
+          "url": "https://www.esologs.com/reports/*"
+        },
+        {
+          "url": "https://esologs.com/reports/*"
         }
       ]
     },
