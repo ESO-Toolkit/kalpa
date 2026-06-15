@@ -105,52 +105,44 @@ fn offsets_still_valid(src: &Path, first: &LogSession) -> bool {
 /// so the caller must re-scan. Reads only the appended tail, not the whole file.
 /// Returns `true` (force a re-scan, the safe choice) on any read error.
 fn appended_range_has_new_session(src: &Path, from: u64, to: u64) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{BufRead, Seek, SeekFrom};
     if to <= from {
         return false;
     }
-    let Ok(mut f) = File::open(src) else {
+    let Ok(f) = File::open(src) else {
         return true;
     };
-    // Start one byte before `from` so a `BEGIN_LOG` line that begins exactly at
-    // `from` is seen whole (its leading newline is just before `from`). Clamp to 0.
-    let start = from.saturating_sub(1);
-    if f.seek(SeekFrom::Start(start)).is_err() {
+    let mut reader = BufReader::with_capacity(1 << 20, f);
+    // Seek to the byte after the last full line that existed at preflight: `from`
+    // is the previous final session's `end_offset`, which sits at a line boundary
+    // (it is `next_offset` past a terminator), so reading whole lines from here
+    // sees each appended line in full. We scan the ENTIRE appended tail — never a
+    // bounded prefix: a new BEGIN_LOG can appear arbitrarily deep into the append
+    // (the same session can grow many MiB before the user re-toggles logging), so
+    // a cap would silently miss it and wrongly trust the stale list. The tail is
+    // read line-by-line in a fixed buffer, so memory stays flat regardless of how
+    // much was appended, and we stop early the moment a BEGIN_LOG is found.
+    if reader.seek(SeekFrom::Start(from)).is_err() {
         return true;
     }
-    // Bound the work: only the appended span matters, and BEGIN_LOG appears at a
-    // line start, so reading the appended bytes in a modest buffer and scanning
-    // for the token is enough. Cap the scan so an enormous append can't read GBs;
-    // a new session's BEGIN_LOG, if present, is at the very start of the append.
-    const MAX_SCAN: u64 = 8 * 1024 * 1024;
-    let span = (to - start).min(MAX_SCAN);
-    let mut remaining = span as usize;
-    let mut buf = vec![0u8; 1 << 20]; // 1 MiB
-                                      // Track whether we are at a line start (the byte before the current buffer
-                                      // was a newline) so a "BEGIN_LOG" mid-field can't false-positive.
-    let mut at_line_start = false; // `start` is mid-line (one byte before `from`)
-    while remaining > 0 {
-        let want = remaining.min(buf.len());
-        let n = match f.read(&mut buf[..want]) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => return true,
-        };
-        remaining -= n;
-        let chunk = &buf[..n];
-        for line in chunk.split_inclusive(|b| *b == b'\n') {
-            if at_line_start {
-                // ESO log lines are `<relMs>,<TYPE>,…`; a session header is
-                // `…,BEGIN_LOG,…` as the second field. Cheap check: the line
-                // contains ",BEGIN_LOG" (the leading comma anchors the field).
-                if line
-                    .windows(10)
-                    .any(|w| w.eq_ignore_ascii_case(b",BEGIN_LOG"))
-                {
-                    return true;
-                }
-            }
-            at_line_start = line.last() == Some(&b'\n');
+    let mut line: Vec<u8> = Vec::with_capacity(256);
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => return true, // read error → fail closed (force re-scan)
+        }
+        // Each read_until call yields exactly one whole line (even across the
+        // buffer boundary), so a BEGIN_LOG can't be torn. ESO log lines are
+        // `<relMs>,<TYPE>,…`; a session header has `BEGIN_LOG` as the second
+        // field, so the line contains the `,BEGIN_LOG` token (the leading comma
+        // anchors it to a field start, avoiding a substring false-positive).
+        if line
+            .windows(10)
+            .any(|w| w.eq_ignore_ascii_case(b",BEGIN_LOG"))
+        {
+            return true;
         }
     }
     false
@@ -348,5 +340,58 @@ mod tests {
         // The single file includes the appended fights (extended to EOF).
         let bytes = std::fs::read(&written[0]).unwrap();
         assert_eq!(bytes.len() as u64, full.len() as u64);
+    }
+
+    // The new BEGIN_LOG can appear FAR into the append (the same session can grow
+    // many MiB before the user re-toggles logging). The appended-tail scan must
+    // not stop early and miss it — a bounded scan would wrongly trust the stale
+    // list and merge the new session. Append >8 MiB of same-session data before
+    // the new BEGIN_LOG and assert two separate files.
+    #[test]
+    fn new_session_deep_in_append_still_forces_rescan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+
+        let sess_a =
+            b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        write(&log, sess_a);
+        let a_end = sess_a.len() as u64;
+        let stale = vec![LogSession {
+            index: 0,
+            start_offset: 0,
+            end_offset: a_end,
+            start_time_ms: 1000,
+            log_version: "15".into(),
+            realm: Some("NA".into()),
+            fight_count: 1,
+            size_bytes: a_end,
+        }];
+
+        // >8 MiB of same-session filler lines (past the old MAX_SCAN cap), THEN a
+        // new session's BEGIN_LOG.
+        let mut full = sess_a.to_vec();
+        let filler_line = b"30,COMBAT_EVENT,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15\n";
+        while full.len() < a_end as usize + 9 * 1024 * 1024 {
+            full.extend_from_slice(filler_line);
+        }
+        full.extend_from_slice(
+            b"0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n40,BEGIN_COMBAT\n50,END_COMBAT\n",
+        );
+        write(&log, &full);
+
+        let written =
+            split_by_session(log.to_str().unwrap(), out.to_str().unwrap(), Some(stale)).unwrap();
+        assert_eq!(
+            written.len(),
+            2,
+            "a new BEGIN_LOG deep in the append must still split into two files"
+        );
+        // Session A's file must not contain session B's bytes.
+        let first = std::fs::read(&written[0]).unwrap();
+        assert!(
+            !first.windows(4).any(|w| w == b"2000"),
+            "session A's split leaked session B's content"
+        );
     }
 }
