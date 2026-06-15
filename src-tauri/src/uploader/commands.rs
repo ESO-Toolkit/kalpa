@@ -20,6 +20,13 @@ use super::watcher::{LiveEvent, LiveWatchHandle};
 use super::{discovery, scanner, splitter, transport, watcher};
 use crate::AllowedAddonsPath;
 
+/// Internal sentinel returned by the live-handoff closure when it observes the
+/// cancel flag set *before* it launches the official uploader. Distinguishes a
+/// clean pre-launch cancellation (nothing spawned) from a real launch failure,
+/// so the caller can report it as cancelled rather than an error. Not shown to
+/// the user — the caller maps it to a friendly message.
+const LIVE_CANCELLED_BEFORE_LAUNCH: &str = "__live_cancelled_before_launch__";
+
 /// A live session slot. A session is registered as `Starting` *before* the
 /// (blocking) uploader handoff so a concurrent stop/unmount during that window
 /// is observed; it transitions to `Running` once the watcher thread exists.
@@ -539,6 +546,7 @@ pub async fn uploader_start_live(
         !still_ours || cancelled.load(Ordering::SeqCst)
     };
     if aborted_before_handoff {
+        // Fast path: already cancelled/superseded before we scheduled anything.
         // Remove only our own slot (a newer start may have replaced it; leave
         // that one alone) and return without launching the uploader or watcher.
         remove_own_slot(&state, &session_id, &cancelled);
@@ -551,15 +559,34 @@ pub async fn uploader_start_live(
     // fake "LIVE" timeline. We already confirmed the uploader is installed above,
     // but detection can still fail (e.g. removed between the check and here), in
     // which case we error rather than silently falling back to a one-shot launch.
+    //
+    // The `aborted_before_handoff` check above runs under the lock but then
+    // releases it before this `spawn_blocking` is scheduled — a stop can still
+    // arrive in that gap and set `cancelled`. So the AUTHORITATIVE pre-launch
+    // check is the `cancelled.load` INSIDE the closure, on the blocking thread,
+    // as the last act before `upload_file`: `stop_slot` sets the flag
+    // synchronously, so any stop ordered before this load aborts the launch with
+    // no external process started. A stop ordered after it is the documented,
+    // unrecallable "stop during handoff" case (settled to `Cancelled` below).
+    // This makes the cancel check atomic with the launch without holding a lock
+    // across the await.
     let mut live_opts = options.clone();
     live_opts.real_time = true;
     let dispatch_path = safe.clone();
-    let outcome = tokio::task::spawn_blocking(move || match transport::CliTransport::detect() {
-        Some(cli) => {
-            use transport::LogUploadTransport;
-            cli.upload_file(&dispatch_path, &live_opts)
+    let launch_cancelled = Arc::clone(&cancelled);
+    let outcome = tokio::task::spawn_blocking(move || {
+        if launch_cancelled.load(Ordering::SeqCst) {
+            return Err(LIVE_CANCELLED_BEFORE_LAUNCH.to_string());
         }
-        None => Err("The ESO Logs Uploader could not be launched for live logging.".to_string()),
+        match transport::CliTransport::detect() {
+            Some(cli) => {
+                use transport::LogUploadTransport;
+                cli.upload_file(&dispatch_path, &live_opts)
+            }
+            None => {
+                Err("The ESO Logs Uploader could not be launched for live logging.".to_string())
+            }
+        }
     })
     .await
     .map_err(|e| format!("Task failed: {e}"));
@@ -572,6 +599,12 @@ pub async fn uploader_start_live(
             return Err(e);
         }
     };
+    // Pre-launch cancellation observed atomically inside the closure: nothing was
+    // launched, so clean up our slot and report the cancellation (not a failure).
+    if matches!(&outcome, Err(e) if e == LIVE_CANCELLED_BEFORE_LAUNCH) {
+        remove_own_slot(&state, &session_id, &cancelled);
+        return Err("Live logging was cancelled before it started.".into());
+    }
     let (report, handed_off, detail) = match outcome {
         Ok(transport::UploadOutcome::Completed { report_code }) => (
             report_code.map(|code| ReportRef {
