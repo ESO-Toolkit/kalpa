@@ -40,8 +40,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(400);
 const MAX_CONSECUTIVE_FAILURES: u32 = 30;
 
 /// Events streamed to the frontend over the live-session [`Channel`].
+///
+/// `rename_all` only camelCases the variant tags; `rename_all_fields` is what
+/// camelCases the struct-variant FIELDS (e.g. `zone_name` → `zoneName`). Without
+/// the latter the channel would emit snake_case fields the TS handler reads as
+/// `undefined`, producing nameless/NaN live-timeline rows — see the test below.
 #[derive(Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum LiveEvent {
     /// Watching started; reports the file and starting byte offset.
     Started { file: String, start_offset: u64 },
@@ -415,4 +424,42 @@ fn tail_loop(
 /// Build the public report URL from a report code.
 pub fn report_url(code: &str) -> String {
     format!("https://www.esologs.com/reports/{code}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The frontend (src/types/uploader.ts + the channel handler) reads camelCase
+    // field names. serde's `rename_all` only renames the variant TAGS, not
+    // struct-variant fields, so without `rename_all_fields` the channel would emit
+    // snake_case (`zone_name`, `duration_ms`, …) and the UI would read `undefined`
+    // — nameless, NaN-duration live rows. Pin the wire field names.
+    #[test]
+    fn live_event_serializes_fields_as_camel_case() {
+        let fight = LiveEvent::FightDetected {
+            index: 0,
+            zone_name: Some("Sunspire".into()),
+            boss_name: Some("Lokkestiiz".into()),
+            duration_ms: 1234,
+        };
+        let j = serde_json::to_string(&fight).unwrap();
+        assert!(j.contains("\"type\":\"fightDetected\""), "{j}");
+        assert!(j.contains("\"zoneName\""), "{j}");
+        assert!(j.contains("\"bossName\""), "{j}");
+        assert!(j.contains("\"durationMs\""), "{j}");
+        // And the snake_case forms must be gone.
+        assert!(
+            !j.contains("zone_name") && !j.contains("duration_ms"),
+            "{j}"
+        );
+
+        let started = LiveEvent::Started {
+            file: "Encounter.log".into(),
+            start_offset: 9,
+        };
+        let j = serde_json::to_string(&started).unwrap();
+        assert!(j.contains("\"startOffset\""), "{j}");
+        assert!(!j.contains("start_offset"), "{j}");
+    }
 }
