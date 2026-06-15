@@ -337,9 +337,11 @@ pub async fn uploader_upload_log(
     fight_count: Option<usize>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
-    // Reconcile prior-run stale records before writing this upload's transient
-    // `Uploading` record, for the same reason as in `uploader_start_live`:
-    // reconcile must not run after a current-process transient record exists.
+    // Reconcile prior-run stale records before this upload writes its transient
+    // `Uploading` record (same invariant as `uploader_start_live`: reconcile
+    // must run while no current-process transient record exists). Unlike live
+    // mode there is no cancellable slot/watcher here, so the pre-record position
+    // is fine — a one-shot upload has nothing to orphan.
     super::history::reconcile_stale_once(&app);
     let safe = confine_log_path(&allowed, &file_path)?
         .to_string_lossy()
@@ -463,14 +465,6 @@ pub async fn uploader_start_live(
     channel: Channel<LiveEvent>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
-    // Settle any prior-run stale records BEFORE writing this process's `Live`
-    // record. `reconcile_stale` cannot tell a leftover record from a live one,
-    // so it must run while none of ours exist — otherwise a later first
-    // `uploader_list_history` would flip THIS active session to `Completed`,
-    // and `uploader_stop_live`/`settle_live` (which only touch `Live` records)
-    // would then silently drop the observed fight count. Once-guarded, so this
-    // still runs at most once per process.
-    super::history::reconcile_stale_once(&app);
     let safe = confine_log_path(&allowed, &file_path)?
         .to_string_lossy()
         .into_owned();
@@ -510,6 +504,19 @@ pub async fn uploader_start_live(
     if let Some(prev) = prev {
         stop_slot(prev);
     }
+
+    // Settle any prior-run stale records BEFORE we write this process's `Live`
+    // record below. `reconcile_stale` can't tell a leftover record from a live
+    // one, so it must run while none of ours exist — otherwise a later first
+    // `uploader_list_history` would flip THIS active session to `Completed`, and
+    // `settle_live` (which only touches `Live` records) would then silently drop
+    // the observed fight count on stop. It runs AFTER the cancellable `Starting`
+    // slot is registered (not before), so a stop/unmount arriving while this
+    // first-use reconcile blocks on history I/O or `MUTATION_LOCK` still sets
+    // `cancelled` and is honored by the `cancelled_during_start` check below —
+    // the start can't orphan a watcher the frontend already asked to stop. The
+    // `Once` keeps this at most once per process.
+    super::history::reconcile_stale_once(&app);
 
     // Hand the whole file to the official uploader once, with real-time on.
     // Live MUST use the CLI transport (which passes --enable-real-time-uploading);
