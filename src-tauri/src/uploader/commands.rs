@@ -472,31 +472,15 @@ pub async fn uploader_start_live(
     channel: Channel<LiveEvent>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
-    let safe = confine_log_path(&allowed, &file_path)?
-        .to_string_lossy()
-        .into_owned();
 
-    let file_name = Path::new(&safe)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("Encounter.log")
-        .to_string();
-
-    // Live mode genuinely requires the official uploader: only it can stream a
-    // running log in real time (a lone fight slice has no BEGIN_LOG header). The
-    // GUI-handoff fallback would just open a download page while Kalpa shows a
-    // convincing-but-fake live timeline — so refuse rather than no-op.
-    if transport::find_official_uploader().is_none() {
-        return Err(
-            "Live logging needs the ESO Logs Uploader installed. Install \
-                    it, or use \"Upload a Log\" after your session instead."
-                .into(),
-        );
-    }
-
-    // Register a Starting slot BEFORE the blocking handoff so a stop/unmount
-    // during that window is observed and the watcher is never orphaned. Replace
-    // (and stop) any existing slot under this id.
+    // Register the cancellable `Starting` slot AS SOON AS the session id is
+    // accepted — before the blocking/fallible setup below (`confine_log_path`
+    // canonicalizes, `find_official_uploader` stats dozens of paths). Without a
+    // slot here, a stop/unmount arriving during that setup window would reach
+    // `uploader_stop_live`, find nothing, and no-op — then this start would
+    // proceed and launch the uploader after the UI already stopped. With the
+    // slot up front, such a stop sets `cancelled` (and is honored at every check
+    // below). Replace (and cancel) any existing slot under this id first.
     let cancelled = Arc::new(AtomicBool::new(false));
     let prev_running = {
         let mut sessions = state
@@ -519,17 +503,47 @@ pub async fn uploader_start_live(
         handle.stop();
     }
 
+    // Fallible setup now runs WITH the cancellable slot in place. On any error we
+    // must vacate our own slot (only if still ours) so a failed start doesn't
+    // leak a `Starting` slot; `confine_err`/the detection branch do exactly that.
+    let safe = match confine_log_path(&allowed, &file_path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => {
+            remove_own_slot(&state, &session_id, &cancelled);
+            return Err(e);
+        }
+    };
+
+    let file_name = Path::new(&safe)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Encounter.log")
+        .to_string();
+
+    // Live mode genuinely requires the official uploader: only it can stream a
+    // running log in real time (a lone fight slice has no BEGIN_LOG header). The
+    // GUI-handoff fallback would just open a download page while Kalpa shows a
+    // convincing-but-fake live timeline — so refuse rather than no-op.
+    if transport::find_official_uploader().is_none() {
+        remove_own_slot(&state, &session_id, &cancelled);
+        return Err(
+            "Live logging needs the ESO Logs Uploader installed. Install \
+                    it, or use \"Upload a Log\" after your session instead."
+                .into(),
+        );
+    }
+
     // Settle any prior-run stale records BEFORE we write this process's `Live`
     // record below. `reconcile_stale` can't tell a leftover record from a live
     // one, so it must run while none of ours exist — otherwise a later first
     // `uploader_list_history` would flip THIS active session to `Completed`, and
     // `settle_live` (which only touches `Live` records) would then silently drop
-    // the observed fight count on stop. It runs AFTER the cancellable `Starting`
-    // slot is registered (not before), so a stop/unmount arriving while this
-    // first-use reconcile blocks on history I/O or `MUTATION_LOCK` still sets
-    // `cancelled` and is honored by the `cancelled_during_start` check below —
-    // the start can't orphan a watcher the frontend already asked to stop. The
-    // `Once` keeps this at most once per process.
+    // the observed fight count on stop. The cancellable `Starting` slot is
+    // already registered above, so a stop/unmount arriving while this first-use
+    // reconcile blocks on history I/O or `MUTATION_LOCK` still sets `cancelled`
+    // and is honored by the `aborted_before_handoff` check just below — the start
+    // can't launch the uploader or orphan a watcher the frontend already asked to
+    // stop. The `Once` keeps this at most once per process.
     super::history::reconcile_stale_once(&app);
 
     // If a stop/unmount (or a superseding start under the same id) arrived while
