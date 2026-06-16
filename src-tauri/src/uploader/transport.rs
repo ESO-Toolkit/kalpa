@@ -186,12 +186,34 @@ impl CliTransport {
         }
 
         let mut cmd = std::process::Command::new(&self.exe);
-        cmd.arg("--operation-name")
-            .arg("uploadALog")
-            .arg("--file-path")
-            .arg(log_path)
-            .arg("--region")
-            .arg(opts.region.to_string());
+        if opts.real_time {
+            // Live logging is the `liveLog` operation, which watches a DIRECTORY
+            // for the active `Encounter.log` (the uploader's ESO config pins
+            // `logFilePattern: ^Encounter\.log$`) and streams it as the game
+            // appends — it does NOT take a `--file-path`. Passing `--file-path`
+            // with `uploadALog` (the old behavior) ran a one-shot file upload
+            // with a real-time flag bolted on, not a real live session. Hand it
+            // the log's PARENT directory and the correct operation. Verified
+            // against the installed uploader's CLI flag table (var `Ofu`):
+            // `--directory-path` = "directory to use when live logging".
+            let dir = Path::new(log_path)
+                .parent()
+                .ok_or("Could not resolve the log's folder for live logging.")?;
+            cmd.arg("--operation-name")
+                .arg("liveLog")
+                .arg("--directory-path")
+                .arg(dir)
+                .arg("--region")
+                .arg(opts.region.to_string());
+        } else {
+            // One-shot upload of a finished, prepared `.log` file.
+            cmd.arg("--operation-name")
+                .arg("uploadALog")
+                .arg("--file-path")
+                .arg(log_path)
+                .arg("--region")
+                .arg(opts.region.to_string());
+        }
 
         // Guild ids are numeric; anything else (a value with spaces, quotes, or
         // a leading `-`) could be mis-parsed by the uploader into extra flags,
@@ -293,6 +315,101 @@ impl LogUploadTransport for CliTransport {
             // unreachable: `should_abort` is always false here.
             Err(LaunchAborted) => Err("Upload was cancelled.".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::uploader::types::UploadOptions;
+    use std::io::Write;
+
+    /// Render a prepared command's program + args as a single string for
+    /// assertions. `Command`'s Debug format prints the program and each arg, so
+    /// this lets us verify the exact operation/flags without spawning anything.
+    fn cmd_string(cmd: &std::process::Command) -> String {
+        let mut s = format!("{:?}", cmd.get_program());
+        for a in cmd.get_args() {
+            s.push(' ');
+            s.push_str(&format!("{a:?}"));
+        }
+        s
+    }
+
+    fn cli_with_dummy_exe() -> (CliTransport, tempfile::TempDir, String) {
+        // `prepare_command` guards on `log_path.is_file()`, so the log must exist.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("Encounter.log");
+        let mut f = std::fs::File::create(&log).unwrap();
+        f.write_all(b"0,BEGIN_LOG,1,15\n").unwrap();
+        let exe = dir.path().join("ESO Logs Uploader.exe");
+        std::fs::File::create(&exe).unwrap();
+        let log_str = log.to_string_lossy().into_owned();
+        (CliTransport { exe }, dir, log_str)
+    }
+
+    // Live mode must invoke the `liveLog` operation against the log's PARENT
+    // DIRECTORY (`--directory-path`), never `uploadALog`/`--file-path`. This is
+    // the bug the operation-aware split fixed: `liveLog` watches a folder for
+    // `Encounter.log`; a `--file-path` + `uploadALog` invocation is a one-shot
+    // upload, not a live session.
+    #[test]
+    fn live_mode_uses_livelog_with_directory_path() {
+        let (cli, dir, log) = cli_with_dummy_exe();
+        let opts = UploadOptions {
+            real_time: true,
+            ..Default::default()
+        };
+        let cmd = cli.prepare_command(&log, &opts).unwrap();
+        let s = cmd_string(&cmd);
+        assert!(s.contains("liveLog"), "live must use the liveLog op: {s}");
+        assert!(
+            s.contains("--directory-path"),
+            "live must pass --directory-path: {s}"
+        );
+        // The directory passed must be the log's parent, not the file itself.
+        // `cmd_string` renders args via Debug, which escapes Windows backslashes,
+        // so compare against the Debug-escaped form of the parent path.
+        let parent = std::path::Path::new(&log).parent().unwrap();
+        let parent_dbg = format!("{parent:?}");
+        let parent_inner = parent_dbg.trim_matches('"');
+        assert!(
+            s.contains(parent_inner),
+            "live must pass the parent dir ({parent_inner}): {s}"
+        );
+        assert!(
+            !s.contains("uploadALog") && !s.contains("--file-path"),
+            "live must NOT use the one-shot uploadALog/--file-path path: {s}"
+        );
+        assert!(
+            s.contains("--enable-real-time-uploading"),
+            "real-time live must request real-time uploading: {s}"
+        );
+        drop(dir);
+    }
+
+    // Manual (one-shot) upload keeps `uploadALog` with `--file-path` and never
+    // touches the live `liveLog`/`--directory-path` path.
+    #[test]
+    fn manual_mode_uses_uploadalog_with_file_path() {
+        let (cli, dir, log) = cli_with_dummy_exe();
+        let opts = UploadOptions::default(); // real_time = false
+        let cmd = cli.prepare_command(&log, &opts).unwrap();
+        let s = cmd_string(&cmd);
+        assert!(s.contains("uploadALog"), "manual must use uploadALog: {s}");
+        assert!(
+            s.contains("--file-path") && s.contains("Encounter.log"),
+            "manual must pass the --file-path to the log: {s}"
+        );
+        assert!(
+            !s.contains("liveLog") && !s.contains("--directory-path"),
+            "manual must NOT use the live liveLog/--directory-path path: {s}"
+        );
+        assert!(
+            !s.contains("--enable-real-time-uploading"),
+            "manual must not request real-time uploading: {s}"
+        );
+        drop(dir);
     }
 }
 
