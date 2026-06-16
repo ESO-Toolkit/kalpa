@@ -19,6 +19,10 @@
 pub mod commands;
 pub mod discovery;
 pub mod history;
+/// Debug-only auth spike for a possible future native upload path. Compiled out
+/// of release builds; delete once that direction is settled.
+#[cfg(debug_assertions)]
+pub mod native_probe;
 pub mod scanner;
 pub mod splitter;
 pub mod transport;
