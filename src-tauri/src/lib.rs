@@ -422,8 +422,6 @@ pub fn run() {
             uploader::commands::uploader_attach_report,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
-            #[cfg(debug_assertions)]
-            uploader::native_probe::uploader_probe_native_auth,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
