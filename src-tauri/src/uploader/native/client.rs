@@ -187,8 +187,27 @@ impl<'a> NativeUpload<'a> {
                 segments_done: i + 1,
                 segments_total: total,
             });
-            // The server sequences ids; a non-positive next id means "done".
-            if next == 0 {
+            let is_last_local = i + 1 == total;
+            // The server sequences ids; `next == 0` is the protocol terminal. It
+            // is only valid on our LAST local segment. A terminal `0` returned
+            // while we still have segments to send is a server anomaly (schema
+            // drift / mis-sequencing): finalizing here would silently truncate
+            // the report. Fail loudly instead so a partial report never ships as
+            // success. Conversely, a non-zero `next` on the last segment is fine
+            // — we simply stop, having sent everything we have.
+            if next == 0 && !is_last_local {
+                let _ = self.terminate_report(&code);
+                return Err(UploadError::Server {
+                    status: 0,
+                    detail: format!(
+                        "server returned terminal nextSegmentId=0 after segment {} of {}; \
+                         remaining segments would be dropped",
+                        i + 1,
+                        total
+                    ),
+                });
+            }
+            if is_last_local {
                 break;
             }
             segment_id = next;

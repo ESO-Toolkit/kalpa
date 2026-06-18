@@ -42,9 +42,8 @@ impl Session {
     }
 
     /// The `Cookie` header value to attach to upload requests. Crate-internal so
-    /// only the protocol client reads it. (Consumed by the client's wire-send,
-    /// which is pinned to the confirmed format before it is filled in.)
-    #[allow(dead_code)]
+    /// only the protocol client reads it (the wire-send attaches it as the
+    /// `Cookie` request header).
     pub(crate) fn cookie_header(&self) -> &str {
         &self.cookie_header
     }
@@ -140,11 +139,18 @@ impl StoredSessionProvider {
     }
 
     /// Record a freshly-captured session cookie (called by the login webview
-    /// flow). Persists it encrypted and updates the in-memory copy.
-    pub fn store(&self, cookie_header: impl Into<String>) {
+    /// flow). Updates the in-memory copy (so the session is usable immediately)
+    /// and attempts to persist it encrypted.
+    ///
+    /// Returns `true` if the cookie was durably committed to the credential store
+    /// (survives restart), `false` if it is **memory-only** (a credential-store
+    /// failure) — the caller should surface that so the user knows they may need
+    /// to sign in again next launch, rather than silently appearing logged in.
+    pub fn store(&self, cookie_header: impl Into<String>) -> bool {
         let cookie = cookie_header.into();
-        crate::token_store::save_upload_session(&cookie);
+        let persisted = crate::token_store::save_upload_session(&cookie);
         *self.cached.lock().unwrap() = Some(cookie);
+        persisted
     }
 
     /// Whether a (non-empty) session is currently available without prompting a
@@ -250,5 +256,30 @@ mod tests {
         // off-Windows / harmless if absent).
         assert!(!p.has_session());
         assert_eq!(p.session().unwrap_err(), SessionError::NotAuthenticated);
+    }
+
+    #[test]
+    fn store_makes_session_immediately_usable_regardless_of_persistence() {
+        // `store` must update the in-memory copy so the session is usable right
+        // away (the upload should work in-session even if the credential write
+        // failed). Its bool return reports durability separately. Starting from a
+        // fresh in-memory provider avoids touching the real credential store on
+        // load; `store` itself attempts a persist whose success is platform- and
+        // environment-dependent, so we assert the in-memory contract, not the
+        // bool value.
+        let p = StoredSessionProvider::with_cached(None);
+        assert!(!p.has_session());
+        let _persisted: bool = p.store("laravel_session=xyz");
+        assert!(
+            p.has_session(),
+            "session must be usable immediately after store"
+        );
+        assert_eq!(
+            p.session().expect("session present").cookie_header(),
+            "laravel_session=xyz"
+        );
+        // Clean up any credential the store may have persisted so the test leaves
+        // no durable side effect.
+        p.invalidate();
     }
 }

@@ -242,9 +242,13 @@ pub fn clear_tokens() {
 const UPLOAD_SESSION_KEY: &str = "upload_session";
 
 /// Persist the upload-session cookie header (the `Cookie:` value for esologs).
+/// Returns `true` only if the cookie was actually committed to the credential
+/// store; `false` means the caller must treat the session as non-durable (it
+/// will not survive a restart). The fail-closed write never leaves a corrupt
+/// blob, so a `false` here is safe — it just is not persisted.
 #[cfg(windows)]
-pub fn save_upload_session(cookie_header: &str) {
-    let _ = save_chunked(UPLOAD_SESSION_KEY, cookie_header.as_bytes());
+pub fn save_upload_session(cookie_header: &str) -> bool {
+    save_chunked(UPLOAD_SESSION_KEY, cookie_header.as_bytes())
 }
 
 /// Load the persisted upload-session cookie header, if any.
@@ -313,7 +317,9 @@ pub fn clear_tokens() {}
 pub fn migrate_from_store(_app: &tauri::AppHandle) {}
 
 #[cfg(not(windows))]
-pub fn save_upload_session(_cookie_header: &str) {}
+pub fn save_upload_session(_cookie_header: &str) -> bool {
+    false
+}
 
 #[cfg(not(windows))]
 pub fn load_upload_session() -> Option<String> {
