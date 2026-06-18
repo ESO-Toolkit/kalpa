@@ -17,6 +17,7 @@
 //! files (`convert` + `testdata/`). The client and session pieces are thin by
 //! comparison. Built clean-room from protocol facts; no third-party code copied.
 
+pub mod a_counter;
 pub mod client;
 pub mod convert;
 pub mod coverage;

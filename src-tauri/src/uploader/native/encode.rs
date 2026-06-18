@@ -483,6 +483,13 @@ fn join_lines(records: &[String]) -> String {
     s
 }
 
+/// Crate-internal access to the quote-aware CSV splitter (used by sibling modules
+/// like [`super::a_counter`] that parse whole raw lines). Returns the fields as a
+/// `Vec` for index access.
+pub(crate) fn split_csv_quoted_pub(s: &str) -> Vec<&str> {
+    split_csv_quoted(s).collect()
+}
+
 /// Split a CSV tail honoring double-quoted fields (which may contain commas).
 /// Lightweight: ESO uses simple `"..."` quoting without escaped inner quotes for
 /// these fields.
