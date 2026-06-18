@@ -7,37 +7,56 @@
 //! the rest exactly. `A` itself is a **global allocation counter** assigned as the
 //! official parser walks the raw log, and it is NOT yet reproducible byte-exact.
 //!
-//! ## What is known (verified)
+//! ## What is known (verified against the combat golden pair)
 //!
-//! * `A` is a dense global counter in segment-emission order (the first ~81 are
-//!   exactly `1,2,3,…`). Codes 41/51 (`ZONE_CHANGED`/`MAP_CHANGED`) don't use the
-//!   counter — they write their literal zone/map id into the slot.
+//! * `A` is a single global counter **minted in SEGMENT-EMISSION order, NOT raw
+//!   order** (monotonic in emission order with only 2 delayed-emit exceptions).
+//!   True range is `1..=3803`; exactly **62** of those are "gaps" (allocated to an
+//!   entity whose segment line is then dropped), so 3741 distinct values are
+//!   emitted. Codes 41/51 (`ZONE_CHANGED`/`MAP_CHANGED`) write a literal zone/map
+//!   id into the `A` slot — those ids happen to coincide with real counter values
+//!   (1123, 1717, 1718, 1720, 1722–1724) but the codes do not themselves create or
+//!   skip counter values.
 //! * The **allocation key** is the first-seen `(sourceIdentity, abilityId,
-//!   targetIdentity)` triple, allocated in raw-line order, skipping a set of
-//!   no-op `actionResult`s. This [`ACounter`] implements exactly that backbone.
+//!   targetIdentity)` triple — VERIFIED CONSISTENT (0 over-split among 1842 cleanly
+//!   aligned A's). This [`ACounter`] implements that key over the combat-ish events
+//!   in raw order, which is the right *key* but the wrong *order/coverage* (below).
 //!
-//! ## Why it does not ship (the two unsolved sub-problems)
+//! ## Why it does not ship — and why a one-pass raw replay CANNOT reach it
 //!
-//! The backbone **over-allocates**: it mints ~4045 distinct `A` where the true
-//! count is 3799 (and only 62 of those should be allocated-but-unemitted "gaps").
-//! Two opposing errors remain, both confirmed by replay:
+//! `A` is minted across **~17 segment codes** in emission order: only ~1095 of the
+//! 3741 distinct A's come from the damage codes {1,2,3,26}; the other ~2646 come
+//! from effect/cast/registration emissions (code 10=1143, 5=693, 16=554, …). A
+//! raw-event replay over combat-ish lines **structurally cannot order** those 2646
+//! effect mints, so it can never land the global counter on the right number — and
+//! since `A` is positional, any miscount shifts *every* later code-1 `A`. Measured:
+//! the triple backbone mints 4045 vs the true 3803 and scores only 696/3733 on the
+//! code-1 acid test; every refinement tried (HEALTH_REGEN keying,
+//! `DAMAGE_SHIELDED` shield-reuse, EFFECT_CHANGED activation filters) *regresses*
+//! the acid score because each shifts the one global counter — they do not compose
+//! one-pass. The surplus over 3803 is entirely EFFECT_CHANGED self/aura
+//! over-registration (581 self-target / 325 ctid-0 keys truth never registers as
+//! new entities).
 //!
-//! 1. **Re-cast splits** — a genuine *re-cast* of the same triple should get a
-//!    NEW `A`, but a DoT *tick* of that triple must reuse the old one. The
-//!    cast-occurrence boundary (likely a fresh `BEGIN_CAST`/castTrackId generation
-//!    after the prior cast `END_CAST`s) is not yet pinned.
-//! 2. **Ability-family merges** — linked morph/synergy abilities share one `A`
-//!    (e.g. ability ids `4730`↔`146311`), which the triple key splits. This needs
-//!    an ability-link graph derived from `ABILITY_INFO`/`EFFECT_INFO`.
+//! **Conclusion (workflow-verified, three independent refutations):** the only path
+//! to a byte-exact `A` is to build the FULL multi-code segment encoder that walks
+//! raw and emits all ~17 codes in emission order, maintaining (a) the master-entity
+//! table (A is allocated as a byproduct on first-emission of a new entity), (b) a
+//! stateful active-effect set (so a self/aura `EFFECT_CHANGED` allocates only on a
+//! true first activation), and (c) a per-code emit/drop predicate (so the 62 gaps
+//! fall out as allocate-but-suppressed). That is a materially larger build than a
+//! counter and is the documented next step.
 //!
-//! Plus the 62 emission **gaps** (allocations whose segment line is filtered/merged
-//! away) are not reproduced from raw-only data.
+//! Sub-rules that ARE individually pinned (correct contributions to that future
+//! encoder, but which do not compose standalone): HEALTH_REGEN (code 4) mints
+//! exactly 5, keyed on source identity only; `DAMAGE_SHIELDED` reuses the
+//! originating cast's `A` on the same castTrackId; 19 channeled-debuff triples
+//! (e.g. 126705 "Wicked Bonds") use a stateful per-`(src,tgt)` rotating slot pool.
 //!
-//! Until a replay mints **exactly** the true count with the gaps at the right
-//! positions, shipping `A` would silently drift on a longer log. So this module is
-//! exercised ONLY by a baseline test (below) that records the current
-//! known-broken accuracy; it is never used by the encoder, and `COMBAT_EVENT`
-//! stays out of [`super::coverage::PROVEN_LINE_TYPES`].
+//! Until that encoder exists, `A` stays gated: this module is exercised ONLY by the
+//! baseline test below, is never used by the encoder, and `COMBAT_EVENT` stays out
+//! of [`super::coverage::PROVEN_LINE_TYPES`]. Shipping the 696/3733 backbone would
+//! silently corrupt the `A` of every code-1 line.
 //!
 //! Clean-room: derived from our own matched-pair captures; no third-party code.
 
@@ -280,15 +299,19 @@ mod tests {
         }
         let minted = c.allocated();
         // KNOWN BASELINE (documented, intentionally NOT byte-exact): the backbone
-        // over-allocates (~4045 vs the true 3799). Assert only a loose envelope so
-        // the test is a stable progress marker, not a brittle exact-count gate. The
-        // real promotion bar (minted == 3799 AND the 62 gaps reproduced) is tracked
-        // in the module docs and the project tasks, not here.
+        // over-allocates — it mints ~4045 distinct A vs the TRUE 3803 (= 3741
+        // emitted + 62 gaps), and scores 696/3733 on the code-1 acid test. The
+        // surplus is EFFECT_CHANGED self/aura over-registration; the true counter is
+        // an emission-order byproduct of the full multi-code encoder (see module
+        // docs), unreachable by this one-pass raw replay. Assert only a loose
+        // envelope so the test is a stable progress marker, not a brittle gate. The
+        // real promotion bar (minted == 3803 AND the 62 gaps at exact positions AND
+        // code-1 3733/3733) is tracked in the module docs and the project tasks.
         assert!(
             (3700..=4200).contains(&minted),
-            "A-counter backbone minted {minted}; expected the documented ~3799–4045 \
-             envelope. A big move means the allocation rule changed — re-measure and \
-             update the baseline (and check the gap/re-cast/family work)."
+            "A-counter backbone minted {minted}; expected the documented ~3803 (true) \
+             to ~4045 (backbone) envelope. A big move means the allocation rule \
+             changed — re-measure and update the baseline."
         );
     }
 }
