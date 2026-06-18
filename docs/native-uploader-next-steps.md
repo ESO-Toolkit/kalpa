@@ -48,6 +48,35 @@ Self-contained state + plan for finishing **fully-native** ESO Logs upload in Ka
 - Native upload STILL GATED: `format::FORMAT_VERSION_CONFIRMED = false` and
   `coverage::PROVEN_LINE_TYPES` empty → zero behavior change for users.
 
+## Adversarial review hardening (6 rounds, all fixed — commits a29bac6 → 9ef92c9)
+
+Ran `/codex:adversarial-review` in a loop until it converged. 11 real issues
+found and fixed across 6 rounds (all green: 266 lib tests, clippy/fmt, tsc):
+- create-report body rebuilt with serde_json (was invalid JSON for any non-null
+  description); dropped the hand-rolled escaper.
+- add-segment: malformed/missing nextSegmentId now a hard error (was a silent
+  end-of-upload that finalized incomplete reports); a terminal `0` before the
+  last local segment is rejected (no silent truncation).
+- token_store chunked write hardened to truly fail-closed (verify the count
+  sentinel is gone before writing chunks; hard-fail on commit-write failure).
+- credential persistence failures surfaced end-to-end: save_tokens/
+  save_upload_session return a committed-bool; save_auth_tokens is #[must_use] +
+  logs; AuthUser gains `sessionPersisted`; UI shows a toast (warnIfSessionNotPersisted)
+  at auth_get_user + both auth_login sites.
+- token migration deletes plaintext only after the chunked read-back EQUALS the
+  source (AuthUser/AuthTokens gained PartialEq) — no stale-set false-verify.
+- upload_finished rejects empty input and best-effort terminate_reports on ANY
+  post-create error (extracted push_segments_and_terminate).
+
+Round-7 verdict findings are NOT code bugs — they are the two items below
+(native dispatch is intentionally gated; the logged-out-uploader → Settings sign-in
+gap is a real UX item). The review loop stopped here: no remaining bugs in the
+changed code.
+
+Known follow-up test gaps (need a mock transport / HTTP layer, none exists yet):
+forcing set_master_table/add_segment failures to assert terminate; the early
+`nextSegmentId:0` multi-segment case; the credential-write-failure store path.
+
 ## NEXT (in order) — the remaining seams
 
 ### 3. Webview login command (the gating piece — needs the app running + a live login)
@@ -74,6 +103,14 @@ and after login reads `laravel_session` from THAT webview's cookie jar, then cal
 - The segment bytes passed to `client.rs` must be the ZIP blob (the wire-send sends
   them as-is in the `logfile` part) — confirm where zipping happens (serialize vs
   transport) and do it once.
+
+### 4b. Logged-out uploader sign-in path (UX gap, found in review round 7)
+The uploader's logged-out state currently tells users to open Settings to sign
+in, but there is NO `auth_login` control in Settings (the only login call sites
+are Pack Create + My Packs). A first-time user entering via the uploader is sent
+to a dead end. Fix: add a direct `auth_login` action to the uploader logged-out
+state (or a real sign-in control in Settings), calling `onAuthChange` +
+`warnIfSessionNotPersisted` on success (see `uploader-workspace.tsx:~774`).
 
 ### 5. Opt-in ToS disclosure UI (ship-blocking)
 - One-time, honest in-app disclosure: native upload uses an unofficial method;
