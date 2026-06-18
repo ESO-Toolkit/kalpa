@@ -226,8 +226,9 @@ impl<'a> NativeUpload<'a> {
                 bytes: &seg.bytes,
             },
         )?;
-        // Response is JSON `{ "nextSegmentId": <n> }`.
-        Ok(extract_next_segment_id(&body))
+        // Response is JSON `{ "nextSegmentId": <n> }`. A malformed body is a hard
+        // error (not a silent end-of-upload) — see `extract_next_segment_id`.
+        extract_next_segment_id(&body)
     }
 
     fn set_master_table(
@@ -357,36 +358,32 @@ impl<'a> NativeUpload<'a> {
     /// Build the `create-report` JSON body. Ten fields, matching the confirmed
     /// live request: a fresh report is created with `startTime == endTime` at
     /// creation time (the server backfills the real range from the segments).
-    fn create_report_body(&self) -> String {
+    ///
+    /// Serialized via `serde_json` (not hand-formatted) so free-text fields
+    /// (`guildId`, `description`) are correctly quoted/escaped for any input.
+    fn create_report_body(&self) -> Vec<u8> {
         let opts = self.opts;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let guild = opts
-            .guild_id
-            .as_deref()
-            .map(|g| format!("\"{}\"", escape_json(g)))
-            .unwrap_or_else(|| "null".to_string());
-        let desc = opts
-            .description
-            .as_deref()
-            .map(|d| format!("\"{}\"", escape_json(d)))
-            .unwrap_or_default();
-        format!(
-            "{{\"clientVersion\":\"{cv}\",\"parserVersion\":{pv},\
-             \"startTime\":{ts},\"endTime\":{ts},\"guildId\":{guild},\
-             \"fileName\":\"{file}\",\"serverOrRegion\":{region},\
-             \"visibility\":{vis},\"reportTagId\":null,\"description\":\"{desc}\"}}",
-            cv = super::format::CLIENT_VERSION,
-            pv = super::format::FORMAT_VERSION,
-            ts = now_ms,
-            guild = guild,
-            file = "log.txt",
-            region = opts.region,
-            vis = opts.visibility.as_report_visibility_id(),
-            desc = desc,
-        )
+        // `description` is sent as "" (not null) when absent — matches the
+        // confirmed request shape; `guildId` is null for Personal Logs.
+        let body = serde_json::json!({
+            "clientVersion": super::format::CLIENT_VERSION,
+            "parserVersion": super::format::FORMAT_VERSION,
+            "startTime": now_ms,
+            "endTime": now_ms,
+            "guildId": opts.guild_id,
+            "fileName": "log.txt",
+            "serverOrRegion": opts.region,
+            "visibility": opts.visibility.as_report_visibility_id(),
+            "reportTagId": serde_json::Value::Null,
+            "description": opts.description.as_deref().unwrap_or(""),
+        });
+        // `to_vec` on an owned Value cannot fail; fall back to an empty object if
+        // it somehow does rather than panicking.
+        serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec())
     }
 }
 
@@ -432,24 +429,6 @@ fn segment_logfile_part(bytes: &[u8]) -> Result<reqwest::blocking::multipart::Pa
         .map_err(|e| format!("multipart part error: {e}"))
 }
 
-/// Minimal JSON string escaping for the few free-text fields (guild id,
-/// description) interpolated into the hand-built `create-report` body.
-fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// Pull the report code from a `create-report` response body.
 ///
 /// The response is JSON `{ "code": <reportCode>, "message"?: <error> }`. The
@@ -481,14 +460,24 @@ fn extract_report_code(body: &[u8]) -> Result<ReportCode, UploadError> {
 }
 
 /// Pull `nextSegmentId` from an `add-report-segment` response body. The server
-/// sequences segment ids; a missing/non-positive value means "no further
-/// segments" (treated as 0 by the lifecycle loop). Lenient by design — an
-/// unparseable body here should not abort an otherwise-successful upload.
-fn extract_next_segment_id(body: &[u8]) -> u64 {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("nextSegmentId").and_then(|n| n.as_u64()))
-        .unwrap_or(0)
+/// sequences segment ids; a numeric `0` is the protocol's explicit "no further
+/// segments" terminal. A missing/non-numeric field or a non-JSON body is NOT
+/// treated as a terminal — that would let a transient schema drift, proxy error
+/// page, or partial response silently stop the upload and finalize an INCOMPLETE
+/// report as success. Such bodies are a hard [`UploadError::Server`] so the
+/// caller fails loudly instead of shipping a truncated report.
+fn extract_next_segment_id(body: &[u8]) -> Result<u64, UploadError> {
+    let v: serde_json::Value = serde_json::from_slice(body).map_err(|e| UploadError::Server {
+        status: 0,
+        detail: format!("add-report-segment response was not JSON: {e}"),
+    })?;
+    match v.get("nextSegmentId").and_then(|n| n.as_u64()) {
+        Some(n) => Ok(n),
+        None => Err(UploadError::Server {
+            status: 0,
+            detail: "add-report-segment response missing a numeric nextSegmentId".into(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -583,11 +572,74 @@ mod tests {
     }
 
     #[test]
-    fn extract_next_segment_id_reads_value_or_defaults_zero() {
-        assert_eq!(extract_next_segment_id(br#"{"nextSegmentId":5}"#), 5);
-        // Missing field, empty body, or non-JSON → 0 (no further segments).
-        assert_eq!(extract_next_segment_id(br#"{"other":1}"#), 0);
-        assert_eq!(extract_next_segment_id(b""), 0);
-        assert_eq!(extract_next_segment_id(b"not json"), 0);
+    fn create_report_body_is_valid_json_for_tricky_descriptions() {
+        use crate::uploader::types::Visibility;
+        let sess = FakeSession {
+            invalidated: std::sync::Mutex::new(false),
+        };
+        // A description with quotes + backslashes + a guild id: the previous
+        // hand-built body double-quoted these and produced invalid JSON.
+        let opts = UploadOptions {
+            region: 1,
+            guild_id: Some("g\"123\\x".into()),
+            visibility: Visibility::Private,
+            description: Some(r#"raid "night" \o/"#.into()),
+            real_time: false,
+            include_entire_file: false,
+        };
+        let up = NativeUpload::new(&sess, &opts, Arc::new(AtomicBool::new(false)));
+        let body = up.create_report_body();
+        let v: serde_json::Value =
+            serde_json::from_slice(&body).expect("create-report body must be valid JSON");
+        assert_eq!(v["description"], serde_json::json!(r#"raid "night" \o/"#));
+        assert_eq!(v["guildId"], serde_json::json!("g\"123\\x"));
+        assert_eq!(v["visibility"], serde_json::json!(1));
+        assert_eq!(
+            v["parserVersion"],
+            serde_json::json!(super::super::format::FORMAT_VERSION)
+        );
+        assert_eq!(v["fileName"], serde_json::json!("log.txt"));
+        // Absent description/guild: description → "" , guildId → null.
+        let opts2 = UploadOptions::default();
+        let up2 = NativeUpload::new(&sess, &opts2, Arc::new(AtomicBool::new(false)));
+        let v2: serde_json::Value =
+            serde_json::from_slice(&up2.create_report_body()).expect("valid JSON");
+        assert_eq!(v2["description"], serde_json::json!(""));
+        assert_eq!(v2["guildId"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn extract_next_segment_id_reads_numeric_value_including_terminal_zero() {
+        // A numeric value (incl the explicit terminal 0) parses successfully.
+        assert_eq!(
+            extract_next_segment_id(br#"{"nextSegmentId":5}"#).unwrap(),
+            5
+        );
+        assert_eq!(
+            extract_next_segment_id(br#"{"nextSegmentId":0}"#).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn extract_next_segment_id_rejects_malformed_responses() {
+        // Missing field, non-numeric, empty body, or non-JSON must be a HARD
+        // error — never a silent "done" that finalizes an incomplete report.
+        for bad in [
+            &br#"{"other":1}"#[..],
+            &br#"{"nextSegmentId":"x"}"#[..],
+            &b""[..],
+            &b"not json"[..],
+            &b"<html>error</html>"[..],
+        ] {
+            assert!(
+                matches!(
+                    extract_next_segment_id(bad),
+                    Err(UploadError::Server { .. })
+                ),
+                "malformed body must be a Server error, not a terminal: {:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
     }
 }

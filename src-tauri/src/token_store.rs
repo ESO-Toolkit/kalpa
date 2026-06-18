@@ -71,9 +71,32 @@ fn save_chunked(key: &str, data: &[u8]) -> bool {
     // None → a re-login) instead of reading a corrupt blob. We cannot keep the
     // prior blob recoverable without an atomic multi-key write (the credential
     // store has none); clean fail-closed is the correct minimal guarantee.
-    if let Some(e) = entry(&count_key) {
-        let _ = e.delete_credential();
+    //
+    // The whole guarantee rests on the sentinel actually being gone before we
+    // touch any chunk, so we VERIFY the deletion rather than ignore its result:
+    // a delete that returns anything but success/NoEntry, or a sentinel still
+    // readable afterward, means the old count could survive and pair with mixed
+    // old/new chunks — so we abort BEFORE writing any chunk (the old blob stays
+    // intact and readable; nothing is corrupted).
+    let Some(count_entry) = entry(&count_key) else {
+        eprintln!("[token_store] failed to open {key} count entry");
+        return false;
+    };
+    match count_entry.delete_credential() {
+        Ok(()) => {}
+        Err(keyring::Error::NoEntry) => {} // already absent — fine
+        Err(err) => {
+            eprintln!("[token_store] could not invalidate {key} count sentinel: {err}");
+            return false;
+        }
     }
+    // Confirm it is truly gone before proceeding (a stale, still-readable count is
+    // the exact failure mode we must prevent).
+    if count_entry.get_password().is_ok() {
+        eprintln!("[token_store] {key} count sentinel still present after delete; aborting");
+        return false;
+    }
+
     for (i, c) in chunks.iter().enumerate() {
         // base64 output is valid ASCII, so this never fails.
         let s = match std::str::from_utf8(c) {
@@ -98,11 +121,11 @@ fn save_chunked(key: &str, data: &[u8]) -> bool {
 
     // Commit point: flip the count to the new chunk total. Until this succeeds
     // there is no valid count (it was cleared above), so the loader fails closed.
-    if let Some(e) = entry(&count_key) {
-        if let Err(err) = e.set_password(&chunks.len().to_string()) {
-            eprintln!("[token_store] failed to save {key} count: {err}");
-            return false;
-        }
+    // Reuse the verified `count_entry`; a write failure here is a hard failure
+    // (the caller must NOT believe the blob was persisted).
+    if let Err(err) = count_entry.set_password(&chunks.len().to_string()) {
+        eprintln!("[token_store] failed to save {key} count: {err}");
+        return false;
     }
 
     // Post-commit cleanup (best-effort): remove orphan high-index chunks left by
