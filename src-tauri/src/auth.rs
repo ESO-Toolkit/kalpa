@@ -29,6 +29,13 @@ pub struct AuthTokens {
 pub struct AuthUser {
     pub user_id: String,
     pub user_name: String,
+    /// Whether the session was durably persisted to the OS credential store.
+    /// `Some(false)` means the login is **memory-only** (a Credential Manager
+    /// failure) and will not survive a restart — the UI should warn the user.
+    /// `None`/absent for callers that don't establish a session (back-compat:
+    /// existing consumers ignore it).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_persisted: Option<bool>,
 }
 
 pub struct AuthState {
@@ -381,4 +388,34 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
     response
         .json::<CallbackTokens>()
         .map_err(|e| format!("Failed to parse refresh response: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_user_session_persisted_serializes_camelcase_and_omits_when_none() {
+        // Present → camelCase `sessionPersisted` field carries the bool.
+        let with = AuthUser {
+            user_id: "1".into(),
+            user_name: "n".into(),
+            session_persisted: Some(false),
+        };
+        let j = serde_json::to_value(&with).unwrap();
+        assert_eq!(j["sessionPersisted"], serde_json::json!(false));
+
+        // Absent → field is OMITTED entirely (back-compat: old consumers and
+        // status responses see no extra key).
+        let without = AuthUser {
+            user_id: "1".into(),
+            user_name: "n".into(),
+            session_persisted: None,
+        };
+        let j2 = serde_json::to_value(&without).unwrap();
+        assert!(
+            j2.get("sessionPersisted").is_none(),
+            "session_persisted: None must be omitted, got {j2}"
+        );
+    }
 }

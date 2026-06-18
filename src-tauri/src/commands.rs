@@ -5363,15 +5363,18 @@ pub async fn auth_login(
         .await
         .map_err(|e| format!("Task failed: {e}"))??;
 
+    // Save to store first so the login response can report durability. A failure
+    // is logged in the helper and leaves the session memory-only (still usable
+    // this process), so we do NOT fail the login — instead we surface
+    // `sessionPersisted: false` to the UI so it can warn the user that they will
+    // need to sign in again after a restart.
+    let persisted = save_auth_tokens(&app, &tokens);
+
     let user = AuthUser {
         user_id: tokens.user_id.clone(),
         user_name: tokens.user_name.clone(),
+        session_persisted: Some(persisted),
     };
-
-    // Save to store. A failure here is logged inside the helper and leaves the
-    // session memory-only (still usable now); the user stays logged in for this
-    // process, so we do not fail the login — but the warning surfaces it.
-    let _persisted = save_auth_tokens(&app, &tokens);
 
     // Update in-memory state
     *state
@@ -5425,15 +5428,16 @@ pub async fn auth_get_user(
     .map_err(|e| format!("Task failed: {e}"))?
     {
         Ok(Some(new_tokens)) => {
-            // Tokens were refreshed — save them
+            // Persistence failure is logged in the helper; keep the refreshed
+            // token working in-memory rather than failing the refresh. Report the
+            // durability so a status check can also reflect a memory-only session.
+            let persisted = save_auth_tokens(&app, &new_tokens);
+
             let user = AuthUser {
                 user_id: new_tokens.user_id.clone(),
                 user_name: new_tokens.user_name.clone(),
+                session_persisted: Some(persisted),
             };
-
-            // Persistence failure is logged in the helper; keep the refreshed
-            // token working in-memory rather than failing the refresh.
-            let _ = save_auth_tokens(&app, &new_tokens);
 
             *state
                 .tokens
@@ -5442,10 +5446,11 @@ pub async fn auth_get_user(
             Ok(Some(user))
         }
         Ok(None) => {
-            // Token still valid
+            // Token still valid (no save happened) — durability unchanged/unknown.
             Ok(Some(AuthUser {
                 user_id: tokens.user_id,
                 user_name: tokens.user_name,
+                session_persisted: None,
             }))
         }
         Err(_) => {

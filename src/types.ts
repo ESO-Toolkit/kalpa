@@ -487,6 +487,13 @@ export interface RosterPack {
 export interface AuthUser {
   userId: string;
   userName: string;
+  /**
+   * Whether the session was durably persisted to the OS credential store.
+   * `false` means the login is memory-only (a credential-store failure) and will
+   * not survive a restart — surface a warning to the user. Absent/undefined for
+   * responses that don't establish a session.
+   */
+  sessionPersisted?: boolean;
 }
 
 // ── Protected Edits types ──────────────────────────────────────────────
