@@ -18,7 +18,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
-reqwest = { version = "0.13", features = ["blocking", "json", "query", "form"] }
+reqwest = { version = "0.13", features = ["blocking", "json", "query", "form", "multipart"] }
 tokio = { version = "1", features = ["rt"] }
 scraper = "0.27"
 zip = "8"
@@ -52,6 +52,14 @@ dunce = "1"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 keyring = { version = "3", features = ["windows-native"] }
+
+[profile.dev]
+# Reduced debug info: the full dependency graph (reqwest/rustls/aws-lc/tauri/…)
+# generates a debug PDB large enough to hit the MSVC linker's section limit
+# (LNK1318 "Unexpected PDB error; LIMIT") and balloon `target/` disk use.
+# Line-tables-only keeps backtraces/line numbers (enough for debugging) while
+# cutting PDB size well under the limit and saving several GB on disk.
+debug = "line-tables-only"
 
 [profile.release]
 lto = true

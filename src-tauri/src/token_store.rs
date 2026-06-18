@@ -25,10 +25,8 @@ const USER: &str = "auth_tokens";
 #[cfg(windows)]
 use base64::{engine::general_purpose::STANDARD, Engine};
 
-/// Sentinel: decimal chunk count. Its presence marks the chunked format.
-#[cfg(windows)]
-const COUNT_KEY: &str = "auth_tokens.count";
-/// Chunk N is stored under `auth_tokens.{N}`.
+/// Blob key prefix for the auth tokens: count sentinel at `auth_tokens.count`,
+/// chunk N at `auth_tokens.{N}` (the historical layout, preserved exactly).
 #[cfg(windows)]
 const CHUNK_PREFIX: &str = "auth_tokens";
 /// Upper bound on chunks read/swept (sanity cap; ~64 KB of base64 max).
@@ -43,6 +41,113 @@ fn entry(user: &str) -> Option<keyring::Entry> {
     keyring::Entry::new(SERVICE, user).ok()
 }
 
+// ── Generic chunked blob storage ─────────────────────────────────────────
+//
+// The credential-manager 2560-byte cap applies to any blob, so the chunked
+// fail-closed write/read is factored out here and reused for both the auth
+// tokens and the upload-session cookie. A blob is addressed by a `key` prefix:
+// the count sentinel lives at `{key}.count` and chunk N at `{key}.{N}`.
+
+/// Write `data` (an arbitrary byte string) under `key` using the fail-closed
+/// chunked scheme. Returns false (after logging) if any chunk write failed; on
+/// failure the count sentinel is left cleared so a reader fails closed rather
+/// than reading a half-written blob.
+#[cfg(windows)]
+fn save_chunked(key: &str, data: &[u8]) -> bool {
+    let count_key = format!("{key}.count");
+    // base64 → pure ASCII so each char is exactly 2 UTF-16 bytes; chunk by byte
+    // count, which (ASCII) equals char count.
+    let b64 = STANDARD.encode(data);
+    let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK_LEN).collect();
+
+    // Fail-closed ordering: invalidate the count sentinel FIRST, then write the
+    // new chunks (overwriting same-index slots), then flip the count to the new
+    // total as the single commit point, then sweep orphans. Invalidating first
+    // is what makes a mid-write crash safe: overwriting a slot in place destroys
+    // the old chunk there, so a crash between slots would otherwise leave the old
+    // count pointing at a base64 splice of old+new chunks — which the loader
+    // decodes to garbage. With the sentinel cleared up front, a mid-write crash
+    // leaves NO valid count, so the loader cleanly falls back (legacy entry or
+    // None → a re-login) instead of reading a corrupt blob. We cannot keep the
+    // prior blob recoverable without an atomic multi-key write (the credential
+    // store has none); clean fail-closed is the correct minimal guarantee.
+    if let Some(e) = entry(&count_key) {
+        let _ = e.delete_credential();
+    }
+    for (i, c) in chunks.iter().enumerate() {
+        // base64 output is valid ASCII, so this never fails.
+        let s = match std::str::from_utf8(c) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("[token_store] {key} chunk {i} not valid ascii (unexpected)");
+                return false;
+            }
+        };
+        let Some(e) = entry(&format!("{key}.{i}")) else {
+            eprintln!("[token_store] failed to create keyring entry for {key} chunk {i}");
+            return false;
+        };
+        if let Err(err) = e.set_password(s) {
+            // Abort before committing the count. The sentinel was already cleared
+            // above, so the loader fails closed (legacy/None → re-login) rather
+            // than reading a half-written blob.
+            eprintln!("[token_store] failed to save {key} chunk {i}: {err}");
+            return false;
+        }
+    }
+
+    // Commit point: flip the count to the new chunk total. Until this succeeds
+    // there is no valid count (it was cleared above), so the loader fails closed.
+    if let Some(e) = entry(&count_key) {
+        if let Err(err) = e.set_password(&chunks.len().to_string()) {
+            eprintln!("[token_store] failed to save {key} count: {err}");
+            return false;
+        }
+    }
+
+    // Post-commit cleanup (best-effort): remove orphan high-index chunks left by
+    // a previously-larger blob. Failures here don't affect correctness — the
+    // loader only reads chunks 0..count.
+    for i in chunks.len()..MAX_CHUNKS {
+        if let Some(e) = entry(&format!("{key}.{i}")) {
+            let _ = e.delete_credential();
+        }
+    }
+    true
+}
+
+/// Read a chunked blob written under `key`. Returns the raw bytes, or `None` if
+/// the count sentinel is missing/invalid or any chunk is missing (fail closed).
+#[cfg(windows)]
+fn load_chunked(key: &str) -> Option<Vec<u8>> {
+    let count_entry = entry(&format!("{key}.count"))?;
+    let count_str = count_entry.get_password().ok()?;
+    let n: usize = count_str.trim().parse().ok()?;
+    if n == 0 || n > MAX_CHUNKS {
+        return None;
+    }
+    let mut b64 = String::new();
+    for i in 0..n {
+        // Any missing chunk = corrupt/partial → fail closed.
+        let part = entry(&format!("{key}.{i}"))?.get_password().ok()?;
+        b64.push_str(&part);
+    }
+    STANDARD.decode(b64.as_bytes()).ok()
+}
+
+/// Remove all chunks + the count sentinel for `key` (best-effort).
+#[cfg(windows)]
+fn clear_chunked(key: &str) {
+    for i in 0..MAX_CHUNKS {
+        if let Some(e) = entry(&format!("{key}.{i}")) {
+            let _ = e.delete_credential();
+        }
+    }
+    if let Some(e) = entry(&format!("{key}.count")) {
+        let _ = e.delete_credential();
+    }
+}
+
 #[cfg(windows)]
 pub fn save_tokens(tokens: &AuthTokens) {
     let json = match serde_json::to_string(tokens) {
@@ -52,64 +157,12 @@ pub fn save_tokens(tokens: &AuthTokens) {
             return;
         }
     };
-    // base64 → pure ASCII so each char is exactly 2 UTF-16 bytes; chunk by byte
-    // count, which (ASCII) equals char count.
-    let b64 = STANDARD.encode(json.as_bytes());
-    let chunks: Vec<&[u8]> = b64.as_bytes().chunks(CHUNK_LEN).collect();
-
-    // Fail-closed ordering: invalidate the count sentinel FIRST, then write the
-    // new chunks (overwriting same-index slots), then flip the count to the new
-    // total as the single commit point, then sweep orphans. Invalidating first
-    // is what makes a mid-write crash safe: overwriting a slot in place destroys
-    // the old chunk there, so a crash between slots would otherwise leave the old
-    // count pointing at a base64 splice of old+new chunks — which `load_tokens`
-    // decodes to garbage. With the sentinel cleared up front, a mid-write crash
-    // leaves NO valid count, so `load_tokens` cleanly falls back (legacy entry or
-    // None → a re-login) instead of reading a corrupt token set. We cannot keep
-    // the prior set recoverable without an atomic multi-key write (the credential
-    // store has none); clean fail-closed is the correct minimal guarantee.
-    if let Some(e) = entry(COUNT_KEY) {
-        let _ = e.delete_credential();
+    // save_chunked(CHUNK_PREFIX) writes exactly the historical
+    // auth_tokens.count / auth_tokens.{N} layout.
+    if !save_chunked(CHUNK_PREFIX, json.as_bytes()) {
+        return;
     }
-    for (i, c) in chunks.iter().enumerate() {
-        // base64 output is valid ASCII, so this never fails.
-        let s = match std::str::from_utf8(c) {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!("[token_store] chunk {i} not valid ascii (unexpected)");
-                return;
-            }
-        };
-        let Some(e) = entry(&format!("{CHUNK_PREFIX}.{i}")) else {
-            eprintln!("[token_store] failed to create keyring entry for chunk {i}");
-            return;
-        };
-        if let Err(err) = e.set_password(s) {
-            // Abort before committing the count. The sentinel was already cleared
-            // above, so load_tokens fails closed (legacy/None → re-login) rather
-            // than reading a half-written set.
-            eprintln!("[token_store] failed to save chunk {i}: {err}");
-            return;
-        }
-    }
-
-    // Commit point: flip the count to the new chunk total. Until this succeeds
-    // there is no valid count (it was cleared above), so load_tokens fails closed.
-    if let Some(e) = entry(COUNT_KEY) {
-        if let Err(err) = e.set_password(&chunks.len().to_string()) {
-            eprintln!("[token_store] failed to save token count: {err}");
-            return;
-        }
-    }
-
-    // Post-commit cleanup (best-effort): remove orphan high-index chunks left by
-    // a previously-larger token set, plus the legacy single-entry blob. Failures
-    // here don't affect correctness — load_tokens only reads chunks 0..count.
-    for i in chunks.len()..MAX_CHUNKS {
-        if let Some(e) = entry(&format!("{CHUNK_PREFIX}.{i}")) {
-            let _ = e.delete_credential();
-        }
-    }
+    // Sweep the legacy single-entry blob (pre-chunking plaintext).
     if let Some(e) = entry(USER) {
         let _ = e.delete_credential();
     }
@@ -122,19 +175,7 @@ pub fn save_tokens(tokens: &AuthTokens) {
 /// delete, even when the chunked write failed.
 #[cfg(windows)]
 fn load_chunked_tokens() -> Option<AuthTokens> {
-    let count_entry = entry(COUNT_KEY)?;
-    let count_str = count_entry.get_password().ok()?;
-    let n: usize = count_str.trim().parse().ok()?;
-    if n == 0 || n > MAX_CHUNKS {
-        return None;
-    }
-    let mut b64 = String::new();
-    for i in 0..n {
-        // Any missing chunk = corrupt/partial → fail closed.
-        let part = entry(&format!("{CHUNK_PREFIX}.{i}"))?.get_password().ok()?;
-        b64.push_str(&part);
-    }
-    let bytes = STANDARD.decode(b64.as_bytes()).ok()?;
+    let bytes = load_chunked(CHUNK_PREFIX)?;
     let json = String::from_utf8(bytes).ok()?;
     serde_json::from_str(&json).ok()
 }
@@ -157,18 +198,43 @@ pub fn clear_tokens() {
     // Best-effort sweep regardless of the recorded count, so orphan chunks from
     // a previously-larger token set are removed too. delete_credential on a
     // nonexistent entry returns Err — ignored.
-    for i in 0..MAX_CHUNKS {
-        if let Some(e) = entry(&format!("{CHUNK_PREFIX}.{i}")) {
-            let _ = e.delete_credential();
-        }
-    }
-    if let Some(e) = entry(COUNT_KEY) {
-        let _ = e.delete_credential();
-    }
+    clear_chunked(CHUNK_PREFIX);
     if let Some(e) = entry(USER) {
         // legacy single-entry
         let _ = e.delete_credential();
     }
+}
+
+// ── Upload-session cookie storage ────────────────────────────────────────
+//
+// The native uploader's `/desktop-client/*` calls authenticate with a website
+// session cookie (Laravel `web` guard), a DIFFERENT credential from the OAuth
+// API tokens above. It is obtained via the in-app ESO Logs login webview and
+// persisted here (encrypted in Credential Manager) so uploads survive restarts
+// without re-login. Stored under its own `upload_session` key so it is managed
+// independently of the auth tokens (clearing one never touches the other).
+
+/// Credential key prefix for the upload-session cookie blob.
+#[cfg(windows)]
+const UPLOAD_SESSION_KEY: &str = "upload_session";
+
+/// Persist the upload-session cookie header (the `Cookie:` value for esologs).
+#[cfg(windows)]
+pub fn save_upload_session(cookie_header: &str) {
+    let _ = save_chunked(UPLOAD_SESSION_KEY, cookie_header.as_bytes());
+}
+
+/// Load the persisted upload-session cookie header, if any.
+#[cfg(windows)]
+pub fn load_upload_session() -> Option<String> {
+    let bytes = load_chunked(UPLOAD_SESSION_KEY)?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Remove the persisted upload-session cookie (e.g. on sign-out or `401`).
+#[cfg(windows)]
+pub fn clear_upload_session() {
+    clear_chunked(UPLOAD_SESSION_KEY);
 }
 
 #[cfg(windows)]
@@ -222,3 +288,14 @@ pub fn clear_tokens() {}
 
 #[cfg(not(windows))]
 pub fn migrate_from_store(_app: &tauri::AppHandle) {}
+
+#[cfg(not(windows))]
+pub fn save_upload_session(_cookie_header: &str) {}
+
+#[cfg(not(windows))]
+pub fn load_upload_session() -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn clear_upload_session() {}

@@ -38,6 +38,13 @@
 /// string.
 pub const FORMAT_VERSION: u32 = 11;
 
+/// The `clientVersion` string sent with `create-report`, identifying the desktop
+/// client to the service. Observed directly in a real `create-report` request
+/// (the matching `parserVersion` is [`FORMAT_VERSION`]). A protocol fact (a value
+/// the service expects), not reverse-engineered logic. If the service starts
+/// rejecting it as outdated, bump it.
+pub const CLIENT_VERSION: &str = "8.20.113";
+
 /// Whether [`FORMAT_VERSION`] has been empirically confirmed against the live
 /// service. Gates enabling native upload by default — while `false`, the native
 /// transport must not be the default (it may still be exercised behind an

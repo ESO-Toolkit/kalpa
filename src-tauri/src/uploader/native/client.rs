@@ -16,15 +16,19 @@
 //! Clean-room: endpoint paths and the multipart envelope are protocol *facts*;
 //! the request construction and lifecycle handling are implemented from scratch.
 //!
-//! The wire-level send is funneled through one private helper so the parts that
-//! depend on empirically-pinned details (exact field names, the master-table
-//! envelope) are isolated and finalized alongside the format version, while the
-//! lifecycle/cancellation logic above is complete and testable now.
+//! The wire-level send is funneled through one private helper ([`NativeUpload::send`])
+//! that builds each endpoint's body (JSON for create/terminate, multipart for the
+//! segment/master-table uploads), attaches the session cookie, and applies a
+//! single re-auth-then-retry on a `401`/`419`. The session itself is supplied by a
+//! [`SessionProvider`] (the in-app login captures the cookie); the format version
+//! gate ([`super::format::FORMAT_VERSION_CONFIRMED`]) still governs whether the
+//! native transport is enabled by default.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::session::{SessionError, SessionProvider};
+use super::session::{Session, SessionError, SessionProvider};
+use crate::uploader::types::UploadOptions;
 
 /// Base for the report lifecycle endpoints. A fact about the service.
 const DESKTOP_CLIENT_BASE: &str = "https://www.esologs.com/desktop-client";
@@ -94,16 +98,25 @@ pub struct MasterTableBytes {
     pub bytes: Vec<u8>,
 }
 
-/// A native upload run. Owns the session provider, the HTTP client, and the
-/// cancel flag; methods are the report lifecycle.
+/// A native upload run. Owns the session provider, the upload options (for the
+/// `create-report` body), and the cancel flag; methods are the report lifecycle.
 pub struct NativeUpload<'a> {
     session: &'a dyn SessionProvider,
+    opts: &'a UploadOptions,
     cancel: Arc<AtomicBool>,
 }
 
 impl<'a> NativeUpload<'a> {
-    pub fn new(session: &'a dyn SessionProvider, cancel: Arc<AtomicBool>) -> Self {
-        Self { session, cancel }
+    pub fn new(
+        session: &'a dyn SessionProvider,
+        opts: &'a UploadOptions,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            session,
+            opts,
+            cancel,
+        }
     }
 
     /// True once a Stop has been requested.
@@ -127,8 +140,7 @@ impl<'a> NativeUpload<'a> {
     /// on stop we still `terminate-report` so no dangling draft is left.
     ///
     /// `master` carries the per-segment master table aligned with `segments`
-    /// (one entry each); the actual HTTP sends are routed through [`Self::send`],
-    /// the single seam awaiting the pinned multipart envelope.
+    /// (one entry each); the actual HTTP sends are routed through [`Self::send`].
     pub fn upload_finished(
         &self,
         segments: &[Segment],
@@ -145,6 +157,12 @@ impl<'a> NativeUpload<'a> {
                     segments.len()
                 ),
             });
+        }
+
+        // Already cancelled before we started? Short-circuit before any network
+        // work — there is no report to terminate yet.
+        if self.is_cancelled() {
+            return Err(UploadError::Cancelled);
         }
 
         // 1. Establish (or fail) the session up front — fail fast before any work.
@@ -198,10 +216,16 @@ impl<'a> NativeUpload<'a> {
         &self,
         code: &ReportCode,
         segment_id: u64,
-        _seg: &Segment,
+        seg: &Segment,
     ) -> Result<u64, UploadError> {
         let url = format!("{DESKTOP_CLIENT_BASE}/add-report-segment/{}", code.0);
-        let body = self.send(&url, RequestKind::AddSegment { segment_id })?;
+        let body = self.send(
+            &url,
+            RequestKind::AddSegment {
+                segment_id,
+                bytes: &seg.bytes,
+            },
+        )?;
         // Response is JSON `{ "nextSegmentId": <n> }`.
         Ok(extract_next_segment_id(&body))
     }
@@ -210,11 +234,17 @@ impl<'a> NativeUpload<'a> {
         &self,
         code: &ReportCode,
         segment_id: u64,
-        _master: &MasterTableBytes,
+        master: &MasterTableBytes,
     ) -> Result<(), UploadError> {
         let url = format!("{DESKTOP_CLIENT_BASE}/set-report-master-table/{}", code.0);
-        self.send(&url, RequestKind::MasterTable { segment_id })
-            .map(|_| ())
+        self.send(
+            &url,
+            RequestKind::MasterTable {
+                segment_id,
+                bytes: &master.bytes,
+            },
+        )
+        .map(|_| ())
     }
 
     fn terminate_report(&self, code: &ReportCode) -> Result<(), UploadError> {
@@ -222,33 +252,202 @@ impl<'a> NativeUpload<'a> {
         self.send(&url, RequestKind::Terminate).map(|_| ())
     }
 
-    /// The single wire-send seam. Attaches the session cookie and the pinned
-    /// multipart envelope, then maps the response. Left unimplemented until the
-    /// request envelope is empirically pinned (alongside the format version), so
-    /// the lifecycle above is the verified part and the wire detail lands in one
-    /// reviewed place rather than scattered across the calls.
-    fn send(&self, _url: &str, _kind: RequestKind) -> Result<Vec<u8>, UploadError> {
-        // Intentionally not yet implemented: the request body envelope and the
-        // success/version-rejection response parsing are pinned against the live
-        // service before this is filled in. Until then the native transport is
-        // not enabled by default (see format::FORMAT_VERSION_CONFIRMED).
-        Err(UploadError::Transport(
-            "native upload wire-send not yet pinned to the confirmed format".into(),
-        ))
+    /// The single wire-send seam. Builds the request body for `kind`, attaches the
+    /// session cookie, sends it, and maps the response to bytes (or a structured
+    /// error). On a `401`/`419` it invalidates the session once and retries a
+    /// single time with a freshly-fetched session, mirroring the official client's
+    /// re-auth-then-retry behaviour; a second auth rejection is surfaced as
+    /// [`SessionError::Expired`] so the caller can prompt a re-login.
+    ///
+    /// Clean-room: the endpoint shapes (JSON create/terminate, multipart segment/
+    /// master-table with these field names) are protocol facts; the request
+    /// construction is implemented from scratch here.
+    fn send(&self, url: &str, kind: RequestKind) -> Result<Vec<u8>, UploadError> {
+        let mut session = self.session.session()?;
+        // One re-auth retry on an auth rejection (401/419), then give up.
+        for attempt in 0..2 {
+            let resp = self.send_once(url, &kind, &session);
+            match resp {
+                Ok(SendResult::Ok(body)) => return Ok(body),
+                Ok(SendResult::AuthRejected) if attempt == 0 => {
+                    // Stale session: drop it and try once more with a fresh one.
+                    self.session.invalidate();
+                    session = match self.session.session() {
+                        Ok(s) => s,
+                        Err(_) => return Err(UploadError::Session(SessionError::Expired)),
+                    };
+                    continue;
+                }
+                Ok(SendResult::AuthRejected) => {
+                    return Err(UploadError::Session(SessionError::Expired));
+                }
+                Ok(SendResult::ServerError { status, detail }) => {
+                    return Err(UploadError::Server { status, detail });
+                }
+                Err(transport) => return Err(UploadError::Transport(transport)),
+            }
+        }
+        // The loop always returns within two iterations.
+        unreachable!("send retry loop must return")
+    }
+
+    /// Perform exactly one HTTP attempt for `kind` with `session`. Returns a
+    /// [`SendResult`] classifying the outcome (so `send` can decide on retry), or
+    /// `Err(String)` for a transport/IO failure. No retry logic lives here.
+    fn send_once(
+        &self,
+        url: &str,
+        kind: &RequestKind,
+        session: &Session,
+    ) -> Result<SendResult, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("HTTP client error: {e}"))?;
+
+        let req = client
+            .post(url)
+            .header(reqwest::header::COOKIE, session.cookie_header())
+            .header(reqwest::header::ACCEPT, "application/json");
+
+        let req = match kind {
+            RequestKind::CreateReport => req
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(self.create_report_body()),
+            RequestKind::Terminate => req, // no body
+            RequestKind::AddSegment { segment_id, bytes } => {
+                let form = reqwest::blocking::multipart::Form::new()
+                    .text("parameters", segment_parameters_json(*segment_id))
+                    .part("logfile", segment_logfile_part(bytes)?);
+                req.multipart(form)
+            }
+            RequestKind::MasterTable { segment_id, bytes } => {
+                let form = reqwest::blocking::multipart::Form::new()
+                    .text("segmentId", segment_id.to_string())
+                    .text("isRealTime", "false")
+                    .part("logfile", segment_logfile_part(bytes)?);
+                req.multipart(form)
+            }
+        };
+
+        let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status.as_u16() == 419
+        // 419 = Laravel CSRF/session mismatch.
+        {
+            return Ok(SendResult::AuthRejected);
+        }
+        let code = status.as_u16();
+        let body = resp.bytes().map_err(|e| format!("read body failed: {e}"))?;
+        if status.is_success() {
+            Ok(SendResult::Ok(body.to_vec()))
+        } else {
+            // Surface a short, non-secret detail for diagnostics.
+            let detail = String::from_utf8_lossy(&body)
+                .chars()
+                .take(200)
+                .collect::<String>();
+            Ok(SendResult::ServerError {
+                status: code,
+                detail,
+            })
+        }
+    }
+
+    /// Build the `create-report` JSON body. Ten fields, matching the confirmed
+    /// live request: a fresh report is created with `startTime == endTime` at
+    /// creation time (the server backfills the real range from the segments).
+    fn create_report_body(&self) -> String {
+        let opts = self.opts;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let guild = opts
+            .guild_id
+            .as_deref()
+            .map(|g| format!("\"{}\"", escape_json(g)))
+            .unwrap_or_else(|| "null".to_string());
+        let desc = opts
+            .description
+            .as_deref()
+            .map(|d| format!("\"{}\"", escape_json(d)))
+            .unwrap_or_default();
+        format!(
+            "{{\"clientVersion\":\"{cv}\",\"parserVersion\":{pv},\
+             \"startTime\":{ts},\"endTime\":{ts},\"guildId\":{guild},\
+             \"fileName\":\"{file}\",\"serverOrRegion\":{region},\
+             \"visibility\":{vis},\"reportTagId\":null,\"description\":\"{desc}\"}}",
+            cv = super::format::CLIENT_VERSION,
+            pv = super::format::FORMAT_VERSION,
+            ts = now_ms,
+            guild = guild,
+            file = "log.txt",
+            region = opts.region,
+            vis = opts.visibility.as_report_visibility_id(),
+            desc = desc,
+        )
     }
 }
 
+/// The classified outcome of a single HTTP attempt, so [`NativeUpload::send`] can
+/// apply retry/auth logic without re-inspecting the response.
+enum SendResult {
+    /// 2xx — the response body.
+    Ok(Vec<u8>),
+    /// 401/419 — the session was rejected; caller may re-auth and retry.
+    AuthRejected,
+    /// Other non-2xx — a hard server error with a short detail.
+    ServerError { status: u16, detail: String },
+}
+
 /// Which lifecycle call a `send` is performing — selects the envelope shape.
-/// The multipart calls carry the segment id that goes in their form/parameters.
-/// (`segment_id` is consumed by the wire-send `send()`, which is pinned to the
-/// confirmed multipart envelope before it is filled in.)
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-enum RequestKind {
+/// The multipart calls carry the segment id (for the form/parameters) and the
+/// already-serialized, ZIP-compressed segment/master bytes.
+enum RequestKind<'a> {
     CreateReport,
-    AddSegment { segment_id: u64 },
-    MasterTable { segment_id: u64 },
+    AddSegment { segment_id: u64, bytes: &'a [u8] },
+    MasterTable { segment_id: u64, bytes: &'a [u8] },
     Terminate,
+}
+
+/// The `parameters` JSON for `add-report-segment` (a manual, finished upload:
+/// not live, not real-time, no in-progress events). `startTime`/`endTime` are 0
+/// here — the server derives the real range from the segment contents.
+fn segment_parameters_json(segment_id: u64) -> String {
+    format!(
+        "{{\"startTime\":0,\"endTime\":0,\"mythic\":0,\"isLiveLog\":false,\
+         \"isRealTime\":false,\"inProgressEventCount\":0,\"segmentId\":{segment_id}}}"
+    )
+}
+
+/// Build the `logfile` multipart part from already-compressed segment bytes. The
+/// part is sent with filename `"blob"` and an octet-stream type, matching the
+/// confirmed envelope. `bytes` is the ZIP-compressed segment produced by the
+/// serializer (a single `log.txt` entry).
+fn segment_logfile_part(bytes: &[u8]) -> Result<reqwest::blocking::multipart::Part, String> {
+    reqwest::blocking::multipart::Part::bytes(bytes.to_vec())
+        .file_name("blob")
+        .mime_str("application/octet-stream")
+        .map_err(|e| format!("multipart part error: {e}"))
+}
+
+/// Minimal JSON string escaping for the few free-text fields (guild id,
+/// description) interpolated into the hand-built `create-report` body.
+fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Pull the report code from a `create-report` response body.
@@ -320,7 +519,8 @@ mod tests {
             invalidated: std::sync::Mutex::new(false),
         };
         let cancel = Arc::new(AtomicBool::new(true)); // already cancelled
-        let up = NativeUpload::new(&sess, cancel);
+        let opts = UploadOptions::default();
+        let up = NativeUpload::new(&sess, &opts, cancel);
         let segs = vec![Segment {
             bytes: vec![1, 2, 3],
         }];
@@ -328,14 +528,9 @@ mod tests {
         let err = up
             .upload_finished(&segs, &masters, &no_progress)
             .unwrap_err();
-        // It gets past session() + create_report's send (which currently errors
-        // as 'not pinned'), so the observable contract here is: it does not
-        // panic and returns a structured error. Once `send` is pinned, this test
-        // asserts `UploadError::Cancelled` specifically.
-        assert!(matches!(
-            err,
-            UploadError::Cancelled | UploadError::Transport(_)
-        ));
+        // An already-cancelled upload short-circuits BEFORE any network work
+        // (the early cancel check), so this is a clean `Cancelled` with no HTTP.
+        assert!(matches!(err, UploadError::Cancelled));
     }
 
     #[test]
@@ -343,7 +538,8 @@ mod tests {
         let sess = FakeSession {
             invalidated: std::sync::Mutex::new(false),
         };
-        let up = NativeUpload::new(&sess, Arc::new(AtomicBool::new(false)));
+        let opts = UploadOptions::default();
+        let up = NativeUpload::new(&sess, &opts, Arc::new(AtomicBool::new(false)));
         let segs = vec![Segment { bytes: vec![1] }, Segment { bytes: vec![2] }];
         let masters = vec![MasterTableBytes { bytes: vec![] }]; // only 1
         let err = up

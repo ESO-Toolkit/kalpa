@@ -115,6 +115,82 @@ pub trait SessionProvider: Send + Sync {
     fn invalidate(&self);
 }
 
+/// The shipping [`SessionProvider`]: serves the upload-session cookie persisted
+/// by the in-app ESO Logs login (encrypted in Credential Manager via
+/// [`crate::token_store`]). It cannot establish a session headlessly — the user
+/// completes the website login in the in-app webview, which calls
+/// [`StoredSessionProvider::store`] with the captured cookie. On a `401`/`419`,
+/// [`SessionProvider::invalidate`] clears the stored cookie so the next upload
+/// prompts a fresh login rather than retrying a dead session.
+///
+/// A `Mutex`-guarded in-memory copy avoids hitting the credential store on every
+/// request; it is the source of truth within a run and is kept in sync with the
+/// persisted copy on `store`/`invalidate`.
+pub struct StoredSessionProvider {
+    cached: std::sync::Mutex<Option<String>>,
+}
+
+impl StoredSessionProvider {
+    /// Build a provider, loading any previously-persisted session cookie so a
+    /// signed-in user does not have to re-login after a restart.
+    pub fn new() -> Self {
+        Self {
+            cached: std::sync::Mutex::new(crate::token_store::load_upload_session()),
+        }
+    }
+
+    /// Record a freshly-captured session cookie (called by the login webview
+    /// flow). Persists it encrypted and updates the in-memory copy.
+    pub fn store(&self, cookie_header: impl Into<String>) {
+        let cookie = cookie_header.into();
+        crate::token_store::save_upload_session(&cookie);
+        *self.cached.lock().unwrap() = Some(cookie);
+    }
+
+    /// Whether a (non-empty) session is currently available without prompting a
+    /// login. Does not prove the server still accepts it.
+    pub fn has_session(&self) -> bool {
+        self.cached
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|c| !c.trim().is_empty())
+    }
+}
+
+impl Default for StoredSessionProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+impl StoredSessionProvider {
+    /// Build a provider with an in-memory cookie and no credential-store I/O, so
+    /// the `session()`/`has_session()` read path and the in-memory half of
+    /// `invalidate` are unit-testable off-Windows and without touching the OS
+    /// keychain. (`store`/`invalidate` persistence is exercised by `token_store`.)
+    fn with_cached(cookie: Option<String>) -> Self {
+        Self {
+            cached: std::sync::Mutex::new(cookie),
+        }
+    }
+}
+
+impl SessionProvider for StoredSessionProvider {
+    fn session(&self) -> Result<Session, SessionError> {
+        match self.cached.lock().unwrap().as_deref() {
+            Some(c) if !c.trim().is_empty() => Ok(Session::from_cookie_header(c)),
+            _ => Err(SessionError::NotAuthenticated),
+        }
+    }
+
+    fn invalidate(&self) {
+        *self.cached.lock().unwrap() = None;
+        crate::token_store::clear_upload_session();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +220,35 @@ mod tests {
             .contains("Not signed in"));
         assert!(SessionError::Expired.to_string().contains("expired"));
         assert!(SessionError::Failed("io".into()).to_string().contains("io"));
+    }
+
+    #[test]
+    fn provider_with_cookie_yields_session() {
+        let p = StoredSessionProvider::with_cached(Some("laravel_session=abc".into()));
+        assert!(p.has_session());
+        let s = p.session().expect("session available");
+        assert_eq!(s.cookie_header(), "laravel_session=abc");
+    }
+
+    #[test]
+    fn provider_without_cookie_is_not_authenticated() {
+        let p = StoredSessionProvider::with_cached(None);
+        assert!(!p.has_session());
+        assert_eq!(p.session().unwrap_err(), SessionError::NotAuthenticated);
+        // An empty/whitespace cookie is treated as no session, not a usable one.
+        let blank = StoredSessionProvider::with_cached(Some("   ".into()));
+        assert!(!blank.has_session());
+        assert_eq!(blank.session().unwrap_err(), SessionError::NotAuthenticated);
+    }
+
+    #[test]
+    fn invalidate_clears_in_memory_session() {
+        let p = StoredSessionProvider::with_cached(Some("laravel_session=abc".into()));
+        assert!(p.has_session());
+        p.invalidate();
+        // In-memory copy is cleared immediately (persistence clear is a no-op
+        // off-Windows / harmless if absent).
+        assert!(!p.has_session());
+        assert_eq!(p.session().unwrap_err(), SessionError::NotAuthenticated);
     }
 }
