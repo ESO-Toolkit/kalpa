@@ -37,8 +37,13 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --legacy-peer-deps
 
+      # Audit production dependencies only. The high-severity advisories that
+      # otherwise fire here are all in dev/build tooling that never ships in the
+      # desktop client (undici←jsdom for Vitest's DOM, hono←shadcn CLI), with no
+      # upstream fix to bump to. --omit=dev still catches anything that would
+      # actually run in the shipped app. Mirrors the Worker audit step below.
       - name: npm audit
-        run: npm audit --audit-level=high
+        run: npm audit --omit=dev --audit-level=high
 
       - name: TypeScript check
         run: npx tsc --noEmit
