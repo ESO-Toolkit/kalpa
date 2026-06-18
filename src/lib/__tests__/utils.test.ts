@@ -148,6 +148,14 @@ describe("decodeHtml", () => {
     expect(decodeHtml("&#39;")).toBe("'");
     expect(decodeHtml("&#x27;")).toBe("'");
   });
+
+  it("decodes astral numeric entities without corrupting surrogate pairs", () => {
+    expect(decodeHtml("&#128512; &#x1F600;")).toBe("😀 😀");
+  });
+
+  it("leaves invalid numeric entities unchanged", () => {
+    expect(decodeHtml("&#999999999;")).toBe("&#999999999;");
+  });
 });
 
 describe("formatBytes", () => {

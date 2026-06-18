@@ -88,10 +88,23 @@ const HTML_ENTITIES: Record<string, string> = {
   Auml: "Ä",
 };
 
+function decodeNumericEntity(value: string): string | null {
+  const codePoint = value.startsWith("#x")
+    ? Number.parseInt(value.slice(2), 16)
+    : Number.parseInt(value.slice(1), 10);
+
+  if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return null;
+
+  try {
+    return String.fromCodePoint(codePoint);
+  } catch {
+    return null;
+  }
+}
+
 export function decodeHtml(str: string): string {
-  return str.replace(/&(#\d+|#x[0-9a-fA-F]+|\w+);/g, (match, entity) => {
-    if (entity.startsWith("#x")) return String.fromCharCode(parseInt(entity.slice(2), 16));
-    if (entity.startsWith("#")) return String.fromCharCode(Number(entity.slice(1)));
+  return str.replace(/&(#\d+|#x[0-9a-fA-F]+|\w+);/g, (match, entity: string) => {
+    if (entity.startsWith("#")) return decodeNumericEntity(entity) ?? match;
     return HTML_ENTITIES[entity] ?? match;
   });
 }
