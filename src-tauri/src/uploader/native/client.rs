@@ -147,6 +147,16 @@ impl<'a> NativeUpload<'a> {
         masters: &[MasterTableBytes],
         progress: &ProgressFn<'_>,
     ) -> Result<ReportCode, UploadError> {
+        // Nothing to upload: never create+terminate an empty report (that would
+        // record a zero-fight conversion or a routing bug as a "successful"
+        // upload). Reject before any network work.
+        if segments.is_empty() {
+            return Err(UploadError::Server {
+                status: 0,
+                detail: "internal: no segments to upload (empty input)".into(),
+            });
+        }
+
         // Master table and fights segment are paired per segment id.
         if masters.len() != segments.len() {
             return Err(UploadError::Server {
@@ -554,6 +564,22 @@ mod tests {
             .upload_finished(&segs, &masters, &no_progress)
             .unwrap_err();
         assert!(matches!(err, UploadError::Server { .. }));
+    }
+
+    #[test]
+    fn empty_segments_are_rejected_before_any_report() {
+        // An empty input must NOT create+terminate an empty report and report
+        // success — it is a local error caught before any network work.
+        let sess = FakeSession {
+            invalidated: std::sync::Mutex::new(false),
+        };
+        let opts = UploadOptions::default();
+        let up = NativeUpload::new(&sess, &opts, Arc::new(AtomicBool::new(false)));
+        let err = up.upload_finished(&[], &[], &no_progress).unwrap_err();
+        match err {
+            UploadError::Server { detail, .. } => assert!(detail.contains("no segments")),
+            other => panic!("expected empty-input Server error, got {other:?}"),
+        }
     }
 
     #[test]

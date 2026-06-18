@@ -171,24 +171,28 @@ fn clear_chunked(key: &str) {
     }
 }
 
+/// Persist the auth tokens. Returns `true` only if they were actually committed
+/// to the credential store (so callers — notably migration — can verify rather
+/// than assume). The fail-closed chunked write never leaves a corrupt blob.
 #[cfg(windows)]
-pub fn save_tokens(tokens: &AuthTokens) {
+pub fn save_tokens(tokens: &AuthTokens) -> bool {
     let json = match serde_json::to_string(tokens) {
         Ok(j) => j,
         Err(e) => {
             eprintln!("[token_store] failed to serialize tokens: {e}");
-            return;
+            return false;
         }
     };
     // save_chunked(CHUNK_PREFIX) writes exactly the historical
     // auth_tokens.count / auth_tokens.{N} layout.
     if !save_chunked(CHUNK_PREFIX, json.as_bytes()) {
-        return;
+        return false;
     }
     // Sweep the legacy single-entry blob (pre-chunking plaintext).
     if let Some(e) = entry(USER) {
         let _ = e.delete_credential();
     }
+    true
 }
 
 /// Load tokens from the chunked format ONLY (count sentinel + chunks), with no
@@ -284,18 +288,25 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
     };
 
     // Use the chunked save path (the old inline single-entry write overflowed
-    // the 2560-byte credential limit and left plaintext behind). Verify via the
-    // CHUNKED loader (not load_tokens) before discarding the plaintext copy:
-    // load_tokens would fall back to the legacy plaintext entry that still
-    // exists here and report success even if the chunked write failed (save
-    // clears the count sentinel before writing chunks), which would delete the
-    // plaintext while no committed copy exists. load_chunked_tokens confirms the
-    // chunked set actually committed, so a failed write never loses the tokens.
-    save_tokens(&tokens);
-    if load_chunked_tokens().is_some() {
+    // the 2560-byte credential limit and left plaintext behind). Only discard the
+    // plaintext copy once we've confirmed THESE tokens committed:
+    //   1. save_tokens must report a successful commit, AND
+    //   2. the chunked loader must read back tokens that EQUAL the source.
+    // Checking equality (not just "some chunked tokens exist") is essential: if
+    // the new save aborted while an OLDER chunked set was still present,
+    // `load_chunked_tokens().is_some()` would pass against the stale set and we'd
+    // delete the only current plaintext copy — losing the live token or reusing a
+    // prior account's credentials. The equality check fails closed in that case,
+    // leaving the plaintext intact.
+    let committed = save_tokens(&tokens);
+    let verified = load_chunked_tokens().as_ref() == Some(&tokens);
+    if committed && verified {
         let _ = store.delete("auth_tokens");
     } else {
-        eprintln!("[token_store] migration: verify failed, leaving plaintext intact");
+        eprintln!(
+            "[token_store] migration: commit/verify failed (committed={committed}, \
+             verified={verified}); leaving plaintext intact"
+        );
     }
 }
 
@@ -303,7 +314,9 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
 // Kalpa is Windows-only; implement platform keychain here if needed.
 
 #[cfg(not(windows))]
-pub fn save_tokens(_tokens: &AuthTokens) {}
+pub fn save_tokens(_tokens: &AuthTokens) -> bool {
+    false
+}
 
 #[cfg(not(windows))]
 pub fn load_tokens() -> Option<AuthTokens> {

@@ -14,7 +14,7 @@ const USER_API: &str = "https://www.esologs.com/api/v2/user";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthTokens {
     pub access_token: String,
