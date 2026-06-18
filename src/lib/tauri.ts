@@ -127,12 +127,12 @@ export function toastTauriError(action: string, error: unknown) {
  * circular import with `types.ts`.
  */
 export function warnIfSessionNotPersisted(
-  user: { sessionPersisted?: boolean } | null | undefined,
+  user: { sessionPersisted?: boolean } | null | undefined
 ): void {
   if (user?.sessionPersisted === false) {
     toast.warning(
       "Signed in, but your session couldn't be saved securely — you'll need to sign in again next time you open Kalpa.",
-      { duration: 8000 },
+      { duration: 8000 }
     );
   }
 }
