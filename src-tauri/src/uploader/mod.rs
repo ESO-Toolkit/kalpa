@@ -19,6 +19,9 @@
 pub mod commands;
 pub mod discovery;
 pub mod history;
+/// Native `/desktop-client/*` upload client (opt-in; official handoff is the
+/// fallback). Built clean-room from protocol facts. See [`native`].
+pub mod native;
 pub mod scanner;
 pub mod splitter;
 pub mod transport;

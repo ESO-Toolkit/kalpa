@@ -1,0 +1,24 @@
+15|1|
+1
+Sceptilee^@Spike'jo^820189967932710348^T|1|1000001|3|"NA Megaserver"|9|nil|1735
+9
+Roll Dodge|2|28549|ability_rogue_035|0|1
+Immobilize Immunity|2|29721|ability_rogue_035|0|1
+Dodge Fatigue|2|69143|ability_rogue_037|0|3
+Mundus Use|2|14031|ability_debuff_stun|0|3
+Boon: The Thief|2|13975|ability_mundusstones_003|0|1
+Boon: The Lady|2|13976|ability_mundusstones_005|0|1
+Light Attack (Unarmed)|2|23604|death_recap_melee_basic|0|1
+Heavy Attack (Unarmed)|2|18429|gear_argonian_heavy_hands_b|0|1
+Swap Weapons|2|28541|ability_warrior_003|0|3
+9
+1|1|1
+1|1|2
+1|1|3
+1|1|4
+1|1|5
+1|1|6
+1|0|7
+1|0|8
+1|1|9
+0

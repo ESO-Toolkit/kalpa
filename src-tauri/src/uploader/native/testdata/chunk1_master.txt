@@ -1,0 +1,708 @@
+15|1|
+12
+Grappa'Ko'Laid^@Spike'jo^10187339961216939847^T|1|1000001|3|"NA Megaserver"|9|nil|1514
+nil^nil^a1750388542019^F|1|1000002|117|"NA Megaserver"|4|nil|2476
+Beams and Toast^@Jirachi_Ex^3269217190459945382^F|1|1000003|117|"NA Megaserver"|3|nil|929
+Book Beamin^@Cheeba_chaser^12277988527667479680^F|1|1000004|117|"NA Megaserver"|4|nil|1850
+Forggiiee^@Forge_Sinical^7974741779245356158^F|1|1000005|117|"NA Megaserver"|9|nil|1373
+Grub's Green Lantern Two^@TheMcGrubber^16118576816160924333^F|1|1000006|117|"NA Megaserver"|4|nil|2424
+I Rodan I^@Magma9783^11891507198510237355^F|1|1000007|1|"NA Megaserver"|4|nil|1817
+nil^nil^a1750388542025^F|1|1000008|3|"NA Megaserver"|9|nil|2100
+Offline^@ItsJustBogus^2591649453350137960^F|1|1000009|0|"NA Megaserver"|0|nil|0
+Purveyor of Knowledge^@Alessia_Bridge^4655396304238494740^F|1|1000010|117|"NA Megaserver"|10|nil|3256
+Seråhe^@Serahe^12907686414742744538^F|1|1000011|5|"NA Megaserver"|1|nil|1502
+Tormented Skullmancer|2|125729|0|"NA Megaserver"|0|death_recap_melee_basic|160
+337
+Gilded Fingers|2|142210|ability_mage_065|0|1
+Sprinter|2|142079|ability_mage_065|0|1
+Blade of Woe|2|78219|ability_darkbrotherhood_passive_001|0|3
+Increase Health Regen|2|84733|store_magickafood_001|0|3
+Increase Health Regen|2|84732|store_magickafood_001|0|3
+Witchmother's Potent Brew|2|84731|event_halloween_2016_iron_cup_bones|0|3
+Reduce Potion Cooldown|2|46742|ability_mage_065|0|1
+Minor Aegis|2|147225|ability_mage_065|0|1
+Restoration Master|2|45524|ability_templar_012|0|3
+Pearls of Ehlnofey|2|147459|ability_mage_065|0|1
+Symphony of Blades|2|117110|ability_mage_065|0|1
+Medium Armor Evasion|2|150054|ability_armor_002|0|1
+Grace|2|45549|ability_armor_004|0|1
+Evocation|2|45557|ability_armor_005|0|1
+Spell Warding|2|45559|ability_armor_006|0|3
+Prodigy|2|45561|ability_sorcerer_038|0|3
+Concentration|2|45562|ability_sorcerer_060|0|3
+Dexterity|2|45564|ability_armor_008|0|3
+Wind Walker|2|45565|ability_armor_011|0|1
+Agility|2|45572|ability_armor_010|0|3
+Resolve|2|45533|ability_dragonknight_020|0|3
+Constitution|2|45526|ability_armor_014|0|1
+Juggernaut|2|45546|ability_armor_012|0|3
+Revitalize|2|45528|ability_armor_013|0|3
+Rapid Mending|2|45529|ability_armor_015|0|3
+Shadow Barrier|2|45071|ability_sorcerer_022|0|1
+Refreshing Shadows|2|45103|ability_sorcerer_038|0|3
+Dark Vigor|2|45084|ability_sorcerer_044|0|1
+Dark Veil|2|45115|ability_sorcerer_036|0|3
+Magicka Flood|2|45150|passive_sorcerer_008|0|3
+Catalyst|2|45135|passive_sorcerer_046|0|1
+Soul Siphoner|2|45155|passive_sorcerer_036|0|3
+Magicka Controller|2|45603|ability_sorcerer_044|0|1
+Mage Adept|2|45601|ability_sorcerer_045|0|3
+Everlasting Magic|2|45602|ability_sorcerer_063|0|3
+Might of the Guild|2|45607|ability_sorcerer_038|0|1
+Intimidating Presence|2|29062|ability_fightersguild_passive_intimidate|0|1
+Skilled Tracker|2|40393|ability_armor_007|0|1
+Slayer|2|45596|ability_dragonknight_025|0|1
+Continuous Attack|2|45614|ability_weapon_028|0|3
+Undaunted Command|2|55676|ability_templar_003|0|3
+Undaunted Mettle|2|55386|ability_armor_014|0|1
+Robustness|2|70390|ability_sorcerer_018|0|3
+Lunar Blessings|2|117848|passive_khajiit_01|0|3
+Feline Ambush|2|45301|ability_armor_006|0|1
+Magicka Aid|2|45622|ability_sorcerer_038|0|1
+Combat Medic|2|45624|ability_sorcerer_045|0|1
+Soul Shatter|2|45583|ability_sorcerer_065|0|1
+Medicinal Use|2|45573|ability_alchemy_004|0|3
+Nature's Gift|2|85879|passive_warden_006|0|1
+Accelerated Growth|2|85883|passive_warden_008|0|1
+Emerald Moss|2|85877|passive_warden_005|0|1
+Maturation|2|85881|passive_warden_007|0|1
+Spell Orb|2|103878|ability_psijic_009|0|1
+Clairvoyance|2|103811|ability_psijic_008|0|1
+Concentrated Barrier|2|103964|ability_psijic_010|0|1
+Deliberation|2|103972|ability_psijic_011|0|1
+Boon: The Ritual|2|13980|ability_mundusstones_010|0|1
+Cycle of Life|2|45520|ability_weapon_004|0|3
+From the Brink|2|156017|ability_mage_065|0|1
+Expert Evasion|2|142092|ability_mage_065|0|1
+Siphoning Attacks|2|215493|ability_nightblade_003_b|0|1
+Death Achieve Check|2|58955|ability_mage_065|0|0
+Spell Power Cure|2|66899|ability_mage_065|0|1
+Budding Seeds|2|85840|ability_warden_007_b|0|1
+Healing Springs|2|40060|ability_restorationstaff_004a|0|1
+Radiating Regeneration|8|40079|ability_restorationstaff_002a|40079|1
+Combat Prayer|2|40094|ability_restorationstaff_003_b|0|1
+Lotus Blossom|2|85855|ability_warden_009_b|0|1
+Soul Tether|2|35460|ability_nightblade_018_a|0|1
+Echoing Vigor|2|61505|ability_ava_echoing_vigor|0|1
+Unstable Wall of Elements|2|39052|ability_destructionstaff_002b|0|3
+Energy Orb|2|42038|ability_undaunted_004b|0|1
+Refreshing Path|2|36028|ability_nightblade_010_a|0|1
+Siphoning Attacks|2|36935|ability_nightblade_003_b|0|1
+Aggressive Horn|2|40223|ability_ava_003_a|0|1
+Dubious Camoran Throne|2|89957|event_jester_fancystonewarejug|0|3
+Increase Stamina|2|89958|store_magickafood_001|0|3
+Minor Slayer|2|147226|ability_mage_065|0|1
+Ansuul's Torment|2|194100|ability_mage_065|0|1
+Velothi Ur-Mage's Amulet|2|193447|ability_mage_065|0|1
+Spear Wall|2|44721|ability_templar_027|0|1
+Relentless Focus|2|61932|ability_mage_065|0|1
+Piercing Spear|2|44046|ability_templar_022|0|1
+Burning Light|2|44730|ability_templar_028|0|1
+Major Brutality|2|183049|ability_mage_065|0|1
+Splintered Secrets|2|184887|passive_arcanist_01|0|1
+Psychic Lesion|2|184873|passive_arcanist_03|0|1
+Harnessed Quintessence|2|184858|passive_arcanist_02|0|1
+Executioner|2|45048|passive_weapon_018|0|1
+Magicka Aid|2|39255|ability_sorcerer_038|0|1
+Pressure Points|2|45053|passive_weapon_015|0|1
+Master Assassin|2|45038|passive_weapon_026|0|3
+Ruination|2|45272|ability_sorcerer_062|0|3
+Hemorrhage|2|45060|passive_weapon_017|0|1
+Dynamic|2|45267|ability_weapon_023|0|3
+Continuous Attack|2|39248|ability_weapon_028|0|3
+Increase Health|2|89959|store_magickafood_001|0|3
+Ashlander|2|36588|ability_weapon_016|0|3
+Resist Flame|2|45270|ability_sorcerer_010|0|3
+Fated Fortune|2|184847|passive_arcanist_04|0|1
+Boon: The Thief|2|13975|ability_mundusstones_003|0|1
+Minor Expedition|2|34741|ability_mage_065|0|1
+Shocking Banner|2|227122|ability_mage_065|0|1
+Destruction Expert|2|45514|ability_weapon_006|0|1
+Energy Orb|2|42040|ability_mage_065|0|1
+Shocking Banner|2|227085|ability_mage_065|0|1
+Shocking Banner|2|217699|ability_grimoire_support|0|1
+Lucent Echoes|2|220015|ability_mage_065|0|1
+Relentless Focus|2|122587|ability_nightblade_005_a|0|1
+Shocking Banner|2|227121|ability_mage_065|0|1
+Shocking Banner|2|227600|ability_mage_065|0|1
+Shocking Banner|2|217706|ability_grimoire_support|0|1
+Shocking Banner|2|227030|ability_mage_065|0|1
+Shocking Banner|2|227120|ability_mage_065|0|1
+Tri Focus|2|45500|ability_weapon_001|0|1
+Unnerving Boneyard|2|117815|ability_mage_065|0|1
+Crushing Wall|2|99875|ability_mage_065|0|1
+Ancient Knowledge|2|45513|ability_weapon_003|0|1
+Penetrating Magic|2|45509|ability_weapon_008|0|3
+Quick Cloak|2|38901|ability_dualwield_004_a|0|1
+Cephaliarch's Flail|2|183006|ability_arcanist_003_a|0|1
+Pragmatic Fatecarver|2|186366|ability_arcanist_002_b|0|3
+Radiant Ward|2|22182|ability_templar_radiant_ward|0|1
+Incapacitating Strike|2|36508|ability_nightblade_007_a|0|1
+Recuperative Treatise|2|183047|ability_arcanist_005_b|0|1
+Elemental Blockade|2|39011|ability_destructionstaff_002a|0|3
+Concealed Weapon|2|25267|ability_nightblade_002_b|0|1
+Relentless Focus|2|61927|ability_nightblade_005_a|0|1
+The Tide King's Gaze|2|189837|ability_arcanist_006_a|0|1
+Exploiter|2|63880|ability_mage_065|0|1
+Follow Up|2|29389|passive_dragonknight_016|0|1
+Merciless Charge|2|99787|ability_mage_065|0|1
+Brawny|2|45309|ability_dragonknight_020|0|3
+Unflinching Rage|2|84672|ability_sorcerer_018|0|3
+Craftsman|2|33293|ability_dragonknight_021|0|3
+Concentration|2|29667|ability_sorcerer_060|0|3
+Illuminate|2|45215|ability_templar_012|0|1
+Restoring Spirit|2|45212|ability_templar_014|0|1
+Shocking Banner|2|227123|ability_mage_065|0|1
+Sul-Xan's Torment|2|154716|ability_mage_065|0|1
+Exhausting Fatecarver|2|183122|ability_arcanist_002_a|0|3
+Radiant Glory|2|63044|ability_templar_under_exposure|0|3
+Soul Harvest|2|36514|ability_nightblade_007_b|0|1
+Solar Barrage|2|22095|ability_templar_solar_power|0|1
+Inspired Scholarship|2|185842|ability_arcanist_005_a|0|1
+Elemental Rage|2|84434|ability_destructionstaff_012_b|0|1
+Lava Foot Soup & Saltrice|2|86673|event_newlifefestival_2016_dancersfestival_soup|0|3
+Bloody Renewal|2|141993|ability_mage_065|0|1
+Slayer|2|35803|ability_dragonknight_025|0|1
+Major Savagery|2|64509|ability_buff_major_savagery|0|3
+Fatecarver|2|189533|ability_mage_065|0|1
+Camouflaged Hunter|2|80469|ability_mage_065|0|3
+Pragmatic Fatecarver|2|186369|ability_mage_065|0|1
+Camouflaged Hunter|2|40195|ability_fightersguild_002_b|0|1
+Stampede|2|38788|ability_2handed_003_a|0|1
+Barbed Trap|2|40382|ability_fightersguild_004_a|0|1
+The Languid Eye|2|189867|ability_arcanist_006_b|0|1
+Slippery|2|142094|ability_mage_065|0|1
+Rapid Rot|2|116201|passive_necromancer_004|0|1
+Dismember|2|116194|passive_necromancer_003|0|1
+Reusable Parts|2|116188|passive_necromancer_001|0|1
+Clockwork Citrus Filet|2|100498|crafting_meat_001|0|3
+Sense Weakness|2|43706|ability_mage_065|0|3
+Shocking Siphon|2|124003|ability_mage_065|0|1
+Reusable Parts|2|116189|passive_necromancer_001|0|1
+Tide-Born Wildstalker|2|240281|ability_mage_065|0|1
+Impale|64|34851|ability_nightblade_017_b|0|1
+Detonating Siphon|2|118763|ability_necromancer_005_b|0|1
+Blighted Blastbones|2|117690|ability_necromancer_002_a|0|1
+Smoked Bear Haunch|2|72824|crafting_meat_001|0|3
+Claw of Yolnakhriin|2|121875|ability_mage_065|0|1
+Prismatic Reduced Cost|2|140300|ability_mage_065|0|1
+Pearlescent Ward|2|171900|ability_mage_065|0|1
+Nazaray|2|167063|ability_mage_065|0|1
+Boon: The Atronach|2|13982|ability_mundusstones_009|0|1
+Bulwark|2|64079|ability_mage_065|0|1
+Implacable Outcome|2|185058|passive_arcanist_08|0|1
+Circumvented Fate|2|184932|passive_arcanist_06|0|1
+Aegis of the Unseen|2|184923|passive_arcanist_05|0|1
+Eternal Mountain|2|44996|ability_dragonknight_023|0|1
+Battle Roar|2|44984|ability_dragonknight_031|0|1
+Rebate|2|45198|ability_sorcerer_056|0|1
+Expert Summoner|2|45199|ability_sorcerer_019|0|3
+Runic Jolt|2|199696|ability_mage_065|0|1
+Major Protection|2|161716|ability_buff_major_protection|0|3
+Revealing Flare|2|61489|ability_ava_revealing_flare|0|1
+Pulsar|2|39161|ability_destructionstaff_008_b|0|3
+Impervious Runeward|2|183241|ability_arcanist_008_b|0|1
+Runic Sunder|1|183430|ability_arcanist_007_a|0|1
+Runeguard of Still Waters|2|183401|ability_arcanist_010_a|0|1
+Gibbering Shelter|2|192380|ability_arcanist_012_b|0|1
+Cruxweaver Armor|2|185908|ability_arcanist_009_a|0|1
+Leashing Soul|2|217784|ability_grimoire_soulmagic1|0|1
+Razor Caltrops|2|40242|ability_ava_001_b|0|1
+Igneous Weapons|2|31874|ability_dragonknight_015_a|0|1
+Summon Charged Atronach|2|23495|ability_sorcerer_endless_atronachs|0|1
+Siphoning Spells|2|141991|ability_mage_065|0|1
+Angler's Instincts|2|142234|ability_provisioner_004|0|1
+Minor Courage|2|172721|ability_mage_065|0|1
+Mora Scribe's Thesis|2|220315|ability_mage_065|0|1
+Yandir's Might|2|135944|ability_mage_065|0|1
+Boon: The Lover|2|13981|ability_mundusstones_011|0|1
+Hawk Eye|2|45497|passive_armor_002|0|1
+Oakensoul|2|176707|ability_mage_065|0|1
+Focused Aim|2|38687|ability_bow_001_b|0|3
+Draining Shot|2|38669|ability_bow_004_a|0|1
+Venom Arrow|2|38645|ability_bow_002_a|0|1
+Ballista|2|85451|ability_bow_006_a|0|1
+Sap Essence|2|36891|ability_nightblade_013_a|0|1
+Killer's Blade|2|34843|ability_nightblade_017_a|0|1
+Inner Light|2|40478|ability_mageguild_002_b|0|1
+Spaulder of Ruin|2|163357|ability_mage_065|0|1
+Saxhleel Champion|2|154820|ability_mage_065|0|1
+Red Diamond|2|45293|ability_dragonknight_028|0|1
+Imperial Mettle|2|45280|ability_dragonknight_021|0|3
+Piercing Cold|2|86196|passive_warden_004|0|1
+Diplomat|2|36312|ability_templar_027|0|3
+Icy Aura|2|86194|passive_warden_003|0|1
+Tough|2|50907|ability_dragonknight_020|0|3
+Aura of Pride|2|163359|ability_mage_065|0|1
+Charging Maneuver|2|40215|ability_ava_002_b|0|1
+Polar Wind|2|86152|ability_warden_003_a|0|1
+Unnerving Boneyard|2|117805|ability_necromancer_004_a|0|1
+Expansive Frost Cloak|2|86126|ability_warden_001_a|0|1
+Elemental Susceptibility|2|39089|ability_destructionstaff_011b|0|1
+Glacial Colossus|2|122388|ability_necromancer_006_a|0|1
+Increase All Primary Stats|2|68411|store_tricolor_food_01|0|3
+Ozezan the Inferno|2|188456|ability_mage_065|0|1
+Roaring Opportunist|2|135920|ability_mage_065|0|1
+Last Gasp|2|116272|passive_necromancer_008|0|1
+Health Avarice|2|116270|passive_necromancer_007|0|1
+Death Gleaning|2|116235|passive_necromancer_005|0|1
+Magicka Mastery|2|45264|ability_armor_005|0|3
+Spell Attunement|2|45262|ability_sorcerer_013|0|3
+Opportunist|2|36247|ability_sorcerer_010|0|3
+Illustrious Healing|2|40058|ability_restorationstaff_004b|0|1
+Healthy Offering|2|34727|ability_nightblade_011_a|0|1
+Soul Shred|2|25091|ability_nightblade_018|0|1
+Overflowing Altar|2|41958|ability_undaunted_001_a|0|1
+Necrotic Potency|2|118639|ability_necromancer_011_b|0|1
+Replenishing Barrier|2|40239|ability_ava_006_a|0|1
+Light Attack (Bow)|1|16688|death_recap_ranged_basic|16688|3
+Light Attack (Ice)|2|16277|death_recap_cold_ranged|0|3
+Minor Savagery|2|61666|ability_buff_minor_savagery|0|3
+Minor Savagery|2|61898|ability_mage_065|0|1
+Minor Berserk|2|61744|ability_buff_minor_berserk|0|1
+Minor Berserk|2|80471|ability_buff_minor_berserk|0|1
+Hawk Eye|2|78855|passive_armor_002|0|1
+Life Drain|64|28919|death_recap_magic_ranged|0|1
+Life Drain|8|28921|ability_mage_065|0|1
+Pearlescent Ward|2|172621|treasure_maw_moon_pearl|0|1
+Radiant Glory|64|63956|ability_templar_over_exposure|0|3
+Radiant Glory|8|69118|ability_mage_065|0|1
+Ozezan's Plating|2|188471|achievement_u32_dl_groupboss1|0|1
+Illustrious Healing|8|40059|quest_spirit_001|0|1
+Incapacitating Strike|2|113107|ability_nightblade_007_a|0|1
+Energy Orb|8|42039|ability_undaunted_004b|0|1
+Harnessed Quintessence|2|184860|passive_arcanist_02|0|1
+Burning Light|64|80170|ability_templar_028|0|1
+Minor Lifesteal|8|86304|ability_buff_minor_lifesteal|16688|1
+Minor Magickasteal|2|88401|ability_buff_minor_magickasteal|0|1
+Burning Light|2|144028|ability_mage_065|0|1
+Blockade of Storms|512|62990|ability_destructionstaff_003_b|0|0
+Berserker|2|21230|ava_artifact_006|0|1
+Off Balance|2|62988|ability_debuff_offbalance|0|1
+Burning|4|18084|ability_mage_062|0|0
+Heavy Attack (Restoration)|64|16212|death_recap_magic_ranged|0|1
+Minor Toughness|2|88490|ability_buff_minor_toughness|0|1
+Minor Toughness|2|88509|ability_mage_065|0|1
+Fated Fortune|2|194875|passive_arcanist_04|0|1
+Inspired Scholarship|64|185843|ability_arcanist_005_a|0|1
+Crux|2|184220|class_buff_arcanist_crux|0|1
+Pragmatic Fatecarver|64|186370|ability_arcanist_002_b|0|1
+Sunderer|2|215727|ability_rogue_029|0|1
+Overcharged|64|148797|ability_buff_minor_magickasteal|0|1
+Overcharged|2|215726|ability_mage_065|0|1
+Minor Magickasteal|64|148798|ability_mage_065|0|1
+Overcharged|64|178118|ability_mage_065|0|1
+Crushing Wall|2|100155|ability_mage_065|0|1
+Light Attack (Lightning)|512|18350|death_recap_shock_ranged|0|3
+Barbed Trap|2|40385|ability_fightersguild_004_a|0|2
+Major Courage|2|66902|ability_mage_045|0|3
+Major Courage|2|109966|ability_buff_major_courage|0|1
+Radiating Regeneration|8|46266|ability_mage_065|40079|1
+Radiating Regeneration|2|218266|ability_mage_065|0|1
+Minor Lifesteal|2|80020|ability_buff_minor_lifesteal|0|1
+Minor Evasion|2|61715|ability_buff_minor_evasion|0|1
+Minor Evasion|2|184933|ability_mage_065|0|1
+Minor Maim|2|61723|ability_debuff_minor_maim|0|1
+Minor Maim|2|183431|ability_mage_065|0|1
+Runic Sunder|2|187742|ability_arcanist_007_a|0|1
+Runic Sunder|2|187741|ability_arcanist_007_a|0|1
+Minor Courage|2|147417|ability_buff_minor_courage|0|1
+Minor Courage|2|121878|ability_mage_045|0|1
+Taunt|2|38254|quest_shield_001|0|0
+Taunt|2|38541|ability_mage_065|0|3
+Siphoning Attacks|8|215494|ability_nightblade_003_b|0|0
+Siphoning Attacks|2|215651|ability_mage_065|0|1
+Heavy Attack (Restoration)|64|67022|death_recap_magic_ranged|0|3
+Heavy Attack (Restoration)|2|32760|ability_mage_065|0|3
+Major Slayer|2|93109|ability_buff_major_slayer|0|1
+Roaring Opportunist Cooldown|2|135924|ability_mage_065|0|1
+Major Slayer|2|135923|procs_006|0|1
+Essence Drain|8|45518|ability_mage_065|0|1
+Major Mending|2|77922|ability_mage_065|0|1
+Major Mending|2|61711|ability_buff_major_mending|0|1
+Sundered|1|148800|ability_debuff_minor_fracture|0|1
+Minor Breach|2|61742|ability_debuff_minor_breach|0|1
+Minor Breach|64|148803|ability_mage_065|0|1
+Sundered|64|178123|ability_mage_065|0|1
+Swap Weapons|2|28541|ability_warrior_003|0|3
+Ghost Fist|2|236667|ability_mage_065|0|1
+Pragmatic Fatecarver|2|201265|ability_mage_065|0|1
+Echoing Vigor|8|61506|ability_ava_echoing_vigor|0|0
+Pragmatic Fatecarver|2|201273|ability_mage_065|0|1
+Rapid Stroke Passive|2|36519|ability_mage_065|0|3
+Off Balance Immunity|2|134599|achievement_030|0|1
+Executioner|2|101436|passive_weapon_018|0|1
+Executioner|2|45050|passive_weapon_018|0|1
+Abyssal Ink|2|183008|ability_arcanist_003_a|0|1
+Concussion|64|95134|ability_mage_065|0|1
+Taunt Counter|2|52790|quest_shield_001|0|3
+Crusher|2|17906|ava_artifact_004|0|1
+Major Breach|2|61743|ability_debuff_major_breach|0|1
+Major Breach|2|62775|ability_debuff_major_breach|0|1
+Minor Vulnerability|2|79717|ability_debuff_minor_vulnerability|0|1
+Minor Vulnerability|2|228115|ability_mage_065|0|1
+Venom Arrow|2|44545|ability_bow_002_a|0|0
+Minor Brittle|2|145975|ability_debuff_minor_brittle|0|1
+Minor Brittle|64|146697|ability_debuff_minor_brittle|0|1
+Major Cowardice|2|147643|ability_debuff_major_cowardice|0|1
+Leashing Soul|2|216945|ability_mage_065|0|1
+Major Defile|2|61727|ability_debuff_major_defile|0|1
+Major Defile|2|36515|ability_mage_065|0|1
+Damage Taken Increased|2|61400|ability_nightblade_007_b|0|1
+Chill|64|95136|ability_mage_065|0|1
+354
+7|0|244
+8|12|243
+8|8|110
+6|8|245
+6|8|246
+6|11|245
+6|11|246
+6|5|245
+6|5|246
+6|6|245
+6|6|246
+6|4|245
+6|4|246
+6|2|245
+6|2|246
+6|7|245
+6|7|246
+8|1|245
+8|1|246
+8|8|246
+8|8|245
+8|11|246
+8|11|245
+8|5|246
+8|5|245
+8|6|246
+8|6|245
+8|4|246
+8|4|245
+8|2|246
+8|2|245
+8|7|246
+8|7|245
+8|8|247
+8|8|248
+8|8|249
+8|12|250
+8|8|251
+7|7|252
+7|2|252
+7|6|252
+7|4|252
+7|5|252
+7|10|252
+7|11|252
+7|8|252
+4|12|253
+4|4|254
+8|12|206
+6|12|168
+11|11|255
+11|11|256
+11|2|255
+11|4|255
+11|5|255
+11|6|255
+11|2|256
+11|4|256
+11|5|256
+11|6|256
+2|12|257
+11|2|258
+11|4|258
+11|5|258
+11|6|258
+11|2|106
+11|4|106
+11|5|106
+11|6|106
+2|2|259
+2|12|260
+11|2|261
+6|2|262
+2|2|263
+2|12|264
+2|2|265
+2|12|266
+11|7|255
+10|2|117
+10|6|117
+5|5|259
+5|12|267
+11|5|261
+6|5|262
+11|12|268
+1|2|269
+1|2|270
+5|5|263
+6|12|262
+5|12|262
+5|5|271
+5|12|272
+5|5|273
+5|12|274
+1|6|269
+1|6|270
+6|6|275
+5|12|276
+5|5|277
+6|12|278
+5|12|278
+5|12|279
+4|4|280
+10|12|267
+11|10|261
+5|10|262
+11|10|255
+11|10|67
+11|7|67
+11|2|67
+4|4|271
+4|4|273
+10|8|117
+11|8|255
+6|6|259
+6|12|276
+11|6|261
+5|6|262
+6|6|277
+10|4|109
+2|12|281
+5|5|246
+5|5|245
+5|11|246
+5|11|245
+5|4|246
+5|4|245
+5|8|246
+5|8|245
+5|6|246
+5|6|245
+5|2|246
+5|2|245
+5|7|246
+5|7|245
+5|1|246
+5|1|245
+5|12|282
+2|2|110
+2|2|126
+11|8|261
+6|8|262
+6|10|245
+6|10|246
+2|2|246
+2|2|245
+2|6|246
+2|6|245
+2|7|246
+2|7|245
+2|4|246
+2|4|245
+2|5|246
+2|5|245
+2|11|246
+2|11|245
+2|8|246
+2|8|245
+2|10|246
+2|10|245
+2|12|267
+4|4|259
+11|4|261
+6|4|262
+6|7|112
+6|7|113
+6|7|114
+6|7|115
+6|7|140
+6|11|112
+6|11|114
+6|11|113
+6|11|140
+6|11|115
+1|4|67
+4|4|265
+1|1|283
+1|1|284
+1|1|269
+1|1|270
+1|8|283
+1|8|284
+1|8|269
+1|8|270
+1|1|67
+1|8|67
+1|8|285
+1|1|286
+1|8|286
+5|11|112
+5|11|113
+5|11|114
+5|11|115
+5|5|111
+5|5|104
+11|12|261
+5|8|112
+5|8|113
+5|8|114
+5|8|115
+11|12|287
+7|7|288
+10|7|289
+7|2|288
+10|2|289
+10|6|288
+10|6|289
+10|4|288
+10|4|289
+10|10|288
+10|10|289
+10|5|288
+10|5|289
+10|11|288
+10|11|289
+10|8|288
+7|8|289
+7|7|289
+7|2|289
+7|6|289
+7|4|289
+7|10|289
+7|5|289
+7|11|289
+7|12|190
+10|12|290
+10|12|291
+7|12|291
+7|12|290
+7|12|292
+7|7|293
+7|7|294
+7|7|295
+7|2|294
+7|2|295
+7|6|294
+7|6|295
+7|4|294
+7|4|295
+7|10|294
+7|10|295
+7|5|294
+7|5|295
+7|11|294
+7|11|295
+7|8|294
+7|8|295
+10|12|296
+7|12|296
+7|7|297
+7|7|273
+11|11|298
+11|11|299
+11|12|300
+6|11|262
+11|11|301
+11|11|302
+11|5|302
+11|4|302
+11|6|302
+11|2|302
+11|1|302
+11|11|303
+11|11|304
+11|5|303
+11|5|304
+11|4|303
+11|4|304
+11|6|303
+11|6|304
+11|2|303
+11|2|304
+11|1|303
+11|1|304
+11|7|305
+11|11|306
+11|11|307
+7|12|308
+6|7|262
+10|12|309
+10|12|310
+7|12|310
+7|12|309
+10|12|311
+7|7|275
+11|8|256
+2|2|118
+2|2|120
+2|2|116
+2|2|119
+2|2|105
+2|2|312
+12|7|313
+5|5|314
+5|5|152
+5|5|154
+11|4|315
+11|8|315
+5|5|316
+11|5|315
+11|2|315
+11|11|315
+11|10|315
+10|12|244
+4|4|246
+4|4|245
+4|5|246
+4|5|245
+4|11|246
+4|11|245
+4|6|246
+4|6|245
+4|2|246
+4|2|245
+4|8|246
+4|8|245
+4|7|246
+4|7|245
+4|10|246
+4|10|245
+4|1|246
+4|1|245
+4|4|317
+12|12|318
+5|5|319
+2|2|320
+2|2|319
+6|6|320
+6|6|319
+4|4|320
+4|4|319
+8|8|319
+4|12|321
+10|12|322
+7|12|323
+2|12|321
+10|12|324
+10|12|325
+10|12|326
+10|12|327
+10|12|328
+8|12|329
+10|12|226
+10|12|330
+10|12|331
+7|12|332
+7|12|333
+5|12|334
+5|12|335
+6|12|321
+5|12|336
+7|12|337
+5|12|321
+4|12|143
+0

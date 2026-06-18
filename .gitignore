@@ -45,3 +45,18 @@ playwright-report/
 
 # DeepSec scanner workspace
 .deepsec/
+
+# Throwaway: extracted official-uploader bundle for clean-room format-fact reads
+.asar-extract/
+.asar-main.js
+.cdp-eval.mjs
+.asar-*.js
+
+# Large decode-only ESO log samples (not committed; used for rule decoding)
+.decode-samples/
+
+# Small native-uploader golden test fixtures ARE committed (they back the
+# byte-exact encoder tests) — re-include them past the broad `*.log` rule above.
+# Only the small `sample_*`/`chunk1_*` fixtures the tests `include_str!`; the
+# multi-MB decode-only fixtures stay untracked (added individually, never by glob).
+!src-tauri/src/uploader/native/testdata/*.log
