@@ -705,6 +705,11 @@ pub struct ActorTable {
     next_index: u32,
     /// Current runtime state per unit id: (master_index, owner_unit_id, reaction).
     units: std::collections::HashMap<String, UnitRuntime>,
+    /// monsterId → next 0-based instance ordinal (the subordinal `B`/`C` source).
+    /// Player-side units always get ordinal 0; each distinct *hostile* unit of a
+    /// given monsterId gets the next index (so multiple copies of one monster are
+    /// distinguished in the subordinal).
+    monster_instance_count: std::collections::HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -712,6 +717,9 @@ struct UnitRuntime {
     master_index: u32,
     owner: String,
     reaction: String,
+    /// The unit's subordinal ordinal: 0 for player-side units, else its 0-based
+    /// per-monsterId instance index. Used to build the `seg[2]` suffix.
+    ordinal: u32,
 }
 
 impl ActorTable {
@@ -743,12 +751,40 @@ impl ActorTable {
         });
         let owner = f.get(13).map(|s| s.trim().to_string()).unwrap_or_default();
         let reaction = f.get(14).map(|s| s.trim().to_string()).unwrap_or_default();
+        let unit_type = f.get(1).map(|s| s.trim()).unwrap_or("");
+        let monster_id = f.get(4).map(|s| s.trim()).unwrap_or("0");
+
+        // Subordinal ordinal: player-side units (a PLAYER, a "monsterId 0" unit, or
+        // a unit owned by a player-side unit — e.g. a pet) are ordinal 0; every
+        // other (hostile) unit gets the next 0-based instance index for its
+        // monsterId, so multiple copies of one monster are distinguished.
+        let owner_is_side0 = !owner.is_empty()
+            && owner != "0"
+            && self
+                .units
+                .get(&owner)
+                .map(|u| u.ordinal == 0)
+                .unwrap_or(false);
+        let side0 = unit_type == "PLAYER" || monster_id == "0" || owner_is_side0;
+        let ordinal = if side0 {
+            0
+        } else {
+            let c = self
+                .monster_instance_count
+                .entry(monster_id.to_string())
+                .or_insert(0);
+            let v = *c;
+            *c += 1;
+            v
+        };
+
         self.units.insert(
             unit_id,
             UnitRuntime {
                 master_index,
                 owner,
                 reaction,
+                ordinal,
             },
         );
     }
@@ -818,6 +854,32 @@ impl ActorTable {
                 }
             }
         }
+    }
+
+    /// A unit's subordinal ordinal (0 for player-side, else its per-monsterId
+    /// instance index). An absent/unknown unit is treated as ordinal 0.
+    fn ordinal(&self, unit_id: &str) -> u32 {
+        self.units.get(unit_id).map(|u| u.ordinal).unwrap_or(0)
+    }
+
+    /// Build the code-1 subordinal string `seg[2]` GIVEN its leading allocation
+    /// number `a`. Form: `A.srcOrd.tgtOrd` with trailing-zero components stripped
+    /// (the leading `A` is always kept): `A` when both ordinals are 0, `A.B` when
+    /// only the target's is 0, else `A.0.C`/`A.B.C`. Proven byte-exact 3733/3733
+    /// (with the true `a`).
+    ///
+    /// `a` itself is NOT mintable from this capture — it is a global cross-code
+    /// allocation counter — so this helper takes it as input. It is exercised and
+    /// proven in isolation (feeding the golden `a`) so it is ready the moment `a`
+    /// is solved; until then whole-line code-1 stays gated.
+    pub fn code1_subordinal(&self, a: &str, src_unit: &str, tgt_unit: &str) -> String {
+        let src_ord = self.ordinal(src_unit);
+        let tgt_ord = self.ordinal(tgt_unit);
+        let mut comps = vec![a.to_string(), src_ord.to_string(), tgt_ord.to_string()];
+        while comps.len() > 1 && comps.last().map(|s| s == "0").unwrap_or(false) {
+            comps.pop();
+        }
+        comps.join(".")
     }
 }
 
@@ -1339,6 +1401,44 @@ mod tests {
         t.on_unit_added("1,MONSTER,F,0,99,F,0,0,\"Imp\",\"\",0,50,160,0,HOSTILE,F");
         let reused = t.sort_key("1").unwrap();
         assert_ne!(reused, k1, "reused unit id now points at a different actor");
+    }
+
+    // The code-1 subordinal SUFFIX generator (B/C ordinals + arity), proven
+    // byte-exact 3733/3733 on the combat golden pair. Player-side units (PLAYER,
+    // monsterId 0, or a pet of a player-side unit) get ordinal 0; each distinct
+    // hostile unit of a monsterId gets the next 0-based instance index. The
+    // subordinal is `A.srcOrd.tgtOrd` with trailing zeros stripped. `A` is fed in
+    // (it is the unsolved global counter); this isolates and proves the suffix.
+    #[test]
+    fn code1_subordinal_suffix_arity_and_ordinals() {
+        let mut t = ActorTable::new();
+        // player (ordinal 0), two instances of monsterId 88330, one of 88331, a pet.
+        t.on_unit_added("1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1700,0,PLAYER_ALLY,T");
+        t.on_unit_added("30,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F");
+        t.on_unit_added("31,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F");
+        t.on_unit_added("32,MONSTER,F,0,88331,F,0,0,\"Lion\",\"\",0,50,160,0,HOSTILE,F");
+        t.on_unit_added("25,MONSTER,F,0,32695,F,0,0,\"Familiar\",\"\",0,50,160,1,NPC_ALLY,F");
+
+        // Per-monsterId 0-based instance ordinals.
+        assert_eq!(t.ordinal("1"), 0, "player → 0");
+        assert_eq!(t.ordinal("30"), 0, "first 88330 → 0");
+        assert_eq!(t.ordinal("31"), 1, "second 88330 → 1");
+        assert_eq!(t.ordinal("32"), 0, "first 88331 → 0");
+        assert_eq!(t.ordinal("25"), 0, "pet of a player-side unit → 0");
+
+        // Arity truth table (A fed as "7"):
+        // both player-side → just "A"
+        assert_eq!(t.code1_subordinal("7", "1", "25"), "7");
+        // src player-side, tgt = second bear (ord 1) → "A.0.C"
+        assert_eq!(t.code1_subordinal("7", "1", "31"), "7.0.1");
+        // src player-side, tgt = first bear (ord 0) → "A"
+        assert_eq!(t.code1_subordinal("7", "1", "30"), "7");
+        // src = second bear (ord 1), tgt player-side → "A.B"
+        assert_eq!(t.code1_subordinal("7", "31", "1"), "7.1");
+        // src = second bear (ord 1), tgt = lion (ord 0) → "A.B" (trailing 0 stripped)
+        assert_eq!(t.code1_subordinal("7", "31", "32"), "7.1");
+        // src = first bear (ord 0), tgt = second bear (ord 1) → "A.0.C"
+        assert_eq!(t.code1_subordinal("7", "30", "31"), "7.0.1");
     }
 
     // Real-data cross-check: replaying chunk1's UNIT_ADDED stream through ActorTable

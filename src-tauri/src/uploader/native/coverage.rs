@@ -30,8 +30,21 @@ use std::collections::BTreeSet;
 /// set in the golden sample is proven, [`assess`] returns [`Coverage::Fallback`]
 /// for every real log — i.e. the official uploader is used, which is correct and
 /// safe. This is the honest state, enforced in code rather than assumed.
+///
+/// `COMBAT_EVENT` (segment code 1) status: nearly every per-field piece is proven
+/// byte-exact (3733/3733 on the combat golden pair) and implemented in
+/// [`super::encode`] — the state blocks (positions, championPoints), the crit
+/// flag, the action-result-branched final field, the masks
+/// ([`super::encode::ActorTable::code1_masks`]), and the subordinal *suffix*
+/// ([`super::encode::ActorTable::code1_subordinal`]). It remains GATED out of this
+/// list for ONE reason: the subordinal's leading allocation number `A` is a global
+/// cross-code emission counter that cannot be minted from a single-code capture.
+/// Until `A` is solved (needs a cross-code emission-ordered raw↔segment capture),
+/// a whole code-1 line can't be reproduced byte-exact, so any log containing
+/// `COMBAT_EVENT` must keep falling back to the official uploader.
 pub const PROVEN_LINE_TYPES: &[&str] = &[
     // e.g. "ZONE_CHANGED", "MAP_CHANGED", ... added as each is proven.
+    // "COMBAT_EVENT" — blocked solely on the subordinal `A` (see above).
 ];
 
 /// The **complete, closed** set of ESO `Encounter.log` event types — the finite
