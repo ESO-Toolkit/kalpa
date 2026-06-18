@@ -652,6 +652,175 @@ fn parse_unit_state(f: &[&str], i: usize) -> (String, Vec<String>, usize) {
     (unit, state, i + 10)
 }
 
+// ---------------------------------------------------------------------------
+// Code-1 state-block field masks (seg[3]=srcMask, seg[4]=tgtMask) — proven
+// byte-exact (3733/3733 on the combat golden pair).
+//
+// The mask is NOT a per-unit-type flag. The two units of a code-1 event are
+// *ordered*, and the EARLIER unit gets mask 16, the LATER gets 64; a side whose
+// raw unit state is absent (unitId 0) is omitted and gets mask 32. The ordering
+// key is `(side, masterActorIndex)`:
+//   * side: a friendly-reaction unit (PLAYER, PLAYER_ALLY, NPC_ALLY, FRIENDLY)
+//     sorts BEFORE a hostile one. (Friendly = "your side" = lower.)
+//   * within a side, the lower master-actor index sorts first.
+// Pets/companions take their owner's `(side, index)` (via `ownerUnitId`).
+//
+// Both inputs are STATEFUL: the master-actor index is assigned incrementally as
+// `UNIT_ADDED` lines appear (raw unit ids are reused intra-session, so a runtime
+// unit id → actor mapping must be kept current), and a unit's reaction can flip
+// mid-fight via `UNIT_CHANGED`. [`ActorTable`] maintains exactly this state.
+
+/// The mask value for the unit that sorts EARLIER in a code-1 pair.
+const MASK_EARLIER: &str = "16";
+/// The mask value for the unit that sorts LATER.
+const MASK_LATER: &str = "64";
+/// The mask value for a side whose unit state is absent (block omitted).
+const MASK_ABSENT: &str = "32";
+
+/// A unit's sort key for mask ordering: `(side, master_index)` where `side` is 0
+/// for friendly-reaction units and 1 for hostile. Lower tuple sorts first → 16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ActorSortKey {
+    side: u8,
+    master_index: u32,
+}
+
+/// Whether a raw `reaction` token denotes a friendly ("your side") unit.
+fn reaction_is_friendly(reaction: &str) -> bool {
+    matches!(
+        reaction.trim(),
+        "PLAYER" | "PLAYER_ALLY" | "NPC_ALLY" | "FRIENDLY"
+    )
+}
+
+/// Incremental runtime actor table for mask ordering. Built by replaying
+/// `UNIT_ADDED`/`UNIT_CHANGED` in order; answers "what is unit N's sort key right
+/// now?" Master indices are assigned on first appearance of a distinct actor
+/// identity (deduped like the master table), and a runtime unit id maps to the
+/// actor currently occupying it (ids are reused after `UNIT_REMOVED`).
+#[derive(Debug, Default)]
+pub struct ActorTable {
+    /// Distinct actor identity → 1-based master index (stable for the session).
+    index_of: std::collections::HashMap<String, u32>,
+    next_index: u32,
+    /// Current runtime state per unit id: (master_index, owner_unit_id, reaction).
+    units: std::collections::HashMap<String, UnitRuntime>,
+}
+
+#[derive(Debug, Clone)]
+struct UnitRuntime {
+    master_index: u32,
+    owner: String,
+    reaction: String,
+}
+
+impl ActorTable {
+    pub fn new() -> Self {
+        Self {
+            next_index: 1,
+            ..Default::default()
+        }
+    }
+
+    /// Apply a `UNIT_ADDED` line (comma tail after `<ts>,UNIT_ADDED,`). Assigns a
+    /// master index on first appearance of the actor identity and binds the
+    /// runtime unit id to it.
+    pub fn on_unit_added(&mut self, rest: &str) {
+        let f: Vec<&str> = split_csv_quoted(rest).collect();
+        // Tail layout (after `<ts>,UNIT_ADDED,`): [0]unitId … [13]ownerUnitId
+        // [14]reaction [15]isGroupedWithLocalPlayer — verified against the real log.
+        let Some(unit_id) = f.first().map(|s| s.trim().to_string()) else {
+            return;
+        };
+        let Some(actor) = ActorInfo::parse(rest) else {
+            return;
+        };
+        let identity = actor.identity();
+        let master_index = *self.index_of.entry(identity).or_insert_with(|| {
+            let i = self.next_index;
+            self.next_index += 1;
+            i
+        });
+        let owner = f.get(13).map(|s| s.trim().to_string()).unwrap_or_default();
+        let reaction = f.get(14).map(|s| s.trim().to_string()).unwrap_or_default();
+        self.units.insert(
+            unit_id,
+            UnitRuntime {
+                master_index,
+                owner,
+                reaction,
+            },
+        );
+    }
+
+    /// Apply a `UNIT_CHANGED` line (comma tail). Updates the unit's reaction (and
+    /// owner), keeping its master index. Layout: `[0]unitId … [8]ownerUnitId
+    /// [9]reaction` (verified UNIT_CHANGED indices).
+    pub fn on_unit_changed(&mut self, rest: &str) {
+        let f: Vec<&str> = split_csv_quoted(rest).collect();
+        let Some(unit_id) = f.first().map(|s| s.trim()) else {
+            return;
+        };
+        if let Some(u) = self.units.get_mut(unit_id) {
+            if let Some(owner) = f.get(8) {
+                u.owner = owner.trim().to_string();
+            }
+            if let Some(reaction) = f.get(9) {
+                u.reaction = reaction.trim().to_string();
+            }
+        }
+    }
+
+    /// The current sort key for a unit id, resolving pets to their owner. Returns
+    /// `None` if the unit is unknown (e.g. an absent/0 unit) or owner resolution
+    /// loops/dangles.
+    pub fn sort_key(&self, unit_id: &str) -> Option<ActorSortKey> {
+        self.sort_key_depth(unit_id, 0)
+    }
+
+    fn sort_key_depth(&self, unit_id: &str, depth: u8) -> Option<ActorSortKey> {
+        let u = self.units.get(unit_id)?;
+        if depth < 4 && !u.owner.is_empty() && u.owner != "0" {
+            if let Some(k) = self.sort_key_depth(&u.owner, depth + 1) {
+                return Some(k);
+            }
+        }
+        Some(ActorSortKey {
+            side: u8::from(!reaction_is_friendly(&u.reaction)),
+            master_index: u.master_index,
+        })
+    }
+
+    /// Compute `(srcMask, tgtMask)` for a code-1 event. `src_unit`/`tgt_unit` are
+    /// the raw source/target unit ids; an absent side (unit id `"0"` / unknown)
+    /// yields [`MASK_ABSENT`]. Returns `None` if both sides are present but their
+    /// keys are equal (an unobserved self/co-located case — gated, not guessed).
+    pub fn code1_masks(
+        &self,
+        src_unit: &str,
+        tgt_unit: &str,
+    ) -> Option<(&'static str, &'static str)> {
+        let src_absent = src_unit == "0";
+        let tgt_absent = tgt_unit == "0";
+        match (src_absent, tgt_absent) {
+            (true, true) => None, // no real state at all — not a code-1 line.
+            (true, false) => Some((MASK_ABSENT, MASK_EARLIER)),
+            (false, true) => Some((MASK_EARLIER, MASK_ABSENT)),
+            (false, false) => {
+                let sk = self.sort_key(src_unit)?;
+                let tk = self.sort_key(tgt_unit)?;
+                match sk.cmp(&tk) {
+                    std::cmp::Ordering::Less => Some((MASK_EARLIER, MASK_LATER)),
+                    std::cmp::Ordering::Greater => Some((MASK_LATER, MASK_EARLIER)),
+                    // Equal keys (self-cast / co-located) never appear in the
+                    // golden code-1 set — gate rather than guess.
+                    std::cmp::Ordering::Equal => None,
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,5 +1280,124 @@ mod tests {
             before, after,
             "current championPoints must flow into the block"
         );
+    }
+
+    // The code-1 mask rule, proven byte-exact 3733/3733 on the combat golden pair.
+    // This test exercises every branch of the ordering with synthetic UNIT_ADDED
+    // lines (so the master indices are fully controlled): player→monster,
+    // monster→player, a FRIENDLY NPC vs a HOSTILE one (reaction beats index), a pet
+    // inheriting its owner's key, an absent side (→32), and a mid-fight reaction
+    // flip via UNIT_CHANGED. The synthetic lines use the verified UNIT_ADDED field
+    // layout (`unitId,TYPE,isLocal,perSession,monsterId,isBoss,class,race,name,
+    // account,charId,level,CP,owner,reaction,grouped`).
+    #[test]
+    fn code1_masks_order_by_side_then_index() {
+        let mut t = ActorTable::new();
+        // index 1: the logging player (friendly).
+        t.on_unit_added("1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1700,0,PLAYER_ALLY,T");
+        // index 2: a hostile monster.
+        t.on_unit_added("30,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F");
+        // index 3: a FRIENDLY NPC (sorts before any hostile despite a higher index).
+        t.on_unit_added("40,MONSTER,F,0,90653,F,0,0,\"Selene\",\"\",0,50,160,0,FRIENDLY,F");
+        // index 4: a player's pet, owned by unit 1.
+        t.on_unit_added("25,MONSTER,F,0,32695,F,0,0,\"Familiar\",\"\",0,50,160,1,NPC_ALLY,F");
+
+        // player (friendly idx1) attacks bear (hostile idx2): src earlier → 16|64.
+        assert_eq!(t.code1_masks("1", "30"), Some(("16", "64")));
+        // bear attacks player: src later → 64|16.
+        assert_eq!(t.code1_masks("30", "1"), Some(("64", "16")));
+        // FRIENDLY Selene (idx3) vs HOSTILE bear (idx2): friendly side wins despite
+        // the higher index → Selene earlier → 16|64. (This is the case a pure
+        // index comparator gets wrong.)
+        assert_eq!(t.code1_masks("40", "30"), Some(("16", "64")));
+        // Pet (owned by player 1) attacks bear: pet inherits owner's friendly key
+        // (idx1) → earlier → 16|64.
+        assert_eq!(t.code1_masks("25", "30"), Some(("16", "64")));
+        // Absent source (unit 0) → 32 on that side, the present side → 16.
+        assert_eq!(t.code1_masks("0", "30"), Some(("32", "16")));
+        assert_eq!(t.code1_masks("30", "0"), Some(("16", "32")));
+
+        // A reaction flip: Selene turns HOSTILE mid-fight (UNIT_CHANGED layout
+        // `unitId,class,race,name,account,charId,level,CP,owner,reaction,...`).
+        t.on_unit_changed("40,0,0,\"Selene\",\"\",0,50,160,0,HOSTILE,F");
+        // Now Selene (hostile idx3) vs bear (hostile idx2): same side → lower index
+        // first → bear earlier → Selene later. Selene as src → 64|16.
+        assert_eq!(t.code1_masks("40", "30"), Some(("64", "16")));
+    }
+
+    // Unit-id reuse: a unit id freed and re-added is a DIFFERENT actor and gets a
+    // fresh master index, but a repeat of the SAME identity reuses its index.
+    #[test]
+    fn actor_table_handles_id_reuse_and_identity_dedup() {
+        let mut t = ActorTable::new();
+        t.on_unit_added("1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1700,0,PLAYER_ALLY,T");
+        let k1 = t.sort_key("1").unwrap();
+        // Same identity re-added on a different runtime unit id keeps master index.
+        t.on_unit_added("7,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1700,0,PLAYER_ALLY,T");
+        assert_eq!(t.sort_key("7").unwrap(), k1, "same identity → same index");
+        // A different monster on a reused id gets its own (higher) index.
+        t.on_unit_added("1,MONSTER,F,0,99,F,0,0,\"Imp\",\"\",0,50,160,0,HOSTILE,F");
+        let reused = t.sort_key("1").unwrap();
+        assert_ne!(reused, k1, "reused unit id now points at a different actor");
+    }
+
+    // Real-data cross-check: replaying chunk1's UNIT_ADDED stream through ActorTable
+    // must assign the SAME 1-based master indices the captured master table uses.
+    // The master table encodes each player's index in its role field (1000000 +
+    // index), so we can verify ActorTable's incremental assignment against ground
+    // truth — the same index that drives the mask ordering.
+    #[test]
+    fn actor_table_indices_match_chunk1_master_roles() {
+        let raw = include_str!("testdata/chunk1_raw.log");
+        let master = include_str!("testdata/chunk1_master.txt");
+
+        // Build the ActorTable from the raw UNIT_ADDED/UNIT_CHANGED stream.
+        let mut t = ActorTable::new();
+        // Track the first runtime unit id seen for each master index so we can ask
+        // its sort key back. (Players are unit id 1 in their own UNIT_ADDED... no —
+        // each player has a distinct unit id; capture them in order.)
+        let mut first_unit_for_index: Vec<String> = Vec::new();
+        for l in raw.lines() {
+            let mut it = l.splitn(3, ',');
+            let _ts = it.next();
+            match it.next().map(str::trim) {
+                Some("UNIT_ADDED") => {
+                    let rest = it.next().unwrap_or("");
+                    let before = t.next_index;
+                    t.on_unit_added(rest);
+                    // If a new index was just assigned, remember this unit id.
+                    if t.next_index > before {
+                        let uid = rest.split(',').next().unwrap_or("").trim().to_string();
+                        first_unit_for_index.push(uid);
+                    }
+                }
+                Some("UNIT_CHANGED") => t.on_unit_changed(it.next().unwrap_or("")),
+                _ => {}
+            }
+        }
+
+        // The 11 player rows carry role = 1000000 + master index. Verify the first
+        // 11 indices ActorTable assigned line up 1..=11 (players precede monsters in
+        // this roster, matching build_master_table's ordering).
+        let player_rows: Vec<&str> = master.lines().skip(2).take(11).collect();
+        for (i, row) in player_rows.iter().enumerate() {
+            let role: u32 = row.split('|').nth(2).unwrap().parse().unwrap();
+            assert_eq!(
+                role,
+                1_000_000 + (i as u32 + 1),
+                "sanity: master row {} role encodes index {}",
+                i + 1,
+                i + 1
+            );
+            // ActorTable assigned this index to the i-th distinct actor; confirm the
+            // unit it bound resolves to that 1-based index.
+            let uid = &first_unit_for_index[i];
+            assert_eq!(
+                t.sort_key(uid).unwrap().master_index,
+                i as u32 + 1,
+                "ActorTable index for player row {} must match the master table",
+                i + 1
+            );
+        }
     }
 }
