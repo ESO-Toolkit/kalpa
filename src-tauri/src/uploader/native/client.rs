@@ -181,18 +181,44 @@ impl<'a> NativeUpload<'a> {
         // 2. create-report
         let code = self.create_report()?;
 
-        // 3. per-segment: master table → add segment → follow nextSegmentId.
+        // 3+4. Push the segments and terminate. ANY error after create-report
+        // (cancel, a failed master-table/segment upload, a server anomaly) must
+        // still attempt `terminate-report` so we never leave an orphaned/partial
+        // report open server-side (which would confuse retries). On success the
+        // inner path terminates itself; on error we best-effort terminate here
+        // and return the ORIGINAL error.
+        match self.push_segments_and_terminate(&code, segments, masters, progress) {
+            Ok(()) => Ok(code),
+            Err(e) => {
+                let _ = self.terminate_report(&code);
+                Err(e)
+            }
+        }
+    }
+
+    /// The post-`create-report` lifecycle: per segment, master-table then
+    /// add-segment (following the server-sequenced id), then `terminate-report`.
+    /// Returns `Err` on cancel / upload failure / server anomaly WITHOUT
+    /// terminating — the caller ([`Self::upload_finished`]) owns the
+    /// terminate-on-error cleanup so every post-create error path is covered in
+    /// one place.
+    fn push_segments_and_terminate(
+        &self,
+        code: &ReportCode,
+        segments: &[Segment],
+        masters: &[MasterTableBytes],
+        progress: &ProgressFn<'_>,
+    ) -> Result<(), UploadError> {
         let total = segments.len();
         // segmentId starts at 1; the server returns the next id to use.
         let mut segment_id: u64 = 1;
         for (i, (seg, master)) in segments.iter().zip(masters.iter()).enumerate() {
             if self.is_cancelled() {
-                let _ = self.terminate_report(&code);
                 return Err(UploadError::Cancelled);
             }
             // a. master table for this segment id, then b. the fights segment.
-            self.set_master_table(&code, segment_id, master)?;
-            let next = self.add_segment(&code, segment_id, seg)?;
+            self.set_master_table(code, segment_id, master)?;
+            let next = self.add_segment(code, segment_id, seg)?;
             progress(UploadProgress {
                 segments_done: i + 1,
                 segments_total: total,
@@ -206,7 +232,6 @@ impl<'a> NativeUpload<'a> {
             // success. Conversely, a non-zero `next` on the last segment is fine
             // — we simply stop, having sent everything we have.
             if next == 0 && !is_last_local {
-                let _ = self.terminate_report(&code);
                 return Err(UploadError::Server {
                     status: 0,
                     detail: format!(
@@ -223,9 +248,8 @@ impl<'a> NativeUpload<'a> {
             segment_id = next;
         }
 
-        // 4. terminate.
-        self.terminate_report(&code)?;
-        Ok(code)
+        // terminate (the success path).
+        self.terminate_report(code)
     }
 
     // ── Lifecycle calls ──────────────────────────────────────────────────────

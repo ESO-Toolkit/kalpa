@@ -5248,7 +5248,9 @@ pub async fn vote_pack(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -5326,8 +5328,24 @@ pub async fn track_pack_install(pack_id: String) -> Result<(), String> {
 
 // ── Auth Helpers ─────────────────────────────────────────────────────────
 
-fn save_auth_tokens(_app: &tauri::AppHandle, tokens: &AuthTokens) {
-    crate::token_store::save_tokens(tokens);
+/// Persist auth tokens, returning whether they were durably committed to the
+/// credential store. A `false` means the tokens are **memory-only** for this
+/// process (a Credential Manager failure) and the user may need to sign in again
+/// next launch — it is logged here so the failure is never silently swallowed,
+/// and the bool is returned so callers establishing auth (e.g. `auth_login`) can
+/// surface it. Refresh paths intentionally keep working in-memory on a `false`
+/// (the live token is still usable this session); they should not hard-fail the
+/// in-flight operation just because persistence hiccuped.
+#[must_use]
+fn save_auth_tokens(_app: &tauri::AppHandle, tokens: &AuthTokens) -> bool {
+    let persisted = crate::token_store::save_tokens(tokens);
+    if !persisted {
+        eprintln!(
+            "[auth] WARNING: failed to persist auth tokens to the credential store; \
+             the session is memory-only and will not survive a restart."
+        );
+    }
+    persisted
 }
 
 fn clear_auth_tokens(_app: &tauri::AppHandle) {
@@ -5350,8 +5368,10 @@ pub async fn auth_login(
         user_name: tokens.user_name.clone(),
     };
 
-    // Save to store
-    save_auth_tokens(&app, &tokens);
+    // Save to store. A failure here is logged inside the helper and leaves the
+    // session memory-only (still usable now); the user stays logged in for this
+    // process, so we do not fail the login — but the warning surfaces it.
+    let _persisted = save_auth_tokens(&app, &tokens);
 
     // Update in-memory state
     *state
@@ -5411,7 +5431,9 @@ pub async fn auth_get_user(
                 user_name: new_tokens.user_name.clone(),
             };
 
-            save_auth_tokens(&app, &new_tokens);
+            // Persistence failure is logged in the helper; keep the refreshed
+            // token working in-memory rather than failing the refresh.
+            let _ = save_auth_tokens(&app, &new_tokens);
 
             *state
                 .tokens
@@ -5492,7 +5514,9 @@ pub async fn create_pack(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -5592,7 +5616,9 @@ pub async fn update_pack(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -5690,7 +5716,9 @@ pub async fn delete_pack(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -5777,7 +5805,9 @@ pub async fn delete_pack_hub_account(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -5954,7 +5984,9 @@ pub async fn create_share_code(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
