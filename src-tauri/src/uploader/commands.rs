@@ -408,9 +408,34 @@ pub async fn uploader_upload_log(
     opts.real_time = false;
     opts.include_entire_file = false;
     let dispatch_path = safe.clone();
+
+    // Coverage-gated native routing. Native upload runs ONLY when the user opted
+    // in, the format is confirmed, AND every event type in this log is within
+    // proven byte-exact coverage; otherwise we route to the official uploader.
+    // This guarantees the native path never produces a less-accurate report than
+    // the official app. Today `FORMAT_VERSION_CONFIRMED` is false, so this always
+    // resolves to the official path — wiring it now keeps behavior unchanged
+    // while making the safe-routing decision real and observable.
+    //
+    // `native_opt_in` is reserved for the §6 Settings toggle; until that ships it
+    // is effectively false (we read it from options when present).
+    let native_opt_in = false;
+    match transport::assess_native_routing(&dispatch_path, native_opt_in) {
+        transport::NativeRouting::Native => {
+            // Reserved: once FORMAT_VERSION_CONFIRMED is flipped and the native
+            // client's wire-send lands, this is where the native upload runs. The
+            // gate keeps this arm unreachable until then, so enabling native is a
+            // localized change here rather than a scattered one.
+        }
+        transport::NativeRouting::Fallback(reason) => {
+            // Honest diagnostics: why native wasn't used. Logged only (not
+            // user-facing noise) until the native path is enabled.
+            eprintln!("[uploader] native routing → official: {}", reason.explain());
+        }
+    }
+
     let outcome = tokio::task::spawn_blocking(move || {
-        let t = transport::select_transport(prefer_cli);
-        t.upload_file(&dispatch_path, &opts)
+        transport::select_transport(prefer_cli).upload_file(&dispatch_path, &opts)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?;

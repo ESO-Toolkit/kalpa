@@ -425,3 +425,151 @@ pub fn select_transport(prefer_cli: bool) -> Box<dyn LogUploadTransport> {
     }
     Box::new(GuiHandoffTransport)
 }
+
+/// Why a given log was (not) routed to the native uploader. Surfaced for
+/// diagnostics and honest UI ("uploaded directly" vs "used the official app
+/// because this log has events Kalpa can't encode yet").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeRouting {
+    /// Native path chosen — the log is fully within proven coverage.
+    Native,
+    /// Fell back to the official uploader. Carries a short, honest reason.
+    Fallback(NativeFallbackReason),
+}
+
+/// The specific reason the native path was declined for a log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeFallbackReason {
+    /// The user has not opted into native upload (or chose the official path).
+    NotOptedIn,
+    /// The upload format/version isn't confirmed yet, so native is disabled.
+    FormatUnconfirmed,
+    /// The log contains event types Kalpa's encoder hasn't proven byte-exact, so
+    /// using native could produce an inaccurate report. Carries the offending
+    /// types for diagnostics.
+    UnprovenEvents(Vec<String>),
+}
+
+impl NativeFallbackReason {
+    /// A short, honest, user-facing explanation.
+    pub fn explain(&self) -> String {
+        match self {
+            NativeFallbackReason::NotOptedIn => {
+                "Using the official ESO Logs uploader (direct upload is off).".into()
+            }
+            NativeFallbackReason::FormatUnconfirmed => {
+                "Using the official ESO Logs uploader (Kalpa's direct upload \
+                 isn't enabled yet)."
+                    .into()
+            }
+            NativeFallbackReason::UnprovenEvents(types) => format!(
+                "Using the official ESO Logs uploader — this log has events Kalpa \
+                 can't yet upload directly with full accuracy ({}).",
+                types.join(", ")
+            ),
+        }
+    }
+}
+
+/// Decide whether a prepared log may use the native uploader, applying the
+/// safety gate that guarantees native output is byte-correct or not used:
+///
+/// 1. The user must have opted in (`opt_in`).
+/// 2. The upload format/version must be confirmed
+///    ([`super::native::format::FORMAT_VERSION_CONFIRMED`]).
+/// 3. **Every** event type in the log must be within proven coverage
+///    ([`super::native::coverage::assess`]).
+///
+/// Any failure routes to the official uploader. This is intentionally
+/// conservative: native upload only runs when we can guarantee a report
+/// identical to the official uploader's. The actual line scan streams the file
+/// so it stays cheap on multi-GB logs.
+pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
+    use super::native::{coverage, format};
+
+    if !opt_in {
+        return NativeRouting::Fallback(NativeFallbackReason::NotOptedIn);
+    }
+    if !format::FORMAT_VERSION_CONFIRMED {
+        return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed);
+    }
+
+    // Scan the log's line types through the coverage gate WITHOUT materializing
+    // the whole file — logs can be multi-GB. We read one line at a time, assess it
+    // in isolation, and accumulate only the (tiny, capped) set of unproven types.
+    let file = match std::fs::File::open(log_path) {
+        Ok(f) => f,
+        // If we can't read it, let the official path surface the real error.
+        Err(_) => return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed),
+    };
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(file);
+    let mut unproven: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for line in reader.lines().map_while(Result::ok) {
+        // Assess this single line; if it carries an unproven type, record it. The
+        // owned `line` is dropped each iteration, so peak memory is O(one line +
+        // the capped unproven set), not O(file).
+        if let coverage::Coverage::Fallback { unproven: u } = coverage::assess([line.as_str()]) {
+            unproven.extend(u);
+            if unproven.len() >= 32 {
+                break; // the reported set is capped anyway; stop early.
+            }
+        }
+    }
+    if unproven.is_empty() {
+        NativeRouting::Native
+    } else {
+        NativeRouting::Fallback(NativeFallbackReason::UnprovenEvents(
+            unproven.into_iter().collect(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn temp_log(contents: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Encounter.log");
+        std::fs::File::create(&p)
+            .unwrap()
+            .write_all(contents.as_bytes())
+            .unwrap();
+        let s = p.to_string_lossy().into_owned();
+        (dir, s)
+    }
+
+    #[test]
+    fn not_opted_in_always_falls_back() {
+        let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
+        assert_eq!(
+            assess_native_routing(&path, false),
+            NativeRouting::Fallback(NativeFallbackReason::NotOptedIn)
+        );
+    }
+
+    #[test]
+    fn opted_in_but_format_unconfirmed_falls_back() {
+        // FORMAT_VERSION_CONFIRMED is false in this build, so even an opted-in
+        // user falls back — the honest current state.
+        let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
+        assert_eq!(
+            assess_native_routing(&path, true),
+            NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed)
+        );
+    }
+
+    #[test]
+    fn fallback_reasons_have_honest_messages() {
+        assert!(NativeFallbackReason::NotOptedIn
+            .explain()
+            .contains("official"));
+        assert!(
+            NativeFallbackReason::UnprovenEvents(vec!["COMBAT_EVENT".into()])
+                .explain()
+                .contains("COMBAT_EVENT")
+        );
+    }
+}
