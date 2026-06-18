@@ -875,7 +875,7 @@ mod tests {
         // First UNIT_ADDED (player) in the log → actor index 1.
         let actor_line = raw
             .lines()
-            .find(|l| l.splitn(3, ',').nth(1) == Some("UNIT_ADDED"))
+            .find(|l| l.split(',').nth(1) == Some("UNIT_ADDED"))
             .unwrap();
         let rest = actor_line.splitn(3, ',').nth(2).unwrap();
         let actor = ActorInfo::parse(rest).expect("parse UNIT_ADDED");
