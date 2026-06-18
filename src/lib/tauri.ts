@@ -112,3 +112,27 @@ export async function invokeOrThrow<T>(
 export function toastTauriError(action: string, error: unknown) {
   toast.error(`${action}: ${getTauriErrorMessage(error)}`);
 }
+
+/**
+ * Surface a warning when a freshly-established ESO Logs session could NOT be
+ * durably saved to the OS credential store (`sessionPersisted === false`). The
+ * user is signed in for this session but will have to sign in again after a
+ * restart, so we tell them rather than letting it silently appear normal.
+ *
+ * Centralizes the check so every auth-establishing call site
+ * (`auth_login`/`auth_get_user`) handles the failure case identically. A `true`
+ * or absent value (a status response that established nothing) shows nothing.
+ *
+ * Accepts the `AuthUser`-shaped result; kept structurally typed to avoid a
+ * circular import with `types.ts`.
+ */
+export function warnIfSessionNotPersisted(
+  user: { sessionPersisted?: boolean } | null | undefined,
+): void {
+  if (user?.sessionPersisted === false) {
+    toast.warning(
+      "Signed in, but your session couldn't be saved securely — you'll need to sign in again next time you open Kalpa.",
+      { duration: 8000 },
+    );
+  }
+}

@@ -21,7 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn, decodeHtml, formatRelativeDate } from "@/lib/utils";
 import { toast } from "sonner";
@@ -98,6 +98,7 @@ export function MyPacksView({
       const user = await invokeOrThrow<AuthUser>("auth_login");
       onAuthChange(user);
       toast.success(`Signed in as ${user.userName}`);
+      warnIfSessionNotPersisted(user);
     } catch (e) {
       toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
     } finally {

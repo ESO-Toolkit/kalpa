@@ -12,7 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
-import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { SearchResultListSkeleton } from "@/components/ui/skeletons";
@@ -170,6 +170,7 @@ export function PackCreateView({
       const user = await invokeOrThrow<AuthUser>("auth_login");
       onAuthChange(user);
       toast.success(`Signed in as ${user.userName}`);
+      warnIfSessionNotPersisted(user);
     } catch (e) {
       toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
     } finally {
