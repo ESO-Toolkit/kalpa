@@ -860,6 +860,21 @@ impl ActorTable {
         self.sort_key_depth(unit_id, 0)
     }
 
+    /// A unit's OWN side mask: [`MASK_EARLIER`] (`16`) for a friendly-reaction unit,
+    /// [`MASK_LATER`] (`64`) for a hostile one. Used by the thin effect/cast codes
+    /// for a self-targeted event (src == tgt), where both mask slots are the unit's
+    /// own side rather than the relative earlier/later ordering of two distinct
+    /// units. Resolves pets to their owner like [`Self::sort_key`]; `None` for an
+    /// unknown/absent unit.
+    pub fn side_mask(&self, unit_id: &str) -> Option<&'static str> {
+        let key = self.sort_key(unit_id)?;
+        Some(if key.side == 0 {
+            MASK_EARLIER
+        } else {
+            MASK_LATER
+        })
+    }
+
     fn sort_key_depth(&self, unit_id: &str, depth: u8) -> Option<ActorSortKey> {
         let u = self.units.get(unit_id)?;
         if depth < 4 && !u.owner.is_empty() && u.owner != "0" {

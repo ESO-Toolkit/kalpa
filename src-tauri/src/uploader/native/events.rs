@@ -130,9 +130,17 @@ pub struct EventEmitter {
     first_seen: bool,
     /// First session's `BEGIN_LOG` wall-clock ms (anchors all sessions' offsets).
     first_wall: i64,
-    /// First session's `BEGIN_LOG` relative ts (the offset always subtracts the
-    /// *first* session's begin ts, per [`session_offset`], not each session's own).
-    first_begin_ts: i64,
+    /// The current session's wall-clock delta from the first session
+    /// (`wall − first_wall`). Combined with [`Self::first_event_ts`] to form the
+    /// offset: `offset = session_wall_delta − first_event_ts`.
+    session_wall_delta: i64,
+    /// The raw ts of the **first emitted event** (anchors all segment timestamps to
+    /// 0). The official segment maps its first event to ts 0, and that first event
+    /// is the first *emittable* line (a `ZONE_CHANGED`), whose raw ts is **not**
+    /// necessarily the `BEGIN_LOG` ts (e.g. `BEGIN_LOG@9`, first `ZONE_CHANGED@10`
+    /// → official ts 0, so the anchor is 10, not 9). Set lazily on the first
+    /// emitted event; `None` until then.
+    first_event_ts: Option<i64>,
 }
 
 impl EventEmitter {
@@ -258,24 +266,33 @@ impl EventEmitter {
         }
     }
 
-    /// Apply a `BEGIN_LOG`: set the per-session timestamp offset. The first
-    /// session anchors `first_wall`; every session's offset is
-    /// `(wall − first_wall) − first_begin_ts`.
+    /// Apply a `BEGIN_LOG`: record the session's wall-clock delta from the first
+    /// session. The first session anchors `first_wall`. The full offset is only
+    /// finalized once the first event's raw ts is known (see [`Self::seg_ts`]):
+    /// `offset = (wall − first_wall) − first_event_ts`.
     fn on_begin_log(&mut self, f: &[&str]) {
-        let begin_ts: i64 = f.first().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
         let wall: i64 = f.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
         if !self.first_seen {
             self.first_seen = true;
             self.first_wall = wall;
-            self.first_begin_ts = begin_ts;
         }
-        // The offset always subtracts the FIRST session's begin ts (not this
-        // session's own), per `session_offset`'s contract.
-        self.offset = session_offset(wall, self.first_wall, self.first_begin_ts);
+        self.session_wall_delta = wall - self.first_wall;
+        // Re-derive the offset for this session if the anchor event ts is known.
+        if let Some(anchor) = self.first_event_ts {
+            self.offset = session_offset(wall, self.first_wall, anchor);
+        }
     }
 
-    /// Current session's segment timestamp for a raw relative ms.
-    fn seg_ts(&self, raw_ts: i64) -> u64 {
+    /// Segment timestamp for a raw relative ms, anchoring the first emitted event
+    /// at ts 0. The anchor is the **first event's raw ts** (not `BEGIN_LOG`'s),
+    /// captured lazily here on the first emission, so a `BEGIN_LOG@9 → first
+    /// ZONE@10` log maps that ZONE to 0 (offset −10), matching the official
+    /// segment. Subsequent sessions keep their `(wall − first_wall)` separation.
+    fn seg_ts(&mut self, raw_ts: i64) -> u64 {
+        if self.first_event_ts.is_none() {
+            self.first_event_ts = Some(raw_ts);
+            self.offset = self.session_wall_delta - raw_ts;
+        }
         segment_ts(raw_ts, self.offset)
     }
 
@@ -332,18 +349,14 @@ impl EventEmitter {
     /// Emit a code-44 `PLAYER_INFO` line: `{ts}|44|{masterIndex}|{arrays…}`. The
     /// master index is the unit's 1-based actor index (dense, from the actor
     /// table); the five raw arrays are passed through verbatim.
-    fn emit_player_info(&self, raw_ts: i64, f: &[&str], line: &str) -> Option<String> {
+    fn emit_player_info(&mut self, raw_ts: i64, f: &[&str], line: &str) -> Option<String> {
         let unit_id = f.get(2)?.trim();
         let master_index = self.actors.master_index_of(unit_id)?;
         // The arrays are everything after `<ts>,PLAYER_INFO,<unitId>,`. They contain
         // commas inside `[...]`, so slice the raw line rather than re-join fields.
         let arrays = nth_comma_tail(line, 3);
-        Some(format!(
-            "{}|44|{}|{}",
-            self.seg_ts(raw_ts),
-            master_index,
-            arrays
-        ))
+        let ts = self.seg_ts(raw_ts);
+        Some(format!("{ts}|44|{master_index}|{arrays}"))
     }
 
     /// Emit a code-4 `HEALTH_REGEN` line:
@@ -358,11 +371,8 @@ impl EventEmitter {
         let block = encode_state_block(&state, &cp)?;
         let ident = self.identity_of(&unit_id);
         let a = self.alloc((ident.clone(), "HEALTH_REGEN".to_string(), ident));
-        // Self-target: both masks 16 (present), S == T.
-        let (src_mask, tgt_mask) = self
-            .actors
-            .code1_masks(&unit_id, &unit_id)
-            .unwrap_or(("16", "16"));
+        // Self-target (src == tgt): both masks are the unit's own side, S == T.
+        let (src_mask, tgt_mask) = self.masks(&unit_id, &unit_id);
         let sub = self
             .actors
             .code1_subordinal(&a.to_string(), &unit_id, &unit_id);
@@ -413,7 +423,7 @@ impl EventEmitter {
         let src_ident = self.identity_of(&src_unit);
         let tgt_ident = self.target_identity(tgt_field, &src_ident);
         let a = self.alloc((src_ident, ability, tgt_ident));
-        let (src_mask, tgt_mask) = self.effect_masks(&src_unit, &tgt_unit);
+        let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
             .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
@@ -454,7 +464,7 @@ impl EventEmitter {
         let src_ident = self.identity_of(&src_unit);
         let tgt_ident = self.target_identity(tgt_field, &src_ident);
         let a = self.alloc((src_ident, ability, tgt_ident));
-        let (src_mask, tgt_mask) = self.effect_masks(&src_unit, &tgt_unit);
+        let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
             .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
@@ -533,10 +543,7 @@ impl EventEmitter {
         let src_ident = self.identity_of(&src_unit);
         let tgt_ident = self.target_identity(tgt_field, &src_ident);
         let a = self.alloc((src_ident, ability, tgt_ident));
-        let (src_mask, tgt_mask) = self
-            .actors
-            .code1_masks(&src_unit, &tgt_unit)
-            .unwrap_or(("16", "16"));
+        let (src_mask, tgt_mask) = self.combat_masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
             .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
@@ -667,14 +674,45 @@ impl EventEmitter {
         }
     }
 
-    /// Masks for the *thin* effect/cast codes. Reuses the proven code-1 mask
-    /// ordering; when both sides resolve equal (self-cast/co-located, which the
-    /// code-1 rule gates) the effect codes still emit, so default to `16|16`
-    /// (present/present) — a structurally-valid mask pair.
-    fn effect_masks(&self, src_unit: &str, tgt_unit: &str) -> (&'static str, &'static str) {
-        self.actors
-            .code1_masks(src_unit, tgt_unit)
-            .unwrap_or(("16", "16"))
+    /// `(srcMask, tgtMask)` for any event with two unit sides. For two distinct
+    /// units the proven code-1 ordering (earlier→16, later→64, absent→32) applies.
+    /// For a **self-targeted** event (src == tgt, including the folded `*` target)
+    /// both slots are the unit's OWN side mask — `16|16` for a friendly unit,
+    /// `64|64` for a hostile one — which `code1_masks` deliberately gates (equal
+    /// keys). A `16|16` fallback is only correct for friendly self-events; a
+    /// hostile monster's self-buff is `64|64` (verified on the combat capture,
+    /// e.g. `33|5|7.1.1`).
+    ///
+    /// **Effect/cast/regen masks are OWN-SIDE**, not the code-1 earlier/later
+    /// ordering: each slot is that unit's own reaction side (`16` friendly, `64`
+    /// hostile), and an absent unit (id `0`/`*`/unknown) is `32`. Verified on the
+    /// combat capture — a buff from player 6 to player 5 is `16|16` (both
+    /// friendly), where the earlier/later rule would wrongly give `16|64`. The
+    /// earlier/later relative ordering is specific to the combat codes
+    /// ([`Self::combat_masks`]).
+    fn masks(&self, src_unit: &str, tgt_unit: &str) -> (&'static str, &'static str) {
+        (self.own_side(src_unit), self.own_side(tgt_unit))
+    }
+
+    /// A unit's own-side mask: `16` friendly, `64` hostile, `32` absent/unknown.
+    fn own_side(&self, unit_id: &str) -> &'static str {
+        let u = unit_id.trim();
+        if u.is_empty() || u == "0" || u == "*" {
+            return "32";
+        }
+        self.actors.side_mask(u).unwrap_or("32")
+    }
+
+    /// `(srcMask, tgtMask)` for the **combat** codes (1/2/3/26), which use the
+    /// proven earlier/later relative ordering ([`ActorTable::code1_masks`]):
+    /// earlier→16, later→64, absent→32, with self/co-located falling back to the
+    /// own side. Byte-exact 3733/3733 on the code-1 golden pair.
+    fn combat_masks(&self, src_unit: &str, tgt_unit: &str) -> (&'static str, &'static str) {
+        if let Some(masks) = self.actors.code1_masks(src_unit, tgt_unit) {
+            return masks;
+        }
+        let side = self.actors.side_mask(src_unit).unwrap_or("16");
+        (side, side)
     }
 }
 
@@ -871,9 +909,11 @@ mod tests {
             // Two players: raw unit ids 1 and 7 → master indices 1 and 2.
             "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
             "0,UNIT_ADDED,7,PLAYER,F,2,0,F,3,9,\"Ally\",\"@ally\",222,50,1500,0,PLAYER_ALLY,T",
+            // A zone change is the first emitted event (anchors segTs 0 at raw ts 5).
+            "5,ZONE_CHANGED,1129,\"Hall\",NORMAL",
             // PLAYER_INFO for raw unit 7 (master index 2). Arrays contain commas,
-            // including a nested [[...]] equipment list.
-            "3,PLAYER_INFO,7,[142210,86673],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]",
+            // including a nested [[...]] equipment list. Raw ts 8 → segTs 8−5 = 3.
+            "8,PLAYER_INFO,7,[142210,86673],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]",
         ];
         let mut e = EventEmitter::new();
         let out = e.build(&lines);
@@ -882,8 +922,8 @@ mod tests {
             .lines()
             .find(|l| l.split('|').nth(1) == Some("44"))
             .expect("a code-44 line");
-        // {segTs}|44|{masterIndex=2}|{arrays verbatim}. segTs for raw ts 3 with the
-        // sample offset (begin ts 0, single session) is 3.
+        // {segTs}|44|{masterIndex=2}|{arrays verbatim}. The first emitted event (the
+        // ZONE_CHANGED at raw ts 5) anchors segTs 0, so PLAYER_INFO at raw ts 8 → 3.
         assert_eq!(
             code44,
             "3|44|2|[142210,86673],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]",
