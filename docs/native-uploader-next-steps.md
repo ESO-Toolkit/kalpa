@@ -163,10 +163,33 @@ byte-exact isn't needed." The round-trip shows that's only half-true: the server
 *accepts* a structurally-valid segment (mints a code) but the *renderer/parser*
 needs the events to actually be there and correct. "Structurally valid line" was
 too weak a bar; the real bar is "the event stream faithfully represents the fight,"
-which is much closer to the byte-exact target we'd set aside. Reaching a rendering
-report likely needs most of the codes + correct counts (the missing UPDATED codes
-6/8/11 alone are 1330 events). Re-evaluate whether full native is worth the long
-tail vs. the official-uploader handoff that already produces correct reports.
+which is much closer to the byte-exact target we'd set aside.
+
+### ⚙️ REPORT-CORRECTNESS PASS (2026-06-18, after the round-trip) — driven by the oracle
+The diff oracle was used test-first to fix the encoder. Landed (commits
+db65d1e → c57199b on `feat/log-uploader`):
+- **TS BASE** anchored on the FIRST EMITTED EVENT (ts 0), not `BEGIN_LOG` — the
+  cascade bug (`BEGIN_LOG@9 / ZONE@10` now → segTs 0, was 1). Hardened so a
+  dropped line can't steal the anchor.
+- **MASKS**: effect/cast/regen use OWN-SIDE masks (16/64/32 per unit); combat codes
+  keep the proven earlier/later. (`ActorTable::side_mask`.)
+- **UPDATED codes 6/8/11** implemented: emit only on a stack-count CHANGE (buff
+  +→6, buff −→8, debuff→11); same-stack / orphan / already-active GAINED dropped.
+- **DEATHS → code 19** (DIED/DIED_XP): combat prefix + S + T, no tail.
+
+**Result: 13 of 25 codes now count-EXACT** vs the official segment (was 7):
+2,6,8,10,11,12,15,19,26,44,52,53. A committed regression guard
+(`per_code_counts_stay_within_known_bounds`) locks them + bounds the residuals.
+
+**Deferred residuals** (owner chose high-confidence wins; underdetermined from one
+capture): code 5 +260 (passive/aura wall), code 1 −140 (DAMAGE_SHIELDED 1-vs-2
+split), code 16 −492 (status/QUEUED cast markers), rare codes 9/14/22/27/28/38
+(~870 events, 1.7%), 41/51 +1 (post-fight zone-out needs fight-window bounding).
+
+**→ NEXT: OWNER RE-TEST the live round-trip.** The structural rendering-blockers
+are fixed. If the report RENDERS now, the long tail likely doesn't matter — flip
+the gate. If not, the oracle's remaining deltas point to what else the parser
+needs. Re-evaluate full-native vs. the official handoff only after this re-test.
 
 ---
 
