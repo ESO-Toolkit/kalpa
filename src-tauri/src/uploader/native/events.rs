@@ -554,14 +554,22 @@ impl EventEmitter {
             let t_block = encode_state_block(&tgt_state, &self.cp_of(&tgt_unit))?;
             line.push_str(&format!("|T{t_block}"));
         }
-        self.append_combat_tail(
+        // Append the per-code trailing fields. If the required tail can't be
+        // formed (an actionResult whose crit/final we don't model byte-safely),
+        // DROP the whole event rather than emit a structurally-incomplete line —
+        // a code-1/2/3/26 line missing its trailing fields is malformed. The
+        // dropped event is rare and out-of-combat-ish; the coverage gate keeps the
+        // log off native regardless until the live round-trip confirms the format.
+        if !self.append_combat_tail(
             &mut line,
             code,
             action_result,
             hit_value,
             overflow,
             power_type,
-        );
+        ) {
+            return None;
+        }
         Some(line)
     }
 
@@ -584,16 +592,20 @@ impl EventEmitter {
         (tgt_field.to_string(), tgt_state)
     }
 
-    /// Append the per-code trailing fields after the state blocks.
+    /// Append the per-code trailing fields after the state blocks. **Returns
+    /// `true` iff a complete, structurally-valid tail was appended** — the caller
+    /// drops the event when this is `false`, so a code-1/2/3/26 line is never
+    /// emitted with a missing/partial tail.
     ///
-    /// * code 1 (damage): `|{critFlag}|{final}` — via the proven code-1 encoders.
-    /// * code 2 (dot) / code 3 (heal): `|{critFlag}|{final}` with the heal/dot
-    ///   crit scheme; heals append the overflow (overheal) when nonzero.
+    /// * code 1 (damage): `|{critFlag}|{final}`. `DAMAGE`/`CRITICAL_DAMAGE` use the
+    ///   proven crit flag (1/2) + hit value; the status results
+    ///   `IMMUNE`/`BLOCKED_DAMAGE`/`DODGED` use crit `1` + the constant final
+    ///   override (10/1/7). Other code-1 results (`DAMAGE_SHIELDED`/`DIED`/
+    ///   `FALL_DAMAGE`, or nonzero-overflow damage) are not byte-safe to encode →
+    ///   `false` (event dropped).
+    /// * code 2 (dot) / code 3 (heal): `|{critFlag}|{final}` with the heal/dot crit
+    ///   scheme; heals append the overflow (overheal) when nonzero.
     /// * code 26 (power): `|{hitValue}|{overflow}|{powerTypeIdx}|{powerMax}`.
-    ///
-    /// Returns the line unchanged for an unhandled (code, result) pair — the line
-    /// is then a valid prefix-only event; the coverage gate keeps such cases off
-    /// native, so this is conservative, not corrupting.
     fn append_combat_tail(
         &self,
         line: &mut String,
@@ -602,25 +614,32 @@ impl EventEmitter {
         hit_value: &str,
         overflow: &str,
         power_type: &str,
-    ) {
+    ) -> bool {
         match code {
             "1" => {
                 use super::encode::combat_crit_flag;
-                if let (Some(crit), Some(final_field)) = (
-                    combat_crit_flag(action_result),
-                    combat_final_field(action_result, hit_value, overflow),
-                ) {
-                    line.push_str(&format!("|{crit}|{final_field}"));
-                }
+                // The status results (IMMUNE/BLOCKED/DODGED) have a constant final
+                // override and a non-crit flag; the damage results use the proven
+                // crit flag. combat_final_field handles both; the crit flag for a
+                // status result is 1 (non-crit).
+                let final_field = match combat_final_field(action_result, hit_value, overflow) {
+                    Some(v) => v,
+                    None => return false, // not byte-safe to encode → drop
+                };
+                let crit = combat_crit_flag(action_result).unwrap_or(1);
+                line.push_str(&format!("|{crit}|{final_field}"));
+                true
             }
-            "2" => {
-                if let Some(crit) = combat_noncode1_crit_flag(action_result) {
-                    // DOT final is the hit value verbatim (overflow==0 in captures).
+            "2" => match combat_noncode1_crit_flag(action_result) {
+                // DOT final is the hit value verbatim (overflow==0 in captures).
+                Some(crit) => {
                     line.push_str(&format!("|{crit}|{hit_value}"));
+                    true
                 }
-            }
-            "3" => {
-                if let Some(crit) = combat_noncode1_crit_flag(action_result) {
+                None => false,
+            },
+            "3" => match combat_noncode1_crit_flag(action_result) {
+                Some(crit) => {
                     if overflow == "0" {
                         line.push_str(&format!("|{crit}|{hit_value}"));
                     } else {
@@ -634,13 +653,17 @@ impl EventEmitter {
                             .unwrap_or_else(|| hit_value.to_string());
                         line.push_str(&format!("|{crit}|{effective}|{overflow}"));
                     }
+                    true
                 }
-            }
+                None => false,
+            },
             "26" => {
                 let (power_idx, power_max) = power_tuple(power_type);
                 line.push_str(&format!("|{hit_value}|{overflow}|{power_idx}|{power_max}"));
+                true
             }
-            _ => {}
+            // No other code reaches append_combat_tail (only 1/2/3/26 do).
+            _ => false,
         }
     }
 
@@ -865,6 +888,52 @@ mod tests {
             code44,
             "3|44|2|[142210,86673],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]",
             "code-44 must carry the dense master index and verbatim arrays"
+        );
+    }
+
+    // A code-1 event whose tail can't be byte-safely formed (e.g. DAMAGE_SHIELDED)
+    // is DROPPED, never emitted as a structurally-incomplete prefix-only line. A
+    // status result with a constant final (IMMUNE) IS emitted, complete.
+    #[test]
+    fn incomplete_combat_tail_drops_the_event() {
+        let prelude = [
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F",
+        ];
+        let state = "18400/18400,9971/12868,8488/28700,198/500,0/1000,0,0.5,0.7,5.9";
+        let tgt = "40000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0";
+
+        // DAMAGE_SHIELDED → combat_final_field returns None → event dropped.
+        let mut e = EventEmitter::new();
+        let shielded =
+            format!("6,COMBAT_EVENT,DAMAGE_SHIELDED,FIRE,1,500,0,5000,100,1,{state},30,{tgt}");
+        let mut lines: Vec<&str> = prelude.to_vec();
+        lines.push(&shielded);
+        let out = e.build(&lines);
+        assert!(
+            !out.events_string
+                .lines()
+                .any(|l| l.split('|').nth(1) == Some("1")),
+            "DAMAGE_SHIELDED must not emit a (prefix-only) code-1 line: {:?}",
+            out.events_string
+        );
+
+        // IMMUNE → final override "10", crit 1 → a complete code-1 line IS emitted.
+        let mut e2 = EventEmitter::new();
+        let immune = format!("6,COMBAT_EVENT,IMMUNE,FIRE,1,0,0,5000,100,1,{state},30,{tgt}");
+        let mut lines2: Vec<&str> = prelude.to_vec();
+        lines2.push(&immune);
+        let out2 = e2.build(&lines2);
+        let code1 = out2
+            .events_string
+            .lines()
+            .find(|l| l.split('|').nth(1) == Some("1"))
+            .expect("IMMUNE emits a complete code-1 line");
+        // It must end with the crit flag (1) and the IMMUNE final override (10).
+        assert!(
+            code1.ends_with("|1|10"),
+            "IMMUNE code-1 line must end with crit|final = 1|10: {code1}"
         );
     }
 
