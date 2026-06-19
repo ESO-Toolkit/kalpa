@@ -833,6 +833,9 @@ impl EventEmitter {
             "2"
         } else if matches!(action_result, "HEAL" | "CRITICAL_HEAL") {
             "3"
+        } else if matches!(action_result, "HOT_TICK" | "HOT_TICK_CRITICAL") {
+            // Heal-over-time tick → code 4, same heal-style tail as code 3.
+            "4"
         } else if matches!(action_result, "POWER_ENERGIZE" | "POWER_DRAIN") {
             "26"
         } else {
@@ -966,7 +969,8 @@ impl EventEmitter {
                 }
                 None => false,
             },
-            "3" => match combat_noncode1_crit_flag(action_result) {
+            // Heal (3) and heal-over-time tick (4) share the same heal-style tail.
+            "3" | "4" => match combat_noncode1_crit_flag(action_result) {
                 Some(crit) => {
                     if overflow == "0" {
                         line.push_str(&format!("|{crit}|{hit_value}"));
