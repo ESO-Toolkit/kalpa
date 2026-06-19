@@ -652,6 +652,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           // -mr-2 pr-2 keeps the scrollbar off the content's right edge; pt-4
           // restores the gap the header used to provide via the grid.
           <div className="-mr-2 space-y-4 overflow-y-auto pr-2 pt-4">
+            {/* Direct-upload session: sign in to ESO Logs for native upload. */}
+            <NativeSessionControl />
             <WhatGetsUploaded />
 
             {/* Mode tabs */}
@@ -813,6 +815,86 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
         {loggingIn ? "Opening sign-in…" : "Sign in to ESO Logs"}
       </Button>
     </div>
+  );
+}
+
+// Establishes + shows the native upload-session cookie — the ESO Logs website
+// session the /desktop-client/* endpoints authenticate with, captured via the
+// in-app esologs login webview (uploader_login_esologs). Required for direct
+// upload; the official-uploader path doesn't use it.
+function NativeSessionControl() {
+  const [hasSession, setHasSession] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      setHasSession(await invokeOrThrow<boolean>("uploader_has_session"));
+    } catch {
+      setHasSession(false);
+    }
+  }, []);
+
+  // Load the initial session state once on mount. The state update happens only
+  // after the awaited IPC resolves (and only if still mounted) — not synchronously
+  // in the effect body — so it doesn't cause cascading renders.
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const present = await invokeOrThrow<boolean>("uploader_has_session");
+        if (active) setHasSession(present);
+      } catch {
+        if (active) setHasSession(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleSignIn = async () => {
+    setBusy(true);
+    try {
+      const result = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs");
+      toast.success("Direct-upload session captured.");
+      warnIfSessionNotPersisted(result);
+      await refresh();
+    } catch (e) {
+      toast.error(`Direct-upload sign-in failed: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await invokeOrThrow("uploader_logout_esologs");
+      await refresh();
+    } catch (e) {
+      toast.error(`Sign out failed: ${getTauriErrorMessage(e)}`);
+    }
+  };
+
+  return (
+    <GlassPanel variant="subtle" className="flex items-center justify-between gap-3 p-3">
+      <div>
+        <p className="text-sm font-medium text-white/90">Direct-upload session</p>
+        <p className="text-xs text-muted-foreground">
+          {hasSession
+            ? "Signed in to ESO Logs for direct upload."
+            : "Sign in inside Kalpa to enable direct upload."}
+        </p>
+      </div>
+      {hasSession ? (
+        <Button variant="ghost" size="sm" onClick={handleSignOut}>
+          Sign out
+        </Button>
+      ) : (
+        <Button size="sm" onClick={handleSignIn} disabled={busy}>
+          {busy ? "Opening…" : "Sign in"}
+        </Button>
+      )}
+    </GlassPanel>
   );
 }
 

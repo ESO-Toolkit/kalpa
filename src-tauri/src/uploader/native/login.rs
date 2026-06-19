@@ -50,7 +50,18 @@ const LOGIN_URL: &str = "https://www.esologs.com/login";
 const ESOLOGS_ORIGINS: &[&str] = &["https://www.esologs.com", "https://esologs.com"];
 
 /// The session cookie the upload endpoints authenticate with.
-const SESSION_COOKIE_NAME: &str = "laravel_session";
+///
+/// EMPIRICALLY CONFIRMED (2026-06-18, live login capture): ESO Logs (an RPGLogs /
+/// Warcraft Logs platform site) names its web session cookie **`wcl_session`**,
+/// NOT `laravel_session` (the earlier assumption — esologs is Laravel-based but
+/// uses the `wcl_` prefix). The authenticated jar also carries `XSRF-TOKEN` and a
+/// `remember_web_<hash>` persistent-auth cookie; all three are forwarded.
+const SESSION_COOKIE_NAME: &str = "wcl_session";
+
+/// Prefix of Laravel's "remember me" persistent-auth cookie (`remember_web_<hash>`).
+/// Present in the authenticated jar; forwarded so the session is recognized even if
+/// `wcl_session` alone is insufficient. Matched by prefix (the suffix is a hash).
+const REMEMBER_COOKIE_PREFIX: &str = "remember_web_";
 
 /// How long to wait for the user to complete the login before giving up.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -121,27 +132,42 @@ impl std::error::Error for LoginError {}
 
 /// Build the `Cookie:` header value from the cookies in the esologs jar.
 ///
-/// The upload requests authenticate on `laravel_session`; the `XSRF-TOKEN`
-/// cookie is included when present (Laravel pairs them, and sending it does no
-/// harm if the endpoint ignores it). Returns `None` if the session cookie is not
-/// present yet (the user has not finished logging in).
+/// The upload requests authenticate on the web session cookie
+/// ([`SESSION_COOKIE_NAME`] = `wcl_session`). We also forward `XSRF-TOKEN` (CSRF)
+/// and the `remember_web_<hash>` persistent-auth cookie when present — together
+/// they are the authenticated jar the official uploader rides. Returns `None` if
+/// the session cookie is not present yet (the user has not finished logging in),
+/// which is the signal the poll loop keeps waiting on.
 ///
 /// Pure over a cookie list so it is unit-testable without a live webview.
 fn cookie_header_from(cookies: &[(String, String)]) -> Option<String> {
     let mut session: Option<&str> = None;
     let mut xsrf: Option<&str> = None;
+    let mut remember: Option<(&str, &str)> = None;
     for (name, value) in cookies {
-        match name.as_str() {
-            SESSION_COOKIE_NAME if !value.is_empty() => session = Some(value),
-            "XSRF-TOKEN" if !value.is_empty() => xsrf = Some(value),
-            _ => {}
+        if value.is_empty() {
+            continue;
+        }
+        if name == SESSION_COOKIE_NAME {
+            session = Some(value);
+        } else if name == "XSRF-TOKEN" {
+            xsrf = Some(value);
+        } else if name.starts_with(REMEMBER_COOKIE_PREFIX) {
+            remember = Some((name, value));
         }
     }
+    // The session cookie is the required signal that login completed.
     let session = session?;
     let mut header = format!("{SESSION_COOKIE_NAME}={session}");
     if let Some(x) = xsrf {
         header.push_str("; XSRF-TOKEN=");
         header.push_str(x);
+    }
+    if let Some((name, value)) = remember {
+        header.push_str("; ");
+        header.push_str(name);
+        header.push('=');
+        header.push_str(value);
     }
     Some(header)
 }
@@ -250,7 +276,7 @@ async fn poll_for_session<R: tauri::Runtime>(
 
         // Only accept a cookie once the webview has navigated to an authenticated
         // view (off `/login`). This is the guard against capturing the anonymous
-        // guest session Laravel sets on the login page load itself. `url()` is
+        // guest session the site sets on the login page load itself. `url()` is
         // cheap and safe to call here. If it errors, treat as "not yet ready".
         let authenticated_view = window
             .url()
@@ -325,7 +351,8 @@ mod tests {
 
     #[test]
     fn cookie_header_requires_session_cookie() {
-        // No laravel_session → no header (user not logged in yet).
+        // No wcl_session → no header (user not logged in yet). XSRF + remember
+        // alone (the anonymous/guest jar) must NOT count as a session.
         assert_eq!(
             cookie_header_from(&[("XSRF-TOKEN".into(), "abc".into())]),
             None
@@ -340,23 +367,25 @@ mod tests {
     }
 
     #[test]
-    fn cookie_header_includes_session_and_xsrf() {
+    fn cookie_header_includes_session_xsrf_and_remember() {
         let header = cookie_header_from(&[
-            ("laravel_session".into(), "sess123".into()),
+            ("wcl_session".into(), "sess123".into()),
             ("XSRF-TOKEN".into(), "tok456".into()),
-            ("other".into(), "ignored".into()),
+            ("remember_web_deadbeef".into(), "rmb789".into()),
+            ("_ga".into(), "ignored".into()),
         ])
         .expect("session present");
-        assert!(header.contains("laravel_session=sess123"));
+        assert!(header.contains("wcl_session=sess123"));
         assert!(header.contains("XSRF-TOKEN=tok456"));
+        assert!(header.contains("remember_web_deadbeef=rmb789"));
         assert!(!header.contains("ignored"));
     }
 
     #[test]
     fn cookie_header_session_only_when_no_xsrf() {
-        let header = cookie_header_from(&[("laravel_session".into(), "sess123".into())])
+        let header = cookie_header_from(&[("wcl_session".into(), "sess123".into())])
             .expect("session present");
-        assert_eq!(header, "laravel_session=sess123");
+        assert_eq!(header, "wcl_session=sess123");
     }
 
     #[test]

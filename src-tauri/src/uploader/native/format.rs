@@ -54,7 +54,14 @@ pub const CLIENT_VERSION: &str = "8.20.113";
 /// **serialization** is also confirmed by a byte-exact round-trip — sending an
 /// independently-produced segment that the server accepts — since a correct
 /// version with a wrong segment body would still fail.
-pub const FORMAT_VERSION_CONFIRMED: bool = false;
+// CONFIRMED (2026-06-18, live round-trip): a Kalpa-built segment + master table
+// was uploaded directly to esologs.com/desktop-client/* and the server accepted
+// it, creating report `jAHXkRdzpGwxVQ1t`. The format version (11) and the segment
+// serialization are therefore empirically validated end-to-end, so native upload
+// is enabled (alongside the per-log coverage gate in `coverage::PROVEN_LINE_TYPES`
+// and the user opt-in). Render-correctness of the report is a separate quality
+// check; server acceptance is the version-confirmation bar this flag guards.
+pub const FORMAT_VERSION_CONFIRMED: bool = true;
 
 /// Errors specific to producing or versioning the upload format.
 #[derive(Debug, Clone, PartialEq, Eq)]
