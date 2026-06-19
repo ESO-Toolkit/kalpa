@@ -121,6 +121,10 @@ pub struct EventEmitter {
     unit_identity: HashMap<String, Identity>,
     /// abilityId → effectType (`BUFF`/`DEBUFF`) from `EFFECT_INFO`.
     effect_type: HashMap<String, String>,
+    /// Per effect instance `(srcUnit, abilityId, tgtUnit)` → its last stack count.
+    /// An `EFFECT_CHANGED UPDATED` emits (codes 6/8/11) only when the stack count
+    /// *changes* from this value; a re-application with the same stack is dropped.
+    last_stack: HashMap<(String, String, String), String>,
     /// First-sight allocation: triple key → its `A`.
     key_to_a: HashMap<(Identity, String, Identity), u32>,
     next_a: u32,
@@ -390,6 +394,7 @@ impl EventEmitter {
     /// a structurally-valid line.
     fn emit_effect_changed(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
         let change_type = f.get(2)?.trim();
+        let stack = f.get(3)?.trim().to_string();
         let ability = f.get(5)?.trim().to_string();
         let src_unit = f.get(6)?.trim().to_string();
         let tgt_field = f.get(16).map(|s| s.trim()).unwrap_or("0");
@@ -404,19 +409,58 @@ impl EventEmitter {
             .get(&ability)
             .map(|t| t != "DEBUFF")
             .unwrap_or(true); // default BUFF when no EFFECT_INFO seen
-        let code = match (change_type, is_buff) {
-            ("GAINED", true) => "5",
-            ("GAINED", false) => "10",
-            ("FADED", true) => "7",
-            ("FADED", false) => "12",
-            // UPDATED (codes 6/8/11) is suppressed: the official segment drops the
-            // vast majority of UPDATED effect changes (a re-application of an
-            // already-active effect), and the exact emit predicate is not derivable
-            // from current captures. Dropping every UPDATED yields a structurally
-            // valid segment (the golden sample emits zero code-6 despite many
-            // UPDATED raws) and never emits a line we can't justify — strictly
-            // safer than guessing which to keep.
-            ("UPDATED", _) => return None,
+
+        // Stack tracking key (raw unit ids, like the line's masks/subordinal).
+        let stack_key = (src_unit.clone(), ability.clone(), tgt_unit.clone());
+
+        // Route the change type to a code (and decide whether it emits at all).
+        // UPDATED emits ONLY when the stack count *changed* from the instance's
+        // previous value, split by direction: a buff increase → 6, a buff decrease
+        // → 8, any debuff change → 11. A same-stack re-application (the common
+        // case, ~90% of UPDATED) is dropped. The new stack is the trailing field.
+        let code = match change_type {
+            "GAINED" => {
+                self.last_stack.insert(stack_key, stack.clone());
+                if is_buff {
+                    "5"
+                } else {
+                    "10"
+                }
+            }
+            "FADED" => {
+                self.last_stack.remove(&stack_key);
+                if is_buff {
+                    "7"
+                } else {
+                    "12"
+                }
+            }
+            "UPDATED" => {
+                let prev = self.last_stack.insert(stack_key, stack.clone());
+                let changed = prev.as_deref() != Some(stack.as_str());
+                if !changed {
+                    return None; // same-stack re-application → not emitted
+                }
+                if is_buff {
+                    // Direction: increase → 6, decrease → 8 (compare numerically).
+                    let increased = match (
+                        prev.as_deref().and_then(|p| p.parse::<i64>().ok()),
+                        stack.parse::<i64>().ok(),
+                    ) {
+                        (Some(p), Some(n)) => n > p,
+                        // No numeric prior (first UPDATED with no GAINED) counts as
+                        // an increase from nothing.
+                        _ => true,
+                    };
+                    if increased {
+                        "6"
+                    } else {
+                        "8"
+                    }
+                } else {
+                    "11"
+                }
+            }
             _ => return None,
         };
 
@@ -427,14 +471,15 @@ impl EventEmitter {
         let sub = self
             .actors
             .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
+        let ts = self.seg_ts(raw_ts);
 
-        // GAINED/FADED are the thin 5-field line (no state block, no trailing A —
-        // the optional capture A is the unsolved byte-exact global counter and is
-        // not needed for structural validity).
-        Some(format!(
-            "{ts}|{code}|{sub}|{src_mask}|{tgt_mask}",
-            ts = self.seg_ts(raw_ts),
-        ))
+        // GAINED/FADED (5/7/10/12) are the thin 5-field line (no trailing field —
+        // the optional capture `A` cast-ref is the unsolved global counter, not
+        // needed for validity). UPDATED (6/8/11) appends the new stack count.
+        match code {
+            "6" | "8" | "11" => Some(format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}")),
+            _ => Some(format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}")),
+        }
     }
 
     /// Route + emit a `BEGIN_CAST` line. Channeled casts (`channeled == T`) are
