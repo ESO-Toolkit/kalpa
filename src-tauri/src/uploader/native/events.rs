@@ -1177,4 +1177,95 @@ mod combat_fixture {
             );
         }
     }
+
+    /// DIAGNOSTIC (manual, `--ignored`): diff OUR fights-segment against the
+    /// OFFICIAL captured segment for the same raw log, and print the structural
+    /// deltas — total event count, per-code counts, and the first diverging line.
+    /// This is how we find WHY a server-accepted segment fails to render: the
+    /// stream is well-formed but does not match what the parser expects. Read the
+    /// printed report with `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "diagnostic; needs .decode-samples golden pair, run with --ignored --nocapture"]
+    fn diff_against_official_combat_segment() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let raw_path = format!("{base}/../.decode-samples/combat_raw_encounter.log");
+        let off_path = format!("{base}/../.decode-samples/combat_fights_segment.txt");
+        let (Ok(raw), Ok(official)) = (
+            std::fs::read_to_string(&raw_path),
+            std::fs::read_to_string(&off_path),
+        ) else {
+            eprintln!("[diff] golden pair not present; skipping");
+            return;
+        };
+        let lines: Vec<&str> = raw.lines().collect();
+        let ours = build_fights_segment(&lines).expect("our segment builds");
+
+        // Header + total event count (line 2 of each).
+        let our_count: u64 = ours
+            .lines()
+            .nth(1)
+            .and_then(|l| l.parse().ok())
+            .unwrap_or(0);
+        let off_count: u64 = official
+            .lines()
+            .nth(1)
+            .and_then(|l| l.parse().ok())
+            .unwrap_or(0);
+        eprintln!("[diff] our header: {:?}", ours.lines().next());
+        eprintln!("[diff] off header: {:?}", official.lines().next());
+        eprintln!(
+            "[diff] TOTAL EVENTS  ours={our_count}  official={off_count}  delta={}",
+            our_count as i64 - off_count as i64
+        );
+        eprintln!(
+            "[diff] LINE COUNT    ours={}  official={}",
+            ours.lines().count(),
+            official.lines().count()
+        );
+
+        // Per-code counts (field 1 after the 2-line header), to see which event
+        // types we over/under-produce.
+        fn code_counts(seg: &str) -> std::collections::BTreeMap<String, u64> {
+            let mut m = std::collections::BTreeMap::new();
+            for l in seg.lines().skip(2) {
+                if let Some(code) = l.split('|').nth(1) {
+                    *m.entry(code.to_string()).or_insert(0) += 1;
+                }
+            }
+            m
+        }
+        let oc = code_counts(&ours);
+        let fc = code_counts(&official);
+        let mut codes: std::collections::BTreeSet<String> = oc.keys().cloned().collect();
+        codes.extend(fc.keys().cloned());
+        eprintln!("[diff] per-code (code: ours / official):");
+        for c in &codes {
+            let o = oc.get(c).copied().unwrap_or(0);
+            let f = fc.get(c).copied().unwrap_or(0);
+            let mark = if o == f { "" } else { "  <-- DIFF" };
+            eprintln!("[diff]   {c:>4}: {o:>7} / {f:>7}{mark}");
+        }
+
+        // First diverging line (after the 2-line headers, body only — header
+        // differences in the count are expected and reported above).
+        let our_body: String = ours.lines().skip(2).collect::<Vec<_>>().join("\n");
+        let off_body: String = official.lines().skip(2).collect::<Vec<_>>().join("\n");
+        match super::super::differential::diff_segments(&our_body, &off_body) {
+            super::super::differential::Diff::Identical => {
+                eprintln!("[diff] BODY IDENTICAL")
+            }
+            super::super::differential::Diff::Diverged {
+                line,
+                ours,
+                official,
+            } => {
+                eprintln!("[diff] FIRST BODY DIVERGENCE at body line {line}:");
+                eprintln!("[diff]   ours: {ours}");
+                eprintln!("[diff]   offl: {official}");
+            }
+            super::super::differential::Diff::LengthMismatch { ours, official } => {
+                eprintln!("[diff] BODY LENGTH MISMATCH ours={ours} official={official}")
+            }
+        }
+    }
 }

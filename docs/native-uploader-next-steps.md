@@ -117,12 +117,66 @@ clippy -D warnings, fmt, npm run check) and are GATED OFF (no behavior change):
   `FORMAT_VERSION_CONFIRMED=false`, so opted-in users still route to the official
   uploader — only the logged routing reason changes.
 
-## DONE 2026-06-18 — the EVENTS ENCODER (seam #2) is BUILT
+## ⚠️ 2026-06-18 — LIVE ROUND-TRIP RESULT: accepted but DOES NOT RENDER
 
-The fights-segment events encoder — the core remaining blocker — is implemented,
-structurally tested, and committed on `feat/log-uploader`. The two locks
-(`FORMAT_VERSION_CONFIRMED=false` + empty `PROVEN_LINE_TYPES`) keep it OFF, so
-there is **zero behavior change**; only the live round-trip (#5 below) remains.
+The owner ran the round-trip. The native upload was **server-ACCEPTED** (report
+`jAHXkRdzpGwxVQ1t` created) **but the report does NOT render** — esologs shows an
+infinite loading screen and it never appears in the user's report list. So
+**server-accept ≠ parseable**: the segment is structurally well-formed (zero
+malformed *lines*) but the event *stream* is wrong, so the parser can't build a
+report. The gate was reverted CLOSED (`FORMAT_VERSION_CONFIRMED=false`, empty
+`PROVEN_LINE_TYPES`) — native is OFF again, no more broken reports.
+
+### Root cause (from the diagnostic diff — see below)
+A new diagnostic test `events::combat_fixture::diff_against_official_combat_segment`
+(`#[ignore]`, run `cargo test -- --ignored --nocapture`) diffs OUR fights-segment
+against the OFFICIAL captured segment for the SAME log (Archive-20260614T190354Z,
+a Lair of Maarselok dungeon — NOT a trial). It found the encoder is materially
+incomplete on a real log:
+
+- **TOTAL EVENTS: ours 48121 vs official 49891** (−1770), and they are *different*
+  events, not just a count.
+- **Entire segment codes MISSING from our output** (we emit zero): code **6**
+  (0/1050), **8** (0/93), **11** (0/187) — the UPDATED-effect family the encoder
+  deliberately suppressed ("emit predicate underivable"); plus **9** (0/25),
+  **14** (0/4), **19** (0/158), **22** (0/1), **27** (0/19), **28** (0/23), **38**
+  (0/638) — codes the encoder does not model at all.
+- **Wrong counts on modeled codes**: code 1 (4525/4665), 16 (2628/3120), 5
+  (11969/11012), 3 (2442/2354), 4 (659/677) — over- AND under-producing.
+- **Wrong base timestamp**: first event `1|41|...` vs official `0|41|...`
+  (off-by-one base — `segment_ts`/offset bug; cascades since events are
+  ts-ordered).
+
+### What this means
+The "structurally valid, zero malformed lines" gate was MISLEADING: every line is
+well-formed, but the stream omits ~6–10 whole event codes (~2900+ events), has
+wrong per-code counts, and a wrong ts base. The events encoder is **NOT done** —
+the prior "BUILT" claim below means the skeleton + the easy codes, not a
+report-correct encoder. Finishing it = real, multi-day work (implement codes
+6/8/9/11/14/19/22/27/28/38, fix counts on 1/3/4/5/16, fix the ts base, then drive
+the diff to ~zero deltas and confirm a RENDERING report — render, not just
+accept). The diff test is the precise target/oracle.
+
+### ENGINEER'S NOTE on the strategy pivot
+The whole plan rested on "the server re-parses any structurally-valid segment, so
+byte-exact isn't needed." The round-trip shows that's only half-true: the server
+*accepts* a structurally-valid segment (mints a code) but the *renderer/parser*
+needs the events to actually be there and correct. "Structurally valid line" was
+too weak a bar; the real bar is "the event stream faithfully represents the fight,"
+which is much closer to the byte-exact target we'd set aside. Reaching a rendering
+report likely needs most of the codes + correct counts (the missing UPDATED codes
+6/8/11 alone are 1330 events). Re-evaluate whether full native is worth the long
+tail vs. the official-uploader handoff that already produces correct reports.
+
+---
+
+## DONE 2026-06-18 — the EVENTS ENCODER (seam #2) is BUILT (skeleton + easy codes)
+
+The fights-segment events encoder is implemented, structurally tested, and
+committed on `feat/log-uploader`. **NOTE: "built" = the driver + the easier codes;
+the round-trip above shows it is NOT yet report-correct on a real log.** The two
+locks (`FORMAT_VERSION_CONFIRMED=false` + empty `PROVEN_LINE_TYPES`) keep it OFF,
+so there is **zero behavior change**.
 
 - **`native/zip_segment.rs`** — `zip_log_txt(text) -> Vec<u8>`: the `logfile`
   envelope (single `log.txt` entry, DEFLATE-9, deterministic — fixed ZIP-epoch

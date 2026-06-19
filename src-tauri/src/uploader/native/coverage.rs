@@ -46,30 +46,13 @@ use std::collections::BTreeSet;
 /// the promotion bar (the server re-parses and accepts any structurally-valid
 /// segment, so byte-identity with the official uploader is not required).
 pub const PROVEN_LINE_TYPES: &[&str] = &[
-    // CONFIRMED (2026-06-18, live round-trip): a segment built from a real combat
-    // log containing exactly these types uploaded to esologs and was accepted
-    // (report jAHXkRdzpGwxVQ1t). These 17 are the structurally-ready set whose
-    // encoders are byte/structurally tested AND now server-confirmed. The 3
-    // *_TRIAL* markers are NOT here — they await a trial-log capture, so a trial
-    // log still falls back to the official uploader (the gate is per-log
-    // all-or-nothing). Add them once a trial upload is confirmed.
-    "BEGIN_LOG",
-    "END_LOG",
-    "BEGIN_COMBAT",
-    "END_COMBAT",
-    "ZONE_CHANGED",
-    "MAP_CHANGED",
-    "UNIT_ADDED",
-    "UNIT_CHANGED",
-    "UNIT_REMOVED",
-    "ABILITY_INFO",
-    "EFFECT_INFO",
-    "EFFECT_CHANGED",
-    "BEGIN_CAST",
-    "END_CAST",
-    "COMBAT_EVENT",
-    "HEALTH_REGEN",
-    "PLAYER_INFO",
+    // EMPTY again (2026-06-18): the live round-trip was server-ACCEPTED (report
+    // jAHXkRdzpGwxVQ1t) but the report does NOT RENDER (infinite loading, absent
+    // from the user's list). Server-accept ≠ parseable. So nothing is proven for
+    // the real bar (renders correctly), and the gate is closed until the encoded
+    // segment is confirmed to produce a working report. The encoders for
+    // STRUCTURALLY_READY_LINE_TYPES exist + are structurally tested, but
+    // "structurally valid" did NOT imply "the parser builds a report from it".
 ];
 
 /// Line types whose [`super::events`] encoder is **built and structurally tested**
@@ -332,21 +315,16 @@ mod tests {
     }
 
     #[test]
-    fn proven_combat_types_are_native_but_trial_markers_fall_back() {
-        // Post-confirmation state: a log of only proven (combat) types is Native.
-        let combat = ["0,BEGIN_LOG,123,15", "4,ZONE_CHANGED,1129,\"Hall\""];
-        assert!(
-            assess(combat).is_native(),
-            "a log of only proven types must be Native after the round-trip confirmation"
-        );
-        // A trial marker is NOT yet proven (no trial-log capture), so a log
-        // containing one still falls back — the per-log all-or-nothing gate.
-        let trial = ["0,BEGIN_LOG,123,15", "10,BEGIN_TRIAL,1,123"];
-        match assess(trial) {
+    fn empty_proven_set_means_any_real_log_falls_back() {
+        // Gate closed again (the round-trip rendered broken): nothing is proven
+        // for the real bar, so every real log falls back to the official uploader.
+        let log = ["0,BEGIN_LOG,123,15", "4,ZONE_CHANGED,1129,\"Hall\""];
+        match assess(log) {
             Coverage::Fallback { unproven } => {
-                assert!(unproven.contains(&"BEGIN_TRIAL".to_string()));
+                assert!(unproven.contains(&"BEGIN_LOG".to_string()));
+                assert!(unproven.contains(&"ZONE_CHANGED".to_string()));
             }
-            Coverage::Native => panic!("trial markers are unproven; must fall back"),
+            Coverage::Native => panic!("nothing is proven (renders); must fall back"),
         }
     }
 

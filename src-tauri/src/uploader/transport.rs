@@ -627,25 +627,15 @@ mod routing_tests {
     }
 
     #[test]
-    fn opted_in_proven_log_routes_native() {
-        // Post-confirmation (FORMAT_VERSION_CONFIRMED=true): an opted-in log whose
-        // every type is proven routes native. ZONE_CHANGED + BEGIN_LOG are in the
-        // proven set, so this is the native path.
-        let (_d, path) = temp_log("0,BEGIN_LOG,123,15\n4,ZONE_CHANGED,1129,x\n");
-        assert_eq!(assess_native_routing(&path, true), NativeRouting::Native);
-    }
-
-    #[test]
-    fn opted_in_trial_log_still_falls_back() {
-        // A trial marker is not yet proven, so even opted-in + format-confirmed,
-        // a trial log falls back with the offending type surfaced.
-        let (_d, path) = temp_log("0,BEGIN_LOG,123,15\n10,BEGIN_TRIAL,1,2\n");
-        match assess_native_routing(&path, true) {
-            NativeRouting::Fallback(NativeFallbackReason::UnprovenEvents(types)) => {
-                assert!(types.contains(&"BEGIN_TRIAL".to_string()));
-            }
-            other => panic!("expected unproven-events fallback, got {other:?}"),
-        }
+    fn opted_in_but_format_unconfirmed_falls_back() {
+        // Gate closed again (the round-trip rendered broken): FORMAT_VERSION_CONFIRMED
+        // is false, so even an opted-in user falls back. This is the honest state
+        // until a produced segment is confirmed to render a working report.
+        let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
+        assert_eq!(
+            assess_native_routing(&path, true),
+            NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed)
+        );
     }
 
     #[test]
@@ -661,19 +651,14 @@ mod routing_tests {
     }
 
     // The native-routing gate is all-or-nothing: a single unproven type forces
-    // fallback and surfaces the offending type. A future ESO patch adding a brand-
-    // new event type is the canonical case — it degrades to the official uploader
-    // rather than risking a wrong report. Use a fabricated unknown type so the test
-    // is independent of which real types are currently proven.
+    // Gate-closed safety: an opted-in upload must NOT route native while
+    // FORMAT_VERSION_CONFIRMED is false, regardless of line types. (When the gate
+    // reopens, the coverage half — unproven types force fallback with the type
+    // surfaced — is exercised via the coverage.rs unit tests.)
     #[test]
-    fn opted_in_with_unproven_events_surfaces_them() {
+    fn opted_in_does_not_route_native_while_gate_closed() {
         let (_d, path) = temp_log("0,BEGIN_LOG,1,15\n100,SOME_FUTURE_EVENT,1,2\n");
-        match assess_native_routing(&path, true) {
-            NativeRouting::Fallback(NativeFallbackReason::UnprovenEvents(types)) => {
-                assert!(types.contains(&"SOME_FUTURE_EVENT".to_string()));
-            }
-            other => panic!("an unknown event type must fall back + surface, got {other:?}"),
-        }
+        assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
     }
 
     /// A SessionProvider with a fixed cookie, for testing the native runner's
