@@ -1419,4 +1419,82 @@ mod combat_fixture {
             }
         }
     }
+
+    /// Regression guard for the per-code accuracy reached against the official
+    /// combat segment. Locks in the codes we reproduce EXACTLY and bounds the
+    /// residual codes so a change can't silently regress them. Runs only when the
+    /// (gitignored) golden pair is present locally; a no-op on a clean checkout.
+    ///
+    /// The remaining non-exact codes are documented residuals:
+    /// * 5 (+260): passive/aura buff over-mint — underdetermined from one capture.
+    /// * 1/2 split of `DAMAGE_SHIELDED`, 16's status-queued source, the 3/4 small
+    ///   deltas — context-dependent, not byte-derivable from one capture.
+    /// * 9/14/22/27/28/38 (~870 events, 1.7%): rare codes with intricate formats,
+    ///   deliberately not yet modeled.
+    /// Tighten these bounds (toward 0) as more rules are proven.
+    #[test]
+    fn per_code_counts_stay_within_known_bounds() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let raw_path = format!("{base}/../.decode-samples/combat_raw_encounter.log");
+        let off_path = format!("{base}/../.decode-samples/combat_fights_segment.txt");
+        let (Ok(raw), Ok(official)) = (
+            std::fs::read_to_string(&raw_path),
+            std::fs::read_to_string(&off_path),
+        ) else {
+            return; // golden pair not present — nothing to check.
+        };
+        let lines: Vec<&str> = raw.lines().collect();
+        let ours = build_fights_segment(&lines).expect("our segment builds");
+
+        fn code_counts(seg: &str) -> std::collections::BTreeMap<String, i64> {
+            let mut m = std::collections::BTreeMap::new();
+            for l in seg.lines().skip(2) {
+                if let Some(code) = l.split('|').nth(1) {
+                    *m.entry(code.to_string()).or_insert(0) += 1;
+                }
+            }
+            m
+        }
+        let oc = code_counts(&ours);
+        let fc = code_counts(&official);
+        let get = |m: &std::collections::BTreeMap<String, i64>, c: &str| *m.get(c).unwrap_or(&0);
+
+        // Codes reproduced EXACTLY (count delta must be 0).
+        for c in [
+            "2", "8", "10", "11", "12", "15", "19", "26", "44", "52", "53",
+        ] {
+            assert_eq!(
+                get(&oc, c),
+                get(&fc, c),
+                "code {c} must stay byte-count-exact vs the official segment"
+            );
+        }
+        // Residual codes: bound the absolute delta so it can't regress past the
+        // current best. (max |ours − official| we accept for each.)
+        let bound = |c: &str, max: i64| {
+            let d = (get(&oc, c) - get(&fc, c)).abs();
+            assert!(
+                d <= max,
+                "code {c} delta {d} exceeds the allowed bound {max} (ours {} / official {})",
+                get(&oc, c),
+                get(&fc, c)
+            );
+        };
+        bound("5", 300); // passive-aura residual (currently +260)
+        bound("6", 10); // GAINED-reset edge (currently +4)
+        bound("7", 20); // FADED edge (currently +10)
+        bound("1", 200); // DAMAGE_SHIELDED split (currently -140)
+        bound("3", 120); // (currently +88)
+        bound("4", 40); // (currently -18)
+        bound("16", 520); // status-queued cast source (currently -492)
+                          // Not-yet-modeled rare codes: bound at their full official count (we emit 0).
+        bound("9", 30);
+        bound("14", 10);
+        bound("22", 5);
+        bound("27", 30);
+        bound("28", 30);
+        bound("38", 650);
+        bound("41", 2);
+        bound("51", 2);
+    }
 }
