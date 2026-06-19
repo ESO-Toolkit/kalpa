@@ -233,7 +233,7 @@ impl EventEmitter {
         let f = split_csv_quoted_pub(line);
         let kind = f.get(1).map(|s| s.trim())?;
         let raw_ts: i64 = f.first().and_then(|s| s.trim().parse().ok())?;
-        match kind {
+        let emitted = match kind {
             "BEGIN_LOG" => {
                 self.on_begin_log(&f);
                 None
@@ -272,7 +272,16 @@ impl EventEmitter {
             "BEGIN_COMBAT" => Some(format!("{}|52|", self.seg_ts(raw_ts))),
             "END_COMBAT" => Some(format!("{}|53|", self.seg_ts(raw_ts))),
             _ => None,
+        };
+        // Anchor the timestamp base on the first line that ACTUALLY emits (a
+        // dropped line must never steal the ts-0 anchor). `seg_ts` already computed
+        // this line's ts with the provisional anchor (== the real anchor for the
+        // first emitted line), so committing here only fixes the base for the
+        // following lines.
+        if emitted.is_some() {
+            self.commit_anchor(raw_ts);
         }
+        emitted
     }
 
     /// Apply a `BEGIN_LOG`: record the session's wall-clock delta from the first
@@ -293,16 +302,32 @@ impl EventEmitter {
     }
 
     /// Segment timestamp for a raw relative ms, anchoring the first emitted event
-    /// at ts 0. The anchor is the **first event's raw ts** (not `BEGIN_LOG`'s),
-    /// captured lazily here on the first emission, so a `BEGIN_LOG@9 → first
-    /// ZONE@10` log maps that ZONE to 0 (offset −10), matching the official
-    /// segment. Subsequent sessions keep their `(wall − first_wall)` separation.
-    fn seg_ts(&mut self, raw_ts: i64) -> u64 {
+    /// at ts 0. The anchor is the **first emitted event's raw ts** (not
+    /// `BEGIN_LOG`'s), so a `BEGIN_LOG@9 → first ZONE@10` log maps that ZONE to 0
+    /// (offset −10), matching the official segment. Subsequent sessions keep their
+    /// `(wall − first_wall)` separation.
+    ///
+    /// **Pure** (`&self`): until the anchor is committed it computes the ts *as if*
+    /// `raw_ts` were the anchor (i.e. `session_wall_delta`, which is 0 for the first
+    /// session). The anchor is committed by [`Self::commit_anchor`], which `feed`
+    /// calls only AFTER a line has actually produced output — so a *dropped* line
+    /// can never steal the anchor and shift every later timestamp.
+    fn seg_ts(&self, raw_ts: i64) -> u64 {
+        let offset = match self.first_event_ts {
+            Some(_) => self.offset,
+            None => self.session_wall_delta - raw_ts,
+        };
+        segment_ts(raw_ts, offset)
+    }
+
+    /// Commit the timestamp anchor to a raw ts if not already set. Called by
+    /// [`Self::feed`] on the FIRST line that actually emits, so the anchor is the
+    /// first *emitted* event (dropped lines never anchor).
+    fn commit_anchor(&mut self, raw_ts: i64) {
         if self.first_event_ts.is_none() {
             self.first_event_ts = Some(raw_ts);
             self.offset = self.session_wall_delta - raw_ts;
         }
-        segment_ts(raw_ts, self.offset)
     }
 
     /// Apply a `UNIT_ADDED`: update the actor table, championPoints, and the
@@ -452,19 +477,19 @@ impl EventEmitter {
             }
             "UPDATED" => {
                 let prev = self.last_stack.insert(stack_key, stack.clone());
-                let changed = prev.as_deref() != Some(stack.as_str());
-                if !changed {
+                // An ORPHAN UPDATED (no prior GAINED for this instance — the effect
+                // was active before the segment window opened) is not emitted: the
+                // official segment has no record to update. Verified on the capture:
+                // dropping orphans makes code 6 exact (1050) without regressing 8/11.
+                let prev = prev?;
+                if prev == stack {
                     return None; // same-stack re-application → not emitted
                 }
                 if is_buff {
-                    // Direction: increase → 6, decrease → 8 (compare numerically).
-                    let increased = match (
-                        prev.as_deref().and_then(|p| p.parse::<i64>().ok()),
-                        stack.parse::<i64>().ok(),
-                    ) {
+                    // Direction: increase → 6, decrease → 8 (compare numerically; a
+                    // non-numeric prior is treated as an increase).
+                    let increased = match (prev.parse::<i64>().ok(), stack.parse::<i64>().ok()) {
                         (Some(p), Some(n)) => n > p,
-                        // No numeric prior (first UPDATED with no GAINED) counts as
-                        // an increase from nothing.
                         _ => true,
                     };
                     if increased {
@@ -899,6 +924,32 @@ mod tests {
         assert_eq!(STATUS_ACTION_RESULTS.len(), 13);
         assert_eq!(CODE1_ACTION_RESULTS.len(), 7);
         assert_eq!(CODE19_ACTION_RESULTS.len(), 2);
+    }
+
+    // Robustness: a DROPPED line preceding the first emitted line must NOT steal
+    // the ts-0 anchor. A DAMAGE_SHIELDED (dropped — no byte-safe tail) before the
+    // first ZONE_CHANGED must still leave that ZONE at segTs 0.
+    #[test]
+    fn dropped_line_does_not_steal_the_ts_anchor() {
+        let state = "18400/18400,9971/12868,8488/28700,198/500,0/1000,0,0.5,0.7,5.9";
+        let tgt = "40000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0";
+        // DAMAGE_SHIELDED at raw ts 7 is dropped; ZONE at raw ts 10 is the first emit.
+        let shielded =
+            format!("7,COMBAT_EVENT,DAMAGE_SHIELDED,FIRE,1,500,0,5000,100,1,{state},30,{tgt}");
+        let lines = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F",
+            &shielded,
+            "10,ZONE_CHANGED,1129,\"Hall\",NORMAL",
+        ];
+        let mut e = EventEmitter::new();
+        let out = e.build(&lines);
+        let first = out.events_string.lines().next().expect("an emitted line");
+        assert!(
+            first.starts_with("0|41|"),
+            "the first emitted event (the ZONE) must anchor at segTs 0, got: {first}"
+        );
     }
 
     // A DIED / DIED_XP COMBAT_EVENT emits a code-19 line: the combat prefix +
@@ -1461,7 +1512,7 @@ mod combat_fixture {
 
         // Codes reproduced EXACTLY (count delta must be 0).
         for c in [
-            "2", "8", "10", "11", "12", "15", "19", "26", "44", "52", "53",
+            "2", "6", "8", "10", "11", "12", "15", "19", "26", "44", "52", "53",
         ] {
             assert_eq!(
                 get(&oc, c),
@@ -1481,7 +1532,6 @@ mod combat_fixture {
             );
         };
         bound("5", 300); // passive-aura residual (currently +260)
-        bound("6", 10); // GAINED-reset edge (currently +4)
         bound("7", 20); // FADED edge (currently +10)
         bound("1", 200); // DAMAGE_SHIELDED split (currently -140)
         bound("3", 120); // (currently +88)
