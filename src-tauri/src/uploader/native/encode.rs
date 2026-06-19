@@ -270,6 +270,16 @@ impl ActorInfo {
                 icon_basename,
                 combat_flag,
             } => {
+                // The icon basename derives from the monster's later attack/damage
+                // type and is not in its UNIT_ADDED line. When we can't derive it,
+                // fall back to `death_recap_melee_basic` (the same default a working
+                // uploader uses) rather than an EMPTY field — an empty icon slot is
+                // malformed to the parser and blocks the report from rendering.
+                let icon_basename = if icon_basename.is_empty() {
+                    "death_recap_melee_basic"
+                } else {
+                    icon_basename
+                };
                 format!("{name}|{kind}|{raw_id}|{icon}|{server}|0|{icon_basename}|{combat_flag}")
             }
         }
