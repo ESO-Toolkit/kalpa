@@ -420,7 +420,17 @@ impl EventEmitter {
         // case, ~90% of UPDATED) is dropped. The new stack is the trailing field.
         let code = match change_type {
             "GAINED" => {
+                // An effect GAINED while it is ALREADY active (re-applied before it
+                // faded) does not re-emit — the official segment records one GAINED
+                // per activation, not per re-application. `last_stack` holds exactly
+                // the currently-active instances (GAINED inserts, FADED removes), so
+                // a key already present means "already active". Verified on the
+                // capture: this removes 697 spurious code-5 GAINEDs.
+                let already_active = self.last_stack.contains_key(&stack_key);
                 self.last_stack.insert(stack_key, stack.clone());
+                if already_active {
+                    return None;
+                }
                 if is_buff {
                     "5"
                 } else {
