@@ -135,6 +135,11 @@ pub struct EventEmitter {
     /// event applied by a tracked cast emits a trailing `A{castA}` linking the buff
     /// to its cast (the reference's `source_cast_index`). Set when a cast emits.
     cast_track_to_a: HashMap<String, u32>,
+    /// `castTrackId → (tupleA, src_unit, tgt_unit)` for TIMED casts (those that
+    /// emitted a code-15 CastWithCastTime). A later `END_CAST COMPLETED` for that id
+    /// emits a thin code-16 `Cast` line reusing the original cast's tuple A + units.
+    /// Only timed casts are recorded (instant casts already emitted their code-16).
+    timed_cast: HashMap<String, (u32, String, String)>,
     /// Per-unit last-seen shield pool (`unit_id → shield`). A buff GAINED carries a
     /// trailing shield magnitude only when the unit's shield *changed* from this
     /// stored value (the reference's `shield_values` history): `source_shield`/
@@ -325,6 +330,7 @@ impl EventEmitter {
             "HEALTH_REGEN" => self.emit_health_regen(raw_ts, &f),
             "EFFECT_CHANGED" => self.emit_effect_changed(raw_ts, &f),
             "BEGIN_CAST" => self.emit_begin_cast(raw_ts, &f),
+            "END_CAST" => self.emit_end_cast(raw_ts, &f),
             "COMBAT_EVENT" => self.emit_combat_event(raw_ts, &f),
             // Combat boundaries: codes 52/53 are a bare `{segTs}|52|` / `{segTs}|53|`
             // (a single trailing empty field). Verified 1:1 with BEGIN/END_COMBAT
@@ -702,6 +708,19 @@ impl EventEmitter {
                 self.cast_track_to_a
                     .insert(cast_track_id.to_string(), cast_ability_index);
             }
+            // A TIMED cast (code 15) WITH A PRESENT TARGET gets a thin code-16 line
+            // when it later completes (END_CAST COMPLETED). Record its units so that
+            // line can reuse this cast's tuple/units. A cast with an absent target
+            // (own-side mask 32) emits no completion — verified: the golden sample's
+            // timed casts all target `*` and produce zero completions, and on the
+            // full capture this gate lands 502 vs the official 494. Instant casts
+            // (16) need no record either.
+            if code == "15" && self.own_side(&tgt_unit) != "32" {
+                self.timed_cast.insert(
+                    cast_track_id.to_string(),
+                    (a, src_unit.clone(), tgt_unit.clone()),
+                );
+            }
         }
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
@@ -721,6 +740,32 @@ impl EventEmitter {
             line.push_str(&format!("|T{t_block}"));
         }
         Some(line)
+    }
+
+    /// Emit a thin code-16 `Cast` line for a COMPLETED `END_CAST` of a TIMED cast.
+    /// A timed cast (one that emitted a code-15 `CastWithCastTime` at BEGIN_CAST)
+    /// produces a second, thin line when it finishes:
+    /// `{ts}|16|{A.inst}|{srcMask}|{tgtMask}` — reusing the original cast's tuple
+    /// (same src/tgt/ability) and own-side masks, with NO state blocks. Layout:
+    /// `<ts>,END_CAST,<endReason>,<abilityCastId>,...`. Only `COMPLETED` of a
+    /// recorded timed cast emits; PLAYER_CANCELLED / INTERRUPTED do not.
+    fn emit_end_cast(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
+        let end_reason = f.get(2)?.trim();
+        if end_reason != "COMPLETED" {
+            return None;
+        }
+        let cast_track_id = f.get(3)?.trim();
+        // Reuse the original BEGIN_CAST's tuple A + units (the reference reuses its
+        // buff_event verbatim — no new tuple is allocated for the completion line).
+        let (a, src_unit, tgt_unit) = self.timed_cast.get(cast_track_id)?.clone();
+        let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
+        let sub = self
+            .actors
+            .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
+        Some(format!(
+            "{ts}|16|{sub}|{src_mask}|{tgt_mask}",
+            ts = self.seg_ts(raw_ts),
+        ))
     }
 
     /// Resolve a cast/combat target's unit id + state, folding the `*` self-target
