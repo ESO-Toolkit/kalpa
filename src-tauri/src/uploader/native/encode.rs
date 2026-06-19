@@ -164,12 +164,19 @@ pub enum ActorInfo {
     /// A monster / NPC / pet.
     Monster {
         name: String,
-        /// 2 = hostile/boss/summon, 3 = player pet/companion.
+        /// The record's REACTION field: 1 = PLAYER_ALLY, 3 = NPC_ALLY (pet/
+        /// companion), 2 = hostile/friendly/neutral. (Field 2 of the record.)
         kind: u8,
         raw_id: String,
         icon: String,
         icon_basename: String,
         combat_flag: String,
+        /// Whether the raw `UNIT_ADDED` marked this unit a boss (`isBoss == T`).
+        /// Drives the record's CLASS field (boss → 100).
+        is_boss: bool,
+        /// The raw `ownerUnitId` (0 = no owner). A non-zero owner makes this a pet
+        /// (class → 50).
+        owner_unit_id: String,
     },
 }
 
@@ -205,24 +212,32 @@ impl ActorInfo {
                 })
             }
             "MONSTER" | "OBJECT" => {
-                // 45,MONSTER,F,0,125729,F,0,0,"Name","",0,50,160,0,HOSTILE,F
-                // [0]unit [1]MONSTER [2]? [3]? [4]rawId [6]icon [7]? [8]name
-                // [12]combatFlag — verified against chunk1 monster record.
+                // UNIT_ADDED tail (after `<ts>,UNIT_ADDED,`):
+                // [0]unitId [1]type [2]isLocal [3]perSessionId [4]monsterId
+                // [5]isBoss [6]classId [7]raceId [8]name [9]displayName [10]charId
+                // [11]level [12]championPoints [13]ownerUnitId [14]reaction
+                // [15]isGrouped.
                 let name = unquote(f.get(8)?).to_string();
-                // kind 2 = hostile/boss/summon. Player pets/companions render as
-                // kind 3, but distinguishing them needs ownership info not yet
-                // decoded; until then everything is 2 and the missing-basename gap
-                // (below) keeps monster-bearing logs on fallback anyway.
+                // The record's reaction field: PLAYER_ALLY→1, NPC_ALLY→3, else→2
+                // (hostile/friendly/neutral). The CLASS field is decided by the
+                // record renderer from is_boss/owner (boss=100, pet=50, object=0).
+                let reaction = match f.get(14).map(|s| s.trim()) {
+                    Some("PLAYER_ALLY") => 1,
+                    Some("NPC_ALLY") => 3,
+                    _ => 2,
+                };
                 Some(ActorInfo::Monster {
                     name,
-                    kind: 2,
+                    kind: reaction,
                     raw_id: f.get(4)?.trim().to_string(),
                     icon: f.get(6)?.trim().to_string(),
                     // icon_basename derives from the monster's later attack/damage
-                    // type (NOT in UNIT_ADDED) — left empty until that correlation
-                    // is encoded; the coverage gate keeps such logs on fallback.
+                    // type (NOT in UNIT_ADDED) — defaulted to death_recap_melee_basic
+                    // by the record renderer when empty.
                     icon_basename: String::new(),
                     combat_flag: f.get(12)?.trim().to_string(),
+                    is_boss: f.get(5).map(|s| s.trim()) == Some("T"),
+                    owner_unit_id: f.get(13).map(|s| s.trim().to_string()).unwrap_or_default(),
                 })
             }
             _ => None,
@@ -233,9 +248,17 @@ impl ActorInfo {
     /// (drives the player role `1000000 + index`); `server` is the session's
     /// `BEGIN_LOG` server (quoted); `begin_wall` is that session's `BEGIN_LOG`
     /// wall-clock ms (used to synthesize an anonymized player's id =
-    /// `begin_wall + reg_offset`). Verified byte-exact against named-player,
+    /// `begin_wall + reg_offset`). `owner_is_player` is whether this unit's owner
+    /// resolved to a player (only player-owned monsters are pets → class 50;
+    /// monster summons are class 0). Verified byte-exact against named-player,
     /// anonymized-player, and monster records.
-    pub fn to_master_record(&self, index: usize, server: &str, begin_wall: u64) -> String {
+    pub fn to_master_record(
+        &self,
+        index: usize,
+        server: &str,
+        begin_wall: u64,
+        owner_is_player: bool,
+    ) -> String {
         match self {
             ActorInfo::Player {
                 is_local,
@@ -266,21 +289,42 @@ impl ActorInfo {
                 name,
                 kind,
                 raw_id,
-                icon,
+                icon: _,
                 icon_basename,
                 combat_flag,
+                is_boss,
+                owner_unit_id,
             } => {
-                // The icon basename derives from the monster's later attack/damage
-                // type and is not in its UNIT_ADDED line. When we can't derive it,
-                // fall back to `death_recap_melee_basic` (the same default a working
-                // uploader uses) rather than an EMPTY field — an empty icon slot is
-                // malformed to the parser and blocks the report from rendering.
+                // Record: `name | reaction | monsterId | class | server | 0 |
+                // iconBasename | championPoints`.
+                //  * reaction (`kind`): 1 PLAYER_ALLY / 3 NPC_ALLY / 2 other; a
+                //    PLAYER-owned unit (a pet/companion) is forced to 3.
+                //  * class: boss → 100, PLAYER-owned (pet) → 50, else → 0.
+                //    A monster-owned summon (owner is not a player) is class 0.
+                let is_pet = owner_is_player && !owner_unit_id.is_empty() && owner_unit_id != "0";
+                let class = if *is_boss {
+                    100
+                } else if is_pet {
+                    50
+                } else {
+                    0
+                };
+                let kind = if is_pet { 3 } else { *kind };
+                // An OBJECT (raw monsterId 0 — a door, ward, challenge marker, …)
+                // has no real id or icon: the record uses `1000000 + actorIndex` as
+                // its id and a literal `nil` icon. A real monster uses its monsterId
+                // and a death-recap icon basename (defaulted when not yet derived —
+                // an EMPTY icon slot is malformed and blocks rendering).
+                if raw_id == "0" {
+                    let obj_id = 1_000_000 + index as u64;
+                    return format!("{name}|{kind}|{obj_id}|{class}|{server}|0|nil|{combat_flag}");
+                }
                 let icon_basename = if icon_basename.is_empty() {
                     "death_recap_melee_basic"
                 } else {
                     icon_basename
                 };
-                format!("{name}|{kind}|{raw_id}|{icon}|{server}|0|{icon_basename}|{combat_flag}")
+                format!("{name}|{kind}|{raw_id}|{class}|{server}|0|{icon_basename}|{combat_flag}")
             }
         }
     }
@@ -426,6 +470,9 @@ pub fn build_master_table(lines: &[&str]) -> Option<String> {
     // The deduped actor identities in actor order (so the tuple/pet second pass
     // can map an identity back to its 1-based actor index).
     let mut identity_order: Vec<String> = Vec::new();
+    // Live raw unit id → is-player, to resolve whether a monster's owner is a
+    // player (a player-owned unit is a pet → class 50 / reaction 3).
+    let mut unit_is_player: std::collections::HashMap<String, bool> = Default::default();
     // ability id → (record, f6); order tracked separately for stable indices.
     let mut ability_order: Vec<String> = Vec::new();
     let mut ability_seen: std::collections::BTreeSet<String> = Default::default();
@@ -450,13 +497,35 @@ pub fn build_master_table(lines: &[&str]) -> Option<String> {
             }
             "UNIT_ADDED" => {
                 if let Some(actor) = ActorInfo::parse(rest) {
+                    // Track this unit's is-player status (for resolving whether a
+                    // later unit's owner is a player → a pet). Keyed on the raw unit
+                    // id (recycled, but the latest binding is what an owner ref
+                    // resolves against at add time).
+                    let f = split_csv_quoted_pub(rest);
+                    if let Some(unit_id) = f.first().map(|s| s.trim().to_string()) {
+                        unit_is_player.insert(unit_id, matches!(actor, ActorInfo::Player { .. }));
+                    }
+                    // A monster's owner (UNIT_ADDED tail [13]) is a player?
+                    let owner_is_player = match &actor {
+                        ActorInfo::Monster { owner_unit_id, .. }
+                            if !owner_unit_id.is_empty() && owner_unit_id != "0" =>
+                        {
+                            unit_is_player.get(owner_unit_id).copied().unwrap_or(false)
+                        }
+                        _ => false,
+                    };
                     // Dedup by identity across sessions; the 1-based master index
                     // (assigned on first insert) drives the player role.
                     let identity = actor.identity();
                     if actor_seen.insert(identity.clone()) {
                         let srv = server.clone().unwrap_or_default();
                         let index = actors.len() + 1;
-                        actors.push(actor.to_master_record(index, &srv, begin_wall));
+                        actors.push(actor.to_master_record(
+                            index,
+                            &srv,
+                            begin_wall,
+                            owner_is_player,
+                        ));
                         identity_order.push(identity);
                     }
                 }
@@ -1353,7 +1422,7 @@ mod tests {
         let actor = ActorInfo::parse(rest).expect("parse UNIT_ADDED");
         // sample BEGIN_LOG wall = 1780641553946 (named player → unused for id).
         assert_eq!(
-            actor.to_master_record(1, server, 1780641553946),
+            actor.to_master_record(1, server, 1780641553946, false),
             expected,
             "actor record must be byte-exact vs the golden master table"
         );
@@ -1401,7 +1470,7 @@ mod tests {
                 }
                 if seen.insert(actor.identity()) {
                     let idx = ours.len() + 1;
-                    ours.push(actor.to_master_record(idx, server, begin_wall));
+                    ours.push(actor.to_master_record(idx, server, begin_wall, false));
                 }
             }
         }
