@@ -1,83 +1,36 @@
-# New-session prompt — finish the native ESO Logs uploader
+# Native uploader — what's left
 
-Copy the block below as the opening message of a fresh **ultracode** session in the
-`log-uploader` worktree.
+The native ESO Logs uploader is **built end-to-end** and gated off. The auth/login,
+opt-in, UI, and the fights-segment **events encoder** are all implemented, tested,
+and committed on `feat/log-uploader`. See `native-uploader-next-steps.md` for the
+full state.
+
+**The only thing left is an owner-run live round-trip** to prove the server accepts
+a Kalpa-produced segment, then flipping the gate. It cannot be done autonomously
+(needs a signed-in session + a live POST). The exact procedure is in
+`native-uploader-next-steps.md` → "5. Confirm + flip the gate". In short:
+
+1. `npm run tauri dev`, sign in via the in-app ESO Logs login (the uploader's
+   logged-out state now has a direct sign-in; the upload-session login command is
+   `uploader_login_esologs`).
+2. Enable "Upload logs directly" in Settings (accept the disclosure).
+3. Temporarily flip `format::FORMAT_VERSION_CONFIRMED = true` and add the
+   structurally-ready types to `coverage::PROVEN_LINE_TYPES` so routing chooses
+   native, then upload a SHORT real combat log to a **test** report. The native path
+   is already wired (`transport::run_native_upload` → `events::build_native_payload`
+   → `client::NativeUpload::upload_finished`).
+4. If ESO Logs accepts + renders it → keep the gate flip (commit it) and treat the
+   `differential.rs` byte-diff as a quality metric, not a ship gate. If not, revert
+   the flip (the gate stays closed = zero corruption) and debug the segment against
+   the captured golden pair.
 
 ---
 
-```
-ultracode
+## If resuming the encoder (only if the round-trip reveals gaps)
 
-Finish the native ESO Logs uploader in Kalpa (Tauri/Rust + React), branch
-feat/log-uploader = PR #157, worktree .claude/worktrees/log-uploader. This is a
-deep, in-progress effort — DO NOT restart or re-decode. FIRST read these IN FULL:
-  - docs/native-uploader-next-steps.md  (the authoritative handoff: strategic
-    facts, what's built, the remaining seams in order, gotchas)
-  - memory note uploader-native-format-facts.md  (protocol + decode state)
-  - memory note uploader-native-auth-probe-result.md  (auth context)
-
-GROUND TRUTH (already decided/verified — do not relitigate):
-- GOAL = fully NATIVE upload: Kalpa POSTs directly to esologs.com/desktop-client/*;
-  NEVER spawn the official GUI uploader. The "handoff/fallback" transport is a
-  temporary scaffold, not the end state.
-- Byte-exact subordinal-A is NOT required. The working reference uploader uploads a
-  valid-but-different segment and the server re-parses + accepts it. Our encoder
-  (engine_v4 in gitignored .decode-samples/) already emits a valid segment. Do NOT
-  grind byte-exact A — it is off the critical path.
-- AUTH = embedded webview showing esologs.com's REAL login page (no password form in
-  Kalpa; Kalpa reads the laravel_session cookie from its OWN webview's cookie jar —
-  works because Kalpa owns that webview; an external browser / esotk proxy CANNOT,
-  blocked by HttpOnly cross-origin/process isolation). This is the chosen approach.
-- CLEAN-ROOM: build from protocol FACTS only (endpoints, multipart field names,
-  version constants). NEVER read/port/name the reference project's conversion code.
-
-ALREADY DONE + pushed (commits b69275b → 83fbf48, all CI-green, 266 lib tests):
-- session.rs StoredSessionProvider (cookie + encrypted persist via token_store,
-  invalidate on 401, store() returns durability bool).
-- client.rs full wire-send (create-report JSON via serde, multipart add-segment +
-  set-master-table, cookie header, 401/419 re-auth-retry, empty-input reject,
-  best-effort terminate_report on ANY post-create error, no silent truncation).
-- token_store generic fail-closed chunked storage + upload_session API.
-- format.rs CLIENT_VERSION; reqwest multipart feature; AuthUser.sessionPersisted
-  surfaced to the UI (warnIfSessionNotPersisted toast).
-- Hardened through 6 adversarial-review rounds. Native path is still GATED
-  (FORMAT_VERSION_CONFIRMED=false, native_opt_in hardcoded false) → zero behavior
-  change today, no corruption risk.
-
-YOUR TASK — complete the remaining seams IN ORDER (see the handoff doc §3-6 + 4b):
-1. WEBVIEW LOGIN COMMAND: a Tauri command that opens a WebviewWindow at esologs.com's
-   login, and after login reads laravel_session from THAT webview's cookie jar, then
-   calls StoredSessionProvider::store(). VERIFY the exact Tauri v2/wry cookie API
-   first (WebviewWindow::cookies()/cookies_for_url() — confirm the Cargo.toml tauri
-   version supports it); do NOT build blind. Build to compiles-clean; this needs a
-   real login to fully test (have me run it).
-2. NATIVE TRANSPORT: a Transport impl wired into select_transport's Native arm that
-   runs the converter (convert→encode→serialize) per fight → Segment +
-   MasterTableBytes, ZIP-deflates each segment (single log.txt entry, zip crate
-   DEFLATE-9), and calls NativeUpload::upload_finished. Behind opt-in; keep the
-   handoff fallback. Add a test proving an eligible opted-in log bypasses the
-   official uploader.
-3. OPT-IN + DISCLOSURE: drive native_opt_in from a persisted Settings toggle; add a
-   one-time honest ToS-risk disclosure (default OFF). (Operator okayed RE; still
-   disclose to users.)
-4b. LOGGED-OUT UPLOADER SIGN-IN: the uploader's logged-out state currently points to
-   Settings, which has no auth_login control. Add a direct sign-in action (call
-   onAuthChange + warnIfSessionNotPersisted on success). See uploader-workspace.tsx.
-5. CONFIRM + FLIP THE GATE: with the above done, do ONE real upload of a short combat
-   log to a test report. If the server accepts it and the report renders correctly →
-   flip FORMAT_VERSION_CONFIRMED=true and change the coverage gate from
-   "byte-exact-or-fallback" to "structurally-valid + server-accepts" (the byte-diff
-   becomes a quality metric, not a ship gate).
-
-CONSTRAINTS: keep CI green (cargo test + clippy -D warnings + fmt + npm run check +
-cargo audit + npm audit --omit=dev). Stage files by name, conventional commits, no AI
-attribution. Machine disk runs ~100% full — if builds fail with os error 112 /
-LNK1318, run `rm -rf src-tauri/target/debug/incremental`. .gitattributes pins
-testdata/** to LF. Never edit package-lock.json. Outward actions (running the live
-login, the real upload round-trip, flipping the gate) need me present — build/test
-autonomously, then hand me the one-line command to run.
-
-Use workflows where the work fans out (e.g. verifying the wry cookie API across
-versions, or a final adversarial review pass). Run /codex:adversarial-review in a
-loop after each seam until clean.
-```
+The events encoder lives in `src-tauri/src/uploader/native/events.rs` (+
+`zip_segment.rs`). Read `uploader-encoder-built.md` and `uploader-native-format-facts.md`
+first. Byte-exact `A` is **not** required (the server re-parses; A only needs to be
+internally consistent). The Python decode prototypes in `.decode-samples/`
+(`engine_v4.py` etc.) are the spec for routing/mint logic — they are OUR research
+scripts (fine to port); never read/port the reference project's conversion code.

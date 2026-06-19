@@ -128,8 +128,8 @@ export function AppDialogs({
       {activeDialog === "log-upload" && (
         <UploaderWorkspace
           authUser={authUser}
+          onAuthChange={onAuthChange}
           onClose={onCloseDialog}
-          onOpenSettings={() => onShowDialog("settings")}
         />
       )}
     </Suspense>

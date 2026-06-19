@@ -204,6 +204,15 @@ pub fn run() {
         )))
         .manage(PendingUpdates(Arc::new(Mutex::new(HashMap::new()))))
         .manage(uploader::commands::UploaderState::default())
+        // The native upload session provider, shared between the in-app login
+        // (which captures the esologs cookie) and the upload path (which reads
+        // it). `new()` rehydrates any cookie persisted on a prior run. Wrapped in
+        // an `Arc` so the (blocking) native upload can clone an owned handle into
+        // `spawn_blocking` while the login/status commands borrow it — all sharing
+        // the one instance (so a mid-upload `invalidate` reaches the login path).
+        .manage(std::sync::Arc::new(
+            uploader::native::session::StoredSessionProvider::new(),
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
@@ -307,9 +316,17 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Hide to tray instead of closing
-                let _ = window.hide();
-                api.prevent_close();
+                // Hide-to-tray applies ONLY to the main app window. Auxiliary
+                // windows (e.g. the "esologs-login" sign-in webview) must close
+                // normally — intercepting their close would leave them hidden but
+                // alive, breaking flows that create a window, wait for the user to
+                // finish, then close it (the login flow detects a user cancel by
+                // the window disappearing, and closes the window itself on
+                // success). Only "main" hides to tray; everything else closes.
+                if window.label() == "main" {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -414,6 +431,9 @@ pub fn run() {
             uploader::commands::uploader_preflight,
             uploader::commands::uploader_split_to_disk,
             uploader::commands::uploader_transport_info,
+            uploader::commands::uploader_login_esologs,
+            uploader::commands::uploader_has_session,
+            uploader::commands::uploader_logout_esologs,
             uploader::commands::uploader_upload_log,
             uploader::commands::uploader_start_live,
             uploader::commands::uploader_stop_live,

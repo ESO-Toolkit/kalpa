@@ -323,6 +323,53 @@ pub fn uploader_transport_info() -> TransportInfo {
     }
 }
 
+// ── Native upload session (in-app ESO Logs login) ────────────────────────────
+
+/// Open the in-app ESO Logs sign-in window and capture the upload-session cookie.
+///
+/// This establishes the **website session** the native `/desktop-client/*`
+/// uploader authenticates with (a different credential from the OAuth API token
+/// used for Pack Hub). The user logs in on ESO Logs' own page inside a webview
+/// Kalpa owns; on success the `laravel_session` cookie is read from that
+/// webview's jar and persisted via the shared [`StoredSessionProvider`].
+///
+/// Returns an [`UploadLoginResult`] whose `sessionPersisted` mirrors
+/// `AuthUser.sessionPersisted`, so the frontend can reuse the same memory-only
+/// warning. `async` is required: the cookie read deadlocks the WebView2 if run on
+/// a synchronous command thread (see `native::login`).
+#[tauri::command]
+pub async fn uploader_login_esologs(
+    app: tauri::AppHandle,
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
+) -> Result<super::native::login::UploadLoginResult, String> {
+    // State derefs through the Arc to the provider; `run_login` takes
+    // `&StoredSessionProvider`.
+    super::native::login::run_login(app, &session)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Whether a native upload session cookie is currently available (signed in for
+/// uploads). Does not prove the server still accepts it — only that one is
+/// present without prompting a fresh login.
+#[tauri::command]
+pub fn uploader_has_session(
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
+) -> bool {
+    session.has_session()
+}
+
+/// Clear the native upload session cookie (sign out of uploads), both in memory
+/// and from the credential store.
+#[tauri::command]
+pub fn uploader_logout_esologs(
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
+) -> Result<(), String> {
+    use super::native::session::SessionProvider;
+    session.invalidate();
+    Ok(())
+}
+
 // ── Manual upload / handoff ─────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
@@ -340,14 +387,26 @@ pub struct UploadDispatch {
 /// `fight_count` is supplied by the UI from the preflight it already ran, so we
 /// don't re-scan a multi-GB log just to fill the history record. If omitted
 /// (`None`) we fall back to a scan.
+// Each parameter is a distinct injected dependency (app, allowed, session) or
+// required user input — they cannot be meaningfully grouped (mirrors
+// `uploader_start_live`).
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn uploader_upload_log(
     app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
     file_path: String,
     options: UploadOptions,
     prefer_cli: bool,
     fight_count: Option<usize>,
+    // Whether the user has opted into Kalpa's direct (native) upload (the
+    // Settings toggle, gated behind a ToS disclosure). `Option` so an
+    // older/omitting caller deserializes to `None` (treated as `false`) and never
+    // enables native by accident. Native still only runs when the coverage gate
+    // ALSO allows it (`FORMAT_VERSION_CONFIRMED` + proven event types), so today
+    // this changes the observable routing reason but not the actual transport.
+    native_opt_in: Option<bool>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
     // Reconcile prior-run stale records before this upload writes its transient
@@ -417,28 +476,43 @@ pub async fn uploader_upload_log(
     // resolves to the official path — wiring it now keeps behavior unchanged
     // while making the safe-routing decision real and observable.
     //
-    // `native_opt_in` is reserved for the §6 Settings toggle; until that ships it
-    // is effectively false (we read it from options when present).
-    let native_opt_in = false;
-    match transport::assess_native_routing(&dispatch_path, native_opt_in) {
-        transport::NativeRouting::Native => {
-            // Reserved: once FORMAT_VERSION_CONFIRMED is flipped and the native
-            // client's wire-send lands, this is where the native upload runs. The
-            // gate keeps this arm unreachable until then, so enabling native is a
-            // localized change here rather than a scattered one.
-        }
-        transport::NativeRouting::Fallback(reason) => {
-            // Honest diagnostics: why native wasn't used. Logged only (not
-            // user-facing noise) until the native path is enabled.
-            eprintln!("[uploader] native routing → official: {}", reason.explain());
-        }
+    // Driven by the Settings opt-in toggle (passed from the frontend). Absent →
+    // false. The coverage gate (`assess_native_routing`) still independently
+    // requires `FORMAT_VERSION_CONFIRMED` + fully-proven event coverage, so an
+    // opted-in user today still routes to the official uploader — only the logged
+    // routing reason changes (NotOptedIn → FormatUnconfirmed).
+    let native_opt_in = native_opt_in.unwrap_or(false);
+    let routing = transport::assess_native_routing(&dispatch_path, native_opt_in);
+    let use_native = matches!(routing, transport::NativeRouting::Native);
+    if let transport::NativeRouting::Fallback(reason) = &routing {
+        // Honest diagnostics: why native wasn't used. Logged only (not user-facing
+        // noise). Today the gate always lands here (FORMAT_VERSION_CONFIRMED=false).
+        eprintln!("[uploader] native routing → official: {}", reason.explain());
     }
 
-    let outcome = tokio::task::spawn_blocking(move || {
-        transport::select_transport(prefer_cli).upload_file(&dispatch_path, &opts)
-    })
-    .await
-    .map_err(|e| format!("Task failed: {e}"))?;
+    let outcome = if use_native {
+        // Native path: build the payload + drive the report lifecycle in-process,
+        // using the shared (managed) session provider so a mid-upload `invalidate`
+        // is visible to the login path. A fresh cancel flag scopes this upload.
+        // TODO(manual-stop): this flag is never set today — a one-shot manual
+        // upload has no Stop UI (unlike live mode, which wires its cancel into
+        // `LiveSlot`/`stop_slot_in_map`). The per-segment cancellation in
+        // `upload_finished` is therefore inert here. If a manual-upload Stop button
+        // is added, lift this flag into managed state keyed by `record_id`.
+        let provider = std::sync::Arc::clone(&session);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        tokio::task::spawn_blocking(move || {
+            transport::run_native_upload(&dispatch_path, &opts, provider.as_ref(), cancel)
+        })
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+    } else {
+        tokio::task::spawn_blocking(move || {
+            transport::select_transport(prefer_cli).upload_file(&dispatch_path, &opts)
+        })
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+    };
 
     match outcome {
         Ok(transport::UploadOutcome::HandedOff { detail }) => {

@@ -32,7 +32,8 @@ import { Input } from "@/components/ui/input";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
-import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
+import { getSetting } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
 import {
@@ -57,8 +58,8 @@ import { FightList, rowsFromLive, rowsFromSummaries } from "./fight-list";
 
 interface UploaderWorkspaceProps {
   authUser: AuthUser | null;
+  onAuthChange: (user: AuthUser | null) => void;
   onClose: () => void;
-  onOpenSettings: () => void;
 }
 
 type Mode = "manual" | "live";
@@ -121,7 +122,7 @@ function loadSavedOptions(): UploadOptions {
   }
 }
 
-export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: UploaderWorkspaceProps) {
+export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderWorkspaceProps) {
   const [mode, setMode] = useState<Mode>("manual");
   const [detection, setDetection] = useState<LogPathDetection | null>(null);
   const [logsDir, setLogsDir] = useState<string | null>(null);
@@ -334,6 +335,10 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
     if (!selectedLog) return;
     setUploading(true);
     try {
+      // Read the opt-in fresh per upload so toggling it in Settings takes effect
+      // without reopening the uploader. The backend's coverage gate still has the
+      // final say (today it always falls back to the official uploader).
+      const nativeOptIn = await getSetting<boolean>("nativeUploadOptIn", false);
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
         filePath: selectedLog,
         options,
@@ -341,6 +346,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
         // Reuse the preflight's count so the backend doesn't re-scan a multi-GB
         // log just to fill the history record.
         fightCount: preflight?.totalFights ?? null,
+        nativeOptIn,
       });
       if (dispatch.report) {
         toast.success("Upload complete — report ready.");
@@ -641,7 +647,7 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
         </DialogHeader>
 
         {!isLoggedIn ? (
-          <LoggedOut onOpenSettings={onOpenSettings} />
+          <LoggedOut onAuthChange={onAuthChange} />
         ) : (
           // -mr-2 pr-2 keeps the scrollbar off the content's right edge; pt-4
           // restores the gap the header used to provide via the grid.
@@ -771,7 +777,26 @@ export function UploaderWorkspace({ authUser, onClose, onOpenSettings }: Uploade
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
-function LoggedOut({ onOpenSettings }: { onOpenSettings: () => void }) {
+function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => void }) {
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  // Inline sign-in, matching the Pack Create / My Packs pattern. Previously this
+  // pointed the user to Settings, which has no sign-in control — a dead end. The
+  // uploader is the most common first entry point, so sign in right here.
+  const handleLogin = async () => {
+    setLoggingIn(true);
+    try {
+      const user = await invokeOrThrow<AuthUser>("auth_login");
+      onAuthChange(user);
+      toast.success(`Signed in as ${user.userName}`);
+      warnIfSessionNotPersisted(user);
+    } catch (e) {
+      toast.error(`Sign in failed: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setLoggingIn(false);
+    }
+  };
+
   return (
     <div className="flex flex-col items-center gap-4 py-8 text-center">
       <div className="flex size-14 items-center justify-center rounded-full bg-[#c4a44a]/10">
@@ -784,7 +809,9 @@ function LoggedOut({ onOpenSettings }: { onOpenSettings: () => void }) {
           Pack Hub — no extra password needed.
         </p>
       </div>
-      <Button onClick={onOpenSettings}>Open Settings to sign in</Button>
+      <Button onClick={handleLogin} disabled={loggingIn}>
+        {loggingIn ? "Opening sign-in…" : "Sign in to ESO Logs"}
+      </Button>
     </div>
   );
 }

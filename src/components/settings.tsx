@@ -86,10 +86,13 @@ export function Settings({
   const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
+  const [nativeUpload, setNativeUpload] = useState(false);
+  const [nativeUploadDisclosureOpen, setNativeUploadDisclosureOpen] = useState(false);
 
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
     void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) => setWarnEsoRunning(!s));
+    void getSetting<boolean>("nativeUploadOptIn", false).then(setNativeUpload);
     void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
       setConflictPolicy
     );
@@ -210,391 +213,497 @@ export function Settings({
   const pathDirty = path.trim() !== addonsPath;
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-xl h-[70vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Logo size={18} className="text-[#4dc2e6]" />
-            Settings
-          </DialogTitle>
-        </DialogHeader>
+    <>
+      <Dialog open onOpenChange={(open) => !open && onClose()}>
+        <DialogContent className="sm:max-w-xl h-[70vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Logo size={18} className="text-[#4dc2e6]" />
+              Settings
+            </DialogTitle>
+          </DialogHeader>
 
-        {/* Tab bar */}
-        <div className="relative flex gap-1 rounded-lg bg-white/[0.03] border border-white/[0.04] p-1">
-          {tabs.map((tab) => {
-            const Icon = tab.icon;
-            const active = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id)}
-                className={`relative z-10 flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${
-                  active
-                    ? "text-white"
-                    : "text-muted-foreground hover:text-white/70 hover:bg-white/[0.03]"
-                }`}
-              >
-                {active && (
-                  <motion.span
-                    layoutId="settings-tab-indicator"
-                    className="absolute inset-0 rounded-md bg-white/[0.08] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.04)]"
-                    transition={{ type: "spring", stiffness: 400, damping: 30 }}
-                  />
-                )}
-                <span className="relative z-10 flex items-center gap-1.5">
-                  <Icon className="size-3.5" />
-                  {tab.label}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Tab content */}
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <AnimatePresence mode="wait">
-            {activeTab === "general" && (
-              <motion.div
-                key={activeTab}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.08 }}
-                className="space-y-3"
-              >
-                {/* Path configuration */}
-                <GlassPanel variant="subtle" className="p-3 space-y-3">
-                  <SectionHeader>AddOns Folder</SectionHeader>
-                  <Input
-                    id="addons-path"
-                    value={path}
-                    onChange={(e) => setPath(e.target.value)}
-                    placeholder="C:\Users\...\Elder Scrolls Online\live\AddOns"
-                    autoFocus
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleSave();
-                    }}
-                  />
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={handleBrowse}>
-                      <FolderSearch className="size-3.5" />
-                      Browse
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={redetecting}
-                      onClick={handleRedetect}
-                    >
-                      <RefreshCw className={`size-3.5 ${redetecting ? "animate-spin" : ""}`} />
-                      {redetecting ? "Detecting..." : "Re-detect"}
-                    </Button>
-                    {pathDirty && (
-                      <Button size="sm" onClick={handleSave} className="ml-auto">
-                        <Sparkles className="size-3.5" />
-                        Apply
-                      </Button>
-                    )}
-                  </div>
-
-                  {/* Instance picker — shown after re-detect finds multiple folders */}
-                  {redetectedInstances && redetectedInstances.length > 1 && (
-                    <Fade>
-                      <div className="space-y-1.5">
-                        <p className="text-xs text-muted-foreground">Select an instance:</p>
-                        {redetectedInstances.map((inst) => (
-                          <button
-                            key={inst.id}
-                            type="button"
-                            className="flex w-full items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-left text-xs text-white/80 transition-all duration-150 hover:border-white/[0.12] hover:bg-white/[0.04]"
-                            onClick={() => {
-                              setPath(inst.addonsPath);
-                              setRedetectedInstances(null);
-                            }}
-                          >
-                            <Monitor className="size-3.5 text-muted-foreground shrink-0" />
-                            <span className="font-medium">{inst.displayLabel}</span>
-                            <span className="text-muted-foreground">
-                              {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </Fade>
-                  )}
-
-                  {/* Quick-switch between already-known instances */}
-                  {knownInstances.length > 1 && !redetectedInstances && (
-                    <div className="space-y-1.5">
-                      <p className="text-xs text-muted-foreground">Switch instance:</p>
-                      {knownInstances.map((inst) => {
-                        const isActive = inst.addonsPath === addonsPath;
-                        return (
-                          <button
-                            key={inst.id}
-                            type="button"
-                            className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
-                              isActive
-                                ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
-                                : "border-white/[0.06] bg-white/[0.02] text-white/80 hover:border-white/[0.12] hover:bg-white/[0.04]"
-                            }`}
-                            onClick={() => {
-                              if (!isActive) {
-                                setPath(inst.addonsPath);
-                              }
-                            }}
-                          >
-                            <Monitor className="size-3.5 shrink-0 text-muted-foreground" />
-                            <span className="font-medium">{inst.displayLabel}</span>
-                            <span className="text-muted-foreground">
-                              {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
-                            </span>
-                            {isActive && (
-                              <span className="ml-auto text-[10px] font-semibold uppercase tracking-wider text-sky-400">
-                                active
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </GlassPanel>
-
-                {/* Auto-update */}
-                <GlassPanel variant="subtle" className="p-3">
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <Checkbox
-                      checked={autoUpdate}
-                      onCheckedChange={(checked) => {
-                        const value = checked === true;
-                        setAutoUpdate(value);
-                        setSetting("autoUpdate", value);
-                      }}
+          {/* Tab bar */}
+          <div className="relative flex gap-1 rounded-lg bg-white/[0.03] border border-white/[0.04] p-1">
+            {tabs.map((tab) => {
+              const Icon = tab.icon;
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`relative z-10 flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${
+                    active
+                      ? "text-white"
+                      : "text-muted-foreground hover:text-white/70 hover:bg-white/[0.03]"
+                  }`}
+                >
+                  {active && (
+                    <motion.span
+                      layoutId="settings-tab-indicator"
+                      className="absolute inset-0 rounded-md bg-white/[0.08] shadow-[0_1px_3px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.04)]"
+                      transition={{ type: "spring", stiffness: 400, damping: 30 }}
                     />
-                    <div>
-                      <p className="text-sm font-medium text-white/90">Auto-update on launch</p>
-                      <p className="text-xs text-muted-foreground">
-                        Automatically update all addons when Kalpa starts
-                      </p>
-                    </div>
-                  </label>
-                </GlassPanel>
-
-                {/* Warn when ESO is running */}
-                <GlassPanel variant="subtle" className="p-3">
-                  <label className="flex items-center gap-3 cursor-pointer">
-                    <Checkbox
-                      checked={warnEsoRunning}
-                      onCheckedChange={(checked) => {
-                        const value = checked === true;
-                        setWarnEsoRunning(value);
-                        setSetting("suppressEsoRunningWarning", !value);
-                      }}
-                    />
-                    <div>
-                      <p className="text-sm font-medium text-white/90">Warn when ESO is running</p>
-                      <p className="text-xs text-muted-foreground">
-                        Remind me to /reloadui after changing addons while the game is open
-                      </p>
-                    </div>
-                  </label>
-                </GlassPanel>
-
-                {/* Conflict policy */}
-                <GlassPanel variant="subtle" className="p-3 space-y-2">
-                  <SectionHeader>When your edited files conflict with an update</SectionHeader>
-                  {(
-                    [
-                      ["ask", "Ask me each time"],
-                      ["keep_mine", "Always keep my version"],
-                      ["take_update", "Always take the update (back up my files)"],
-                    ] as const
-                  ).map(([value, label]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className="flex items-center gap-3 cursor-pointer w-full text-left"
-                      onClick={() => {
-                        setConflictPolicy(value);
-                        void setSetting("conflictPolicy", value);
-                      }}
-                    >
-                      <span
-                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
-                          conflictPolicy === value
-                            ? "border-[#c4a44a] bg-[#c4a44a]/20"
-                            : "border-white/20 bg-white/[0.03]"
-                        }`}
-                      >
-                        {conflictPolicy === value && (
-                          <span className="h-2 w-2 rounded-full bg-[#c4a44a]" />
-                        )}
-                      </span>
-                      <span className="text-sm text-white/80">{label}</span>
-                    </button>
-                  ))}
-                </GlassPanel>
-              </motion.div>
-            )}
-
-            {activeTab === "tools" && (
-              <motion.div
-                key={activeTab}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.08 }}
-                className="space-y-2"
-              >
-                <ToolItem
-                  icon={Archive}
-                  label="Backup & Restore"
-                  description="Save and recover your addon settings"
-                  onClick={onShowBackups}
-                />
-                <ToolItem
-                  icon={Users}
-                  label="Characters"
-                  description="View and manage your ESO characters"
-                  onClick={onShowCharacters}
-                />
-                <ToolItem
-                  icon={ShieldCheck}
-                  label="API Compatibility"
-                  description="Check addons against current API version"
-                  onClick={onShowApiCompat}
-                />
-                <ToolItem
-                  icon={ArrowDownToLine}
-                  label="Check for App Updates"
-                  description="See if a newer version of Kalpa is available"
-                  onClick={onCheckForAppUpdate}
-                />
-                {minionDetected && (
-                  <ToolItem
-                    icon={Sparkles}
-                    label="Minion Migration"
-                    description="Import tracking data from Minion with backup and preview"
-                    onClick={onShowMigrationWizard}
-                    accent="gold"
-                  />
-                )}
-                <ToolItem
-                  icon={Shield}
-                  label="Safety Center"
-                  description="Snapshots, integrity checks, and operation log"
-                  onClick={onShowSafetyCenter}
-                />
-              </motion.div>
-            )}
-
-            {activeTab === "data" && (
-              <motion.div
-                key={activeTab}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.08 }}
-                className="space-y-3"
-              >
-                <GlassPanel variant="subtle" className="p-3 space-y-3">
-                  <SectionHeader>Addon List Backup</SectionHeader>
-                  <p className="text-xs text-muted-foreground">
-                    Export your tracked addon list to clipboard, or import from a previously
-                    exported list to restore on a new machine.
-                  </p>
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={handleExport}>
-                      <ClipboardCopy className="size-3.5" />
-                      Export to Clipboard
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={handleImport} disabled={importing}>
-                      <ClipboardPaste className="size-3.5" />
-                      {importing ? "Importing..." : "Import from Clipboard"}
-                    </Button>
-                  </div>
-                  {exportStatus && <p className="text-xs text-emerald-400">{exportStatus}</p>}
-                  {importError && (
-                    <Alert variant="destructive" className="mt-1">
-                      {importError}
-                    </Alert>
                   )}
-                  {importResult && (
-                    <div className="space-y-2">
-                      {importResult.installed.length > 0 && (
-                        <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] p-2 text-xs text-emerald-400">
-                          Installed: {importResult.installed.join(", ")}
-                        </div>
-                      )}
-                      {importResult.skipped.length > 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          Already installed: {importResult.skipped.join(", ")}
-                        </p>
-                      )}
-                      {importResult.failed.length > 0 && (
-                        <Alert variant="destructive">
-                          Failed:{" "}
-                          {importResult.failed
-                            .map((f) =>
-                              importResult.errors?.[f] ? `${f} (${importResult.errors[f]})` : f
-                            )
-                            .join(", ")}
-                        </Alert>
-                      )}
-                    </div>
-                  )}
-                </GlassPanel>
+                  <span className="relative z-10 flex items-center gap-1.5">
+                    <Icon className="size-3.5" />
+                    {tab.label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
 
-                {authUser && (
+          {/* Tab content */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <AnimatePresence mode="wait">
+              {activeTab === "general" && (
+                <motion.div
+                  key={activeTab}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.08 }}
+                  className="space-y-3"
+                >
+                  {/* Path configuration */}
                   <GlassPanel variant="subtle" className="p-3 space-y-3">
-                    <SectionHeader>Pack Hub Data</SectionHeader>
-                    <p className="text-xs text-muted-foreground">
-                      Permanently delete all your data from the Pack Hub, including packs, votes,
-                      and share codes. This cannot be undone.
-                    </p>
-                    {!deleteConfirmOpen ? (
+                    <SectionHeader>AddOns Folder</SectionHeader>
+                    <Input
+                      id="addons-path"
+                      value={path}
+                      onChange={(e) => setPath(e.target.value)}
+                      placeholder="C:\Users\...\Elder Scrolls Online\live\AddOns"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleSave();
+                      }}
+                    />
+                    <div className="flex gap-2">
+                      <Button variant="outline" size="sm" onClick={handleBrowse}>
+                        <FolderSearch className="size-3.5" />
+                        Browse
+                      </Button>
                       <Button
                         variant="outline"
                         size="sm"
-                        className="border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
-                        onClick={() => setDeleteConfirmOpen(true)}
+                        disabled={redetecting}
+                        onClick={handleRedetect}
                       >
-                        <Trash2 className="size-3.5" />
-                        Delete My Pack Hub Data
+                        <RefreshCw className={`size-3.5 ${redetecting ? "animate-spin" : ""}`} />
+                        {redetecting ? "Detecting..." : "Re-detect"}
                       </Button>
-                    ) : (
-                      <div className="space-y-2 rounded-lg border border-red-500/20 bg-red-500/[0.04] p-3">
-                        <p className="text-xs font-medium text-red-400">
-                          Are you sure? This will permanently delete all your packs, votes, and
-                          share codes. You will also be signed out.
-                        </p>
-                        <div className="flex gap-2">
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            disabled={deletingAccount}
-                            onClick={handleDeleteAccount}
-                          >
-                            {deletingAccount ? "Deleting..." : "Yes, delete everything"}
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={deletingAccount}
-                            onClick={() => setDeleteConfirmOpen(false)}
-                          >
-                            Cancel
-                          </Button>
+                      {pathDirty && (
+                        <Button size="sm" onClick={handleSave} className="ml-auto">
+                          <Sparkles className="size-3.5" />
+                          Apply
+                        </Button>
+                      )}
+                    </div>
+
+                    {/* Instance picker — shown after re-detect finds multiple folders */}
+                    {redetectedInstances && redetectedInstances.length > 1 && (
+                      <Fade>
+                        <div className="space-y-1.5">
+                          <p className="text-xs text-muted-foreground">Select an instance:</p>
+                          {redetectedInstances.map((inst) => (
+                            <button
+                              key={inst.id}
+                              type="button"
+                              className="flex w-full items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-left text-xs text-white/80 transition-all duration-150 hover:border-white/[0.12] hover:bg-white/[0.04]"
+                              onClick={() => {
+                                setPath(inst.addonsPath);
+                                setRedetectedInstances(null);
+                              }}
+                            >
+                              <Monitor className="size-3.5 text-muted-foreground shrink-0" />
+                              <span className="font-medium">{inst.displayLabel}</span>
+                              <span className="text-muted-foreground">
+                                {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
+                              </span>
+                            </button>
+                          ))}
                         </div>
+                      </Fade>
+                    )}
+
+                    {/* Quick-switch between already-known instances */}
+                    {knownInstances.length > 1 && !redetectedInstances && (
+                      <div className="space-y-1.5">
+                        <p className="text-xs text-muted-foreground">Switch instance:</p>
+                        {knownInstances.map((inst) => {
+                          const isActive = inst.addonsPath === addonsPath;
+                          return (
+                            <button
+                              key={inst.id}
+                              type="button"
+                              className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
+                                isActive
+                                  ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
+                                  : "border-white/[0.06] bg-white/[0.02] text-white/80 hover:border-white/[0.12] hover:bg-white/[0.04]"
+                              }`}
+                              onClick={() => {
+                                if (!isActive) {
+                                  setPath(inst.addonsPath);
+                                }
+                              }}
+                            >
+                              <Monitor className="size-3.5 shrink-0 text-muted-foreground" />
+                              <span className="font-medium">{inst.displayLabel}</span>
+                              <span className="text-muted-foreground">
+                                {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
+                              </span>
+                              {isActive && (
+                                <span className="ml-auto text-[10px] font-semibold uppercase tracking-wider text-sky-400">
+                                  active
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </GlassPanel>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
+
+                  {/* Auto-update */}
+                  <GlassPanel variant="subtle" className="p-3">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <Checkbox
+                        checked={autoUpdate}
+                        onCheckedChange={(checked) => {
+                          const value = checked === true;
+                          setAutoUpdate(value);
+                          setSetting("autoUpdate", value);
+                        }}
+                      />
+                      <div>
+                        <p className="text-sm font-medium text-white/90">Auto-update on launch</p>
+                        <p className="text-xs text-muted-foreground">
+                          Automatically update all addons when Kalpa starts
+                        </p>
+                      </div>
+                    </label>
+                  </GlassPanel>
+
+                  {/* Warn when ESO is running */}
+                  <GlassPanel variant="subtle" className="p-3">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <Checkbox
+                        checked={warnEsoRunning}
+                        onCheckedChange={(checked) => {
+                          const value = checked === true;
+                          setWarnEsoRunning(value);
+                          setSetting("suppressEsoRunningWarning", !value);
+                        }}
+                      />
+                      <div>
+                        <p className="text-sm font-medium text-white/90">
+                          Warn when ESO is running
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Remind me to /reloadui after changing addons while the game is open
+                        </p>
+                      </div>
+                    </label>
+                  </GlassPanel>
+
+                  {/* Direct (native) log upload — experimental, opt-in, ToS-gated.
+                    Enabling shows a disclosure first; disabling is immediate. */}
+                  <GlassPanel variant="subtle" className="p-3">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <Checkbox
+                        checked={nativeUpload}
+                        onCheckedChange={(checked) => {
+                          const value = checked === true;
+                          if (value) {
+                            // Require the disclosure before enabling.
+                            setNativeUploadDisclosureOpen(true);
+                          } else {
+                            setNativeUpload(false);
+                            void setSetting("nativeUploadOptIn", false);
+                          }
+                        }}
+                      />
+                      <div>
+                        <p className="text-sm font-medium text-white/90">
+                          Upload logs directly{" "}
+                          <span className="ml-1 rounded bg-[#c4a44a]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#c4a44a]">
+                            Experimental
+                          </span>
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Send logs to ESO Logs from Kalpa instead of the official uploader. Uses an
+                          unofficial method — see the disclosure when you enable it.
+                        </p>
+                      </div>
+                    </label>
+                  </GlassPanel>
+
+                  {/* Conflict policy */}
+                  <GlassPanel variant="subtle" className="p-3 space-y-2">
+                    <SectionHeader>When your edited files conflict with an update</SectionHeader>
+                    {(
+                      [
+                        ["ask", "Ask me each time"],
+                        ["keep_mine", "Always keep my version"],
+                        ["take_update", "Always take the update (back up my files)"],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className="flex items-center gap-3 cursor-pointer w-full text-left"
+                        onClick={() => {
+                          setConflictPolicy(value);
+                          void setSetting("conflictPolicy", value);
+                        }}
+                      >
+                        <span
+                          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                            conflictPolicy === value
+                              ? "border-[#c4a44a] bg-[#c4a44a]/20"
+                              : "border-white/20 bg-white/[0.03]"
+                          }`}
+                        >
+                          {conflictPolicy === value && (
+                            <span className="h-2 w-2 rounded-full bg-[#c4a44a]" />
+                          )}
+                        </span>
+                        <span className="text-sm text-white/80">{label}</span>
+                      </button>
+                    ))}
+                  </GlassPanel>
+                </motion.div>
+              )}
+
+              {activeTab === "tools" && (
+                <motion.div
+                  key={activeTab}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.08 }}
+                  className="space-y-2"
+                >
+                  <ToolItem
+                    icon={Archive}
+                    label="Backup & Restore"
+                    description="Save and recover your addon settings"
+                    onClick={onShowBackups}
+                  />
+                  <ToolItem
+                    icon={Users}
+                    label="Characters"
+                    description="View and manage your ESO characters"
+                    onClick={onShowCharacters}
+                  />
+                  <ToolItem
+                    icon={ShieldCheck}
+                    label="API Compatibility"
+                    description="Check addons against current API version"
+                    onClick={onShowApiCompat}
+                  />
+                  <ToolItem
+                    icon={ArrowDownToLine}
+                    label="Check for App Updates"
+                    description="See if a newer version of Kalpa is available"
+                    onClick={onCheckForAppUpdate}
+                  />
+                  {minionDetected && (
+                    <ToolItem
+                      icon={Sparkles}
+                      label="Minion Migration"
+                      description="Import tracking data from Minion with backup and preview"
+                      onClick={onShowMigrationWizard}
+                      accent="gold"
+                    />
+                  )}
+                  <ToolItem
+                    icon={Shield}
+                    label="Safety Center"
+                    description="Snapshots, integrity checks, and operation log"
+                    onClick={onShowSafetyCenter}
+                  />
+                </motion.div>
+              )}
+
+              {activeTab === "data" && (
+                <motion.div
+                  key={activeTab}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.08 }}
+                  className="space-y-3"
+                >
+                  <GlassPanel variant="subtle" className="p-3 space-y-3">
+                    <SectionHeader>Addon List Backup</SectionHeader>
+                    <p className="text-xs text-muted-foreground">
+                      Export your tracked addon list to clipboard, or import from a previously
+                      exported list to restore on a new machine.
+                    </p>
+                    <div className="flex gap-2">
+                      <Button variant="outline" size="sm" onClick={handleExport}>
+                        <ClipboardCopy className="size-3.5" />
+                        Export to Clipboard
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleImport}
+                        disabled={importing}
+                      >
+                        <ClipboardPaste className="size-3.5" />
+                        {importing ? "Importing..." : "Import from Clipboard"}
+                      </Button>
+                    </div>
+                    {exportStatus && <p className="text-xs text-emerald-400">{exportStatus}</p>}
+                    {importError && (
+                      <Alert variant="destructive" className="mt-1">
+                        {importError}
+                      </Alert>
+                    )}
+                    {importResult && (
+                      <div className="space-y-2">
+                        {importResult.installed.length > 0 && (
+                          <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] p-2 text-xs text-emerald-400">
+                            Installed: {importResult.installed.join(", ")}
+                          </div>
+                        )}
+                        {importResult.skipped.length > 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            Already installed: {importResult.skipped.join(", ")}
+                          </p>
+                        )}
+                        {importResult.failed.length > 0 && (
+                          <Alert variant="destructive">
+                            Failed:{" "}
+                            {importResult.failed
+                              .map((f) =>
+                                importResult.errors?.[f] ? `${f} (${importResult.errors[f]})` : f
+                              )
+                              .join(", ")}
+                          </Alert>
+                        )}
+                      </div>
+                    )}
+                  </GlassPanel>
+
+                  {authUser && (
+                    <GlassPanel variant="subtle" className="p-3 space-y-3">
+                      <SectionHeader>Pack Hub Data</SectionHeader>
+                      <p className="text-xs text-muted-foreground">
+                        Permanently delete all your data from the Pack Hub, including packs, votes,
+                        and share codes. This cannot be undone.
+                      </p>
+                      {!deleteConfirmOpen ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
+                          onClick={() => setDeleteConfirmOpen(true)}
+                        >
+                          <Trash2 className="size-3.5" />
+                          Delete My Pack Hub Data
+                        </Button>
+                      ) : (
+                        <div className="space-y-2 rounded-lg border border-red-500/20 bg-red-500/[0.04] p-3">
+                          <p className="text-xs font-medium text-red-400">
+                            Are you sure? This will permanently delete all your packs, votes, and
+                            share codes. You will also be signed out.
+                          </p>
+                          <div className="flex gap-2">
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              disabled={deletingAccount}
+                              onClick={handleDeleteAccount}
+                            >
+                              {deletingAccount ? "Deleting..." : "Yes, delete everything"}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={deletingAccount}
+                              onClick={() => setDeleteConfirmOpen(false)}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </GlassPanel>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <NativeUploadDisclosure
+        open={nativeUploadDisclosureOpen}
+        onOpenChange={setNativeUploadDisclosureOpen}
+        onAccept={() => {
+          setNativeUpload(true);
+          void setSetting("nativeUploadOptIn", true);
+          setNativeUploadDisclosureOpen(false);
+          toast.success("Direct upload enabled.");
+        }}
+      />
+    </>
+  );
+}
+
+/// One-time, honest disclosure shown before enabling direct (native) upload.
+/// Direct upload talks to ESO Logs' private desktop-client endpoints — a
+/// reverse-engineered method the site operator has okayed but which is not an
+/// officially supported integration. We default it OFF and require an explicit
+/// accept so the user makes an informed choice; the official uploader remains the
+/// default and the always-available fallback.
+function NativeUploadDisclosure({
+  open,
+  onOpenChange,
+  onAccept,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onAccept: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Enable direct upload?</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-sm text-muted-foreground">
+          <p>
+            Direct upload sends your logs to ESO Logs straight from Kalpa, instead of opening the
+            official ESO Logs uploader. It's faster and keeps everything in one window.
+          </p>
+          <p>
+            It works by talking to ESO Logs' uploader endpoints directly — an{" "}
+            <span className="font-medium text-white/90">unofficial method</span>. The ESO Logs
+            operator has said this is fine, but it isn't an officially supported integration, so it
+            could stop working if ESO Logs changes how their uploader works.
+          </p>
+          <p>
+            Kalpa only uses direct upload for logs it can encode with full accuracy; anything else
+            automatically falls back to the official uploader, so a report is never uploaded
+            incorrectly. You can turn this off any time.
+          </p>
+          <p className="text-xs">
+            This is still being rolled out. Until your logs are fully supported, Kalpa keeps using
+            the official uploader even with this on — so for now, turning it on may not change
+            anything yet.
+          </p>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={onAccept}>Enable direct upload</Button>
         </div>
       </DialogContent>
     </Dialog>
