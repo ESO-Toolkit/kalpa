@@ -413,6 +413,9 @@ pub fn build_master_table(lines: &[&str]) -> Option<String> {
     // re-added in a later session is one actor), matching the golden master
     // table which lists each distinct actor once.
     let mut actor_seen: std::collections::BTreeSet<String> = Default::default();
+    // The deduped actor identities in actor order (so the tuple/pet second pass
+    // can map an identity back to its 1-based actor index).
+    let mut identity_order: Vec<String> = Vec::new();
     // ability id → (record, f6); order tracked separately for stable indices.
     let mut ability_order: Vec<String> = Vec::new();
     let mut ability_seen: std::collections::BTreeSet<String> = Default::default();
@@ -439,10 +442,12 @@ pub fn build_master_table(lines: &[&str]) -> Option<String> {
                 if let Some(actor) = ActorInfo::parse(rest) {
                     // Dedup by identity across sessions; the 1-based master index
                     // (assigned on first insert) drives the player role.
-                    if actor_seen.insert(actor.identity()) {
+                    let identity = actor.identity();
+                    if actor_seen.insert(identity.clone()) {
                         let srv = server.clone().unwrap_or_default();
                         let index = actors.len() + 1;
                         actors.push(actor.to_master_record(index, &srv, begin_wall));
+                        identity_order.push(identity);
                     }
                 }
             }
@@ -465,6 +470,30 @@ pub fn build_master_table(lines: &[&str]) -> Option<String> {
     }
 
     let log_version = log_version?;
+
+    // Build the index maps the tuple/pet sections need:
+    //   identity → 1-based actor index, abilityId → 1-based ability index.
+    let identity_to_actor: std::collections::HashMap<String, u32> = identity_order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i as u32 + 1))
+        .collect();
+    let mut ability_to_index: std::collections::HashMap<String, u32> = ability_order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i as u32 + 1))
+        .collect();
+    // abilityId "0" → ability index 0 (e.g. SOUL_GEM_RESURRECTION_ACCEPTED).
+    ability_to_index.insert("0".to_string(), 0);
+
+    // Second pass: the TUPLE and PET sections. Tuples are the distinct
+    // `(srcActorIndex, tgtActorIndex, abilityIndex)` triples referenced by the
+    // registering combat/effect/cast events; pets are `(petActorIndex,
+    // ownerActorIndex)` for player-owned units. Both need a TIME-AWARE
+    // `unitId → actorIndex` live map (unit ids are recycled, so a global lookup
+    // mis-pairs).
+    let (tuples, pets) = build_tuples_and_pets(lines, &identity_to_actor, &ability_to_index);
+
     // Render sections.
     let actors_string = join_lines(&actors);
     let abilities_string = join_lines(
@@ -473,13 +502,8 @@ pub fn build_master_table(lines: &[&str]) -> Option<String> {
             .map(|(r, _)| r.clone())
             .collect::<Vec<_>>(),
     );
-    let tuples: Vec<String> = ability_order
-        .iter()
-        .zip(ability_recs.iter())
-        .enumerate()
-        .map(|(i, (id, (_, f6)))| tuple_record(i + 1, *f6, effect_ids.contains(id)))
-        .collect();
     let tuples_string = join_lines(&tuples);
+    let pets_string = join_lines(&pets);
 
     let doc = MasterTableDoc {
         log_version: &log_version,
@@ -491,10 +515,148 @@ pub fn build_master_table(lines: &[&str]) -> Option<String> {
         abilities_string: &abilities_string,
         last_assigned_tuple_id: tuples.len() as u64,
         tuples_string: &tuples_string,
-        last_assigned_pet_id: 0,
-        pets_string: "",
+        last_assigned_pet_id: pets.len() as u64,
+        pets_string: &pets_string,
     };
     Some(doc.render())
+}
+
+/// Build the master-table TUPLE and PET sections via a time-aware second pass.
+///
+/// A **tuple** is a distinct `{srcActorIndex}|{tgtActorIndex}|{abilityIndex}`
+/// triple referenced by a registering event (a `COMBAT_EVENT`/`EFFECT_CHANGED`/
+/// `BEGIN_CAST`). The actor indices come from the live `unitId → actorIndex` map
+/// (set on `UNIT_ADDED`, cleared on `UNIT_REMOVED` — unit ids are recycled, so the
+/// map must be time-aware). `0` is "unknown/no actor". A self-target (`*`) sets
+/// `tgt = src`; a `0` target is "no target"; a triple with both sides unknown, or a
+/// `COMBAT_EVENT` whose result never landed, is not registered.
+///
+/// A **pet** is `{petActorIndex}|{ownerActorIndex}` for a `UNIT_ADDED` whose owner
+/// resolves (via the same live map) to a player-side actor.
+///
+/// Returns `(tuples, pets)` as ordered, de-duplicated record lists.
+fn build_tuples_and_pets(
+    lines: &[&str],
+    identity_to_actor: &std::collections::HashMap<String, u32>,
+    ability_to_index: &std::collections::HashMap<String, u32>,
+) -> (Vec<String>, Vec<String>) {
+    // Live unitId → (actorIndex, is_player). Set on UNIT_ADDED, cleared on REMOVE.
+    let mut live: std::collections::HashMap<String, (u32, bool)> = Default::default();
+    let mut tuple_seen: std::collections::HashSet<(u32, u32, u32)> = Default::default();
+    let mut tuples: Vec<String> = Vec::new();
+    let mut pet_seen: std::collections::HashSet<(u32, u32)> = Default::default();
+    let mut pets: Vec<String> = Vec::new();
+
+    for line in lines {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            continue;
+        };
+        match kind {
+            "UNIT_ADDED" => {
+                let rest = line.splitn(3, ',').nth(2).unwrap_or("");
+                let Some(actor) = ActorInfo::parse(rest) else {
+                    continue;
+                };
+                let identity = actor.identity();
+                let Some(&idx) = identity_to_actor.get(&identity) else {
+                    continue;
+                };
+                let is_player = matches!(actor, ActorInfo::Player { .. });
+                let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) else {
+                    continue;
+                };
+                // Pet: a UNIT_ADDED whose owner resolves to a player-side actor.
+                // ownerUnitId is the field before the reaction (UNIT_ADDED tail
+                // index 13 → absolute 15).
+                if let Some(owner) = f.get(15).map(|s| s.trim()) {
+                    if owner != "0" && !owner.is_empty() {
+                        if let Some(&(owner_idx, owner_is_player)) = live.get(owner) {
+                            if owner_is_player && pet_seen.insert((idx, owner_idx)) {
+                                pets.push(format!("{idx}|{owner_idx}"));
+                            }
+                        }
+                    }
+                }
+                live.insert(unit_id, (idx, is_player));
+            }
+            "UNIT_REMOVED" => {
+                if let Some(u) = f.get(2) {
+                    live.remove(u.trim());
+                }
+            }
+            "COMBAT_EVENT" | "EFFECT_CHANGED" | "BEGIN_CAST" => {
+                // Field positions differ between COMBAT_EVENT and the effect/cast
+                // lines (which share a layout).
+                let (result, ability, src, tgt) = if kind == "COMBAT_EVENT" {
+                    (
+                        f.get(2).map(|s| s.trim()).unwrap_or(""),
+                        f.get(8).map(|s| s.trim()).unwrap_or(""),
+                        f.get(9).map(|s| s.trim()).unwrap_or(""),
+                        f.get(19).map(|s| s.trim()).unwrap_or("0"),
+                    )
+                } else {
+                    (
+                        "",
+                        f.get(5).map(|s| s.trim()).unwrap_or(""),
+                        f.get(6).map(|s| s.trim()).unwrap_or(""),
+                        f.get(16).map(|s| s.trim()).unwrap_or("0"),
+                    )
+                };
+                let Some(&ci) = ability_to_index.get(ability) else {
+                    continue; // ability not in the master table → no tuple
+                };
+                let sa = live.get(src).map(|&(i, _)| i).unwrap_or(0);
+                let self_target = tgt == "*";
+                let ta = if self_target {
+                    sa
+                } else if tgt == "0" {
+                    0
+                } else {
+                    live.get(tgt).map(|&(i, _)| i).unwrap_or(0)
+                };
+                if sa == 0 && ta == 0 {
+                    continue; // both sides unknown → not registered
+                }
+                if kind == "COMBAT_EVENT" && !combat_event_registers(result, self_target) {
+                    continue;
+                }
+                if tuple_seen.insert((sa, ta, ci)) {
+                    tuples.push(format!("{sa}|{ta}|{ci}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    (tuples, pets)
+}
+
+/// Whether a `COMBAT_EVENT` registers an actor-pairing tuple. The cast that never
+/// landed (`QUEUED`/`TARGET_DEAD`/`CASTER_DEAD`/`ABILITY_ON_COOLDOWN`) and the
+/// self-targeted control/movement results do not.
+fn combat_event_registers(result: &str, self_target: bool) -> bool {
+    if matches!(
+        result,
+        "QUEUED" | "TARGET_DEAD" | "CASTER_DEAD" | "ABILITY_ON_COOLDOWN"
+    ) {
+        return false;
+    }
+    if self_target
+        && matches!(
+            result,
+            "STUNNED"
+                | "ROOTED"
+                | "FEARED"
+                | "SPRINTING"
+                | "REINCARNATING"
+                | "BAD_TARGET"
+                | "KNOCKBACK"
+                | "TARGET_OUT_OF_RANGE"
+        )
+    {
+        return false;
+    }
+    true
 }
 
 /// Join records with trailing newlines (each record on its own `\n`-terminated

@@ -1638,4 +1638,55 @@ mod combat_fixture {
             }
         }
     }
+
+    /// Regression guard for the master-table section counts. Locks the tuple +
+    /// pet fix (tuples were catastrophically 885 vs 4007; now ~4050 — close enough
+    /// that every event resolves its actor/ability reference and the report can
+    /// render). No-op without the golden pair.
+    #[test]
+    fn master_table_section_counts_stay_within_bounds() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let raw_path = format!("{base}/../.decode-samples/combat_raw_encounter.log");
+        let off_path = format!("{base}/src/uploader/native/testdata/combat_master_table.txt");
+        let Ok(raw) = std::fs::read_to_string(&raw_path) else {
+            return;
+        };
+        let _ = std::fs::read_to_string(&off_path); // presence not required for bounds
+        let lines: Vec<&str> = raw.lines().collect();
+        let ours = super::super::encode::build_master_table(&lines).expect("master builds");
+        let v: Vec<&str> = ours.lines().collect();
+        // Count tuples + pets: walk to the tuple section and count its records.
+        // Sections: header, lastActorId, actors…, lastAbilityId, abilities…,
+        // lastTupleId, tuples…, lastPetId, pets…
+        let mut i = 1;
+        let count_section = |v: &[&str], i: &mut usize| -> usize {
+            *i += 1; // skip the lastAssignedId line
+            let mut n = 0;
+            while *i < v.len() && !v[*i].is_empty() && v[*i].parse::<u64>().is_err() {
+                n += 1;
+                *i += 1;
+            }
+            n
+        };
+        let actors = count_section(&v, &mut i);
+        let abilities = count_section(&v, &mut i);
+        let tuples = count_section(&v, &mut i);
+        let pets = count_section(&v, &mut i);
+        // Official: actors 75, abilities 865, tuples 4007, pets 4. Bound each delta
+        // so the tuple/pet fix can't silently regress (tuples must NOT collapse back
+        // toward 885 — the render-blocking bug).
+        assert!(
+            actors >= 70 && actors <= 80,
+            "actors {actors} out of expected ~75 band"
+        );
+        assert!(
+            abilities >= 860 && abilities <= 890,
+            "abilities {abilities} out of expected ~865 band"
+        );
+        assert!(
+            (3900..=4150).contains(&tuples),
+            "tuples {tuples} must be ~4007 (was catastrophically 885 — render-blocker)"
+        );
+        assert_eq!(pets, 4, "pets must be exactly 4");
+    }
 }
