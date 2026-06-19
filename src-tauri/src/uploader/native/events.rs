@@ -83,7 +83,8 @@ const STATUS_ACTION_RESULTS: &[&str] = &[
     "BLOCKED",
 ];
 
-/// `actionResults` that emit a code-1 (damage) line.
+/// `actionResults` that emit a code-1 (damage) line. (`DIED`/`DIED_XP` are NOT
+/// here — a death emits a code-19 line, handled separately.)
 const CODE1_ACTION_RESULTS: &[&str] = &[
     "DAMAGE",
     "CRITICAL_DAMAGE",
@@ -91,9 +92,13 @@ const CODE1_ACTION_RESULTS: &[&str] = &[
     "IMMUNE",
     "BLOCKED_DAMAGE",
     "DODGED",
-    "DIED",
     "FALL_DAMAGE",
 ];
+
+/// `actionResults` that emit a code-19 (unit death) line. The line is the combat
+/// prefix + S + T state blocks with **no trailing crit/final tail** (the target's
+/// state shows 0 health). Verified on the capture: `DIED`/`DIED_XP` → code 19.
+const CODE19_ACTION_RESULTS: &[&str] = &["DIED", "DIED_XP"];
 
 /// A stable identity for the `A` allocation key. Coarser than the runtime unit id
 /// (which ESO reuses within a session): players key on account+char id, monsters
@@ -571,6 +576,8 @@ impl EventEmitter {
         }
         let code = if CODE1_ACTION_RESULTS.contains(&action_result) {
             "1"
+        } else if CODE19_ACTION_RESULTS.contains(&action_result) {
+            "19"
         } else if matches!(action_result, "DOT_TICK" | "DOT_TICK_CRITICAL") {
             "2"
         } else if matches!(action_result, "HEAL" | "CRITICAL_HEAL") {
@@ -615,6 +622,11 @@ impl EventEmitter {
         if tgt_mask != "32" {
             let t_block = encode_state_block(&tgt_state, &self.cp_of(&tgt_unit))?;
             line.push_str(&format!("|T{t_block}"));
+        }
+        // Code 19 (death) is the combat prefix + S + T with NO trailing tail (the
+        // target's state already shows 0 health) — emit it as-is.
+        if code == "19" {
+            return Some(line);
         }
         // Append the per-code trailing fields. If the required tail can't be
         // formed (an actionResult whose crit/final we don't model byte-safely),
@@ -885,7 +897,51 @@ mod tests {
     fn skip_and_status_sets_are_the_verified_sizes() {
         assert_eq!(SKIP_ACTION_RESULTS.len(), 15);
         assert_eq!(STATUS_ACTION_RESULTS.len(), 13);
-        assert_eq!(CODE1_ACTION_RESULTS.len(), 8);
+        assert_eq!(CODE1_ACTION_RESULTS.len(), 7);
+        assert_eq!(CODE19_ACTION_RESULTS.len(), 2);
+    }
+
+    // A DIED / DIED_XP COMBAT_EVENT emits a code-19 line: the combat prefix +
+    // S + T state blocks, with NO trailing crit/final tail (the target shows 0 HP).
+    #[test]
+    fn death_emits_code_19_without_a_tail() {
+        let state = "18400/18400,9971/12868,8488/28700,198/500,0/1000,0,0.5,0.7,5.9";
+        let dead = "0/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0";
+        let death_line =
+            format!("6,COMBAT_EVENT,DIED_XP,DISEASE,1,92,0,5000,100,1,{state},30,{dead}");
+        let lines = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F",
+            "5,ZONE_CHANGED,1129,\"Hall\",NORMAL",
+            &death_line,
+        ];
+        let mut e = EventEmitter::new();
+        let out = e.build(&lines);
+        let code19 = out
+            .events_string
+            .lines()
+            .find(|l| l.split('|').nth(1) == Some("19"))
+            .expect("DIED_XP emits a code-19 line");
+        // Combat prefix + C + S + T, ending at the T block's last field (a heading),
+        // with NO crit/final tail and NO trailing pipe.
+        assert!(
+            code19.contains("|C5000|S"),
+            "must carry C + S block: {code19}"
+        );
+        assert!(
+            code19.contains("|T0/45000"),
+            "must carry the dead T block: {code19}"
+        );
+        // The last field is the target heading (0), not a crit/final pair.
+        assert!(code19.ends_with("|0"), "no crit/final tail: {code19}");
+        // It must NOT be routed to code 1.
+        assert!(
+            !out.events_string
+                .lines()
+                .any(|l| l.split('|').nth(1) == Some("1")),
+            "a death must not emit a code-1 line"
+        );
     }
 
     #[test]
