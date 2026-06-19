@@ -11,9 +11,20 @@ Self-contained state + plan for finishing **fully-native** ESO Logs upload in Ka
    reproduce ESO Logs' exact `A` counter; it uses a simpler self-consistent index
    and users upload successfully. ESO Logs' server **re-parses** the segment and
    accepts any structurally-valid one. The old "acid 3733/3733" bar was a
-   self-imposed safety gate, stricter than reality. Our encoder (engine_v4 in
-   `.decode-samples/`) already emits a valid segment (A reproduced to 3/3803).
-   → Do NOT keep grinding byte-exact A. It is off the critical path.
+   self-imposed safety gate, stricter than reality.
+   → Do NOT keep grinding byte-exact A. It is off the critical path. The A counter
+   only needs to be **internally consistent** (dense, first-sight allocation in
+   raw-line order), not byte-identical to the official uploader's.
+
+   ⚠️ **CORRECTION (2026-06-18): a prior version of this doc claimed "Our encoder
+   (engine_v4 in `.decode-samples/`) already emits a valid segment." That is an
+   OVER-CLAIM.** `engine_v4.py` (and engine_final/engine_v3) are A-counter
+   **scorers** — they compute and score the A allocation against ground truth and
+   `print` a number; they do NOT serialize an uploadable segment (no `log.txt`,
+   no `to_wire`, no events-string assembly). And there is **no fights-segment event
+   encoder in Rust at all.** See "WHAT IS NOT BUILT" below and memory note
+   `uploader-encoder-not-built.md`. The format is well-DECODED (in Python research
+   scripts); the segment ASSEMBLY was never built. This is the real remaining work.
 
 2. **Auth = embedded webview showing ESO Logs' REAL login page.** No password
    form in Kalpa. Why not other options:
@@ -77,58 +88,106 @@ Known follow-up test gaps (need a mock transport / HTTP layer, none exists yet):
 forcing set_master_table/add_segment failures to assert terminate; the early
 `nextSegmentId:0` multi-segment case; the credential-write-failure store path.
 
-## NEXT (in order) — the remaining seams
+## DONE 2026-06-18 (the auth/login/opt-in/UI seams — committed, all green)
 
-### 3. Webview login command (the gating piece — needs the app running + a live login)
-Build a Tauri command that opens a `WebviewWindow` pointed at esologs.com's login,
-and after login reads `laravel_session` from THAT webview's cookie jar, then calls
-`StoredSessionProvider::store(cookie_header)`.
-- **Verify the exact Tauri v2 / wry cookie API first** (it's version-specific):
-  `WebviewWindow::cookies()` / `cookies_for_url()` exist in recent Tauri 2.x —
-  confirm the version in `Cargo.toml` supports it; may need a tauri feature or a
-  wry-level call. Do NOT build blind.
-- Filter to the `laravel_session` (and any XSRF cookie the upload needs) for the
-  esologs.com origin; assemble the `Cookie:` header string.
-- This CANNOT be fully tested without running `npm run tauri dev` + a real login
-  (outward-facing) — build to compiles-clean, then have the user run it once.
+These were the "plumbing around the upload." All build clean (273 lib tests,
+clippy -D warnings, fmt, npm run check) and are GATED OFF (no behavior change):
 
-### 4. NativeTransport (wire into `select_transport`)
-- New `Transport` impl in `transport.rs` that: builds `UploadOptions`, constructs
-  `NativeUpload::new(&StoredSessionProvider, &opts, cancel)`, runs the converter
-  (`convert.rs` → `encode.rs` → `serialize.rs`) to produce `Segment` +
-  `MasterTableBytes` per fight, ZIP-deflates each segment (single `log.txt` entry;
-  `zip` crate, DEFLATE-9), and calls `upload_finished`.
-- Behind the opt-in flag; keep `GuiHandoffTransport` as fallback for not-opted-in
-  / not-logged-in / errors. `assess_native_routing` already exists in transport.rs.
-- The segment bytes passed to `client.rs` must be the ZIP blob (the wire-send sends
-  them as-is in the `logfile` part) — confirm where zipping happens (serialize vs
-  transport) and do it once.
+- **Seam #1 — Webview login.** `native/login.rs`: `run_login`/`poll_for_session`
+  open a `WebviewWindow` at `esologs.com/login`, and — only once the webview has
+  navigated to an **authenticated view** (off `/login,/register,/password,/oauth`
+  on an esologs host) — read `laravel_session` via `WebviewWindow::cookies_for_url`
+  (Tauri 2.11.2, sync, returns HttpOnly cookies, off a `spawn_blocking` to avoid
+  the Windows WebView2 deadlock) and `StoredSessionProvider::store`. The auth-view
+  gate is the guard against capturing Laravel's anonymous guest session (the
+  cookie is set on `/login` load — presence ≠ logged in). Commands:
+  `uploader_login_esologs` (async) / `uploader_has_session` / `uploader_logout_esologs`.
+  `StoredSessionProvider` is now **managed Tauri state** (`lib.rs`, single shared
+  instance the login writes + the upload reads). The global `on_window_event`
+  close handler is now **label-discriminated** (`window.label() == "main"`) so the
+  login window closes instead of hide-to-tray. **Needs a live login to fully test.**
+- **Seam #4b — Uploader inline sign-in.** `uploader-workspace.tsx` `LoggedOut` now
+  does inline `auth_login` (was a dead-end "Open Settings"); `onAuthChange` threaded
+  through `app-dialogs.tsx`.
+- **Seam #3 — Opt-in + ToS disclosure.** `settings.tsx` `nativeUploadOptIn` toggle
+  + `NativeUploadDisclosure` dialog (default OFF, honest "unofficial method"
+  copy, accept-to-enable). The frontend reads it per-upload and passes `nativeOptIn`
+  to `uploader_upload_log`, which now takes `native_opt_in: Option<bool>` and drives
+  `assess_native_routing` (was hardcoded false). Still gated by
+  `FORMAT_VERSION_CONFIRMED=false`, so opted-in users still route to the official
+  uploader — only the logged routing reason changes.
 
-### 4b. Logged-out uploader sign-in path (UX gap, found in review round 7)
-The uploader's logged-out state currently tells users to open Settings to sign
-in, but there is NO `auth_login` control in Settings (the only login call sites
-are Pack Create + My Packs). A first-time user entering via the uploader is sent
-to a dead end. Fix: add a direct `auth_login` action to the uploader logged-out
-state (or a real sign-in control in Settings), calling `onAuthChange` +
-`warnIfSessionNotPersisted` on success (see `uploader-workspace.tsx:~774`).
+## DONE 2026-06-18 — the EVENTS ENCODER (seam #2) is BUILT
 
-### 5. Opt-in ToS disclosure UI (ship-blocking)
-- One-time, honest in-app disclosure: native upload uses an unofficial method;
-  default OFF; user opts in. Settings toggle drives the native_opt_in flag that
-  `assess_native_routing` reads (currently hardcoded false).
+The fights-segment events encoder — the core remaining blocker — is implemented,
+structurally tested, and committed on `feat/log-uploader`. The two locks
+(`FORMAT_VERSION_CONFIRMED=false` + empty `PROVEN_LINE_TYPES`) keep it OFF, so
+there is **zero behavior change**; only the live round-trip (#5 below) remains.
 
-### 6. Confirm + flip the gate (user-run round-trip)
-- With seams 3–5 done, do ONE real upload of a short real combat log to a test
-  report. If the server accepts it and the report renders correctly → flip
-  `FORMAT_VERSION_CONFIRMED = true` and change the coverage gate from
-  "byte-exact-or-fallback" to "structurally-valid + server-accepts" (the byte-diff
-  in `differential.rs`/`coverage.rs` becomes a QUALITY metric, not a ship gate).
+- **`native/zip_segment.rs`** — `zip_log_txt(text) -> Vec<u8>`: the `logfile`
+  envelope (single `log.txt` entry, DEFLATE-9, deterministic — fixed ZIP-epoch
+  mtime, no wall-clock read). `Segment::from_text` / `MasterTableBytes::from_text`
+  build the wire bytes from rendered text.
+- **`native/events.rs`** — `EventEmitter` walks the raw log in file order and emits
+  a structurally-valid line per code, threading the actor table, championPoints,
+  effect types and a **dense first-sight `A`** counter (keyed on the
+  `(srcIdentity, abilityId, tgtIdentity)` triple). Codes covered: 41/51 (zone/map),
+  5/7/10/12 (effect gained/faded), 15/16 (cast), 1/2/3/26 (damage/dot/heal/power),
+  44 (player info), 4 (regen), 52/53 (combat boundaries). UPDATED (6/8/11) is
+  suppressed (the official segment drops the vast majority; emit predicate
+  underivable). `build_fights_segment(lines)` frames the full segment;
+  `build_native_payload(lines)` returns the ZIP'd `(Segment, MasterTableBytes)` —
+  the single seam a `NativeTransport` calls.
+- **Two `encode.rs` byte-bugs the combat capture exposed, fixed**: zone difficulty
+  (`NONE/NORMAL/VETERAN → 0/1/2`, was hardcoded 0) and map resource-path
+  lowercasing. Plus `combat_noncode1_crit_flag` (heal/dot/power) and a public
+  `master_index_of` (code 44). `encode_state_block` now rejects a non-numeric
+  championPoints (fail-loud against field-index bugs).
+- **Validation**: reproduces the golden sample segment byte-for-byte **except the
+  optional `A` cast-ref** (deliberately omitted — not needed for validity), and
+  assembles the full ~49k-event combat capture with **zero malformed lines** (test
+  no-ops on a clean checkout since the fixture is gitignored).
+- **Adversarial review** (`/codex`-style, two workflow rounds, 50 agents): round 1
+  found + fixed a high-sev UNIT_CHANGED championPoints off-by-two and a code-44
+  coverage gap; round 2 found zero bugs. A prefix-only-tail issue (code-1 status
+  results) was caught and fixed (drop the event rather than emit a malformed line).
+
+### Coverage posture (deliberate)
+`coverage::PROVEN_LINE_TYPES` stays **empty** — the ship gate is honestly closed
+until the live round-trip proves server acceptance. `STRUCTURALLY_READY_LINE_TYPES`
++ `structural_readiness()` report what is built-and-tested-but-not-yet-confirmed
+(17 of the 20 target types; the 3 `*_TRIAL*` markers await a trial-log capture).
+
+### 5. Confirm + flip the gate (OWNER-run live round-trip — the only thing left)
+The encoder produces a candidate segment; the empirical proof is a real upload.
+Cannot be run autonomously (needs the signed-in webview session + a live POST).
+
+**Procedure for the owner:**
+1. `npm run tauri dev`, sign in via the in-app ESO Logs login (seam #1 stores the
+   `laravel_session` cookie).
+2. Pick a SHORT real combat log (a few minutes of fight).
+3. Build + upload a native payload to a **test** report. The building blocks are
+   `events::build_native_payload(&lines)` → `(Segment, MasterTableBytes)` and
+   `client::NativeUpload::new(provider, &opts, cancel).upload_finished(&[seg],
+   &[master], &progress)`. A `NativeTransport` that wires these into
+   `select_transport` behind the opt-in flag is the remaining integration glue (the
+   payload + lifecycle are both built + tested; this is plumbing, not research).
+4. If ESO Logs **accepts and renders** the report:
+   - set `format::FORMAT_VERSION_CONFIRMED = true`, and
+   - copy the confirmed subset of `STRUCTURALLY_READY_LINE_TYPES` into
+     `PROVEN_LINE_TYPES` (the gate is all-or-nothing per log).
+   - `differential.rs`'s byte-diff becomes a QUALITY metric, not the ship gate.
+5. If it is rejected, the server's error pinpoints the wrong field — the encoder is
+   structured per-code (`events::emit_*`) so a fix is localized; re-test.
 
 ## Gotchas / environment
 
-- **Machine disk is 100% full** (~1.5G free on C:). Builds may fail with `os error
-  112` / linker `LNK1318`. Reclaim: `rm -rf src-tauri/target/debug/incremental`
-  (safe, regenerates) or `cargo sweep --time 30`. Don't clean outside the worktree.
+- **Machine disk runs near-full** (C: was at ~900M free this session). Builds may
+  fail with `os error 112` / linker `LNK1318`. Reclaim: `rm -rf
+  src-tauri/target/debug/incremental` (safe, regenerates). NOTE: the **main repo's**
+  `src-tauri/target/debug/incremental` (a separate checkout, ~700M) is the bigger
+  reclaim — clearing both regenerable incremental caches freed ~750M this session.
+  `cargo sweep --time 30` found nothing stale (all artifacts recent).
 - `.gitattributes` pins `testdata/**` to LF — CRLF breaks byte-exact tests.
 - Never edit `package-lock.json` (it shows modified from before this session —
   not ours). `Cargo.lock` IS ours to commit.
@@ -138,6 +197,7 @@ state (or a real sign-in control in Settings), calling `onAuthChange` +
 
 ## Key files
 - `src-tauri/src/uploader/native/{session,client,format,serialize,convert,encode,
-  coverage,differential,transport}.rs`
+  events,zip_segment,coverage,differential,login}.rs`
+- `src-tauri/src/uploader/transport.rs` (`assess_native_routing` — the routing seam)
 - `src-tauri/src/token_store.rs`
 - Reference (facts only): sheumais/logs `cli/src/esologs_{convert,format}.rs`.
