@@ -131,6 +131,22 @@ pub struct EventEmitter {
     /// effects).
     tuple_to_index: HashMap<(u32, u32, u32), u32>,
     tuple_order: Vec<(u32, u32, u32)>,
+    /// `castTrackId → the tuple A of the BEGIN_CAST that opened it`. An effect
+    /// event applied by a tracked cast emits a trailing `A{castA}` linking the buff
+    /// to its cast (the reference's `source_cast_index`). Set when a cast emits.
+    cast_track_to_a: HashMap<String, u32>,
+    /// Per-unit last-seen shield pool (`unit_id → shield`). A buff GAINED carries a
+    /// trailing shield magnitude only when the unit's shield *changed* from this
+    /// stored value (the reference's `shield_values` history): `source_shield`/
+    /// `target_shield` are the new values iff they differ from what was stored,
+    /// else 0. The display then emits the trailing iff one is non-zero AND they
+    /// differ from each other.
+    shield_values: HashMap<String, u32>,
+    /// Whether we are inside a BEGIN_COMBAT/END_COMBAT window. A damage-class
+    /// COMBAT_EVENT outside combat allocates NO tuple (the only pre-allocation skip
+    /// the parser applies); every other combat event allocates its tuple regardless
+    /// of whether its line is emitted.
+    in_combat: bool,
     /// The current session's segment-timestamp offset (`segTs = rawTs + offset`).
     offset: i64,
     /// Whether the first `BEGIN_LOG` has been seen (anchors `first_wall`).
@@ -313,8 +329,14 @@ impl EventEmitter {
             // Combat boundaries: codes 52/53 are a bare `{segTs}|52|` / `{segTs}|53|`
             // (a single trailing empty field). Verified 1:1 with BEGIN/END_COMBAT
             // counts in the capture. No subordinal/mask/state — pure markers.
-            "BEGIN_COMBAT" => Some(format!("{}|52|", self.seg_ts(raw_ts))),
-            "END_COMBAT" => Some(format!("{}|53|", self.seg_ts(raw_ts))),
+            "BEGIN_COMBAT" => {
+                self.in_combat = true;
+                Some(format!("{}|52|", self.seg_ts(raw_ts)))
+            }
+            "END_COMBAT" => {
+                self.in_combat = false;
+                Some(format!("{}|53|", self.seg_ts(raw_ts)))
+            }
             _ => None,
         };
         // Anchor the timestamp base on the first line that ACTUALLY emits (a
@@ -431,8 +453,11 @@ impl EventEmitter {
         let state: Vec<&str> = f.get(4..13)?.iter().map(|s| s.trim()).collect();
         let cp = self.cp_of(&unit_id);
         let block = encode_state_block(&state, &cp)?;
-        // HEALTH_REGEN has no abilityId; its tuple is (unit, unit, 0).
-        let a = self.alloc_for(&unit_id, "0", &unit_id);
+        // HEALTH_REGEN has no abilityId of its own — the parser models it as the
+        // synthetic HEALTH_RECOVERY buff (id 61322, spliced into the master ability
+        // table). Its tuple is (unit, unit, indexOf(61322)), NOT (unit,unit,0). Using
+        // 0 here put every regen at ability-index 0, desyncing the whole tuple table.
+        let a = self.alloc_for(&unit_id, "61322", &unit_id);
         // Self-target (src == tgt): both masks are the unit's own side, S == T.
         let (src_mask, tgt_mask) = self.masks(&unit_id, &unit_id);
         let sub = self
@@ -453,6 +478,7 @@ impl EventEmitter {
     fn emit_effect_changed(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
         let change_type = f.get(2)?.trim();
         let stack = f.get(3)?.trim().to_string();
+        let cast_track_id = f.get(4)?.trim().to_string();
         let ability = f.get(5)?.trim().to_string();
         let src_unit = f.get(6)?.trim().to_string();
         let tgt_field = f.get(16).map(|s| s.trim()).unwrap_or("0");
@@ -461,6 +487,19 @@ impl EventEmitter {
         } else {
             tgt_field.to_string()
         };
+        // Unit-state shields. Source state is f[7..16]
+        // (health,magicka,stamina,ultimate,werewolf,SHIELD,x,y,heading) → shield at
+        // f[12]. Target id at f[16], its state at f[17..26] → shield at f[22] (`*`
+        // collapses target onto source). A buff carries a trailing shield only when
+        // the unit's pool *changed*, per `update_shield_history` below.
+        let src_shield: u32 = f.get(12).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        let tgt_shield: u32 = if tgt_field == "*" {
+            src_shield
+        } else {
+            f.get(22).and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+        };
+        // Ability id (numeric) for the frost-safeguard shield exception.
+        let ability_id: u32 = ability.parse().unwrap_or(0);
 
         let is_buff = self
             .effect_type
@@ -470,6 +509,15 @@ impl EventEmitter {
 
         // Stack tracking key (raw unit ids, like the line's masks/subordinal).
         let stack_key = (src_unit.clone(), ability.clone(), tgt_unit.clone());
+
+        // Allocate the tuple at FIRST SIGHT — BEFORE the emit decision. The parser
+        // reserves a tuple/effects-table slot the moment an effect is seen, even for
+        // an orphan UPDATED (no prior GAINED) or an already-active GAINED whose LINE
+        // is suppressed. Allocating here (not after the routing's early returns)
+        // keeps our tuple index == the official's: a dropped LINE still consumes its
+        // A. `alloc_for` is idempotent on (src,ability,tgt), so this never
+        // double-counts a later real emission of the same effect.
+        let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
 
         // Route the change type to a code (and decide whether it emits at all).
         // UPDATED emits ONLY when the stack count *changed* from the instance's
@@ -485,7 +533,7 @@ impl EventEmitter {
                 // a key already present means "already active". Verified on the
                 // capture: this removes 697 spurious code-5 GAINEDs.
                 let already_active = self.last_stack.contains_key(&stack_key);
-                self.last_stack.insert(stack_key, stack.clone());
+                self.last_stack.insert(stack_key.clone(), stack.clone());
                 if already_active {
                     return None;
                 }
@@ -504,7 +552,7 @@ impl EventEmitter {
                 }
             }
             "UPDATED" => {
-                let prev = self.last_stack.insert(stack_key, stack.clone());
+                let prev = self.last_stack.insert(stack_key.clone(), stack.clone());
                 // An ORPHAN UPDATED (no prior GAINED for this instance — the effect
                 // was active before the segment window opened) is not emitted: the
                 // official segment has no record to update. Verified on the capture:
@@ -532,20 +580,90 @@ impl EventEmitter {
             _ => return None,
         };
 
-        let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
             .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
         let ts = self.seg_ts(raw_ts);
 
-        // GAINED/FADED (5/7/10/12) are the thin 5-field line (no trailing field —
-        // the optional capture `A` cast-ref is the unsolved global counter, not
-        // needed for validity). UPDATED (6/8/11) appends the new stack count.
+        // Shield history. On GAINED/FADED both unit pools are reconciled against the
+        // stored history; a side "registers" a shield value only when it *changed*
+        // (or ability 146311, frost safeguard, which always registers). The
+        // registered value (else 0) is what may print. Runs on GAINED and FADED so
+        // the stored pool stays accurate; UPDATED never touches shields.
+        // Both updates are guarded on the *source* unit being known (the reference
+        // gates `update_target` on `source.unit_id != 0` too): a sourceless effect
+        // registers no shield on either side.
+        let (reg_src, reg_tgt) =
+            if matches!(code, "5" | "10" | "7" | "12") && !src_unit.is_empty() && src_unit != "0" {
+                let us = self.update_shield_history(&src_unit, src_shield, ability_id);
+                let ut = self.update_shield_history(&tgt_unit, tgt_shield, ability_id);
+                (
+                    if us { src_shield } else { 0 },
+                    if ut { tgt_shield } else { 0 },
+                )
+            } else {
+                (0, 0)
+            };
+
+        // A buff/debuff applied by a tracked cast carries a trailing `A{castA}`
+        // (the reference's `source_cast_index`) linking it to that cast's tuple.
+        // Only GAINED (5/10) and UPDATED-debuff (11) carry it — a FADED has no
+        // causing cast. The shield trailing is gated on the cast-ref being present.
+        let cast_a = if matches!(code, "5" | "10" | "11") {
+            self.cast_track_to_a.get(&cast_track_id).copied()
+        } else {
+            None
+        };
+        let cast_ref = cast_a.map(|a| format!("|A{a}")).unwrap_or_default();
+
+        // Shield trailing, only when a cast-ref is present and the two registered
+        // pools differ (matching the reference's display gate). Forms:
+        //   both ≠ 0           → `|A{cast}|{src}|{tgt}`
+        //   only source ≠ 0    → `|A{cast}|{src}`
+        //   only target ≠ 0    → `|A{cast}|{tgt}`
+        let shield_tail =
+            if cast_a.is_some() && (reg_src != 0 || reg_tgt != 0) && reg_src != reg_tgt {
+                if reg_src != 0 {
+                    if reg_tgt != 0 {
+                        format!("|{reg_src}|{reg_tgt}")
+                    } else {
+                        format!("|{reg_src}")
+                    }
+                } else {
+                    format!("|{reg_tgt}")
+                }
+            } else {
+                String::new()
+            };
+
+        // GAINED/FADED (5/7/10/12) are the thin 5-field line; UPDATED (6/8/11)
+        // appends the new stack count. Cast-ref then the optional shield follow.
         match code {
-            "6" | "8" | "11" => Some(format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}")),
-            _ => Some(format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}")),
+            "6" | "8" => Some(format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}")),
+            "11" => Some(format!(
+                "{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}{cast_ref}"
+            )),
+            _ => Some(format!(
+                "{ts}|{code}|{sub}|{src_mask}|{tgt_mask}{cast_ref}{shield_tail}"
+            )),
         }
+    }
+
+    /// Reconcile a unit's shield pool against history. Returns `true` (the value
+    /// "registers", i.e. may print) iff it *changed* from the stored value, or the
+    /// ability is frost safeguard (146311) which always registers. Updates the
+    /// stored value. A `unit_id` of "0"/empty never registers.
+    fn update_shield_history(&mut self, unit_id: &str, shield: u32, ability_id: u32) -> bool {
+        if unit_id.is_empty() || unit_id == "0" {
+            return false;
+        }
+        let stored = self.shield_values.get(unit_id).copied().unwrap_or(0);
+        if shield != stored || ability_id == 146311 {
+            self.shield_values.insert(unit_id.to_string(), shield);
+            return true;
+        }
+        false
     }
 
     /// Route + emit a `BEGIN_CAST` line. Channeled casts (`channeled == T`) are
@@ -573,6 +691,11 @@ impl EventEmitter {
             "15"
         };
         let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
+        // Record this cast's tuple A against its track id, so buffs it applies can
+        // reference it with a trailing A{castA}.
+        if !cast_track_id.is_empty() && cast_track_id != "0" {
+            self.cast_track_to_a.insert(cast_track_id.to_string(), a);
+        }
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
@@ -618,6 +741,33 @@ impl EventEmitter {
     /// fields (crit flag + final for 1/2/3; the power tuple for 26).
     fn emit_combat_event(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
         let action_result = f.get(2)?.trim();
+
+        // Raw COMBAT_EVENT layout (absolute indices after the `<ts>,COMBAT_EVENT,`
+        // header): [2]actionResult [3]damageType [4]powerType [5]hitValue
+        // [6]overflow [7]castTrackId [8]abilityId [9]srcUnit [10..=18]srcState
+        // [19]tgtUnit [20..=28]tgtState.
+        let power_type = f.get(4)?.trim();
+        let hit_value = f.get(5)?.trim();
+        let overflow = f.get(6)?.trim();
+        let cast_track_id = f.get(7)?.trim();
+        let mut ability = f.get(8)?.trim().to_string();
+        let src_unit = f.get(9)?.trim().to_string();
+        let src_state: Vec<&str> = f.get(10..19)?.iter().map(|s| s.trim()).collect();
+        let tgt_field = f.get(19).map(|s| s.trim()).unwrap_or("*");
+        let (tgt_unit, tgt_state) = self.parse_combat_target(f, tgt_field, &src_unit, &src_state);
+
+        // A soul-gem resurrection accept carries abilityId 0; the parser maps it to
+        // the rez ability 26770 for tuple purposes.
+        if ability == "0" && action_result == "SOUL_GEM_RESURRECTION_ACCEPTED" {
+            ability = "26770".to_string();
+        }
+
+        // Filter the LINE before allocating: a status/skip/unmodeled combat event
+        // neither emits a line NOR registers a tuple here (empirically the official
+        // tuple set matches the registering-result rule, not an allocate-for-all
+        // rule — allocating for every status event over-produces). The registering
+        // rule lives in `combat_event_registers` (used by the master); the routing
+        // tables below are its line-level mirror.
         if SKIP_ACTION_RESULTS.contains(&action_result)
             || STATUS_ACTION_RESULTS.contains(&action_result)
         {
@@ -636,20 +786,6 @@ impl EventEmitter {
         } else {
             return None; // unmodeled actionResult → dropped (not guessed)
         };
-
-        // Raw COMBAT_EVENT layout (absolute indices after the `<ts>,COMBAT_EVENT,`
-        // header): [2]actionResult [3]damageType [4]powerType [5]hitValue
-        // [6]overflow [7]castTrackId [8]abilityId [9]srcUnit [10..=18]srcState
-        // [19]tgtUnit [20..=28]tgtState.
-        let power_type = f.get(4)?.trim();
-        let hit_value = f.get(5)?.trim();
-        let overflow = f.get(6)?.trim();
-        let cast_track_id = f.get(7)?.trim();
-        let ability = f.get(8)?.trim().to_string();
-        let src_unit = f.get(9)?.trim().to_string();
-        let src_state: Vec<&str> = f.get(10..19)?.iter().map(|s| s.trim()).collect();
-        let tgt_field = f.get(19).map(|s| s.trim()).unwrap_or("*");
-        let (tgt_unit, tgt_state) = self.parse_combat_target(f, tgt_field, &src_unit, &src_state);
 
         let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
         let (src_mask, tgt_mask) = self.combat_masks(&src_unit, &tgt_unit);
@@ -1298,8 +1434,11 @@ mod tests {
             "reported event_count must equal the number of emitted lines"
         );
         for (i, (got, want)) in ours.iter().zip(golden_events.iter()).enumerate() {
+            // Strip the optional cast-ref from BOTH sides: whether a GAINED carries
+            // `|A{n}` depends on having seen its causing BEGIN_CAST inside this short
+            // sample window, which is incidental to structural correctness.
             assert_eq!(
-                *got,
+                strip_a_ref(got),
                 strip_a_ref(want),
                 "event line {i} must reproduce the golden line (modulo optional A-ref)"
             );

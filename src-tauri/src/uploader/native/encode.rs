@@ -689,6 +689,9 @@ pub fn actor_ability_maps(
 ) {
     let mut identity_order: Vec<String> = Vec::new();
     let mut actor_seen: std::collections::BTreeSet<String> = Default::default();
+    // Exclude monsters never referenced by a registering event (same rule as the
+    // master table — the two index spaces MUST stay identical).
+    let registering = registering_monster_identities(lines);
     for line in lines {
         let mut it = line.splitn(3, ',');
         let _ts = it.next();
@@ -699,6 +702,9 @@ pub fn actor_ability_maps(
         if kind == "UNIT_ADDED" {
             if let Some(actor) = ActorInfo::parse(rest) {
                 let identity = actor.identity();
+                if matches!(actor, ActorInfo::Monster { .. }) && !registering.contains(&identity) {
+                    continue;
+                }
                 if actor_seen.insert(identity.clone()) {
                     identity_order.push(identity);
                 }
@@ -746,6 +752,9 @@ fn build_master_table_inner(
     // Live raw unit id → is-player, to resolve whether a monster's owner is a
     // player (a player-owned unit is a pet → class 50 / reaction 3).
     let mut unit_is_player: std::collections::HashMap<String, bool> = Default::default();
+    // Monster identities the actor master keeps (those referenced by ≥1
+    // registering event); a never-referenced monster owns no tuple and is dropped.
+    let registering = registering_monster_identities(lines);
 
     for line in lines {
         let mut it = line.splitn(3, ',');
@@ -782,9 +791,18 @@ fn build_master_table_inner(
                         }
                         _ => false,
                     };
+                    // A monster never referenced by a registering event owns no
+                    // tuple and is excluded from the actor master (players are
+                    // always kept). Skipping it before it consumes an index keeps
+                    // every later actor index aligned with the official table.
+                    let identity = actor.identity();
+                    if matches!(actor, ActorInfo::Monster { .. })
+                        && !registering.contains(&identity)
+                    {
+                        continue;
+                    }
                     // Dedup by identity across sessions; the 1-based master index
                     // (assigned on first insert) drives the player role.
-                    let identity = actor.identity();
                     if actor_seen.insert(identity.clone()) {
                         let srv = server.clone().unwrap_or_default();
                         let index = actors.len() + 1;
@@ -994,6 +1012,74 @@ fn combat_event_registers(result: &str, self_target: bool) -> bool {
         return false;
     }
     true
+}
+
+/// The set of MONSTER/OBJECT actor identities that participate (as source or
+/// target) in at least one tuple-*registering* event. The master actor table
+/// excludes a monster that is never referenced by a registering event — e.g. a
+/// unit that only ever appears as the target of a non-landing `TARGET_DEAD`
+/// COMBAT_EVENT (it was already dead when targeted) is dropped, because it owns no
+/// tuple. Players are always kept (they always have a player-info/own events), so
+/// this set only governs monster inclusion. Keying on IDENTITY (not unit id)
+/// handles recycled unit ids: a monster identity is included if ANY unit id
+/// bearing it registers.
+fn registering_monster_identities(lines: &[&str]) -> std::collections::HashSet<String> {
+    // Live raw unit id → its monster identity (set on UNIT_ADDED, cleared on
+    // UNIT_REMOVED — unit ids recycle, so the map must be time-aware).
+    let mut live: std::collections::HashMap<String, String> = Default::default();
+    let mut registering: std::collections::HashSet<String> = Default::default();
+
+    for line in lines {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            continue;
+        };
+        match kind {
+            "UNIT_ADDED" => {
+                let rest = line.splitn(3, ',').nth(2).unwrap_or("");
+                // Only monsters/objects are gated; players are always kept.
+                if let Some(actor @ ActorInfo::Monster { .. }) = ActorInfo::parse(rest) {
+                    if let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) {
+                        live.insert(unit_id, actor.identity());
+                    }
+                }
+            }
+            "UNIT_REMOVED" => {
+                if let Some(u) = f.get(2) {
+                    live.remove(u.trim());
+                }
+            }
+            "COMBAT_EVENT" | "EFFECT_CHANGED" | "BEGIN_CAST" => {
+                let (result, src, tgt) = if kind == "COMBAT_EVENT" {
+                    (
+                        f.get(2).map(|s| s.trim()).unwrap_or(""),
+                        f.get(9).map(|s| s.trim()).unwrap_or(""),
+                        f.get(19).map(|s| s.trim()).unwrap_or("0"),
+                    )
+                } else {
+                    (
+                        "",
+                        f.get(6).map(|s| s.trim()).unwrap_or(""),
+                        f.get(16).map(|s| s.trim()).unwrap_or("0"),
+                    )
+                };
+                let self_target = tgt == "*";
+                if kind == "COMBAT_EVENT" && !combat_event_registers(result, self_target) {
+                    continue;
+                }
+                if let Some(identity) = live.get(src) {
+                    registering.insert(identity.clone());
+                }
+                if !self_target && tgt != "0" {
+                    if let Some(identity) = live.get(tgt) {
+                        registering.insert(identity.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    registering
 }
 
 /// Join records with trailing newlines (each record on its own `\n`-terminated
