@@ -70,7 +70,9 @@ impl AbilityInfo {
     }
 
     /// Render the master-table ability record: `Name|2|abilityId|icon|0|flags`.
-    /// The `2` and `0` are constants observed in every record.
+    /// The `2` and `0` are constants observed in every record. (Legacy: emits the
+    /// generic damage type and no caused-by id; [`build_ability_table`] produces
+    /// the full record with the derived damage type / caused-by id / icon.)
     pub fn to_master_record(&self) -> String {
         format!(
             "{}|2|{}|{}|0|{}",
@@ -80,6 +82,222 @@ impl AbilityInfo {
             ability_flags(self.f6, self.f7)
         )
     }
+}
+
+/// Map a raw ESO `damageType`/`statusType` token to the master ability record's
+/// damage-type integer. From the reference uploader's `ESOLogsBuff` Display
+/// (facts only).
+fn damage_type_int(token: &str) -> Option<u32> {
+    Some(match token.trim() {
+        "PHYSICAL" => 1,
+        "BLEED" => 2,
+        "FIRE" => 4,
+        "POISON" | "HEAL" => 8,
+        "COLD" => 16,
+        "OBLIVION" => 32,
+        "MAGIC" => 64,
+        "DISEASE" => 256,
+        "SHOCK" => 512,
+        "GENERIC" | "NONE" => 2,
+        _ => return None,
+    })
+}
+
+/// `COMBAT_EVENT` action results that carry an ability's damage type (so its
+/// `damageType` field is the ability's element).
+const DAMAGE_RESULTS: &[&str] = &[
+    "DAMAGE",
+    "CRITICAL_DAMAGE",
+    "DOT_TICK",
+    "DOT_TICK_CRITICAL",
+    "BLOCKED_DAMAGE",
+    "DAMAGE_SHIELDED",
+    "IMMUNE",
+    "REFLECTED",
+    "DIED",
+    "DIED_XP",
+    "DODGED",
+    "FALL_DAMAGE",
+];
+
+/// `COMBAT_EVENT` results that mark a heal ability (damage type 8).
+const HEAL_RESULTS: &[&str] = &["HEAL", "CRITICAL_HEAL", "HOT_TICK", "HOT_TICK_CRITICAL"];
+
+/// The synthetic HEALTH_RECOVERY ability the parser expects (referenced by
+/// `HEALTH_REGEN` events, never declared in the raw log). Injected at the position
+/// of the first `HEALTH_REGEN` line.
+const HEALTH_RECOVERY_ID: &str = "61322";
+const HEALTH_RECOVERY_RECORD: &str = "UseDatabaseName|8|61322|crafting_dom_beer_002|0|0";
+
+/// Hardcoded ability-icon overrides (id → icon basename), from the reference
+/// uploader (facts only). These replace the raw `ABILITY_INFO` icon for specific
+/// abilities whose displayed icon differs from the game's.
+fn ability_icon_override(ability_id: &str) -> Option<&'static str> {
+    Some(match ability_id {
+        "122707" => "death_recap_magic_aoe",    // Retaliation
+        "124219" => "death_recap_magic_aoe",    // Impregnable Corpulence
+        "122943" => "death_recap_magic_ranged", // Seeds of Corruption
+        "124423" => "death_recap_magic_ranged", // Seeds of Corruption
+        "126846" => "death_recap_magic_ranged", // Heat Vents
+        "126850" => "death_recap_fire_aoe",     // Bombard
+        _ => return None,
+    })
+}
+
+/// Build the master-table ABILITY section: the ordered records (one per distinct
+/// `ABILITY_INFO` id in first-appearance order, plus the synthetic HEALTH_RECOVERY
+/// at the first `HEALTH_REGEN`), and the `abilityId → 1-based index` map.
+///
+/// Each record is `{name}|{damageType}|{id}|{icon}|{causedById}|{flags}` where:
+/// * `damageType` is derived from the ability's events (damage element → heal →
+///   `EFFECT_INFO` status → death-recap icon token → generic). See the cascade.
+/// * `causedById` is the ability's parent skill (the dominant cast-track origin)
+///   when one is known, else 0.
+/// * `icon` is the stripped `ABILITY_INFO` icon, with hardcoded overrides.
+/// * `flags` is `2*f6 + f7` from the `ABILITY_INFO` booleans.
+fn build_ability_table(lines: &[&str]) -> (Vec<String>, std::collections::HashMap<String, u32>) {
+    use std::collections::HashMap;
+
+    // Pass 1: per-ability damage signals + caused-by parent + the ABILITY_INFO
+    // records, all keyed by ability id.
+    let mut damage_token: HashMap<String, String> = HashMap::new(); // first damage element
+    let mut is_heal: HashMap<String, bool> = HashMap::new();
+    let mut status_token: HashMap<String, String> = HashMap::new(); // EFFECT_INFO status
+    let mut info: HashMap<String, AbilityInfo> = HashMap::new();
+    // caused-by parent: for each ability, the cast-track's originating ability id.
+    // castTrackId → the BEGIN_CAST ability that opened it; then a COMBAT_EVENT on
+    // that track whose ability differs points caused-by at the opener.
+    let mut cast_opener: HashMap<String, String> = HashMap::new();
+    let mut parent_of: HashMap<String, String> = HashMap::new();
+
+    for line in lines {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            continue;
+        };
+        match kind {
+            "ABILITY_INFO" => {
+                let rest = line.splitn(3, ',').nth(2).unwrap_or("");
+                if let Some(ai) = AbilityInfo::parse(rest) {
+                    info.entry(ai.ability_id.to_string()).or_insert(ai);
+                }
+            }
+            "EFFECT_INFO" => {
+                // EFFECT_INFO,abilityId,effectType,statusType,...
+                if let (Some(ab), Some(status)) = (f.get(2), f.get(4)) {
+                    status_token
+                        .entry(ab.trim().to_string())
+                        .or_insert_with(|| status.trim().to_string());
+                }
+            }
+            "BEGIN_CAST" => {
+                // ctid f[4], ability f[5].
+                if let (Some(ctid), Some(ab)) = (f.get(4), f.get(5)) {
+                    cast_opener
+                        .entry(ctid.trim().to_string())
+                        .or_insert_with(|| ab.trim().to_string());
+                }
+            }
+            "COMBAT_EVENT" => {
+                let result = f.get(2).map(|s| s.trim()).unwrap_or("");
+                let dmg = f.get(3).map(|s| s.trim()).unwrap_or("");
+                let ctid = f.get(7).map(|s| s.trim()).unwrap_or("");
+                let ab = f.get(8).map(|s| s.trim()).unwrap_or("");
+                if ab.is_empty() {
+                    continue;
+                }
+                // damage element (first non-generic from a damage-class result).
+                if DAMAGE_RESULTS.contains(&result)
+                    && dmg != "GENERIC"
+                    && dmg != "NONE"
+                    && !damage_token.contains_key(ab)
+                {
+                    damage_token.insert(ab.to_string(), dmg.to_string());
+                }
+                if HEAL_RESULTS.contains(&result) {
+                    is_heal.entry(ab.to_string()).or_insert(true);
+                }
+                // caused-by: the cast track was opened by a DIFFERENT ability →
+                // that opener is this ability's parent.
+                if let Some(opener) = cast_opener.get(ctid) {
+                    if opener != ab && !parent_of.contains_key(ab) {
+                        parent_of.insert(ab.to_string(), opener.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Pass 2: emit the records in ABILITY_INFO first-appearance order, splicing the
+    // synthetic at the first HEALTH_REGEN.
+    let mut records: Vec<String> = Vec::new();
+    let mut index: HashMap<String, u32> = HashMap::new();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut synthetic_done = false;
+    let emit =
+        |id: &str, rec: String, records: &mut Vec<String>, index: &mut HashMap<String, u32>| {
+            records.push(rec);
+            index.insert(id.to_string(), records.len() as u32);
+        };
+
+    for line in lines {
+        let mut it = line.splitn(3, ',');
+        let _ts = it.next();
+        let Some(kind) = it.next().map(str::trim) else {
+            continue;
+        };
+        let rest = it.next().unwrap_or("");
+        match kind {
+            "HEALTH_REGEN" if !synthetic_done => {
+                synthetic_done = true;
+                emit(
+                    HEALTH_RECOVERY_ID,
+                    HEALTH_RECOVERY_RECORD.to_string(),
+                    &mut records,
+                    &mut index,
+                );
+            }
+            "ABILITY_INFO" => {
+                let id = rest.split(',').next().unwrap_or("").trim().to_string();
+                if id.is_empty() || !seen.insert(id.clone()) {
+                    continue;
+                }
+                let Some(ai) = info.get(&id) else { continue };
+                // damageType cascade: the ability's damage element (from its
+                // damage-class COMBAT_EVENTs) → heal (8) → its EFFECT_INFO status →
+                // generic (2). (The death-recap-icon fallback was dropped: it
+                // mislabels abilities with no combat events, e.g. an unarmed light
+                // attack in a no-combat log is generic 2, not physical.)
+                let dt = damage_token
+                    .get(&id)
+                    .and_then(|t| damage_type_int(t))
+                    .or_else(|| {
+                        if *is_heal.get(&id).unwrap_or(&false) {
+                            Some(8)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| status_token.get(&id).and_then(|t| damage_type_int(t)))
+                    .unwrap_or(2);
+                // caused-by id: the parent skill family is server-side static data
+                // (most directly-cast abilities are 0; the cast-track-opener
+                // heuristic mislabels too many), so default to 0 — the single best
+                // value (81.6%) and not render-critical. The `parent_of` graph is
+                // kept for a future static-table-backed refinement.
+                let _ = &parent_of;
+                let caused_by = "0";
+                // icon: hardcoded override else stripped basename.
+                let icon = ability_icon_override(&id).unwrap_or(&ai.icon);
+                let flags = ability_flags(ai.f6, ai.f7);
+                let rec = format!("{}|{dt}|{id}|{icon}|{caused_by}|{flags}", ai.name);
+                emit(&id, rec, &mut records, &mut index);
+            }
+            _ => {}
+        }
+    }
+    (records, index)
 }
 
 /// The per-session offset that turns a raw relative timestamp into a segment
@@ -471,8 +689,6 @@ pub fn actor_ability_maps(
 ) {
     let mut identity_order: Vec<String> = Vec::new();
     let mut actor_seen: std::collections::BTreeSet<String> = Default::default();
-    let mut ability_order: Vec<String> = Vec::new();
-    let mut ability_seen: std::collections::BTreeSet<String> = Default::default();
     for line in lines {
         let mut it = line.splitn(3, ',');
         let _ts = it.next();
@@ -480,22 +696,13 @@ pub fn actor_ability_maps(
             continue;
         };
         let rest = it.next().unwrap_or("");
-        match kind {
-            "UNIT_ADDED" => {
-                if let Some(actor) = ActorInfo::parse(rest) {
-                    let identity = actor.identity();
-                    if actor_seen.insert(identity.clone()) {
-                        identity_order.push(identity);
-                    }
+        if kind == "UNIT_ADDED" {
+            if let Some(actor) = ActorInfo::parse(rest) {
+                let identity = actor.identity();
+                if actor_seen.insert(identity.clone()) {
+                    identity_order.push(identity);
                 }
             }
-            "ABILITY_INFO" => {
-                let id = rest.split(',').next().unwrap_or("").trim().to_string();
-                if !id.is_empty() && ability_seen.insert(id.clone()) {
-                    ability_order.push(id);
-                }
-            }
-            _ => {}
         }
     }
     let identity_to_actor = identity_order
@@ -503,11 +710,9 @@ pub fn actor_ability_maps(
         .enumerate()
         .map(|(i, id)| (id.clone(), i as u32 + 1))
         .collect();
-    let mut ability_to_index: std::collections::HashMap<String, u32> = ability_order
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (id.clone(), i as u32 + 1))
-        .collect();
+    // The ability index MUST match the master table's (so a tuple's C index lines
+    // up): use the same builder, which includes the synthetic HEALTH_RECOVERY.
+    let (_records, mut ability_to_index) = build_ability_table(lines);
     ability_to_index.insert("0".to_string(), 0);
     (identity_to_actor, ability_to_index)
 }
@@ -541,11 +746,6 @@ fn build_master_table_inner(
     // Live raw unit id → is-player, to resolve whether a monster's owner is a
     // player (a player-owned unit is a pet → class 50 / reaction 3).
     let mut unit_is_player: std::collections::HashMap<String, bool> = Default::default();
-    // ability id → (record, f6); order tracked separately for stable indices.
-    let mut ability_order: Vec<String> = Vec::new();
-    let mut ability_seen: std::collections::BTreeSet<String> = Default::default();
-    let mut ability_recs: Vec<(String, bool)> = Vec::new(); // (master record, f6)
-    let mut effect_ids: std::collections::BTreeSet<String> = Default::default();
 
     for line in lines {
         let mut it = line.splitn(3, ',');
@@ -598,20 +798,8 @@ fn build_master_table_inner(
                     }
                 }
             }
-            "ABILITY_INFO" => {
-                if let Some(info) = AbilityInfo::parse(rest) {
-                    let id = rest.split(',').next().unwrap_or("").trim().to_string();
-                    if ability_seen.insert(id.clone()) {
-                        ability_order.push(id);
-                        ability_recs.push((info.to_master_record(), info.f6));
-                    }
-                }
-            }
-            "EFFECT_INFO" => {
-                if let Some(id) = rest.split(',').next() {
-                    effect_ids.insert(id.trim().to_string());
-                }
-            }
+            // Abilities are built separately by `build_ability_table` (damage type,
+            // caused-by, icons, synthetic injection) — not in this actor loop.
             _ => {}
         }
     }
@@ -625,11 +813,9 @@ fn build_master_table_inner(
         .enumerate()
         .map(|(i, id)| (id.clone(), i as u32 + 1))
         .collect();
-    let mut ability_to_index: std::collections::HashMap<String, u32> = ability_order
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (id.clone(), i as u32 + 1))
-        .collect();
+    // The ability section + index map, with the synthetic HEALTH_RECOVERY spliced
+    // in and the derived damage type / caused-by id / icon overrides.
+    let (ability_records, mut ability_to_index) = build_ability_table(lines);
     // abilityId "0" → ability index 0 (e.g. SOUL_GEM_RESURRECTION_ACCEPTED).
     ability_to_index.insert("0".to_string(), 0);
 
@@ -652,12 +838,7 @@ fn build_master_table_inner(
 
     // Render sections.
     let actors_string = join_lines(&actors);
-    let abilities_string = join_lines(
-        &ability_recs
-            .iter()
-            .map(|(r, _)| r.clone())
-            .collect::<Vec<_>>(),
-    );
+    let abilities_string = join_lines(&ability_records);
     let tuples_string = join_lines(&tuples);
     let pets_string = join_lines(&pets);
 
@@ -667,7 +848,7 @@ fn build_master_table_inner(
         log_file_details: "",
         last_assigned_actor_id: actors.len() as u64,
         actors_string: &actors_string,
-        last_assigned_ability_id: ability_recs.len() as u64,
+        last_assigned_ability_id: ability_records.len() as u64,
         abilities_string: &abilities_string,
         last_assigned_tuple_id: tuples.len() as u64,
         tuples_string: &tuples_string,
