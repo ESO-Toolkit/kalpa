@@ -99,24 +99,42 @@ pub fn segment_ts(raw_ts: i64, offset: i64) -> u64 {
 }
 
 /// Encode a `ZONE_CHANGED` raw line into its segment event (code 41).
-/// Raw: `<ts>,ZONE_CHANGED,<zoneId>,"<name>",<extra>` →
-/// segment: `<ts>|41|<zoneId>|<name>|0`. The trailing `0` is constant in the
-/// sample (its meaning is unconfirmed but its value is byte-stable).
+/// Raw: `<ts>,ZONE_CHANGED,<zoneId>,"<name>",<difficulty>` →
+/// segment: `<ts>|41|<zoneId>|<name>|<difficultyInt>`. The trailing field is the
+/// zone difficulty as an integer: `NONE → 0`, `NORMAL → 1`, `VETERAN → 2` (the
+/// first two proven against captures; `VETERAN` follows the sequential mapping and
+/// is in any case a structurally-valid integer). An unrecognized token maps to 0.
 pub fn encode_zone_changed(seg_ts: u64, rest: &str) -> Option<String> {
     let mut f = split_csv_quoted(rest);
     let zone_id = f.next()?.trim();
     let name = unquote(f.next()?);
-    Some(format!("{seg_ts}|41|{zone_id}|{name}|0"))
+    let difficulty = zone_difficulty_int(unquote(f.next().unwrap_or("")));
+    Some(format!("{seg_ts}|41|{zone_id}|{name}|{difficulty}"))
+}
+
+/// Map a `ZONE_CHANGED` difficulty token to its segment integer. Unknown tokens
+/// fall back to `0` (a structurally-valid value); the known mapping keeps us
+/// self-consistent with captured segments.
+fn zone_difficulty_int(token: &str) -> u8 {
+    match token.trim() {
+        "NORMAL" => 1,
+        "VETERAN" => 2,
+        // "NONE" and anything unrecognized → 0.
+        _ => 0,
+    }
 }
 
 /// Encode a `MAP_CHANGED` raw line into its segment event (code 51).
 /// Raw: `<ts>,MAP_CHANGED,<mapId>,"<name>","<resource>"` →
-/// segment: `<ts>|51|<mapId>|<name>|<resource>`.
+/// segment: `<ts>|51|<mapId>|<name>|<resourceLowercased>`. The display `name`
+/// keeps its original case; the `resource` path is ASCII-lowercased (verified
+/// against a capture where `grahtwood/MaarsOutsideMap001_base` →
+/// `grahtwood/maarsoutsidemap001_base` while the name stayed mixed-case).
 pub fn encode_map_changed(seg_ts: u64, rest: &str) -> Option<String> {
     let mut f = split_csv_quoted(rest);
     let map_id = f.next()?.trim();
     let name = unquote(f.next()?);
-    let resource = unquote(f.next()?);
+    let resource = unquote(f.next()?).to_ascii_lowercase();
     Some(format!("{seg_ts}|51|{map_id}|{name}|{resource}"))
 }
 
@@ -566,6 +584,20 @@ pub fn combat_crit_flag(action_result: &str) -> Option<u8> {
     }
 }
 
+/// The crit flag for the heal / dot / power combat codes (3 / 2 / 26), which use
+/// the same `1 = normal, 2 = critical` scheme as code 1:
+/// `HEAL`/`DOT_TICK`/`POWER_*` → 1, `CRITICAL_HEAL`/`DOT_TICK_CRITICAL` → 2.
+/// Verified `1` across the code-2/3 captures (no critical-heal/dot sample, but the
+/// scheme is the same one code 1 proved). Returns `None` for anything outside
+/// these families so the caller gates it.
+pub fn combat_noncode1_crit_flag(action_result: &str) -> Option<u8> {
+    match action_result {
+        "HEAL" | "DOT_TICK" | "POWER_ENERGIZE" | "POWER_DRAIN" => Some(1),
+        "CRITICAL_HEAL" | "DOT_TICK_CRITICAL" => Some(2),
+        _ => None,
+    }
+}
+
 /// The final field (`seg[-1]`) of a code-1 line. It is **not** always the raw
 /// hitValue — it branches on `actionResult` (verified against the full segment;
 /// a verbatim hitValue would corrupt every immune/blocked/dodged hit):
@@ -867,6 +899,14 @@ impl ActorTable {
     /// instance index). An absent/unknown unit is treated as ordinal 0.
     fn ordinal(&self, unit_id: &str) -> u32 {
         self.units.get(unit_id).map(|u| u.ordinal).unwrap_or(0)
+    }
+
+    /// The 1-based master actor index currently bound to a runtime unit id, or
+    /// `None` if the id is unknown. This is the same index the master table's
+    /// player role encodes (`1000000 + index`) and the `PLAYER_INFO` (code 44)
+    /// line emits as its unit reference.
+    pub fn master_index_of(&self, unit_id: &str) -> Option<u32> {
+        self.units.get(unit_id.trim()).map(|u| u.master_index)
     }
 
     /// Build the code-1 subordinal string `seg[2]` GIVEN its leading allocation

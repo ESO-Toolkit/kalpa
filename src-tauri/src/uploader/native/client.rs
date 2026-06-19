@@ -92,10 +92,32 @@ pub struct Segment {
     pub bytes: Vec<u8>,
 }
 
+impl Segment {
+    /// Build a segment from its rendered fights-segment **text** by ZIP-wrapping
+    /// it into the `logfile` envelope (single `log.txt` entry, DEFLATE-9). This is
+    /// the bridge from [`super::serialize`]'s rendered string to the wire bytes.
+    pub fn from_text(text: &str) -> Result<Self, String> {
+        Ok(Self {
+            bytes: super::zip_segment::zip_log_txt(text)?,
+        })
+    }
+}
+
 /// The serialized master table for a report.
 #[derive(Debug, Clone)]
 pub struct MasterTableBytes {
     pub bytes: Vec<u8>,
+}
+
+impl MasterTableBytes {
+    /// Build a master table from its rendered **text** by ZIP-wrapping it into the
+    /// `logfile` envelope (single `log.txt` entry, DEFLATE-9), mirroring
+    /// [`Segment::from_text`].
+    pub fn from_text(text: &str) -> Result<Self, String> {
+        Ok(Self {
+            bytes: super::zip_segment::zip_log_txt(text)?,
+        })
+    }
 }
 
 /// A native upload run. Owns the session provider, the upload options (for the

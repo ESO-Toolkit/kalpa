@@ -23,6 +23,8 @@ pub mod convert;
 pub mod coverage;
 pub mod differential;
 pub mod encode;
+pub mod events;
 pub mod format;
 pub mod serialize;
 pub mod session;
+pub mod zip_segment;
