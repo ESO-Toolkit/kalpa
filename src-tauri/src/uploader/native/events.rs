@@ -311,15 +311,20 @@ impl EventEmitter {
         }
     }
 
-    /// Apply a `UNIT_CHANGED`: update the actor table and championPoints. Layout:
-    /// `[0]unitId … [9]championPoints` (verified UNIT_CHANGED indices) — so the
-    /// absolute field index is 2 (header) + 0 = 2 for unitId, + 9 = 11 for CP.
+    /// Apply a `UNIT_CHANGED`: update the actor table and championPoints. The
+    /// `UNIT_CHANGED` tail (after `<ts>,UNIT_CHANGED,`) is
+    /// `unitId,class,race,name,account,charId,level,CP,owner,reaction,grouped`, so
+    /// tail-relative championPoints is index 7 → absolute index 9 (the 2-field
+    /// `<ts>,UNIT_CHANGED,` header shifts every tail index by 2). Owner is at
+    /// absolute 10, reaction at 11 — reading 11 here would store the reaction token
+    /// (e.g. "HOSTILE") as championPoints and corrupt every later state block for
+    /// the unit. Cross-checked against [`ActorTable::on_unit_changed`]'s layout.
     fn on_unit_changed(&mut self, f: &[&str], line: &str) {
         self.actors.on_unit_changed(tail(line));
         let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) else {
             return;
         };
-        if let Some(cp) = f.get(11) {
+        if let Some(cp) = f.get(9) {
             self.champion_points.insert(unit_id, cp.trim().to_string());
         }
     }
@@ -683,6 +688,32 @@ pub fn build_fights_segment(lines: &[&str]) -> Option<String> {
     Some(doc.render())
 }
 
+/// Build the complete, ready-to-upload native payload for a raw log: the ZIP'd
+/// fights segment + the ZIP'd master table, paired for one `add-report-segment`
+/// call. This is the single seam a native [`super::super::transport`] impl calls —
+/// it turns scanner-provided raw lines into the exact
+/// ([`super::client::Segment`], [`super::client::MasterTableBytes`]) the
+/// [`super::client::NativeUpload::upload_finished`] lifecycle consumes.
+///
+/// Returns `None` if the log is not a valid session (no `BEGIN_LOG`), and `Err`
+/// only on an internal ZIP failure. The segment and master table are built from
+/// the *same* lines so their interned ids line up.
+pub fn build_native_payload(
+    lines: &[&str],
+) -> Result<Option<(super::client::Segment, super::client::MasterTableBytes)>, String> {
+    use super::client::{MasterTableBytes, Segment};
+    use super::encode::build_master_table;
+
+    let (Some(segment_text), Some(master_text)) =
+        (build_fights_segment(lines), build_master_table(lines))
+    else {
+        return Ok(None); // not a valid session
+    };
+    let segment = Segment::from_text(&segment_text)?;
+    let master = MasterTableBytes::from_text(&master_text)?;
+    Ok(Some((segment, master)))
+}
+
 /// Map a raw `powerType` to the segment's `(powerTypeIdx, powerMax)` pair for a
 /// code-26 (power) line. `powerType` is an ESO power-mechanic ordinal; the segment
 /// remaps it to a small index and pairs it with the relevant pool max. Only the
@@ -804,6 +835,113 @@ mod tests {
         // No BEGIN_LOG → not a valid session → None.
         let lines = vec!["4,ZONE_CHANGED,1129,\"Hall\",NONE"];
         assert!(build_fights_segment(&lines).is_none());
+    }
+
+    // Code-44 (PLAYER_INFO) end-to-end: the line is `{segTs}|44|{masterIndex}|`
+    // followed by the raw bracketed arrays passed through verbatim. The master
+    // index is the unit's dense 1-based actor index (NOT the raw unit id), and the
+    // nested equipment array (which contains commas) must survive intact.
+    #[test]
+    fn player_info_emits_master_index_and_verbatim_arrays() {
+        let lines = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"",
+            // Two players: raw unit ids 1 and 7 → master indices 1 and 2.
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "0,UNIT_ADDED,7,PLAYER,F,2,0,F,3,9,\"Ally\",\"@ally\",222,50,1500,0,PLAYER_ALLY,T",
+            // PLAYER_INFO for raw unit 7 (master index 2). Arrays contain commas,
+            // including a nested [[...]] equipment list.
+            "3,PLAYER_INFO,7,[142210,86673],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]",
+        ];
+        let mut e = EventEmitter::new();
+        let out = e.build(&lines);
+        let code44 = out
+            .events_string
+            .lines()
+            .find(|l| l.split('|').nth(1) == Some("44"))
+            .expect("a code-44 line");
+        // {segTs}|44|{masterIndex=2}|{arrays verbatim}. segTs for raw ts 3 with the
+        // sample offset (begin ts 0, single session) is 3.
+        assert_eq!(
+            code44,
+            "3|44|2|[142210,86673],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]",
+            "code-44 must carry the dense master index and verbatim arrays"
+        );
+    }
+
+    // The end-to-end seam: raw lines → ready-to-upload ZIP'd segment + master
+    // table. The segment bytes must unzip back to the exact fights-segment text,
+    // confirming the full assemble → frame → ZIP pipeline.
+    #[test]
+    fn native_payload_zips_segment_and_master() {
+        let raw = include_str!("testdata/sample_raw_encounter.log");
+        let lines: Vec<&str> = raw.lines().collect();
+        let (segment, master) = build_native_payload(&lines)
+            .expect("build payload")
+            .expect("valid session");
+        assert!(!segment.bytes.is_empty(), "segment must have ZIP bytes");
+        assert!(!master.bytes.is_empty(), "master must have ZIP bytes");
+
+        // The segment ZIP must unzip to the same text build_fights_segment renders.
+        let expected = build_fights_segment(&lines).unwrap();
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(segment.bytes)).expect("open segment zip");
+        let mut file = archive.by_index(0).unwrap();
+        assert_eq!(file.name(), "log.txt");
+        use std::io::Read;
+        let mut got = String::new();
+        file.read_to_string(&mut got).unwrap();
+        assert_eq!(
+            got, expected,
+            "unzipped segment must match the rendered text"
+        );
+    }
+
+    #[test]
+    fn native_payload_needs_a_valid_session() {
+        let lines = vec!["4,ZONE_CHANGED,1129,\"Hall\",NONE"];
+        assert!(build_native_payload(&lines).unwrap().is_none());
+    }
+
+    // Regression: a UNIT_CHANGED updates championPoints from the CORRECT field
+    // (tail index 7 → absolute 9), not the reaction field (absolute 11). The
+    // emitted state block must carry the new numeric CP, never a reaction token.
+    #[test]
+    fn unit_changed_updates_champion_points_not_reaction() {
+        // UNIT_CHANGED tail layout: unitId,class,race,name,account,charId,level,CP,
+        // owner,reaction,grouped → CP at tail index 7 (here 1741), reaction at 9.
+        let lines = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"",
+            // Player unit 1, initial CP 1740.
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            // A hostile target so a damage event has both sides.
+            "0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F",
+            // CP increments to 1741 (reaction stays PLAYER_ALLY).
+            "5,UNIT_CHANGED,1,3,1,\"Hero\",\"@hero\",111,50,1741,0,PLAYER_ALLY,T",
+            // A damage event from the player carries the player's CURRENT CP (1741)
+            // in its source state block.
+            "6,COMBAT_EVENT,DAMAGE,FIRE,1,500,0,5000,100,1,18400/18400,9971/12868,8488/28700,198/500,0/1000,0,0.5760,0.7050,5.9698,30,40000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0",
+        ];
+        let mut e = EventEmitter::new();
+        let out = e.build(&lines);
+        // Find the code-1 line; its source state block's 7th field must be 1741.
+        let code1 = out
+            .events_string
+            .lines()
+            .find(|l| l.split('|').nth(1) == Some("1"))
+            .expect("a code-1 line");
+        // Locate the S block and read its championPoints (7th block field).
+        let fields: Vec<&str> = code1.split('|').collect();
+        let s_idx = fields.iter().position(|f| f.starts_with('S')).unwrap();
+        let s_cp = fields[s_idx + 6];
+        assert_eq!(
+            s_cp, "1741",
+            "source state block must carry the updated numeric CP, got {s_cp:?} in {code1}"
+        );
+        // And definitely not a reaction token.
+        assert!(
+            !code1.contains("PLAYER_ALLY") && !code1.contains("HOSTILE"),
+            "a reaction token must never leak into a state block: {code1}"
+        );
     }
 
     /// Strip the optional trailing `|A{n}` reference (the unsolved byte-exact

@@ -362,6 +362,13 @@ pub fn encode_state_block(stat_fields: &[&str], champion_points: &str) -> Option
     if stat_fields.len() < 9 {
         return None;
     }
+    // championPoints must be numeric — a non-numeric value (e.g. a reaction token
+    // like "HOSTILE") means an upstream field-index bug fed the wrong field. Bail
+    // rather than emit a malformed block; the caller drops the event and the
+    // coverage gate keeps the log off native, so corruption never ships.
+    if champion_points.trim().parse::<i64>().is_err() {
+        return None;
+    }
     let passthrough = &stat_fields[0..6];
     let map_x: f64 = stat_fields[6].trim().parse().ok()?;
     let map_y: f64 = stat_fields[7].trim().parse().ok()?;
