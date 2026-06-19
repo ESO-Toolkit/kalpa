@@ -1547,4 +1547,95 @@ mod combat_fixture {
         bound("41", 2);
         bound("51", 2);
     }
+
+    /// DIAGNOSTIC (manual, `--ignored`): diff OUR MASTER TABLE against the official
+    /// captured master table for the same log. The segment events reference master-
+    /// table ids (actors/abilities/tuples); a wrong master table makes the server
+    /// ACCEPT the upload (valid envelope) but never render (references unresolvable)
+    /// — the exact "accepts but loads forever" symptom. The segment oracle does NOT
+    /// cover this; this is the missing check.
+    #[test]
+    #[ignore = "diagnostic; needs the combat raw + testdata master table"]
+    fn diff_against_official_combat_master_table() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let raw_path = format!("{base}/../.decode-samples/combat_raw_encounter.log");
+        let off_path = format!("{base}/src/uploader/native/testdata/combat_master_table.txt");
+        let (Ok(raw), Ok(official)) = (
+            std::fs::read_to_string(&raw_path),
+            std::fs::read_to_string(&off_path),
+        ) else {
+            eprintln!("[master] golden master table not present; skipping");
+            return;
+        };
+        let lines: Vec<&str> = raw.lines().collect();
+        let ours = super::super::encode::build_master_table(&lines).expect("master builds");
+
+        let o: Vec<&str> = ours.lines().collect();
+        let f: Vec<&str> = official.lines().collect();
+        eprintln!("[master] LINE COUNT ours={} official={}", o.len(), f.len());
+        eprintln!("[master] our header:  {:?}", o.first());
+        eprintln!("[master] off header:  {:?}", f.first());
+        // Section counts: header, then {lastActorId}\n{actors}{lastAbilityId}\n
+        // {abilities}{lastTupleId}\n{tuples}{lastPetId}\n{pets}.
+        fn sections(v: &[&str]) -> (String, usize, usize, usize, usize) {
+            let mut i = 1;
+            let last_actor = v.get(i).unwrap_or(&"?").to_string();
+            i += 1;
+            let mut a = 0;
+            while i < v.len() && v[i].parse::<u64>().is_err() {
+                a += 1;
+                i += 1;
+            }
+            i += 1; // skip lastAbilityId
+            let mut b = 0;
+            while i < v.len() && v[i].parse::<u64>().is_err() {
+                b += 1;
+                i += 1;
+            }
+            i += 1; // skip lastTupleId
+            let mut t = 0;
+            while i < v.len() && v[i].parse::<u64>().is_err() {
+                t += 1;
+                i += 1;
+            }
+            i += 1; // skip lastPetId
+            let mut p = 0;
+            while i < v.len() && !v[i].is_empty() {
+                p += 1;
+                i += 1;
+            }
+            (last_actor, a, b, t, p)
+        }
+        let (oa, oar, oab, ot, op) = sections(&o);
+        let (fa, far, fab, ft, fp) = sections(&f);
+        eprintln!(
+            "[master] OURS: lastActorId={oa} actors={oar} abilities={oab} tuples={ot} pets={op}"
+        );
+        eprintln!(
+            "[master] OFFL: lastActorId={fa} actors={far} abilities={fab} tuples={ft} pets={fp}"
+        );
+        // Section counts are the bare-integer lines right after each section start.
+        // Just report the first few lines of each and the first divergence.
+        let n = o.len().min(f.len());
+        let mut first_div = None;
+        for i in 0..n {
+            if o[i] != f[i] {
+                first_div = Some(i);
+                break;
+            }
+        }
+        match first_div {
+            None if o.len() == f.len() => eprintln!("[master] IDENTICAL"),
+            None => eprintln!(
+                "[master] common prefix identical; LENGTH differs ours={} official={}",
+                o.len(),
+                f.len()
+            ),
+            Some(i) => {
+                eprintln!("[master] FIRST DIVERGENCE at line {i}:");
+                eprintln!("[master]   ours: {}", &o[i][..o[i].len().min(160)]);
+                eprintln!("[master]   offl: {}", &f[i][..f[i].len().min(160)]);
+            }
+        }
+    }
 }
