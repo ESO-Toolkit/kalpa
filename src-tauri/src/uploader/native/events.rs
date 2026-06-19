@@ -691,10 +691,17 @@ impl EventEmitter {
             "15"
         };
         let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
-        // Record this cast's tuple A against its track id, so buffs it applies can
-        // reference it with a trailing A{castA}.
+        // Record this cast's ABILITY INDEX against its track id. A buff applied by
+        // this cast carries a trailing `A{n}` where n is this index — the reference's
+        // `source_cast_index` is the cast ability's 1-based master index (from
+        // `buffs_hashmap[cast_id] = buff_index`), NOT a tuple index. (Storing the
+        // tuple A here was the render bug: cast-refs pointed into the wrong table.)
         if !cast_track_id.is_empty() && cast_track_id != "0" {
-            self.cast_track_to_a.insert(cast_track_id.to_string(), a);
+            let cast_ability_index = self.ability_index(&ability);
+            if cast_ability_index != 0 {
+                self.cast_track_to_a
+                    .insert(cast_track_id.to_string(), cast_ability_index);
+            }
         }
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
@@ -817,13 +824,32 @@ impl EventEmitter {
         // a code-1/2/3/26 line missing its trailing fields is malformed. The
         // dropped event is rare and out-of-combat-ish; the coverage gate keeps the
         // log off native regardless until the live round-trip confirms the format.
+        // The code-26 pool max is the TARGET unit's max for the energized resource
+        // (magicka(1)→state[1], stamina(4)→state[2], ultimate(8)→state[3], `cur/MAX`
+        // → MAX), with the resource index remapped (1→0, 4→1, 8→2). Resolve it here
+        // (where the target state is in scope) and pass the formed power tail.
+        let power_tail = if code == "26" {
+            let (power_idx, slot) = match power_type.trim() {
+                "1" => ("0", 1),
+                "4" => ("1", 2),
+                "8" => ("2", 3),
+                _ => ("0", 1),
+            };
+            let power_max = tgt_state
+                .get(slot)
+                .and_then(|s| s.split('/').nth(1))
+                .unwrap_or("0");
+            Some(format!("{power_idx}|{power_max}"))
+        } else {
+            None
+        };
         if !self.append_combat_tail(
             &mut line,
             code,
             action_result,
             hit_value,
             overflow,
-            power_type,
+            power_tail.as_deref(),
         ) {
             return None;
         }
@@ -870,7 +896,7 @@ impl EventEmitter {
         action_result: &str,
         hit_value: &str,
         overflow: &str,
-        power_type: &str,
+        power_tail: Option<&str>,
     ) -> bool {
         match code {
             "1" => {
@@ -914,11 +940,15 @@ impl EventEmitter {
                 }
                 None => false,
             },
-            "26" => {
-                let (power_idx, power_max) = power_tuple(power_type);
-                line.push_str(&format!("|{hit_value}|{overflow}|{power_idx}|{power_max}"));
-                true
-            }
+            "26" => match power_tail {
+                // `{hit}|{overflow}|{resourceIdx}|{poolMax}` — the resource index +
+                // target pool max are resolved by the caller (target state in scope).
+                Some(pt) => {
+                    line.push_str(&format!("|{hit_value}|{overflow}|{pt}"));
+                    true
+                }
+                None => false,
+            },
             // No other code reaches append_combat_tail (only 1/2/3/26 do).
             _ => false,
         }
@@ -1044,16 +1074,6 @@ pub fn build_native_payload(
 /// remaps it to a small index and pairs it with the relevant pool max. Only the
 /// observed mappings are encoded; an unknown type falls back to a structurally
 /// valid `(0, 0)`.
-fn power_tuple(power_type: &str) -> (&'static str, &'static str) {
-    match power_type.trim() {
-        // magicka → idx 0, pool max from captures.
-        "1" => ("0", "22216"),
-        // ultimate → idx 2.
-        "8" => ("2", "500"),
-        _ => ("0", "0"),
-    }
-}
-
 /// The comma tail after `<ts>,<TYPE>,` (i.e. everything the inner encoders parse).
 fn tail(line: &str) -> &str {
     line.splitn(3, ',').nth(2).unwrap_or("")
