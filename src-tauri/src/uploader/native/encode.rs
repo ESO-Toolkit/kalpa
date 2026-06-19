@@ -451,12 +451,80 @@ pub fn encode_state_block(stat_fields: &[&str], champion_points: &str) -> Option
 ///   yields a tuple record (`f6 OR has_effect_info`).
 /// * `EFFECT_INFO` → marks its ability as effect-bearing (affects the tuple flag).
 ///
-/// Returns `None` if the log lacks a `BEGIN_LOG` (not a valid session). Pets are
-/// always `0` here (none in the sample; non-zero pet handling awaits a sample).
+/// Returns `None` if the log lacks a `BEGIN_LOG` (not a valid session).
 ///
-/// Because tuple flags depend on EFFECT_INFO that may appear *after* the
-/// ABILITY_INFO, this collects abilities first, then resolves flags, then renders.
+/// Self-contained: builds its own tuple/pet sections. The production path uses
+/// [`build_master_table_with_tuples`] to share the tuple table with the events
+/// encoder (so the segment's `A` references resolve).
 pub fn build_master_table(lines: &[&str]) -> Option<String> {
+    build_master_table_inner(lines, None)
+}
+
+/// The 1-based `(identity → actor index, abilityId → ability index)` maps the
+/// events encoder needs to compute each event's tuple `A`. These are the same maps
+/// [`build_master_table`] uses internally.
+pub fn actor_ability_maps(
+    lines: &[&str],
+) -> (
+    std::collections::HashMap<String, u32>,
+    std::collections::HashMap<String, u32>,
+) {
+    let mut identity_order: Vec<String> = Vec::new();
+    let mut actor_seen: std::collections::BTreeSet<String> = Default::default();
+    let mut ability_order: Vec<String> = Vec::new();
+    let mut ability_seen: std::collections::BTreeSet<String> = Default::default();
+    for line in lines {
+        let mut it = line.splitn(3, ',');
+        let _ts = it.next();
+        let Some(kind) = it.next().map(str::trim) else {
+            continue;
+        };
+        let rest = it.next().unwrap_or("");
+        match kind {
+            "UNIT_ADDED" => {
+                if let Some(actor) = ActorInfo::parse(rest) {
+                    let identity = actor.identity();
+                    if actor_seen.insert(identity.clone()) {
+                        identity_order.push(identity);
+                    }
+                }
+            }
+            "ABILITY_INFO" => {
+                let id = rest.split(',').next().unwrap_or("").trim().to_string();
+                if !id.is_empty() && ability_seen.insert(id.clone()) {
+                    ability_order.push(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    let identity_to_actor = identity_order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i as u32 + 1))
+        .collect();
+    let mut ability_to_index: std::collections::HashMap<String, u32> = ability_order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i as u32 + 1))
+        .collect();
+    ability_to_index.insert("0".to_string(), 0);
+    (identity_to_actor, ability_to_index)
+}
+
+/// Build the master table using an EXTERNAL tuple table (the events encoder's), so
+/// the segment `A` references and the master tuples section share one numbering.
+pub fn build_master_table_with_tuples(
+    lines: &[&str],
+    tuples: &[(u32, u32, u32)],
+) -> Option<String> {
+    build_master_table_inner(lines, Some(tuples))
+}
+
+fn build_master_table_inner(
+    lines: &[&str],
+    external_tuples: Option<&[(u32, u32, u32)]>,
+) -> Option<String> {
     use super::serialize::MasterTableDoc;
 
     let mut log_version: Option<String> = None;
@@ -571,7 +639,16 @@ pub fn build_master_table(lines: &[&str]) -> Option<String> {
     // ownerActorIndex)` for player-owned units. Both need a TIME-AWARE
     // `unitId → actorIndex` live map (unit ids are recycled, so a global lookup
     // mis-pairs).
-    let (tuples, pets) = build_tuples_and_pets(lines, &identity_to_actor, &ability_to_index);
+    //
+    // When `external_tuples` is supplied (the production path), it is used
+    // verbatim instead — it is the events encoder's tuple table, so the segment's
+    // `A` references and the master's tuple section are the SAME numbering (which
+    // is what makes a report render). The internal build stays for the
+    // self-contained `build_master_table` (tests + the master diff).
+    let (mut tuples, pets) = build_tuples_and_pets(lines, &identity_to_actor, &ability_to_index);
+    if let Some(ext) = external_tuples {
+        tuples = ext.iter().map(|(s, t, a)| format!("{s}|{t}|{a}")).collect();
+    }
 
     // Render sections.
     let actors_string = join_lines(&actors);
@@ -1007,6 +1084,9 @@ struct UnitRuntime {
     /// The unit's subordinal ordinal: 0 for player-side units, else its 0-based
     /// per-monsterId instance index. Used to build the `seg[2]` suffix.
     ordinal: u32,
+    /// The unit's master-table identity (the dedup key). Lets a caller resolve a
+    /// runtime unit id to the same identity the master table indexes by.
+    identity: String,
 }
 
 impl ActorTable {
@@ -1031,7 +1111,7 @@ impl ActorTable {
             return;
         };
         let identity = actor.identity();
-        let master_index = *self.index_of.entry(identity).or_insert_with(|| {
+        let master_index = *self.index_of.entry(identity.clone()).or_insert_with(|| {
             let i = self.next_index;
             self.next_index += 1;
             i
@@ -1072,8 +1152,16 @@ impl ActorTable {
                 owner,
                 reaction,
                 ordinal,
+                identity,
             },
         );
+    }
+
+    /// The master-table identity currently bound to a runtime unit id, if known.
+    /// Lets the events encoder resolve a unit id to the same identity the master
+    /// table indexes by (so the event's tuple `A` references resolve).
+    pub fn identity_of_unit(&self, unit_id: &str) -> Option<String> {
+        self.units.get(unit_id.trim()).map(|u| u.identity.clone())
     }
 
     /// Apply a `UNIT_CHANGED` line (comma tail). Updates the unit's reaction (and

@@ -41,7 +41,7 @@ use std::collections::HashMap;
 
 use super::encode::{
     combat_final_field, combat_noncode1_crit_flag, encode_map_changed, encode_state_block,
-    encode_zone_changed, segment_ts, session_offset, split_csv_quoted_pub, ActorInfo, ActorTable,
+    encode_zone_changed, segment_ts, session_offset, split_csv_quoted_pub, ActorTable,
 };
 
 /// `actionResult` values that never emit a segment line (no-op / failed casts).
@@ -100,17 +100,6 @@ const CODE1_ACTION_RESULTS: &[&str] = &[
 /// state shows 0 health). Verified on the capture: `DIED`/`DIED_XP` → code 19.
 const CODE19_ACTION_RESULTS: &[&str] = &["DIED", "DIED_XP"];
 
-/// A stable identity for the `A` allocation key. Coarser than the runtime unit id
-/// (which ESO reuses within a session): players key on account+char id, monsters
-/// on monsterId+name. `None` is "no unit" (target id `0`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Identity {
-    Player { account: String, char_id: String },
-    Monster { monster_id: String, name: String },
-    None,
-    Unknown(String),
-}
-
 /// The running parser state for one log's event assembly.
 ///
 /// Holds the actor table (master indices, reactions, owners — for masks and the
@@ -122,17 +111,26 @@ pub struct EventEmitter {
     actors: ActorTable,
     /// Raw unit id → current championPoints (from `UNIT_ADDED`/`UNIT_CHANGED`).
     champion_points: HashMap<String, String>,
-    /// Raw unit id → identity (for the `A` allocation key).
-    unit_identity: HashMap<String, Identity>,
     /// abilityId → effectType (`BUFF`/`DEBUFF`) from `EFFECT_INFO`.
     effect_type: HashMap<String, String>,
     /// Per effect instance `(srcUnit, abilityId, tgtUnit)` → its last stack count.
     /// An `EFFECT_CHANGED UPDATED` emits (codes 6/8/11) only when the stack count
     /// *changes* from this value; a re-application with the same stack is dropped.
     last_stack: HashMap<(String, String, String), String>,
-    /// First-sight allocation: triple key → its `A`.
-    key_to_a: HashMap<(Identity, String, Identity), u32>,
-    next_a: u32,
+    /// `identity → 1-based actor master index` and `abilityId → 1-based ability
+    /// index`, supplied from the master-table build. The event subordinal `A` is
+    /// the index of the event's `(srcActorIndex, tgtActorIndex, abilityIndex)`
+    /// **tuple** in the master tuple/effects table — so these maps tie the segment
+    /// to the master.
+    identity_to_actor: HashMap<String, u32>,
+    ability_to_index: HashMap<String, u32>,
+    /// The tuple/effects table, built in event-emission order: a tuple key →
+    /// its 1-based index (== the event's `A`). `tuple_order` keeps the records for
+    /// the master's tuples section. Same `(src,tgt,ability)` → same index → same A,
+    /// which is what makes a uploaded report *render* (events resolve to real
+    /// effects).
+    tuple_to_index: HashMap<(u32, u32, u32), u32>,
+    tuple_order: Vec<(u32, u32, u32)>,
     /// The current session's segment-timestamp offset (`segTs = rawTs + offset`).
     offset: i64,
     /// Whether the first `BEGIN_LOG` has been seen (anchors `first_wall`).
@@ -156,47 +154,81 @@ impl EventEmitter {
     pub fn new() -> Self {
         Self {
             actors: ActorTable::new(),
-            next_a: 1,
             ..Default::default()
         }
     }
 
-    /// How many distinct `A` values have been minted.
-    pub fn allocated(&self) -> u32 {
-        self.next_a - 1
+    /// Construct with the master-table index maps (so the segment's `A` is the
+    /// master tuple index — the reference that makes a report render).
+    pub fn with_master_indices(
+        identity_to_actor: HashMap<String, u32>,
+        ability_to_index: HashMap<String, u32>,
+    ) -> Self {
+        Self {
+            actors: ActorTable::new(),
+            identity_to_actor,
+            ability_to_index,
+            ..Default::default()
+        }
     }
 
-    /// First-sight allocation for a triple key: mints the next `A` on first sight,
-    /// reuses it thereafter.
-    fn alloc(&mut self, key: (Identity, String, Identity)) -> u32 {
-        if let Some(&a) = self.key_to_a.get(&key) {
+    /// How many distinct tuples (== `A` values) have been allocated.
+    pub fn allocated(&self) -> u32 {
+        self.tuple_order.len() as u32
+    }
+
+    /// The ordered tuple/effects table (`(srcActorIndex, tgtActorIndex,
+    /// abilityIndex)` records) built during assembly — this becomes the master
+    /// table's tuples section, guaranteeing the segment's `A` references resolve.
+    pub fn tuples(&self) -> &[(u32, u32, u32)] {
+        &self.tuple_order
+    }
+
+    /// Allocate (or look up) the tuple index for an event's `(srcActorIndex,
+    /// tgtActorIndex, abilityIndex)`. The 1-based index IS the event's subordinal
+    /// `A`. First sight of a tuple appends it (event-emission order); repeats reuse
+    /// the same index.
+    fn alloc_tuple(&mut self, src_actor: u32, tgt_actor: u32, ability_idx: u32) -> u32 {
+        let key = (src_actor, tgt_actor, ability_idx);
+        if let Some(&a) = self.tuple_to_index.get(&key) {
             return a;
         }
-        let a = self.next_a;
-        self.next_a += 1;
-        self.key_to_a.insert(key, a);
+        let a = self.tuple_order.len() as u32 + 1;
+        self.tuple_order.push(key);
+        self.tuple_to_index.insert(key, a);
         a
     }
 
-    /// Resolve a raw unit-id field to an identity. `0`/`*`/missing → `None`; an id
-    /// not seen via `UNIT_ADDED` → `Unknown`.
-    fn identity_of(&self, unit_id: &str) -> Identity {
-        match unit_id.trim() {
-            "" | "0" | "*" => Identity::None,
-            u => self
-                .unit_identity
-                .get(u)
-                .cloned()
-                .unwrap_or_else(|| Identity::Unknown(u.to_string())),
+    /// Resolve a raw unit id to its 1-based actor master index (0 = unknown).
+    fn actor_index(&self, unit_id: &str) -> u32 {
+        let u = unit_id.trim();
+        if u.is_empty() || u == "0" || u == "*" {
+            return 0;
         }
+        // Resolve via the live actor table → identity → master index.
+        self.actors
+            .identity_of_unit(u)
+            .and_then(|id| self.identity_to_actor.get(&id).copied())
+            .unwrap_or(0)
     }
 
-    /// Resolve a target field, folding the `*` "same as source" token to `src`.
-    fn target_identity(&self, tgt_field: &str, src: &Identity) -> Identity {
-        if tgt_field.trim() == "*" {
-            return src.clone();
-        }
-        self.identity_of(tgt_field)
+    /// Resolve an ability id to its 1-based ability master index (0 if unknown).
+    fn ability_index(&self, ability_id: &str) -> u32 {
+        self.ability_to_index
+            .get(ability_id.trim())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The event's subordinal `A`: the tuple index for `(srcActor, tgtActor,
+    /// abilityIndex)`. `src_unit`/`tgt_unit` are raw unit ids (the folded `*`
+    /// target already resolved to the source). This is what ties the segment to
+    /// the master tuple table.
+    fn alloc_for(&mut self, src_unit: &str, ability_id: &str, tgt_unit: &str) -> u32 {
+        let src = self.actor_index(src_unit);
+        let tgt = self.actor_index(tgt_unit);
+        let ab = self.ability_index(ability_id);
+        self.alloc_tuple(src, tgt, ab)
     }
 
     /// The current championPoints for a unit id (`"0"` if unknown — the state-block
@@ -210,7 +242,19 @@ impl EventEmitter {
 
     /// Assemble the whole log's events into one [`EventsOutput`] (the single-fight
     /// case — every event in one events string). Walks lines in file order.
+    ///
+    /// If the emitter was built without the master index maps
+    /// ([`EventEmitter::new`]), they are derived from `lines` here so a standalone
+    /// `EventEmitter::new().build(lines)` still produces correct tuple-indexed `A`
+    /// values. The production path supplies the maps up front
+    /// ([`EventEmitter::with_master_indices`]) so the segment and master share one
+    /// tuple numbering.
     pub fn build(&mut self, lines: &[&str]) -> EventsOutput {
+        if self.identity_to_actor.is_empty() && self.ability_to_index.is_empty() {
+            let (id2a, ab2i) = super::encode::actor_ability_maps(lines);
+            self.identity_to_actor = id2a;
+            self.ability_to_index = ab2i;
+        }
         let mut out = String::new();
         let mut count: u64 = 0;
         for line in lines {
@@ -247,9 +291,9 @@ impl EventEmitter {
                 None
             }
             "UNIT_REMOVED" => {
-                if let Some(u) = f.get(2) {
-                    self.unit_identity.remove(u.trim());
-                }
+                // The actor index map keeps the latest unit→actor binding (a
+                // recycled id is rebound on the next UNIT_ADDED), so no cleanup is
+                // needed here.
                 None
             }
             "EFFECT_INFO" => {
@@ -330,8 +374,9 @@ impl EventEmitter {
         }
     }
 
-    /// Apply a `UNIT_ADDED`: update the actor table, championPoints, and the
-    /// identity map used for the `A` key.
+    /// Apply a `UNIT_ADDED`: update the actor table (master indices, reactions,
+    /// owners — for masks, the subordinal suffix, and actor-index resolution) and
+    /// the per-unit championPoints.
     fn on_unit_added(&mut self, f: &[&str], line: &str) {
         let rest = tail(line);
         self.actors.on_unit_added(rest);
@@ -341,24 +386,7 @@ impl EventEmitter {
         // championPoints: UNIT_ADDED field [12] (after the `<ts>,UNIT_ADDED,`
         // header these are f[2+0]=unitId … f[2+12]=champ → absolute index 14).
         if let Some(cp) = f.get(14) {
-            self.champion_points
-                .insert(unit_id.clone(), cp.trim().to_string());
-        }
-        // Identity for the A key (players by account+charId, monsters by id+name).
-        if let Some(actor) = ActorInfo::parse(rest) {
-            let identity = match &actor {
-                ActorInfo::Player {
-                    account, player_id, ..
-                } => Identity::Player {
-                    account: account.clone(),
-                    char_id: player_id.clone(),
-                },
-                ActorInfo::Monster { raw_id, name, .. } => Identity::Monster {
-                    monster_id: raw_id.clone(),
-                    name: name.clone(),
-                },
-            };
-            self.unit_identity.insert(unit_id, identity);
+            self.champion_points.insert(unit_id, cp.trim().to_string());
         }
     }
 
@@ -403,8 +431,8 @@ impl EventEmitter {
         let state: Vec<&str> = f.get(4..13)?.iter().map(|s| s.trim()).collect();
         let cp = self.cp_of(&unit_id);
         let block = encode_state_block(&state, &cp)?;
-        let ident = self.identity_of(&unit_id);
-        let a = self.alloc((ident.clone(), "HEALTH_REGEN".to_string(), ident));
+        // HEALTH_REGEN has no abilityId; its tuple is (unit, unit, 0).
+        let a = self.alloc_for(&unit_id, "0", &unit_id);
         // Self-target (src == tgt): both masks are the unit's own side, S == T.
         let (src_mask, tgt_mask) = self.masks(&unit_id, &unit_id);
         let sub = self
@@ -504,9 +532,7 @@ impl EventEmitter {
             _ => return None,
         };
 
-        let src_ident = self.identity_of(&src_unit);
-        let tgt_ident = self.target_identity(tgt_field, &src_ident);
-        let a = self.alloc((src_ident, ability, tgt_ident));
+        let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
@@ -546,9 +572,7 @@ impl EventEmitter {
         } else {
             "15"
         };
-        let src_ident = self.identity_of(&src_unit);
-        let tgt_ident = self.target_identity(tgt_field, &src_ident);
-        let a = self.alloc((src_ident, ability, tgt_ident));
+        let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
@@ -627,9 +651,7 @@ impl EventEmitter {
         let tgt_field = f.get(19).map(|s| s.trim()).unwrap_or("*");
         let (tgt_unit, tgt_state) = self.parse_combat_target(f, tgt_field, &src_unit, &src_state);
 
-        let src_ident = self.identity_of(&src_unit);
-        let tgt_ident = self.target_identity(tgt_field, &src_ident);
-        let a = self.alloc((src_ident, ability, tgt_ident));
+        let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
         let (src_mask, tgt_mask) = self.combat_masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
@@ -819,9 +841,18 @@ impl EventEmitter {
 /// `BEGIN_LOG` (not a valid session). The result is the text to ZIP via
 /// [`super::zip_segment::zip_log_txt`] into the `logfile` upload field.
 pub fn build_fights_segment(lines: &[&str]) -> Option<String> {
-    use super::serialize::FightsSegmentDoc;
+    // Run the emitter with the master-table index maps so its `A` is the tuple
+    // index (the standalone path — tests/diagnostics; the production path shares
+    // the tuple table via `build_native_payload`).
+    let (id2a, ab2i) = super::encode::actor_ability_maps(lines);
+    let mut emitter = EventEmitter::with_master_indices(id2a, ab2i);
+    render_segment(lines, &mut emitter)
+}
 
-    // The log version is the BEGIN_LOG field after the wall-clock ms.
+/// Frame an emitter's assembled events into the fights-segment text. Returns
+/// `None` if the log has no `BEGIN_LOG`.
+fn render_segment(lines: &[&str], emitter: &mut EventEmitter) -> Option<String> {
+    use super::serialize::FightsSegmentDoc;
     let log_version = lines.iter().find_map(|l| {
         let f = split_csv_quoted_pub(l);
         if f.get(1).map(|s| s.trim()) == Some("BEGIN_LOG") {
@@ -830,8 +861,6 @@ pub fn build_fights_segment(lines: &[&str]) -> Option<String> {
             None
         }
     })?;
-
-    let mut emitter = EventEmitter::new();
     let out = emitter.build(lines);
     let doc = FightsSegmentDoc {
         log_version: &log_version,
@@ -855,12 +884,19 @@ pub fn build_native_payload(
     lines: &[&str],
 ) -> Result<Option<(super::client::Segment, super::client::MasterTableBytes)>, String> {
     use super::client::{MasterTableBytes, Segment};
-    use super::encode::build_master_table;
+    use super::encode::{actor_ability_maps, build_master_table_with_tuples};
 
-    let (Some(segment_text), Some(master_text)) =
-        (build_fights_segment(lines), build_master_table(lines))
-    else {
+    // Build the segment with an emitter that holds the master index maps, so its
+    // `A` values are tuple indices. Then build the master table using THAT
+    // emitter's tuple table — the segment's `A` references and the master's tuple
+    // section share one numbering, which is what lets the uploaded report render.
+    let (id2a, ab2i) = actor_ability_maps(lines);
+    let mut emitter = EventEmitter::with_master_indices(id2a, ab2i);
+    let Some(segment_text) = render_segment(lines, &mut emitter) else {
         return Ok(None); // not a valid session
+    };
+    let Some(master_text) = build_master_table_with_tuples(lines, emitter.tuples()) else {
+        return Ok(None);
     };
     let segment = Segment::from_text(&segment_text)?;
     let master = MasterTableBytes::from_text(&master_text)?;
@@ -995,24 +1031,23 @@ mod tests {
         );
     }
 
+    // The tuple allocation: A is the 1-based index of an event's (srcActor,
+    // tgtActor, abilityIndex) tuple, in first-emission order; the same tuple reuses
+    // its index. This is what ties the segment's A to the master tuple table.
     #[test]
-    fn alloc_is_first_sight_and_dense() {
+    fn tuple_alloc_is_first_sight_and_dense() {
         let mut e = EventEmitter::new();
-        let p = Identity::Player {
-            account: "@a".into(),
-            char_id: "1".into(),
-        };
-        let m = Identity::Monster {
-            monster_id: "88330".into(),
-            name: "Bear".into(),
-        };
-        let a1 = e.alloc((p.clone(), "100".into(), m.clone()));
-        let a2 = e.alloc((p.clone(), "100".into(), m.clone())); // same triple
-        let a3 = e.alloc((p.clone(), "200".into(), m.clone())); // new ability
+        // (srcActor=4, tgtActor=5, ability=150)
+        let a1 = e.alloc_tuple(4, 5, 150);
+        let a2 = e.alloc_tuple(4, 5, 150); // same tuple
+        let a3 = e.alloc_tuple(4, 6, 150); // different target → new tuple
+        let a4 = e.alloc_tuple(4, 5, 146); // different ability → new tuple
         assert_eq!(a1, 1);
-        assert_eq!(a2, 1, "same triple reuses its A");
-        assert_eq!(a3, 2, "new triple mints the next A");
-        assert_eq!(e.allocated(), 2);
+        assert_eq!(a2, 1, "same tuple reuses its index (== A)");
+        assert_eq!(a3, 2);
+        assert_eq!(a4, 3);
+        assert_eq!(e.allocated(), 3);
+        assert_eq!(e.tuples(), &[(4, 5, 150), (4, 6, 150), (4, 5, 146)]);
     }
 
     #[test]
@@ -1241,7 +1276,9 @@ mod tests {
         let raw = include_str!("testdata/sample_raw_encounter.log");
         let golden = include_str!("testdata/sample_fights_segment.txt");
         let lines: Vec<&str> = raw.lines().collect();
-        let mut e = EventEmitter::new();
+        // The emitter needs the master index maps so its `A` is the tuple index.
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+        let mut e = EventEmitter::with_master_indices(id2a, ab2i);
         let out = e.build(&lines);
 
         // Golden events are the file minus the 2-line header (version|game, count).
