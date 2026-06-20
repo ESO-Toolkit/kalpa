@@ -189,7 +189,12 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // gate still has final say per log (an unproven event type falls back).
   const [nativeOptIn, setNativeOptIn] = useState(false);
   const [hasNativeSession, setHasNativeSession] = useState(false);
-  const willUseNative = nativeOptIn && hasNativeSession;
+  // Direct upload is the *intended* path only for MANUAL uploads with both opt-in
+  // and a session. Live mode ALWAYS hands off to the official uploader
+  // (uploader_start_live never goes native), so the transport readout, the
+  // "Upload directly" label, and the direct-only report-name field must not claim
+  // native there.
+  const willUseNative = mode === "manual" && nativeOptIn && hasNativeSession;
 
   // Live-mode state
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
