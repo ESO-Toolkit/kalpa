@@ -200,7 +200,7 @@ fn session_file_name(stem: &str, session: &LogSession) -> String {
 /// separators and dots, cap the length, and reject anything that reduces to
 /// empty — the caller then falls back to the stable auto name. The `.log`
 /// extension is appended by the caller, never taken from user input.
-fn sanitize_split_stem(raw: &str) -> Option<String> {
+pub fn sanitize_split_stem(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(raw.len());
     let mut last_was_sep = false;
     for ch in raw.trim().chars() {

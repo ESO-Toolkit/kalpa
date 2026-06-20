@@ -159,6 +159,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const [history, setHistory] = useState<UploadRecord[]>([]);
   const [uploading, setUploading] = useState(false);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  // True while a file is dragged over the window — drives the picker drop-zone
+  // visual. `importing` covers the copy-in of a dropped out-of-folder log.
+  const [dragOver, setDragOver] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   // Direct (native) upload state, lifted here so both the promoted Direct Upload
   // section and the upload action can reflect which transport will run. `optIn`
@@ -408,6 +412,64 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       if (selectTokenRef.current === token) setScanning(false);
     }
   }, []);
+
+  // Import a dropped .log: the backend copies it into the Logs folder (or uses it
+  // in place if already there), then we refresh the list and select the result so
+  // it flows through the normal preflight path. Only .log files are accepted.
+  const handleImportLog = useCallback(
+    async (srcPath: string) => {
+      if (!/\.log$/i.test(srcPath)) {
+        toast.error("Only .log files can be added.");
+        return;
+      }
+      setImporting(true);
+      try {
+        const imported = await invokeOrThrow<string>("uploader_import_log", { srcPath });
+        if (logsDir) await loadLogs(logsDir);
+        await handleSelectLog(imported);
+        toast.success("Log added — scanning it now.");
+      } catch (e) {
+        toast.error(`Couldn't add that log: ${getTauriErrorMessage(e)}`);
+      } finally {
+        setImporting(false);
+      }
+    },
+    [logsDir, loadLogs, handleSelectLog]
+  );
+
+  // Native file drag-drop over the window. Tauri delivers real OS paths (unlike
+  // HTML5 drag-drop in a webview), which the backend then copy-confines. We only
+  // act on a single dropped .log; the drag-over state drives the picker visual.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        unlisten = await getCurrentWebview().onDragDropEvent((event) => {
+          if (!active) return;
+          const t = event.payload.type;
+          if (t === "over") {
+            setDragOver(true);
+          } else if (t === "leave") {
+            setDragOver(false);
+          } else if (t === "drop") {
+            setDragOver(false);
+            const paths = event.payload.paths ?? [];
+            const log = paths.find((p) => /\.log$/i.test(p));
+            if (log) void handleImportLog(log);
+            else if (paths.length > 0) toast.error("Drop a .log file to add it.");
+          }
+        });
+      } catch {
+        /* drag-drop is an enhancement; ignore if the webview API is unavailable */
+      }
+    })();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [handleImportLog]);
 
   const handleManualUpload = async () => {
     if (!selectedLog) return;
@@ -761,6 +823,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               listError={listError}
               selectedLog={selectedLog}
               scanning={scanning}
+              dragOver={dragOver}
+              importing={importing}
               onSelect={handleSelectLog}
               onRefresh={() => logsDir && loadLogs(logsDir)}
               onPickFolder={handlePickFolder}
@@ -1305,6 +1369,8 @@ function LogPicker({
   listError,
   selectedLog,
   scanning,
+  dragOver,
+  importing,
   onSelect,
   onRefresh,
   onPickFolder,
@@ -1316,6 +1382,8 @@ function LogPicker({
   listError: string | null;
   selectedLog: string | null;
   scanning: boolean;
+  dragOver: boolean;
+  importing: boolean;
   onSelect: (path: string) => void;
   onRefresh: () => void;
   onPickFolder: () => void;
@@ -1343,7 +1411,27 @@ function LogPicker({
   }, [logs, query, filter, sort]);
 
   return (
-    <GlassPanel variant="subtle" className="p-3">
+    <GlassPanel
+      variant="subtle"
+      className={cn(
+        "relative p-3 transition-colors duration-150",
+        dragOver && "border-sky-400/50 bg-sky-400/[0.05]"
+      )}
+    >
+      {/* Drag-over overlay: a clear drop target appears while a file is dragged
+          over the window. The actual import (copy-into-Logs) runs on drop. */}
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-sky-400/50 bg-[rgba(12,20,38,0.85)] text-center">
+          <CloudUpload className="size-7 text-sky-400" aria-hidden />
+          <span className="text-sm font-medium text-sky-300">Drop your .log to add it</span>
+        </div>
+      )}
+      {importing && (
+        <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-[rgba(12,20,38,0.85)] text-center">
+          <span className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
+          <span className="text-sm text-muted-foreground">Adding log to your folder…</span>
+        </div>
+      )}
       <div className="mb-2 flex items-center justify-between gap-2">
         <SectionHeader>Logs Folder</SectionHeader>
         <div className="flex gap-1">
@@ -1524,6 +1612,14 @@ function LogPicker({
             );
           })}
         </ul>
+      )}
+
+      {/* Discoverability for drag-drop — a quiet hint that you can drop a log
+          from anywhere; the backend copies it into this folder first. */}
+      {!listError && (
+        <p className="mt-2 text-center text-[11px] text-muted-foreground/60">
+          or drop a <code className="text-muted-foreground/80">.log</code> file here from anywhere
+        </p>
       )}
     </GlassPanel>
   );

@@ -301,6 +301,92 @@ pub async fn uploader_split_to_disk(
         .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Import a `.log` file that lives OUTSIDE the ESO Logs folder (e.g. dropped from
+/// the Desktop or Downloads) by copying it into the Logs folder, then returning
+/// the new in-folder path. Everything downstream (preflight, upload, split) still
+/// runs the existing `confine_log_path` guard, so the imported copy is treated
+/// exactly like any other log in the folder.
+///
+/// Validation: the source must be an existing `.log` file with no UNC/verbatim/
+/// device prefix (same rejections as `confine_log_path`). The destination name is
+/// the source file's own name, sanitized to a single safe segment and made
+/// collision-free in the Logs folder — the caller never controls the directory.
+#[tauri::command]
+pub async fn uploader_import_log(
+    allowed: State<'_, AllowedAddonsPath>,
+    src_path: String,
+) -> Result<String, String> {
+    let src = Path::new(&src_path);
+    if has_unc_or_verbatim_prefix(src) {
+        return Err("Network and special paths are not allowed.".into());
+    }
+    let is_log = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("log"))
+        .unwrap_or(false);
+    if !is_log {
+        return Err("Only .log files can be imported.".into());
+    }
+    // Resolve the real source (rejects a dangling path / missing file).
+    let canonical_src =
+        dunce::canonicalize(src).map_err(|_| "That file could not be found.".to_string())?;
+    if !canonical_src.is_file() {
+        return Err("That isn't a file.".into());
+    }
+
+    let root = logs_root(&allowed)?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("Could not access the Logs folder: {e}"))?;
+
+    // If the file is ALREADY inside the Logs folder, just use it in place — no
+    // copy needed (e.g. a drop of a file the picker already lists).
+    if canonical_src.starts_with(&root) {
+        return Ok(canonical_src.to_string_lossy().into_owned());
+    }
+
+    // Build a safe destination name from the source's stem + ".log", made unique
+    // in the Logs folder so an import never overwrites an existing log.
+    let stem = canonical_src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(super::splitter::sanitize_split_stem)
+        .unwrap_or(None)
+        .unwrap_or_else(|| "imported-log".to_string());
+    let mut candidate = format!("{stem}.log");
+    let mut n = 2;
+    while root.join(&candidate).exists() {
+        candidate = format!("{stem}-{n}.log");
+        n += 1;
+        if n > 1000 {
+            return Err("Too many imported copies — clean up the Logs folder.".into());
+        }
+    }
+    let dst = root.join(&candidate);
+
+    // Stream the copy on a blocking thread (logs can be multi-GB).
+    let dst_str = dst.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        std::fs::copy(&canonical_src, &dst).map_err(|e| {
+            use std::io::ErrorKind;
+            // Windows Controlled Folder Access blocks third-party writes into
+            // Documents (where the ESO Logs folder lives) and surfaces as
+            // PermissionDenied or a misleading NotFound on the destination.
+            // Give actionable guidance instead of a raw OS error.
+            if matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::NotFound) {
+                "Couldn't copy the log into your ESO Logs folder. If Windows \
+                 Controlled Folder Access is on, allow Kalpa to write there (or \
+                 move the log into your Logs folder manually), then try again."
+                    .to_string()
+            } else {
+                format!("Couldn't import the log: {e}")
+            }
+        })?;
+        Ok::<String, String>(dst_str)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 /// Split only the sessions the user selected in the split workbench, naming each
 /// from the user's (sanitized) custom name. Like [`uploader_split_to_disk`] the
 /// destination is app-owned, not caller-controlled, and every custom name is
