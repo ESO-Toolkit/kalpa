@@ -41,6 +41,7 @@ import { Input } from "@/components/ui/input";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
+import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
 import { getSetting, setSetting } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -1454,20 +1455,31 @@ function LogPicker({
       <div className="mb-2 flex items-center justify-between gap-2">
         <SectionHeader>Logs Folder</SectionHeader>
         <div className="flex gap-1">
-          <Button variant="ghost" size="icon-sm" onClick={onRefresh} aria-label="Refresh logs">
-            <RefreshCw className="size-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={onOpenFolder}
-            aria-label="Open Logs folder"
-          >
-            <FolderOpen className="size-3.5" />
-          </Button>
-          <Button variant="ghost" size="icon-sm" onClick={onPickFolder} aria-label="Choose folder">
-            <FolderSearch className="size-3.5" />
-          </Button>
+          <SimpleTooltip content="Refresh logs" side="bottom">
+            <Button variant="ghost" size="icon-sm" onClick={onRefresh} aria-label="Refresh logs">
+              <RefreshCw className="size-3.5" />
+            </Button>
+          </SimpleTooltip>
+          <SimpleTooltip content="Open Logs folder in File Explorer" side="bottom">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onOpenFolder}
+              aria-label="Open Logs folder"
+            >
+              <FolderOpen className="size-3.5" />
+            </Button>
+          </SimpleTooltip>
+          <SimpleTooltip content="Choose a different Logs folder" side="bottom">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onPickFolder}
+              aria-label="Choose folder"
+            >
+              <FolderSearch className="size-3.5" />
+            </Button>
+          </SimpleTooltip>
         </div>
       </div>
 
@@ -1680,37 +1692,32 @@ function Preflight({
   // The summary card carries the size/fights/sessions counts now; this row is the
   // split-affordance + large-log nudge. Render nothing when there's neither a
   // reason to split nor multiple sessions to carve.
-  const canSplit = preflight.recommendSplit || preflight.sessions.length > 1;
-  if (!canSplit) return null;
-
+  // Split is always available for a selected log (the workbench handles the
+  // single-session case fine). The label/nudge adapts to the log.
+  const sessionCount = preflight.sessions.length;
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
-      {preflight.recommendSplit ? (
-        <>
-          <span className="text-xs text-amber-400/90">
-            This log is large — splitting by session helps it upload.
-          </span>
-          <Button variant="outline" size="sm" onClick={onSplit} className="ml-auto">
-            <Scissors className="size-3.5" />
-            Split by session…
-          </Button>
-        </>
-      ) : (
-        <>
-          <span className="text-xs text-muted-foreground">
-            {preflight.sessions.length} logging sessions in this file.
-          </span>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onSplit}
-            className="ml-auto text-foreground/70"
-          >
-            <Scissors className="size-3.5" />
-            Split…
-          </Button>
-        </>
-      )}
+      <span
+        className={cn(
+          "text-xs",
+          preflight.recommendSplit ? "text-amber-400/90" : "text-muted-foreground"
+        )}
+      >
+        {preflight.recommendSplit
+          ? "This log is large — splitting by session helps it upload."
+          : sessionCount > 1
+            ? `${sessionCount} logging sessions in this file.`
+            : "Split this log into per-session files to upload them separately."}
+      </span>
+      <Button
+        variant={preflight.recommendSplit ? "outline" : "ghost"}
+        size="sm"
+        onClick={onSplit}
+        className={cn("ml-auto", !preflight.recommendSplit && "text-foreground/70")}
+      >
+        <Scissors className="size-3.5" />
+        {preflight.recommendSplit ? "Split by session…" : "Split…"}
+      </Button>
     </div>
   );
 }
@@ -1818,22 +1825,13 @@ function ManualActions({
         {label}
       </Button>
 
-      <div className="flex flex-col items-center gap-1.5 text-center">
-        {willUseNative ? (
-          <InfoPill color="sky" className="gap-1">
-            <Zap className="size-3" aria-hidden /> Fast — stays in Kalpa
-          </InfoPill>
-        ) : (
-          <InfoPill color="muted">Uses the official uploader</InfoPill>
-        )}
-        <p className="text-xs text-muted-foreground">
-          {willUseNative
-            ? "Your report appears here when it's done. If a log has an event type Kalpa can't upload directly, it falls back to the official uploader automatically."
-            : installed
-              ? "Uploads run through the official ESO Logs Uploader installed on your PC."
-              : "We'll open the ESO Logs Uploader (or its download page) with your prepared log."}
-        </p>
-      </div>
+      <p className="max-w-md text-center text-xs text-muted-foreground">
+        {willUseNative
+          ? "Your report appears here when it's done. If a log has an event type Kalpa can't upload directly, it falls back to the official uploader automatically."
+          : installed
+            ? "Uploads run through the official ESO Logs Uploader installed on your PC."
+            : "We'll open the ESO Logs Uploader (or its download page) with your prepared log."}
+      </p>
     </GlassPanel>
   );
 }
