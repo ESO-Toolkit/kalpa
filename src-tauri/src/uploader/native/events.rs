@@ -1859,6 +1859,73 @@ mod tests {
     }
 
     #[test]
+    fn soul_gem_resurrection_emits_a_code_22_line() {
+        // A player (unit 1) resurrects another player (unit 2). The accept carries
+        // abilityId 0 (mapped to 26770). The line is the combat prefix with own-side
+        // masks (16|16, both allies), NO `C` cast field, and NO trailing tail.
+        let st = "18400/18400,9971/12868,8488/28700,198/500,0/1000,0,0.5,0.7,5.9";
+        // src=1 resurrects tgt=2, abilityId 0, hit 0.
+        let rez = format!(
+            "2,COMBAT_EVENT,SOUL_GEM_RESURRECTION_ACCEPTED,GENERIC,0,0,0,0,0,1,{st},2,{st}"
+        );
+        let lines = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "0,UNIT_ADDED,2,PLAYER,F,2,0,F,1,3,\"Ally\",\"@ally\",222,50,1740,0,PLAYER_ALLY,T",
+            "1,BEGIN_COMBAT,",
+            &rez,
+        ];
+        let mut e = EventEmitter::new();
+        let out = e.build(&lines);
+        let c22 = out
+            .events_string
+            .lines()
+            .find(|l| l.split('|').nth(1) == Some("22"))
+            .expect("a soul-gem resurrection must emit a code-22 line");
+        let f: Vec<&str> = c22.split('|').collect();
+        assert_eq!(f[1], "22");
+        assert_eq!((f[3], f[4]), ("16", "16"), "own-side ally masks: {c22}");
+        // No `C{cast}` field (cast_id 0) and no trailing crit/final tail: after the
+        // masks come straight to S/T blocks, and the line ends with the T block.
+        assert!(
+            !c22.contains("|C"),
+            "resurrect carries no cast field: {c22}"
+        );
+        assert!(
+            c22.contains("|S") && c22.contains("|T"),
+            "S+T blocks: {c22}"
+        );
+    }
+
+    #[test]
+    fn immune_code_1_uses_the_bare_result_flag_end_to_end() {
+        // Regression for the headline fix: IMMUNE emits a single trailing `|10`, not
+        // `|1|10`. Exercised end-to-end through emit_combat_event (not just the tail
+        // helper), so the integration with masks/state can't silently regress it.
+        let st = "18400/18400,9971/12868,8488/28700,198/500,0/1000,0,0.5,0.7,5.9";
+        // IMMUNE with a non-zero raw hit (162) — the official zeroes it → bare `|10`.
+        let immune = format!("2,COMBAT_EVENT,IMMUNE,FIRE,1,162,0,5000,100,1,{st},30,{st}");
+        let lines = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F",
+            "1,BEGIN_COMBAT,",
+            &immune,
+        ];
+        let mut e = EventEmitter::new();
+        let out = e.build(&lines);
+        let c1 = out
+            .events_string
+            .lines()
+            .find(|l| l.split('|').nth(1) == Some("1"))
+            .expect("IMMUNE emits a code-1 line");
+        assert!(
+            c1.ends_with("|10") && !c1.ends_with("|1|10"),
+            "IMMUNE must end with the bare result flag 10 (raw hit ignored): {c1}"
+        );
+    }
+
+    #[test]
     fn end_cast_interrupted_emits_code_27() {
         // A player (unit 1) casts an interrupting ability (61665) at a monster (30)
         // who is mid-cast (cast 5000, ability 88330). The interrupting cast registers
