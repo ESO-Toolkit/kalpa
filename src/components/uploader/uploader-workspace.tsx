@@ -23,6 +23,7 @@ import {
   Check,
   AlertCircle,
   AlertTriangle,
+  ChevronRight,
 } from "lucide-react";
 import {
   Dialog,
@@ -700,7 +701,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           way to reach it. */}
       <DialogContent
         initialFocus={isLoggedIn ? firstTabRef : undefined}
-        className="flex max-h-[90vh] flex-col gap-0 overflow-hidden sm:max-w-2xl"
+        className="flex max-h-[90vh] flex-col gap-0 overflow-hidden sm:max-w-3xl"
       >
         <DialogHeader className="shrink-0">
           <div className="flex items-center justify-between gap-3">
@@ -711,9 +712,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
             <StatusPill status={headlineStatus} />
           </div>
           <DialogDescription>
-            Send your combat logs to esologs.com — analyze your raids, compare parses, and share
-            reports with your group.
+            Turn your <code className="text-foreground/80">Encounter.log</code> into a shareable
+            report on esologs.com — parses, rankings, and full fight breakdowns.
           </DialogDescription>
+          {isLoggedIn && <TransportReadout willUseNative={willUseNative} transport={transport} />}
         </DialogHeader>
 
         {!isLoggedIn ? (
@@ -871,6 +873,45 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
+// A compact "route" instrument that dramatizes the data path the upload takes:
+// your machine → the active engine → esologs.com. The middle chip reflects which
+// transport will run (direct = sky/Zap, official = muted), so the user always
+// knows the route at a glance from the header — the signature element of the
+// workspace, grounded in the subject (a log's journey to the site).
+function TransportReadout({
+  willUseNative,
+  transport,
+}: {
+  willUseNative: boolean;
+  transport: TransportInfo | null;
+}) {
+  const installed = transport?.officialUploaderInstalled ?? false;
+  return (
+    <div className="mt-2.5 flex items-center gap-2 text-[11px]">
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-foreground/80">
+        <FileText className="size-3 text-muted-foreground" aria-hidden />
+        Your log
+      </span>
+      <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
+      {willUseNative ? (
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-sky-400/25 bg-sky-400/[0.06] px-2 py-1 font-medium text-sky-300">
+          <Zap className="size-3" aria-hidden />
+          Direct from Kalpa
+        </span>
+      ) : (
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-muted-foreground">
+          <CloudUpload className="size-3" aria-hidden />
+          {installed ? "Official uploader" : "ESO Logs Uploader"}
+        </span>
+      )}
+      <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] px-2 py-1 font-medium text-[#c4a44a]">
+        esologs.com
+      </span>
+    </div>
+  );
+}
+
 function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => void }) {
   const [loggingIn, setLoggingIn] = useState(false);
 
@@ -996,26 +1037,23 @@ function DirectUploadSection({
     );
   }
 
-  // State 3 — opted in and signed in: ready.
+  // State 3 — opted in and signed in: ready. Slimmed to a single confirmation
+  // line (the header route readout already shows "Direct from Kalpa"), so it
+  // doesn't add a second heavy panel above the action.
   if (hasSession) {
     return (
-      <GlassPanel
-        variant="subtle"
-        className="flex items-center justify-between gap-3 border-emerald-400/20 bg-emerald-400/[0.03] p-3"
-      >
-        <div className="flex min-w-0 items-start gap-2.5">
-          <Check className="mt-0.5 size-4 shrink-0 text-emerald-400" aria-hidden />
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-white/90">Direct upload ready</p>
-            <p className="text-xs text-muted-foreground">
-              Your logs upload straight from Kalpa — faster, and the report appears here.
-            </p>
-          </div>
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-400/15 bg-emerald-400/[0.03] px-3 py-1.5">
+        <div className="flex min-w-0 items-center gap-2 text-xs">
+          <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-emerald-400/15">
+            <Check className="size-2.5 text-emerald-400" aria-hidden />
+          </span>
+          <span className="text-foreground/80">Direct upload ready</span>
+          <span className="truncate text-muted-foreground">— reports appear here</span>
         </div>
         <Button variant="ghost" size="sm" className="shrink-0" onClick={handleSignOut}>
           Sign out
         </Button>
-      </GlassPanel>
+      </div>
     );
   }
 
@@ -1107,23 +1145,36 @@ function ModeTab({
       aria-pressed={active}
       aria-label={`${title} mode — ${hint}`}
       className={cn(
-        "rounded-xl border p-3 text-left transition-colors duration-150",
+        "group relative overflow-hidden rounded-xl border p-3.5 text-left transition-all duration-200",
         "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
         active
-          ? "border-sky-400/40 bg-sky-400/[0.06]"
-          : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+          ? "border-sky-400/40 bg-gradient-to-br from-sky-400/[0.1] to-sky-400/[0.02] shadow-[inset_0_1px_0_rgba(56,189,248,0.12)]"
+          : "border-white/[0.06] bg-white/[0.02] hover:-translate-y-px hover:border-white/[0.14] hover:bg-white/[0.03]"
       )}
     >
+      {/* Active accent rail along the top edge — a quiet "you are here" marker. */}
+      {active && (
+        <span className="absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-sky-400/0 via-sky-400/80 to-sky-400/0" />
+      )}
       <div
         className={cn(
-          "flex items-center gap-1.5 text-sm font-medium",
-          active ? "text-sky-400" : "text-foreground/80"
+          "flex items-center gap-2 text-sm font-semibold",
+          active ? "text-sky-300" : "text-foreground/80"
         )}
       >
-        <Icon className="size-4" aria-hidden />
+        <span
+          className={cn(
+            "flex size-7 shrink-0 items-center justify-center rounded-lg transition-colors duration-200",
+            active
+              ? "bg-sky-400/15 text-sky-300"
+              : "bg-white/[0.04] text-muted-foreground group-hover:text-foreground/70"
+          )}
+        >
+          <Icon className="size-4" aria-hidden />
+        </span>
         {title}
       </div>
-      <div className="mt-0.5 text-xs text-muted-foreground">{hint}</div>
+      <div className="mt-1 text-xs text-muted-foreground">{hint}</div>
     </button>
   );
 }
