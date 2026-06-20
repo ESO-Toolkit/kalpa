@@ -1640,6 +1640,50 @@ function LiveDashboard({
   );
 }
 
+/** A scannable label for an upload history row. ESO archive logs carry long,
+ *  machine-generated names (`Archive-2025-06-20__03_46_03-Encounter-session02-
+ *  1750394097660.log`); strip that noise to the part a human recognizes, while
+ *  leaving ordinary names (and user-named splits) intact. */
+function tidyLogLabel(fileName: string): string {
+  const base = fileName.replace(/\.log$/i, "");
+  // Archive pattern with a session number → keep the readable "session NN".
+  const sess = base.match(/-session(\d+)/i);
+  if (/^Archive-/i.test(base) && sess) {
+    const datePart = base.match(/Archive-(\d{4}-\d{2}-\d{2})/);
+    return datePart
+      ? `Archive ${datePart[1]} · session ${Number(sess[1])}`
+      : `Session ${Number(sess[1])}`;
+  }
+  // ISO-stamped archive (Archive-20260614T190354Z-Encounter) → "Archive Jun 14".
+  const iso = base.match(/^Archive-(\d{4})(\d{2})(\d{2})T\d+Z?/i);
+  if (iso) {
+    const [, y, m, d] = iso;
+    const dt = new Date(Number(y), Number(m) - 1, Number(d));
+    return `Archive · ${dt.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+  }
+  // Drop a trailing epoch-ms id some names carry.
+  return base.replace(/-\d{13,}$/, "");
+}
+
+/** Map an upload status to a left-accent color for the history row. */
+function statusAccent(status: UploadRecord["status"]): string {
+  switch (status) {
+    case "completed":
+      return "border-l-emerald-500/70";
+    case "uploading":
+    case "queued":
+      return "border-l-sky-400/70";
+    case "live":
+      return "border-l-red-500/70";
+    case "handedOff":
+      return "border-l-amber-500/70";
+    case "failed":
+      return "border-l-red-500/70";
+    default:
+      return "border-l-white/10";
+  }
+}
+
 function HistoryPanel({
   history,
   onCopyLink,
@@ -1677,31 +1721,51 @@ function HistoryPanel({
           <RefreshCw className="size-3.5" />
         </Button>
       </div>
-      <ul className="space-y-1">
+      <ul className="space-y-1.5">
         {history.slice(0, 8).map((r) => (
           <li
             key={r.id}
-            className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2"
+            className={cn(
+              "rounded-lg border border-l-[3px] border-white/[0.06] bg-white/[0.02] px-3 py-2 transition-colors hover:bg-white/[0.03]",
+              statusAccent(r.status)
+            )}
           >
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
-                <div className="truncate text-sm text-foreground/90">{r.fileName}</div>
-                <div className="text-xs text-muted-foreground">
-                  {relativeFromMs(r.createdAtMs)} · {r.fightCount} fight
-                  {r.fightCount === 1 ? "" : "s"} · {r.visibility}
+                <div className="truncate text-sm text-foreground/90">
+                  {tidyLogLabel(r.fileName)}
+                </div>
+                <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className="text-foreground/60">{relativeFromMs(r.createdAtMs)}</span>
+                  <span className="text-muted-foreground/40">·</span>
+                  <span>
+                    {r.fightCount} fight{r.fightCount === 1 ? "" : "s"}
+                  </span>
+                  <span className="text-muted-foreground/40">·</span>
+                  <span className="capitalize">{r.visibility}</span>
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
                 <StatusBadge status={r.status} />
                 {r.report ? (
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => void onCopyLink(r.report!.url)}
-                    aria-label="Copy report link"
-                  >
-                    <Copy className="size-3.5" />
-                  </Button>
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => void onCopyLink(r.report!.url)}
+                      aria-label="Copy report link"
+                    >
+                      <Copy className="size-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => void openReportUrl(r.report!.url)}
+                      aria-label="Open report"
+                    >
+                      <ExternalLink className="size-3.5" />
+                    </Button>
+                  </>
                 ) : (
                   // Handed-off uploads finish in the official uploader, so we
                   // can't observe the report code — let the user paste it in.
