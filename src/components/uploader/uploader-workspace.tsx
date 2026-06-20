@@ -66,6 +66,7 @@ import {
 } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
 import { FightList, rowsFromLive, rowsFromSummaries } from "./fight-list";
+import { SplitWorkbench } from "./split-workbench";
 
 interface UploaderWorkspaceProps {
   authUser: AuthUser | null;
@@ -152,7 +153,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const [transport, setTransport] = useState<TransportInfo | null>(null);
   const [history, setHistory] = useState<UploadRecord[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [splitting, setSplitting] = useState(false);
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
 
   // Direct (native) upload state, lifted here so both the promoted Direct Upload
   // section and the upload action can reflect which transport will run. `optIn`
@@ -421,33 +422,12 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     }
   };
 
-  const handleSplit = async () => {
-    if (!selectedLog) return;
-    setSplitting(true);
-    try {
-      // Split files go to an app-owned folder (the destination isn't
-      // caller-controlled); we reveal the result so the user can find them.
-      // Pass the preflight's sessions so the backend doesn't re-scan the whole
-      // multi-GB file (re-scanning only as a fallback if we have none).
-      const written = await invokeOrThrow<string[]>("uploader_split_to_disk", {
-        filePath: selectedLog,
-        sessions: preflight?.sessions ?? null,
-      });
-      toast.success(
-        `Split into ${written.length} session file${written.length === 1 ? "" : "s"}.`,
-        { duration: 7000 }
-      );
-      try {
-        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-        if (written[0]) await revealItemInDir(written[0]);
-      } catch {
-        /* reveal is best-effort */
-      }
-    } catch (e) {
-      toast.error(`Split failed: ${getTauriErrorMessage(e)}`);
-    } finally {
-      setSplitting(false);
-    }
+  // Opening the split workbench: the rich modal authors the per-session plan and
+  // performs the named split itself (uploader_split_to_disk_named). Requires the
+  // preflight to be loaded so the workbench has sessions to show.
+  const handleSplit = () => {
+    if (!selectedLog || !preflight) return;
+    setWorkbenchOpen(true);
   };
 
   const handleStartLive = async () => {
@@ -774,7 +754,6 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 scanning={scanning}
                 scanningSizeBytes={logs.find((l) => l.path === selectedLog)?.sizeBytes ?? null}
                 onSplit={handleSplit}
-                splitting={splitting}
               />
             )}
 
@@ -797,6 +776,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   onChange={setOptions}
                   disabled={uploading || liveSessionId !== null}
                   willUseNative={willUseNative}
+                  fights={fights}
+                  whenMs={logs.find((l) => l.path === selectedLog)?.modifiedAtMs ?? null}
                 />
                 {mode === "live" && (
                   <LiveToggles
@@ -867,6 +848,19 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           </div>
         )}
       </DialogContent>
+
+      {/* The split workbench overlays as its own modal when invoked from the
+          preflight's Split control. Rendered here so it shares the uploader's
+          lifetime but layers above the main dialog. */}
+      {selectedLog && (
+        <SplitWorkbench
+          open={workbenchOpen}
+          onOpenChange={setWorkbenchOpen}
+          filePath={selectedLog}
+          fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
+          preflight={preflight}
+        />
+      )}
     </Dialog>
   );
 }
@@ -1324,13 +1318,11 @@ function Preflight({
   scanning,
   scanningSizeBytes,
   onSplit,
-  splitting,
 }: {
   preflight: LogPreflight | null;
   scanning: boolean;
   scanningSizeBytes: number | null;
   onSplit: () => void;
-  splitting: boolean;
 }) {
   if (scanning && !preflight) {
     // Surface the known file size so a long scan of a multi-GB log reads as
@@ -1366,22 +1358,21 @@ function Preflight({
       {preflight.recommendSplit && (
         <div className="ml-auto flex items-center gap-2">
           <span className="text-xs text-amber-400/90">This log is large — splitting helps.</span>
-          <Button variant="outline" size="sm" onClick={onSplit} disabled={splitting}>
+          <Button variant="outline" size="sm" onClick={onSplit}>
             <Scissors className="size-3.5" />
-            {splitting ? "Splitting…" : "Split by session"}
+            Split by session…
           </Button>
         </div>
       )}
-      {!preflight.recommendSplit && (
+      {!preflight.recommendSplit && preflight.sessions.length > 1 && (
         <Button
           variant="ghost"
           size="sm"
           onClick={onSplit}
-          disabled={splitting}
           className="ml-auto text-muted-foreground"
         >
           <Scissors className="size-3.5" />
-          Split to disk
+          Split…
         </Button>
       )}
     </div>

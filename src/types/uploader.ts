@@ -140,6 +140,14 @@ export interface LiveFight {
   durationMs: number;
 }
 
+/** One session's choice in the split workbench: which session (by `index`,
+ *  matching `LogSession.index`) and an optional custom name. Mirrors the Rust
+ *  `SplitSelection`. Only sessions present in the selection are written. */
+export interface SplitSelection {
+  index: number;
+  name: string | null;
+}
+
 export const REGION_OPTIONS: { id: number; label: string }[] = [
   { id: 1, label: "North America (NA)" },
   { id: 2, label: "Europe (EU)" },

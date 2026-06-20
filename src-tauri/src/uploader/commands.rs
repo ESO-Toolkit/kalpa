@@ -301,6 +301,33 @@ pub async fn uploader_split_to_disk(
         .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Split only the sessions the user selected in the split workbench, naming each
+/// from the user's (sanitized) custom name. Like [`uploader_split_to_disk`] the
+/// destination is app-owned, not caller-controlled, and every custom name is
+/// sanitized to a single safe path segment in the splitter — a compromised
+/// webview cannot write outside the split folder or traverse via a crafted name.
+#[tauri::command]
+pub async fn uploader_split_to_disk_named(
+    app: tauri::AppHandle,
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+    sessions: Option<Vec<LogSession>>,
+    selections: Vec<splitter::SplitSelection>,
+) -> Result<Vec<String>, String> {
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
+    let out_root = split_output_root(&app)?;
+    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_dir = out_root.join(format!("split-{}", now_ms()));
+    let out_str = out_dir.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        splitter::split_selected(&safe, &out_str, sessions, selections)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // ── Transport availability ─────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]

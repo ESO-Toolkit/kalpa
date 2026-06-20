@@ -430,6 +430,7 @@ pub fn run() {
             uploader::commands::uploader_list_logs,
             uploader::commands::uploader_preflight,
             uploader::commands::uploader_split_to_disk,
+            uploader::commands::uploader_split_to_disk_named,
             uploader::commands::uploader_transport_info,
             uploader::commands::uploader_login_esologs,
             uploader::commands::uploader_has_session,

@@ -191,6 +191,68 @@ fn session_file_name(stem: &str, session: &LogSession) -> String {
     )
 }
 
+/// Sanitize a user-supplied split name into a safe, single-segment file stem.
+///
+/// The UI lets users name each split (e.g. "core-prog lucent hm"). That string
+/// reaches the filesystem, so it must never enable path traversal or produce an
+/// invalid name. We keep only a conservative allowlist (alphanumerics, space,
+/// `-`, `_`, `.`), collapse whitespace to single `-`, strip leading/trailing
+/// separators and dots, cap the length, and reject anything that reduces to
+/// empty — the caller then falls back to the stable auto name. The `.log`
+/// extension is appended by the caller, never taken from user input.
+fn sanitize_split_stem(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_was_sep = false;
+    for ch in raw.trim().chars() {
+        let keep = if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+            last_was_sep = false;
+            Some(ch)
+        } else if ch == '-' || ch == '/' || ch == '\\' || ch.is_whitespace() {
+            // Collapse runs of separators/whitespace/path-separators into a single
+            // '-'. Treating `/` and `\` as word separators (not dropping them)
+            // keeps names predictable ("lucent/hm" → "lucent-hm") while still
+            // preventing any real path segment from surviving.
+            if last_was_sep {
+                None
+            } else {
+                last_was_sep = true;
+                Some('-')
+            }
+        } else {
+            // Drop anything else (colons, control chars, unicode punctuation, …).
+            None
+        };
+        if let Some(c) = keep {
+            out.push(c);
+        }
+        // Cap the stem so a pathological name can't blow past filesystem limits.
+        if out.len() >= 80 {
+            break;
+        }
+    }
+    // Trim separators/dots from the ends so we never produce ".", "..", a hidden
+    // dotfile, or a trailing-dot name (invalid on Windows).
+    let trimmed = out.trim_matches(|c| c == '-' || c == '.' || c == '_');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// A user's choice for one session in the split workbench: which session
+/// (`index`, matching [`LogSession::index`]) and an optional custom name. Only
+/// sessions present in the selection are written, so the UI can drop empty or
+/// unwanted sessions.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitSelection {
+    /// The [`LogSession::index`] this selection refers to.
+    pub index: usize,
+    /// A user-supplied name (sanitized before use); falls back to the auto name.
+    pub name: Option<String>,
+}
+
 /// Split `source_path` into one file per logging session inside `out_dir`.
 ///
 /// `sessions` may be supplied from a prior preflight scan to avoid a second full
@@ -219,6 +281,37 @@ pub fn split_by_session(
         .map_err(|e| format!("Failed to stat source: {e}"))?
         .len();
 
+    let (sessions, snapshot_len) = resolve_sessions(src, source_path, sessions, snapshot_len)?;
+
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Encounter");
+
+    let last_index = sessions.len() - 1;
+    let mut written = Vec::with_capacity(sessions.len());
+    for (i, session) in sessions.iter().enumerate() {
+        let end = clamped_session_end(session, i == last_index, snapshot_len);
+        if end <= session.start_offset {
+            continue; // session lies entirely past the snapshot (shouldn't happen)
+        }
+        let dst = out.join(session_file_name(stem, session));
+        copy_range(src, &dst, session.start_offset, end)?;
+        written.push(dst.to_string_lossy().into_owned());
+    }
+    Ok(written)
+}
+
+/// Resolve the trustworthy session list (re-scanning if the stale preflight
+/// offsets can't be trusted) plus the length snapshot the copies are clamped to.
+/// Shared by [`split_by_session`] and [`split_selected`] so both apply the exact
+/// same correctness gate.
+fn resolve_sessions(
+    src: &Path,
+    source_path: &str,
+    sessions: Option<Vec<LogSession>>,
+    snapshot_len: u64,
+) -> Result<(Vec<LogSession>, u64), String> {
     let sessions = match sessions {
         Some(s) if !s.is_empty() => {
             // Caller-supplied offsets are from preflight time. They're only safe
@@ -250,35 +343,117 @@ pub fn split_by_session(
     if sessions.is_empty() {
         return Err("No logging sessions found in this file.".into());
     }
+    Ok((sessions, snapshot_len))
+}
+
+/// The byte offset a session's copy ends at, clamped to the snapshot. Completed
+/// sessions end at a real BEGIN_LOG/END_LOG boundary that never moves, so their
+/// stale `end_offset` is correct. The FINAL (possibly still-open) session is
+/// extended to the current EOF so fights ESO appended since preflight are
+/// included, then clamped so no copy reads past the snapshot.
+fn clamped_session_end(session: &LogSession, is_last: bool, snapshot_len: u64) -> u64 {
+    let raw = if is_last {
+        session.end_offset.max(snapshot_len)
+    } else {
+        session.end_offset
+    };
+    raw.min(snapshot_len)
+}
+
+/// Split only the sessions the user selected (in the split workbench), naming
+/// each from the user's sanitized custom name where given. Unlike
+/// [`split_by_session`], a session not present in `selections` is skipped — so a
+/// user can drop empty/unwanted sessions and keep just the ones worth uploading.
+///
+/// A custom name that sanitizes to empty (or collides with another written file)
+/// falls back to the stable auto name, so the result is always valid and
+/// collision-free. Returns the written paths in selection order.
+pub fn split_selected(
+    source_path: &str,
+    out_dir: &str,
+    sessions: Option<Vec<LogSession>>,
+    selections: Vec<SplitSelection>,
+) -> Result<Vec<String>, String> {
+    let src = Path::new(source_path);
+    if !src.is_file() {
+        return Err(format!("Source log not found: {source_path}"));
+    }
+    if selections.is_empty() {
+        return Err("No sessions were selected to split.".into());
+    }
+    let out = PathBuf::from(out_dir);
+    std::fs::create_dir_all(&out).map_err(|e| format!("Create output dir: {e}"))?;
+
+    let snapshot_len = std::fs::metadata(src)
+        .map_err(|e| format!("Failed to stat source: {e}"))?
+        .len();
+    let (sessions, snapshot_len) = resolve_sessions(src, source_path, sessions, snapshot_len)?;
+    let last_index = sessions.len() - 1;
 
     let stem = src
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Encounter");
 
-    let last_index = sessions.len() - 1;
-    let mut written = Vec::with_capacity(sessions.len());
-    for (i, session) in sessions.iter().enumerate() {
-        // Completed sessions end at a real BEGIN_LOG/END_LOG boundary that never
-        // moves, so their stale `end_offset` is correct (clamped to the snapshot
-        // for safety). The FINAL session may still be open and growing: its
-        // preflight `end_offset` was the EOF at scan time, so anything ESO
-        // appended since would be silently dropped. Extend it to the current EOF
-        // (snapshot_len) so those later fights are included (L3).
-        let end = if i == last_index {
-            session.end_offset.max(snapshot_len)
-        } else {
-            session.end_offset
-        }
-        .min(snapshot_len);
+    // Track used file names so two custom names (or a custom name colliding with
+    // an auto name) never overwrite each other; a clash gets a `-2`, `-3`, … suffix.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut written = Vec::with_capacity(selections.len());
+
+    for sel in &selections {
+        // Find the session this selection refers to. Ignore unknown indices
+        // rather than failing the whole split (the list may have been re-scanned).
+        let Some((pos, session)) = sessions
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.index == sel.index)
+        else {
+            continue;
+        };
+        let end = clamped_session_end(session, pos == last_index, snapshot_len);
         if end <= session.start_offset {
-            continue; // session lies entirely past the snapshot (shouldn't happen)
+            continue;
         }
-        let dst = out.join(session_file_name(stem, session));
+
+        // Resolve the file name: sanitized custom name if usable, else the auto
+        // name; then de-duplicate against names already written this run.
+        let base = sel
+            .name
+            .as_deref()
+            .and_then(sanitize_split_stem)
+            .map(|s| format!("{s}.log"))
+            .unwrap_or_else(|| session_file_name(stem, session));
+        let name = unique_name(&mut used, base);
+
+        let dst = out.join(&name);
         copy_range(src, &dst, session.start_offset, end)?;
         written.push(dst.to_string_lossy().into_owned());
     }
+
+    if written.is_empty() {
+        return Err("None of the selected sessions could be written.".into());
+    }
     Ok(written)
+}
+
+/// Reserve a unique file name, appending `-2`, `-3`, … before the extension on
+/// collision so two splits never clobber one another.
+fn unique_name(used: &mut std::collections::HashSet<String>, candidate: String) -> String {
+    if used.insert(candidate.clone()) {
+        return candidate;
+    }
+    let (stem, ext) = match candidate.rsplit_once('.') {
+        Some((s, e)) => (s.to_string(), format!(".{e}")),
+        None => (candidate.clone(), String::new()),
+    };
+    for n in 2..1000 {
+        let next = format!("{stem}-{n}{ext}");
+        if used.insert(next.clone()) {
+            return next;
+        }
+    }
+    // Pathological fallback (1000 collisions): use the original, accepting overwrite.
+    candidate
 }
 
 #[cfg(test)]
@@ -289,6 +464,142 @@ mod tests {
     fn write(path: &Path, bytes: &[u8]) {
         let mut f = File::create(path).unwrap();
         f.write_all(bytes).unwrap();
+    }
+
+    // The split-name sanitizer must never let a crafted name escape the output
+    // directory or produce an invalid file name. Path separators, traversal, and
+    // exotic characters are stripped; a name that reduces to nothing falls back.
+    #[test]
+    fn sanitize_split_stem_blocks_traversal_and_separators() {
+        // Traversal / separators collapse to a single inner '-' and trim to a
+        // safe stem (never "..", a slash, or a leading dot).
+        assert_eq!(sanitize_split_stem("../../etc/passwd").as_deref(), Some("etc-passwd"));
+        assert_eq!(sanitize_split_stem("a/b\\c").as_deref(), Some("a-b-c"));
+        assert_eq!(sanitize_split_stem("  core prog  ").as_deref(), Some("core-prog"));
+        assert_eq!(sanitize_split_stem("lucent--hm__farm").as_deref(), Some("lucent-hm__farm"));
+        // Reduces to empty → None (caller uses the stable auto name).
+        assert_eq!(sanitize_split_stem("../"), None);
+        assert_eq!(sanitize_split_stem("..."), None);
+        assert_eq!(sanitize_split_stem("   "), None);
+        assert_eq!(sanitize_split_stem(""), None);
+        // No leading dot (hidden file) or trailing dot (invalid on Windows).
+        assert_eq!(sanitize_split_stem(".hidden").as_deref(), Some("hidden"));
+        assert_eq!(sanitize_split_stem("name.").as_deref(), Some("name"));
+        // Length is capped.
+        assert!(sanitize_split_stem(&"x".repeat(500)).unwrap().len() <= 80);
+    }
+
+    // split_selected writes only the chosen sessions, names them from the
+    // sanitized custom name, and de-duplicates colliding names.
+    #[test]
+    fn split_selected_writes_only_chosen_sessions_with_custom_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+
+        // Two sessions.
+        let a = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let b = b"0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let mut full = a.to_vec();
+        full.extend_from_slice(b);
+        write(&log, &full);
+        let a_end = a.len() as u64;
+
+        let sessions = vec![
+            LogSession {
+                index: 0,
+                start_offset: 0,
+                end_offset: a_end,
+                start_time_ms: 1000,
+                log_version: "15".into(),
+                realm: Some("NA".into()),
+                fight_count: 1,
+                size_bytes: a_end,
+            },
+            LogSession {
+                index: 1,
+                start_offset: a_end,
+                end_offset: full.len() as u64,
+                start_time_ms: 2000,
+                log_version: "15".into(),
+                realm: Some("NA".into()),
+                fight_count: 1,
+                size_bytes: b.len() as u64,
+            },
+        ];
+
+        // Select only session 1 (index 1), with a custom name.
+        let written = split_selected(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(sessions),
+            vec![SplitSelection {
+                index: 1,
+                name: Some("core prog/hm".into()),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(written.len(), 1, "only the selected session is written");
+        // Custom name was sanitized (slash → '-') and used.
+        assert!(
+            written[0].ends_with("core-prog-hm.log"),
+            "got {}",
+            written[0]
+        );
+        // The written file is session B's bytes (starts with its BEGIN_LOG ts).
+        let bytes = std::fs::read(&written[0]).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"2000"));
+        assert!(!bytes.windows(4).any(|w| w == b"1000"));
+    }
+
+    // Two selections with the same custom name must not clobber each other.
+    #[test]
+    fn split_selected_dedupes_colliding_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        let a = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let b = b"0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let mut full = a.to_vec();
+        full.extend_from_slice(b);
+        write(&log, &full);
+        let a_end = a.len() as u64;
+        let sessions = vec![
+            LogSession {
+                index: 0,
+                start_offset: 0,
+                end_offset: a_end,
+                start_time_ms: 1000,
+                log_version: "15".into(),
+                realm: Some("NA".into()),
+                fight_count: 1,
+                size_bytes: a_end,
+            },
+            LogSession {
+                index: 1,
+                start_offset: a_end,
+                end_offset: full.len() as u64,
+                start_time_ms: 2000,
+                log_version: "15".into(),
+                realm: Some("NA".into()),
+                fight_count: 1,
+                size_bytes: b.len() as u64,
+            },
+        ];
+        let written = split_selected(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(sessions),
+            vec![
+                SplitSelection { index: 0, name: Some("raid".into()) },
+                SplitSelection { index: 1, name: Some("raid".into()) },
+            ],
+        )
+        .unwrap();
+        assert_eq!(written.len(), 2);
+        assert!(written[0].ends_with("raid.log"));
+        assert!(written[1].ends_with("raid-2.log"), "got {}", written[1]);
     }
 
     // A preflight that saw ONE session must not, after the file appends a SECOND

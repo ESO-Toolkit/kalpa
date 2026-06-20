@@ -1,10 +1,18 @@
-// Region + visibility controls shown before an upload. Defaults persist via the
-// parent (last choice), and each visibility tier shows a one-line consequence.
+// Report name, region + visibility controls shown before an upload. Defaults
+// persist via the parent (last choice), and each visibility tier shows a
+// one-line consequence. The report name carries smart suggestions + run-tags.
 
-import { Globe, Link2, Lock } from "lucide-react";
+import { Globe, Link2, Lock, Sparkles, Tag } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { SectionHeader } from "@/components/ui/section-header";
 import { cn } from "@/lib/utils";
-import { REGION_OPTIONS, type UploadOptions, type Visibility } from "@/types/uploader";
+import {
+  REGION_OPTIONS,
+  type FightSummary,
+  type UploadOptions,
+  type Visibility,
+} from "@/types/uploader";
+import { RUN_TAGS, suggestReportName, withTag } from "./naming";
 
 const VISIBILITY_TIERS: {
   value: Visibility;
@@ -39,14 +47,64 @@ export function UploadOptionsControl({
   // When direct upload is the intended path, visibility is applied immediately;
   // the official uploader instead asks the user to confirm before publishing.
   willUseNative = false,
+  // Parsed fights + the log's time, used to suggest a report name from content.
+  fights = [],
+  whenMs = null,
 }: {
   options: UploadOptions;
   onChange: (next: UploadOptions) => void;
   disabled?: boolean;
   willUseNative?: boolean;
+  fights?: FightSummary[];
+  whenMs?: number | null;
 }) {
+  const name = options.description ?? "";
+  const setName = (v: string) => onChange({ ...options, description: v || null });
+  const suggestion = suggestReportName(fights, whenMs);
+  const showSuggest = name.trim() !== suggestion;
+
   return (
     <div className="space-y-4">
+      <div className="space-y-2">
+        <SectionHeader>Report name</SectionHeader>
+        <Input
+          value={name}
+          disabled={disabled}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={suggestion}
+          aria-label="Report name"
+          maxLength={120}
+        />
+        <div className="flex flex-wrap items-center gap-1.5">
+          {showSuggest && (
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => setName(suggestion)}
+              className="inline-flex items-center gap-1 rounded-md border border-sky-400/25 bg-sky-400/[0.06] px-2 py-0.5 text-[11px] font-medium text-sky-300 transition-colors hover:bg-sky-400/[0.12] disabled:opacity-50"
+            >
+              <Sparkles className="size-3" aria-hidden />
+              {suggestion}
+            </button>
+          )}
+          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/70">
+            <Tag className="size-3" aria-hidden />
+          </span>
+          {RUN_TAGS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              disabled={disabled}
+              title={t.hint}
+              onClick={() => setName(withTag(name || suggestion, t.id))}
+              className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-white/[0.16] hover:text-foreground/80 disabled:opacity-50"
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="space-y-2">
         <SectionHeader>Region</SectionHeader>
         {/* Plain toggle buttons (aria-pressed) rather than a radiogroup: a true
