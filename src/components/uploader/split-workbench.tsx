@@ -5,7 +5,7 @@
 // (`uploader_split_to_disk_named`) re-sanitizes every name, so this is purely the
 // authoring surface; it never controls the destination.
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Scissors,
@@ -93,6 +93,10 @@ export function SplitWorkbench({
       return "";
     }
   });
+  // The prefix currently baked into the draft names (kebab form). Starts empty:
+  // the initial suggested names carry no prefix even if one is remembered in the
+  // input. Lets applyPrefix strip the prior prefix idempotently per keystroke.
+  const appliedPrefixRef = useRef("");
 
   // Keep drafts in sync if the preflight changes underneath (new selection).
   const draftsKey = Object.keys(drafts).length;
@@ -141,32 +145,40 @@ export function SplitWorkbench({
       return next;
     });
 
-  // Apply (and remember) a common prefix on every included split. A kebab prefix
-  // like "tos" or "core" leads each file name: "tos-lucent-citadel-jun18".
-  const applyPrefix = (raw: string) => {
-    const clean = raw
+  const kebab = (raw: string) =>
+    raw
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "");
+
+  // Apply (and remember) a common prefix on every included split, live as the
+  // user types. Idempotent: each change STRIPS the previously-applied prefix
+  // before adding the new one, so typing "core" yields "core-name" — not the
+  // compounding "co-c-name" bug. `appliedPrefixRef` tracks the last applied value.
+  const applyPrefix = (raw: string) => {
+    const next = kebab(raw);
+    const prev = appliedPrefixRef.current;
     setPrefix(raw);
     try {
       localStorage.setItem(SPLIT_PREFIX_KEY, raw);
     } catch {
       /* ignore */
     }
-    if (!clean) return;
-    setDrafts((prev) => {
-      const next = { ...prev };
+    if (next === prev) return;
+    setDrafts((drafts) => {
+      const out = { ...drafts };
       for (const s of sessions) {
-        const d = draftFor(prev, s.index);
+        const d = draftFor(drafts, s.index);
         if (!d.include) continue;
-        // Don't double-prefix if it's already there.
-        const name = d.name.startsWith(`${clean}-`) ? d.name : `${clean}-${d.name}`;
-        next[s.index] = { ...d, name };
+        // Strip the prior prefix (if present), then add the new one.
+        let stem = d.name;
+        if (prev && stem.startsWith(`${prev}-`)) stem = stem.slice(prev.length + 1);
+        out[s.index] = { ...d, name: next ? `${next}-${stem}` : stem };
       }
-      return next;
+      return out;
     });
+    appliedPrefixRef.current = next;
   };
 
   const handleSplit = async () => {

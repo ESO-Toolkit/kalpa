@@ -186,11 +186,15 @@ fn recycle_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// How long a soft-deleted log stays restorable before prune removes it.
 const RECYCLE_KEEP_DAYS: u64 = 30;
 
-/// Remove recycled files older than [`RECYCLE_KEEP_DAYS`]. Best-effort: errors
-/// are logged, never propagated. Mirrors `prune_split_folders`' retention intent.
+/// Remove recycled files older than [`RECYCLE_KEEP_DAYS`]. Retention is based on
+/// the DELETION time encoded in the recycle file name (`<epoch-ms>-<stem>.log`),
+/// NOT the file's `modified()` mtime: a same-volume rename preserves the log's
+/// original mtime, so an old archive deleted today would otherwise be pruned
+/// immediately, breaking the restore window. Falls back to `modified()` only if
+/// the name has no parseable prefix. Best-effort: errors logged, never propagated.
 fn prune_recycle_folder(root: &Path) {
-    let cutoff = std::time::Duration::from_secs(RECYCLE_KEEP_DAYS * 24 * 60 * 60);
-    let now = std::time::SystemTime::now();
+    let cutoff_ms = RECYCLE_KEEP_DAYS * 24 * 60 * 60 * 1000;
+    let now = now_ms();
     let Ok(rd) = std::fs::read_dir(root) else {
         return;
     };
@@ -199,13 +203,23 @@ fn prune_recycle_folder(root: &Path) {
         if !path.is_file() {
             continue;
         }
-        let too_old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|mt| now.duration_since(mt).ok())
-            .map(|age| age > cutoff)
-            .unwrap_or(false);
+        // Prefer the deletion timestamp from the file name.
+        let deleted_at_ms = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split_once('-'))
+            .and_then(|(ts, _)| ts.parse::<u64>().ok());
+        let too_old = match deleted_at_ms {
+            Some(ts) => now.saturating_sub(ts) > cutoff_ms,
+            // Fallback: no parseable prefix → use mtime age.
+            None => entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mt| std::time::SystemTime::now().duration_since(mt).ok())
+                .map(|age| age.as_millis() as u64 > cutoff_ms)
+                .unwrap_or(false),
+        };
         if too_old {
             if let Err(e) = std::fs::remove_file(&path) {
                 eprintln!("Warning: failed to prune recycled log {path:?}: {e}");
