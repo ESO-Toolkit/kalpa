@@ -30,29 +30,47 @@ use std::collections::BTreeSet;
 /// structurally reproduces every line type (it rebuilds the golden sample segment
 /// byte-for-byte except the optional `A` cast-ref, and assembles a full ~49k-event
 /// raid capture with zero malformed lines — see [`STRUCTURALLY_READY_LINE_TYPES`]).
-/// But "structurally valid" is only *proven* by uploading a real segment and
-/// confirming ESO Logs renders it. That empirical step is the owner-run ship gate;
-/// it has not happened yet, so this list stays empty and native upload stays off.
+///
+/// **CONFIRMED RENDERING (2026-06-19, owner-verified):** a native upload of a real
+/// dungeon log (all the combat types below) was accepted by ESO Logs and rendered
+/// a complete report. Native upload is therefore enabled for any log whose line
+/// types are all in this set. The blocker had been a transport bug (the
+/// `add-report-segment` request sent a zero-width `startTime`/`endTime`), not the
+/// encoder — see [`super::client`].
+///
+/// The trial markers (`BEGIN_TRIAL`/`END_TRIAL`/`TRIAL_INIT`) are included so
+/// trial/raid logs also route native: `END_TRIAL` emits a code-55 line and the
+/// other two are no-op state lines (same as the reference). Any line type NOT in
+/// this set still forces fallback to the official uploader (graceful degradation),
+/// so a future game-patch event type can never corrupt a report.
 ///
 /// This is belt-and-suspenders with [`super::format::FORMAT_VERSION_CONFIRMED`]
-/// (also `false`): either lock alone keeps native off. The flip to enable native
-/// is deliberate and documented in [`STRUCTURALLY_READY_LINE_TYPES`].
-///
-/// **Promotion rule (updated for the structural-validity bar):** add a type here
-/// only once (a) its [`super::events`] encoder + a passing *structural* test
-/// exist — both true today for the ready set — AND (b) a live upload of a segment
-/// containing it has been confirmed accepted by the server. Step (b) is what's
-/// pending. The byte-level [`super::differential`] is now a *quality metric*, not
-/// the promotion bar (the server re-parses and accepts any structurally-valid
-/// segment, so byte-identity with the official uploader is not required).
+/// (`true`): both must agree for native to run.
 pub const PROVEN_LINE_TYPES: &[&str] = &[
-    // EMPTY again (2026-06-18): the live round-trip was server-ACCEPTED (report
-    // jAHXkRdzpGwxVQ1t) but the report does NOT RENDER (infinite loading, absent
-    // from the user's list). Server-accept ≠ parseable. So nothing is proven for
-    // the real bar (renders correctly), and the gate is closed until the encoded
-    // segment is confirmed to produce a working report. The encoders for
-    // STRUCTURALLY_READY_LINE_TYPES exist + are structurally tested, but
-    // "structurally valid" did NOT imply "the parser builds a report from it".
+    // Always-present combat/state types (17) — every real log contains these, and
+    // a dungeon log of exactly these rendered correctly (owner-confirmed).
+    "BEGIN_LOG",
+    "END_LOG",
+    "BEGIN_COMBAT",
+    "END_COMBAT",
+    "ZONE_CHANGED",
+    "MAP_CHANGED",
+    "UNIT_ADDED",
+    "UNIT_CHANGED",
+    "UNIT_REMOVED",
+    "ABILITY_INFO",
+    "EFFECT_INFO",
+    "EFFECT_CHANGED",
+    "BEGIN_CAST",
+    "END_CAST",
+    "COMBAT_EVENT",
+    "HEALTH_REGEN",
+    "PLAYER_INFO",
+    // Trial markers (3) — present in every raid/trial log. END_TRIAL → code 55;
+    // BEGIN_TRIAL/TRIAL_INIT are no-op state lines. Included so trials route native.
+    "BEGIN_TRIAL",
+    "END_TRIAL",
+    "TRIAL_INIT",
 ];
 
 /// Line types whose [`super::events`] encoder is **built and structurally tested**
@@ -101,6 +119,10 @@ pub const STRUCTURALLY_READY_LINE_TYPES: &[&str] = &[
     "COMBAT_EVENT",
     "HEALTH_REGEN",
     "PLAYER_INFO",
+    // Trial markers: END_TRIAL → code 55; BEGIN_TRIAL/TRIAL_INIT → no-op state.
+    "BEGIN_TRIAL",
+    "END_TRIAL",
+    "TRIAL_INIT",
 ];
 
 /// The **complete, closed** set of ESO `Encounter.log` event types — the finite
@@ -315,16 +337,26 @@ mod tests {
     }
 
     #[test]
-    fn empty_proven_set_means_any_real_log_falls_back() {
-        // Gate closed again (the round-trip rendered broken): nothing is proven
-        // for the real bar, so every real log falls back to the official uploader.
-        let log = ["0,BEGIN_LOG,123,15", "4,ZONE_CHANGED,1129,\"Hall\""];
-        match assess(log) {
+    fn an_unproven_line_type_forces_fallback() {
+        // The gate is OPEN (native rendering confirmed). A log of only-proven types
+        // routes native; a single UNPROVEN type still forces fallback so a novel
+        // (e.g. future-patch) event can never reach the encoder and corrupt a report.
+        let proven_only = ["0,BEGIN_LOG,123,15", "4,ZONE_CHANGED,1129,\"Hall\""];
+        assert!(
+            matches!(assess(proven_only), Coverage::Native),
+            "a log of only-proven types must route native now that rendering is confirmed"
+        );
+
+        let with_unknown = [
+            "0,BEGIN_LOG,123,15",
+            "4,SOME_FUTURE_EVENT,1,2,3",
+            "5,END_LOG",
+        ];
+        match assess(with_unknown) {
             Coverage::Fallback { unproven } => {
-                assert!(unproven.contains(&"BEGIN_LOG".to_string()));
-                assert!(unproven.contains(&"ZONE_CHANGED".to_string()));
+                assert!(unproven.contains(&"SOME_FUTURE_EVENT".to_string()));
             }
-            Coverage::Native => panic!("nothing is proven (renders); must fall back"),
+            Coverage::Native => panic!("an unproven line type must force fallback"),
         }
     }
 

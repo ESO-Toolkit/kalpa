@@ -372,6 +372,13 @@ impl EventEmitter {
                 self.in_combat = false;
                 Some(format!("{}|53|", self.seg_ts(raw_ts)))
             }
+            // END_TRIAL → code 55: `{segTs}|55|{trialId}|{duration}|{success}|{score}`.
+            // Raw layout: `ts,END_TRIAL,id,duration,success(T/F),finalScore`.
+            "END_TRIAL" => self.emit_end_trial(raw_ts, &f),
+            // BEGIN_TRIAL / TRIAL_INIT carry no segment event (the reference treats
+            // them as unknown/no-op) — they only need to be *covered* so a trial log
+            // routes native instead of falling back.
+            "BEGIN_TRIAL" | "TRIAL_INIT" => None,
             _ => None,
         };
         // Anchor the timestamp base on the first line that ACTUALLY emits (a
@@ -481,6 +488,25 @@ impl EventEmitter {
     /// Emit a code-4 `HEALTH_REGEN` line:
     /// `{ts}|4|{A}|{srcMask}|{tgtMask}|S{state}|T{state}|1|{effectiveRegen}`. The
     /// unit is both source and target (self), so S and T are the same block.
+    /// Emit a code-55 `END_TRIAL` line: `{ts}|55|{trialId}|{duration}|{success}|
+    /// {finalScore}`. Raw layout: `ts,END_TRIAL,id,duration,success(T/F),score`.
+    /// `success` is the `T`/`F` flag mapped to `1`/`0`. A pure trailing marker (no
+    /// subordinal/mask/state) like the combat boundaries.
+    fn emit_end_trial(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
+        let trial_id = f.get(2)?.trim();
+        let duration = f.get(3)?.trim();
+        let success = if f.get(4).map(|s| s.trim()) == Some("T") {
+            "1"
+        } else {
+            "0"
+        };
+        let final_score = f.get(5).map(|s| s.trim()).unwrap_or("0");
+        Some(format!(
+            "{ts}|55|{trial_id}|{duration}|{success}|{final_score}",
+            ts = self.seg_ts(raw_ts),
+        ))
+    }
+
     fn emit_health_regen(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
         let effective_regen = f.get(2)?.trim();
         let unit_id = f.get(3)?.trim().to_string();
