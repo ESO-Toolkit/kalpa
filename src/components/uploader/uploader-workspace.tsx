@@ -30,6 +30,9 @@ import {
   FolderOpen,
   CheckCircle2,
   LogIn,
+  Trash2,
+  FolderInput,
+  ClipboardCopy,
 } from "lucide-react";
 import {
   Dialog,
@@ -173,6 +176,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // visual. `importing` covers the copy-in of a dropped out-of-folder log.
   const [dragOver, setDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
+  // The log queued for deletion (drives the DeleteLogConfirm dialog); null = no
+  // pending delete. `deleting` guards the confirm button while the move runs.
+  const [deleteTarget, setDeleteTarget] = useState<LogFileInfo | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   // Direct (native) upload state, lifted here so both the promoted Direct Upload
   // section and the upload action can reflect which transport will run. `optIn`
@@ -399,6 +406,70 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       toast.error("Couldn't open the Logs folder.");
     }
   }, [logsDir]);
+
+  // Reveal a single log file in the OS file manager.
+  const handleRevealLog = useCallback(async (path: string) => {
+    try {
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(path);
+    } catch {
+      toast.error("Couldn't reveal that file.");
+    }
+  }, []);
+
+  // Copy a log's full path to the clipboard.
+  const handleCopyPath = useCallback(async (path: string) => {
+    try {
+      await navigator.clipboard.writeText(path);
+      toast.success("Path copied.");
+    } catch {
+      toast.error("Couldn't copy the path.");
+    }
+  }, []);
+
+  // Restore a log from the recycle bin back into the Logs folder (the undo path
+  // for a delete). Best-effort: a failure leaves the file safe in the recycle
+  // folder, so we don't cascade — manual recovery still exists.
+  const restoreLog = useCallback(
+    async (recyclePath: string) => {
+      try {
+        const restored = await invokeOrThrow<string>("uploader_restore_log", { recyclePath });
+        if (logsDir) await loadLogs(logsDir);
+        toast.success("Log restored.");
+        return restored;
+      } catch (e) {
+        toast.error(`Couldn't restore the log: ${getTauriErrorMessage(e)}`);
+      }
+    },
+    [logsDir, loadLogs]
+  );
+
+  // Move the queued log to the recycle bin (soft delete). If it's the currently
+  // selected log, clear the selection FIRST — clearSelection() bumps
+  // selectTokenRef, orphaning any in-flight preflight scan (reuse the existing
+  // guard; don't hand-roll a new one). The toast offers one-tap Restore.
+  const handleConfirmDelete = useCallback(async () => {
+    const target = deleteTarget;
+    if (!target) return;
+    setDeleting(true);
+    try {
+      if (selectedLogRef.current === target.path) clearSelection();
+      const recyclePath = await invokeOrThrow<string>("uploader_delete_log", {
+        filePath: target.path,
+      });
+      setLogs((prev) => prev.filter((l) => l.path !== target.path));
+      setDeleteTarget(null);
+      toast.success("Log moved to recycle bin.", {
+        duration: 7000,
+        action: { label: "Restore", onClick: () => void restoreLog(recyclePath) },
+      });
+      if (logsDir) void loadLogs(logsDir);
+    } catch (e) {
+      toast.error(`Couldn't delete the log: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleteTarget, restoreLog, logsDir, loadLogs, clearSelection]);
 
   const handleSelectLog = useCallback(async (path: string) => {
     // Guard against a slow scan of a previously-selected log resolving after a
@@ -765,6 +836,22 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     [refreshHistory]
   );
 
+  // Remove an upload record from history. The log FILE on disk is untouched —
+  // this only clears the record (the backend command already existed but had no
+  // UI to reach it).
+  const handleDeleteHistory = useCallback(
+    async (id: string) => {
+      try {
+        await invokeOrThrow("uploader_delete_history", { id });
+        await refreshHistory();
+        toast.success("Removed from history.");
+      } catch (e) {
+        toast.error(getTauriErrorMessage(e));
+      }
+    },
+    [refreshHistory]
+  );
+
   // The headline status pill reflects live state if a session is running,
   // otherwise manual upload state.
   const headlineStatus: UploaderStatus = useMemo(() => {
@@ -863,6 +950,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 onRefresh={() => logsDir && loadLogs(logsDir)}
                 onPickFolder={handlePickFolder}
                 onOpenFolder={handleOpenLogsFolder}
+                onReveal={handleRevealLog}
+                onCopyPath={handleCopyPath}
+                onRequestDelete={setDeleteTarget}
               />
 
               {/* Selected-log summary: the confident "here's what you're uploading"
@@ -975,6 +1065,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 onCopyLink={copyLink}
                 onRefresh={refreshHistory}
                 onAttachReport={handleAttachReport}
+                onDelete={handleDeleteHistory}
               />
             </div>
           </div>
@@ -993,6 +1084,63 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           preflight={preflight}
         />
       )}
+
+      {/* Delete confirmation — soft delete to the recycle bin (recoverable). */}
+      <DeleteLogConfirm
+        target={deleteTarget}
+        deleting={deleting}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={handleConfirmDelete}
+      />
+    </Dialog>
+  );
+}
+
+// Confirmation for deleting a log. Soft delete: the file moves to Kalpa's recycle
+// bin (kept 30 days) and can be restored — combat logs are irreplaceable, so this
+// is never a hard unlink. The dialog stays cool glass; only the file inset and the
+// confirm button carry red, per the design system's restraint on danger color.
+function DeleteLogConfirm({
+  target,
+  deleting,
+  onCancel,
+  onConfirm,
+}: {
+  target: LogFileInfo | null;
+  deleting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={target !== null} onOpenChange={(o) => !o && onCancel()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Delete this log?</DialogTitle>
+          <DialogDescription>
+            It moves to Kalpa's recycle bin and is removed from your Logs folder. You can restore it
+            for 30 days.
+          </DialogDescription>
+        </DialogHeader>
+        {target && (
+          <div className="mt-3 rounded-lg border border-red-500/15 border-l-[3px] border-l-red-500 bg-red-500/[0.05] p-3">
+            <div className="truncate font-mono text-sm text-foreground/90" title={target.fileName}>
+              {target.fileName}
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {compactBytes(target.sizeBytes)} · {relativeFromMs(target.modifiedAtMs)}
+            </div>
+          </div>
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel} disabled={deleting}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm} disabled={deleting}>
+            <Trash2 className="size-4" />
+            {deleting ? "Deleting…" : "Delete log"}
+          </Button>
+        </div>
+      </DialogContent>
     </Dialog>
   );
 }
@@ -1442,6 +1590,9 @@ function LogPicker({
   onRefresh,
   onPickFolder,
   onOpenFolder,
+  onReveal,
+  onCopyPath,
+  onRequestDelete,
 }: {
   detection: LogPathDetection | null;
   logsDir: string | null;
@@ -1455,13 +1606,17 @@ function LogPicker({
   onRefresh: () => void;
   onPickFolder: () => void;
   onOpenFolder: () => void;
+  onReveal: (path: string) => void;
+  onCopyPath: (path: string) => void;
+  onRequestDelete: (log: LogFileInfo) => void;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<LogFilter>("all");
   const [sort, setSort] = useState<LogSort>("newest");
 
   // Only show the controls once the folder has enough logs to be worth filtering.
-  const showControls = logs.length > 4;
+  const showControls = logs.length > 1;
+  const totalBytes = logs.reduce((sum, l) => sum + l.sizeBytes, 0);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -1516,7 +1671,13 @@ function LogPicker({
               {logsDir && (
                 <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
                   {logs.length} {logs.length === 1 ? "file" : "files"}
+                  {totalBytes > 0 && ` · ${compactBytes(totalBytes)}`}
                 </span>
+              )}
+              {totalBytes > 5 * 1024 * 1024 * 1024 && (
+                <InfoPill color="amber" className="text-[10px]">
+                  Folder large — delete old archives
+                </InfoPill>
               )}
             </div>
             {logsDir ? (
@@ -1668,12 +1829,15 @@ function LogPicker({
           {visible.map((log) => {
             const isSelected = selectedLog === log.path;
             return (
-              <li key={log.path}>
+              // The row is a group container so the per-file actions can sit as
+              // SIBLINGS of the select button (buttons can't nest in buttons) and
+              // reveal on hover / keyboard focus-within.
+              <li key={log.path} className="group/row relative">
                 <button
                   type="button"
                   onClick={() => onSelect(log.path)}
                   className={cn(
-                    "flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-all duration-150",
+                    "flex w-full items-center justify-between gap-3 rounded-lg border py-2 pr-24 pl-3 text-left transition-all duration-150",
                     "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
                     isSelected
                       ? // Selected row pops OFF the recessed list: lit sky fill, a
@@ -1698,8 +1862,8 @@ function LogPicker({
                       </div>
                     </div>
                   </div>
-                  {/* Co-locate scanning feedback with the selection it belongs to,
-                      so picking a big log reads as work-in-progress on that row. */}
+                  {/* Scanning / active status, co-located with its row. Hidden
+                      when the action cluster is showing so they don't overlap. */}
                   {isSelected && scanning ? (
                     <InfoPill color="sky" className="shrink-0 gap-1">
                       <span className="size-2.5 animate-spin rounded-full border-2 border-sky-400/30 border-t-sky-400" />
@@ -1707,12 +1871,63 @@ function LogPicker({
                     </InfoPill>
                   ) : (
                     log.isActive && (
-                      <InfoPill color="sky" className="shrink-0 gap-1">
+                      <InfoPill
+                        color="sky"
+                        className="shrink-0 gap-1 transition-opacity group-hover/row:opacity-0 group-focus-within/row:opacity-0"
+                      >
                         <Radio className="size-3 animate-pulse" aria-hidden /> Active
                       </InfoPill>
                     )
                   )}
                 </button>
+
+                {/* Per-file actions — reveal, copy path, delete. Sit over the row's
+                    right edge; appear on hover/focus, always present for keyboard.
+                    stopPropagation so they never trigger row selection. */}
+                <div className="absolute top-1/2 right-2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
+                  <SimpleTooltip content="Reveal in Explorer" side="top">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-7 text-muted-foreground/70 hover:text-foreground"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onReveal(log.path);
+                      }}
+                      aria-label={`Reveal ${log.fileName} in Explorer`}
+                    >
+                      <FolderInput className="size-3.5" />
+                    </Button>
+                  </SimpleTooltip>
+                  <SimpleTooltip content="Copy file path" side="top">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-7 text-muted-foreground/70 hover:text-foreground"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCopyPath(log.path);
+                      }}
+                      aria-label={`Copy path of ${log.fileName}`}
+                    >
+                      <ClipboardCopy className="size-3.5" />
+                    </Button>
+                  </SimpleTooltip>
+                  <SimpleTooltip content="Delete log" side="top">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-7 text-muted-foreground/70 hover:text-red-400"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRequestDelete(log);
+                      }}
+                      aria-label={`Delete ${log.fileName}`}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </SimpleTooltip>
+                </div>
               </li>
             );
           })}
@@ -2083,14 +2298,19 @@ function HistoryPanel({
   onCopyLink,
   onRefresh,
   onAttachReport,
+  onDelete,
 }: {
   history: UploadRecord[];
   onCopyLink: (url: string) => void | Promise<void>;
   onRefresh: () => void;
   onAttachReport: (id: string, url: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
 }) {
   const [attachingId, setAttachingId] = useState<string | null>(null);
   const [linkDraft, setLinkDraft] = useState("");
+  // Inline two-step confirm: clicking trash arms the row; a second click on the
+  // revealed "Remove" confirms. Removing a history record never touches the file.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   if (history.length === 0) return null;
 
@@ -2172,8 +2392,44 @@ function HistoryPanel({
                     Add link
                   </Button>
                 )}
+                <SimpleTooltip
+                  content="Remove from history (your log file stays on disk)"
+                  side="top"
+                >
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-muted-foreground/70 hover:text-red-400"
+                    onClick={() => setConfirmDeleteId(confirmDeleteId === r.id ? null : r.id)}
+                    aria-label="Remove this upload from history"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </Button>
+                </SimpleTooltip>
               </div>
             </div>
+            {confirmDeleteId === r.id && (
+              <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.05] px-3 py-2">
+                <span className="text-xs text-red-200/90">
+                  Remove this record? Your log file stays on disk.
+                </span>
+                <div className="flex shrink-0 gap-1.5">
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteId(null)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => {
+                      setConfirmDeleteId(null);
+                      void onDelete(r.id);
+                    }}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              </div>
+            )}
             {attachingId === r.id && (
               <div className="mt-2 flex items-center gap-2">
                 <Input

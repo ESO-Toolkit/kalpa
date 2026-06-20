@@ -170,6 +170,64 @@ fn prune_split_folders(root: &Path, keep: usize) {
     }
 }
 
+/// App-owned recycle bin for deleted logs: `<app_data>/uploader-recycle`. A
+/// deleted log is MOVED here (soft delete) rather than unlinked, because combat
+/// logs are irreplaceable; it can be restored for [`RECYCLE_KEEP_DAYS`] days.
+fn recycle_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Could not resolve app data dir: {e}"))?
+        .join("uploader-recycle");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create recycle dir: {e}"))?;
+    Ok(dir)
+}
+
+/// How long a soft-deleted log stays restorable before prune removes it.
+const RECYCLE_KEEP_DAYS: u64 = 30;
+
+/// Remove recycled files older than [`RECYCLE_KEEP_DAYS`]. Best-effort: errors
+/// are logged, never propagated. Mirrors `prune_split_folders`' retention intent.
+fn prune_recycle_folder(root: &Path) {
+    let cutoff = std::time::Duration::from_secs(RECYCLE_KEEP_DAYS * 24 * 60 * 60);
+    let now = std::time::SystemTime::now();
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let too_old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mt| now.duration_since(mt).ok())
+            .map(|age| age > cutoff)
+            .unwrap_or(false);
+        if too_old {
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!("Warning: failed to prune recycled log {path:?}: {e}");
+            }
+        }
+    }
+}
+
+/// Move a file, falling back to copy+remove when a plain rename fails because
+/// source and destination are on different volumes (EXDEV) — the app-data
+/// recycle bin can sit on a different drive than the user's Logs folder.
+fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(src, dst)?;
+            std::fs::remove_file(src)?;
+            Ok(())
+        }
+    }
+}
+
 /// Validate user-supplied upload options before they reach the official
 /// uploader's CLI. `region` is the one user-controlled argv integer with no
 /// downstream allowlist (the transport forwards it verbatim), so a buggy/
@@ -379,6 +437,128 @@ pub async fn uploader_import_log(
                     .to_string()
             } else {
                 format!("Couldn't import the log: {e}")
+            }
+        })?;
+        Ok::<String, String>(dst_str)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Soft-delete a log: MOVE it from the Logs folder into the app-owned recycle
+/// bin (kept [`RECYCLE_KEEP_DAYS`] days), returning the recycle path so the UI can
+/// offer a one-tap Restore. Never a hard unlink — combat logs are irreplaceable.
+///
+/// `confine_log_path` is the security boundary: the source must be a `.log` inside
+/// the Logs folder (canonical, no UNC/verbatim), exactly like every other
+/// destructive/IO command. The recycle file name is timestamp-prefixed so repeated
+/// deletes of same-named logs never collide.
+#[tauri::command]
+pub async fn uploader_delete_log(
+    allowed: State<'_, AllowedAddonsPath>,
+    app: tauri::AppHandle,
+    file_path: String,
+) -> Result<String, String> {
+    let safe = confine_log_path(&allowed, &file_path)?;
+    let recycle = recycle_root(&app)?;
+    // Opportunistically prune expired entries whenever the bin is touched.
+    prune_recycle_folder(&recycle);
+
+    let stem = safe
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(super::splitter::sanitize_split_stem)
+        .unwrap_or(None)
+        .unwrap_or_else(|| "log".to_string());
+    // Timestamp prefix keeps deletes of identically-named logs distinct and lets
+    // restore strip it back to the original stem.
+    let mut candidate = format!("{}-{stem}.log", now_ms());
+    let mut n = 2;
+    while recycle.join(&candidate).exists() {
+        candidate = format!("{}-{stem}-{n}.log", now_ms());
+        n += 1;
+        if n > 1000 {
+            return Err("Recycle bin is full — empty it and try again.".into());
+        }
+    }
+    let dst = recycle.join(&candidate);
+    let dst_str = dst.to_string_lossy().into_owned();
+
+    tokio::task::spawn_blocking(move || {
+        move_file(&safe, &dst).map_err(|e| {
+            use std::io::ErrorKind;
+            if matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::NotFound) {
+                "Couldn't delete the log. If Windows Controlled Folder Access is \
+                 on, allow Kalpa to manage your Logs folder, then try again."
+                    .to_string()
+            } else {
+                format!("Couldn't delete the log: {e}")
+            }
+        })?;
+        Ok::<String, String>(dst_str)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Restore a soft-deleted log from the recycle bin back into the Logs folder (the
+/// undo for [`uploader_delete_log`]). Confinement here checks the RECYCLE root (not
+/// the Logs root — `confine_log_path` would reject a recycle file), then writes
+/// back into the Logs folder with a collision-safe name. Returns the restored path.
+#[tauri::command]
+pub async fn uploader_restore_log(
+    allowed: State<'_, AllowedAddonsPath>,
+    app: tauri::AppHandle,
+    recycle_path: String,
+) -> Result<String, String> {
+    let p = Path::new(&recycle_path);
+    if has_unc_or_verbatim_prefix(p) {
+        return Err("Network and special paths are not allowed.".into());
+    }
+    let recycle = recycle_root(&app)?;
+    let canonical =
+        dunce::canonicalize(p).map_err(|_| "That recycled log could not be found.".to_string())?;
+    // The recycle-bin equivalent of confine_log_path: the file must live inside
+    // the app-owned recycle root, so a crafted path can't restore arbitrary files.
+    if !canonical.starts_with(&recycle) {
+        return Err("That file isn't in the recycle bin.".into());
+    }
+
+    let root = logs_root(&allowed)?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("Could not access the Logs folder: {e}"))?;
+
+    // Strip the leading "<epoch-ms>-" prefix delete added; fall back to sanitize.
+    let raw_stem = canonical
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("restored-log");
+    let stripped = raw_stem
+        .split_once('-')
+        .map(|(_, rest)| rest)
+        .unwrap_or(raw_stem);
+    let stem = super::splitter::sanitize_split_stem(stripped)
+        .unwrap_or_else(|| "restored-log".to_string());
+    let mut candidate = format!("{stem}.log");
+    let mut n = 2;
+    while root.join(&candidate).exists() {
+        candidate = format!("{stem}-{n}.log");
+        n += 1;
+        if n > 1000 {
+            return Err("Too many copies — clean up the Logs folder.".into());
+        }
+    }
+    let dst = root.join(&candidate);
+    let dst_str = dst.to_string_lossy().into_owned();
+
+    tokio::task::spawn_blocking(move || {
+        move_file(&canonical, &dst).map_err(|e| {
+            use std::io::ErrorKind;
+            if matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::NotFound) {
+                "Couldn't restore the log into your Logs folder. If Windows \
+                 Controlled Folder Access is on, allow Kalpa to write there."
+                    .to_string()
+            } else {
+                format!("Couldn't restore the log: {e}")
             }
         })?;
         Ok::<String, String>(dst_str)
