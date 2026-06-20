@@ -79,10 +79,10 @@ export function FightList({
           <li
             key={f.index}
             className={cn(
-              "flex animate-[fade-in_0.2s_ease-out] items-center justify-between gap-3 rounded-lg border px-3 py-2",
+              "flex animate-[fade-in_0.2s_ease-out] items-center justify-between gap-3 rounded-lg border px-3 py-2 transition-colors duration-150",
               isNewest
                 ? "border-sky-400/30 bg-sky-400/[0.05]"
-                : "border-white/[0.06] bg-white/[0.02]"
+                : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]"
             )}
           >
             <div className="flex min-w-0 items-center gap-2.5">

@@ -64,8 +64,11 @@ export function UploadOptionsControl({
   const showSuggest = name.trim() !== suggestion;
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-2">
+    // Hairline dividers between the three groups read as one cohesive form rather
+    // than flat siblings — without over-containering (no nested boxes inside the
+    // already-raised options panel).
+    <div className="divide-y divide-white/[0.06]">
+      <div className="space-y-2 pb-4">
         <SectionHeader>Report name</SectionHeader>
         <Input
           value={name}
@@ -105,7 +108,7 @@ export function UploadOptionsControl({
         </div>
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-2 py-4">
         <SectionHeader>Region</SectionHeader>
         {/* Plain toggle buttons (aria-pressed) rather than a radiogroup: a true
             radiogroup implies roving-tabindex arrow-key nav we don't implement,
@@ -134,7 +137,7 @@ export function UploadOptionsControl({
         </div>
       </div>
 
-      <div className="space-y-2">
+      <div className="space-y-2 pt-4">
         <SectionHeader>Visibility</SectionHeader>
         <div
           className="grid grid-cols-1 gap-2 sm:grid-cols-3"

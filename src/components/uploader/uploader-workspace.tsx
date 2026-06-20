@@ -1209,7 +1209,7 @@ function LogSummaryCard({
   return (
     <GlassPanel
       variant="primary"
-      className="overflow-hidden border-emerald-400/15 bg-gradient-to-b from-emerald-400/[0.05] to-white/[0.01] p-4 shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.06)]"
+      className="overflow-hidden border-emerald-400/15 bg-gradient-to-b from-emerald-400/[0.05] to-white/[0.01] p-4 shadow-[0_12px_36px_-14px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.06)]"
     >
       <div className="mb-2.5 flex items-center gap-1.5">
         <CheckCircle2 className="size-3.5 text-emerald-400" aria-hidden />
@@ -1435,7 +1435,7 @@ function DirectUploadSection({
   // doesn't add a second heavy panel above the action.
   if (hasSession) {
     return (
-      <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-400/15 bg-emerald-400/[0.03] px-3 py-1.5">
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.06] to-emerald-400/[0.02] px-3 py-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
         <div className="flex min-w-0 items-center gap-2 text-xs">
           <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-emerald-400/15">
             <Check className="size-2.5 text-emerald-400" aria-hidden />
