@@ -2205,15 +2205,26 @@ mod combat_fixture {
     /// residual codes so a change can't silently regress them. Runs only when the
     /// (gitignored) golden pair is present locally; a no-op on a clean checkout.
     ///
-    /// The remaining non-exact codes are documented residuals:
-    /// * 5 (+260): passive/aura buff over-mint — underdetermined from one capture.
-    /// * 1/2 split of `DAMAGE_SHIELDED`, 16's status-queued source, the 3/4 small
-    ///   deltas — context-dependent, not byte-derivable from one capture.
+    /// CROSS-CAPTURE VALIDATION (2nd capture, an Ossein Cage veteran-trial slice):
+    /// on that independent encounter, codes 2/5/6/7/8/10/11/12/15/16/26/27/38/41/44/
+    /// 51/52/53 are ALL byte-count-EXACT. That is decisive for two large Maarselok
+    /// residuals: **code 5 (+260) and code 16 (−492) are capture-specific artifacts
+    /// of the Maarselok log, NOT encoder bugs** — the buff/effect family and the cast
+    /// path reproduce exactly on a clean capture, so do not "fix" them toward Maarselok
+    /// (that would break Ossein). The genuinely-still-open codes (9/14/28 and the
+    /// code-1/19 parser-internal predicates) are small on BOTH captures.
+    ///
+    /// The remaining non-exact Maarselok codes are documented residuals:
+    /// * 5 (+260) / 16 (−492): Maarselok-capture artifacts (EXACT on Ossein) — leave.
+    /// * 1 (−139): zero-hit damage the official keeps — emit-vs-drop predicate lives
+    ///   in the parser crate's is_damage_event, underdetermined on both captures.
     /// * 9/14/28 (~50 events): rare codes the reference does not model (no construct
-    ///   site) and that are underdetermined from one capture — deliberately dropped.
-    /// * 27 (interrupted): 17 of 19 emitted byte-correct; the 2 dropped need a tuple
-    ///   for an interrupting ability seen only on an END_CAST INTERRUPTED (no
-    ///   COMBAT_EVENT to register it) — tied to the missing-tuple tail.
+    ///   site); stateful shield-pool / CC-fade correlations underdetermined on both.
+    /// * 19 (death): count is right but positioning is the parser's intra-timestamp
+    ///   tiebreak (not in the stream); reworking it would regress the exact count.
+    /// * 27 (interrupted): 17 of 19 emitted byte-correct (EXACT on Ossein); the 2
+    ///   dropped need a tuple for an interrupting ability seen only on an END_CAST
+    ///   INTERRUPTED — tied to the missing-tuple tail.
     /// Tighten these bounds (toward 0) as more rules are proven.
     #[test]
     fn per_code_counts_stay_within_known_bounds() {
@@ -2282,6 +2293,64 @@ mod combat_fixture {
         bound("38", 650);
         bound("41", 2);
         bound("51", 2);
+    }
+
+    /// Cross-capture regression guard: on the SECOND (Ossein trial) capture, the
+    /// high-volume event vocabulary must stay byte-count-EXACT. This locks the proof
+    /// that the buff/effect (5/6/7/8/10/11/12), cast (15/16), dot/power (2/26),
+    /// interrupt (27) and shield (38) encoders are correct on an independent
+    /// encounter — so the large Maarselok-only residuals (code 5/16) are capture
+    /// artifacts, not rules to chase. No-op until the Ossein pair is staged.
+    #[test]
+    fn ossein_capture_high_volume_codes_stay_exact() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let Ok(raw) = std::fs::read_to_string(format!("{base}/../.decode-samples/ossein_raw.log"))
+        else {
+            return; // second capture not present — nothing to check.
+        };
+        let mut official = String::new();
+        for n in 1..=20 {
+            if let Ok(s) = std::fs::read_to_string(format!(
+                "{base}/../.decode-samples/ossein_fights_segment_{n}.txt"
+            )) {
+                official.push_str(&s.lines().skip(2).collect::<Vec<_>>().join("\n"));
+                official.push('\n');
+            }
+        }
+        if let Ok(s) = std::fs::read_to_string(format!(
+            "{base}/../.decode-samples/ossein_fights_segment.txt"
+        )) {
+            official.push_str(&s.lines().skip(2).collect::<Vec<_>>().join("\n"));
+        }
+        if official.is_empty() {
+            return; // segment files not staged
+        }
+        let lines: Vec<&str> = raw.lines().collect();
+        let ours = build_fights_segment(&lines).expect("our segment builds");
+        let our_body: String = ours.lines().skip(2).collect::<Vec<_>>().join("\n");
+
+        fn counts(body: &str) -> std::collections::BTreeMap<String, i64> {
+            let mut m = std::collections::BTreeMap::new();
+            for l in body.lines() {
+                if let Some(c) = l.split('|').nth(1) {
+                    *m.entry(c.to_string()).or_insert(0) += 1;
+                }
+            }
+            m
+        }
+        let oc = counts(&our_body);
+        let fc = counts(&official);
+        let get = |m: &std::collections::BTreeMap<String, i64>, c: &str| *m.get(c).unwrap_or(&0);
+        for c in [
+            "2", "5", "6", "7", "8", "10", "11", "12", "15", "16", "26", "27", "38", "41", "44",
+            "51", "52", "53",
+        ] {
+            assert_eq!(
+                get(&oc, c),
+                get(&fc, c),
+                "code {c} must stay byte-count-exact on the Ossein capture"
+            );
+        }
     }
 
     /// DIAGNOSTIC (manual, `--ignored`): diff OUR MASTER TABLE against the official
