@@ -28,6 +28,8 @@ import {
   Search,
   ArrowDownUp,
   FolderOpen,
+  CheckCircle2,
+  LogIn,
 } from "lucide-react";
 import {
   Dialog,
@@ -1042,7 +1044,16 @@ function LogSummaryCard({
   const sessions = preflight.sessions.length;
 
   return (
-    <GlassPanel variant="primary" className="overflow-hidden p-4">
+    <GlassPanel
+      variant="primary"
+      className="overflow-hidden border-emerald-400/15 bg-gradient-to-b from-emerald-400/[0.05] to-white/[0.01] p-4 shadow-[0_8px_32px_-12px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.06)]"
+    >
+      <div className="mb-2.5 flex items-center gap-1.5">
+        <CheckCircle2 className="size-3.5 text-emerald-400" aria-hidden />
+        <span className="font-heading text-[11px] font-semibold tracking-[0.08em] text-emerald-300/90 uppercase">
+          Ready to upload
+        </span>
+      </div>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -1133,20 +1144,39 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
   };
 
   return (
-    <div className="flex flex-col items-center gap-4 py-8 text-center">
-      <div className="flex size-14 items-center justify-center rounded-full bg-[#c4a44a]/10">
-        <CloudUpload className="size-7 text-[#c4a44a]" aria-hidden />
-      </div>
-      <div>
-        <div className="text-base font-medium">Sign in to ESO Logs</div>
-        <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-          Connect your ESO Logs account to upload your logs. It's the same sign-in Kalpa uses for
-          Pack Hub — no extra password needed.
-        </p>
-      </div>
-      <Button onClick={handleLogin} disabled={loggingIn}>
-        {loggingIn ? "Opening sign-in…" : "Sign in to ESO Logs"}
-      </Button>
+    // A contained "gateway" card so signing in reads as a distinct first step,
+    // not floating text. Sky-accented (an account/connection action) to set it
+    // apart from the gold Upload climax that comes later.
+    <div className="mt-4">
+      <GlassPanel
+        variant="primary"
+        className="flex flex-col items-center gap-4 border-sky-400/15 bg-gradient-to-b from-sky-400/[0.05] to-white/[0.01] px-6 py-8 text-center"
+      >
+        <div className="flex size-14 items-center justify-center rounded-2xl border border-sky-400/20 bg-sky-400/[0.1] text-sky-400 shadow-[0_0_28px_-8px_rgba(56,189,248,0.5)]">
+          <LogIn className="size-7" aria-hidden />
+        </div>
+        <div>
+          <div className="font-heading text-lg font-semibold text-foreground/95">
+            Connect your ESO Logs account
+          </div>
+          <p className="mx-auto mt-1.5 max-w-sm text-sm text-muted-foreground">
+            Sign in to upload your combat logs and get your reports. It's the same account Kalpa
+            uses for Pack Hub — no extra password needed.
+          </p>
+        </div>
+        {/* Outline (not gold): a connect action, deliberately distinct from the
+            gold "Upload to ESO Logs" primary action that appears once signed in. */}
+        <Button
+          variant="outline"
+          size="lg"
+          onClick={handleLogin}
+          disabled={loggingIn}
+          className="border-sky-400/30 bg-sky-400/[0.06] text-sky-200 hover:border-sky-400/50 hover:bg-sky-400/[0.12]"
+        >
+          <LogIn className="size-4" />
+          {loggingIn ? "Opening sign-in…" : "Sign in to ESO Logs"}
+        </Button>
+      </GlassPanel>
     </div>
   );
 }
@@ -1267,7 +1297,14 @@ function DirectUploadSection({
           enables the faster in-app path.
         </p>
       </div>
-      <Button size="sm" className="shrink-0" onClick={handleSignIn} disabled={busy}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="shrink-0"
+        onClick={handleSignIn}
+        disabled={busy}
+      >
+        <LogIn className="size-3.5" />
         {busy ? "Opening…" : "Sign in"}
       </Button>
     </GlassPanel>
@@ -1452,9 +1489,33 @@ function LogPicker({
           <span className="text-sm text-muted-foreground">Adding log to your folder…</span>
         </div>
       )}
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <SectionHeader>Logs Folder</SectionHeader>
-        <div className="flex gap-1">
+      {/* Folder identity row: a sky folder-icon chip + the source path make it
+          unmistakable that this is your on-disk Logs folder, not a generic
+          panel. The path reads as a path; the count anchors "what's in here". */}
+      <div className="mb-2.5 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-sky-400/20 bg-sky-400/[0.08] text-sky-400">
+            <FolderOpen className="size-4" aria-hidden />
+          </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground/90">Logs folder</span>
+              {logsDir && (
+                <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
+                  {logs.length} {logs.length === 1 ? "file" : "files"}
+                </span>
+              )}
+            </div>
+            {logsDir ? (
+              <div className="truncate font-mono text-[11px] text-muted-foreground" title={logsDir}>
+                {logsDir}
+              </div>
+            ) : (
+              <div className="text-[11px] text-amber-400/90">{detection?.message}</div>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-1">
           <SimpleTooltip content="Refresh logs" side="bottom">
             <Button variant="ghost" size="icon-sm" onClick={onRefresh} aria-label="Refresh logs">
               <RefreshCw className="size-3.5" />
@@ -1482,14 +1543,6 @@ function LogPicker({
           </SimpleTooltip>
         </div>
       </div>
-
-      {logsDir ? (
-        <div className="mb-2 truncate text-xs text-muted-foreground" title={logsDir}>
-          {logsDir}
-        </div>
-      ) : (
-        <div className="mb-2 text-xs text-amber-400/90">{detection?.message}</div>
-      )}
 
       {/* Search + filter + sort, shown only when the folder is busy enough. */}
       {showControls && !listError && (
@@ -1999,25 +2052,6 @@ function tidyLogLabel(fileName: string): string {
   return base.replace(/-\d{13,}$/, "");
 }
 
-/** Map an upload status to a left-accent color for the history row. */
-function statusAccent(status: UploadRecord["status"]): string {
-  switch (status) {
-    case "completed":
-      return "border-l-emerald-500/70";
-    case "uploading":
-    case "queued":
-      return "border-l-sky-400/70";
-    case "live":
-      return "border-l-red-500/70";
-    case "handedOff":
-      return "border-l-amber-500/70";
-    case "failed":
-      return "border-l-red-500/70";
-    default:
-      return "border-l-white/10";
-  }
-}
-
 function HistoryPanel({
   history,
   onCopyLink,
@@ -2059,10 +2093,7 @@ function HistoryPanel({
         {history.slice(0, 8).map((r) => (
           <li
             key={r.id}
-            className={cn(
-              "rounded-lg border border-l-[3px] border-white/[0.06] bg-white/[0.02] px-3 py-2 transition-colors hover:bg-white/[0.03]",
-              statusAccent(r.status)
-            )}
+            className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 transition-colors hover:bg-white/[0.04]"
           >
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
