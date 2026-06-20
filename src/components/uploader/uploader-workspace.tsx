@@ -66,6 +66,7 @@ import {
   StatusPill,
   WhatGetsUploaded,
   compactBytes,
+  formatElapsed,
   relativeFromMs,
 } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
@@ -680,6 +681,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     // dialog-close can't re-warn for an already-stopped session.
     const wasRunning = liveWasRunningRef.current;
     liveWasRunningRef.current = false;
+
+    // Snapshot the session stats NOW (before any state clears) so we can show a
+    // calm end-of-session summary: how long, how many fights, what content.
+    const sessionFightCount = liveFightCountRef.current;
+    const sessionDurationMs = liveStartMs ? Date.now() - liveStartMs : 0;
+    const sessionZones = Array.from(
+      new Set(liveFights.map((f) => f.bossName || f.zoneName).filter((z): z is string => !!z))
+    ).slice(0, 3);
     try {
       await invokeOrThrow("uploader_stop_live", {
         sessionId: id,
@@ -707,6 +716,16 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       toast.info(
         "Stopped tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report.",
         { duration: 8000 }
+      );
+    }
+    // A calm end-of-session recap when we actually tracked fights — what the
+    // night amounted to, at a glance.
+    if (sessionFightCount > 0) {
+      const dur = sessionDurationMs > 0 ? ` over ${formatElapsed(sessionDurationMs)}` : "";
+      const where = sessionZones.length ? ` — ${sessionZones.join(", ")}` : "";
+      toast.success(
+        `Session recap: ${sessionFightCount} fight${sessionFightCount === 1 ? "" : "s"}${dur}${where}.`,
+        { duration: 7000 }
       );
     }
     await refreshHistory();
