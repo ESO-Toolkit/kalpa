@@ -961,6 +961,21 @@ impl EventEmitter {
             );
         }
 
+        // A fully-ineffective IN-COMBAT heal (hit 0 AND overflow 0 — healed nothing,
+        // no overheal) is dropped: the official segment omits it. Verified EXACT on
+        // the Maarselok capture (88 such raw heals, all in-combat, official drops
+        // exactly 88 → code-3 2354/2354) and within ~2 on the Ossein trial capture.
+        // The in-combat gate matters — out-of-combat zero heals are kept (the Ossein
+        // capture keeps several). This mirrors the zero-zero drop the damage path
+        // already applies.
+        if self.in_combat
+            && matches!(action_result, "HEAL" | "CRITICAL_HEAL")
+            && hit_value == "0"
+            && overflow == "0"
+        {
+            return None;
+        }
+
         // DAMAGE_SHIELDED → a code-38 line (NOT code-1). It carries the SHIELD
         // ability (e.g. 146311) and references the SHIELD's tuple; its damaging
         // ability is unknown until the paired real DAMAGE/DOT event arrives, so the
@@ -1813,6 +1828,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn zero_zero_in_combat_heal_is_dropped() {
+        let st = "18400/18400,9971/12868,8488/28700,198/500,0/1000,0,0.5,0.7,5.9";
+        let prelude = [
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "1,BEGIN_COMBAT,",
+        ];
+        // A heal that healed nothing (hit 0, overflow 0) in combat → dropped.
+        let zero = format!("2,COMBAT_EVENT,HEAL,GENERIC,8,0,0,5000,1000,1,{st},*");
+        let mut lines: Vec<&str> = prelude.to_vec();
+        lines.push(&zero);
+        let mut e = EventEmitter::new();
+        let out = e.build(&lines);
+        assert!(
+            !out.events_string
+                .lines()
+                .any(|l| l.split('|').nth(1) == Some("3")),
+            "a zero-zero in-combat heal must not emit a code-3 line: {:?}",
+            out.events_string
+        );
+        // A heal with a real value still emits.
+        let real = format!("3,COMBAT_EVENT,HEAL,GENERIC,8,500,0,5000,1000,1,{st},*");
+        let mut lines2: Vec<&str> = prelude.to_vec();
+        lines2.push(&real);
+        let mut e2 = EventEmitter::new();
+        let out2 = e2.build(&lines2);
+        assert!(
+            out2.events_string
+                .lines()
+                .any(|l| l.split('|').nth(1) == Some("3")),
+            "a real heal must still emit a code-3 line"
+        );
+    }
+
     // The end-to-end seam: raw lines → ready-to-upload ZIP'd segment + master
     // table. The segment bytes must unzip back to the exact fights-segment text,
     // confirming the full assemble → frame → ZIP pipeline.
@@ -2221,7 +2271,7 @@ mod combat_fixture {
                         // lives in the parser crate's is_damage_event and is underdetermined from one
                         // capture (cross-faction count 482 ≠ emitted 99) — left as a documented drop.
         bound("1", 200); // currently -139 (zero-zero damage drop)
-        bound("3", 120); // (currently +88)
+        bound("3", 4); // now EXACT on Maarselok (zero-zero in-combat heals dropped)
         bound("4", 40); // (currently -18)
         bound("16", 520); // status-queued cast source (currently -492)
                           // Not-yet-modeled rare codes: bound at their full official count (we emit 0).
