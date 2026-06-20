@@ -426,6 +426,12 @@ pub fn select_transport(prefer_cli: bool) -> Box<dyn LogUploadTransport> {
     Box::new(GuiHandoffTransport)
 }
 
+/// Whole-file memory ceiling for the native path. The native encoder reads the
+/// log into memory, so a file above this routes to the official uploader (which
+/// streams) instead. Shared by `assess_native_routing` (route away) and
+/// `run_native_upload` (defence-in-depth refuse) so they agree on the limit.
+const MAX_NATIVE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+
 /// Why a given log was (not) routed to the native uploader. Surfaced for
 /// diagnostics and honest UI ("uploaded directly" vs "used the official app
 /// because this log has events Kalpa can't encode yet").
@@ -448,6 +454,9 @@ pub enum NativeFallbackReason {
     /// using native could produce an inaccurate report. Carries the offending
     /// types for diagnostics.
     UnprovenEvents(Vec<String>),
+    /// The log exceeds the native path's whole-file memory ceiling, so it routes
+    /// to the official uploader instead of hard-failing. Split it to upload direct.
+    TooLarge,
 }
 
 impl NativeFallbackReason {
@@ -467,6 +476,11 @@ impl NativeFallbackReason {
                  can't yet upload directly with full accuracy ({}).",
                 types.join(", ")
             ),
+            NativeFallbackReason::TooLarge => {
+                "Using the official ESO Logs uploader — this log is too large for \
+                 direct upload (split it to upload directly)."
+                    .into()
+            }
         }
     }
 }
@@ -492,6 +506,15 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
     }
     if !format::FORMAT_VERSION_CONFIRMED {
         return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed);
+    }
+
+    // The native path reads the whole file into memory, so it refuses files over
+    // MAX_NATIVE_BYTES. Check the size HERE so an over-large covered log routes to
+    // the official uploader instead of reaching run_native_upload and hard-failing.
+    if let Ok(meta) = std::fs::metadata(log_path) {
+        if meta.len() > MAX_NATIVE_BYTES {
+            return NativeRouting::Fallback(NativeFallbackReason::TooLarge);
+        }
     }
 
     // Scan the log's line types through the coverage gate WITHOUT materializing
@@ -560,9 +583,8 @@ pub fn run_native_upload(
     // so this is the one place that bounds memory on the native path. Above the
     // ceiling we refuse native (the caller falls back to the official uploader,
     // which streams). The user-facing route is to split first (the uploader already
-    // offers split-to-disk for large logs). Keep this comfortably above a normal
-    // single-session split but well under "slurp gigabytes".
-    const MAX_NATIVE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+    // offers split-to-disk for large logs). Uses the module-level MAX_NATIVE_BYTES
+    // shared with assess_native_routing so routing and this guard agree.
     let size = std::fs::metadata(log_path)
         .map_err(|e| format!("Failed to read log: {e}"))?
         .len();

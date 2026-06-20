@@ -453,9 +453,13 @@ pub fn split_selected(
 }
 
 /// Reserve a unique file name, appending `-2`, `-3`, … before the extension on
-/// collision so two splits never clobber one another.
+/// collision so two splits never clobber one another. The reservation key is
+/// LOWERCASED: on Windows the output directory is case-insensitive, so `Raid.log`
+/// and `raid.log` resolve to the same path and the second copy would overwrite
+/// the first. We compare case-insensitively while keeping the user's casing in
+/// the actual file name.
 fn unique_name(used: &mut std::collections::HashSet<String>, candidate: String) -> String {
-    if used.insert(candidate.clone()) {
+    if used.insert(candidate.to_lowercase()) {
         return candidate;
     }
     let (stem, ext) = match candidate.rsplit_once('.') {
@@ -464,7 +468,7 @@ fn unique_name(used: &mut std::collections::HashSet<String>, candidate: String) 
     };
     for n in 2..1000 {
         let next = format!("{stem}-{n}{ext}");
-        if used.insert(next.clone()) {
+        if used.insert(next.to_lowercase()) {
             return next;
         }
     }

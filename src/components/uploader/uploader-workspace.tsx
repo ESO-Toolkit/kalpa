@@ -567,12 +567,16 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     if (!selectedLog) return;
     setUploading(true);
     try {
-      // Read the opt-in fresh per upload so toggling it (here or in Settings)
-      // takes effect immediately. This is the source of truth for the backend;
-      // the component's `nativeOptIn` state only drives the presentational hint.
-      // The backend coverage gate still has the final say per log — an unproven
-      // event type falls back to the official uploader.
-      const nativeOptIn = await getSetting<boolean>("nativeUploadOptIn", false);
+      // Read opt-in AND session presence fresh per upload. Native upload needs
+      // BOTH the opt-in and a captured esologs session — without the session the
+      // backend would route native and hard-fail "Not signed in" instead of
+      // using the official uploader. Gating the dispatched flag on the session
+      // keeps the routing consistent with the UI's willUseNative hint.
+      const [optIn, hasSession] = await Promise.all([
+        getSetting<boolean>("nativeUploadOptIn", false),
+        invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+      ]);
+      const nativeOptIn = optIn && hasSession;
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
         filePath: selectedLog,
         options,
@@ -2347,8 +2351,12 @@ function HistoryPanel({
   if (history.length === 0) return null;
 
   const submitLink = async (id: string) => {
-    const url = linkDraft.trim();
-    if (!url) return;
+    const raw = linkDraft.trim();
+    if (!raw) return;
+    // The backend only accepts a full esologs.com/reports/<code> URL. We tell
+    // users they can paste just the code, so normalize a bare alphanumeric code
+    // into the canonical URL here before sending.
+    const url = /^[a-zA-Z0-9]+$/.test(raw) ? `https://www.esologs.com/reports/${raw}` : raw;
     await onAttachReport(id, url);
     setAttachingId(null);
     setLinkDraft("");
