@@ -31,7 +31,11 @@ import { cn } from "@/lib/utils";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import type { FightSummary, LogPreflight, LogSession, SplitSelection } from "@/types/uploader";
 import { compactBytes, formatDuration, relativeFromMs } from "./uploader-shared";
-import { suggestSplitName } from "./naming";
+import { RUN_TAGS, suggestSplitName, withTag } from "./naming";
+
+// Remember the last prefix the user applied to a batch of splits (e.g. a guild
+// or character tag), so a regular raid-night split keeps the same convention.
+const SPLIT_PREFIX_KEY = "kalpa.uploader.splitPrefix";
 
 /** The fights that fall inside a session's byte range, in file order. */
 function fightsInSession(session: LogSession, fights: FightSummary[]): FightSummary[] {
@@ -80,6 +84,15 @@ export function SplitWorkbench({
   const [drafts, setDrafts] = useState<Record<number, SessionDraft>>(initialDrafts);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [splitting, setSplitting] = useState(false);
+  // A common prefix applied to every included split name (e.g. a guild tag),
+  // remembered across sessions so a recurring raid keeps its naming convention.
+  const [prefix, setPrefix] = useState<string>(() => {
+    try {
+      return localStorage.getItem(SPLIT_PREFIX_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
 
   // Keep drafts in sync if the preflight changes underneath (new selection).
   const draftsKey = Object.keys(drafts).length;
@@ -115,6 +128,46 @@ export function SplitWorkbench({
         next[s.index] = { ...draftFor(prev, s.index), include: s.fightCount > 0 };
       return next;
     });
+
+  // Append a run-tag (prog/core/pug/…) to every INCLUDED split's name at once,
+  // reusing the same idempotent withTag() the report-name field uses.
+  const tagAllIncluded = (tag: (typeof RUN_TAGS)[number]["id"]) =>
+    setDrafts((prev) => {
+      const next = { ...prev };
+      for (const s of sessions) {
+        const d = draftFor(prev, s.index);
+        if (d.include) next[s.index] = { ...d, name: withTag(d.name, tag) };
+      }
+      return next;
+    });
+
+  // Apply (and remember) a common prefix on every included split. A kebab prefix
+  // like "tos" or "core" leads each file name: "tos-lucent-citadel-jun18".
+  const applyPrefix = (raw: string) => {
+    const clean = raw
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    setPrefix(raw);
+    try {
+      localStorage.setItem(SPLIT_PREFIX_KEY, raw);
+    } catch {
+      /* ignore */
+    }
+    if (!clean) return;
+    setDrafts((prev) => {
+      const next = { ...prev };
+      for (const s of sessions) {
+        const d = draftFor(prev, s.index);
+        if (!d.include) continue;
+        // Don't double-prefix if it's already there.
+        const name = d.name.startsWith(`${clean}-`) ? d.name : `${clean}-${d.name}`;
+        next[s.index] = { ...d, name };
+      }
+      return next;
+    });
+  };
 
   const handleSplit = async () => {
     if (selected.length === 0) return;
@@ -175,6 +228,33 @@ export function SplitWorkbench({
             Clear
           </Button>
         </div>
+
+        {/* Batch naming: a remembered prefix + one-tap run-tags applied to every
+            included split, so a recurring raid keeps one convention. */}
+        {selected.length > 0 && (
+          <div className="mt-2 flex shrink-0 flex-wrap items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1.5">
+            <span className="text-[11px] font-medium text-muted-foreground">Name all:</span>
+            <Input
+              value={prefix}
+              onChange={(e) => applyPrefix(e.target.value)}
+              placeholder="prefix (e.g. guild)"
+              aria-label="Prefix for all split names"
+              className="h-7 w-32 text-[11px]"
+            />
+            <span className="text-[11px] text-muted-foreground/50">+ tag:</span>
+            {RUN_TAGS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                title={`Add "${t.label}" to every selected split`}
+                onClick={() => tagAllIncluded(t.id)}
+                className="rounded-md border border-white/[0.08] bg-white/[0.02] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-sky-400/30 hover:text-sky-300"
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Session cards */}
         <div className="-mr-2 mt-3 space-y-2 overflow-y-auto pr-2">
