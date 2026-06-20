@@ -40,8 +40,8 @@
 use std::collections::HashMap;
 
 use super::encode::{
-    combat_final_field, combat_noncode1_crit_flag, encode_map_changed, encode_state_block,
-    encode_zone_changed, segment_ts, session_offset, split_csv_quoted_pub, ActorTable,
+    combat_noncode1_crit_flag, encode_map_changed, encode_state_block, encode_zone_changed,
+    segment_ts, session_offset, split_csv_quoted_pub, ActorTable,
 };
 
 /// `actionResult` values that never emit a segment line (no-op / failed casts).
@@ -167,6 +167,13 @@ pub struct EventEmitter {
     /// (same target) that immediately follows. Each entry is the line up to the f10
     /// slot. They flush — in order, before the damage line — when that event arrives.
     pending_shields: Vec<PendingShield>,
+    /// Per-target accumulated **absorbed** shield damage (`target unit → sum of
+    /// DAMAGE_SHIELDED hit values not yet folded`). The paired real DAMAGE/DOT event
+    /// for that target folds this into its `overflow` (the reference's
+    /// `temporary_damage_buffer`) and resets it to 0. This is why a hit-0 damage
+    /// event whose damage was fully absorbed is still EMITTED (with the absorbed
+    /// total in overflow) rather than dropped — the official segment keeps those.
+    temp_damage: HashMap<String, u64>,
     /// The current session's segment-timestamp offset (`segTs = rawTs + offset`).
     offset: i64,
     /// Whether the first `BEGIN_LOG` has been seen (anchors `first_wall`).
@@ -938,6 +945,26 @@ impl EventEmitter {
             }
         };
 
+        // For an actual damage hit (DAMAGE/CRITICAL_DAMAGE/BLOCKED_DAMAGE), fold any
+        // accumulated absorbed shield damage for this target into the overflow and
+        // reset the buffer (the reference's temporary_damage_buffer). IMMUNE/DODGED
+        // never carry damage, so they don't fold. A fully-absorbed (hit 0) hit is
+        // dropped ONLY when nothing was absorbed either — otherwise it is emitted
+        // with the absorbed total in overflow (this is the −140 the official keeps).
+        let folds_damage = matches!(
+            action_result,
+            "DAMAGE" | "CRITICAL_DAMAGE" | "BLOCKED_DAMAGE"
+        );
+        let mut folded_overflow = overflow.parse::<u64>().unwrap_or(0);
+        if code == "1" && folds_damage {
+            let absorbed = self.temp_damage.remove(&tgt_unit).unwrap_or(0);
+            folded_overflow += absorbed;
+            let hit = hit_value.parse::<u64>().unwrap_or(0);
+            if hit == 0 && folded_overflow == 0 {
+                return prepend(None); // nothing happened — dropped (matches official)
+            }
+        }
+
         let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
         let (src_mask, tgt_mask) = self.combat_masks(&src_unit, &tgt_unit);
         let sub = self
@@ -967,6 +994,25 @@ impl EventEmitter {
         // target's state already shows 0 health) — emit it as-is.
         if code == "19" {
             return prepend(Some(line));
+        }
+        // Code 1 (damage/immune/dodged/blocked): the unified tail, derived from the
+        // capture. Folds the absorbed shield damage into overflow (computed above)
+        // and uses the killing-blow form when the target's health is 0.
+        if code == "1" {
+            let target_dead = tgt_state
+                .first()
+                .and_then(|s| s.split('/').next())
+                .map(|h| h.trim() == "0")
+                .unwrap_or(false);
+            let hit = hit_value.parse::<u64>().unwrap_or(0);
+            match super::encode::code1_tail(action_result, hit, folded_overflow, target_dead) {
+                Some(tail) => {
+                    line.push('|');
+                    line.push_str(&tail);
+                    return prepend(Some(line));
+                }
+                None => return prepend(None),
+            }
         }
         // Append the per-code trailing fields. If the required tail can't be
         // formed (an actionResult whose crit/final we don't model byte-safely),
@@ -1067,6 +1113,11 @@ impl EventEmitter {
         if hit_value == "0" || hit_value.is_empty() {
             return;
         }
+        // Accumulate the absorbed amount for this target so the paired real damage
+        // event folds it into its overflow (the reference's temporary_damage_buffer).
+        if let Ok(v) = hit_value.parse::<u64>() {
+            *self.temp_damage.entry(tgt_unit.to_string()).or_insert(0) += v;
+        }
         // The DAMAGE_SHIELDED combat event allocates its OWN tuple first — keyed on
         // (damageSource, shieldAbility, damageTarget), e.g. `9|3|210` — exactly like
         // any combat event (the reference allocates buff_event before the
@@ -1165,20 +1216,9 @@ impl EventEmitter {
         power_tail: Option<&str>,
     ) -> bool {
         match code {
-            "1" => {
-                use super::encode::combat_crit_flag;
-                // The status results (IMMUNE/BLOCKED/DODGED) have a constant final
-                // override and a non-crit flag; the damage results use the proven
-                // crit flag. combat_final_field handles both; the crit flag for a
-                // status result is 1 (non-crit).
-                let final_field = match combat_final_field(action_result, hit_value, overflow) {
-                    Some(v) => v,
-                    None => return false, // not byte-safe to encode → drop
-                };
-                let crit = combat_crit_flag(action_result).unwrap_or(1);
-                line.push_str(&format!("|{crit}|{final_field}"));
-                true
-            }
+            // Code 1 (damage/immune/dodged/blocked) is formed by the unified
+            // `code1_tail` at the call site (it needs the folded overflow + the
+            // target-dead flag), so it never reaches here.
             "2" => match combat_noncode1_crit_flag(action_result) {
                 // DOT final is the hit value verbatim (overflow==0 in captures).
                 Some(crit) => {
@@ -1614,7 +1654,9 @@ mod tests {
             out.events_string
         );
 
-        // IMMUNE → final override "10", crit 1 → a complete code-1 line IS emitted.
+        // IMMUNE → a complete code-1 line with the single result flag `10` (the
+        // official segment emits a bare `|10`, NOT `|1|10` — IMMUNE carries no hit
+        // value, so hit/overflow/blocked are zeroed and stripped).
         let mut e2 = EventEmitter::new();
         let immune = format!("6,COMBAT_EVENT,IMMUNE,FIRE,1,0,0,5000,100,1,{state},30,{tgt}");
         let mut lines2: Vec<&str> = prelude.to_vec();
@@ -1625,10 +1667,10 @@ mod tests {
             .lines()
             .find(|l| l.split('|').nth(1) == Some("1"))
             .expect("IMMUNE emits a complete code-1 line");
-        // It must end with the crit flag (1) and the IMMUNE final override (10).
+        // It must end with the single IMMUNE result flag (10), no crit prefix.
         assert!(
-            code1.ends_with("|1|10"),
-            "IMMUNE code-1 line must end with crit|final = 1|10: {code1}"
+            code1.ends_with("|10") && !code1.ends_with("|1|10"),
+            "IMMUNE code-1 line must end with the bare result flag 10: {code1}"
         );
     }
 
@@ -2031,7 +2073,12 @@ mod combat_fixture {
         };
         bound("5", 300); // passive-aura residual (currently +260)
         bound("7", 20); // FADED edge (currently +10)
-        bound("1", 200); // DAMAGE_SHIELDED split (currently -140)
+                        // code-1 tail format is now byte-correct (IMMUNE/DODGED single flag, blocked,
+                        // overflow-fold, target-dead). The residual −139 is the zero-hit/zero-overflow
+                        // damage events the official keeps but we drop: the emit-vs-drop discriminator
+                        // lives in the parser crate's is_damage_event and is underdetermined from one
+                        // capture (cross-faction count 482 ≠ emitted 99) — left as a documented drop.
+        bound("1", 200); // currently -139 (zero-zero damage drop)
         bound("3", 120); // (currently +88)
         bound("4", 40); // (currently -18)
         bound("16", 520); // status-queued cast source (currently -492)
