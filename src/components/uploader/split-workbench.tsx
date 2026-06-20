@@ -188,6 +188,9 @@ export function SplitWorkbench({
       const selections: SplitSelection[] = selected.map((s) => ({
         index: s.index,
         name: drafts[s.index]?.name?.trim() || null,
+        // Pin the session identity so the backend can detect a rescan that shifted
+        // indices (log truncated/rotated since preflight) and refuse to mislabel.
+        startTimeMs: s.startTimeMs,
       }));
       const written = await invokeOrThrow<string[]>("uploader_split_to_disk_named", {
         filePath,

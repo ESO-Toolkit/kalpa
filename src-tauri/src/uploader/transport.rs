@@ -526,13 +526,24 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
         Err(_) => return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed),
     };
     use std::io::BufRead;
-    let reader = std::io::BufReader::new(file);
+    let mut reader = std::io::BufReader::new(file);
     let mut unproven: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for line in reader.lines().map_while(Result::ok) {
-        // Assess this single line; if it carries an unproven type, record it. The
-        // owned `line` is dropped each iteration, so peak memory is O(one line +
-        // the capped unproven set), not O(file).
-        if let coverage::Coverage::Fallback { unproven: u } = coverage::assess([line.as_str()]) {
+    // Read raw bytes per line and decode lossily (like the scanner), so invalid
+    // UTF-8 doesn't truncate the scan. An IO error mid-scan FAILS CLOSED — we must
+    // not return Native off a partial read, or the all-or-nothing coverage gate is
+    // bypassed and an unproven event later in the file could reach the encoder.
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF — full file scanned
+            Ok(_) => {}
+            // Read error: fail closed to the official uploader rather than risk a
+            // partial-scan false "Native".
+            Err(_) => return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed),
+        }
+        let line = String::from_utf8_lossy(&buf);
+        if let coverage::Coverage::Fallback { unproven: u } = coverage::assess([line.as_ref()]) {
             unproven.extend(u);
             if unproven.len() >= 32 {
                 break; // the reported set is capped anyway; stop early.

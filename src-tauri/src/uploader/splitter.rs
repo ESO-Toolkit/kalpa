@@ -251,6 +251,11 @@ pub struct SplitSelection {
     pub index: usize,
     /// A user-supplied name (sanitized before use); falls back to the auto name.
     pub name: Option<String>,
+    /// The session's `start_time_ms` at selection time. When present, it is
+    /// verified against the resolved session so a rescan (the log was
+    /// truncated/rotated between preflight and split) that shifted indices is
+    /// caught instead of silently writing a different session under this name.
+    pub start_time_ms: Option<u64>,
 }
 
 /// Split `source_path` into one file per logging session inside `out_dir`.
@@ -426,6 +431,18 @@ pub fn split_selected(
         else {
             continue;
         };
+        // If the caller pinned the session's identity, verify it still matches the
+        // resolved session. A mismatch means the log was truncated/rotated between
+        // preflight and split and indices shifted — fail loudly so we never write a
+        // different session under the user's chosen name.
+        if let Some(expected) = sel.start_time_ms {
+            if session.start_time_ms != expected {
+                return Err(
+                    "The log changed since it was scanned. Re-select it and try the split again."
+                        .into(),
+                );
+            }
+        }
         let end = clamped_session_end(session, pos == last_index, snapshot_len);
         if end <= session.start_offset {
             continue;
@@ -565,6 +582,7 @@ mod tests {
             vec![SplitSelection {
                 index: 1,
                 name: Some("core prog/hm".into()),
+                start_time_ms: None,
             }],
         )
         .unwrap();
@@ -624,10 +642,12 @@ mod tests {
                 SplitSelection {
                     index: 0,
                     name: Some("raid".into()),
+                    start_time_ms: None,
                 },
                 SplitSelection {
                     index: 1,
                     name: Some("raid".into()),
+                    start_time_ms: None,
                 },
             ],
         )
@@ -635,6 +655,40 @@ mod tests {
         assert_eq!(written.len(), 2);
         assert!(written[0].ends_with("raid.log"));
         assert!(written[1].ends_with("raid-2.log"), "got {}", written[1]);
+    }
+
+    // A pinned start_time_ms that doesn't match the resolved session (the log
+    // changed/rescanned since preflight, shifting indices) must fail loudly rather
+    // than write a different session under the user's chosen name.
+    #[test]
+    fn split_selected_rejects_stale_session_fingerprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        let a = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        write(&log, a);
+        let sessions = vec![LogSession {
+            index: 0,
+            start_offset: 0,
+            end_offset: a.len() as u64,
+            start_time_ms: 1000,
+            log_version: "15".into(),
+            realm: Some("NA".into()),
+            fight_count: 1,
+            size_bytes: a.len() as u64,
+        }];
+        // Selection pins start_time_ms=9999, but the resolved session is 1000.
+        let res = split_selected(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(sessions),
+            vec![SplitSelection {
+                index: 0,
+                name: Some("raid".into()),
+                start_time_ms: Some(9999),
+            }],
+        );
+        assert!(res.is_err(), "a mismatched session fingerprint must fail");
     }
 
     // A preflight that saw ONE session must not, after the file appends a SECOND

@@ -146,6 +146,9 @@ export interface LiveFight {
 export interface SplitSelection {
   index: number;
   name: string | null;
+  /** The session's startTimeMs at selection time; the backend verifies it still
+   *  matches after any rescan so a shifted index can't mislabel a split. */
+  startTimeMs: number | null;
 }
 
 export const REGION_OPTIONS: { id: number; label: string }[] = [

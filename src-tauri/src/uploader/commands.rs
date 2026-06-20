@@ -491,11 +491,26 @@ pub async fn uploader_delete_log(
 ) -> Result<String, String> {
     let safe = confine_log_path(&allowed, &file_path)?;
 
-    // Refuse to delete a log that's still being written. Moving the live
-    // Encounter.log out from under ESO would corrupt or split the in-progress
-    // stream. A modification within the active window means it's hot — reject and
-    // tell the user to stop logging first. (Backend guard; the UI also disables
-    // delete for active rows, but this is the authoritative check.)
+    // Fail CLOSED for the current log: ESO always writes the live stream to the
+    // file literally named `Encounter.log`, and may hold it open even during an
+    // idle gap between pulls (when mtime looks stale). Never move that file — only
+    // rotated archives (`Archive-*.log`) and other named logs are deletable.
+    let is_current = safe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.eq_ignore_ascii_case("Encounter.log"))
+        .unwrap_or(false);
+    if is_current {
+        return Err(
+            "This is the current Encounter.log that ESO writes to. Turn off in-game logging \
+             first — only archived logs can be deleted."
+                .into(),
+        );
+    }
+
+    // Defence in depth: also refuse any log modified within the active window —
+    // it's hot even if not named Encounter.log (e.g. a just-rotated archive). The
+    // UI disables delete for active rows; this is the authoritative backend check.
     const DELETE_ACTIVE_WINDOW_MS: u64 = 90 * 1000;
     if let Ok(meta) = std::fs::metadata(&safe) {
         let modified_ms = meta
