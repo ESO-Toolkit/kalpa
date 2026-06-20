@@ -627,15 +627,12 @@ mod routing_tests {
     }
 
     #[test]
-    fn opted_in_but_format_unconfirmed_falls_back() {
-        // Gate closed again (the round-trip rendered broken): FORMAT_VERSION_CONFIRMED
-        // is false, so even an opted-in user falls back. This is the honest state
-        // until a produced segment is confirmed to render a working report.
+    fn opted_in_with_proven_types_routes_native() {
+        // Gate OPEN (native rendering confirmed 2026-06-19, FORMAT_VERSION_CONFIRMED
+        // = true): an opted-in user whose log is all proven types routes native. A
+        // ZONE_CHANGED-only log is proven, so it routes native (not fallback).
         let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
-        assert_eq!(
-            assess_native_routing(&path, true),
-            NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed)
-        );
+        assert_eq!(assess_native_routing(&path, true), NativeRouting::Native);
     }
 
     #[test]
