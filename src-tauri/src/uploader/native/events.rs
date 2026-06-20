@@ -984,9 +984,15 @@ impl EventEmitter {
 
         // An INTERRUPT-status combat event records its target as the last interrupted
         // unit (the reference's `last_interrupt`), the fall-back caster for a later
-        // END_CAST INTERRUPTED whose cast id we never saw. It still emits no line.
+        // END_CAST INTERRUPTED whose cast id we never saw. It emits no line, but it
+        // DOES register its `(src, ability, tgt)` tuple — the reference allocates a
+        // buff event for every combat event at the top of the handler, and the later
+        // END_CAST INTERRUPTED reuses this exact tuple as its code-27 subordinal `A`.
+        // Without it the interrupting ability (e.g. Bash 21973) owns no tuple and
+        // both the tuple and its interrupt line are lost.
         if action_result == "INTERRUPT" {
             self.last_interrupt = Some(tgt_unit.clone());
+            self.alloc_for(&src_unit, &ability, &tgt_unit);
         }
 
         // Filter the LINE before allocating: a status/skip/unmodeled combat event
@@ -2155,9 +2161,9 @@ mod combat_fixture {
     ///   deltas — context-dependent, not byte-derivable from one capture.
     /// * 9/14/28 (~50 events): rare codes the reference does not model (no construct
     ///   site) and that are underdetermined from one capture — deliberately dropped.
-    /// * 27 (interrupted): 15 of 19 emitted byte-correct; the 4 dropped need a tuple
-    ///   for an interrupting ability (e.g. Bash 21973) that is never otherwise
-    ///   registered — tied to the missing-tuple tail.
+    /// * 27 (interrupted): 17 of 19 emitted byte-correct; the 2 dropped need a tuple
+    ///   for an interrupting ability seen only on an END_CAST INTERRUPTED (no
+    ///   COMBAT_EVENT to register it) — tied to the missing-tuple tail.
     /// Tighten these bounds (toward 0) as more rules are proven.
     #[test]
     fn per_code_counts_stay_within_known_bounds() {
@@ -2221,7 +2227,7 @@ mod combat_fixture {
                           // Not-yet-modeled rare codes: bound at their full official count (we emit 0).
         bound("9", 30);
         bound("14", 10);
-        bound("27", 6); // 15/19 emitted byte-correct; 4 need an unregistered tuple
+        bound("27", 4); // 17/19 emitted byte-correct; 2 need an END_CAST-only tuple
         bound("28", 30);
         bound("38", 650);
         bound("41", 2);
