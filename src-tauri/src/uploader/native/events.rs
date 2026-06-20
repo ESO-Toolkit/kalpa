@@ -945,28 +945,42 @@ impl EventEmitter {
             }
         };
 
-        // For an actual damage hit (DAMAGE/CRITICAL_DAMAGE/BLOCKED_DAMAGE), fold any
-        // accumulated absorbed shield damage for this target into the overflow and
-        // reset the buffer (the reference's temporary_damage_buffer). IMMUNE/DODGED
-        // never carry damage, so they don't fold. A fully-absorbed (hit 0) hit is
-        // dropped ONLY when nothing was absorbed either — otherwise it is emitted
-        // with the absorbed total in overflow (this is the −140 the official keeps).
+        // For an actual damage/dot hit (DAMAGE/CRITICAL_DAMAGE/BLOCKED_DAMAGE and the
+        // DOT_TICK family), fold any accumulated absorbed shield damage for this
+        // target into the overflow and reset the buffer (the reference's
+        // temporary_damage_buffer). IMMUNE/DODGED never carry damage, so they don't
+        // fold. A fully-absorbed (hit 0) hit is dropped ONLY when nothing was absorbed
+        // either — otherwise it is emitted with the absorbed total in overflow.
         let folds_damage = matches!(
             action_result,
-            "DAMAGE" | "CRITICAL_DAMAGE" | "BLOCKED_DAMAGE"
+            "DAMAGE" | "CRITICAL_DAMAGE" | "BLOCKED_DAMAGE" | "DOT_TICK" | "DOT_TICK_CRITICAL"
         );
         let mut folded_overflow = overflow.parse::<u64>().unwrap_or(0);
-        if code == "1" && folds_damage {
+        if matches!(code, "1" | "2") && folds_damage {
             let absorbed = self.temp_damage.remove(&tgt_unit).unwrap_or(0);
             folded_overflow += absorbed;
-            let hit = hit_value.parse::<u64>().unwrap_or(0);
-            if hit == 0 && folded_overflow == 0 {
-                return prepend(None); // nothing happened — dropped (matches official)
+            // Only code-1 (direct damage) drops a fully-zero event; the official keeps
+            // every DOT_TICK (code-2 is count-exact at 2938) and just folds overflow.
+            if code == "1" {
+                let hit = hit_value.parse::<u64>().unwrap_or(0);
+                if hit == 0 && folded_overflow == 0 {
+                    return prepend(None); // nothing happened — dropped (matches official)
+                }
             }
         }
 
         let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
-        let (src_mask, tgt_mask) = self.combat_masks(&src_unit, &tgt_unit);
+        // Mask rule is code-dependent (verified on the capture): the DAMAGE codes
+        // (1 damage, 2 dot) use the earlier/later ordering (16/64 by master index —
+        // a cross-faction attacker/victim pair), while the heal/power codes (3 heal,
+        // 4 hot, 26 power) use OWN-SIDE masks (source and target are always the same
+        // faction — you heal/energize allies — so both slots are that side: 16|16 for
+        // friendlies, 64|64 for hostiles, never crossed).
+        let (src_mask, tgt_mask) = if matches!(code, "3" | "4" | "26") {
+            self.masks(&src_unit, &tgt_unit)
+        } else {
+            self.combat_masks(&src_unit, &tgt_unit)
+        };
         let sub = self
             .actors
             .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
@@ -995,10 +1009,11 @@ impl EventEmitter {
         if code == "19" {
             return prepend(Some(line));
         }
-        // Code 1 (damage/immune/dodged/blocked): the unified tail, derived from the
-        // capture. Folds the absorbed shield damage into overflow (computed above)
-        // and uses the killing-blow form when the target's health is 0.
-        if code == "1" {
+        // Code 1 (damage/immune/dodged/blocked) and code 2 (dot) share the unified
+        // tail, derived from the capture. It folds the absorbed shield damage into
+        // overflow (computed above) and uses the killing-blow form when the target's
+        // health is 0.
+        if matches!(code, "1" | "2") {
             let target_dead = tgt_state
                 .first()
                 .and_then(|s| s.split('/').next())
@@ -1197,15 +1212,13 @@ impl EventEmitter {
     /// drops the event when this is `false`, so a code-1/2/3/26 line is never
     /// emitted with a missing/partial tail.
     ///
-    /// * code 1 (damage): `|{critFlag}|{final}`. `DAMAGE`/`CRITICAL_DAMAGE` use the
-    ///   proven crit flag (1/2) + hit value; the status results
-    ///   `IMMUNE`/`BLOCKED_DAMAGE`/`DODGED` use crit `1` + the constant final
-    ///   override (10/1/7). Other code-1 results (`DAMAGE_SHIELDED`/`DIED`/
-    ///   `FALL_DAMAGE`, or nonzero-overflow damage) are not byte-safe to encode →
-    ///   `false` (event dropped).
-    /// * code 2 (dot) / code 3 (heal): `|{critFlag}|{final}` with the heal/dot crit
-    ///   scheme; heals append the overflow (overheal) when nonzero.
+    /// * code 3 (heal): `|{critFlag}|{final}` with the heal crit scheme; heals append
+    ///   the overflow (overheal) when nonzero.
     /// * code 26 (power): `|{hitValue}|{overflow}|{powerTypeIdx}|{powerMax}`.
+    ///
+    /// Codes 1 (damage) and 2 (dot) are formed by the unified [`super::encode::code1_tail`]
+    /// at the call site (they need the folded overflow + the target-dead flag), so
+    /// they never reach here.
     fn append_combat_tail(
         &self,
         line: &mut String,
@@ -1216,17 +1229,6 @@ impl EventEmitter {
         power_tail: Option<&str>,
     ) -> bool {
         match code {
-            // Code 1 (damage/immune/dodged/blocked) is formed by the unified
-            // `code1_tail` at the call site (it needs the folded overflow + the
-            // target-dead flag), so it never reaches here.
-            "2" => match combat_noncode1_crit_flag(action_result) {
-                // DOT final is the hit value verbatim (overflow==0 in captures).
-                Some(crit) => {
-                    line.push_str(&format!("|{crit}|{hit_value}"));
-                    true
-                }
-                None => false,
-            },
             // Heal (3) and heal-over-time tick (4) share the same heal-style tail.
             "3" | "4" => match combat_noncode1_crit_flag(action_result) {
                 Some(crit) => {

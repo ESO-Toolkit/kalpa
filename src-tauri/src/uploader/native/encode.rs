@@ -1155,15 +1155,16 @@ fn split_csv_quoted(s: &str) -> impl Iterator<Item = &str> {
 // per-field encoder proven, the assembled line is unshippable without `A`. The
 // coverage gate keeps any real combat log on the official uploader meanwhile.
 
-/// The leading **crit/result flag** of a code-1 (damage) line's tail. Verified
-/// against the official capture (which is the ground truth — the byte format is
-/// derived from the matched-pair capture, not from any reference's serializer):
-/// `DAMAGE → 1`, `CRITICAL_DAMAGE → 2`, `BLOCKED_DAMAGE → 4`, `DODGED → 7`,
-/// `IMMUNE → 10`. `None` for an actionResult that does not emit a code-1 line.
+/// The leading **crit/result flag** of a code-1/2 (damage / dot) line's tail.
+/// Verified against the official capture (which is the ground truth — the byte
+/// format is derived from the matched-pair capture, not from any reference's
+/// serializer): `DAMAGE → 1`, `CRITICAL_DAMAGE → 2`, `BLOCKED_DAMAGE → 4`,
+/// `DODGED → 7`, `IMMUNE → 10`, `DOT_TICK → 1`, `DOT_TICK_CRITICAL → 2`. `None`
+/// for an actionResult that does not emit a damage/dot line.
 pub fn code1_result_flag(action_result: &str) -> Option<u8> {
     match action_result {
-        "DAMAGE" => Some(1),
-        "CRITICAL_DAMAGE" => Some(2),
+        "DAMAGE" | "DOT_TICK" => Some(1),
+        "CRITICAL_DAMAGE" | "DOT_TICK_CRITICAL" => Some(2),
         "BLOCKED_DAMAGE" => Some(4),
         "DODGED" => Some(7),
         "IMMUNE" => Some(10),
@@ -1171,13 +1172,14 @@ pub fn code1_result_flag(action_result: &str) -> Option<u8> {
     }
 }
 
-/// Build the trailing fields of a code-1 (damage) line, appended after the state
-/// blocks. The format is derived **from the official capture** as the four fields
-/// `{flag}|{hit}|{overflow}|{blocked}` with trailing `|0` fields stripped, plus a
-/// distinct **target-dead** form. Verified against every code-1 line-length class
-/// in the capture (the 27/28/29/30/31-field families):
+/// Build the trailing fields of a code-1 (damage) or code-2 (dot) line, appended
+/// after the state blocks. The format is derived **from the official capture** as
+/// the four fields `{flag}|{hit}|{overflow}|{blocked}` with trailing `|0` fields
+/// stripped, plus a distinct **target-dead** form. Verified against every code-1
+/// and code-2 line-length class in the capture (27/28/29/30/31-field families;
+/// code-2 shares the 28/29/31 forms):
 ///
-/// * Normal damage (`overflow == 0`, not blocked, target alive): `{flag}|{hit}`
+/// * Normal damage/dot (`overflow == 0`, not blocked, target alive): `{flag}|{hit}`
 ///   (the `|0|0` overflow/blocked are stripped).
 /// * `IMMUNE`/`DODGED` (hit 0, overflow 0): just `{flag}` (`10` / `7`) — a single
 ///   trailing field, no hit. This is the headline byte-divergence fix: the official
@@ -1190,9 +1192,9 @@ pub fn code1_result_flag(action_result: &str) -> Option<u8> {
 ///   `1` is non-zero so nothing is stripped.
 /// * Target dead (`target_health == 0`): `{flag}|{hit + overflow}|0|0|{overflow}`
 ///   — the killing-blow form (the parser reads the effective total then the
-///   overflow).
+///   overflow). Applies to damage AND dot hits (flags 1/2).
 ///
-/// Returns `None` only for an actionResult that does not emit a code-1 line.
+/// Returns `None` only for an actionResult that does not emit a damage/dot line.
 pub fn code1_tail(
     action_result: &str,
     hit_value: u64,
@@ -1208,10 +1210,14 @@ pub fn code1_tail(
     } else {
         (hit_value, overflow)
     };
-    // The killing-blow (target-dead) form applies ONLY to actual damage hits
-    // (DAMAGE / CRITICAL_DAMAGE). Verified: the official 31-field dead-form lines
-    // carry only flags 1/2 — never IMMUNE(10)/DODGED(7)/BLOCKED(4).
-    let target_dead = target_dead && matches!(action_result, "DAMAGE" | "CRITICAL_DAMAGE");
+    // The killing-blow (target-dead) form applies ONLY to actual damage/dot hits
+    // (flags 1/2). Verified: the official 31-field dead-form lines carry only flags
+    // 1/2 — never IMMUNE(10)/DODGED(7)/BLOCKED(4).
+    let target_dead = target_dead
+        && matches!(
+            action_result,
+            "DAMAGE" | "CRITICAL_DAMAGE" | "DOT_TICK" | "DOT_TICK_CRITICAL"
+        );
     if target_dead {
         // Killing-blow form: effective total, then 0|0, then the overflow.
         return Some(format!("{flag}|{}|0|0|{overflow}", hit_value + overflow));
@@ -1999,7 +2005,20 @@ mod tests {
         );
         // IMMUNE never takes the dead form (verified: 31-field lines carry only flags 1/2).
         assert_eq!(code1_tail("IMMUNE", 0, 0, true).as_deref(), Some("10"));
-        // Non-code-1 results → None.
+        // DOT (code 2) shares the format: normal, overflow-folded, and dead forms.
+        assert_eq!(
+            code1_tail("DOT_TICK", 516, 0, false).as_deref(),
+            Some("1|516")
+        );
+        assert_eq!(
+            code1_tail("DOT_TICK_CRITICAL", 0, 1018, false).as_deref(),
+            Some("2|0|1018")
+        );
+        assert_eq!(
+            code1_tail("DOT_TICK", 887, 1063, true).as_deref(),
+            Some("1|1950|0|0|1063")
+        );
+        // Non-damage/dot results → None.
         assert_eq!(code1_tail("HEAL", 100, 0, false), None);
     }
 
