@@ -24,6 +24,10 @@ import {
   AlertCircle,
   AlertTriangle,
   ChevronRight,
+  Swords,
+  Search,
+  ArrowDownUp,
+  FolderOpen,
 } from "lucide-react";
 import {
   Dialog,
@@ -67,6 +71,7 @@ import {
 import { UploadOptionsControl } from "./upload-options";
 import { FightList, rowsFromLive, rowsFromSummaries } from "./fight-list";
 import { SplitWorkbench } from "./split-workbench";
+import { dominantZone } from "./naming";
 
 interface UploaderWorkspaceProps {
   authUser: AuthUser | null;
@@ -366,6 +371,20 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       toast.error(`Couldn't open the folder picker: ${getTauriErrorMessage(e)}`);
     }
   };
+
+  // Reveal the current logs directory in the OS file manager. Best-effort: a
+  // missing dir or opener rejection toasts rather than silently no-ops.
+  const handleOpenLogsFolder = useCallback(async () => {
+    if (!logsDir) return;
+    try {
+      // revealItemInDir is the opener API already used for split output; pointing
+      // it at the directory opens the folder in the OS file manager.
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(logsDir);
+    } catch {
+      toast.error("Couldn't open the Logs folder.");
+    }
+  }, [logsDir]);
 
   const handleSelectLog = useCallback(async (path: string) => {
     // Guard against a slow scan of a previously-selected log resolving after a
@@ -745,7 +764,19 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               onSelect={handleSelectLog}
               onRefresh={() => logsDir && loadLogs(logsDir)}
               onPickFolder={handlePickFolder}
+              onOpenFolder={handleOpenLogsFolder}
             />
+
+            {/* Selected-log summary: the confident "here's what you're uploading"
+                moment before the action. */}
+            {selectedLog && preflight && !scanning && (
+              <LogSummaryCard
+                fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
+                preflight={preflight}
+                fights={fights}
+                willUseNative={willUseNative}
+              />
+            )}
 
             {/* Preflight + fights */}
             {selectedLog && (
@@ -902,6 +933,97 @@ function TransportReadout({
       <span className="inline-flex items-center gap-1.5 rounded-md border border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] px-2 py-1 font-medium text-[#c4a44a]">
         esologs.com
       </span>
+    </div>
+  );
+}
+
+// The confident "here's what you're uploading" card shown once a log is scanned.
+// Leads with the content (dominant zone) so the user recognizes the night at a
+// glance, then the hard facts (fights / sessions / size) and the route it takes.
+function LogSummaryCard({
+  fileName,
+  preflight,
+  fights,
+  willUseNative,
+}: {
+  fileName: string;
+  preflight: LogPreflight;
+  fights: FightSummary[];
+  willUseNative: boolean;
+}) {
+  const zone = dominantZone(fights);
+  const bosses = Array.from(
+    new Set(fights.map((f) => f.bossName).filter((b): b is string => !!b))
+  ).slice(0, 3);
+  const sessions = preflight.sessions.length;
+
+  return (
+    <GlassPanel variant="primary" className="overflow-hidden p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-[#c4a44a]/12 text-[#c4a44a]">
+              <Swords className="size-4" aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <div className="truncate text-base font-semibold text-foreground/95">
+                {zone ?? "Combat log"}
+              </div>
+              <div
+                className="truncate font-mono text-[11px] text-muted-foreground"
+                title={fileName}
+              >
+                {fileName}
+              </div>
+            </div>
+          </div>
+          {bosses.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {bosses.map((b) => (
+                <InfoPill key={b} color="muted" className="text-[11px]">
+                  {b}
+                </InfoPill>
+              ))}
+              {fights.length > bosses.length && (
+                <span className="self-center text-[11px] text-muted-foreground/70">
+                  +{fights.length - bosses.length} more
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+        {/* Transport chip — the engine this upload will use. */}
+        {willUseNative ? (
+          <InfoPill color="sky" className="shrink-0 gap-1">
+            <Zap className="size-3" aria-hidden /> Direct
+          </InfoPill>
+        ) : (
+          <InfoPill color="muted" className="shrink-0 gap-1">
+            <CloudUpload className="size-3" aria-hidden /> Official
+          </InfoPill>
+        )}
+      </div>
+
+      {/* Hard facts row. */}
+      <div className="mt-3 grid grid-cols-3 gap-2">
+        <SummaryStat
+          value={preflight.totalFights}
+          label={preflight.totalFights === 1 ? "fight" : "fights"}
+        />
+        <SummaryStat value={sessions} label={sessions === 1 ? "session" : "sessions"} />
+        <SummaryStat value={compactBytes(preflight.sizeBytes)} label="on disk" />
+      </div>
+    </GlassPanel>
+  );
+}
+
+function SummaryStat({ value, label }: { value: string | number; label: string }) {
+  return (
+    <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-center">
+      <div className="font-heading text-lg leading-tight font-semibold text-foreground/90 tabular-nums">
+        {value}
+      </div>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
     </div>
   );
 }
@@ -1173,6 +1295,9 @@ function ModeTab({
   );
 }
 
+type LogFilter = "all" | "active" | "archives";
+type LogSort = "newest" | "largest";
+
 function LogPicker({
   detection,
   logsDir,
@@ -1183,6 +1308,7 @@ function LogPicker({
   onSelect,
   onRefresh,
   onPickFolder,
+  onOpenFolder,
 }: {
   detection: LogPathDetection | null;
   logsDir: string | null;
@@ -1193,7 +1319,29 @@ function LogPicker({
   onSelect: (path: string) => void;
   onRefresh: () => void;
   onPickFolder: () => void;
+  onOpenFolder: () => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<LogFilter>("all");
+  const [sort, setSort] = useState<LogSort>("newest");
+
+  // Only show the controls once the folder has enough logs to be worth filtering.
+  const showControls = logs.length > 4;
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let out = logs.filter((l) => {
+      if (q && !l.fileName.toLowerCase().includes(q)) return false;
+      if (filter === "active") return l.isActive;
+      if (filter === "archives") return /^archive/i.test(l.fileName);
+      return true;
+    });
+    out = [...out].sort((a, b) =>
+      sort === "largest" ? b.sizeBytes - a.sizeBytes : b.modifiedAtMs - a.modifiedAtMs
+    );
+    return out;
+  }, [logs, query, filter, sort]);
+
   return (
     <GlassPanel variant="subtle" className="p-3">
       <div className="mb-2 flex items-center justify-between gap-2">
@@ -1201,6 +1349,14 @@ function LogPicker({
         <div className="flex gap-1">
           <Button variant="ghost" size="icon-sm" onClick={onRefresh} aria-label="Refresh logs">
             <RefreshCw className="size-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={onOpenFolder}
+            aria-label="Open Logs folder"
+          >
+            <FolderOpen className="size-3.5" />
           </Button>
           <Button variant="ghost" size="icon-sm" onClick={onPickFolder} aria-label="Choose folder">
             <FolderSearch className="size-3.5" />
@@ -1214,6 +1370,61 @@ function LogPicker({
         </div>
       ) : (
         <div className="mb-2 text-xs text-amber-400/90">{detection?.message}</div>
+      )}
+
+      {/* Search + filter + sort, shown only when the folder is busy enough. */}
+      {showControls && !listError && (
+        <div className="mb-2 space-y-2">
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/60"
+              aria-hidden
+            />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search logs…"
+              aria-label="Search logs"
+              className="h-8 pl-8 text-xs"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex gap-1" role="group" aria-label="Filter logs">
+              {(
+                [
+                  { id: "all", label: "All" },
+                  { id: "active", label: "Active" },
+                  { id: "archives", label: "Archives" },
+                ] as { id: LogFilter; label: string }[]
+              ).map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  aria-pressed={filter === f.id}
+                  onClick={() => setFilter(f.id)}
+                  className={cn(
+                    "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors",
+                    "focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
+                    filter === f.id
+                      ? "border-sky-400/40 bg-sky-400/[0.06] text-sky-300"
+                      : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:text-foreground/80"
+                  )}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setSort((s) => (s === "newest" ? "largest" : "newest"))}
+              className="inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground/80 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none"
+              aria-label={`Sort by ${sort === "newest" ? "largest" : "newest"}`}
+            >
+              <ArrowDownUp className="size-3" aria-hidden />
+              {sort === "newest" ? "Newest" : "Largest"}
+            </button>
+          </div>
+        </div>
       )}
 
       {listError ? (
@@ -1264,7 +1475,12 @@ function LogPicker({
             buttons[next]?.focus();
           }}
         >
-          {logs.map((log) => {
+          {visible.length === 0 ? (
+            <li className="rounded-lg border border-dashed border-white/[0.08] px-3 py-4 text-center text-xs text-muted-foreground">
+              No logs match — clear the search or filter.
+            </li>
+          ) : null}
+          {visible.map((log) => {
             const isSelected = selectedLog === log.path;
             return (
               <li key={log.path}>
@@ -1346,34 +1562,39 @@ function Preflight({
   }
   if (!preflight) return null;
 
+  // The summary card carries the size/fights/sessions counts now; this row is the
+  // split-affordance + large-log nudge. Render nothing when there's neither a
+  // reason to split nor multiple sessions to carve.
+  const canSplit = preflight.recommendSplit || preflight.sessions.length > 1;
+  if (!canSplit) return null;
+
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
-      <InfoPill color="muted">{compactBytes(preflight.sizeBytes)}</InfoPill>
-      <InfoPill color="gold">
-        {preflight.totalFights} fight{preflight.totalFights === 1 ? "" : "s"}
-      </InfoPill>
-      <InfoPill color="muted">
-        {preflight.sessions.length} session{preflight.sessions.length === 1 ? "" : "s"}
-      </InfoPill>
-      {preflight.recommendSplit && (
-        <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs text-amber-400/90">This log is large — splitting helps.</span>
-          <Button variant="outline" size="sm" onClick={onSplit}>
+      {preflight.recommendSplit ? (
+        <>
+          <span className="text-xs text-amber-400/90">
+            This log is large — splitting by session helps it upload.
+          </span>
+          <Button variant="outline" size="sm" onClick={onSplit} className="ml-auto">
             <Scissors className="size-3.5" />
             Split by session…
           </Button>
-        </div>
-      )}
-      {!preflight.recommendSplit && preflight.sessions.length > 1 && (
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onSplit}
-          className="ml-auto text-muted-foreground"
-        >
-          <Scissors className="size-3.5" />
-          Split…
-        </Button>
+        </>
+      ) : (
+        <>
+          <span className="text-xs text-muted-foreground">
+            {preflight.sessions.length} logging sessions in this file.
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onSplit}
+            className="ml-auto text-foreground/70"
+          >
+            <Scissors className="size-3.5" />
+            Split…
+          </Button>
+        </>
       )}
     </div>
   );
