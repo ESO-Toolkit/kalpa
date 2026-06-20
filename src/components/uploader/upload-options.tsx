@@ -36,10 +36,14 @@ export function UploadOptionsControl({
   options,
   onChange,
   disabled,
+  // When direct upload is the intended path, visibility is applied immediately;
+  // the official uploader instead asks the user to confirm before publishing.
+  willUseNative = false,
 }: {
   options: UploadOptions;
   onChange: (next: UploadOptions) => void;
   disabled?: boolean;
+  willUseNative?: boolean;
 }) {
   return (
     <div className="space-y-4">
@@ -54,10 +58,12 @@ export function UploadOptionsControl({
               key={r.id}
               type="button"
               aria-pressed={options.region === r.id}
+              aria-label={`${r.label} region`}
               disabled={disabled}
               onClick={() => onChange({ ...options, region: r.id })}
               className={cn(
                 "flex-1 rounded-lg border px-3 py-2 text-sm transition-colors duration-150",
+                "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
                 "disabled:opacity-50",
                 options.region === r.id
                   ? "border-sky-400/40 bg-sky-400/[0.06] text-foreground"
@@ -84,19 +90,23 @@ export function UploadOptionsControl({
                 key={value}
                 type="button"
                 aria-pressed={active}
+                aria-label={`${label} visibility — ${hint}`}
                 disabled={disabled}
                 onClick={() => onChange({ ...options, visibility: value })}
                 className={cn(
                   "rounded-lg border p-3 text-left transition-colors duration-150 disabled:opacity-50",
+                  "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
+                  // Selection state is uniformly sky across the uploader (Region,
+                  // mode tabs, visibility); gold is reserved for primary actions.
                   active
-                    ? "border-[#c4a44a]/40 bg-[#c4a44a]/[0.05]"
+                    ? "border-sky-400/40 bg-sky-400/[0.06]"
                     : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
                 )}
               >
                 <div
                   className={cn(
                     "flex items-center gap-1.5 text-sm font-medium",
-                    active ? "text-[#c4a44a]" : "text-foreground/80"
+                    active ? "text-sky-400" : "text-foreground/80"
                   )}
                 >
                   <Icon className="size-3.5" aria-hidden />
@@ -108,7 +118,9 @@ export function UploadOptionsControl({
           })}
         </div>
         <p className="text-[11px] text-muted-foreground/80">
-          You'll confirm visibility in the ESO Logs Uploader before the report goes live.
+          {willUseNative
+            ? "Direct upload applies this visibility immediately."
+            : "You'll confirm visibility in the ESO Logs Uploader before the report goes live."}
         </p>
       </div>
     </div>

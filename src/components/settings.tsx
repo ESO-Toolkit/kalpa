@@ -433,8 +433,9 @@ export function Settings({
                           </span>
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          Send logs to ESO Logs from Kalpa instead of the official uploader. Uses an
-                          unofficial method — see the disclosure when you enable it.
+                          Send logs to ESO Logs straight from Kalpa — faster, and the report appears
+                          in-app. Unofficial method; falls back to the official uploader
+                          automatically. See details when you enable it.
                         </p>
                       </div>
                     </label>
@@ -694,9 +695,9 @@ function NativeUploadDisclosure({
             incorrectly. You can turn this off any time.
           </p>
           <p className="text-xs">
-            This is still being rolled out. Until your logs are fully supported, Kalpa keeps using
-            the official uploader even with this on — so for now, turning it on may not change
-            anything yet.
+            Direct upload works today for common combat logs. If a log has an event type Kalpa can't
+            yet encode exactly, it falls back to the official uploader for that log automatically —
+            so a report is never uploaded incorrectly.
           </p>
         </div>
         <div className="mt-4 flex justify-end gap-2">

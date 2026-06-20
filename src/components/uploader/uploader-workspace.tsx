@@ -4,7 +4,7 @@
 // first-run wizard. Uploads are handed to the official ESO Logs uploader (Kalpa
 // never speaks the private upload protocol itself).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
@@ -19,6 +19,10 @@ import {
   Upload,
   ExternalLink,
   Copy,
+  Zap,
+  Check,
+  AlertCircle,
+  AlertTriangle,
 } from "lucide-react";
 import {
   Dialog,
@@ -33,7 +37,7 @@ import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
-import { getSetting } from "@/lib/store";
+import { getSetting, setSetting } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
 import {
@@ -52,7 +56,13 @@ import {
   type UploadRecord,
   type Visibility,
 } from "@/types/uploader";
-import { StatusPill, WhatGetsUploaded, compactBytes, relativeFromMs } from "./uploader-shared";
+import {
+  SessionTimer,
+  StatusPill,
+  WhatGetsUploaded,
+  compactBytes,
+  relativeFromMs,
+} from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
 import { FightList, rowsFromLive, rowsFromSummaries } from "./fight-list";
 
@@ -143,6 +153,16 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const [uploading, setUploading] = useState(false);
   const [splitting, setSplitting] = useState(false);
 
+  // Direct (native) upload state, lifted here so both the promoted Direct Upload
+  // section and the upload action can reflect which transport will run. `optIn`
+  // mirrors the Settings `nativeUploadOptIn` toggle (writable inline here too);
+  // `hasSession` is whether the in-app esologs upload cookie is present. Direct
+  // upload is the *intended* path only when both are true — the backend coverage
+  // gate still has final say per log (an unproven event type falls back).
+  const [nativeOptIn, setNativeOptIn] = useState(false);
+  const [hasNativeSession, setHasNativeSession] = useState(false);
+  const willUseNative = nativeOptIn && hasNativeSession;
+
   // Live-mode state
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   // Rendered fights are capped to a rolling window (most-recent MAX_LIVE_FIGHTS)
@@ -155,6 +175,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const liveFightCountRef = useRef(0);
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
+  // Wall-clock start of the current live session, for the elapsed timer. Stored
+  // as state (drives the timer's mount) and set alongside the session id in
+  // handleStartLive. Kept separate from the `live-${ts}` id string so the timer
+  // never depends on the id format the session guards key off.
+  const [liveStartMs, setLiveStartMs] = useState<number | null>(null);
   const [starting, setStarting] = useState(false);
   // Synchronous re-entry guard for start-live (state updates lag a frame).
   const startingRef = useRef(false);
@@ -252,6 +277,38 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     };
   }, [loadLogs, refreshHistory]);
 
+  // Re-read the direct-upload opt-in + session presence. Called on mount and
+  // after the user enables/signs in/out inline, so the promoted section and the
+  // transport hint stay in sync with Settings and the credential store.
+  const refreshNativeState = useCallback(async () => {
+    try {
+      const [optIn, session] = await Promise.all([
+        getSetting<boolean>("nativeUploadOptIn", false),
+        invokeOrThrow<boolean>("uploader_has_session"),
+      ]);
+      setNativeOptIn(optIn);
+      setHasNativeSession(session);
+    } catch {
+      /* best-effort — the upload path still reads the setting fresh per upload */
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [optIn, session] = await Promise.all([
+        getSetting<boolean>("nativeUploadOptIn", false),
+        invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+      ]);
+      if (cancelled) return;
+      setNativeOptIn(optIn);
+      setHasNativeSession(session);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Stop any live session when the workspace unmounts (e.g. the dialog is
   // closed). Reads the ref (set before the start await) so a session started but
   // not yet reflected in state is still torn down. Empty deps: this must run
@@ -282,7 +339,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         // Over-warning ("it may still be uploading") is the safe, honest default
         // vs. silently leaving an upload running.
         toast.info(
-          "Closed live tracking in Kalpa. The ESO Logs Uploader may still be uploading — stop it in its own window to end the live report.",
+          "Closed live tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report.",
           { duration: 8000 }
         );
         void invokeOrThrow("uploader_stop_live", {
@@ -335,9 +392,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     if (!selectedLog) return;
     setUploading(true);
     try {
-      // Read the opt-in fresh per upload so toggling it in Settings takes effect
-      // without reopening the uploader. The backend's coverage gate still has the
-      // final say (today it always falls back to the official uploader).
+      // Read the opt-in fresh per upload so toggling it (here or in Settings)
+      // takes effect immediately. This is the source of truth for the backend;
+      // the component's `nativeOptIn` state only drives the presentational hint.
+      // The backend coverage gate still has the final say per log — an unproven
+      // event type falls back to the official uploader.
       const nativeOptIn = await getSetting<boolean>("nativeUploadOptIn", false);
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
         filePath: selectedLog,
@@ -402,7 +461,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     if (startingRef.current || liveSessionId) return;
     startingRef.current = true;
     setStarting(true);
-    const sessionId = `live-${Date.now()}`;
+    const startedAt = Date.now();
+    const sessionId = `live-${startedAt}`;
     // Record the id before the await so unmount cleanup can stop the backend
     // watcher even if the dialog closes before the await resolves.
     liveSessionIdRef.current = sessionId;
@@ -411,6 +471,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setLiveFightCount(0);
     liveFightCountRef.current = 0;
     setLiveReport(null);
+    setLiveStartMs(startedAt);
     setLiveStatus("watching");
     liveActiveRef.current = true;
 
@@ -582,7 +643,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       // Be honest: Kalpa stopped its own tracking, but it can't stop the separate
       // official uploader — it may still be streaming until the user stops it.
       toast.info(
-        "Stopped tracking in Kalpa. The ESO Logs Uploader may still be uploading — stop it in its own window to end the live report.",
+        "Stopped tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report.",
         { duration: 8000 }
       );
     }
@@ -624,6 +685,12 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
 
   const isLoggedIn = authUser !== null;
 
+  // Initial dialog focus: land on the first meaningful control (the Manual mode
+  // tab) rather than the close button, so keyboard users start in the flow. When
+  // logged out this ref is null and the dialog falls back to default focus (the
+  // sign-in button).
+  const firstTabRef = useRef<HTMLButtonElement>(null);
+
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       {/* Cap height to the viewport and lay the dialog out as a flex column so the
@@ -631,7 +698,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           DialogContent (overflow-hidden, no max-height, vertically centered)
           lets tall content spill off the top and bottom of the screen with no
           way to reach it. */}
-      <DialogContent className="flex max-h-[90vh] flex-col gap-0 overflow-hidden sm:max-w-2xl">
+      <DialogContent
+        initialFocus={isLoggedIn ? firstTabRef : undefined}
+        className="flex max-h-[90vh] flex-col gap-0 overflow-hidden sm:max-w-2xl"
+      >
         <DialogHeader className="shrink-0">
           <div className="flex items-center justify-between gap-3">
             <DialogTitle className="flex items-center gap-2">
@@ -652,13 +722,12 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           // -mr-2 pr-2 keeps the scrollbar off the content's right edge; pt-4
           // restores the gap the header used to provide via the grid.
           <div className="-mr-2 space-y-4 overflow-y-auto pr-2 pt-4">
-            {/* Direct-upload session: sign in to ESO Logs for native upload. */}
-            <NativeSessionControl />
             <WhatGetsUploaded />
 
             {/* Mode tabs */}
             <div className="grid grid-cols-2 gap-2">
               <ModeTab
+                buttonRef={firstTabRef}
                 active={mode === "manual"}
                 onClick={() => {
                   // Leaving Live unmounts its only Stop control, so stop the
@@ -690,6 +759,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               logs={logs}
               listError={listError}
               selectedLog={selectedLog}
+              scanning={scanning}
               onSelect={handleSelectLog}
               onRefresh={() => logsDir && loadLogs(logsDir)}
               onPickFolder={handlePickFolder}
@@ -724,6 +794,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   options={options}
                   onChange={setOptions}
                   disabled={uploading || liveSessionId !== null}
+                  willUseNative={willUseNative}
                 />
                 {mode === "live" && (
                   <LiveToggles
@@ -735,33 +806,54 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               </GlassPanel>
             )}
 
-            {/* Action area */}
-            {mode === "manual" ? (
-              <ManualActions
-                canUpload={
-                  !!selectedLog &&
-                  !uploading &&
-                  !scanning &&
-                  preflight !== null &&
-                  liveSessionId === null
-                }
-                uploading={uploading}
-                transport={transport}
-                onUpload={handleManualUpload}
-              />
-            ) : (
-              <LiveDashboard
-                running={liveSessionId !== null}
-                starting={starting}
-                canStart={!!selectedLog}
-                liveFights={liveFights}
-                liveFightCount={liveFightCount}
-                liveReport={liveReport}
-                onStart={handleStartLive}
-                onStop={handleStopLive}
-                onCopyLink={copyLink}
+            {/* Direct upload (recommended) — opt-in + in-app sign-in. Placed just
+                before the action so the user sets up the faster path right where
+                it pays off. Gated on the same `nativeUploadOptIn` setting the
+                upload reads fresh per dispatch. Hidden during an active live
+                session so the live dashboard stays the focus (the opt-in can't
+                meaningfully change mid-session anyway). */}
+            {liveSessionId === null && (
+              <DirectUploadSection
+                optIn={nativeOptIn}
+                hasSession={hasNativeSession}
+                onChanged={refreshNativeState}
               />
             )}
+
+            {/* Action area. Keyed on `mode` so switching cross-fades the panel
+                (content opacity only — never the glass blur). The mode-switch
+                handler already stops a live session before setMode, so this
+                remount never bypasses the watcher teardown. */}
+            <div key={mode} className="animate-[fade-in_0.2s_ease-out]">
+              {mode === "manual" ? (
+                <ManualActions
+                  canUpload={
+                    !!selectedLog &&
+                    !uploading &&
+                    !scanning &&
+                    preflight !== null &&
+                    liveSessionId === null
+                  }
+                  uploading={uploading}
+                  transport={transport}
+                  willUseNative={willUseNative}
+                  onUpload={handleManualUpload}
+                />
+              ) : (
+                <LiveDashboard
+                  running={liveSessionId !== null}
+                  starting={starting}
+                  canStart={!!selectedLog}
+                  startMs={liveStartMs}
+                  liveFights={liveFights}
+                  liveFightCount={liveFightCount}
+                  liveReport={liveReport}
+                  onStart={handleStartLive}
+                  onStop={handleStopLive}
+                  onCopyLink={copyLink}
+                />
+              )}
+            </div>
 
             {/* History */}
             <HistoryPanel
@@ -818,47 +910,44 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
   );
 }
 
-// Establishes + shows the native upload-session cookie — the ESO Logs website
-// session the /desktop-client/* endpoints authenticate with, captured via the
-// in-app esologs login webview (uploader_login_esologs). Required for direct
-// upload; the official-uploader path doesn't use it.
-function NativeSessionControl() {
-  const [hasSession, setHasSession] = useState(false);
+// Promoted "Direct upload (recommended)" section. Folds the old standalone
+// native-session sign-in into one place that also drives discovery of the
+// faster in-app path, and shows three states:
+//   • opt-in OFF → a benefit-led promo with an inline "Enable" that opens the
+//     same honest disclosure as Settings (2 clicks, no detour to Settings);
+//   • opt-in ON, no session → the in-app esologs sign-in (relabelled so it's
+//     clearly the SAME account, and clearly optional);
+//   • opt-in ON, signed in → a calm "Ready" state with a quiet Sign out.
+// `onChanged` re-reads the lifted opt-in/session state in the parent so the
+// upload action's transport hint stays in sync. The setting key is the exact
+// one Settings writes, so the two stay consistent; the backend coverage gate
+// remains the final authority over which transport actually runs per log.
+function DirectUploadSection({
+  optIn,
+  hasSession,
+  onChanged,
+}: {
+  optIn: boolean;
+  hasSession: boolean;
+  onChanged: () => void | Promise<void>;
+}) {
   const [busy, setBusy] = useState(false);
+  const [disclosureOpen, setDisclosureOpen] = useState(false);
 
-  const refresh = useCallback(async () => {
-    try {
-      setHasSession(await invokeOrThrow<boolean>("uploader_has_session"));
-    } catch {
-      setHasSession(false);
-    }
-  }, []);
-
-  // Load the initial session state once on mount. The state update happens only
-  // after the awaited IPC resolves (and only if still mounted) — not synchronously
-  // in the effect body — so it doesn't cause cascading renders.
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      try {
-        const present = await invokeOrThrow<boolean>("uploader_has_session");
-        if (active) setHasSession(present);
-      } catch {
-        if (active) setHasSession(false);
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, []);
+  const handleEnable = async () => {
+    await setSetting("nativeUploadOptIn", true);
+    setDisclosureOpen(false);
+    toast.success("Direct upload enabled.");
+    await onChanged();
+  };
 
   const handleSignIn = async () => {
     setBusy(true);
     try {
       const result = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs");
-      toast.success("Direct-upload session captured.");
+      toast.success("Direct upload ready — your logs now go straight from Kalpa.");
       warnIfSessionNotPersisted(result);
-      await refresh();
+      await onChanged();
     } catch (e) {
       toast.error(`Direct-upload sign-in failed: ${getTauriErrorMessage(e)}`);
     } finally {
@@ -869,32 +958,129 @@ function NativeSessionControl() {
   const handleSignOut = async () => {
     try {
       await invokeOrThrow("uploader_logout_esologs");
-      await refresh();
+      await onChanged();
     } catch (e) {
       toast.error(`Sign out failed: ${getTauriErrorMessage(e)}`);
     }
   };
 
-  return (
-    <GlassPanel variant="subtle" className="flex items-center justify-between gap-3 p-3">
-      <div>
-        <p className="text-sm font-medium text-white/90">Direct-upload session</p>
-        <p className="text-xs text-muted-foreground">
-          {hasSession
-            ? "Signed in to ESO Logs for direct upload."
-            : "Sign in inside Kalpa to enable direct upload."}
-        </p>
-      </div>
-      {hasSession ? (
-        <Button variant="ghost" size="sm" onClick={handleSignOut}>
+  // State 1 — not opted in: promote the faster path. Sky accent (interactive),
+  // never red — this is reversible and the official uploader is the safe default.
+  if (!optIn) {
+    return (
+      <>
+        <GlassPanel
+          variant="subtle"
+          className="flex items-center justify-between gap-3 border-sky-400/20 bg-sky-400/[0.03] p-3"
+        >
+          <div className="flex min-w-0 items-start gap-2.5">
+            <Zap className="mt-0.5 size-4 shrink-0 text-sky-400" aria-hidden />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-white/90">Upload faster, in-app</p>
+              <p className="text-xs text-muted-foreground">
+                Send logs straight from Kalpa and see the report here — no second window. Unofficial
+                method; falls back to the official uploader automatically.
+              </p>
+            </div>
+          </div>
+          <Button size="sm" className="shrink-0" onClick={() => setDisclosureOpen(true)}>
+            Enable
+          </Button>
+        </GlassPanel>
+        <DirectUploadDisclosure
+          open={disclosureOpen}
+          onOpenChange={setDisclosureOpen}
+          onAccept={handleEnable}
+        />
+      </>
+    );
+  }
+
+  // State 3 — opted in and signed in: ready.
+  if (hasSession) {
+    return (
+      <GlassPanel
+        variant="subtle"
+        className="flex items-center justify-between gap-3 border-emerald-400/20 bg-emerald-400/[0.03] p-3"
+      >
+        <div className="flex min-w-0 items-start gap-2.5">
+          <Check className="mt-0.5 size-4 shrink-0 text-emerald-400" aria-hidden />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-white/90">Direct upload ready</p>
+            <p className="text-xs text-muted-foreground">
+              Your logs upload straight from Kalpa — faster, and the report appears here.
+            </p>
+          </div>
+        </div>
+        <Button variant="ghost" size="sm" className="shrink-0" onClick={handleSignOut}>
           Sign out
         </Button>
-      ) : (
-        <Button size="sm" onClick={handleSignIn} disabled={busy}>
-          {busy ? "Opening…" : "Sign in"}
-        </Button>
-      )}
+      </GlassPanel>
+    );
+  }
+
+  // State 2 — opted in, needs the in-app esologs session.
+  return (
+    <GlassPanel variant="subtle" className="flex items-center justify-between gap-3 p-3">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-white/90">Finish enabling direct upload</p>
+        <p className="text-xs text-muted-foreground">
+          Sign in to ESO Logs once inside Kalpa — same account as above. This is optional; it just
+          enables the faster in-app path.
+        </p>
+      </div>
+      <Button size="sm" className="shrink-0" onClick={handleSignIn} disabled={busy}>
+        {busy ? "Opening…" : "Sign in"}
+      </Button>
     </GlassPanel>
+  );
+}
+
+// Inline, honest disclosure shown before enabling direct (native) upload — the
+// same plain-language framing as the Settings disclosure, lifted here so the
+// user can opt in from the uploader without a detour. Reversible, so it uses a
+// neutral tone and the official uploader stays the always-available fallback.
+function DirectUploadDisclosure({
+  open,
+  onOpenChange,
+  onAccept,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onAccept: () => void | Promise<void>;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Enable direct upload?</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-sm text-muted-foreground">
+          <p>
+            Direct upload sends your logs to ESO Logs straight from Kalpa instead of opening the
+            official ESO Logs uploader. It's faster and keeps everything in one window — the report
+            link appears right here.
+          </p>
+          <p>
+            It works by talking to ESO Logs' uploader endpoints directly — an{" "}
+            <span className="font-medium text-white/90">unofficial method</span>. The ESO Logs
+            operator has said this is fine, but it isn't an officially supported integration, so it
+            could stop working if ESO Logs changes how their uploader works.
+          </p>
+          <p>
+            Kalpa only uses direct upload for logs it can encode with full accuracy; anything else
+            falls back to the official uploader automatically, so a report is never uploaded
+            incorrectly. You can turn this off any time in Settings.
+          </p>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={() => void onAccept()}>Enable direct upload</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -904,20 +1090,25 @@ function ModeTab({
   Icon,
   title,
   hint,
+  buttonRef,
 }: {
   active: boolean;
   onClick: () => void;
   Icon: typeof Upload;
   title: string;
   hint: string;
+  buttonRef?: Ref<HTMLButtonElement>;
 }) {
   return (
     <button
+      ref={buttonRef}
       type="button"
       onClick={onClick}
       aria-pressed={active}
+      aria-label={`${title} mode — ${hint}`}
       className={cn(
         "rounded-xl border p-3 text-left transition-colors duration-150",
+        "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
         active
           ? "border-sky-400/40 bg-sky-400/[0.06]"
           : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
@@ -943,6 +1134,7 @@ function LogPicker({
   logs,
   listError,
   selectedLog,
+  scanning,
   onSelect,
   onRefresh,
   onPickFolder,
@@ -952,6 +1144,7 @@ function LogPicker({
   logs: LogFileInfo[];
   listError: string | null;
   selectedLog: string | null;
+  scanning: boolean;
   onSelect: (path: string) => void;
   onRefresh: () => void;
   onPickFolder: () => void;
@@ -979,48 +1172,96 @@ function LogPicker({
       )}
 
       {listError ? (
-        <div className="rounded-lg border border-dashed border-red-400/30 bg-red-400/[0.04] p-4 text-center text-sm text-red-300/90">
-          Couldn't read this folder — check it's accessible and try Refresh.
-          <div className="mt-1 text-xs text-muted-foreground">{listError}</div>
+        // On-brand error card: 3px red left-accent, icon + headline + raw detail,
+        // so a folder-access failure reads as an intentional state, not a glitch.
+        <div className="rounded-lg border border-red-500/15 border-l-[3px] border-l-red-500 bg-red-500/[0.04] p-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-red-300/90">
+            <AlertTriangle className="size-4 shrink-0" aria-hidden />
+            Couldn't read this folder
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Check it's accessible and try Refresh.
+          </p>
+          <p className="mt-1 text-xs break-words text-muted-foreground/70">{listError}</p>
         </div>
       ) : logs.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-white/[0.08] p-4 text-center text-sm text-muted-foreground">
-          {detection && !detection.encounterLogExists
-            ? "No Encounter.log yet. Type /encounterlog in chat (or use a logging addon) to start recording."
-            : "No log files found in this folder."}
+        // Unified empty state matching the FightList dashed pattern.
+        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-white/[0.08] p-5 text-center">
+          <FileText className="size-6 text-muted-foreground/40" aria-hidden />
+          <p className="text-sm text-muted-foreground">
+            {detection && !detection.encounterLogExists
+              ? "No Encounter.log yet. Type /encounterlog in chat (or use a logging addon) to start recording."
+              : "No log files found in this folder."}
+          </p>
         </div>
       ) : (
-        <ul className="max-h-44 space-y-1 overflow-y-auto" aria-label="Log files">
-          {logs.map((log) => (
-            <li key={log.path}>
-              <button
-                type="button"
-                onClick={() => onSelect(log.path)}
-                className={cn(
-                  "flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors duration-150",
-                  selectedLog === log.path
-                    ? "border-sky-400/40 bg-sky-400/[0.06]"
-                    : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
-                )}
-                aria-pressed={selectedLog === log.path}
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                  <div className="min-w-0">
-                    <div className="truncate text-sm text-foreground/90">{log.fileName}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {compactBytes(log.sizeBytes)} · {relativeFromMs(log.modifiedAtMs)}
+        <ul
+          className="max-h-44 space-y-1 overflow-y-auto"
+          aria-label="Log files"
+          // Lightweight roving navigation: Up/Down/Home/End move focus between
+          // log rows so a long folder isn't N Tab presses. Tab still works as a
+          // fallback; we deliberately keep the aria-pressed button model (not a
+          // listbox) for consistency with the rest of the uploader's selectors.
+          onKeyDown={(e) => {
+            const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+            if (!keys.includes(e.key)) return;
+            const buttons = Array.from(
+              e.currentTarget.querySelectorAll<HTMLButtonElement>("button")
+            );
+            if (buttons.length === 0) return;
+            const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            e.preventDefault();
+            let next: number;
+            if (e.key === "Home") next = 0;
+            else if (e.key === "End") next = buttons.length - 1;
+            else if (e.key === "ArrowDown") next = current < 0 ? 0 : (current + 1) % buttons.length;
+            else next = current <= 0 ? buttons.length - 1 : current - 1;
+            buttons[next]?.focus();
+          }}
+        >
+          {logs.map((log) => {
+            const isSelected = selectedLog === log.path;
+            return (
+              <li key={log.path}>
+                <button
+                  type="button"
+                  onClick={() => onSelect(log.path)}
+                  className={cn(
+                    "flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors duration-150",
+                    "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
+                    isSelected
+                      ? "border-sky-400/40 bg-sky-400/[0.06]"
+                      : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+                  )}
+                  aria-pressed={isSelected}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                    <div className="min-w-0">
+                      <div className="truncate text-sm text-foreground/90">{log.fileName}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {compactBytes(log.sizeBytes)} · {relativeFromMs(log.modifiedAtMs)}
+                      </div>
                     </div>
                   </div>
-                </div>
-                {log.isActive && (
-                  <InfoPill color="sky" className="shrink-0 gap-1">
-                    <Radio className="size-3 animate-pulse" aria-hidden /> Active
-                  </InfoPill>
-                )}
-              </button>
-            </li>
-          ))}
+                  {/* Co-locate scanning feedback with the selection it belongs to,
+                      so picking a big log reads as work-in-progress on that row. */}
+                  {isSelected && scanning ? (
+                    <InfoPill color="sky" className="shrink-0 gap-1">
+                      <span className="size-2.5 animate-spin rounded-full border-2 border-sky-400/30 border-t-sky-400" />
+                      Scanning
+                    </InfoPill>
+                  ) : (
+                    log.isActive && (
+                      <InfoPill color="sky" className="shrink-0 gap-1">
+                        <Radio className="size-3 animate-pulse" aria-hidden /> Active
+                      </InfoPill>
+                    )
+                  )}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </GlassPanel>
@@ -1042,13 +1283,21 @@ function Preflight({
 }) {
   if (scanning && !preflight) {
     // Surface the known file size so a long scan of a multi-GB log reads as
-    // expected work, not a hang.
+    // expected work, not a hang, and show skeleton pills shaped like the real
+    // result so the layout doesn't jump when it resolves.
     const sizeHint = scanningSizeBytes ? ` (${compactBytes(scanningSizeBytes)})` : "";
     const big = (scanningSizeBytes ?? 0) > 256 * 1024 * 1024;
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-muted-foreground">
-        <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
-        Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
+      <div className="space-y-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+          Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
+        </div>
+        <div className="flex gap-2" aria-hidden>
+          <span className="h-5 w-16 animate-pulse rounded-lg bg-white/[0.05]" />
+          <span className="h-5 w-20 animate-pulse rounded-lg bg-white/[0.05]" />
+          <span className="h-5 w-20 animate-pulse rounded-lg bg-white/[0.05]" />
+        </div>
       </div>
     );
   }
@@ -1131,9 +1380,10 @@ function Toggle({
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={`${label} — ${hint}`}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1.5 text-left disabled:opacity-50"
+      className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1.5 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-sky-400/40 focus-visible:outline-none disabled:opacity-50"
     >
       <span>
         <span className="block text-sm text-foreground/90">{label}</span>
@@ -1160,26 +1410,53 @@ function ManualActions({
   canUpload,
   uploading,
   transport,
+  willUseNative,
   onUpload,
 }: {
   canUpload: boolean;
   uploading: boolean;
   transport: TransportInfo | null;
+  // The *intended* transport (opt-in + a captured session). The backend coverage
+  // gate still decides for real per log, so this is an honest hint, not a promise
+  // — the fallback caption keeps a fallback from feeling like a bug.
+  willUseNative: boolean;
   onUpload: () => void;
 }) {
   const installed = transport?.officialUploaderInstalled ?? false;
+  const label = uploading
+    ? "Preparing…"
+    : willUseNative
+      ? "Upload directly"
+      : installed
+        ? "Upload to ESO Logs"
+        : "Open in ESO Logs Uploader";
+
   return (
-    <div className="flex items-center justify-between gap-3">
-      <p className="text-xs text-muted-foreground">
-        {installed
-          ? "Uploads run through the official ESO Logs Uploader installed on your PC."
-          : "We'll open the ESO Logs Uploader (or its download page) with your prepared log."}
-      </p>
-      <Button onClick={onUpload} disabled={!canUpload} className="shrink-0">
+    // Elevated to a primary panel so the climactic step carries the same weight
+    // as the Live dashboard (was a bare flex row that lost the hierarchy).
+    <GlassPanel variant="primary" className="flex flex-col items-center gap-3 p-4">
+      <Button onClick={onUpload} disabled={!canUpload} size="lg" className="w-full sm:w-auto">
         <CloudUpload className="size-4" />
-        {uploading ? "Preparing…" : installed ? "Upload to ESO Logs" : "Open in ESO Logs Uploader"}
+        {label}
       </Button>
-    </div>
+
+      <div className="flex flex-col items-center gap-1.5 text-center">
+        {willUseNative ? (
+          <InfoPill color="sky" className="gap-1">
+            <Zap className="size-3" aria-hidden /> Fast — stays in Kalpa
+          </InfoPill>
+        ) : (
+          <InfoPill color="muted">Uses the official uploader</InfoPill>
+        )}
+        <p className="text-xs text-muted-foreground">
+          {willUseNative
+            ? "Your report appears here when it's done. If a log has an event type Kalpa can't upload directly, it falls back to the official uploader automatically."
+            : installed
+              ? "Uploads run through the official ESO Logs Uploader installed on your PC."
+              : "We'll open the ESO Logs Uploader (or its download page) with your prepared log."}
+        </p>
+      </div>
+    </GlassPanel>
   );
 }
 
@@ -1187,6 +1464,7 @@ function LiveDashboard({
   running,
   starting,
   canStart,
+  startMs,
   liveFights,
   liveFightCount,
   liveReport,
@@ -1197,6 +1475,7 @@ function LiveDashboard({
   running: boolean;
   starting: boolean;
   canStart: boolean;
+  startMs: number | null;
   liveFights: LiveFight[];
   liveFightCount: number;
   liveReport: ReportRef | null;
@@ -1204,15 +1483,26 @@ function LiveDashboard({
   onStop: () => void;
   onCopyLink: (url: string) => void | Promise<void>;
 }) {
+  const detecting = running && liveFightCount > 0;
   return (
     <GlassPanel variant="primary" className="space-y-3 p-4">
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
           <SectionHeader>Live Session</SectionHeader>
           {running && (
-            <InfoPill color="red" className="gap-1">
-              <Radio className="size-3 animate-pulse" aria-hidden /> LIVE
-            </InfoPill>
+            <>
+              {/* Session-level LIVE: a steady dot with a soft pulsing ring, so it
+                  doesn't compete with the per-fight "Streaming" pulses. Emerald,
+                  not red — live-and-healthy; red is reserved for real errors. */}
+              <InfoPill color="emerald" className="gap-1.5">
+                <span className="relative flex size-2">
+                  <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
+                  <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+                </span>
+                LIVE
+              </InfoPill>
+              {startMs !== null && <SessionTimer startMs={startMs} />}
+            </>
           )}
         </div>
         {running ? (
@@ -1227,54 +1517,81 @@ function LiveDashboard({
         )}
       </div>
 
-      {running && (
-        <p className="text-xs text-muted-foreground">
-          The ESO Logs Uploader is streaming this log in real time in its own window — Kalpa just
-          shows the fights here. <span className="text-amber-400/90">Stop tracking</span> ends this
-          timeline, but the uploader keeps going: to actually stop uploading, stop it in the ESO
-          Logs Uploader window and turn off in-game logging.
-        </p>
-      )}
-
+      {/* Report-ready, promoted to the top so it's seen the moment it lands. */}
       {liveReport && (
-        <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.04] px-3 py-2">
-          <span className="truncate text-sm text-emerald-300/90">
-            Report ready: <span className="text-foreground/80">{liveReport.code}</span>
-          </span>
-          <div className="flex shrink-0 gap-1">
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] px-3 py-2.5">
+          <div className="min-w-0">
+            <div className="text-xs font-medium uppercase tracking-wide text-emerald-400/90">
+              Report ready
+            </div>
+            <div className="truncate text-base text-foreground/90">{liveReport.code}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
             <Button
               variant="ghost"
               size="icon-sm"
               onClick={() => void onCopyLink(liveReport.url)}
-              aria-label="Copy link"
+              aria-label="Copy report link"
             >
               <Copy className="size-3.5" />
             </Button>
             <Button
-              variant="ghost"
-              size="icon-sm"
+              size="sm"
+              className="bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
               onClick={() => void openReportUrl(liveReport.url)}
-              aria-label="Open report"
             >
               <ExternalLink className="size-3.5" />
+              View report
             </Button>
           </div>
         </div>
       )}
 
+      {/* Scannable "what Stop does" callout — the single most important thing to
+          understand in live mode, lifted out of a gray paragraph into a bulleted
+          amber-accented card so a raider gets it at a glance. */}
       {running && (
-        <div className="text-sm text-muted-foreground" role="status" aria-live="polite">
-          {liveFightCount === 0
-            ? "Watching for combat… start a fight in-game and it'll appear here."
-            : `${liveFightCount} fight${liveFightCount === 1 ? "" : "s"} detected this session.` +
-              (liveFightCount > liveFights.length
-                ? ` Showing the latest ${liveFights.length}.`
-                : "")}
+        <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
+          <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
+            <AlertCircle className="size-3.5 shrink-0" aria-hidden />
+            Kalpa tracks; the ESO Logs Uploader uploads
+          </div>
+          <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
+            <li className="list-disc">
+              <span className="text-amber-400/90">Stop tracking</span> ends this timeline in Kalpa.
+            </li>
+            <li className="list-disc">The ESO Logs Uploader keeps streaming in its own window.</li>
+            <li className="list-disc">
+              To end uploading: stop it there and turn off in-game logging.
+            </li>
+          </ul>
+        </div>
+      )}
+
+      {running && (
+        <div
+          className={cn(
+            "flex items-center gap-2 text-sm",
+            detecting ? "text-foreground/80" : "text-muted-foreground"
+          )}
+          role="status"
+          aria-live="polite"
+        >
+          {detecting && <InfoPill color="emerald">Detecting fights</InfoPill>}
+          <span>
+            {liveFightCount === 0
+              ? "Watching for combat… start a fight in-game and it'll appear here."
+              : `${liveFightCount} fight${liveFightCount === 1 ? "" : "s"} this session.` +
+                (liveFightCount > liveFights.length
+                  ? ` Showing the latest ${liveFights.length} — your full history is saved on esologs.com.`
+                  : "")}
+          </span>
         </div>
       )}
 
       <FightList
         fights={rowsFromLive(liveFights)}
+        newestFirst
         emptyHint={running ? "No fights yet this session." : "Start live logging to begin."}
       />
     </GlassPanel>
@@ -1401,8 +1718,17 @@ function StatusBadge({ status }: { status: UploadRecord["status"] }) {
       return <InfoPill color="red">Live</InfoPill>;
     case "handedOff":
       // The official uploader may still be streaming this one — neutral, not a
-      // green "Done" that would imply the upload finished.
-      return <InfoPill color="amber">Handed off</InfoPill>;
+      // green "Done" that would imply the upload finished. The external-link cue
+      // signals ownership transferred to the separate uploader.
+      return (
+        <InfoPill
+          color="amber"
+          className="gap-1"
+          title="Finished in the ESO Logs Uploader — paste the report link to track it here."
+        >
+          <ExternalLink className="size-2.5" aria-hidden /> Handed off
+        </InfoPill>
+      );
     case "failed":
       return <InfoPill color="red">Failed</InfoPill>;
     case "cancelled":

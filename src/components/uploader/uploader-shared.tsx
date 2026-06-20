@@ -1,9 +1,10 @@
 // Shared presentational pieces for the uploader workspace: the glanceable
 // status pill, the "what gets uploaded" privacy summary, and small helpers.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   CircleDashed,
@@ -12,6 +13,7 @@ import {
   ShieldQuestion,
   Swords,
   Lock,
+  Zap,
 } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { GlassPanel } from "@/components/ui/glass-panel";
@@ -34,7 +36,7 @@ export function StatusPill({ status }: { status: UploaderStatus }) {
     uploading: { color: "sky", label: "Uploading", Icon: Loader2, spin: true },
     upToDate: { color: "emerald", label: "Up to date", Icon: CheckCircle2 },
     retrying: { color: "amber", label: "Retrying", Icon: RefreshCw, spin: true },
-    attention: { color: "red", label: "Needs attention", Icon: ShieldQuestion },
+    attention: { color: "red", label: "Needs attention", Icon: AlertTriangle },
   };
   const { color, label, Icon, spin } = map[status];
   return (
@@ -68,6 +70,39 @@ export function formatDuration(ms: number): string {
   const m = Math.floor(totalSec / 60);
   const s = Math.round(totalSec % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** Format an elapsed duration as a session clock: `M:SS`, then `H:MM:SS` past an
+ *  hour. Used by the live session timer (counts up; raids have no deadline). */
+export function formatElapsed(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  }
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** A live session stopwatch. Ticks once a second while mounted, computing
+ *  elapsed from a fixed start timestamp (drift-free; survives dropped ticks over
+ *  a multi-hour raid). Mounted only while a session runs, so the interval is torn
+ *  down with the component — no setState-after-unmount risk. */
+export function SessionTimer({ startMs }: { startMs: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <span
+      className="font-heading text-xs tabular-nums text-muted-foreground"
+      aria-label="Session elapsed time"
+    >
+      {formatElapsed(now - startMs)}
+    </span>
+  );
 }
 
 /** Relative time from an epoch-ms timestamp. */
@@ -121,7 +156,7 @@ export function WhatGetsUploaded() {
         />
       </button>
       {open && (
-        <div className="space-y-2 border-t border-white/[0.06] p-3 text-xs text-muted-foreground">
+        <div className="animate-[fade-in_0.2s_ease-out] space-y-2 border-t border-white/[0.06] p-3 text-xs text-muted-foreground">
           <div className="flex items-start gap-2">
             <Swords className="mt-0.5 size-3.5 shrink-0 text-sky-400/80" aria-hidden />
             <span>
@@ -141,6 +176,14 @@ export function WhatGetsUploaded() {
             <span>
               You control visibility (public, unlisted, or private) and can delete a report from ESO
               Logs at any time.
+            </span>
+          </div>
+          <div className="flex items-start gap-2">
+            <Zap className="mt-0.5 size-3.5 shrink-0 text-[#c4a44a]/80" aria-hidden />
+            <span>
+              <span className="text-foreground/80">How it uploads:</span> Kalpa uploads directly to
+              ESO Logs when you enable it (faster, an unofficial but operator-approved method);
+              anything it can't encode exactly falls back to the official uploader automatically.
             </span>
           </div>
         </div>
