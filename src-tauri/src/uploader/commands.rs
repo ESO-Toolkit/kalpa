@@ -434,12 +434,19 @@ pub async fn uploader_import_log(
 
     // Build a safe destination name from the source's stem + ".log", made unique
     // in the Logs folder so an import never overwrites an existing log.
-    let stem = canonical_src
+    let mut stem = canonical_src
         .file_stem()
         .and_then(|s| s.to_str())
         .map(super::splitter::sanitize_split_stem)
         .unwrap_or(None)
         .unwrap_or_else(|| "imported-log".to_string());
+    // `Encounter.log` is RESERVED for the live file ESO writes (and which delete
+    // refuses to touch). An imported file named Encounter.log must NOT take that
+    // name — it would become an un-deletable archive that a later live session
+    // could append to. Prefix it so it lands as a distinct importable archive.
+    if stem.eq_ignore_ascii_case("Encounter") {
+        stem = format!("imported-{stem}");
+    }
     let mut candidate = format!("{stem}.log");
     let mut n = 2;
     while root.join(&candidate).exists() {

@@ -1033,10 +1033,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               {/* Direct upload (recommended) — opt-in + in-app sign-in. Placed just
                 before the action so the user sets up the faster path right where
                 it pays off. Gated on the same `nativeUploadOptIn` setting the
-                upload reads fresh per dispatch. Hidden during an active live
-                session so the live dashboard stays the focus (the opt-in can't
-                meaningfully change mid-session anyway). */}
-              {liveSessionId === null && (
+                upload reads fresh per dispatch. MANUAL mode only: live logging
+                always hands off to the official uploader, so a direct-upload
+                promo/ready panel there would be a false claim. */}
+              {mode === "manual" && liveSessionId === null && (
                 <DirectUploadSection
                   optIn={nativeOptIn}
                   hasSession={hasNativeSession}
