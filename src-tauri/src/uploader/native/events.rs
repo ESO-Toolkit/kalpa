@@ -88,7 +88,6 @@ const STATUS_ACTION_RESULTS: &[&str] = &[
 const CODE1_ACTION_RESULTS: &[&str] = &[
     "DAMAGE",
     "CRITICAL_DAMAGE",
-    "DAMAGE_SHIELDED",
     "IMMUNE",
     "BLOCKED_DAMAGE",
     "DODGED",
@@ -99,6 +98,16 @@ const CODE1_ACTION_RESULTS: &[&str] = &[
 /// prefix + S + T state blocks with **no trailing crit/final tail** (the target's
 /// state shows 0 health). Verified on the capture: `DIED`/`DIED_XP` → code 19.
 const CODE19_ACTION_RESULTS: &[&str] = &["DIED", "DIED_XP"];
+
+/// A buffered code-38 (DamageShielded) line awaiting its damaging-ability index.
+/// `prefix` is the full line up to (but excluding) the trailing `|{f10}` field; the
+/// target unit lets the flushing damage event confirm the run belongs to it.
+struct PendingShield {
+    /// The line text through field 9 (`...|0|{hit}`); `|{f10}` is appended on flush.
+    prefix: String,
+    /// The shielded (damage target) raw unit id — the back-patch run's owner.
+    target_unit: String,
+}
 
 /// The running parser state for one log's event assembly.
 ///
@@ -152,6 +161,12 @@ pub struct EventEmitter {
     /// the parser applies); every other combat event allocates its tuple regardless
     /// of whether its line is emitted.
     in_combat: bool,
+    /// Buffered code-38 (DamageShielded) lines awaiting their damaging-ability index
+    /// (`f10`). A DAMAGE_SHIELDED carries the SHIELD ability (146311), not the
+    /// damaging one; the damaging ability arrives on the paired real DAMAGE/DOT event
+    /// (same target) that immediately follows. Each entry is the line up to the f10
+    /// slot. They flush — in order, before the damage line — when that event arrives.
+    pending_shields: Vec<PendingShield>,
     /// The current session's segment-timestamp offset (`segTs = rawTs + offset`).
     offset: i64,
     /// Whether the first `BEGIN_LOG` has been seen (anchors `first_wall`).
@@ -280,10 +295,24 @@ impl EventEmitter {
         let mut count: u64 = 0;
         for line in lines {
             if let Some(ev) = self.feed(line) {
-                out.push_str(&ev);
-                out.push('\n');
-                count += 1;
+                // `feed` may return MULTIPLE `\n`-separated lines (a damage event
+                // flushes its preceding buffered code-38 DamageShielded run); count
+                // each emitted line.
+                for l in ev.split('\n') {
+                    out.push_str(l);
+                    out.push('\n');
+                    count += 1;
+                }
             }
+        }
+        // Any code-38 lines still pending at end of stream (no following real
+        // damage to back-patch them) are flushed with f10 = 0 (the reference's
+        // un-patched placeholder).
+        let tail = self.flush_pending_shields(None, None);
+        for l in tail.iter() {
+            out.push_str(l);
+            out.push('\n');
+            count += 1;
         }
         EventsOutput {
             events_string: out,
@@ -814,6 +843,27 @@ impl EventEmitter {
             ability = "26770".to_string();
         }
 
+        // DAMAGE_SHIELDED → a code-38 line (NOT code-1). It carries the SHIELD
+        // ability (e.g. 146311) and references the SHIELD's tuple; its damaging
+        // ability is unknown until the paired real DAMAGE/DOT event arrives, so the
+        // line is buffered and flushed (back-patched with f10) then.
+        if action_result == "DAMAGE_SHIELDED" {
+            self.buffer_damage_shielded(raw_ts, hit_value, &ability, &src_unit, &tgt_unit);
+            return None; // emitted later via the flush
+        }
+
+        // A real damage/dot event flushes any buffered code-38 lines for its target
+        // FIRST (stamping their f10 with this event's damaging ability), then emits
+        // its own line. The flushed shield lines precede the damage line in output.
+        let flushed = if matches!(
+            action_result,
+            "DAMAGE" | "CRITICAL_DAMAGE" | "DOT_TICK" | "DOT_TICK_CRITICAL" | "BLOCKED_DAMAGE"
+        ) {
+            self.flush_pending_shields(Some(&tgt_unit), Some(&ability))
+        } else {
+            Vec::new()
+        };
+
         // Filter the LINE before allocating: a status/skip/unmodeled combat event
         // neither emits a line NOR registers a tuple here (empirically the official
         // tuple set matches the registering-result rule, not an allocate-for-all
@@ -842,6 +892,16 @@ impl EventEmitter {
             return None; // unmodeled actionResult → dropped (not guessed)
         };
 
+        // Prepend any flushed code-38 lines (back-patched above) to whatever this
+        // damage event itself emits, so the shield run precedes the damage line.
+        let prepend = |emitter_line: Option<String>| -> Option<String> {
+            match (flushed.is_empty(), emitter_line) {
+                (true, l) => l,
+                (false, Some(l)) => Some(format!("{}\n{}", flushed.join("\n"), l)),
+                (false, None) => Some(flushed.join("\n")),
+            }
+        };
+
         let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
         let (src_mask, tgt_mask) = self.combat_masks(&src_unit, &tgt_unit);
         let sub = self
@@ -854,17 +914,23 @@ impl EventEmitter {
         );
         // S block present iff src side present (mask != 32); same for T.
         if src_mask != "32" {
-            let s_block = encode_state_block(&src_state, &self.cp_of(&src_unit))?;
+            let s_block = match encode_state_block(&src_state, &self.cp_of(&src_unit)) {
+                Some(b) => b,
+                None => return prepend(None),
+            };
             line.push_str(&format!("|S{s_block}"));
         }
         if tgt_mask != "32" {
-            let t_block = encode_state_block(&tgt_state, &self.cp_of(&tgt_unit))?;
+            let t_block = match encode_state_block(&tgt_state, &self.cp_of(&tgt_unit)) {
+                Some(b) => b,
+                None => return prepend(None),
+            };
             line.push_str(&format!("|T{t_block}"));
         }
         // Code 19 (death) is the combat prefix + S + T with NO trailing tail (the
         // target's state already shows 0 health) — emit it as-is.
         if code == "19" {
-            return Some(line);
+            return prepend(Some(line));
         }
         // Append the per-code trailing fields. If the required tail can't be
         // formed (an actionResult whose crit/final we don't model byte-safely),
@@ -899,9 +965,90 @@ impl EventEmitter {
             overflow,
             power_tail.as_deref(),
         ) {
-            return None;
+            return prepend(None);
         }
-        Some(line)
+        prepend(Some(line))
+    }
+
+    /// Buffer a code-38 DamageShielded line from a DAMAGE_SHIELDED combat event. The
+    /// line references the SHIELD's tuple and the damage source, but its damaging
+    /// ability (`f10`) is unknown until the paired real DAMAGE/DOT event; the line is
+    /// held until [`Self::flush_pending_shields`] back-patches and emits it.
+    ///
+    /// Fields (from the empirically-verified layout
+    /// `{ts}|38|{A}|{f4}|{f5}|{f6}|{f7}|{f8}|0|{hit}|{f10}`):
+    /// * `{A}` = the shield tuple `(target, shieldAbility, target)` — a self-shield
+    ///   on the damage target (the absorbing ward). Allocated like any tuple.
+    /// * `{f4}` = `{f5}` = the damage target's (shield owner's) own-side mask.
+    /// * `{f6}` = the damage source's 1-based actor index.
+    /// * `{f7}` = the damage source's per-fight session/instance index (0 if none).
+    /// * `{f8}` = the damage source's own-side mask.
+    /// * `{hit}` = the absorbed hit value (raw, not accumulated).
+    /// A zero hit absorbs nothing → no line.
+    fn buffer_damage_shielded(
+        &mut self,
+        raw_ts: i64,
+        hit_value: &str,
+        shield_ability: &str,
+        src_unit: &str,
+        tgt_unit: &str,
+    ) {
+        if hit_value == "0" || hit_value.is_empty() {
+            return;
+        }
+        // The DAMAGE_SHIELDED combat event allocates its OWN tuple first — keyed on
+        // (damageSource, shieldAbility, damageTarget), e.g. `9|3|210` — exactly like
+        // any combat event (the reference allocates buff_event before the
+        // DamageShielded arm). This is distinct from the shield's self-tuple the line
+        // references, and must be minted at the event's position so the A numbering
+        // stays aligned with the official table.
+        self.alloc_for(src_unit, shield_ability, tgt_unit);
+        // The shield's tuple: a self-shield on the damage target (target absorbs with
+        // its own ward). alloc_for is idempotent, so this mints the shield self-tuple
+        // (e.g. Frost Safeguard `3|3|210`) if not already present.
+        let a = self.alloc_for(tgt_unit, shield_ability, tgt_unit);
+        let sub = self
+            .actors
+            .code1_subordinal(&a.to_string(), tgt_unit, tgt_unit);
+        let shield_mask = self.own_side(tgt_unit); // f4 == f5 (shield owner)
+        let dmg_src_actor = self.actor_index(src_unit); // f6
+        let dmg_src_session = self.actors.session_index(src_unit); // f7
+        let dmg_src_mask = self.own_side(src_unit); // f8
+        let prefix = format!(
+            "{ts}|38|{sub}|{shield_mask}|{shield_mask}|{dmg_src_actor}|{dmg_src_session}|{dmg_src_mask}|0|{hit_value}",
+            ts = self.seg_ts(raw_ts),
+        );
+        self.pending_shields.push(PendingShield {
+            prefix,
+            target_unit: tgt_unit.to_string(),
+        });
+    }
+
+    /// Flush buffered code-38 lines, appending the damaging-ability index (`f10`) to
+    /// each. Called by the paired real damage event (with `tgt`/`ability` set) — only
+    /// the pending lines whose target matches are flushed — and at end of stream
+    /// (both `None`) to drain any leftover lines with `f10 = 0`. Returns the finished
+    /// lines in buffered (timestamp) order.
+    fn flush_pending_shields(&mut self, tgt: Option<&str>, ability: Option<&str>) -> Vec<String> {
+        if self.pending_shields.is_empty() {
+            return Vec::new();
+        }
+        // The damaging ability's 1-based master index (+0 placeholder at end of
+        // stream, matching the reference's un-patched `usize::MAX.wrapping_add(1)`).
+        let f10 = ability.map(|ab| self.ability_index(ab)).unwrap_or(0);
+        let mut out = Vec::new();
+        let mut kept = Vec::new();
+        // `take` so we can re-borrow self while iterating.
+        for p in std::mem::take(&mut self.pending_shields) {
+            let matches_target = tgt.map(|t| t == p.target_unit).unwrap_or(true);
+            if matches_target {
+                out.push(format!("{}|{f10}", p.prefix));
+            } else {
+                kept.push(p);
+            }
+        }
+        self.pending_shields = kept;
+        out
     }
 
     /// Resolve a combat target's unit id + state (target state at raw f[20..=28]),
@@ -1163,7 +1310,8 @@ mod tests {
     fn skip_and_status_sets_are_the_verified_sizes() {
         assert_eq!(SKIP_ACTION_RESULTS.len(), 15);
         assert_eq!(STATUS_ACTION_RESULTS.len(), 13);
-        assert_eq!(CODE1_ACTION_RESULTS.len(), 7);
+        // DAMAGE_SHIELDED is no longer a code-1 result — it routes to code-38.
+        assert_eq!(CODE1_ACTION_RESULTS.len(), 6);
         assert_eq!(CODE19_ACTION_RESULTS.len(), 2);
     }
 

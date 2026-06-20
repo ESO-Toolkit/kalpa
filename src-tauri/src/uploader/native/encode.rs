@@ -1519,6 +1519,15 @@ impl ActorTable {
         self.units.get(unit_id).map(|u| u.ordinal).unwrap_or(0)
     }
 
+    /// A unit's per-fight session/instance index (the reference's
+    /// `index_in_session`): 0 for player-side/boss units, else the 0-based
+    /// per-monsterId instance counter. This is the `f7` field of a code-38
+    /// DamageShielded line (the damage source's instance) — same value as the
+    /// subordinal ordinal.
+    pub fn session_index(&self, unit_id: &str) -> u32 {
+        self.ordinal(unit_id.trim())
+    }
+
     /// The 1-based master actor index currently bound to a runtime unit id, or
     /// `None` if the id is unknown. This is the same index the master table's
     /// player role encodes (`1000000 + index`) and the `PLAYER_INFO` (code 44)
