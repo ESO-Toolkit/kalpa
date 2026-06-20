@@ -2375,4 +2375,87 @@ mod combat_fixture {
         );
         assert_eq!(pets, 4, "pets must be exactly 4");
     }
+
+    /// DIAGNOSTIC (manual, `--ignored`): the SECOND-capture oracle. Diffs our
+    /// combined segment for the Ossein Cage trial slice against the official
+    /// captured segment(s) for the SAME slice, triangulating the rare-code rules
+    /// (death positioning, code-9/14/27/28 forms, the zero-hit-damage predicate)
+    /// against the Maarselok dungeon capture. Because the official uploader splits
+    /// the slice into per-fight segments, the official side concatenates the bodies
+    /// of every `ossein_fights_segment*.txt` it finds.
+    ///
+    /// Stage the capture as:
+    ///   `.decode-samples/ossein_raw.log`            (the uploaded slice)
+    ///   `.decode-samples/ossein_fights_segment.txt` (the decoded official segment;
+    ///      or multiple `ossein_fights_segment_1.txt`, `_2.txt`, … for the splits)
+    /// then run with `--ignored --nocapture`. No-op (returns) until present.
+    #[test]
+    #[ignore = "second-capture oracle; needs .decode-samples/ossein_* , run with --ignored --nocapture"]
+    fn diff_against_official_ossein_segment() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let raw_path = format!("{base}/../.decode-samples/ossein_raw.log");
+        let Ok(raw) = std::fs::read_to_string(&raw_path) else {
+            eprintln!("[ossein] raw slice not present ({raw_path}); skipping");
+            return;
+        };
+        // Gather the official segment(s): a single ossein_fights_segment.txt, or the
+        // numbered per-fight splits ossein_fights_segment_1.txt, _2.txt, …
+        let mut official_bodies: Vec<String> = Vec::new();
+        let single = format!("{base}/../.decode-samples/ossein_fights_segment.txt");
+        if let Ok(s) = std::fs::read_to_string(&single) {
+            // Drop the 2-line header (logVersion|gameVersion, totalEventCount).
+            official_bodies.push(s.lines().skip(2).collect::<Vec<_>>().join("\n"));
+        }
+        for n in 1..=20 {
+            let p = format!("{base}/../.decode-samples/ossein_fights_segment_{n}.txt");
+            if let Ok(s) = std::fs::read_to_string(&p) {
+                official_bodies.push(s.lines().skip(2).collect::<Vec<_>>().join("\n"));
+            }
+        }
+        if official_bodies.is_empty() {
+            eprintln!("[ossein] no official segment files present; skipping");
+            return;
+        }
+        let official_body = official_bodies.join("\n");
+
+        let lines: Vec<&str> = raw.lines().collect();
+        let ours = build_fights_segment(&lines).expect("our segment builds");
+        let our_body: String = ours.lines().skip(2).collect::<Vec<_>>().join("\n");
+
+        fn code_counts(body: &str) -> std::collections::BTreeMap<String, i64> {
+            let mut m = std::collections::BTreeMap::new();
+            for l in body.lines() {
+                if let Some(c) = l.split('|').nth(1) {
+                    *m.entry(c.to_string()).or_insert(0) += 1;
+                }
+            }
+            m
+        }
+        let oc = code_counts(&our_body);
+        let fc = code_counts(&official_body);
+        let mut codes: std::collections::BTreeSet<String> = oc.keys().cloned().collect();
+        codes.extend(fc.keys().cloned());
+        eprintln!("[ossein] per-code (code: ours / official):");
+        for c in &codes {
+            let o = oc.get(c).copied().unwrap_or(0);
+            let f = fc.get(c).copied().unwrap_or(0);
+            let mark = if o == f { "" } else { "  <-- DIFF" };
+            eprintln!("[ossein]   {c:>4}: {o:>7} / {f:>7}{mark}");
+        }
+        // Print the first few official lines of each rare code so the byte forms can
+        // be triangulated against the Maarselok capture.
+        for code in ["9", "14", "19", "22", "27", "28", "38"] {
+            let off_samples: Vec<&str> = official_body
+                .lines()
+                .filter(|l| l.split('|').nth(1) == Some(code))
+                .take(4)
+                .collect();
+            if !off_samples.is_empty() {
+                eprintln!("[ossein] official code-{code} samples:");
+                for s in off_samples {
+                    eprintln!("[ossein]     {s}");
+                }
+            }
+        }
+    }
 }
