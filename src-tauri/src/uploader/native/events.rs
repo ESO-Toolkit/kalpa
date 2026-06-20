@@ -984,6 +984,7 @@ impl EventEmitter {
     /// * `{f7}` = the damage source's per-fight session/instance index (0 if none).
     /// * `{f8}` = the damage source's own-side mask.
     /// * `{hit}` = the absorbed hit value (raw, not accumulated).
+    ///
     /// A zero hit absorbs nothing → no line.
     fn buffer_damage_shielded(
         &mut self,
