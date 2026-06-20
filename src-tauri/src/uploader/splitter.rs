@@ -381,6 +381,22 @@ pub fn split_selected(
     if selections.is_empty() {
         return Err("No sessions were selected to split.".into());
     }
+    // Bound the work: a real log has at most a few dozen sessions. A list far
+    // larger than that is a bug or abuse — refuse rather than copy unbounded
+    // multi-GB ranges into app data.
+    const MAX_SELECTIONS: usize = 256;
+    if selections.len() > MAX_SELECTIONS {
+        return Err("Too many sessions selected.".into());
+    }
+    // De-duplicate by session index (first occurrence wins) so a repeated index
+    // can't write the same multi-GB range twice.
+    let selections: Vec<SplitSelection> = {
+        let mut seen = std::collections::HashSet::new();
+        selections
+            .into_iter()
+            .filter(|s| seen.insert(s.index))
+            .collect()
+    };
     let out = PathBuf::from(out_dir);
     std::fs::create_dir_all(&out).map_err(|e| format!("Create output dir: {e}"))?;
 
@@ -473,10 +489,19 @@ mod tests {
     fn sanitize_split_stem_blocks_traversal_and_separators() {
         // Traversal / separators collapse to a single inner '-' and trim to a
         // safe stem (never "..", a slash, or a leading dot).
-        assert_eq!(sanitize_split_stem("../../etc/passwd").as_deref(), Some("etc-passwd"));
+        assert_eq!(
+            sanitize_split_stem("../../etc/passwd").as_deref(),
+            Some("etc-passwd")
+        );
         assert_eq!(sanitize_split_stem("a/b\\c").as_deref(), Some("a-b-c"));
-        assert_eq!(sanitize_split_stem("  core prog  ").as_deref(), Some("core-prog"));
-        assert_eq!(sanitize_split_stem("lucent--hm__farm").as_deref(), Some("lucent-hm__farm"));
+        assert_eq!(
+            sanitize_split_stem("  core prog  ").as_deref(),
+            Some("core-prog")
+        );
+        assert_eq!(
+            sanitize_split_stem("lucent--hm__farm").as_deref(),
+            Some("lucent-hm__farm")
+        );
         // Reduces to empty → None (caller uses the stable auto name).
         assert_eq!(sanitize_split_stem("../"), None);
         assert_eq!(sanitize_split_stem("..."), None);
@@ -592,8 +617,14 @@ mod tests {
             out.to_str().unwrap(),
             Some(sessions),
             vec![
-                SplitSelection { index: 0, name: Some("raid".into()) },
-                SplitSelection { index: 1, name: Some("raid".into()) },
+                SplitSelection {
+                    index: 0,
+                    name: Some("raid".into()),
+                },
+                SplitSelection {
+                    index: 1,
+                    name: Some("raid".into()),
+                },
             ],
         )
         .unwrap();

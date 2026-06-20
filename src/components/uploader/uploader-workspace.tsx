@@ -1087,7 +1087,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           preflight's Split control. Rendered here so it shares the uploader's
           lifetime but layers above the main dialog. */}
       {selectedLog && (
+        // key on the selected log so switching logs REMOUNTS the workbench,
+        // resetting its per-session drafts (include/name) — otherwise a new log
+        // with the same session indices would inherit the previous log's choices.
         <SplitWorkbench
+          key={selectedLog}
           open={workbenchOpen}
           onOpenChange={setWorkbenchOpen}
           filePath={selectedLog}
@@ -1925,16 +1929,26 @@ function LogPicker({
                       <ClipboardCopy className="size-3.5" />
                     </Button>
                   </SimpleTooltip>
-                  <SimpleTooltip content="Delete log" side="top">
+                  <SimpleTooltip
+                    content={
+                      log.isActive ? "Can't delete — this log is still being written" : "Delete log"
+                    }
+                    side="top"
+                  >
                     <Button
                       variant="ghost"
                       size="icon-sm"
                       className="size-7 text-muted-foreground/70 hover:text-red-400"
+                      disabled={log.isActive}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onRequestDelete(log);
+                        if (!log.isActive) onRequestDelete(log);
                       }}
-                      aria-label={`Delete ${log.fileName}`}
+                      aria-label={
+                        log.isActive
+                          ? `${log.fileName} is active and can't be deleted`
+                          : `Delete ${log.fileName}`
+                      }
                     >
                       <Trash2 className="size-3.5" />
                     </Button>

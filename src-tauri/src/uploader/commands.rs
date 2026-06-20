@@ -228,17 +228,33 @@ fn prune_recycle_folder(root: &Path) {
     }
 }
 
-/// Move a file, falling back to copy+remove when a plain rename fails because
-/// source and destination are on different volumes (EXDEV) — the app-data
-/// recycle bin can sit on a different drive than the user's Logs folder.
+/// Move a file from `src` to `dst` (which the caller has reserved as a fresh,
+/// non-existing name). A plain rename is preferred; we fall back to copy+remove
+/// ONLY when the rename failed because the two paths are on different volumes
+/// (the app-data recycle bin can sit on a different drive than the user's Logs
+/// folder). Any other rename error is surfaced as-is rather than masked by a
+/// blind copy. If the post-copy source removal fails, the partial destination is
+/// cleaned up so a failed move never leaves a duplicate behind.
 fn move_file(src: &Path, dst: &Path) -> std::io::Result<()> {
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
-        Err(_) => {
+        // CrossesDevices is the portable EXDEV signal; some platforms report it
+        // as a raw error code, so also accept a generic Other as a cross-volume
+        // candidate. Permission/NotFound/etc. are NOT cross-volume — re-raise.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::CrossesDevices
+                || e.kind() == std::io::ErrorKind::Other =>
+        {
             std::fs::copy(src, dst)?;
-            std::fs::remove_file(src)?;
+            if let Err(rm) = std::fs::remove_file(src) {
+                // Couldn't remove the source after copying — don't leave a
+                // duplicate in the destination; roll back the copy.
+                let _ = std::fs::remove_file(dst);
+                return Err(rm);
+            }
             Ok(())
         }
+        Err(e) => Err(e),
     }
 }
 
@@ -474,6 +490,30 @@ pub async fn uploader_delete_log(
     file_path: String,
 ) -> Result<String, String> {
     let safe = confine_log_path(&allowed, &file_path)?;
+
+    // Refuse to delete a log that's still being written. Moving the live
+    // Encounter.log out from under ESO would corrupt or split the in-progress
+    // stream. A modification within the active window means it's hot — reject and
+    // tell the user to stop logging first. (Backend guard; the UI also disables
+    // delete for active rows, but this is the authoritative check.)
+    const DELETE_ACTIVE_WINDOW_MS: u64 = 90 * 1000;
+    if let Ok(meta) = std::fs::metadata(&safe) {
+        let modified_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let now = now_ms();
+        if modified_ms > 0 && modified_ms <= now && now - modified_ms < DELETE_ACTIVE_WINDOW_MS {
+            return Err(
+                "This log is still being written. Stop logging in-game (or wait a moment) \
+                 before deleting it."
+                    .into(),
+            );
+        }
+    }
+
     let recycle = recycle_root(&app)?;
     // Opportunistically prune expired entries whenever the bin is touched.
     prune_recycle_folder(&recycle);
