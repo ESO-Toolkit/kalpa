@@ -256,8 +256,10 @@ export function SplitWorkbench({
           </div>
         )}
 
-        {/* Session cards */}
-        <div className="-mr-2 mt-3 space-y-2 overflow-y-auto pr-2">
+        {/* Session cards. flex-1 + min-h-0 are load-bearing: without min-h-0 a
+            flex child won't shrink below its content, so overflow-y-auto never
+            engages and the footer scrolls off the capped-height dialog. */}
+        <div className="-mr-2 mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto pr-2">
           {sessions.length === 0 ? (
             <div className="rounded-lg border border-dashed border-white/[0.08] p-6 text-center text-sm text-muted-foreground">
               No logging sessions found in this file.
