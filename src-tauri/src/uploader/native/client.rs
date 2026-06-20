@@ -90,15 +90,25 @@ pub struct UploadProgress {
 #[derive(Debug, Clone)]
 pub struct Segment {
     pub bytes: Vec<u8>,
+    /// Wall-clock ms of the segment's FIRST event, and of its LAST event. The
+    /// `add-report-segment` request sends these as `startTime`/`endTime` so the
+    /// server can place the segment on the report timeline and bound fight
+    /// extraction. A zero-width window (both 0) yields a report with NO fights
+    /// ("Fetching Fights: None") even though the segment is otherwise valid.
+    pub start_time: u64,
+    pub end_time: u64,
 }
 
 impl Segment {
     /// Build a segment from its rendered fights-segment **text** by ZIP-wrapping
     /// it into the `logfile` envelope (single `log.txt` entry, DEFLATE-9). This is
     /// the bridge from [`super::serialize`]'s rendered string to the wire bytes.
-    pub fn from_text(text: &str) -> Result<Self, String> {
+    /// `start_time`/`end_time` are the segment's first/last event wall-clock ms.
+    pub fn from_text(text: &str, start_time: u64, end_time: u64) -> Result<Self, String> {
         Ok(Self {
             bytes: super::zip_segment::zip_log_txt(text)?,
+            start_time,
+            end_time,
         })
     }
 }
@@ -299,6 +309,8 @@ impl<'a> NativeUpload<'a> {
             RequestKind::AddSegment {
                 segment_id,
                 bytes: &seg.bytes,
+                start_time: seg.start_time,
+                end_time: seg.end_time,
             },
         )?;
         // Response is JSON `{ "nextSegmentId": <n> }`. A malformed body is a hard
@@ -391,9 +403,17 @@ impl<'a> NativeUpload<'a> {
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(self.create_report_body()),
             RequestKind::Terminate => req, // no body
-            RequestKind::AddSegment { segment_id, bytes } => {
+            RequestKind::AddSegment {
+                segment_id,
+                bytes,
+                start_time,
+                end_time,
+            } => {
                 let form = reqwest::blocking::multipart::Form::new()
-                    .text("parameters", segment_parameters_json(*segment_id))
+                    .text(
+                        "parameters",
+                        segment_parameters_json(*segment_id, *start_time, *end_time),
+                    )
                     .part("logfile", segment_logfile_part(bytes)?);
                 req.multipart(form)
             }
@@ -478,17 +498,27 @@ enum SendResult {
 /// already-serialized, ZIP-compressed segment/master bytes.
 enum RequestKind<'a> {
     CreateReport,
-    AddSegment { segment_id: u64, bytes: &'a [u8] },
-    MasterTable { segment_id: u64, bytes: &'a [u8] },
+    AddSegment {
+        segment_id: u64,
+        bytes: &'a [u8],
+        start_time: u64,
+        end_time: u64,
+    },
+    MasterTable {
+        segment_id: u64,
+        bytes: &'a [u8],
+    },
     Terminate,
 }
 
 /// The `parameters` JSON for `add-report-segment` (a manual, finished upload:
-/// not live, not real-time, no in-progress events). `startTime`/`endTime` are 0
-/// here — the server derives the real range from the segment contents.
-fn segment_parameters_json(segment_id: u64) -> String {
+/// not live, not real-time, no in-progress events). `startTime`/`endTime` are the
+/// segment's first/last event **wall-clock ms** — the server uses them to place
+/// the segment on the report timeline; sending 0/0 yields a zero-width segment and
+/// a report with no extractable fights ("Fetching Fights: None").
+fn segment_parameters_json(segment_id: u64, start_time: u64, end_time: u64) -> String {
     format!(
-        "{{\"startTime\":0,\"endTime\":0,\"mythic\":0,\"isLiveLog\":false,\
+        "{{\"startTime\":{start_time},\"endTime\":{end_time},\"mythic\":0,\"isLiveLog\":false,\
          \"isRealTime\":false,\"inProgressEventCount\":0,\"segmentId\":{segment_id}}}"
     )
 }
@@ -587,6 +617,8 @@ mod tests {
         let up = NativeUpload::new(&sess, &opts, cancel);
         let segs = vec![Segment {
             bytes: vec![1, 2, 3],
+            start_time: 0,
+            end_time: 0,
         }];
         let masters = vec![MasterTableBytes { bytes: vec![] }];
         let err = up
@@ -604,7 +636,18 @@ mod tests {
         };
         let opts = UploadOptions::default();
         let up = NativeUpload::new(&sess, &opts, Arc::new(AtomicBool::new(false)));
-        let segs = vec![Segment { bytes: vec![1] }, Segment { bytes: vec![2] }];
+        let segs = vec![
+            Segment {
+                bytes: vec![1],
+                start_time: 0,
+                end_time: 0,
+            },
+            Segment {
+                bytes: vec![2],
+                start_time: 0,
+                end_time: 0,
+            },
+        ];
         let masters = vec![MasterTableBytes { bytes: vec![] }]; // only 1
         let err = up
             .upload_finished(&segs, &masters, &no_progress)

@@ -1261,9 +1261,43 @@ pub fn build_native_payload(
     let Some(master_text) = build_master_table_with_tuples(lines, emitter.tuples()) else {
         return Ok(None);
     };
-    let segment = Segment::from_text(&segment_text)?;
+    // The segment's wall-clock time bounds — the `add-report-segment` request sends
+    // these so the server can place the segment on the timeline and extract fights.
+    let (start_time, end_time) = segment_time_bounds(lines);
+    let segment = Segment::from_text(&segment_text, start_time, end_time)?;
     let master = MasterTableBytes::from_text(&master_text)?;
     Ok(Some((segment, master)))
+}
+
+/// The segment's `(startTime, endTime)` in **absolute wall-clock ms** — the values
+/// the `add-report-segment` request needs. `startTime` is the `BEGIN_LOG` wall-clock
+/// (its field-2 ms) plus its own relative timestamp (field 0); `endTime` is that
+/// same wall anchor plus the LAST event's relative timestamp. Mirrors the reference
+/// uploader: `first = beginLogWall + beginLogRelTs`, `last = first + lastEventRelTs`.
+/// Without these the server receives a zero-width segment and finds no fights.
+fn segment_time_bounds(lines: &[&str]) -> (u64, u64) {
+    let mut begin_wall: u64 = 0;
+    let mut begin_rel: u64 = 0;
+    let mut found_begin = false;
+    let mut last_rel: u64 = 0;
+    for line in lines {
+        let f = split_csv_quoted_pub(line);
+        let kind = f.get(1).map(|s| s.trim()).unwrap_or("");
+        let rel: u64 = f.first().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        if kind == "BEGIN_LOG" && !found_begin {
+            begin_wall = f.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            begin_rel = rel;
+            found_begin = true;
+        }
+        // Track the last line's relative ts (the segment ends at the last event).
+        last_rel = rel;
+    }
+    if !found_begin {
+        return (0, 0);
+    }
+    let start = begin_wall + begin_rel;
+    let end = begin_wall + last_rel;
+    (start, end)
 }
 
 /// Map a raw `powerType` to the segment's `(powerTypeIdx, powerMax)` pair for a
