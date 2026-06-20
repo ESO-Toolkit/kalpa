@@ -96,6 +96,12 @@ const DEFAULT_OPTIONS: UploadOptions = {
 
 const OPTIONS_KEY = "kalpa.uploader.options";
 
+/** A mid-tier "raised work panel" — sits clearly above the dark canvas but
+ *  quieter than the primary picker/action. Used for fights, options, history so
+ *  the elevation order reads: canvas < these < picker/action. */
+const WORK_PANEL =
+  "rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.045] to-white/[0.015] shadow-[0_8px_28px_-14px_rgba(0,0,0,0.65),inset_0_1px_0_rgba(255,255,255,0.05)]";
+
 /** Open a report URL in the user's browser, surfacing failures instead of
  *  swallowing them. The opener plugin rejects a URL outside the capability's
  *  allow-scope (now includes esologs.com/reports/*); a rejection should toast,
@@ -813,8 +819,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
             <div className="space-y-3.5">
               <WhatGetsUploaded />
 
-              {/* Mode tabs */}
-              <div className="grid grid-cols-2 gap-2">
+              {/* Mode tabs — a segmented control sitting in a recessed track, so
+                  the active tab reads as raised out of the well, not as two equal
+                  panels. */}
+              <div className="grid grid-cols-2 gap-1.5 rounded-2xl border border-black/40 bg-black/25 p-1.5 shadow-[inset_0_2px_8px_-2px_rgba(0,0,0,0.6)]">
                 <ModeTab
                   buttonRef={firstTabRef}
                   active={mode === "manual"}
@@ -880,7 +888,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
 
               {selectedLog &&
                 (mode === "live" ? null : (
-                  <GlassPanel variant="subtle" className="p-3">
+                  <div className={cn(WORK_PANEL, "p-3.5")}>
                     <SectionHeader className="mb-2">Fights</SectionHeader>
                     <FightList
                       fights={rowsFromSummaries(fights)}
@@ -888,12 +896,12 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                         scanning ? "Scanning the log…" : "No fights found in this log yet."
                       }
                     />
-                  </GlassPanel>
+                  </div>
                 ))}
 
               {/* Upload options */}
               {selectedLog && (
-                <GlassPanel variant="subtle" className="p-4">
+                <div className={cn(WORK_PANEL, "p-4")}>
                   <UploadOptionsControl
                     options={options}
                     onChange={setOptions}
@@ -909,7 +917,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                       disabled={liveSessionId !== null}
                     />
                   )}
-                </GlassPanel>
+                </div>
               )}
 
               {/* Direct upload (recommended) — opt-in + in-app sign-in. Placed just
@@ -1389,36 +1397,31 @@ function ModeTab({
       aria-pressed={active}
       aria-label={`${title} mode — ${hint}`}
       className={cn(
-        "group relative overflow-hidden rounded-xl border p-3.5 text-left transition-all duration-200",
-        "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
+        "group relative overflow-hidden rounded-xl p-3 text-left transition-all duration-200",
+        "focus-visible:ring-2 focus-visible:ring-sky-400/40 focus-visible:outline-none",
         active
-          ? "border-sky-400/40 bg-gradient-to-br from-sky-400/[0.1] to-sky-400/[0.02] shadow-[inset_0_1px_0_rgba(56,189,248,0.12)]"
-          : "border-white/[0.06] bg-white/[0.02] hover:-translate-y-px hover:border-white/[0.14] hover:bg-white/[0.03]"
+          ? // RAISED out of the track: a lit sky surface with an outer shadow +
+            // top highlight so the active mode physically reads as selected.
+            "bg-gradient-to-b from-sky-400/[0.16] to-sky-400/[0.06] shadow-[0_4px_14px_-4px_rgba(56,189,248,0.4),inset_0_1px_0_rgba(255,255,255,0.12)]"
+          : // FLAT in the well: no fill, no border — just sits in the recess.
+            "text-muted-foreground hover:bg-white/[0.04]"
       )}
     >
-      {/* Active accent rail along the top edge — a quiet "you are here" marker. */}
-      {active && (
-        <span className="absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-sky-400/0 via-sky-400/80 to-sky-400/0" />
-      )}
       <div
         className={cn(
           "flex items-center gap-2 text-sm font-semibold",
-          active ? "text-sky-300" : "text-foreground/80"
+          active ? "text-sky-200" : "text-foreground/70"
         )}
       >
-        <span
-          className={cn(
-            "flex size-7 shrink-0 items-center justify-center rounded-lg transition-colors duration-200",
-            active
-              ? "bg-sky-400/15 text-sky-300"
-              : "bg-white/[0.04] text-muted-foreground group-hover:text-foreground/70"
-          )}
-        >
-          <Icon className="size-4" aria-hidden />
-        </span>
+        <Icon
+          className={cn("size-4 shrink-0", active ? "text-sky-300" : "text-muted-foreground")}
+          aria-hidden
+        />
         {title}
       </div>
-      <div className="mt-1 text-xs text-muted-foreground">{hint}</div>
+      <div className={cn("mt-1 text-xs", active ? "text-sky-100/60" : "text-muted-foreground/70")}>
+        {hint}
+      </div>
     </button>
   );
 }
@@ -1888,9 +1891,14 @@ function ManualActions({
         : "Open in ESO Logs Uploader";
 
   return (
-    // Elevated to a primary panel so the climactic step carries the same weight
-    // as the Live dashboard (was a bare flex row that lost the hierarchy).
-    <GlassPanel variant="primary" className="flex flex-col items-center gap-3 p-4">
+    // The climax — the MOST raised surface, and the only WARM (gold) one, so it
+    // reads as the destination of the whole flow against the cool-blue inputs
+    // above it. Strong outer shadow + gold top highlight lift it off the canvas.
+    <div className="relative flex flex-col items-center gap-3 overflow-hidden rounded-2xl border border-[#c4a44a]/25 bg-gradient-to-b from-[#c4a44a]/[0.1] to-[#c4a44a]/[0.02] p-5 shadow-[0_16px_44px_-16px_rgba(0,0,0,0.75),0_0_40px_-20px_rgba(196,164,74,0.4),inset_0_1px_0_rgba(255,255,255,0.08)]">
+      <span
+        className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-[#c4a44a]/0 via-[#c4a44a]/60 to-[#c4a44a]/0"
+        aria-hidden
+      />
       <Button onClick={onUpload} disabled={!canUpload} size="lg" className="w-full sm:w-auto">
         <CloudUpload className="size-4" />
         {label}
@@ -1903,7 +1911,7 @@ function ManualActions({
             ? "Uploads run through the official ESO Logs Uploader installed on your PC."
             : "We'll open the ESO Logs Uploader (or its download page) with your prepared log."}
       </p>
-    </GlassPanel>
+    </div>
   );
 }
 
@@ -2095,7 +2103,7 @@ function HistoryPanel({
   };
 
   return (
-    <GlassPanel variant="subtle" className="p-3">
+    <div className={cn(WORK_PANEL, "p-3.5")}>
       <div className="mb-2 flex items-center justify-between">
         <SectionHeader>Recent Uploads</SectionHeader>
         <Button
@@ -2192,7 +2200,7 @@ function HistoryPanel({
           </li>
         ))}
       </ul>
-    </GlassPanel>
+    </div>
   );
 }
 
