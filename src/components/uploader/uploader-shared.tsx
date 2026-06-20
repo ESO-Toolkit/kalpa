@@ -16,7 +16,6 @@ import {
   Zap,
 } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
-import { GlassPanel } from "@/components/ui/glass-panel";
 import { cn } from "@/lib/utils";
 import type { UploaderStatus } from "@/types/uploader";
 
@@ -133,16 +132,18 @@ export function relativeFromMs(ms: number): string {
 export function WhatGetsUploaded() {
   const [open, setOpen] = useState(false);
   return (
-    <GlassPanel variant="subtle" className="overflow-hidden">
+    // Read-once trust note — it RECEDES into the canvas (no panel, no border) so
+    // it doesn't compete with the real work surfaces. Expands to the detail.
+    <div className="overflow-hidden rounded-lg">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-3 p-3 text-left"
+        className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1.5 text-left transition-colors hover:bg-white/[0.03]"
         aria-expanded={open}
       >
-        <span className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Lock className="size-3.5 text-emerald-400/80" aria-hidden />
-          This report is built from your <code className="text-foreground/80">
+        <span className="flex items-center gap-2 text-xs text-muted-foreground/80">
+          <Lock className="size-3.5 text-emerald-400/70" aria-hidden />
+          This report is built from your <code className="text-foreground/70">
             Encounter.log
           </code>{" "}
           and is owned by your ESO Logs account.
@@ -156,7 +157,7 @@ export function WhatGetsUploaded() {
         />
       </button>
       {open && (
-        <div className="animate-[fade-in_0.2s_ease-out] space-y-2 border-t border-white/[0.06] p-3 text-xs text-muted-foreground">
+        <div className="mt-1 animate-[fade-in_0.2s_ease-out] space-y-2 rounded-lg bg-black/20 p-3 text-xs text-muted-foreground">
           <div className="flex items-start gap-2">
             <Swords className="mt-0.5 size-3.5 shrink-0 text-sky-400/80" aria-hidden />
             <span>
@@ -188,6 +189,6 @@ export function WhatGetsUploaded() {
           </div>
         </div>
       )}
-    </GlassPanel>
+    </div>
   );
 }

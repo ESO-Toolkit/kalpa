@@ -804,164 +804,171 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         {!isLoggedIn ? (
           <LoggedOut onAuthChange={onAuthChange} />
         ) : (
-          // -mr-2 pr-2 keeps the scrollbar off the content's right edge; pt-4
-          // restores the gap the header used to provide via the grid.
-          <div className="-mr-2 space-y-4 overflow-y-auto pr-2 pt-4">
-            <WhatGetsUploaded />
+          // The body is a DARKER inset canvas than the dialog chrome, so the
+          // raised content surfaces below it actually read as raised (you can't
+          // elevate from a surface the same color as everything else). The
+          // negative margins bleed it to the dialog edges; a top inset shadow
+          // sells the "sunken work surface" depth.
+          <div className="-mx-5 -mb-5 flex-1 overflow-y-auto bg-[#080b14] px-5 pt-4 pb-5 shadow-[inset_0_8px_16px_-8px_rgba(0,0,0,0.6)]">
+            <div className="space-y-3.5">
+              <WhatGetsUploaded />
 
-            {/* Mode tabs */}
-            <div className="grid grid-cols-2 gap-2">
-              <ModeTab
-                buttonRef={firstTabRef}
-                active={mode === "manual"}
-                onClick={() => {
-                  // Leaving Live unmounts its only Stop control, so stop the
-                  // session first rather than orphaning the watcher. Check the
-                  // REF (not `liveSessionId` state): a session that is still
-                  // starting has its id in the ref before state lands, and
-                  // handleStopLive now keys off the ref too, so this also cancels
-                  // an in-flight start.
-                  if (liveSessionIdRef.current) void handleStopLive();
-                  setMode("manual");
-                }}
-                Icon={Upload}
-                title="Upload a Log"
-                hint="Send a finished log after your session."
-              />
-              <ModeTab
-                active={mode === "live"}
-                onClick={() => setMode("live")}
-                Icon={Radio}
-                title="Live Log"
-                hint="Stream fights during an ongoing raid."
-              />
-            </div>
-
-            {/* Log picker */}
-            <LogPicker
-              detection={detection}
-              logsDir={logsDir}
-              logs={logs}
-              listError={listError}
-              selectedLog={selectedLog}
-              scanning={scanning}
-              dragOver={dragOver}
-              importing={importing}
-              onSelect={handleSelectLog}
-              onRefresh={() => logsDir && loadLogs(logsDir)}
-              onPickFolder={handlePickFolder}
-              onOpenFolder={handleOpenLogsFolder}
-            />
-
-            {/* Selected-log summary: the confident "here's what you're uploading"
-                moment before the action. */}
-            {selectedLog && preflight && !scanning && (
-              <LogSummaryCard
-                fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
-                preflight={preflight}
-                fights={fights}
-                willUseNative={willUseNative}
-              />
-            )}
-
-            {/* Preflight + fights */}
-            {selectedLog && (
-              <Preflight
-                preflight={preflight}
-                scanning={scanning}
-                scanningSizeBytes={logs.find((l) => l.path === selectedLog)?.sizeBytes ?? null}
-                onSplit={handleSplit}
-              />
-            )}
-
-            {selectedLog &&
-              (mode === "live" ? null : (
-                <GlassPanel variant="subtle" className="p-3">
-                  <SectionHeader className="mb-2">Fights</SectionHeader>
-                  <FightList
-                    fights={rowsFromSummaries(fights)}
-                    emptyHint={scanning ? "Scanning the log…" : "No fights found in this log yet."}
-                  />
-                </GlassPanel>
-              ))}
-
-            {/* Upload options */}
-            {selectedLog && (
-              <GlassPanel variant="subtle" className="p-4">
-                <UploadOptionsControl
-                  options={options}
-                  onChange={setOptions}
-                  disabled={uploading || liveSessionId !== null}
-                  willUseNative={willUseNative}
-                  fights={fights}
-                  whenMs={logs.find((l) => l.path === selectedLog)?.modifiedAtMs ?? null}
+              {/* Mode tabs */}
+              <div className="grid grid-cols-2 gap-2">
+                <ModeTab
+                  buttonRef={firstTabRef}
+                  active={mode === "manual"}
+                  onClick={() => {
+                    // Leaving Live unmounts its only Stop control, so stop the
+                    // session first rather than orphaning the watcher. Check the
+                    // REF (not `liveSessionId` state): a session that is still
+                    // starting has its id in the ref before state lands, and
+                    // handleStopLive now keys off the ref too, so this also cancels
+                    // an in-flight start.
+                    if (liveSessionIdRef.current) void handleStopLive();
+                    setMode("manual");
+                  }}
+                  Icon={Upload}
+                  title="Upload a Log"
+                  hint="Send a finished log after your session."
                 />
-                {mode === "live" && (
-                  <LiveToggles
+                <ModeTab
+                  active={mode === "live"}
+                  onClick={() => setMode("live")}
+                  Icon={Radio}
+                  title="Live Log"
+                  hint="Stream fights during an ongoing raid."
+                />
+              </div>
+
+              {/* Log picker */}
+              <LogPicker
+                detection={detection}
+                logsDir={logsDir}
+                logs={logs}
+                listError={listError}
+                selectedLog={selectedLog}
+                scanning={scanning}
+                dragOver={dragOver}
+                importing={importing}
+                onSelect={handleSelectLog}
+                onRefresh={() => logsDir && loadLogs(logsDir)}
+                onPickFolder={handlePickFolder}
+                onOpenFolder={handleOpenLogsFolder}
+              />
+
+              {/* Selected-log summary: the confident "here's what you're uploading"
+                moment before the action. */}
+              {selectedLog && preflight && !scanning && (
+                <LogSummaryCard
+                  fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
+                  preflight={preflight}
+                  fights={fights}
+                  willUseNative={willUseNative}
+                />
+              )}
+
+              {/* Preflight + fights */}
+              {selectedLog && (
+                <Preflight
+                  preflight={preflight}
+                  scanning={scanning}
+                  scanningSizeBytes={logs.find((l) => l.path === selectedLog)?.sizeBytes ?? null}
+                  onSplit={handleSplit}
+                />
+              )}
+
+              {selectedLog &&
+                (mode === "live" ? null : (
+                  <GlassPanel variant="subtle" className="p-3">
+                    <SectionHeader className="mb-2">Fights</SectionHeader>
+                    <FightList
+                      fights={rowsFromSummaries(fights)}
+                      emptyHint={
+                        scanning ? "Scanning the log…" : "No fights found in this log yet."
+                      }
+                    />
+                  </GlassPanel>
+                ))}
+
+              {/* Upload options */}
+              {selectedLog && (
+                <GlassPanel variant="subtle" className="p-4">
+                  <UploadOptionsControl
                     options={options}
                     onChange={setOptions}
-                    disabled={liveSessionId !== null}
+                    disabled={uploading || liveSessionId !== null}
+                    willUseNative={willUseNative}
+                    fights={fights}
+                    whenMs={logs.find((l) => l.path === selectedLog)?.modifiedAtMs ?? null}
                   />
-                )}
-              </GlassPanel>
-            )}
+                  {mode === "live" && (
+                    <LiveToggles
+                      options={options}
+                      onChange={setOptions}
+                      disabled={liveSessionId !== null}
+                    />
+                  )}
+                </GlassPanel>
+              )}
 
-            {/* Direct upload (recommended) — opt-in + in-app sign-in. Placed just
+              {/* Direct upload (recommended) — opt-in + in-app sign-in. Placed just
                 before the action so the user sets up the faster path right where
                 it pays off. Gated on the same `nativeUploadOptIn` setting the
                 upload reads fresh per dispatch. Hidden during an active live
                 session so the live dashboard stays the focus (the opt-in can't
                 meaningfully change mid-session anyway). */}
-            {liveSessionId === null && (
-              <DirectUploadSection
-                optIn={nativeOptIn}
-                hasSession={hasNativeSession}
-                onChanged={refreshNativeState}
-              />
-            )}
+              {liveSessionId === null && (
+                <DirectUploadSection
+                  optIn={nativeOptIn}
+                  hasSession={hasNativeSession}
+                  onChanged={refreshNativeState}
+                />
+              )}
 
-            {/* Action area. Keyed on `mode` so switching cross-fades the panel
+              {/* Action area. Keyed on `mode` so switching cross-fades the panel
                 (content opacity only — never the glass blur). The mode-switch
                 handler already stops a live session before setMode, so this
                 remount never bypasses the watcher teardown. */}
-            <div key={mode} className="animate-[fade-in_0.2s_ease-out]">
-              {mode === "manual" ? (
-                <ManualActions
-                  canUpload={
-                    !!selectedLog &&
-                    !uploading &&
-                    !scanning &&
-                    preflight !== null &&
-                    liveSessionId === null
-                  }
-                  uploading={uploading}
-                  transport={transport}
-                  willUseNative={willUseNative}
-                  onUpload={handleManualUpload}
-                />
-              ) : (
-                <LiveDashboard
-                  running={liveSessionId !== null}
-                  starting={starting}
-                  canStart={!!selectedLog}
-                  startMs={liveStartMs}
-                  liveFights={liveFights}
-                  liveFightCount={liveFightCount}
-                  liveReport={liveReport}
-                  onStart={handleStartLive}
-                  onStop={handleStopLive}
-                  onCopyLink={copyLink}
-                />
-              )}
-            </div>
+              <div key={mode} className="animate-[fade-in_0.2s_ease-out]">
+                {mode === "manual" ? (
+                  <ManualActions
+                    canUpload={
+                      !!selectedLog &&
+                      !uploading &&
+                      !scanning &&
+                      preflight !== null &&
+                      liveSessionId === null
+                    }
+                    uploading={uploading}
+                    transport={transport}
+                    willUseNative={willUseNative}
+                    onUpload={handleManualUpload}
+                  />
+                ) : (
+                  <LiveDashboard
+                    running={liveSessionId !== null}
+                    starting={starting}
+                    canStart={!!selectedLog}
+                    startMs={liveStartMs}
+                    liveFights={liveFights}
+                    liveFightCount={liveFightCount}
+                    liveReport={liveReport}
+                    onStart={handleStartLive}
+                    onStop={handleStopLive}
+                    onCopyLink={copyLink}
+                  />
+                )}
+              </div>
 
-            {/* History */}
-            <HistoryPanel
-              history={history}
-              onCopyLink={copyLink}
-              onRefresh={refreshHistory}
-              onAttachReport={handleAttachReport}
-            />
+              {/* History */}
+              <HistoryPanel
+                history={history}
+                onCopyLink={copyLink}
+                onRefresh={refreshHistory}
+                onAttachReport={handleAttachReport}
+              />
+            </div>
           </div>
         )}
       </DialogContent>
@@ -1468,11 +1475,14 @@ function LogPicker({
   }, [logs, query, filter, sort]);
 
   return (
-    <GlassPanel
-      variant="subtle"
+    // The picker is the primary work surface, so it RISES off the dark canvas:
+    // a lighter fill, a luminous top edge (inset highlight), and a real outer
+    // shadow. This is the one place the eye should land first.
+    <div
       className={cn(
-        "relative p-3 transition-colors duration-150",
-        dragOver && "border-sky-400/50 bg-sky-400/[0.05]"
+        "relative rounded-2xl border border-white/[0.1] bg-gradient-to-b from-white/[0.07] to-white/[0.025] p-3.5 transition-colors duration-150",
+        "shadow-[0_12px_40px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.08)]",
+        dragOver && "border-sky-400/60 from-sky-400/[0.1] to-sky-400/[0.03]"
       )}
     >
       {/* Drag-over overlay: a clear drop target appears while a file is dragged
@@ -1624,7 +1634,7 @@ function LogPicker({
         </div>
       ) : (
         <ul
-          className="max-h-44 space-y-1 overflow-y-auto"
+          className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-black/40 bg-black/25 p-1.5 shadow-[inset_0_2px_8px_-2px_rgba(0,0,0,0.6)]"
           aria-label="Log files"
           // Lightweight roving navigation: Up/Down/Home/End move focus between
           // log rows so a long folder isn't N Tab presses. Tab still works as a
@@ -1660,16 +1670,24 @@ function LogPicker({
                   type="button"
                   onClick={() => onSelect(log.path)}
                   className={cn(
-                    "flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors duration-150",
+                    "flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-all duration-150",
                     "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
                     isSelected
-                      ? "border-sky-400/40 bg-sky-400/[0.06]"
-                      : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
+                      ? // Selected row pops OFF the recessed list: lit sky fill, a
+                        // left accent bar, and a glow so the current choice is loud.
+                        "border-sky-400/50 border-l-[3px] border-l-sky-400 bg-sky-400/[0.12] shadow-[0_2px_12px_-2px_rgba(56,189,248,0.35)]"
+                      : "border-transparent bg-white/[0.03] hover:bg-white/[0.06]"
                   )}
                   aria-pressed={isSelected}
                 >
                   <div className="flex min-w-0 items-center gap-2">
-                    <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                    <FileText
+                      className={cn(
+                        "size-4 shrink-0",
+                        isSelected ? "text-sky-300" : "text-muted-foreground"
+                      )}
+                      aria-hidden
+                    />
                     <div className="min-w-0">
                       <div className="truncate text-sm text-foreground/90">{log.fileName}</div>
                       <div className="text-xs text-muted-foreground">
@@ -1705,7 +1723,7 @@ function LogPicker({
           or drop a <code className="text-muted-foreground/80">.log</code> file here from anywhere
         </p>
       )}
-    </GlassPanel>
+    </div>
   );
 }
 
