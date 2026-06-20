@@ -869,6 +869,16 @@ impl EventEmitter {
             ability = "26770".to_string();
         }
 
+        // SOUL_GEM_RESURRECTION_ACCEPTED → a code-22 Resurrect line: the combat
+        // prefix (own-side masks, no `C` cast field) + S + T state blocks, no
+        // trailing tail. A resurrect can only ever target a player/companion, whose
+        // session instance is 0, so the subordinal is the bare tuple `A`.
+        if action_result == "SOUL_GEM_RESURRECTION_ACCEPTED" {
+            return self.emit_resurrect(
+                raw_ts, &ability, &src_unit, &src_state, &tgt_unit, &tgt_state,
+            );
+        }
+
         // DAMAGE_SHIELDED → a code-38 line (NOT code-1). It carries the SHIELD
         // ability (e.g. 146311) and references the SHIELD's tuple; its damaging
         // ability is unknown until the paired real DAMAGE/DOT event arrives, so the
@@ -994,6 +1004,40 @@ impl EventEmitter {
             return prepend(None);
         }
         prepend(Some(line))
+    }
+
+    /// Emit a code-22 `Resurrect` line for a `SOUL_GEM_RESURRECTION_ACCEPTED`
+    /// combat event. Format (verified on the capture):
+    /// `{ts}|22|{A}|{srcMask}|{tgtMask}|S{srcState}|T{tgtState}` — the combat prefix
+    /// with **own-side** masks and **no `C` cast field** (the reference uses
+    /// `cast_id_origin: 0`), and **no trailing crit/final tail** (`cast_information:
+    /// None`). The subordinal is the bare tuple `A` (a resurrect targets a
+    /// player/companion, whose session instance ordinal is 0). The tuple is keyed on
+    /// `(src, 26770, tgt)` — the rez ability the parser substitutes for ability 0.
+    fn emit_resurrect(
+        &mut self,
+        raw_ts: i64,
+        ability: &str,
+        src_unit: &str,
+        src_state: &[&str],
+        tgt_unit: &str,
+        tgt_state: &[&str],
+    ) -> Option<String> {
+        let a = self.alloc_for(src_unit, ability, tgt_unit);
+        let (src_mask, tgt_mask) = self.masks(src_unit, tgt_unit);
+        let mut line = format!(
+            "{ts}|22|{a}|{src_mask}|{tgt_mask}",
+            ts = self.seg_ts(raw_ts)
+        );
+        if src_mask != "32" {
+            let s_block = encode_state_block(src_state, &self.cp_of(src_unit))?;
+            line.push_str(&format!("|S{s_block}"));
+        }
+        if tgt_mask != "32" {
+            let t_block = encode_state_block(tgt_state, &self.cp_of(tgt_unit))?;
+            line.push_str(&format!("|T{t_block}"));
+        }
+        Some(line)
     }
 
     /// Buffer a code-38 DamageShielded line from a DAMAGE_SHIELDED combat event. The
@@ -1966,7 +2010,7 @@ mod combat_fixture {
 
         // Codes reproduced EXACTLY (count delta must be 0).
         for c in [
-            "2", "6", "8", "10", "11", "12", "15", "19", "26", "44", "52", "53",
+            "2", "6", "8", "10", "11", "12", "15", "19", "22", "26", "44", "52", "53",
         ] {
             assert_eq!(
                 get(&oc, c),
@@ -1994,7 +2038,6 @@ mod combat_fixture {
                           // Not-yet-modeled rare codes: bound at their full official count (we emit 0).
         bound("9", 30);
         bound("14", 10);
-        bound("22", 5);
         bound("27", 30);
         bound("28", 30);
         bound("38", 650);
