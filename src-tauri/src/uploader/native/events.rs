@@ -161,6 +161,16 @@ pub struct EventEmitter {
     /// the parser applies); every other combat event allocates its tuple regardless
     /// of whether its line is emitted.
     in_combat: bool,
+    /// `castTrackId → (sourceUnit, targetUnit)` recorded at every `BEGIN_CAST`. An
+    /// `END_CAST INTERRUPTED` looks up the interrupted cast's caster (source) here to
+    /// build the code-27 interrupt line (the reference's `cast_id_source_unit_id` /
+    /// `cast_id_target_unit_id`). The fall-back when a cast id is unknown is
+    /// [`Self::last_interrupt`].
+    cast_id_units: HashMap<String, (String, String)>,
+    /// The unit id of the most recent `INTERRUPT`-status COMBAT_EVENT target — the
+    /// reference's `last_interrupt`, used as the interrupted-cast caster when the
+    /// `END_CAST INTERRUPTED`'s cast id isn't in [`Self::cast_id_units`].
+    last_interrupt: Option<String>,
     /// Buffered code-38 (DamageShielded) lines awaiting their damaging-ability index
     /// (`f10`). A DAMAGE_SHIELDED carries the SHIELD ability (146311), not the
     /// damaging one; the damaging ability arrives on the paired real DAMAGE/DOT event
@@ -765,6 +775,12 @@ impl EventEmitter {
         // `buffs_hashmap[cast_id] = buff_index`), NOT a tuple index. (Storing the
         // tuple A here was the render bug: cast-refs pointed into the wrong table.)
         if !cast_track_id.is_empty() && cast_track_id != "0" {
+            // Record this cast's source/target so an END_CAST INTERRUPTED can resolve
+            // the interrupted cast's caster (the code-27 line's target).
+            self.cast_id_units.insert(
+                cast_track_id.to_string(),
+                (src_unit.clone(), tgt_unit.clone()),
+            );
             let cast_ability_index = self.ability_index(&ability);
             if cast_ability_index != 0 {
                 self.cast_track_to_a
@@ -813,6 +829,9 @@ impl EventEmitter {
     /// recorded timed cast emits; PLAYER_CANCELLED / INTERRUPTED do not.
     fn emit_end_cast(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
         let end_reason = f.get(2)?.trim();
+        if end_reason == "INTERRUPTED" {
+            return self.emit_interrupt(raw_ts, f);
+        }
         if end_reason != "COMPLETED" {
             return None;
         }
@@ -826,6 +845,62 @@ impl EventEmitter {
             .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
         Some(format!(
             "{ts}|16|{sub}|{src_mask}|{tgt_mask}",
+            ts = self.seg_ts(raw_ts),
+        ))
+    }
+
+    /// Emit a code-27 `Interrupted` line for an `END_CAST INTERRUPTED`. Raw layout:
+    /// `{ts},END_CAST,INTERRUPTED,{interruptedCastId},{interruptedAbility},{interruptingAbility},{interruptingUnit}`.
+    ///
+    /// The line is `{ts}|27|{sub}|{srcMask}|{tgtMask}|{interruptedAbilityIndex}`:
+    /// * source = the **interrupting** unit, target = the **interrupted** cast's
+    ///   caster (resolved via [`Self::cast_id_units`], falling back to
+    ///   [`Self::last_interrupt`]).
+    /// * the subordinal `A` is the tuple `(interruptingUnit, interruptedCaster,
+    ///   interruptingAbility)` — which must already exist (the reference only emits
+    ///   when its `effects_hashmap` has that key). If it doesn't, the interrupt is
+    ///   dropped (matches the official, which omits ~3 of the raw interrupts).
+    /// * the trailing field is the interrupted ability's 1-based master index.
+    ///
+    /// Dropped (returns `None`, no line) when the interrupting unit is 0, the
+    /// interrupting and interrupted abilities are identical (a cast can't interrupt
+    /// itself), the caster is unknown, or the interrupting tuple was never allocated.
+    fn emit_interrupt(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
+        let interrupted_cast_id = f.get(3)?.trim();
+        let interrupted_ability = f.get(4)?.trim();
+        let interrupting_ability = f.get(5)?.trim();
+        let interrupting_unit = f.get(6)?.trim();
+        if interrupting_unit == "0" || interrupting_unit.is_empty() {
+            return None;
+        }
+        if interrupting_ability == interrupted_ability {
+            return None; // an ability cannot interrupt itself
+        }
+        // The interrupted cast's caster is the line's target: look it up by the
+        // interrupted cast id, falling back to the last INTERRUPT-status target.
+        let caster = self
+            .cast_id_units
+            .get(interrupted_cast_id)
+            .map(|(src, _)| src.clone())
+            .or_else(|| self.last_interrupt.clone())?;
+        // The tuple must already exist for (interruptingUnit, caster,
+        // interruptingAbility) — the reference reuses the existing effect tuple.
+        let src_actor = self.actor_index(interrupting_unit);
+        let tgt_actor = self.actor_index(&caster);
+        let ability_idx = self.ability_index(interrupting_ability);
+        let &a = self
+            .tuple_to_index
+            .get(&(src_actor, tgt_actor, ability_idx))?;
+        // Own-side masks (the reference's allegiance_from_reaction per unit): the
+        // interrupter and caster are usually cross-faction (16|64) but can be same
+        // side (16|16 / 64|64), which the earlier/later ordering can't produce.
+        let (src_mask, tgt_mask) = self.masks(interrupting_unit, &caster);
+        let sub = self
+            .actors
+            .code1_subordinal(&a.to_string(), interrupting_unit, &caster);
+        let interrupted_idx = self.ability_index(interrupted_ability);
+        Some(format!(
+            "{ts}|27|{sub}|{src_mask}|{tgt_mask}|{interrupted_idx}",
             ts = self.seg_ts(raw_ts),
         ))
     }
@@ -906,6 +981,13 @@ impl EventEmitter {
         } else {
             Vec::new()
         };
+
+        // An INTERRUPT-status combat event records its target as the last interrupted
+        // unit (the reference's `last_interrupt`), the fall-back caster for a later
+        // END_CAST INTERRUPTED whose cast id we never saw. It still emits no line.
+        if action_result == "INTERRUPT" {
+            self.last_interrupt = Some(tgt_unit.clone());
+        }
 
         // Filter the LINE before allocating: a status/skip/unmodeled combat event
         // neither emits a line NOR registers a tuple here (empirically the official
@@ -1676,6 +1758,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn end_cast_interrupted_emits_code_27() {
+        // A player (unit 1) casts an interrupting ability (61665) at a monster (30)
+        // who is mid-cast (cast 5000, ability 88330). The interrupting cast registers
+        // its tuple via its BEGIN_CAST; the END_CAST INTERRUPTED then emits code-27.
+        let st = "18400/18400,9971/12868,8488/28700,198/500,0/1000,0,0.5,0.7,5.9";
+        let prelude = [
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Bear\",\"\",0,50,160,0,HOSTILE,F",
+            "1,BEGIN_COMBAT,",
+            // The monster begins the cast that will be interrupted (cast id 5000).
+            &format!("2,BEGIN_CAST,1000,F,5000,88330,30,{st},*"),
+            // The player begins the interrupting cast (ability 61665) targeting the
+            // monster — this registers the (player, monster, 61665) tuple.
+            &format!("3,BEGIN_CAST,0,F,5001,61665,1,{st},30,{st}"),
+        ];
+        // END_CAST INTERRUPTED of cast 5000: interruptedAbility 88330, interrupting
+        // ability 61665, interrupting unit 1.
+        let interrupted = "4,END_CAST,INTERRUPTED,5000,88330,61665,1";
+        let mut lines: Vec<&str> = prelude.to_vec();
+        lines.push(interrupted);
+        let mut e = EventEmitter::new();
+        let out = e.build(&lines);
+        let c27 = out
+            .events_string
+            .lines()
+            .find(|l| l.split('|').nth(1) == Some("27"));
+        let c27 = c27.expect("END_CAST INTERRUPTED must emit a code-27 line");
+        let f: Vec<&str> = c27.split('|').collect();
+        // {ts}|27|{sub}|{srcMask}|{tgtMask}|{interruptedAbilityIndex}
+        assert_eq!(f[1], "27");
+        // Player source is friendly (16), monster caster is hostile (64).
+        assert_eq!((f[3], f[4]), ("16", "64"), "own-side masks: 16|64 ({c27})");
+        // A self-interrupt (same interrupting + interrupted ability) is dropped.
+        let mut lines2: Vec<&str> = prelude.to_vec();
+        let self_int = "4,END_CAST,INTERRUPTED,5000,61665,61665,1";
+        lines2.push(self_int);
+        let mut e2 = EventEmitter::new();
+        let out2 = e2.build(&lines2);
+        assert!(
+            !out2
+                .events_string
+                .lines()
+                .any(|l| l.split('|').nth(1) == Some("27")),
+            "an ability interrupting itself must not emit a code-27 line"
+        );
+    }
+
     // The end-to-end seam: raw lines → ready-to-upload ZIP'd segment + master
     // table. The segment bytes must unzip back to the exact fights-segment text,
     // confirming the full assemble → frame → ZIP pipeline.
@@ -2022,8 +2153,11 @@ mod combat_fixture {
     /// * 5 (+260): passive/aura buff over-mint — underdetermined from one capture.
     /// * 1/2 split of `DAMAGE_SHIELDED`, 16's status-queued source, the 3/4 small
     ///   deltas — context-dependent, not byte-derivable from one capture.
-    /// * 9/14/22/27/28/38 (~870 events, 1.7%): rare codes with intricate formats,
-    ///   deliberately not yet modeled.
+    /// * 9/14/28 (~50 events): rare codes the reference does not model (no construct
+    ///   site) and that are underdetermined from one capture — deliberately dropped.
+    /// * 27 (interrupted): 15 of 19 emitted byte-correct; the 4 dropped need a tuple
+    ///   for an interrupting ability (e.g. Bash 21973) that is never otherwise
+    ///   registered — tied to the missing-tuple tail.
     /// Tighten these bounds (toward 0) as more rules are proven.
     #[test]
     fn per_code_counts_stay_within_known_bounds() {
@@ -2087,7 +2221,7 @@ mod combat_fixture {
                           // Not-yet-modeled rare codes: bound at their full official count (we emit 0).
         bound("9", 30);
         bound("14", 10);
-        bound("27", 30);
+        bound("27", 6); // 15/19 emitted byte-correct; 4 need an unregistered tuple
         bound("28", 30);
         bound("38", 650);
         bound("41", 2);
