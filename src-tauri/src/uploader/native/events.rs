@@ -1476,12 +1476,91 @@ pub fn build_native_payload(
     let Some(master_text) = build_master_table_with_tuples(lines, emitter.tuples()) else {
         return Ok(None);
     };
+    // Structural self-check BEFORE we ZIP and upload: a malformed segment (a short/
+    // non-numeric line, a wrong declared count, or an `A` that points past the tuple
+    // table) would be ACCEPTED by the server but never render — the exact "loads
+    // forever" failure. The encoder is proven on two captures, but this guards
+    // against an unseen log shape slipping a broken segment to a real user's account.
+    // On failure the caller falls back to the official uploader (never ships native).
+    validate_segment_text(&segment_text, emitter.allocated())?;
     // The segment's wall-clock time bounds — the `add-report-segment` request sends
     // these so the server can place the segment on the timeline and extract fights.
     let (start_time, end_time) = segment_time_bounds(lines);
     let segment = Segment::from_text(&segment_text, start_time, end_time)?;
     let master = MasterTableBytes::from_text(&master_text)?;
     Ok(Some((segment, master)))
+}
+
+/// Codes whose subordinal field LEADS with the tuple index `A` (so the leading
+/// `A.b.c` must reference a real master tuple). The pure markers (41/51/52/53/55)
+/// and the trial/zone lines carry literal ids or nothing in that slot, so they are
+/// not range-checked. Mirrors the `a_bearing` set the structural test asserts.
+const A_BEARING_CODES: &[&str] = &[
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "15", "16", "19", "22", "26",
+    "27", "28", "38", "44",
+];
+
+/// Validate that a built fights-segment is **structurally uploadable**: the server
+/// re-parses any well-formed segment but the renderer needs the events present and
+/// internally consistent, so a structurally-broken segment renders as an infinite
+/// load. This is the runtime gate the production upload path runs before sending —
+/// a cheap O(lines) pass that mirrors the invariants the test suite proves offline.
+///
+/// `max_a` is the number of allocated tuples (`EventEmitter::allocated()`); the
+/// master tuples section has exactly this many records, so every event's leading
+/// `A` must be in `1..=max_a` or it references a tuple that does not exist.
+///
+/// Returns `Err` (not a panic) so the caller can fall back to the official uploader
+/// rather than ship a segment that would not render.
+pub(crate) fn validate_segment_text(segment_text: &str, max_a: u32) -> Result<(), String> {
+    let mut lines = segment_text.lines();
+    // Line 1: `{logVersion}|{gameVersion}` (>=2 fields). Line 2: the event count.
+    let header = lines.next().ok_or("empty segment")?;
+    if header.split('|').count() < 2 {
+        return Err(format!("segment header malformed: {header:?}"));
+    }
+    let declared: u64 = lines
+        .next()
+        .ok_or("segment missing event-count line")?
+        .trim()
+        .parse()
+        .map_err(|_| "segment event-count line is not a number".to_string())?;
+
+    let mut body_count: u64 = 0;
+    for line in lines {
+        body_count += 1;
+        let mut f = line.split('|');
+        let ts = f.next().unwrap_or("");
+        let code = f
+            .next()
+            .ok_or_else(|| format!("line too short: {line:?}"))?;
+        if ts.parse::<u64>().is_err() {
+            return Err(format!("non-numeric timestamp: {line:?}"));
+        }
+        if A_BEARING_CODES.contains(&code) {
+            // The subordinal is `A.b.c`; only the leading `A` is the tuple index.
+            let sub = f
+                .next()
+                .ok_or_else(|| format!("missing subordinal: {line:?}"))?;
+            let a: u32 = sub
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .parse()
+                .map_err(|_| format!("non-numeric subordinal A: {line:?}"))?;
+            if a < 1 || a > max_a {
+                return Err(format!(
+                    "subordinal A={a} out of range 1..={max_a} (dangling tuple ref): {line:?}"
+                ));
+            }
+        }
+    }
+    if body_count != declared {
+        return Err(format!(
+            "declared event count {declared} != {body_count} emitted lines"
+        ));
+    }
+    Ok(())
 }
 
 /// The segment's `(startTime, endTime)` in **absolute wall-clock ms** — the values
@@ -1861,6 +1940,58 @@ mod tests {
                 .any(|l| l.split('|').nth(1) == Some("3")),
             "a real heal must still emit a code-3 line"
         );
+    }
+
+    #[test]
+    fn validate_segment_text_accepts_a_well_formed_segment() {
+        // header | count | two well-formed body lines (an A-bearing code-1 and a
+        // pure marker code-52). max_a = 2 → A=2 is in range.
+        let seg = "15|1\n2\n100|1|2|16|64|C5|S1|T1|1|50\n200|52|";
+        assert!(validate_segment_text(seg, 2).is_ok());
+    }
+
+    #[test]
+    fn validate_segment_text_rejects_a_dangling_tuple_ref() {
+        // A code-1 line with A=5 but only 2 tuples allocated → out-of-range ref, the
+        // exact "accepts but never renders" failure. Must be rejected so the caller
+        // falls back to the official uploader.
+        let seg = "15|1\n1\n100|1|5|16|64|C5|S1|T1|1|50";
+        let err = validate_segment_text(seg, 2).unwrap_err();
+        assert!(err.contains("out of range"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_segment_text_rejects_a_wrong_event_count() {
+        // Declared 3 but only 1 body line.
+        let seg = "15|1\n3\n100|52|";
+        let err = validate_segment_text(seg, 1).unwrap_err();
+        assert!(err.contains("event count"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_segment_text_rejects_a_non_numeric_timestamp() {
+        let seg = "15|1\n1\nXX|52|";
+        let err = validate_segment_text(seg, 1).unwrap_err();
+        assert!(err.contains("timestamp"), "got: {err}");
+    }
+
+    #[test]
+    fn full_combat_payload_passes_the_structural_self_check() {
+        // The real combat capture (when present) must pass the runtime self-check —
+        // proving the gate the production path runs never rejects a good segment.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../.decode-samples/combat_raw_encounter.log"
+        );
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return; // golden pair not present — nothing to check.
+        };
+        let lines: Vec<&str> = raw.lines().collect();
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+        let mut e = EventEmitter::with_master_indices(id2a, ab2i);
+        let seg = render_segment(&lines, &mut e).expect("segment builds");
+        validate_segment_text(&seg, e.allocated())
+            .expect("the real combat segment must pass the runtime self-check");
     }
 
     // The end-to-end seam: raw lines → ready-to-upload ZIP'd segment + master

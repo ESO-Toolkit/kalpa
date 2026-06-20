@@ -477,16 +477,17 @@ pub async fn uploader_upload_log(
     // while making the safe-routing decision real and observable.
     //
     // Driven by the Settings opt-in toggle (passed from the frontend). Absent →
-    // false. The coverage gate (`assess_native_routing`) still independently
-    // requires `FORMAT_VERSION_CONFIRMED` + fully-proven event coverage, so an
-    // opted-in user today still routes to the official uploader — only the logged
-    // routing reason changes (NotOptedIn → FormatUnconfirmed).
+    // false. With the format-version gate OPEN (native rendering confirmed
+    // 2026-06-19), an opted-in user whose log is all proven types routes native; an
+    // un-opted-in user, or a log with any unproven event type, falls back to the
+    // official uploader. The native path itself also self-checks the built segment
+    // and falls back if it is ever malformed (see `run_native_upload`).
     let native_opt_in = native_opt_in.unwrap_or(false);
     let routing = transport::assess_native_routing(&dispatch_path, native_opt_in);
     let use_native = matches!(routing, transport::NativeRouting::Native);
     if let transport::NativeRouting::Fallback(reason) = &routing {
         // Honest diagnostics: why native wasn't used. Logged only (not user-facing
-        // noise). Today the gate always lands here (FORMAT_VERSION_CONFIRMED=false).
+        // noise).
         eprintln!("[uploader] native routing → official: {}", reason.explain());
     }
 
