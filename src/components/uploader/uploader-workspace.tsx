@@ -486,6 +486,17 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       if (selectTokenRef.current !== token) return;
       setPreflight(pre);
       setFights(pre.fights);
+      // Keyboard continuity: a slow scan can blur the row (re-renders, the
+      // "Scanning" pill swap). Once this scan is still the current one, restore
+      // focus to the selected row so keyboard users aren't stranded. Deferred a
+      // tick so it runs after the post-setState re-render.
+      if (selectTokenRef.current === token) {
+        const sel = CSS.escape(path);
+        setTimeout(() => {
+          if (selectTokenRef.current !== token) return;
+          document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
+        }, 0);
+      }
     } catch (e) {
       if (selectTokenRef.current !== token) return;
       toast.error(`Couldn't read that log: ${getTauriErrorMessage(e)}`);
@@ -1764,7 +1775,7 @@ function LogPicker({
               type="button"
               onClick={() => setSort((s) => (s === "newest" ? "largest" : "newest"))}
               className="inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground/80 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none"
-              aria-label={`Sort by ${sort === "newest" ? "largest" : "newest"}`}
+              aria-label={`Sorted by ${sort === "newest" ? "newest" : "largest"} first — tap to sort by ${sort === "newest" ? "largest" : "newest"}`}
             >
               <ArrowDownUp className="size-3" aria-hidden />
               {sort === "newest" ? "Newest" : "Largest"}
@@ -1835,6 +1846,7 @@ function LogPicker({
               <li key={log.path} className="group/row relative">
                 <button
                   type="button"
+                  data-log-path={log.path}
                   onClick={() => onSelect(log.path)}
                   className={cn(
                     "flex w-full items-center justify-between gap-3 rounded-lg border py-2 pr-24 pl-3 text-left transition-all duration-150",
@@ -2114,7 +2126,13 @@ function ManualActions({
         className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-[#c4a44a]/0 via-[#c4a44a]/60 to-[#c4a44a]/0"
         aria-hidden
       />
-      <Button onClick={onUpload} disabled={!canUpload} size="lg" className="w-full sm:w-auto">
+      <Button
+        onClick={onUpload}
+        disabled={!canUpload}
+        size="lg"
+        className="w-full sm:w-auto"
+        aria-label="Upload your log to ESO Logs"
+      >
         <CloudUpload className="size-4" />
         {label}
       </Button>
@@ -2326,14 +2344,16 @@ function HistoryPanel({
     <div className={cn(WORK_PANEL, "p-3.5")}>
       <div className="mb-2 flex items-center justify-between">
         <SectionHeader>Recent Uploads</SectionHeader>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          onClick={() => void onRefresh()}
-          aria-label="Refresh history"
-        >
-          <RefreshCw className="size-3.5" />
-        </Button>
+        <SimpleTooltip content="Refresh history" side="bottom">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => void onRefresh()}
+            aria-label="Refresh history"
+          >
+            <RefreshCw className="size-3.5" />
+          </Button>
+        </SimpleTooltip>
       </div>
       <ul className="space-y-1.5">
         {history.slice(0, 8).map((r) => (
@@ -2439,8 +2459,8 @@ function HistoryPanel({
                     if (e.key === "Enter") void submitLink(r.id);
                     if (e.key === "Escape") setAttachingId(null);
                   }}
-                  placeholder="https://www.esologs.com/reports/…"
-                  aria-label="ESO Logs report link"
+                  placeholder="Report code or full esologs.com link"
+                  aria-label="ESO Logs report link or code"
                   autoFocus
                   className="h-8 text-xs"
                 />
