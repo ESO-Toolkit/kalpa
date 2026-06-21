@@ -4680,8 +4680,10 @@ pub struct CharacterInfo {
 }
 
 /// Result of `list_characters`: the roster plus how many SavedVariables files
-/// the scan had to skip (oversized/unreadable/unparseable), so the UI can warn
+/// the scan could not fully read (a directory/file I/O error, or a
+/// malformed/truncated file whose structure didn't balance), so the UI can warn
 /// that a character might be missing rather than silently showing a short list.
+/// There is no longer a file-size limit, so being large is never a skip reason.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CharacterRoster {
@@ -4836,9 +4838,10 @@ pub async fn list_characters(
             None => None,
         };
 
-        // Source 2: a bounded, roster-specific scan of SavedVariables .lua files.
-        // Recovers characters that have no AddOnSettings.txt block (the common
-        // account-wide case). `skipped` counts files the scan couldn't cover.
+        // Source 2: a streaming, bounded-memory scan of the SavedVariables .lua
+        // files (no size cap). Recovers characters that have no AddOnSettings.txt
+        // block (the common account-wide case). `skipped` counts files the scan
+        // couldn't fully read (I/O error or malformed structure).
         let (sv_chars, skipped) = collect_roster_characters(&addons_dir);
 
         Ok(CharacterRoster {
@@ -6929,14 +6932,18 @@ pub async fn import_sv_settings(
 }
 
 /// Walk the SavedVariables `.lua` files, parse each that parses successfully,
-/// and invoke `visit` with its tree. Centralizes the directory walk shared by
-/// the scrub identity scan and the Characters roster scan.
+/// and invoke `visit` with its tree. Used by the scrub/identity-export path
+/// (`collect_local_identities`), which needs the full parsed tree.
 ///
 /// When `max_file_bytes` is `Some`, files larger than the cap are skipped so a
 /// single pathological SavedVariables file cannot blow up memory. `None` means
 /// no cap (the scrub/export path needs every identity for correctness). Returns
 /// the number of `.lua` files skipped for ANY reason (size, unreadable, or
 /// parse failure) so a caller relying on completeness can react.
+///
+/// NOTE: the Characters roster no longer uses this — it streams the bytes via
+/// [`collect_roster_characters`] with no size cap. The `Some(max)` branch is
+/// retained for the size-cap unit test and any future tree-based caller.
 fn for_each_sv_tree(
     addons_dir: &Path,
     max_file_bytes: Option<u64>,
@@ -7032,28 +7039,43 @@ fn collect_local_identities(addons_dir: &Path) -> crate::saved_variables::scrub:
     merged
 }
 
-/// Per-file size cap for the roster scan. `list_characters` runs on panel open
-/// and the roster parses each file into a full in-memory tree, so the cap keeps
-/// a single giant SavedVariables file from spiking latency/memory there. The
-/// discriminator is sound: the only files holding per-character character-name
-/// keys (per-character addon settings) are small — comfortably under this — while
-/// the genuinely huge SV files are account-wide data blobs (trading/history/
-/// inventory databases) whose data lives under `$AccountWide`, with no
-/// per-character keys, so skipping them omits no characters. Skips are counted
-/// and logged (see `collect_roster_characters`) for diagnosis. A streaming
-/// key-extractor that removes the cap entirely is a possible future refinement.
-const ROSTER_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-
 /// Scan SavedVariables for the Characters roster, returning `(raw_key, world)`
-/// per character. Uses the stricter [`detect_roster_characters_from_tree`] (not
-/// the over-collecting scrub detector) so addon config sections are not surfaced
-/// as fake characters, and is size-bounded so opening the panel stays cheap.
+/// per character.
+///
+/// Uses the bounded-memory streaming extractor
+/// ([`crate::saved_variables::roster_stream`]), which walks each `.lua` file's
+/// raw bytes instead of parsing it into a full in-memory tree. This emits the
+/// SAME `(name, world)` set as the stricter `detect_roster_characters_from_tree`
+/// (verified by a parity test) — so addon config sections are never surfaced as
+/// fake characters — while imposing NO file-size cap, so a character whose only
+/// key lives in a huge SavedVariables file is no longer hidden.
 ///
 /// Runs synchronously; callers wrap it in `spawn_blocking`. Returns the
-/// `(raw_key, world)` characters plus the number of `.lua` files skipped (size/
-/// unreadable/parse) so the caller can warn that the roster may be incomplete.
+/// `(raw_key, world)` characters plus the number of `.lua` files the scan could
+/// not fully trust — a directory/file I/O error, or a malformed/truncated file
+/// whose structure didn't balance — so the caller can warn that the roster may
+/// be incomplete. (Unlike the old tree path, an oversized file is no longer a
+/// skip reason, and a malformed file still contributes whatever it could
+/// recover rather than being dropped wholesale.)
 fn collect_roster_characters(addons_dir: &Path) -> (Vec<(String, Option<String>)>, usize) {
-    use crate::saved_variables::scrub::detect_roster_characters_from_tree;
+    use crate::saved_variables::roster_stream::extract_roster_characters_streaming;
+
+    /// Aggregate cap on distinct character names merged across every `.lua` file,
+    /// bounding `list_characters` memory against a directory of pathological files
+    /// even though each individual scan is already capped. Wildly above any real
+    /// account roster.
+    const ROSTER_TOTAL_MAX: usize = 100_000;
+
+    let sv_dir = sv_io::saved_variables_dir(addons_dir);
+    let entries = match fs::read_dir(&sv_dir) {
+        Ok(e) => e,
+        // A missing SavedVariables folder is the expected "no characters yet"
+        // case (0 skipped). Any OTHER error (permissions, etc.) means we couldn't
+        // scan at all — report it as a skipped file so the UI still warns rather
+        // than silently showing an empty roster.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), 0),
+        Err(_) => return (Vec::new(), 1),
+    };
 
     // raw key -> the distinct megaservers it was seen under. A name with one or
     // more known worlds yields one entry per world (so an NA and an EU character
@@ -7062,21 +7084,75 @@ fn collect_roster_characters(addons_dir: &Path) -> (Vec<(String, Option<String>)
     let mut known_worlds: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
     let mut all_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut skipped = 0usize;
+    let mut aggregate_truncated = false;
 
-    let skipped = for_each_sv_tree(addons_dir, Some(ROSTER_MAX_FILE_BYTES), |tree| {
-        for ch in detect_roster_characters_from_tree(tree) {
-            all_names.insert(ch.name.clone());
-            if let Some(world) = ch.world {
-                known_worlds.entry(ch.name).or_default().insert(world);
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => {
+                // Couldn't enumerate this entry — count it so the roster warns.
+                skipped += 1;
+                continue;
+            }
+        };
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+            continue;
+        }
+        let file = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let scan = match extract_roster_characters_streaming(std::io::BufReader::new(file)) {
+            Ok(s) => s,
+            Err(_) => {
+                // Underlying read error mid-stream.
+                skipped += 1;
+                continue;
+            }
+        };
+        if scan.malformed {
+            // Best-effort: keep whatever characters were recovered, but flag the
+            // file so the UI still warns the roster may be incomplete.
+            skipped += 1;
+        }
+        for (name, world) in scan.characters {
+            // Aggregate bound: a real account has at most a few dozen characters,
+            // so this ceiling is never reached in practice, but it keeps the merged
+            // roster from growing without limit across many pathological files
+            // (each individually under the per-scan cap). New names beyond the cap
+            // are dropped and the roster is flagged incomplete; worlds for names we
+            // already kept still merge.
+            if all_names.contains(&name) {
+                if let Some(world) = world {
+                    known_worlds.entry(name).or_default().insert(world);
+                }
+            } else if all_names.len() < ROSTER_TOTAL_MAX {
+                all_names.insert(name.clone());
+                if let Some(world) = world {
+                    known_worlds.entry(name).or_default().insert(world);
+                }
+            } else {
+                aggregate_truncated = true;
             }
         }
-    });
+    }
+
+    if aggregate_truncated {
+        // Count the truncation once so the UI's "may be incomplete" warning fires.
+        skipped += 1;
+    }
+
     if skipped > 0 {
-        // This scan is the only character source in account-wide mode, so a
-        // skipped file can hide a character. Surface it in the logs too.
+        // This scan is the only character source in account-wide mode, so an
+        // unreadable/malformed file can hide a character. Surface it in the logs.
         eprintln!(
-            "[characters] roster scan skipped {skipped} oversized/unreadable/unparseable \
-             SavedVariables file(s); some characters may be missing from the list"
+            "[characters] roster scan could not fully read {skipped} SavedVariables \
+             file(s) (unreadable or malformed); some characters may be missing from the list"
         );
     }
 
