@@ -38,7 +38,10 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: npm audit
-        run: npm audit --audit-level=high
+        # --omit=dev mirrors the worker audit step: high-severity advisories in
+        # dev-only tooling (jsdom→undici, shadcn→hono/js-yaml) don't ship in the
+        # app, so audit production deps only.
+        run: npm audit --omit=dev --audit-level=high
 
       - name: TypeScript check
         run: npx tsc --noEmit
