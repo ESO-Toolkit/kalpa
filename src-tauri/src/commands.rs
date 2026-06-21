@@ -5210,33 +5210,57 @@ enum CharRestoreMode {
 /// that would splat minimal subtree files over live SavedVariables). Everything
 /// else (manual, auto-before-restore, legacy whole-file character backups) is
 /// restored by whole-file copy.
+///
+/// File-access ERRORS are never collapsed with absence: if the marker or the
+/// sidecar exists but can't be read, the directory is REFUSED rather than risk
+/// taking the whole-file path on what might be a per-character backup.
 fn classify_backup_for_restore(backup_path: &Path) -> CharRestoreMode {
-    let marker = fs::read(backup_path.join(CHAR_BACKUP_MARKER)).ok();
+    use std::io::ErrorKind::NotFound;
+
+    let refuse = |msg: &str| CharRestoreMode::Refuse(msg.to_string());
+
+    // Read the marker, distinguishing "absent" from "present but unreadable".
+    let marker = match fs::read(backup_path.join(CHAR_BACKUP_MARKER)) {
+        Ok(c) => Some(c),
+        Err(e) if e.kind() == NotFound => None,
+        Err(_) => {
+            return refuse(
+                "This character backup's marker is present but unreadable, so it \
+                 can't be restored safely.",
+            )
+        }
+    };
     let v2_marker = marker
         .as_deref()
         .is_some_and(|c| c.starts_with(CHAR_BACKUP_MARKER_V2_PREFIX));
+
     let meta_path = backup_path.join(CHAR_BACKUP_META);
-    let has_meta_file = meta_path.is_file();
+    let has_meta_file = meta_path.exists();
 
     if !v2_marker && !has_meta_file {
-        // No per-character signal at all → manual / auto / legacy whole-file.
+        // Confirmed absence of any per-character signal → manual / auto / legacy
+        // whole-file backup.
         return CharRestoreMode::WholeFile;
     }
 
-    match fs::read(&meta_path)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<CharBackupMeta>(&b).ok())
-    {
-        Some(m) if m.version == CHAR_BACKUP_VERSION => CharRestoreMode::Merge(m),
-        Some(m) => CharRestoreMode::Refuse(format!(
-            "This character backup uses an unsupported format (version {}). \
-             Update Kalpa to restore it.",
-            m.version
-        )),
-        None => CharRestoreMode::Refuse(
+    // Per-character candidate: require a readable, current-version sidecar to
+    // MERGE; anything else fails closed (never whole-file).
+    match fs::read(&meta_path) {
+        Ok(bytes) => match serde_json::from_slice::<CharBackupMeta>(&bytes) {
+            Ok(m) if m.version == CHAR_BACKUP_VERSION => CharRestoreMode::Merge(m),
+            Ok(m) => CharRestoreMode::Refuse(format!(
+                "This character backup uses an unsupported format (version {}). \
+                 Update Kalpa to restore it.",
+                m.version
+            )),
+            Err(_) => refuse(
+                "This character backup's metadata is corrupt, so it can't be \
+                 restored safely.",
+            ),
+        },
+        Err(_) => refuse(
             "This character backup's metadata is missing or unreadable, so it can't \
-             be restored safely."
-                .to_string(),
+             be restored safely.",
         ),
     }
 }
@@ -8192,6 +8216,26 @@ mod tests {
         assert!(matches!(
             classify_backup_for_restore(&d),
             CharRestoreMode::Refuse(_)
+        ));
+
+        // v2 marker + corrupt (non-JSON) metadata -> Refuse.
+        let d = root.join("v2-corrupt");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY).unwrap();
+        fs::write(d.join(CHAR_BACKUP_META), b"not json at all").unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Refuse(_)
+        ));
+
+        // A sidecar present without a v2 marker is still treated as a
+        // per-character candidate (fail-closed): valid sidecar -> Merge.
+        let d = root.join("meta-only");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_META), &good_meta).unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Merge(_)
         ));
 
         // Legacy whole-file character backup (old marker body, no sidecar) -> WholeFile.
