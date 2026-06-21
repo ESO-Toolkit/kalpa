@@ -336,13 +336,15 @@ pub(crate) fn normalize_addon_name(name: &str) -> String {
 /// parsing the full manifest.  Returns `None` if the file can't be read
 /// or doesn't contain an `AddOnVersion` line.
 ///
-/// Matching mirrors `manifest::parse_manifest` exactly (leading BOM stripped,
-/// `## ` directive prefix, `key: value` split) so the bundled-library version
-/// read here can never disagree with the top-level manifest parse — a mismatch
-/// there would manufacture a false "outdated" flag.
+/// Matching mirrors `manifest::parse_manifest` exactly (lossy UTF-8 decode,
+/// leading BOM stripped, `## ` directive prefix, `key: value` split) so the
+/// version read here can never disagree with the top-level manifest parse — a
+/// mismatch (e.g. one invalid byte making this stricter) would manufacture a
+/// false "outdated" flag or hide a real one.
 fn read_addon_version(manifest_path: &Path) -> Option<u32> {
-    let raw = fs::read_to_string(manifest_path).ok()?;
-    let content = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
+    let bytes = fs::read(manifest_path).ok()?;
+    let raw = String::from_utf8_lossy(&bytes);
+    let content: &str = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
     for line in content.lines() {
         let Some(line) = line.trim().strip_prefix("## ") else {
             continue;
@@ -7220,6 +7222,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         std::fs::write(&path, "\u{FEFF}## Title: A\r\n## AddOnVersion: 7221\r\n").unwrap();
+        assert_eq!(read_addon_version(&path), Some(7221));
+    }
+
+    #[test]
+    fn read_addon_version_tolerates_invalid_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        // An invalid UTF-8 byte elsewhere must not stop the version being read
+        // (parse_manifest decodes lossily, so this must too).
+        std::fs::write(&path, b"## Title: A\xFF\n## AddOnVersion: 7221\n").unwrap();
         assert_eq!(read_addon_version(&path), Some(7221));
     }
 
