@@ -35,6 +35,11 @@ pub struct AddonManifest {
     pub missing_dependencies: Vec<String>,
     #[serde(default)]
     pub outdated_dependencies: Vec<String>,
+    /// Optional dependencies that are not currently installed. Lets the UI show
+    /// a present/absent state for optional deps using the same subfolder-aware,
+    /// case-insensitive resolution as required deps (computed in `commands.rs`).
+    #[serde(default)]
+    pub missing_optional_dependencies: Vec<String>,
     pub esoui_id: Option<u32>,
     pub tags: Vec<String>,
     pub esoui_last_update: u64,
@@ -43,20 +48,43 @@ pub struct AddonManifest {
     pub modified_file_count: u32,
 }
 
+/// Strip zero-width / BOM characters that occasionally get glued onto manifest
+/// tokens (copy-paste artifacts, exotic editors). Left in place they would make
+/// a dependency name fail to match its on-disk folder and produce a false
+/// "missing" flag.
+fn strip_invisible(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
+        .collect()
+}
+
 fn parse_dependencies(value: &str) -> Vec<Dependency> {
-    value
+    // ESO writes `Name>=NNNN`, but tolerate stray whitespace around `>=`
+    // (e.g. `Name >= NNNN`) so the version pin is never silently dropped.
+    static GE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = GE_RE.get_or_init(|| Regex::new(r"\s*>=\s*").unwrap());
+    let normalized = re.replace_all(value, ">=");
+
+    normalized
         .split_whitespace()
-        .filter(|s| !s.is_empty())
-        .map(|dep| {
+        .filter_map(|dep| {
+            let dep = strip_invisible(dep);
+            let dep = dep.trim();
+            if dep.is_empty() {
+                return None;
+            }
             if let Some(pos) = dep.find(">=") {
-                let name = dep[..pos].to_string();
-                let min_version = dep[pos + 2..].parse::<u32>().ok();
-                Dependency { name, min_version }
+                let name = dep[..pos].trim().to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                let min_version = dep[pos + 2..].trim().parse::<u32>().ok();
+                Some(Dependency { name, min_version })
             } else {
-                Dependency {
+                Some(Dependency {
                     name: dep.to_string(),
                     min_version: None,
-                }
+                })
             }
         })
         .collect()
@@ -64,7 +92,10 @@ fn parse_dependencies(value: &str) -> Vec<Dependency> {
 
 pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonManifest> {
     let bytes = fs::read(manifest_path).ok()?;
-    let content = String::from_utf8_lossy(&bytes).into_owned();
+    let raw = String::from_utf8_lossy(&bytes);
+    // Strip a leading UTF-8 BOM so the first directive (often `## Title:` or
+    // `## AddOnVersion:`) isn't shadowed by an invisible byte-order mark.
+    let content: &str = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
 
     let mut title = String::new();
     let mut author = String::new();
@@ -169,6 +200,7 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
         optional_depends_on,
         missing_dependencies: Vec::new(),
         outdated_dependencies: Vec::new(),
+        missing_optional_dependencies: Vec::new(),
         esoui_id: None,
         tags: Vec::new(),
         esoui_last_update: 0,
@@ -245,6 +277,52 @@ mod tests {
         assert_eq!(m.depends_on[1].min_version, None);
         assert_eq!(m.optional_depends_on.len(), 1);
         assert_eq!(m.optional_depends_on[0].name, "LibAsync");
+    }
+
+    #[test]
+    fn parses_dependencies_with_spaces_around_operator() {
+        // Some manifests (or hand edits) put spaces around ">=" — the version
+        // pin must still be captured, not split into a bogus separate token.
+        let dir = tempfile::tempdir().unwrap();
+        let content = "\
+## Title: TestAddon
+## DependsOn: LuiData >= 7221 LuiMedia>= 7133 LibStub
+";
+        let path = write_manifest(dir.path(), "TestAddon", content);
+        let m = parse_manifest("TestAddon", &path).unwrap();
+
+        assert_eq!(m.depends_on.len(), 3);
+        assert_eq!(m.depends_on[0].name, "LuiData");
+        assert_eq!(m.depends_on[0].min_version, Some(7221));
+        assert_eq!(m.depends_on[1].name, "LuiMedia");
+        assert_eq!(m.depends_on[1].min_version, Some(7133));
+        assert_eq!(m.depends_on[2].name, "LibStub");
+        assert_eq!(m.depends_on[2].min_version, None);
+    }
+
+    #[test]
+    fn strips_zero_width_chars_from_dependency_names() {
+        let dir = tempfile::tempdir().unwrap();
+        // Zero-width space glued onto a dependency token.
+        let content = "## Title: T\n## DependsOn: LuiMedia\u{200B}>=7133\n";
+        let path = write_manifest(dir.path(), "T", content);
+        let m = parse_manifest("T", &path).unwrap();
+
+        assert_eq!(m.depends_on.len(), 1);
+        assert_eq!(m.depends_on[0].name, "LuiMedia");
+        assert_eq!(m.depends_on[0].min_version, Some(7133));
+    }
+
+    #[test]
+    fn parses_manifest_with_utf8_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        // Leading UTF-8 BOM before the first directive.
+        let content = "\u{FEFF}## Title: BomAddon\n## AddOnVersion: 7221\n";
+        let path = write_manifest(dir.path(), "BomAddon", content);
+        let m = parse_manifest("BomAddon", &path).unwrap();
+
+        assert_eq!(m.title, "BomAddon");
+        assert_eq!(m.addon_version, Some(7221));
     }
 
     #[test]

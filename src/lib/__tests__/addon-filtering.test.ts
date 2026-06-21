@@ -18,6 +18,7 @@ function makeAddon(overrides: Partial<AddonManifest> = {}): AddonManifest {
     optionalDependsOn: [],
     missingDependencies: [],
     outdatedDependencies: [],
+    missingOptionalDependencies: [],
     esouiId: 1234,
     tags: [],
     esouiLastUpdate: 0,

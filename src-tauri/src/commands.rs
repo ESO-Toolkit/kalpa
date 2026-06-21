@@ -237,7 +237,8 @@ fn resolve_transitive_deps(
                 .and_then(|p| manifest::parse_manifest(folder, &p));
             if let Some(addon) = addon {
                 for dep in &addon.depends_on {
-                    if !all_installed.contains(&dep.name) && seen.insert(dep.name.clone()) {
+                    let key = normalize_addon_name(&dep.name);
+                    if !all_installed.contains(&key) && seen.insert(key) {
                         missing_deps.push(dep.name.clone());
                     }
                 }
@@ -257,7 +258,7 @@ fn resolve_transitive_deps(
             match try_install_dep(dep_name, addons_dir, store) {
                 Ok(dep_folders) => {
                     for f in &dep_folders {
-                        all_installed.insert(f.clone());
+                        all_installed.insert(normalize_addon_name(f));
                         newly_installed_folders.push(f.clone());
                         collect_subfolder_names(&addons_dir.join(f), &mut all_installed);
                     }
@@ -310,15 +311,42 @@ fn try_install_dep(
     Ok(dep_folders)
 }
 
+/// Normalize an addon folder or dependency name for matching.
+///
+/// ESO resolves addon names case-INSENSITIVELY, so Kalpa must too: a folder
+/// stored on disk as `LUIMedia` still satisfies a `LuiMedia` dependency in-game.
+/// We also strip zero-width / BOM characters and trim surrounding whitespace so
+/// a stray invisible character can never produce a false "missing" or
+/// "outdated" flag. Used as the key for both the installed-name set and the
+/// version map.
+pub(crate) fn normalize_addon_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
+        .collect::<String>()
+        .trim()
+        .to_lowercase()
+}
+
 /// Extract just the `AddOnVersion` number from a manifest file without
 /// parsing the full manifest.  Returns `None` if the file can't be read
 /// or doesn't contain an `AddOnVersion` line.
+///
+/// Matching mirrors `manifest::parse_manifest` exactly (leading BOM stripped,
+/// `## ` directive prefix, `key: value` split) so the bundled-library version
+/// read here can never disagree with the top-level manifest parse — a mismatch
+/// there would manufacture a false "outdated" flag.
 fn read_addon_version(manifest_path: &Path) -> Option<u32> {
-    let content = fs::read_to_string(manifest_path).ok()?;
+    let raw = fs::read_to_string(manifest_path).ok()?;
+    let content = raw.strip_prefix('\u{FEFF}').unwrap_or(&raw);
     for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("## AddOnVersion:") {
-            return rest.trim().parse().ok();
+        let Some(line) = line.trim().strip_prefix("## ") else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() == "AddOnVersion" {
+            return value.trim().parse().ok();
         }
     }
     None
@@ -336,13 +364,13 @@ fn collect_subfolder_names(folder_path: &Path, out: &mut HashSet<String>) {
             continue;
         }
         if let Some(sub_name) = sub_path.file_name().and_then(|n| n.to_str()) {
-            out.insert(sub_name.to_string());
+            out.insert(normalize_addon_name(sub_name));
         }
         if let Ok(sub2_entries) = fs::read_dir(&sub_path) {
             for sub2 in sub2_entries.flatten() {
                 if sub2.path().is_dir() {
                     if let Some(sub2_name) = sub2.path().file_name().and_then(|n| n.to_str()) {
-                        out.insert(sub2_name.to_string());
+                        out.insert(normalize_addon_name(sub2_name));
                     }
                 }
             }
@@ -355,6 +383,10 @@ fn collect_subfolder_names(folder_path: &Path, out: &mut HashSet<String>) {
 /// ESO scans top-level addon folders plus 2 levels of subfolders (3 levels total
 /// from the AddOns root), matching ESO's own resolution depth on PC.
 /// Disabled folders (ending in `.disabled`) are excluded.
+///
+/// Names are stored normalized (see [`normalize_addon_name`]) so membership
+/// tests are case-insensitive, matching ESO's own resolution. Callers MUST
+/// normalize the name they look up.
 pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
     let Ok(entries) = fs::read_dir(addons_dir) else {
         return HashSet::new();
@@ -372,7 +404,7 @@ pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
         if name.ends_with(".disabled") {
             continue;
         }
-        installed.insert(name);
+        installed.insert(normalize_addon_name(&name));
         collect_subfolder_names(&path, &mut installed);
     }
     installed
@@ -799,10 +831,12 @@ fn scan_installed_addons_blocking(
         }
     }
 
-    // Build a map of folder_name → addon_version for version constraint checking.
+    // Build a map of normalized folder_name → addon_version for version
+    // constraint checking. Keys are normalized (case-insensitive) so a
+    // dependency lookup resolves the same way ESO would.
     let mut version_map: HashMap<String, Option<u32>> = addons
         .iter()
-        .map(|a| (a.folder_name.clone(), a.addon_version))
+        .map(|a| (normalize_addon_name(&a.folder_name), a.addon_version))
         .collect();
 
     // Also scan bundled sub-libraries (2 levels deep, matching ESO's resolution
@@ -819,7 +853,9 @@ fn scan_installed_addons_blocking(
             if let Some(name) = d1.file_name().and_then(|n| n.to_str()) {
                 if let Some(manifest) = find_manifest_in(&d1, name) {
                     if let Some(ver) = read_addon_version(&manifest) {
-                        let entry = version_map.entry(name.to_string()).or_insert(Some(0));
+                        let entry = version_map
+                            .entry(normalize_addon_name(name))
+                            .or_insert(Some(0));
                         if let Some(cur) = entry {
                             *cur = (*cur).max(ver);
                         }
@@ -835,7 +871,9 @@ fn scan_installed_addons_blocking(
                 if let Some(name) = d2.file_name().and_then(|n| n.to_str()) {
                     if let Some(manifest) = find_manifest_in(&d2, name) {
                         if let Some(ver) = read_addon_version(&manifest) {
-                            let entry = version_map.entry(name.to_string()).or_insert(Some(0));
+                            let entry = version_map
+                                .entry(normalize_addon_name(name))
+                                .or_insert(Some(0));
                             if let Some(cur) = entry {
                                 *cur = (*cur).max(ver);
                             }
@@ -846,12 +884,14 @@ fn scan_installed_addons_blocking(
         }
     }
 
-    // Check for missing/outdated dependencies and enrich with ESOUI ID
+    // Check for missing/outdated dependencies and enrich with ESOUI ID.
+    // All lookups normalize the dependency name so resolution is
+    // case-insensitive, matching ESO (and the normalized `installed`/`version_map`).
     for addon in &mut addons {
         addon.missing_dependencies = addon
             .depends_on
             .iter()
-            .filter(|dep| !installed.contains(&dep.name))
+            .filter(|dep| !installed.contains(&normalize_addon_name(&dep.name)))
             .map(|dep| dep.name.clone())
             .collect();
 
@@ -862,14 +902,24 @@ fn scan_installed_addons_blocking(
                 let Some(min) = dep.min_version else {
                     return false;
                 };
-                if !installed.contains(&dep.name) {
+                let key = normalize_addon_name(&dep.name);
+                if !installed.contains(&key) {
                     return false;
                 }
-                match version_map.get(&dep.name) {
+                match version_map.get(&key) {
                     Some(Some(installed_ver)) => *installed_ver < min,
                     _ => false,
                 }
             })
+            .map(|dep| dep.name.clone())
+            .collect();
+
+        // Optional dependencies that are not installed (subfolder-aware,
+        // case-insensitive) so the UI can show present/absent for them too.
+        addon.missing_optional_dependencies = addon
+            .optional_depends_on
+            .iter()
+            .filter(|dep| !installed.contains(&normalize_addon_name(&dep.name)))
             .map(|dep| dep.name.clone())
             .collect();
 
@@ -7023,6 +7073,53 @@ mod tests {
         assert_eq!(download_thread_count(50), 6);
         // Defensive: an empty batch never yields a zero-thread pool.
         assert_eq!(download_thread_count(0), 1);
+    }
+
+    #[test]
+    fn normalize_addon_name_is_case_and_invisible_insensitive() {
+        assert_eq!(normalize_addon_name("LuiMedia"), "luimedia");
+        assert_eq!(normalize_addon_name("LUIMEDIA"), "luimedia");
+        assert_eq!(normalize_addon_name("  LuiMedia  "), "luimedia");
+        // Zero-width space and BOM glued to the name must not matter.
+        assert_eq!(normalize_addon_name("LuiMedia\u{200B}"), "luimedia");
+        assert_eq!(normalize_addon_name("\u{FEFF}LuiData"), "luidata");
+    }
+
+    #[test]
+    fn installed_set_matches_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        // Folder cased differently than the manifest's DependsOn token would be.
+        std::fs::create_dir_all(dir.path().join("LUIMedia")).unwrap();
+        std::fs::create_dir_all(dir.path().join("LuiData")).unwrap();
+        let installed = build_installed_set(dir.path());
+        assert!(installed.contains(&normalize_addon_name("LuiMedia")));
+        assert!(installed.contains(&normalize_addon_name("luidata")));
+        assert!(!installed.contains(&normalize_addon_name("Nonexistent")));
+    }
+
+    #[test]
+    fn installed_set_finds_bundled_subfolders_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        // A library bundled one level deep inside another addon, oddly cased.
+        std::fs::create_dir_all(dir.path().join("BigAddon").join("LIBStub")).unwrap();
+        let installed = build_installed_set(dir.path());
+        assert!(installed.contains(&normalize_addon_name("LibStub")));
+    }
+
+    #[test]
+    fn installed_set_excludes_disabled_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("LuiMedia.disabled")).unwrap();
+        let installed = build_installed_set(dir.path());
+        assert!(!installed.contains(&normalize_addon_name("LuiMedia")));
+    }
+
+    #[test]
+    fn read_addon_version_handles_bom_and_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "\u{FEFF}## Title: A\r\n## AddOnVersion: 7221\r\n").unwrap();
+        assert_eq!(read_addon_version(&path), Some(7221));
     }
 
     #[test]
