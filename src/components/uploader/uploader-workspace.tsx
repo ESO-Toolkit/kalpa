@@ -1227,11 +1227,12 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   <LiveDashboard
                     running={liveSessionId !== null}
                     starting={starting}
-                    // Enabled when there's a selection OR any log to auto-target —
-                    // handleStartLive resolves the active Encounter.log itself (and
-                    // shows an honest toast if the folder is empty), so don't require
-                    // a manual pick first (that made the auto-select fallback dead).
-                    canStart={!!selectedLog || logs.length > 0}
+                    // Always enabled (the listError empty-state aside, handled by the
+                    // panel): handleStartLive resolves the active Encounter.log itself
+                    // and surfaces an honest toast when the folder is empty — so gating
+                    // on a selection or logs.length>0 made both the auto-select fallback
+                    // AND the empty-folder toast unreachable from the button.
+                    canStart={true}
                     startMs={liveStartMs}
                     liveFights={liveFights}
                     liveFightCount={liveFightCount}
