@@ -1132,6 +1132,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                     liveFights={liveFights}
                     liveFightCount={liveFightCount}
                     liveReport={liveReport}
+                    // Fights already in the selected log before going live. Live
+                    // streams only NEW fights (tail starts at EOF), so this drives the
+                    // "earlier fights won't be uploaded" expectation note.
+                    priorFightCount={preflight?.totalFights ?? 0}
                     onStart={handleStartLive}
                     onStop={handleStopLive}
                     onCopyLink={copyLink}
@@ -2239,6 +2243,7 @@ function LiveDashboard({
   liveFights,
   liveFightCount,
   liveReport,
+  priorFightCount,
   onStart,
   onStop,
   onCopyLink,
@@ -2250,11 +2255,27 @@ function LiveDashboard({
   liveFights: LiveFight[];
   liveFightCount: number;
   liveReport: ReportRef | null;
+  priorFightCount: number;
   onStart: () => void;
   onStop: () => void;
   onCopyLink: (url: string) => void | Promise<void>;
 }) {
   const detecting = running && liveFightCount > 0;
+  // After this long with no detected fight, hint that combat logging may have been
+  // ALREADY running before Go Live — in which case ESO wrote no fresh session header
+  // and a /reloadui starts one. We tick a local clock only while running-and-quiet so
+  // the nudge appears at the threshold (SessionTimer is a separate component, so its
+  // tick doesn't re-render us); the interval clears the moment a fight arrives or we
+  // stop, so there's no idle timer over a long session.
+  const RELOAD_NUDGE_MS = 90_000;
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const waitingQuiet = running && liveFightCount === 0;
+  useEffect(() => {
+    if (!waitingQuiet) return;
+    const id = setInterval(() => setNowTick(Date.now()), 5_000);
+    return () => clearInterval(id);
+  }, [waitingQuiet]);
+  const quietTooLong = waitingQuiet && startMs !== null && nowTick - startMs > RELOAD_NUDGE_MS;
   return (
     <GlassPanel variant="primary" className="space-y-3 p-4">
       <div className="flex items-center justify-between gap-3">
@@ -2356,6 +2377,37 @@ function LiveDashboard({
                 (liveFightCount > liveFights.length
                   ? ` Showing the latest ${liveFights.length} — your full history is saved on esologs.com.`
                   : "")}
+          </span>
+        </div>
+      )}
+
+      {/* Quiet-too-long nudge: if combat logging was ALREADY on before Go Live, ESO
+          won't write a fresh session header, so nothing streams until a /reloadui. */}
+      {quietTooLong && (
+        <div className="flex items-start gap-2 rounded-lg border border-sky-400/20 bg-sky-400/[0.05] p-3 text-xs text-muted-foreground">
+          <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-sky-300/90" aria-hidden />
+          <span>
+            No fights yet. If combat logging was already running before you went live, type{" "}
+            <code className="text-foreground/80">/reloadui</code> in ESO to start a fresh session —
+            then new fights will stream here.
+          </span>
+        </div>
+      )}
+
+      {/* Pre-start expectation: live streams only NEW fights (the tail starts at the
+          current end of the log), so earlier fights already in this Encounter.log are
+          not part of this live report. Set the expectation; no destructive action —
+          the report is already clean, and ESO holds the file open so Kalpa can't
+          rotate it anyway. */}
+      {!running && priorFightCount > 0 && (
+        <div className="flex items-start gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-muted-foreground">
+          <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-foreground/50" aria-hidden />
+          <span>
+            Live streams only fights from when you start. The {priorFightCount} earlier fight
+            {priorFightCount === 1 ? "" : "s"} already in this log{" "}
+            {priorFightCount === 1 ? "isn't" : "aren't"} part of this live report — upload{" "}
+            {priorFightCount === 1 ? "it" : "them"} separately with{" "}
+            <span className="text-foreground/70">Upload a Log</span> if you want.
           </span>
         </div>
       )}
