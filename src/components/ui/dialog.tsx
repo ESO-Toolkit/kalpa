@@ -45,7 +45,7 @@ function DialogContent({
       <DialogOverlay />
       <DialogPopup
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-hidden rounded-2xl bg-[rgba(12,20,38,0.96)] backdrop-blur-2xl backdrop-saturate-[1.3] p-5 text-sm text-popover-foreground border border-white/[0.08] shadow-[0_24px_80px_rgba(0,0,0,0.6),0_0_0_1px_rgba(255,255,255,0.03),inset_0_1px_0_rgba(255,255,255,0.06)] outline-none sm:max-w-sm",
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-hidden rounded-2xl bg-surface-overlay backdrop-blur-2xl backdrop-saturate-[1.3] p-5 text-sm text-popover-foreground border border-white/[0.08] shadow-[0_24px_80px_rgba(0,0,0,0.6),0_0_0_1px_rgba(255,255,255,0.03),inset_0_1px_0_rgba(255,255,255,0.06)] outline-none sm:max-w-sm",
           className
         )}
         transition={{ type: "spring", stiffness: 400, damping: 30 }}

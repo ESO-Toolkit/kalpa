@@ -1590,7 +1590,7 @@ function EditorTab({
 
       {/* Two-panel layout */}
       <div
-        className="flex gap-0 rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.4)] backdrop-blur-sm overflow-hidden shadow-[0_4px_16px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.04)]"
+        className="flex gap-0 rounded-xl border border-white/[0.08] bg-[color-mix(in_oklab,var(--card)_40%,transparent)] backdrop-blur-sm overflow-hidden shadow-[0_4px_16px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.04)]"
         style={{ height: "380px" }}
       >
         {loading ? (

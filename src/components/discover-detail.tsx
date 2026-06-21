@@ -257,7 +257,7 @@ export function DiscoverDetail({
                 >
                   {installingId !== null ? (
                     <span className="flex items-center gap-2">
-                      <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
+                      <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
                       Installing
                     </span>
                   ) : installSuccess || installedEsouiIds.has(result.id) ? (

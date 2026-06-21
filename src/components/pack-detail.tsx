@@ -226,7 +226,7 @@ export function PackDetailView({
           offset={12}
           transition={{ type: "spring", stiffness: 300, damping: 25 }}
         >
-          <div className="rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.5)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
+          <div className="rounded-xl border border-white/[0.08] bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 space-y-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]">
             {/* Segmented control: Private Link vs Export File */}
             <div className="relative flex p-0.5 rounded-lg bg-white/[0.03] border border-white/[0.06]">
               <div

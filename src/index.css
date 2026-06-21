@@ -140,6 +140,7 @@
   --color-glass-bg-light: var(--glass-bg-light);
   --color-glass-border: var(--glass-border);
   --color-glass-border-subtle: var(--glass-border-subtle);
+  --color-surface-overlay: var(--surface-overlay);
 
   /* Card alt */
   --color-card-alt: var(--card-alt);
@@ -187,6 +188,10 @@
   --card-alt: oklch(from var(--card) clamp(0, calc(l - 0.02), 1) c h);
   --popover: var(--card);
   --popover-foreground: var(--foreground);
+  /* Elevated translucent surface for modals, dropdowns, tooltips, menus, popovers.
+   * Theme surface at ~95% alpha so backdrop-blur still reads. Any overlay built on
+   * the shared primitives (incl. future modals) inherits the active theme. */
+  --surface-overlay: color-mix(in oklab, var(--card) 95%, transparent);
 
   /* === Accents === */
   --primary-hover: oklch(
@@ -403,13 +408,13 @@
 }
 
 [data-slot="dialog-content"] ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in oklab, var(--accent-sky) 28%, transparent);
   border-radius: 3px;
   border: none;
 }
 
 [data-slot="dialog-content"] ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: color-mix(in oklab, var(--accent-sky) 48%, transparent);
 }
 
 /* === Select Dropdown Scrollbar === */
@@ -422,7 +427,7 @@
 }
 
 [data-slot="select-content"] ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in oklab, var(--accent-sky) 28%, transparent);
   border-radius: 3px;
   border: none;
 }

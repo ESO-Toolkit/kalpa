@@ -89,7 +89,7 @@ export function AppHeader({
         if ((e.target as HTMLElement).closest('button, a, input, [role="button"]')) return;
         void getCurrentWindow().toggleMaximize();
       }}
-      className="relative z-20 flex items-center border-b border-white/[0.06] bg-[rgba(10,18,36,0.85)] px-4 py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2]"
+      className="relative z-20 flex items-center border-b border-white/[0.06] bg-[color-mix(in_oklab,var(--bg-base)_85%,transparent)] px-4 py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2]"
     >
       <div className="absolute right-0 bottom-0 left-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
       <div className="flex items-center gap-2.5">
@@ -145,7 +145,7 @@ export function AppHeader({
                 Tag
               </Button>
               {tagMenuOpen && (
-                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-white/[0.06] bg-[rgba(10,18,36,0.95)] backdrop-blur-xl p-1 shadow-lg">
+                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-white/[0.06] bg-surface-overlay backdrop-blur-xl p-1 shadow-lg">
                   {PRESET_TAGS.map((tag) => (
                     <button
                       key={tag}

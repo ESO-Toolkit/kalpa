@@ -989,7 +989,7 @@ export function Packs({
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -8 }}
                         transition={{ type: "spring", stiffness: 400, damping: 30 }}
-                        className="rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.5)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]"
+                        className="rounded-xl border border-white/[0.08] bg-[color-mix(in_oklab,var(--card)_50%,transparent)] backdrop-blur-md p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_4px_16px_rgba(0,0,0,0.15)]"
                       >
                         <PackImportView
                           key={importedPack ? "resolved" : "empty"}

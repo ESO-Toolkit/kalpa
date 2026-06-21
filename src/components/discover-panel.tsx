@@ -156,7 +156,7 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
         >
           {isInstalling ? (
             <span className="flex items-center gap-1">
-              <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
+              <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
               Installing
             </span>
           ) : isInstalled ? (
@@ -927,7 +927,7 @@ function UrlContent({
 
       {state === "resolving" && (
         <Button disabled className="w-full" size="sm">
-          <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220] mr-2" />
+          <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)] mr-2" />
           Resolving...
         </Button>
       )}
@@ -961,7 +961,7 @@ function UrlContent({
 
       {state === "installing" && (
         <Button disabled className="w-full" size="sm">
-          <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220] mr-2" />
+          <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)] mr-2" />
           Installing...
         </Button>
       )}
