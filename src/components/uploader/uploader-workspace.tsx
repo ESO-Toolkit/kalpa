@@ -534,6 +534,25 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     [logsDir, loadLogs, handleSelectLog]
   );
 
+  // Live mode has exactly one sensible target — the active Encounter.log the game is
+  // writing right now — so there's no real choice to make. Auto-pick it (so "Go Live"
+  // works without hunting for a file); the user can still override by clicking a
+  // different log first. Prefer the backend's `isActive` flag (recently-modified = the
+  // one being written); fall back to the newest log so a between-sessions folder still
+  // resolves the obvious candidate. Returns the selected path, or null if no logs.
+  // Called from the Live-tab click and as a Go-Live fallback (NOT from an effect — the
+  // React Compiler discourages firing setState from effects; this is a user action).
+  const autoSelectActiveLog = useCallback((): string | null => {
+    if (logs.length === 0) return null;
+    const active =
+      logs.find((l) => l.isActive) ?? [...logs].sort((a, b) => b.modifiedAtMs - a.modifiedAtMs)[0];
+    if (active) {
+      void handleSelectLog(active.path);
+      return active.path;
+    }
+    return null;
+  }, [logs, handleSelectLog]);
+
   // Native file drag-drop over the window. Tauri delivers real OS paths (unlike
   // HTML5 drag-drop in a webview), which the backend then copy-confines. We only
   // act on a single dropped .log; the drag-over state drives the picker visual.
@@ -613,8 +632,18 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   };
 
   const handleStartLive = async () => {
-    if (!selectedLog) {
-      toast.error("Pick the active Encounter.log first.");
+    // Resolve a target if none is selected (e.g. logs finished loading after the Live
+    // tab was clicked): auto-pick the active Encounter.log. `handleSelectLog` is async
+    // and won't have updated `selectedLog` state by this tick, so use the path it
+    // returns directly for this start.
+    let target = selectedLog;
+    if (!target) target = autoSelectActiveLog();
+    if (!target) {
+      toast.error(
+        logs.length === 0
+          ? "No Encounter.log found yet — enable combat logging in ESO (/encounterlog), then try again."
+          : "Pick the Encounter.log to stream first."
+      );
       return;
     }
     // Guard re-entry SYNCHRONOUSLY via a ref: `starting`/`liveSessionId` state
@@ -749,7 +778,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     try {
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_start_live", {
         sessionId,
-        filePath: selectedLog,
+        filePath: target,
         options,
         channel,
         nativeOptIn,
@@ -974,7 +1003,13 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 />
                 <ModeTab
                   active={mode === "live"}
-                  onClick={() => setMode("live")}
+                  onClick={() => {
+                    setMode("live");
+                    // Auto-target the active Encounter.log so Go Live needs no file
+                    // pick. Only when nothing's chosen / not already streaming — an
+                    // existing selection (manual pick the user wants to keep) stands.
+                    if (!selectedLog && !liveSessionId) autoSelectActiveLog();
+                  }}
                   Icon={Radio}
                   title="Live Log"
                   hint="Stream fights during an ongoing raid."
