@@ -295,6 +295,75 @@ impl<'a> NativeUpload<'a> {
         extract_report_code(&body)
     }
 
+    // ── Debug-only LIVE seam (the `spike/native-live` spike) ─────────────────
+    // These mirror the one-shot lifecycle calls but thread the LIVE request params
+    // (`isLiveLog`/`isRealTime` = true, a non-zero `inProgressEventCount`) and do NOT
+    // terminate — the live driver holds the report open across many segments and
+    // terminates only when logging ends. They are `#[cfg(debug_assertions)]` so they
+    // are UNREACHABLE in release: native live is unproven against the server (see the
+    // FINDINGS doc) and is ToS-gated on operator sign-off, so it must never ship by
+    // accident. They deliberately reuse the proven `send`/auth/retry path and do NOT
+    // mutate the one-shot `segment_parameters_json`.
+
+    /// Open a report for live streaming (same call as one-shot `create-report`; the
+    /// liveness is carried by the per-segment params, not the create body). Exposed
+    /// for the debug live driver.
+    #[cfg(debug_assertions)]
+    pub(crate) fn create_report_live(&self) -> Result<ReportCode, UploadError> {
+        self.create_report()
+    }
+
+    /// Set the master table for `segment_id` in LIVE mode (`isRealTime=true`).
+    #[cfg(debug_assertions)]
+    pub(crate) fn set_master_table_live(
+        &self,
+        code: &ReportCode,
+        segment_id: u64,
+        master: &MasterTableBytes,
+    ) -> Result<(), UploadError> {
+        let url = format!("{DESKTOP_CLIENT_BASE}/set-report-master-table/{}", code.0);
+        self.send(
+            &url,
+            RequestKind::MasterTableLive {
+                segment_id,
+                bytes: &master.bytes,
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Add a fights segment in LIVE mode and return the server's `nextSegmentId`.
+    /// `in_progress_event_count` is the count of events in an as-yet-unfinished fight
+    /// at the tail of this segment (0 when the segment ends on a fight boundary).
+    #[cfg(debug_assertions)]
+    pub(crate) fn add_segment_live(
+        &self,
+        code: &ReportCode,
+        segment_id: u64,
+        seg: &Segment,
+        in_progress_event_count: u64,
+    ) -> Result<u64, UploadError> {
+        let url = format!("{DESKTOP_CLIENT_BASE}/add-report-segment/{}", code.0);
+        let body = self.send(
+            &url,
+            RequestKind::AddSegmentLive {
+                segment_id,
+                bytes: &seg.bytes,
+                start_time: seg.start_time,
+                end_time: seg.end_time,
+                in_progress_event_count,
+            },
+        )?;
+        extract_next_segment_id(&body)
+    }
+
+    /// Terminate a live report (same call as one-shot). Exposed for the driver so it
+    /// can close the report on stop / session end / inactivity.
+    #[cfg(debug_assertions)]
+    pub(crate) fn terminate_report_live(&self, code: &ReportCode) -> Result<(), UploadError> {
+        self.terminate_report(code)
+    }
+
     /// POST the fights segment for `segment_id`; returns the server-assigned
     /// `nextSegmentId` (0 = no further segments).
     fn add_segment(
@@ -424,6 +493,35 @@ impl<'a> NativeUpload<'a> {
                     .part("logfile", segment_logfile_part(bytes)?);
                 req.multipart(form)
             }
+            #[cfg(debug_assertions)]
+            RequestKind::AddSegmentLive {
+                segment_id,
+                bytes,
+                start_time,
+                end_time,
+                in_progress_event_count,
+            } => {
+                let form = reqwest::blocking::multipart::Form::new()
+                    .text(
+                        "parameters",
+                        segment_parameters_json_live(
+                            *segment_id,
+                            *start_time,
+                            *end_time,
+                            *in_progress_event_count,
+                        ),
+                    )
+                    .part("logfile", segment_logfile_part(bytes)?);
+                req.multipart(form)
+            }
+            #[cfg(debug_assertions)]
+            RequestKind::MasterTableLive { segment_id, bytes } => {
+                let form = reqwest::blocking::multipart::Form::new()
+                    .text("segmentId", segment_id.to_string())
+                    .text("isRealTime", "true")
+                    .part("logfile", segment_logfile_part(bytes)?);
+                req.multipart(form)
+            }
         };
 
         let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
@@ -509,6 +607,21 @@ enum RequestKind<'a> {
         bytes: &'a [u8],
     },
     Terminate,
+    /// Debug-only LIVE variants — same wire shape as their one-shot counterparts but
+    /// with the live params flipped on. Gated so the live path can't ship by accident.
+    #[cfg(debug_assertions)]
+    AddSegmentLive {
+        segment_id: u64,
+        bytes: &'a [u8],
+        start_time: u64,
+        end_time: u64,
+        in_progress_event_count: u64,
+    },
+    #[cfg(debug_assertions)]
+    MasterTableLive {
+        segment_id: u64,
+        bytes: &'a [u8],
+    },
 }
 
 /// The `parameters` JSON for `add-report-segment` (a manual, finished upload:
@@ -520,6 +633,26 @@ fn segment_parameters_json(segment_id: u64, start_time: u64, end_time: u64) -> S
     format!(
         "{{\"startTime\":{start_time},\"endTime\":{end_time},\"mythic\":0,\"isLiveLog\":false,\
          \"isRealTime\":false,\"inProgressEventCount\":0,\"segmentId\":{segment_id}}}"
+    )
+}
+
+/// The `parameters` JSON for a LIVE `add-report-segment` (debug-only). Same shape as
+/// the one-shot variant but with `isLiveLog`/`isRealTime` true and a caller-supplied
+/// `inProgressEventCount` (the count of events in an unfinished fight at the segment
+/// tail; 0 when the segment ends on a fight boundary). The exact server semantics of
+/// these flags on an OPEN report are UNVERIFIED — settling them is the live spike's
+/// one open question (see `docs/native-live-streaming-spike-FINDINGS.md`).
+#[cfg(debug_assertions)]
+fn segment_parameters_json_live(
+    segment_id: u64,
+    start_time: u64,
+    end_time: u64,
+    in_progress_event_count: u64,
+) -> String {
+    format!(
+        "{{\"startTime\":{start_time},\"endTime\":{end_time},\"mythic\":0,\"isLiveLog\":true,\
+         \"isRealTime\":true,\"inProgressEventCount\":{in_progress_event_count},\
+         \"segmentId\":{segment_id}}}"
     )
 }
 

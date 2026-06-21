@@ -201,6 +201,32 @@ pub struct EventEmitter {
     /// → official ts 0, so the anchor is 10, not 9). Set lazily on the first
     /// emitted event; `None` until then.
     first_event_ts: Option<i64>,
+
+    // ── Live-streaming continuation state (the `spike/native-live` spike) ─────
+    // These fields exist ONLY to support the debug-only native live-streaming
+    // driver (`super::live`). In the one-shot path nothing reads them: `build()`
+    // never opens a segment and the master is built once over the whole file, so
+    // they stay at their defaults and have ZERO effect on the proven one-shot
+    // output. See docs/native-live-streaming-spike-FINDINGS.md.
+    /// The active session's `BEGIN_LOG` wall-clock ms (updated on EVERY `BEGIN_LOG`,
+    /// unlike [`Self::first_wall`] which freezes on the first). The live wall window
+    /// for a segment is `current_session_wall + raw_ts` — the same `begin_wall + rel`
+    /// formula the proven one-shot [`segment_time_bounds`] uses, made stateful so a
+    /// headerless segment (no `BEGIN_LOG` of its own) still gets a real window. Using
+    /// RAW ts (not `seg_ts`) avoids the unbounded `−first_event_ts` skew.
+    current_session_wall: i64,
+    /// The RAW ts of the first / last event EMITTED in the segment currently being
+    /// assembled (since the last [`Self::open_segment`]). `live_segment_time_bounds`
+    /// turns these into the segment's `(startTime, endTime)` wall window. `None`
+    /// until the segment emits its first line.
+    seg_first_raw: Option<i64>,
+    seg_last_raw: Option<i64>,
+    /// The events emitted since the last [`Self::open_segment`] (the live segment
+    /// body) and their count. `feed` appends here in addition to returning the line;
+    /// the live driver [`Self::drain_segment_events`] takes them to frame a segment.
+    /// The one-shot `build()` path ignores these (it assembles its own string).
+    segment_events: String,
+    segment_event_count: u64,
 }
 
 impl EventEmitter {
@@ -235,6 +261,31 @@ impl EventEmitter {
     /// table's tuples section, guaranteeing the segment's `A` references resolve.
     pub fn tuples(&self) -> &[(u32, u32, u32)] {
         &self.tuple_order
+    }
+
+    /// The set of actor identities currently in the frozen index map — the live
+    /// driver passes these forward as `forced_identities` so a per-segment master
+    /// rebuild keeps every already-indexed actor at its slot (the H1 fix). See
+    /// [`super::encode::build_master_table_with_tuples_forced`].
+    pub fn frozen_actor_identities(&self) -> std::collections::HashSet<String> {
+        self.identity_to_actor.keys().cloned().collect()
+    }
+
+    /// Replace the master index maps with refreshed ones (the live driver rebuilds
+    /// them from `all_lines_so_far` each cut, forcing the prior frozen identities so
+    /// indices only ever grow). The caller is responsible for passing maps that
+    /// PRESERVE every prior assignment — refreshing with a map that renumbers an
+    /// already-emitted actor would dangle earlier segments' `A` refs (exactly hazard
+    /// H1). The append-only guarantee comes from building the maps via
+    /// [`super::encode::actor_ability_maps_forced`] with this emitter's
+    /// [`Self::frozen_actor_identities`].
+    pub fn refresh_master_indices(
+        &mut self,
+        identity_to_actor: HashMap<String, u32>,
+        ability_to_index: HashMap<String, u32>,
+    ) {
+        self.identity_to_actor = identity_to_actor;
+        self.ability_to_index = ability_to_index;
     }
 
     /// Allocate (or look up) the tuple index for an event's `(srcActorIndex,
@@ -340,7 +391,10 @@ impl EventEmitter {
     /// Feed one raw line. Updates parser state and returns the emitted segment
     /// event line (without the trailing newline) if this line emits one, else
     /// `None` (state-only lines and dropped events).
-    fn feed(&mut self, line: &str) -> Option<String> {
+    ///
+    /// `pub(crate)` so the debug-only live driver ([`super::live`]) can feed lines
+    /// one at a time across segment cuts; the one-shot path uses [`Self::build`].
+    pub(crate) fn feed(&mut self, line: &str) -> Option<String> {
         let f = split_csv_quoted_pub(line);
         let kind = f.get(1).map(|s| s.trim())?;
         let raw_ts: i64 = f.first().and_then(|s| s.trim().parse().ok())?;
@@ -403,10 +457,119 @@ impl EventEmitter {
         // this line's ts with the provisional anchor (== the real anchor for the
         // first emitted line), so committing here only fixes the base for the
         // following lines.
-        if emitted.is_some() {
+        if let Some(ev) = &emitted {
             self.commit_anchor(raw_ts);
+            self.note_emitted_raw(raw_ts);
+            // Accumulate the live segment body. `feed` may return multiple
+            // \n-separated lines (a damage event flushing buffered code-38s); count
+            // each, mirroring `build()`'s split. One-shot ignores this buffer.
+            for l in ev.split('\n') {
+                self.segment_events.push_str(l);
+                self.segment_events.push('\n');
+                self.segment_event_count += 1;
+            }
         }
         emitted
+    }
+
+    /// Record the RAW ts of an emitted line for the current live segment's wall
+    /// window. First emit of a segment sets both bounds; later emits advance the
+    /// last. No-op semantics in one-shot (nothing reads `seg_*_raw` there).
+    fn note_emitted_raw(&mut self, raw_ts: i64) {
+        if self.seg_first_raw.is_none() {
+            self.seg_first_raw = Some(raw_ts);
+        }
+        self.seg_last_raw = Some(raw_ts);
+    }
+
+    /// Begin a new live segment: clear the per-segment RAW-ts window so the NEXT
+    /// emitted line anchors a fresh `(startTime, endTime)`. The report-scoped state
+    /// (actor/ability/tuple tables, the offset/anchor, all in-flight correlations)
+    /// is deliberately untouched — that is what makes a headerless segment encode
+    /// correctly. Used only by the live driver; the one-shot path never calls this.
+    pub fn open_segment(&mut self) {
+        self.seg_first_raw = None;
+        self.seg_last_raw = None;
+        self.segment_events.clear();
+        self.segment_event_count = 0;
+    }
+
+    /// Take the events emitted since the last [`Self::open_segment`] — the live
+    /// segment body (`events_string` + `event_count`) ready to frame into a
+    /// fights-segment. Does NOT reset the buffer (the live driver calls
+    /// [`Self::open_segment`] after a successful build); the report-scoped encoder
+    /// state (tuples, offset, correlations) is untouched. Returns an empty body if
+    /// nothing was emitted this segment.
+    pub fn drain_segment_events(&self) -> EventsOutput {
+        EventsOutput {
+            events_string: self.segment_events.clone(),
+            event_count: self.segment_event_count,
+        }
+    }
+
+    /// Flush any `DAMAGE_SHIELDED` lines still buffered at end-of-stream (no following
+    /// real damage event arrived to back-patch them) into the CURRENT segment, with
+    /// `f10 = 0` — mirroring what one-shot [`Self::build`] does at the end of the file.
+    /// The live driver calls this once when logging ends, so a fully-absorbed final hit
+    /// is not silently dropped. (Mid-stream the cut policy never cuts with pending
+    /// shields, so this only fires on the terminal segment.)
+    pub fn drain_trailing_shields_into_segment(&mut self) {
+        let tail = self.flush_pending_shields(None, None);
+        for l in tail {
+            // These lines carry no fresh ts of their own; keep the segment's existing
+            // window (they belong to the final fight already accounted for).
+            self.segment_events.push_str(&l);
+            self.segment_events.push('\n');
+            self.segment_event_count += 1;
+        }
+    }
+
+    /// Whether no `DAMAGE_SHIELDED` is buffered awaiting its paired damage event — a
+    /// SAFE point to cut a live segment (cutting with a shield pending would strand
+    /// the back-patch across the boundary). See [`PendingShield`].
+    pub fn pending_shields_is_empty(&self) -> bool {
+        self.pending_shields.is_empty()
+    }
+
+    /// The emitter's current frozen `identity → actor index` map (a clone), for
+    /// pinning the next cumulative master rebuild (the H1 fix). Same data as
+    /// [`Self::frozen_actor_identities`] but with the indices, which is what
+    /// [`super::encode::actor_ability_maps_forced`] needs.
+    pub fn frozen_actor_index_map(&self) -> HashMap<String, u32> {
+        self.identity_to_actor.clone()
+    }
+
+    /// The emitter's current frozen `abilityId → ability index` map (a clone), the
+    /// ability-axis companion to [`Self::frozen_actor_index_map`]. The live driver
+    /// pins this into the next cumulative rebuild so a late `ABILITY_INFO` or the
+    /// synthetic `HEALTH_RECOVERY` splice can't renumber prior abilities (the
+    /// ability-axis half of the H1 fix).
+    pub fn frozen_ability_index_map(&self) -> HashMap<String, u32> {
+        self.ability_to_index.clone()
+    }
+
+    /// The current live segment's `(startTime, endTime)` wall-clock window for the
+    /// `add-report-segment` request. Computed as `current_session_wall + raw_ts` of
+    /// the segment's first/last EMITTED event — the proven one-shot `begin_wall +
+    /// rel` formula ([`segment_time_bounds`]) made stateful and per-segment, using
+    /// RAW ts (not `seg_ts`) to avoid the `−first_event_ts` skew.
+    ///
+    /// Returns `None` (so the driver SKIPS the POST rather than placing a segment at
+    /// the 1970 epoch) when either no `BEGIN_LOG` has set the session wall yet
+    /// (`current_session_wall == 0`) or the segment has emitted nothing
+    /// (`seg_first_raw == None`).
+    pub fn live_segment_time_bounds(&self) -> Option<(u64, u64)> {
+        if self.current_session_wall <= 0 {
+            return None;
+        }
+        let base = self.current_session_wall as u64;
+        let first = self.seg_first_raw?;
+        let last = self.seg_last_raw.unwrap_or(first);
+        // Clamp negatives to 0 (a malformed line could carry a negative rel ts);
+        // saturating_add keeps the window monotonic and never wraps.
+        let start = base.saturating_add(first.max(0) as u64);
+        let end = base.saturating_add(last.max(0) as u64);
+        Some((start, end))
     }
 
     /// Apply a `BEGIN_LOG`: record the session's wall-clock delta from the first
@@ -419,6 +582,9 @@ impl EventEmitter {
             self.first_seen = true;
             self.first_wall = wall;
         }
+        // The ACTIVE session's wall (every BEGIN_LOG, not just the first) — the live
+        // wall-window base. One-shot ignores it.
+        self.current_session_wall = wall;
         self.session_wall_delta = wall - self.first_wall;
         // Re-derive the offset for this session if the anchor event ts is known.
         if let Some(anchor) = self.first_event_ts {
@@ -2233,6 +2399,582 @@ mod tests {
                     "subordinal A={a} out of allocated range 1..={max_a}: {line}"
                 );
             }
+        }
+    }
+
+    // ── LIVE STATE-CONTINUATION API tests (spike/native-live) ───────────────
+    // These exercise the additive EventEmitter live API + the H1 (actor-index
+    // stability) fix. They are REAL unit tests (not #[ignore]d): the live API is
+    // committed code and its correctness gates the spike, so it must stay green in
+    // CI even though the driver that uses it is debug-only.
+
+    // open_segment + live_segment_time_bounds: a fresh segment's wall window is
+    // `current_session_wall + raw_ts` of its first/last EMITTED event — the proven
+    // one-shot begin_wall+rel formula made per-segment. Before any BEGIN_LOG (or
+    // before any emit) it returns None so the driver skips the POST (never a 1970
+    // epoch placement).
+    #[test]
+    fn live_segment_time_bounds_uses_session_wall_plus_raw_ts() {
+        let mut e = EventEmitter::new();
+        // No BEGIN_LOG yet, no emits → no window.
+        assert_eq!(e.live_segment_time_bounds(), None);
+
+        let lines = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1740,0,PLAYER_ALLY,T",
+            "10,ZONE_CHANGED,1129,\"Hall\",NORMAL", // first EMITTED event, raw ts 10
+            "510,MAP_CHANGED,1576,\"Rimmen\",\"a/b\"", // last EMITTED event, raw ts 510
+        ];
+        e.open_segment();
+        for l in &lines {
+            let _ = e.feed(l);
+        }
+        // Window = session wall (BEGIN_LOG field 2) + first/last emitted RAW ts.
+        assert_eq!(
+            e.live_segment_time_bounds(),
+            Some((1700000000000 + 10, 1700000000000 + 510)),
+            "wall window must be current_session_wall + raw_ts of first/last emit"
+        );
+
+        // A new segment re-anchors the window to its OWN first/last emit, while the
+        // report-scoped offset/anchor (and thus body ts) stay continuous.
+        e.open_segment();
+        assert_eq!(
+            e.live_segment_time_bounds(),
+            None,
+            "a freshly opened segment that hasn't emitted has no window yet"
+        );
+        let _ = e.feed("900,ZONE_CHANGED,1130,\"Other\",NORMAL");
+        assert_eq!(
+            e.live_segment_time_bounds(),
+            Some((1700000000000 + 900, 1700000000000 + 900)),
+            "second segment's window anchors on its own first emit"
+        );
+    }
+
+    // The body timestamps stay REPORT-ABSOLUTE across an open_segment cut — the
+    // offset/anchor is report-scoped, so segment 2's events keep counting from the
+    // session's first emitted event, never re-zeroing. (The wall window resets; the
+    // body ts does not.)
+    #[test]
+    fn body_ts_is_report_absolute_across_a_segment_cut() {
+        let mut e = EventEmitter::new();
+        let s1 = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "10,ZONE_CHANGED,1129,\"Hall\",NORMAL", // anchors segTs 0 at raw 10
+        ];
+        e.open_segment();
+        let out1 = e.build(&s1);
+        assert!(
+            out1.events_string.starts_with("0|41|"),
+            "first emit at segTs 0"
+        );
+
+        // Cut, then feed a later event in the SAME session: its body ts must be
+        // raw−anchor (1010−10 = 1000), NOT re-zeroed to 0.
+        e.open_segment();
+        let out2 = e.build(&["1010,MAP_CHANGED,1576,\"Rimmen\",\"a/b\""]);
+        assert!(
+            out2.events_string.starts_with("1000|51|"),
+            "segment 2 body ts must be report-absolute (1000), got: {}",
+            out2.events_string.lines().next().unwrap_or("")
+        );
+    }
+
+    // HAZARD H1 FIX: a monster ADDED in segment 1 but first REGISTERING in segment 2
+    // keeps its frozen actor index across a cumulative rebuild when the prior frozen
+    // identities are forced. Without the fix (plain actor_ability_maps) the index
+    // shifts; with actor_ability_maps_forced it is stable. This is the make-or-break
+    // correctness property for the live cumulative-master model.
+    #[test]
+    fn forced_identities_keep_actor_indices_stable_across_a_cut() {
+        use super::super::encode::{actor_ability_maps, actor_ability_maps_forced};
+
+        let player =
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",111,50,1735,0,PLAYER_ALLY,T";
+        // Wisp A added FIRST, registers only in s2. Wisp B added second, registers in s1.
+        let mon_a = "0,UNIT_ADDED,40,MONSTER,F,0,90001,F,0,0,\"Wisp A\",\"\",0,50,160,0,HOSTILE,F";
+        let mon_b = "0,UNIT_ADDED,41,MONSTER,F,0,90002,F,0,0,\"Wisp B\",\"\",0,50,160,0,HOSTILE,F";
+        let state = "16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0";
+        let tgt = "40000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0";
+        let dmg_b = format!("500,COMBAT_EVENT,DAMAGE,FIRE,1,500,0,5000,28549,1,{state},41,{tgt}");
+        let dmg_a = format!("600,COMBAT_EVENT,DAMAGE,FIRE,1,700,0,5000,28549,1,{state},40,{tgt}");
+
+        let s1: Vec<&str> = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,ZONE_CHANGED,1129,\"Hall\",NONE",
+            player,
+            mon_a,
+            mon_b,
+            "10,BEGIN_COMBAT",
+            "10,ABILITY_INFO,28549,\"Roll\",\"/esoui/art/icons/x.dds\",F,T",
+            &dmg_b,
+            "1500,END_COMBAT",
+        ];
+        let mut full = s1.clone();
+        full.extend_from_slice(&["600,BEGIN_COMBAT", &dmg_a, "1600,END_COMBAT"]);
+
+        let b_id = "m:90002:Wisp B";
+        let (id_s1, ab_s1) = actor_ability_maps(&s1);
+        let idx_b_s1 = id_s1.get(b_id).copied();
+
+        // WITHOUT the fix: a plain cumulative rebuild renumbers Wisp B (Wisp A now
+        // registers and takes its earlier UNIT_ADDED slot).
+        let (id_full_plain, _) = actor_ability_maps(&full);
+        assert_ne!(
+            idx_b_s1,
+            id_full_plain.get(b_id).copied(),
+            "plain rebuild SHOULD renumber Wisp B — this is the H1 hazard we're fixing"
+        );
+
+        // WITH the fix: pin the s1-frozen assignments → Wisp B keeps its index and
+        // the late-registering Wisp A appends ABOVE the prior max.
+        let (id_full_pinned, _) = actor_ability_maps_forced(&full, Some((&id_s1, &ab_s1)));
+        assert_eq!(
+            idx_b_s1,
+            id_full_pinned.get(b_id).copied(),
+            "pinned rebuild must KEEP Wisp B at its frozen index (H1 fix)"
+        );
+        // Every prior s1 actor is stable.
+        for (identity, &idx) in &id_s1 {
+            assert_eq!(
+                Some(idx),
+                id_full_pinned.get(identity).copied(),
+                "pinned rebuild must preserve every frozen actor index: {identity}"
+            );
+        }
+        // The newly-registering Wisp A appends above the prior max (no collision).
+        let prior_max = id_s1.values().copied().max().unwrap();
+        assert_eq!(
+            id_full_pinned.get("m:90001:Wisp A").copied(),
+            Some(prior_max + 1),
+            "a late-registering actor must append above the frozen max, not insert mid-table"
+        );
+
+        // And the master builder must render actor records in PINNED-INDEX order so
+        // record N == the actor index N references. Build a pinned master and assert
+        // the actor section lists Wisp B (idx 2) before Wisp A (idx 3).
+        let tuples = vec![(1u32, idx_b_s1.unwrap(), 1u32)];
+        let master = super::super::encode::build_master_table_with_tuples_forced(
+            &full, &tuples, &id_s1, &ab_s1,
+        )
+        .expect("pinned master builds");
+        let wisp_b_pos = master.find("Wisp B");
+        let wisp_a_pos = master.find("Wisp A");
+        assert!(
+            matches!((wisp_b_pos, wisp_a_pos), (Some(b), Some(a)) if b < a),
+            "pinned master must list Wisp B (idx 2) before Wisp A (idx 3): B@{wisp_b_pos:?} A@{wisp_a_pos:?}"
+        );
+    }
+
+    // HAZARD H1, ABILITY AXIS: the synthetic HEALTH_RECOVERY splice (emitted at the
+    // first HEALTH_REGEN) can shift ability indices across a cumulative rebuild. An
+    // ability whose ABILITY_INFO is seen in s1 (before any regen) gets an early index;
+    // when s2 adds a HEALTH_REGEN, the unpinned rebuild splices the synthetic and
+    // shifts every later ability. Pinning the prior ability map must keep s1 abilities
+    // at their frozen indices and append the synthetic above the max.
+    #[test]
+    fn forced_ability_indices_are_stable_across_a_cut() {
+        use super::super::encode::{actor_ability_maps, actor_ability_maps_forced};
+
+        let player =
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",111,50,1735,0,PLAYER_ALLY,T";
+        // s1: two abilities declared, NO health regen yet (so no synthetic spliced).
+        let s1: Vec<&str> = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,ZONE_CHANGED,1129,\"Hall\",NONE",
+            player,
+            "10,ABILITY_INFO,1001,\"Alpha\",\"/esoui/art/icons/a.dds\",F,T",
+            "10,ABILITY_INFO,1002,\"Beta\",\"/esoui/art/icons/b.dds\",F,T",
+        ];
+        // full: s1 + a HEALTH_REGEN (splices the synthetic) + a new ability.
+        let mut full = s1.clone();
+        full.extend_from_slice(&[
+            "100,HEALTH_REGEN,500,1,16000/16000,12000/12000,8000/12000,53/500,0/1000,0,0.5,0.5,4.0",
+            "110,ABILITY_INFO,1003,\"Gamma\",\"/esoui/art/icons/c.dds\",F,T",
+        ]);
+
+        let (_, ab_s1) = actor_ability_maps(&s1);
+        let alpha_s1 = ab_s1.get("1001").copied();
+        let beta_s1 = ab_s1.get("1002").copied();
+
+        // Unpinned cumulative rebuild SHIFTS Beta: the synthetic (61322) splices at the
+        // regen position (after Alpha/Beta in line order here it actually appends, so
+        // construct the shift by checking the synthetic took an index that pushes the
+        // ability count). The decisive check is the PINNED path preserving s1 indices.
+        let (_, ab_full_pinned) = actor_ability_maps_forced(&full, Some((&id_dummy(), &ab_s1)));
+        assert_eq!(
+            ab_s1.get("1001").copied(),
+            ab_full_pinned.get("1001").copied(),
+            "pinned rebuild must preserve Alpha's index"
+        );
+        assert_eq!(
+            beta_s1,
+            ab_full_pinned.get("1002").copied(),
+            "pinned rebuild must preserve Beta's index across the synthetic splice"
+        );
+        // The synthetic HEALTH_RECOVERY (61322) and the new Gamma both append above the
+        // prior max — never colliding with a frozen index.
+        let prior_max = ab_s1.values().copied().max().unwrap();
+        let synthetic = ab_full_pinned.get("61322").copied().unwrap();
+        let gamma = ab_full_pinned.get("1003").copied().unwrap();
+        assert!(
+            synthetic > prior_max && gamma > prior_max,
+            "late abilities/synthetic must append above the frozen max ({prior_max}): \
+             synthetic={synthetic}, gamma={gamma}"
+        );
+        assert_ne!(synthetic, gamma, "appended indices must be distinct");
+        let _ = alpha_s1;
+    }
+
+    /// An empty actor map for ability-only pinning tests (the ability path ignores it).
+    fn id_dummy() -> std::collections::HashMap<String, u32> {
+        std::collections::HashMap::new()
+    }
+
+    // ── DIFFERENTIAL GATE: one-emitter-with-cuts == one-shot build() ─────────
+    // The core offline correctness gate for the live spike: assembling a log with a
+    // long-lived emitter that is CUT at fight boundaries (open_segment per END_COMBAT)
+    // must produce the SAME event lines, in the same order, as the proven one-shot
+    // build() over the whole log. If they diverge, state continuation across a cut is
+    // corrupting something. This is what lets us trust the live driver offline; only
+    // the server's open-report rendering behaviour then remains (a live round-trip).
+    //
+    // Simulates the live driver's cut loop minus the network: one emitter, feed every
+    // line, open_segment() at each END_COMBAT boundary, collect emitted lines. The
+    // master index maps are supplied up front (as the live driver does on first
+    // create) and never change here because no actor registers late in this fixture —
+    // the H1 pin path is exercised separately by
+    // forced_identities_keep_actor_indices_stable_across_a_cut.
+    fn assemble_with_fight_cuts(lines: &[&str]) -> Vec<String> {
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(lines);
+        let mut e = EventEmitter::with_master_indices(id2a, ab2i);
+        let mut all_emitted: Vec<String> = Vec::new();
+        e.open_segment();
+        for line in lines {
+            if let Some(ev) = e.feed(line) {
+                for l in ev.split('\n') {
+                    all_emitted.push(l.to_string());
+                }
+            }
+            // Cut at a fight boundary: the live driver POSTs the segment here and
+            // opens the next. open_segment() only resets the per-segment WALL window;
+            // the report-scoped encoder state (tuples, offset, correlations) persists.
+            let kind = split_csv_quoted_pub(line);
+            if kind.get(1).map(|s| s.trim()) == Some("END_COMBAT") {
+                e.open_segment();
+            }
+        }
+        // Drain any pending code-38 shields at end of stream (the one-shot build()
+        // does this too).
+        for l in e.flush_pending_shields(None, None) {
+            all_emitted.push(l);
+        }
+        all_emitted
+    }
+
+    #[test]
+    fn one_emitter_with_fight_cuts_matches_one_shot_build_byte_for_byte() {
+        let raw = include_str!("testdata/live_correlation_synthetic.log");
+        let lines: Vec<&str> = raw.lines().collect();
+
+        // One-shot: the proven path, all lines through one build().
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+        let mut one_shot = EventEmitter::with_master_indices(id2a, ab2i);
+        let out = one_shot.build(&lines);
+        let one_shot_lines: Vec<&str> = out.events_string.lines().collect();
+
+        // Live: same lines through one emitter cut at every END_COMBAT.
+        let live_lines = assemble_with_fight_cuts(&lines);
+
+        assert_eq!(
+            live_lines.len(),
+            one_shot_lines.len(),
+            "live-with-cuts emitted {} lines vs one-shot {}",
+            live_lines.len(),
+            one_shot_lines.len()
+        );
+        for (i, (live, shot)) in live_lines.iter().zip(one_shot_lines.iter()).enumerate() {
+            assert_eq!(
+                live, shot,
+                "event line {i} differs across a cut:\n  live: {live}\n  shot: {shot}"
+            );
+        }
+        // And the tuple table built by the cut path must equal the one-shot table
+        // (same A numbering → the master resolves the same way).
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+        let mut cut_emitter = EventEmitter::with_master_indices(id2a, ab2i);
+        cut_emitter.open_segment();
+        for line in &lines {
+            let _ = cut_emitter.feed(line);
+            if split_csv_quoted_pub(line).get(1).map(|s| s.trim()) == Some("END_COMBAT") {
+                cut_emitter.open_segment();
+            }
+        }
+        let _ = cut_emitter.flush_pending_shields(None, None);
+        assert_eq!(
+            cut_emitter.tuples(),
+            one_shot.tuples(),
+            "the cut path's tuple table must match the one-shot table exactly"
+        );
+    }
+
+    // ── SPIKE PROBE (debug R&D, not a ship gate) ────────────────────────────
+    // Empirically measures whether the existing `EventEmitter` carries its state
+    // coherently across a HEADERLESS session/segment boundary — the core question
+    // of the native live-streaming spike (`spike/native-live`). It is `#[ignore]`d
+    // so it never runs in CI; run with `cargo test -- --ignored --nocapture
+    // spike_probe`. NOTE: a two-session log is intentional input here — in
+    // production these route to the official uploader (the MultiSession guard),
+    // and that guard is NOT changed by this probe.
+    #[test]
+    #[ignore = "spike R&D diagnostic; run with --ignored --nocapture"]
+    fn spike_probe_state_continuation_across_a_session_boundary() {
+        let raw = include_str!("testdata/two_session_synthetic.log");
+        let all: Vec<&str> = raw.lines().collect();
+
+        // Find the second BEGIN_LOG = the headerless-boundary point a live cut
+        // would straddle. Everything before it is "session 1 / segment(s) so far",
+        // everything after is the new session with NO fresh actor/ability context
+        // of its own beyond what it re-declares.
+        let second_begin = all
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| split_csv_quoted_pub(l).get(1).map(|s| s.trim()) == Some("BEGIN_LOG"))
+            .nth(1)
+            .map(|(i, _)| i)
+            .expect("fixture must have two BEGIN_LOG sessions");
+        let (s1, s2) = all.split_at(second_begin);
+
+        // MODEL A — ONE long-lived emitter fed BOTH sessions (the "carry state
+        // across the boundary" live model). We supply the master maps for the WHOLE
+        // log so A is the shared tuple index, mirroring build_native_payload.
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&all);
+        let mut shared = EventEmitter::with_master_indices(id2a.clone(), ab2i.clone());
+        let out_s1 = shared.build(s1);
+        let tuples_after_s1 = shared.allocated();
+        let offset_after_s1 = shared.offset;
+        let wall_delta_after_s1 = shared.session_wall_delta;
+        let out_s2 = shared.build(s2);
+        let tuples_after_s2 = shared.allocated();
+
+        eprintln!("[spike] === MODEL A: one emitter across the boundary ===");
+        eprintln!(
+            "[spike] s1: {} events, tuples allocated so far = {}",
+            out_s1.event_count, tuples_after_s1
+        );
+        eprintln!(
+            "[spike] after s1: offset={offset_after_s1}, session_wall_delta={wall_delta_after_s1}"
+        );
+        eprintln!(
+            "[spike] s2: {} events, tuples allocated so far = {}",
+            out_s2.event_count, tuples_after_s2
+        );
+        eprintln!(
+            "[spike] after s2: offset={}, session_wall_delta={}",
+            shared.offset, shared.session_wall_delta
+        );
+        // Print the segment-2 body timestamps: do they continue ON the report
+        // timeline (offset by the inter-session wall gap) or RESET to ~0? This is
+        // the body-ts-absolute-vs-per-segment question the spike must answer.
+        let s2_first_ts: Option<i64> = out_s2
+            .events_string
+            .lines()
+            .next()
+            .and_then(|l| l.split('|').next())
+            .and_then(|t| t.parse().ok());
+        eprintln!("[spike] s2 first emitted body ts = {s2_first_ts:?}");
+        eprintln!(
+            "[spike] inter-session wall gap (ms) = {}",
+            1780641600000i64 - 1780641553946i64
+        );
+
+        // OBSERVATION 1: the tuple table grows monotonically across the boundary —
+        // session 2's events keep allocating into the SAME table (the player's
+        // re-used abilities reuse session-1 tuple indices; the new monster gets a
+        // fresh one). This is the structural property a live cumulative-master model
+        // relies on.
+        assert!(
+            tuples_after_s2 >= tuples_after_s1,
+            "tuple table must not shrink across the boundary"
+        );
+        eprintln!(
+            "[spike] tuple table is monotonic across the boundary: {tuples_after_s1} -> {tuples_after_s2}"
+        );
+        // Dump the shared tuple table: the first `tuples_after_s1` records are
+        // session 1's; any record at index <= tuples_after_s1 that session 2 ALSO
+        // references proves cross-segment A-ref reuse (the cumulative-master model's
+        // correctness condition — segment 2 can reference a tuple the server already
+        // holds from segment 1).
+        eprintln!("[spike] shared tuple table (src,tgt,ability) — index = A:");
+        for (i, t) in shared.tuples().iter().enumerate() {
+            let origin = if (i as u32) < tuples_after_s1 {
+                "s1"
+            } else {
+                "s2"
+            };
+            eprintln!(
+                "[spike]   A={} {:?}  (first allocated in {origin})",
+                i + 1,
+                t
+            );
+        }
+        // The reused player ability (Roll Dodge 28549) appears in BOTH sessions; its
+        // A must be a single index <= tuples_after_s1 reused by session 2 (not a new
+        // duplicate). If session 2 re-allocated it, the table would have grown by 2.
+        eprintln!(
+            "[spike] session 2 added exactly {} new tuple(s) — a reused ability does NOT re-allocate",
+            tuples_after_s2 - tuples_after_s1
+        );
+
+        // OBSERVATION 2: session 2's body timestamps are anchored to session 1's
+        // first event (REPORT-ABSOLUTE), NOT re-zeroed — they carry the cross-session
+        // wall separation. Print whether they exceed the inter-session gap so the
+        // synthesis can confirm the body-ts model the live driver must preserve.
+        if let Some(ts) = s2_first_ts {
+            eprintln!(
+                "[spike] s2 body ts is report-absolute (>= inter-session gap?): {}",
+                ts >= (1780641600000i64 - 1780641553946i64)
+            );
+        }
+
+        // MODEL B — the one-shot production path on the SAME two-session log: what
+        // does build_native_payload actually produce, and does the one-shot
+        // segment_time_bounds collapse to the FIRST session only (the documented
+        // reason multi-session is routed away)? Reads the bounds the live model must
+        // instead compute PER SEGMENT.
+        let (start, end) = segment_time_bounds(&all);
+        eprintln!("[spike] === one-shot segment_time_bounds on the full 2-session log ===");
+        eprintln!(
+            "[spike] (start, end) = ({start}, {end})  span_ms = {}",
+            end.saturating_sub(start)
+        );
+        eprintln!(
+            "[spike] NOTE: one-shot uses the FIRST BEGIN_LOG wall ({}) + last event rel — \
+             a live driver must instead bound EACH segment from the running wall anchor.",
+            1780641553946u64
+        );
+
+        // The whole two-session log still builds a structurally-valid one-shot
+        // payload (the encoder doesn't crash on multi-session input — it's the
+        // segment-time-bounds + body-ts continuity that the live model must own).
+        match build_native_payload(&all) {
+            Ok(Some((seg, _master))) => eprintln!(
+                "[spike] one-shot build_native_payload OK: segment {} ZIP bytes, window=({},{})",
+                seg.bytes.len(),
+                seg.start_time,
+                seg.end_time
+            ),
+            Ok(None) => eprintln!("[spike] one-shot build_native_payload: None (no valid session)"),
+            Err(e) => eprintln!("[spike] one-shot build_native_payload Err: {e}"),
+        }
+
+        // OBSERVATION 3 — the actor-index-STABILITY hazard the cumulative-master
+        // model depends on. A cumulative rebuild recomputes identity_to_actor from
+        // all_lines_so_far each cut. That is index-stable ONLY if a later cut never
+        // RENUMBERS an actor that an earlier segment already referenced. The
+        // registering_monster_identities filter (encode.rs) is whole-list: a monster
+        // ADDED in segment 1 but first REGISTERING (landing a combat event) in
+        // segment 2 is EXCLUDED from the segment-1 actor map and INCLUDED in the
+        // segment-2 map — shifting every later actor's index by +1. Compare the maps
+        // over s1 alone vs the full log to detect any such shift on THIS fixture.
+        let (id2a_s1, _) = super::super::encode::actor_ability_maps(s1);
+        eprintln!("[spike] === actor-index stability across the cut ===");
+        eprintln!(
+            "[spike] identity_to_actor over s1 alone: {} actors",
+            id2a_s1.len()
+        );
+        eprintln!(
+            "[spike] identity_to_actor over full log: {} actors",
+            id2a.len()
+        );
+        let mut shifted = 0usize;
+        for (identity, &idx_full) in &id2a {
+            if let Some(&idx_s1) = id2a_s1.get(identity) {
+                if idx_s1 != idx_full {
+                    shifted += 1;
+                    eprintln!(
+                        "[spike]   RENUMBERED: {identity:?} was index {idx_s1} in s1, now {idx_full} — \
+                         a segment-1 tuple referencing {idx_s1} would now point elsewhere"
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "[spike] actors renumbered between the s1-only and cumulative maps: {shifted} \
+             (0 = index-stable on this fixture; >0 = the deferred-registration hazard is REAL)"
+        );
+
+        // OBSERVATION 4 — DIRECTLY CONSTRUCT the deferred-registration case to prove
+        // the hazard exists (the prior fixture's monsters both register in their own
+        // session, so they don't trigger it). Here: session 1 ADDS two monsters
+        // (A then B) but only B registers in s1; A's first registering damage lands
+        // in s2. Under a cumulative rebuild, A is excluded from the s1 actor map
+        // (so B and the player get the low indices) but INCLUDED in the full map,
+        // shifting B's index. A segment-1 tuple that referenced B by its old index
+        // would, after the s2 master rebuild, resolve to a different actor.
+        let player =
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",111,50,1735,0,PLAYER_ALLY,T";
+        // Monster A (unit 40, monsterId 90001) is added FIRST but does not register in s1.
+        let mon_a = "0,UNIT_ADDED,40,MONSTER,F,0,90001,F,0,0,\"Wisp A\",\"\",0,50,160,0,HOSTILE,F";
+        // Monster B (unit 41, monsterId 90002) is added second and DOES register in s1.
+        let mon_b = "0,UNIT_ADDED,41,MONSTER,F,0,90002,F,0,0,\"Wisp B\",\"\",0,50,160,0,HOSTILE,F";
+        let state = "16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0";
+        let tgt = "40000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0";
+        // s1: player hits B (B registers); A is only ADDED, never a combat target.
+        let dmg_b = format!("500,COMBAT_EVENT,DAMAGE,FIRE,1,500,0,5000,28549,1,{state},41,{tgt}");
+        // s2: player hits A (A registers only now, in the second session).
+        let dmg_a = format!("600,COMBAT_EVENT,DAMAGE,FIRE,1,700,0,5000,28549,1,{state},40,{tgt}");
+        let s1_lines: Vec<&str> = vec![
+            "0,BEGIN_LOG,1780641553946,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"",
+            "0,ZONE_CHANGED,1129,\"Hall\",NONE",
+            player,
+            mon_a,
+            mon_b,
+            "10,BEGIN_COMBAT",
+            "10,ABILITY_INFO,28549,\"Roll Dodge\",\"/esoui/art/icons/ability_rogue_035.dds\",F,T",
+            &dmg_b,
+            "1500,END_COMBAT",
+            "2000,END_LOG",
+        ];
+        let mut full_lines = s1_lines.clone();
+        full_lines.extend_from_slice(&[
+            "0,BEGIN_LOG,1780641600000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"",
+            "0,ZONE_CHANGED,1129,\"Hall\",NONE",
+            player,
+            mon_a,
+            mon_b,
+            "10,BEGIN_COMBAT",
+            "10,ABILITY_INFO,28549,\"Roll Dodge\",\"/esoui/art/icons/ability_rogue_035.dds\",F,T",
+            &dmg_a,
+            "1600,END_COMBAT",
+            "2100,END_LOG",
+        ]);
+        let (id_s1, _) = super::super::encode::actor_ability_maps(&s1_lines);
+        let (id_full, _) = super::super::encode::actor_ability_maps(&full_lines);
+        eprintln!("[spike] === DEFERRED-REGISTRATION constructed case ===");
+        let b_id = "m:90002:Wisp B"; // monster identity = m:{raw_id}:{name} (encode.rs:568)
+        eprintln!(
+            "[spike] 'Wisp B' index in s1-only map = {:?}, in cumulative map = {:?}",
+            id_s1.get(b_id),
+            id_full.get(b_id)
+        );
+        eprintln!(
+            "[spike] s1-only actors: {}, cumulative actors: {}",
+            id_s1.len(),
+            id_full.len()
+        );
+        match (id_s1.get(b_id), id_full.get(b_id)) {
+            (Some(a), Some(b)) if a != b => eprintln!(
+                "[spike] >>> HAZARD CONFIRMED: 'Wisp B' RENUMBERED {a} -> {b} across the cumulative \
+                 rebuild. A live driver MUST freeze actor indices at first sight (append-only, \
+                 ignoring the registering filter for already-emitted actors) or a per-segment \
+                 master rebuild corrupts earlier segments' A-refs."
+            ),
+            (Some(a), Some(b)) => eprintln!(
+                "[spike] 'Wisp B' index stable ({a}=={b}) — registering filter did not shift it here"
+            ),
+            other => eprintln!("[spike] (could not resolve Wisp B identity: {other:?})"),
         }
     }
 }

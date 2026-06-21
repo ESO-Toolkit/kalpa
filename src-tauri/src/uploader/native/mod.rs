@@ -25,6 +25,11 @@ pub mod differential;
 pub mod encode;
 pub mod events;
 pub mod format;
+/// Debug-only native live-streaming upload spike (`spike/native-live`). Compiled out
+/// of release builds — feasibility R&D, never the shipping live path. See
+/// `docs/native-live-streaming-spike-FINDINGS.md`.
+#[cfg(debug_assertions)]
+pub mod live;
 pub mod login;
 pub mod serialize;
 pub mod session;
