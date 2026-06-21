@@ -48,19 +48,11 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
     load();
   }, [addonsPath]);
 
-  // Names shared by more than one character (e.g. an NA and an EU twin) get the
-  // server folded into the default backup name so their backups don't collide.
-  const duplicateNames = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const c of characters) counts.set(c.name, (counts.get(c.name) ?? 0) + 1);
-    return new Set([...counts].filter(([, n]) => n > 1).map(([name]) => name));
-  }, [characters]);
-
   const handleBackup = async (char: CharacterInfo) => {
-    const defaultName = duplicateNames.has(char.name)
-      ? `${char.server}-${char.name}-backup`
-      : `${char.name}-backup`;
-    const name = backupName.trim() || defaultName;
+    // A character backup copies the whole SavedVariables files the character's
+    // data lives in — it is keyed by name, not isolated per server, so two
+    // same-named characters (an NA/EU twin) intentionally share one backup.
+    const name = backupName.trim() || `${char.name}-backup`;
     setBackingUp(`${char.server}-${char.name}`);
     try {
       const count = await invokeOrThrow<number>("backup_character_settings", {
@@ -97,8 +89,8 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
         </DialogHeader>
 
         <p className="text-sm text-muted-foreground">
-          Your ESO characters. Back up SavedVariables for a specific character to preserve their
-          addon settings.
+          Your ESO characters. A backup copies the SavedVariables files a character&apos;s settings
+          live in — those files can also hold your account-wide and other characters&apos; data.
         </p>
 
         {!loading && skippedFiles > 0 && (
