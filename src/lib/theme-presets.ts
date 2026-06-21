@@ -11,11 +11,12 @@ import { SKINS } from "./theme-skins";
 
 export const DEFAULT_THEME_ID = "eso-gold";
 
-/** Order categories appear in the gallery. Unknown categories sort last. */
+/** Order categories appear in the gallery. Unknown categories sort last.
+ * Elder Scrolls (the deluxe textured art themes) lead; the ESO bucket holds the
+ * signature default plus the faction/lore color palettes. */
 export const CATEGORY_ORDER = [
-  "ESO",
-  "ESO Lore",
   "Elder Scrolls",
+  "ESO",
   "Editor Classics",
   "Neon",
   "Nature",
@@ -55,7 +56,7 @@ const GENERATED_THEMES: Theme[] = [
     id: "daedric-crimson",
     name: "Daedric Crimson",
     description: "Infernal red fire raging across cooling obsidian, the forge of Molag Bal.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#070203",
       background: "#16060a",
@@ -76,7 +77,7 @@ const GENERATED_THEMES: Theme[] = [
     name: "Coldharbour",
     description:
       "A sickly desaturated cyan glow bleeding through the cold grey-black of the soul prison.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#030608",
       background: "#071218",
@@ -96,7 +97,7 @@ const GENERATED_THEMES: Theme[] = [
     id: "apocrypha-ink",
     name: "Apocrypha",
     description: "Black ink and toxic green-gold sigils, the forbidden libraries of Hermaeus Mora.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#040603",
       background: "#0a0f06",
@@ -117,7 +118,7 @@ const GENERATED_THEMES: Theme[] = [
     name: "Nightblade Twilight",
     description:
       "Violet-magenta shadowfire over assassin's charcoal, the moment before the strike.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#06030b",
       background: "#0f0817",
@@ -137,7 +138,7 @@ const GENERATED_THEMES: Theme[] = [
     id: "blood-matron",
     name: "Blood Matron",
     description: "Muted blood red and weathered bone, the gothic hunger of the vampire courts.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#060304",
       background: "#140a0c",
@@ -157,7 +158,7 @@ const GENERATED_THEMES: Theme[] = [
     id: "aldmeri-dominion",
     name: "Aldmeri Dominion",
     description: "Regal high-elf gold crowned with living emerald over a deep forest dark.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#070a06",
       background: "#0d1409",
@@ -177,7 +178,7 @@ const GENERATED_THEMES: Theme[] = [
     id: "daggerfall-covenant",
     name: "Daggerfall Covenant",
     description: "Royal sapphire heraldry edged in covenant gold over a midnight blue keep.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#04060f",
       background: "#080f22",
@@ -197,7 +198,7 @@ const GENERATED_THEMES: Theme[] = [
     id: "ebonheart-pact",
     name: "Ebonheart Pact",
     description: "Harsh Pact crimson set against cold slate iron, martial and unyielding.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#080506",
       background: "#150c0e",
@@ -218,7 +219,7 @@ const GENERATED_THEMES: Theme[] = [
     name: "Meridia's Light",
     description:
       "Radiant teal-white luminescence and holy gold flooding a deep teal-black sanctum.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#020e0d",
       background: "#04201d",
@@ -238,7 +239,7 @@ const GENERATED_THEMES: Theme[] = [
     id: "hist-sap",
     name: "Hist Sap",
     description: "Warm amber sap weeping through swamp green over a dark Argonian bog.",
-    category: "ESO Lore",
+    category: "ESO",
     colors: {
       bgBase: "#0c0703",
       background: "#180f06",

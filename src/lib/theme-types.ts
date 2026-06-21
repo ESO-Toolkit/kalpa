@@ -70,7 +70,6 @@ export const THEME_COLOR_META: Record<keyof ThemeColors, { label: string; hint: 
 
 export type ThemeCategory =
   | "ESO"
-  | "ESO Lore"
   | "Elder Scrolls"
   | "Editor Classics"
   | "Neon"
