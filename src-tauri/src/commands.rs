@@ -4672,27 +4672,52 @@ fn build_character_list(
         }
     }
 
+    // Normalize and classify SavedVariables-derived characters. Trust only a
+    // canonical megaserver as a real server label; anything else is bucketed so
+    // we never fabricate or mis-group a server.
+    let mut recovered: Vec<(String, Option<String>)> = Vec::new();
     for (raw, world) in sv_chars {
         let name = normalize_character_name(raw);
         // Guard against markers / numeric character IDs leaking in as names.
         if name.is_empty() || name.starts_with('$') || name.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        if !known_names.insert(name.clone()) {
-            continue;
-        }
-        // Trust only a canonical megaserver as a server label; anything else is
-        // bucketed so we never fabricate or mis-group a server.
         let server = world
             .as_deref()
             .filter(|w| crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(w))
-            .map(str::to_string)
-            .unwrap_or_else(|| UNKNOWN_SERVER.to_string());
-        characters.push(CharacterInfo {
-            server,
-            name,
-            recovered: true,
-        });
+            .map(str::to_string);
+        recovered.push((name, server));
+    }
+    // Process known-megaserver characters first so that NA/EU twins of the same
+    // name are both kept (distinct per server), while a later unknown-server
+    // entry for an already-listed name is recognized as a duplicate and dropped.
+    recovered.sort_by_key(|(_, server)| server.is_none());
+
+    for (name, server) in recovered {
+        match server {
+            // Known megaserver: a distinct character per (server, name).
+            Some(server) => {
+                if seen_pairs.insert((server.clone(), name.clone())) {
+                    known_names.insert(name.clone());
+                    characters.push(CharacterInfo {
+                        server,
+                        name,
+                        recovered: true,
+                    });
+                }
+            }
+            // Unknown server: dedup by name against every source, since we can't
+            // tell it apart from a same-named character already listed.
+            None => {
+                if known_names.insert(name.clone()) {
+                    characters.push(CharacterInfo {
+                        server: UNKNOWN_SERVER.to_string(),
+                        name,
+                        recovered: true,
+                    });
+                }
+            }
+        }
     }
 
     characters
@@ -4707,11 +4732,17 @@ pub async fn list_characters(
 
     tokio::task::spawn_blocking(move || -> Result<Vec<CharacterInfo>, String> {
         // Source 1: AddOnSettings.txt (authoritative server, may be missing or,
-        // in account-wide mode, hold no per-character headers at all).
-        let addon_settings = addons_dir
-            .parent()
-            .map(|p| p.join("AddOnSettings.txt"))
-            .and_then(|p| fs::read_to_string(p).ok());
+        // in account-wide mode, hold no per-character headers at all). A missing
+        // file is an expected fallback; any other read error (permissions, bad
+        // encoding) is surfaced rather than silently degrading the roster.
+        let addon_settings = match addons_dir.parent().map(|p| p.join("AddOnSettings.txt")) {
+            Some(path) => match fs::read_to_string(&path) {
+                Ok(content) => Some(content),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(format!("Failed to read AddOnSettings.txt: {e}")),
+            },
+            None => None,
+        };
 
         // Source 2: a bounded, roster-specific scan of SavedVariables .lua files.
         // Recovers characters that have no AddOnSettings.txt block (the common
@@ -4757,7 +4788,12 @@ pub fn backup_character_settings(
     let needle_exact = format!("[\"{character_name}\"]");
     let needle_caret = format!("[\"{character_name}^");
     let max_lines: usize = 10_000;
-    let mut count: u32 = 0;
+    // `matched` counts files that contain the character's data; `copied` counts
+    // those successfully backed up. Tracking them separately lets us tell "this
+    // character has no per-character data" apart from "the copy failed".
+    let mut matched: u32 = 0;
+    let mut copied: u32 = 0;
+    let mut last_copy_err: Option<String> = None;
     if let Ok(entries) = fs::read_dir(&sv_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -4782,10 +4818,12 @@ pub fn backup_character_settings(
                     }
                 }
                 if found {
+                    matched += 1;
                     if let Some(name) = path.file_name() {
                         let dest = backups.join(name);
-                        if fs::copy(&path, &dest).is_ok() {
-                            count += 1;
+                        match fs::copy(&path, &dest) {
+                            Ok(_) => copied += 1,
+                            Err(e) => last_copy_err = Some(e.to_string()),
                         }
                     }
                 }
@@ -4793,10 +4831,10 @@ pub fn backup_character_settings(
         }
     }
 
-    if count == 0 {
-        // Nothing was backed up — don't leave an empty folder or report success.
-        // A character with only account-wide addon settings has no per-character
-        // SavedVariables data to copy.
+    if matched == 0 {
+        // No file held this character's data — don't leave an empty folder or
+        // report success. A character with only account-wide addon settings has
+        // no per-character SavedVariables data to copy.
         let _ = fs::remove_dir(&backups);
         return Err(format!(
             "No per-character SavedVariables data found for \"{character_name}\". \
@@ -4804,7 +4842,17 @@ pub fn backup_character_settings(
         ));
     }
 
-    Ok(count)
+    if copied < matched {
+        // Files matched but at least one copy failed (permissions, locked
+        // destination, disk error) — surface it instead of silently truncating.
+        let detail = last_copy_err.map(|e| format!(" ({e})")).unwrap_or_default();
+        return Err(format!(
+            "Backed up only {copied} of {matched} SavedVariables files for \
+             \"{character_name}\"; some files could not be copied{detail}."
+        ));
+    }
+
+    Ok(copied)
 }
 
 // ─── Minion Migration ────────────────────────────────────────
@@ -6641,18 +6689,35 @@ const ROSTER_MAX_FILE_BYTES: u64 = 96 * 1024 * 1024;
 fn collect_roster_characters(addons_dir: &Path) -> Vec<(String, Option<String>)> {
     use crate::saved_variables::scrub::detect_roster_characters_from_tree;
 
-    // raw key -> world, preferring a known megaserver over `None` across files.
-    let mut merged: std::collections::BTreeMap<String, Option<String>> =
+    // raw key -> the distinct megaservers it was seen under. A name with one or
+    // more known worlds yields one entry per world (so an NA and an EU character
+    // sharing a name stay distinct); a name only ever seen world-less yields a
+    // single unknown-world entry.
+    let mut known_worlds: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
+    let mut all_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
     for_each_sv_tree(addons_dir, Some(ROSTER_MAX_FILE_BYTES), |tree| {
         for ch in detect_roster_characters_from_tree(tree) {
-            let slot = merged.entry(ch.name).or_insert(None);
-            if slot.is_none() {
-                *slot = ch.world;
+            all_names.insert(ch.name.clone());
+            if let Some(world) = ch.world {
+                known_worlds.entry(ch.name).or_default().insert(world);
             }
         }
     });
-    merged.into_iter().collect()
+
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    for name in all_names {
+        match known_worlds.get(&name) {
+            Some(worlds) if !worlds.is_empty() => {
+                for world in worlds {
+                    out.push((name.clone(), Some(world.clone())));
+                }
+            }
+            _ => out.push((name, None)),
+        }
+    }
+    out
 }
 
 /// Detect the account/character identities present in the local SavedVariables
@@ -7283,6 +7348,33 @@ mod tests {
         let chars = build_character_list(None, &sv(&[("Faewynd", Some("Some Guild"))]));
         assert_eq!(chars.len(), 1);
         assert_eq!(chars[0].server, UNKNOWN_SERVER);
+    }
+
+    #[test]
+    fn build_character_list_keeps_recovered_na_eu_twins() {
+        // Same name recovered under two megaservers stays two distinct characters.
+        let roster = sv(&[
+            ("Bob", Some("NA Megaserver")),
+            ("Bob", Some("EU Megaserver")),
+        ]);
+        let chars = build_character_list(None, &roster);
+        assert_eq!(chars.len(), 2);
+        assert!(chars
+            .iter()
+            .any(|c| c.server == "NA Megaserver" && c.name == "Bob"));
+        assert!(chars
+            .iter()
+            .any(|c| c.server == "EU Megaserver" && c.name == "Bob"));
+    }
+
+    #[test]
+    fn build_character_list_unknown_dup_collapses_to_known_server() {
+        // Known-megaserver + unknown-server entry of the same name collapse to
+        // the known one, independent of input order.
+        let roster = sv(&[("Bob", None), ("Bob", Some("NA Megaserver"))]);
+        let chars = build_character_list(None, &roster);
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].server, "NA Megaserver");
     }
 
     #[test]
