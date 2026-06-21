@@ -4981,11 +4981,21 @@ fn finalize_backup_replace(
             Ok(())
         }
         Err(e) => {
-            // Roll back: restore the previous backup and discard staging.
+            // Roll back: restore the previous backup. Only discard staging once
+            // the prior backup is safely back at `final_dir`. If the restore
+            // itself fails, PRESERVE both the tombstone (the only good copy) and
+            // staging, so `recover_orphaned_backups` sees the staging and treats
+            // the tombstone as a recoverable crash state rather than a deletion.
             if had_previous {
-                let _ = fs::rename(tombstone, final_dir);
+                match fs::rename(tombstone, final_dir) {
+                    Ok(()) => {
+                        let _ = fs::remove_dir_all(staging);
+                    }
+                    Err(_) => return Err(e),
+                }
+            } else {
+                let _ = fs::remove_dir_all(staging);
             }
-            let _ = fs::remove_dir_all(staging);
             Err(e)
         }
     }
