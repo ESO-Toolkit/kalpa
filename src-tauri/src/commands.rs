@@ -4268,7 +4268,7 @@ fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
 fn restore_character_subtrees_merge(
     backup_path: &Path,
     sv_dir: &Path,
-    meta_path: &Path,
+    meta: &CharBackupMeta,
 ) -> (u32, Vec<String>) {
     use crate::saved_variables::char_backup::{
         char_base, extract_character_blocks, merge_character_block,
@@ -4277,17 +4277,17 @@ fn restore_character_subtrees_merge(
     let mut restored: u32 = 0;
     let mut failed: Vec<String> = Vec::new();
 
-    let meta: CharBackupMeta = match fs::read(meta_path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-    {
-        Some(m) => m,
-        None => {
-            failed.push("metadata: could not read character backup metadata".to_string());
-            return (restored, failed);
-        }
-    };
     let base = char_base(meta.character.as_bytes()).to_vec();
+    // Re-extract from the (already-isolated) stored files using the SAME world
+    // filter the backup used, so a known-server backup can never restore a
+    // subtree under a different megaserver even if one somehow leaked into the
+    // stored file. Unknown server -> no filter (account-keyed / any world).
+    let world: Option<&str> =
+        if crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(&meta.server.as_str()) {
+            Some(meta.server.as_str())
+        } else {
+            None
+        };
 
     let entries = match fs::read_dir(backup_path) {
         Ok(e) => e,
@@ -4317,8 +4317,7 @@ fn restore_character_subtrees_merge(
                 continue;
             }
         };
-        // Re-extract from the (already-isolated) stored file with no world filter.
-        let blocks = extract_character_blocks(&stored, &base, None);
+        let blocks = extract_character_blocks(&stored, &base, world);
         if blocks.is_empty() {
             failed.push(format!("{name_str}: no character subtree found in backup"));
             continue;
@@ -4444,11 +4443,39 @@ pub async fn restore_backup_safe(
 
     let meta_path = backup_path.join(CHAR_BACKUP_META);
     if meta_path.is_file() {
-        // Per-character (v2) backup: merge each stored subtree into its live file,
-        // leaving other characters and account-wide data untouched.
-        let (r, f) = restore_character_subtrees_merge(&backup_path, &sv_dir, &meta_path);
-        restored = r;
-        failed = f;
+        // The directory claims to be a per-character (v2) backup. Validate it
+        // STRICTLY before merging: it must carry the character-backup marker and
+        // parse as the current format version. A `.json` that doesn't validate is
+        // refused outright (rather than falling back to a whole-file copy, which
+        // would splat minimal subtree files over the live SavedVariables) so a
+        // corrupt or future-format backup can never destroy live data.
+        let has_marker = backup_path.join(CHAR_BACKUP_MARKER).is_file();
+        let meta: Option<CharBackupMeta> = fs::read(&meta_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        match meta {
+            Some(m) if has_marker && m.version == CHAR_BACKUP_VERSION => {
+                // Per-character backup: merge each stored subtree into its live
+                // file, leaving other characters and account-wide data untouched.
+                let (r, f) = restore_character_subtrees_merge(&backup_path, &sv_dir, &m);
+                restored = r;
+                failed = f;
+            }
+            Some(m) => {
+                return Err(format!(
+                    "This character backup uses an unsupported format (version {}). \
+                     Update Kalpa to restore it.",
+                    m.version
+                ));
+            }
+            None => {
+                return Err(
+                    "This character backup's metadata is missing or unreadable, so it \
+                     can't be restored safely."
+                        .to_string(),
+                );
+            }
+        }
     } else {
         // Manual / auto-before-restore / legacy whole-file character backup: copy
         // whole files into the SavedVariables folder.
@@ -8124,8 +8151,7 @@ mod tests {
         fs::write(&live_file, &mutated).unwrap();
 
         // Restore: merge only NA Bob's subtree back.
-        let (restored, failed) =
-            restore_character_subtrees_merge(&backup_dir, &sv, &backup_dir.join(CHAR_BACKUP_META));
+        let (restored, failed) = restore_character_subtrees_merge(&backup_dir, &sv, &meta);
         assert_eq!(restored, 1, "one file restored; failures: {failed:?}");
         assert!(failed.is_empty());
 

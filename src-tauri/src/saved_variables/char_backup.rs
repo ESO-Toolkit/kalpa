@@ -518,8 +518,9 @@ fn merge_raw(live: &[u8], block: &CharBlock) -> Vec<u8> {
 
     if idx == block.path.len() {
         // Full path exists; act on the character within the account table `cur`.
-        if let Some((_k, vo, vc)) = find_char_value(live, cur.0, cur.1, char_base(&block.char_key))
-        {
+        // Match the EXACT backed-up key (e.g. `Bob^Mx`) — never a different
+        // same-base sibling — so a replace can't splice into the wrong key.
+        if let Some((vo, vc)) = find_child_by_key(live, cur.0, cur.1, &block.char_key) {
             // Replace the character's value block in place.
             let mut buf = Vec::with_capacity(live.len() + block.value.len());
             buf.extend_from_slice(&live[..vo]);
@@ -570,9 +571,12 @@ fn validate_merge(buf: &[u8], block: &CharBlock) -> Result<(), String> {
         return Err("merge produced unbalanced braces".to_string());
     }
     let blocks = extract_character_blocks(buf, char_base(&block.char_key), None);
-    let round_trips = blocks
-        .iter()
-        .any(|b| b.addon_var == block.addon_var && b.path == block.path && b.value == block.value);
+    let round_trips = blocks.iter().any(|b| {
+        b.addon_var == block.addon_var
+            && b.path == block.path
+            && b.char_key == block.char_key
+            && b.value == block.value
+    });
     if !round_trips {
         return Err("merge did not round-trip the character subtree".to_string());
     }

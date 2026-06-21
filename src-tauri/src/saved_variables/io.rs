@@ -499,27 +499,51 @@ pub fn write_raw_content(sv_dir: &Path, file_name: &str, content: &str) -> Resul
     write_raw_bytes(sv_dir, file_name, content.as_bytes())
 }
 
-/// Write raw bytes to `sv_dir/file_name` atomically (temp file + rename), with no
-/// lossy UTF-8 round-trip. Used by the per-character backup/restore path, whose
-/// merged content may contain non-UTF8 SavedVariables bytes (caret keys, addon
-/// binary blobs). No `.bak` is written: the per-character restore takes a full
-/// safety snapshot beforehand, so a stray `.lua.bak` in the live SavedVariables
-/// folder (which subsequent backups/snapshots would sweep up) is avoided.
+/// Write raw bytes to `sv_dir/file_name` with no lossy UTF-8 round-trip. Used by
+/// the per-character backup/restore path, whose merged content may contain
+/// non-UTF8 SavedVariables bytes (caret keys, addon binary blobs).
+///
+/// The replacement is crash-safer than a plain remove-then-rename: the new
+/// content is written to `<file>.tmp`, the existing file (if any) is moved aside
+/// to `<file>.old`, the temp is renamed into place, and only then is the old copy
+/// removed. If the final rename fails, the original is restored from `<file>.old`,
+/// so a failed write never destroys the live file. (On Windows `fs::rename` won't
+/// replace an existing file, which is why the move-aside is needed.) No `.bak` is
+/// left behind on success: the per-character restore already takes a full safety
+/// snapshot, so a lingering `.lua.bak` in the live folder (which later
+/// backups/snapshots would sweep up) is avoided.
 pub fn write_raw_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
     let file_path = sv_dir.join(file_name);
     let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
     fs::write(&tmp_path, content).map_err(|e| format!("Failed to write temp file: {e}"))?;
-    // On Windows, fs::rename fails if the destination exists. Remove it first.
-    if file_path.exists() {
-        fs::remove_file(&file_path).map_err(|e| {
+
+    if !file_path.exists() {
+        return fs::rename(&tmp_path, &file_path).map_err(|e| {
             let _ = fs::remove_file(&tmp_path);
-            format!("Failed to replace existing file: {e}")
-        })?;
+            format!("Failed to finalize write: {e}")
+        });
     }
-    fs::rename(&tmp_path, &file_path).map_err(|e| {
+
+    // Move the existing file aside, then swap the new content in. Keep the old
+    // copy until the swap succeeds so a mid-write failure can roll back.
+    let old_path = sv_dir.join(format!("{file_name}.old"));
+    let _ = fs::remove_file(&old_path);
+    fs::rename(&file_path, &old_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {e}")
-    })
+        format!("Failed to set aside existing file: {e}")
+    })?;
+    match fs::rename(&tmp_path, &file_path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&old_path);
+            Ok(())
+        }
+        Err(e) => {
+            // Roll the original back into place and drop the temp.
+            let _ = fs::rename(&old_path, &file_path);
+            let _ = fs::remove_file(&tmp_path);
+            Err(format!("Failed to finalize write: {e}"))
+        }
+    }
 }
 
 /// Restore a .bak file back to the original .lua file.
