@@ -1166,8 +1166,11 @@ fn install_dependency_blocking(
     dep_info: EsouiAddonInfo,
     dep_tmp: NamedTempFile,
 ) -> Result<InstallResult, String> {
+    // Surface the real extraction error (installer already explains the common
+    // Controlled Folder Access / permission case with fix steps) rather than a
+    // generic "extract_failed" the user can't act on.
     let dep_folders = installer::extract_addon_zip(dep_tmp.path(), addons_dir)
-        .map_err(|_| format!("Failed to install {dep_name}: extract_failed"))?;
+        .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
 
     file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
         .map_err(|e| format!("Failed to install {dep_name}: {e}"))?;
