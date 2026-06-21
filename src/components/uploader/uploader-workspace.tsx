@@ -199,6 +199,25 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // LogSummaryCard) only render in manual mode, so broadening this is safe for them.
   const willUseNative = nativeOptIn && hasNativeSession;
 
+  // Live mode defaults to native for everyone (the official handoff is an explicit
+  // opt-out via `liveUseOfficialUploader`, default false), independent of the legacy
+  // `nativeUploadOptIn` (manual) toggle. The readout must stay HONEST, though: native
+  // also requires an upload session, and Go Live can fail/decline the sign-in prompt
+  // and hand off. So gate the live readout on `hasNativeSession` exactly as manual does
+  // (line above) — showing "ESO Logs Uploader" until a session is captured. This
+  // under-promises only in the narrow "user will sign in at Go Live" case (the safe
+  // direction) and never claims "Direct from Kalpa" for a session that handed off.
+  const [liveUseOfficial, setLiveUseOfficial] = useState(false);
+  const liveWillUseNative = !liveUseOfficial && hasNativeSession;
+
+  // The transport hint for the CURRENT mode. Several shared panels (the header
+  // readout, LogSummaryCard's route chip, UploadOptionsControl's report-name field)
+  // render in BOTH modes, so they must reflect the mode-correct flag — live uses a
+  // different opt-out (`liveUseOfficialUploader`) than manual (`nativeUploadOptIn`).
+  // Passing the manual `willUseNative` into them while in live mode made the route
+  // chip / report-name field contradict the (mode-aware) header.
+  const activeWillUseNative = mode === "live" ? liveWillUseNative : willUseNative;
+
   // Live-mode state
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   // Rendered fights are capped to a rolling window (most-recent MAX_LIVE_FIGHTS)
@@ -337,12 +356,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // transport hint stay in sync with Settings and the credential store.
   const refreshNativeState = useCallback(async () => {
     try {
-      const [optIn, session] = await Promise.all([
+      const [optIn, session, liveOfficial] = await Promise.all([
         getSetting<boolean>("nativeUploadOptIn", false),
         invokeOrThrow<boolean>("uploader_has_session"),
+        getSetting<boolean>("liveUseOfficialUploader", false),
       ]);
       setNativeOptIn(optIn);
       setHasNativeSession(session);
+      setLiveUseOfficial(liveOfficial);
     } catch {
       /* best-effort — the upload path still reads the setting fresh per upload */
     }
@@ -351,13 +372,15 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [optIn, session] = await Promise.all([
+      const [optIn, session, liveOfficial] = await Promise.all([
         getSetting<boolean>("nativeUploadOptIn", false),
         invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+        getSetting<boolean>("liveUseOfficialUploader", false),
       ]);
       if (cancelled) return;
       setNativeOptIn(optIn);
       setHasNativeSession(session);
+      setLiveUseOfficial(liveOfficial);
     })();
     return () => {
       cancelled = true;
@@ -561,21 +584,41 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     [logsDir, loadLogs, handleSelectLog]
   );
 
-  // Live mode has exactly one sensible target — the active Encounter.log the game is
-  // writing right now — so there's no real choice to make. Auto-pick it (so "Go Live"
-  // works without hunting for a file); the user can still override by clicking a
-  // different log first. Prefer the backend's `isActive` flag (recently-modified = the
-  // one being written); fall back to the newest log so a between-sessions folder still
-  // resolves the obvious candidate. Returns the selected path, or null if no logs.
+  // Live mode has exactly one sensible target — the live Encounter.log ESO is writing
+  // right now — so there's no real choice to make. Auto-pick it (so "Go Live" works
+  // without hunting for a file); the user can still override by clicking a different
+  // log first. Returns the selected path, or null if no encounter log is present.
+  //
+  // CRUCIAL: live streaming is ONLY valid for an ESO *encounter* log. The folder also
+  // holds `Interface.log` — the game's UI/error log, which it writes constantly (even
+  // in menus), so it is almost always the most-recently-modified file and would win a
+  // naive "newest / isActive" pick. But it has no BEGIN_LOG and the native encoder
+  // can't anchor a session on it, so it must NEVER be a live target. We therefore
+  // restrict to encounter logs and prefer, in order: the active `Encounter.log` (the
+  // hot file) → any active encounter log (a just-rotated session that's still hot) →
+  // the literal `Encounter.log` even if cold → the newest encounter log. Archives
+  // (`Archive-…-Encounter-….log`) are historical and belong in manual upload, but they
+  // ARE encounter logs, so they remain a last-resort candidate rather than Interface.log.
   // Called from the Live-tab click and as a Go-Live fallback (NOT from an effect — the
   // React Compiler discourages firing setState from effects; this is a user action).
   const autoSelectActiveLog = useCallback((): string | null => {
-    if (logs.length === 0) return null;
-    const active =
-      logs.find((l) => l.isActive) ?? [...logs].sort((a, b) => b.modifiedAtMs - a.modifiedAtMs)[0];
-    if (active) {
-      void handleSelectLog(active.path);
-      return active.path;
+    // `fileName` is the bare name (no path). ESO encounter logs contain "encounter"
+    // and end in .log; the live file is named exactly `Encounter.log`. Anything else —
+    // notably `Interface.log` — is not streamable, so it's excluded outright.
+    const isEncounterLog = (name: string) => /encounter.*\.log$/i.test(name);
+    const isLiveEncounter = (name: string) => /^encounter\.log$/i.test(name);
+    const encounterLogs = logs.filter((l) => isEncounterLog(l.fileName));
+    if (encounterLogs.length === 0) return null;
+
+    const target =
+      encounterLogs.find((l) => l.isActive && isLiveEncounter(l.fileName)) ??
+      encounterLogs.find((l) => l.isActive) ??
+      encounterLogs.find((l) => isLiveEncounter(l.fileName)) ??
+      [...encounterLogs].sort((a, b) => b.modifiedAtMs - a.modifiedAtMs)[0];
+
+    if (target) {
+      void handleSelectLog(target.path);
+      return target.path;
     }
     return null;
   }, [logs, handleSelectLog]);
@@ -666,10 +709,16 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     let target = selectedLog;
     if (!target) target = autoSelectActiveLog();
     if (!target) {
+      // autoSelectActiveLog returns null when there's no *encounter* log to stream.
+      // Distinguish "the folder has logs but none are an Encounter.log" (e.g. only
+      // Interface.log so far — combat logging was never turned on) from "no logs at
+      // all"; both want the same /encounterlog nudge, not a "pick a file" message
+      // (there's nothing valid to pick).
+      const hasEncounterLog = logs.some((l) => /encounter.*\.log$/i.test(l.fileName));
       toast.error(
-        logs.length === 0
-          ? "No Encounter.log found yet — enable combat logging in ESO (/encounterlog), then try again."
-          : "Pick the Encounter.log to stream first."
+        hasEncounterLog
+          ? "Pick the Encounter.log to stream first."
+          : "No Encounter.log found yet — enable combat logging in ESO (/encounterlog), then try again."
       );
       return;
     }
@@ -810,17 +859,66 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       }
     };
 
-    // Read the native opt-in + session presence fresh per start. The backend gates
-    // native live on BOTH (and the format-version flag); without a session it routes
-    // to the official handoff rather than hard-failing. Default false → official
-    // handoff, preserving the prior behaviour for users who haven't opted in.
-    const [liveOptIn, liveHasSession] = await Promise.all([
-      getSetting<boolean>("nativeUploadOptIn", false),
-      invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
-    ]);
-    // `forceHandoff` (the "go live anyway via official uploader" escape hatch) overrides
-    // the native path for this session even when opted in + signed in.
-    const nativeOptIn = !forceHandoff && liveOptIn && liveHasSession;
+    // Native direct-streaming is the DEFAULT live path: it's faster and keeps the
+    // report in-app. The only ways off it are (a) `forceHandoff` — the explicit "go
+    // live via the official uploader instead" escape hatch — or (b) the persisted
+    // `liveUseOfficialUploader` opt-OUT (default false → native). We use a dedicated
+    // key (not the legacy `nativeUploadOptIn`, whose default-false meant "native off")
+    // so existing users' stored values aren't silently inverted: an unset key resolves
+    // to false = native, which is the new default for everyone.
+    const preferOfficial =
+      forceHandoff || (await getSetting<boolean>("liveUseOfficialUploader", false));
+
+    // Native needs the in-app ESO Logs upload session (the wcl_session cookie), which
+    // is SEPARATE from the profile login that gates this dialog (authUser/isLoggedIn).
+    // A user can be "signed in" to the dialog yet have no upload session — the old
+    // behaviour then silently handed off to the official uploader, which is exactly the
+    // surprise we're fixing. So when native is wanted but there's no session, prompt the
+    // capture inline and proceed native once it lands; only fall back to handoff if the
+    // user cancels/the capture fails.
+    let liveHasSession = await invokeOrThrow<boolean>("uploader_has_session").catch(() => false);
+    if (!preferOfficial && !liveHasSession) {
+      // Bail if the start was superseded while we were checking (mirror of the
+      // pre-start abort check below) before opening a sign-in window.
+      if (liveSessionIdRef.current !== sessionId) {
+        startingRef.current = false;
+        setStarting(false);
+        return;
+      }
+      setLiveStatus("attention");
+      const signedIn = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs")
+        .then((r) => {
+          warnIfSessionNotPersisted(r);
+          return true;
+        })
+        .catch(() => false);
+      // Re-read the session: the capture either populated the cookie or it didn't.
+      liveHasSession = signedIn
+        ? await invokeOrThrow<boolean>("uploader_has_session").catch(() => false)
+        : false;
+      // Keep the lifted state in sync so the header readout/Direct Upload section
+      // reflect the freshly captured (or still-missing) session.
+      void refreshNativeState();
+      // A stop / mode-switch could have landed during the sign-in window.
+      if (liveSessionIdRef.current !== sessionId) {
+        startingRef.current = false;
+        setStarting(false);
+        return;
+      }
+      // Toast AFTER the abort re-check (and only for the still-current session) so a
+      // Stop-during-sign-in doesn't emit a "streaming via the official uploader"
+      // message for a start that's about to be abandoned.
+      if (!liveHasSession) {
+        toast.info(
+          "Streaming via the ESO Logs Uploader (sign in to ESO Logs for the faster path)."
+        );
+      }
+      setLiveStatus("watching");
+    }
+
+    // Final native decision: wanted AND we have a session (either pre-existing or just
+    // captured). Without a session even after prompting, fall back to the handoff.
+    const nativeOptIn = !preferOfficial && liveHasSession;
 
     // Native only: peek whether a fresh logging session is coming, so the waiting
     // state opens with the right guidance (/encounterlog on vs /reloadui). Best-effort
@@ -1059,7 +1157,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
             Turn your <code className="text-foreground/80">Encounter.log</code> into a shareable
             report on esologs.com — parses, rankings, and full fight breakdowns.
           </DialogDescription>
-          {isLoggedIn && <TransportReadout willUseNative={willUseNative} transport={transport} />}
+          {isLoggedIn && (
+            <TransportReadout willUseNative={activeWillUseNative} transport={transport} />
+          )}
         </DialogHeader>
 
         {!isLoggedIn ? (
@@ -1141,7 +1241,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
                   preflight={preflight}
                   fights={fights}
-                  willUseNative={willUseNative}
+                  willUseNative={activeWillUseNative}
                 />
               )}
 
@@ -1175,7 +1275,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                     options={options}
                     onChange={setOptions}
                     disabled={uploading || liveSessionId !== null}
-                    willUseNative={willUseNative}
+                    willUseNative={activeWillUseNative}
                     fights={fights}
                     whenMs={logs.find((l) => l.path === selectedLog)?.modifiedAtMs ?? null}
                   />
@@ -1749,9 +1849,13 @@ function ModeTab({
         "group relative overflow-hidden rounded-xl p-3 text-left transition-all duration-200",
         "focus-visible:ring-2 focus-visible:ring-sky-400/40 focus-visible:outline-none",
         active
-          ? // RAISED out of the track: a lit sky surface with an outer shadow +
-            // top highlight so the active mode physically reads as selected.
-            "bg-gradient-to-b from-sky-400/[0.16] to-sky-400/[0.06] shadow-[0_4px_14px_-4px_rgba(56,189,248,0.4),inset_0_1px_0_rgba(255,255,255,0.12)]"
+          ? // RAISED out of the well. The lift is built from layered NEUTRAL
+            // shadows (matching the design system's dark-ambient idiom), not a
+            // single saturated blue drop — a tight contact shadow + a soft
+            // ambient shadow give real depth, a hairline ring defines the raised
+            // edge against the dark track, the sky tint is a faint accent glow
+            // (not the lift), and an inset top highlight catches the light.
+            "bg-gradient-to-b from-sky-400/[0.14] to-sky-400/[0.05] ring-1 ring-inset ring-sky-400/25 shadow-[0_1px_2px_rgba(0,0,0,0.5),0_8px_20px_-8px_rgba(0,0,0,0.55),0_0_22px_-12px_rgba(56,189,248,0.55),inset_0_1px_0_rgba(255,255,255,0.14)]"
           : // FLAT in the well: no fill, no border — just sits in the recess.
             "text-muted-foreground hover:bg-white/[0.04]"
       )}
