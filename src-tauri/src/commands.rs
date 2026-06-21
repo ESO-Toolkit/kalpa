@@ -4260,9 +4260,112 @@ fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
     }
 }
 
+/// Restore a per-character (v2) backup by MERGING each stored character subtree
+/// into the matching live SavedVariables file, leaving other characters and all
+/// account-wide data byte-identical. Returns `(restored_file_count, failures)`;
+/// failures are surfaced by the caller (the live data is unchanged on failure of
+/// a given file, and the caller has already taken a safety snapshot).
+fn restore_character_subtrees_merge(
+    backup_path: &Path,
+    sv_dir: &Path,
+    meta: &CharBackupMeta,
+) -> (u32, Vec<String>) {
+    use crate::saved_variables::char_backup::{
+        char_base, extract_character_blocks, merge_character_block,
+    };
+
+    let mut restored: u32 = 0;
+    let mut failed: Vec<String> = Vec::new();
+
+    let base = char_base(meta.character.as_bytes()).to_vec();
+    // Re-extract from the (already-isolated) stored files using the SAME world
+    // filter the backup used, so a known-server backup can never restore a
+    // subtree under a different megaserver even if one somehow leaked into the
+    // stored file. Unknown server -> no filter (account-keyed / any world).
+    let world: Option<&str> =
+        if crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(&meta.server.as_str()) {
+            Some(meta.server.as_str())
+        } else {
+            None
+        };
+
+    let entries = match fs::read_dir(backup_path) {
+        Ok(e) => e,
+        Err(e) => {
+            failed.push(format!("backup: {e}"));
+            return (restored, failed);
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let name_str = name.to_string_lossy().to_string();
+        // Skip the dot-prefixed marker/metadata and any non-.lua file.
+        if name_str.starts_with('.') || path.extension().and_then(|e| e.to_str()) != Some("lua") {
+            continue;
+        }
+        let stored = match fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                failed.push(format!("{name_str}: {e}"));
+                continue;
+            }
+        };
+        let blocks = extract_character_blocks(&stored, &base, world);
+        if blocks.is_empty() {
+            failed.push(format!("{name_str}: no character subtree found in backup"));
+            continue;
+        }
+        let live_path = sv_dir.join(&name_str);
+        let mut live = if live_path.is_file() {
+            match fs::read(&live_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    failed.push(format!("{name_str}: {e}"));
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let mut ok = true;
+        for block in &blocks {
+            match merge_character_block(&live, block) {
+                Ok(merged) => live = merged,
+                Err(e) => {
+                    failed.push(format!("{name_str}: {e}"));
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        match sv_io::write_raw_bytes(sv_dir, &name_str, &live) {
+            Ok(_) => restored += 1,
+            Err(e) => failed.push(format!("{name_str}: {e}")),
+        }
+    }
+
+    (restored, failed)
+}
+
 /// Restore a backup, but first capture the user's current SavedVariables into a
 /// timestamped "auto-before-restore-…" snapshot so the restore can be undone.
 /// If the user has no current SavedVariables, the snapshot step is skipped.
+///
+/// A per-character (v2) backup — identified by its `.kalpa-char-backup.json`
+/// metadata — is restored by MERGING each stored subtree back into the matching
+/// live file (other characters / account-wide data untouched). Every other
+/// backup (manual, auto-before-restore, and LEGACY whole-file character backups
+/// that predate the per-character format) restores by copying whole files.
 #[tauri::command]
 pub async fn restore_backup_safe(
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -4337,24 +4440,39 @@ pub async fn restore_backup_safe(
 
     let mut restored: u32 = 0;
     let mut failed: Vec<String> = Vec::new();
-    let entries = fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {e}"))?;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name() {
-                // Skip dot-prefixed metadata (e.g. the character-backup marker);
-                // it isn't a SavedVariables file and must not land in the game dir.
-                if name.to_str().map(|n| n.starts_with('.')).unwrap_or(false) {
-                    continue;
-                }
-                let dest = sv_dir.join(name);
-                match fs::copy(&path, &dest) {
-                    Ok(_) => restored += 1,
-                    Err(e) => {
-                        failed.push(format!("{}: {}", name.to_string_lossy(), e));
+    match classify_backup_for_restore(&backup_path) {
+        CharRestoreMode::Refuse(reason) => return Err(reason),
+        CharRestoreMode::Merge(meta) => {
+            // Per-character backup: merge each stored subtree into its live file,
+            // leaving other characters and account-wide data untouched.
+            let (r, f) = restore_character_subtrees_merge(&backup_path, &sv_dir, &meta);
+            restored = r;
+            failed = f;
+        }
+        CharRestoreMode::WholeFile => {
+            // Manual / auto-before-restore / legacy whole-file character backup:
+            // copy whole files into the SavedVariables folder.
+            let entries =
+                fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {e}"))?;
+            for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name() {
+                    // Skip dot-prefixed metadata (e.g. the character-backup marker);
+                    // it isn't a SavedVariables file and must not land in the game dir.
+                    if name.to_str().map(|n| n.starts_with('.')).unwrap_or(false) {
+                        continue;
+                    }
+                    let dest = sv_dir.join(name);
+                    match fs::copy(&path, &dest) {
+                        Ok(_) => restored += 1,
+                        Err(e) => {
+                            failed.push(format!("{}: {}", name.to_string_lossy(), e));
+                        }
                     }
                 }
+            }
             }
         }
     }
@@ -4862,68 +4980,34 @@ static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// directory can't race on it (the per-call staging/tombstone handle the rest).
 static BACKUP_FINALIZE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Stream `path` in chunks and report whether it contains any of `needles`.
-/// Uses a raw byte search so non-UTF8 SavedVariables content is handled and the
-/// *entire* file is scanned (no line cap — a character block can sit megabytes
-/// in, after a large account-wide block). Chunk reads overlap by `max_needle-1`
-/// bytes so a needle split across a read boundary is still found.
-fn file_contains_needle(path: &Path, needles: &[&[u8]]) -> std::io::Result<bool> {
-    use std::io::Read;
-
-    let max_len = needles.iter().map(|n| n.len()).max().unwrap_or(0);
-    if max_len == 0 {
-        return Ok(false);
-    }
-    let mut file = fs::File::open(path)?;
-    let mut chunk = vec![0u8; 64 * 1024];
-    let mut window: Vec<u8> = Vec::with_capacity(64 * 1024 + max_len);
-    loop {
-        let n = file.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        window.extend_from_slice(&chunk[..n]);
-        if needles
-            .iter()
-            .any(|needle| window.windows(needle.len()).any(|w| w == *needle))
-        {
-            return Ok(true);
-        }
-        // Keep the last (max_len - 1) bytes so a needle straddling the boundary
-        // with the next chunk is still detected.
-        let keep = max_len - 1;
-        if window.len() > keep {
-            let drop = window.len() - keep;
-            window.drain(..drop);
-        }
-    }
-    Ok(false)
-}
-
-/// Scan `.lua` SavedVariables files under `sv_dir` for `character_name` and copy
-/// every match into `staging`. Matches the cleaned name `["Name"]` and the raw
-/// caret form `["Name^...` a minority of addons store. Returns
-/// `(matched, copied, last_copy_err)` where `matched` is files containing the
-/// character and `copied` is files successfully staged.
+/// Extract `character_name`'s per-character subtree from each `.lua`
+/// SavedVariables file and write a minimal, self-contained, restorable copy of
+/// just that subtree into `staging` (same filename). `world` restricts
+/// world-scoped subtrees to a single megaserver (`None` = take any, used for
+/// `Unknown`-server recovered characters). Account-wide data and other
+/// characters are excluded.
 ///
-/// Aborts with `Err` if any `.lua` file cannot be opened or fully read: an
-/// incomplete scan must never be allowed to silently produce an incomplete
-/// backup (which could then replace a good one).
-fn scan_and_stage_character_files(
+/// Returns `(matched, copied, last_err)` where `matched` is files that yielded at
+/// least one subtree and `copied` is files whose minimal copy was written.
+/// Aborts with `Err` if any `.lua` file cannot be read, so an incomplete scan
+/// never produces an incomplete backup that could replace a good one.
+fn stage_character_subtrees(
     sv_dir: &Path,
     character_name: &str,
+    world: Option<&str>,
     staging: &Path,
 ) -> Result<(u32, u32, Option<String>), String> {
-    // Bracket-quote delimiters avoid false positives (e.g. "Lib" vs "LibStub").
-    let needle_exact = format!("[\"{character_name}\"]");
-    let needle_caret = format!("[\"{character_name}^");
-    let needles: [&[u8]; 2] = [needle_exact.as_bytes(), needle_caret.as_bytes()];
+    use crate::saved_variables::char_backup::{
+        build_backup_file, char_base, extract_character_blocks,
+    };
+
+    let base = char_base(character_name.as_bytes()).to_vec();
 
     let entries =
         fs::read_dir(sv_dir).map_err(|e| format!("Failed to read SavedVariables folder: {e}"))?;
     let mut matched: u32 = 0;
     let mut copied: u32 = 0;
-    let mut last_copy_err: Option<String> = None;
+    let mut last_err: Option<String> = None;
 
     for entry in entries {
         // Abort on a directory-enumeration error rather than silently omitting a
@@ -4938,20 +5022,26 @@ fn scan_and_stage_character_files(
             .and_then(|n| n.to_str())
             .unwrap_or("?")
             .to_string();
-        let found = file_contains_needle(&path, &needles)
-            .map_err(|e| format!("Could not read {fname}: {e}"))?;
-        if found {
-            matched += 1;
-            if let Some(name) = path.file_name() {
-                match fs::copy(&path, staging.join(name)) {
-                    Ok(_) => copied += 1,
-                    Err(e) => last_copy_err = Some(e.to_string()),
-                }
-            }
+        // Read raw bytes (non-UTF8 safe) and abort on any read error.
+        let bytes = fs::read(&path).map_err(|e| format!("Could not read {fname}: {e}"))?;
+        let blocks = extract_character_blocks(&bytes, &base, world);
+        if blocks.is_empty() {
+            continue;
+        }
+        matched += 1;
+        match build_backup_file(&blocks) {
+            Ok(content) => match fs::write(staging.join(&fname), &content) {
+                Ok(_) => copied += 1,
+                Err(e) => last_err = Some(e.to_string()),
+            },
+            // A subtree we couldn't safely represent/validate: leave copied <
+            // matched so the caller fails closed rather than installing a
+            // partial backup.
+            Err(e) => last_err = Some(e),
         }
     }
 
-    Ok((matched, copied, last_copy_err))
+    Ok((matched, copied, last_err))
 }
 
 /// Atomically replace `final_dir` with `staging`, preserving the previous
@@ -5064,9 +5154,126 @@ fn recover_orphaned_backups(backups_root: &Path) {
 }
 
 /// Marker file written inside every character backup directory to label it as
-/// one (e.g. for future tooling). Dot-prefixed so it is excluded from backup
-/// file counts and restores.
+/// one. Dot-prefixed so it is excluded from backup file counts and restores.
+/// `char_backup_replaceable` keys off this exact FILENAME, so every character
+/// backup — legacy whole-file OR new per-character — writes it. The marker's
+/// CONTENT distinguishes the format (see [`CHAR_BACKUP_MARKER_V2_BODY`]).
 const CHAR_BACKUP_MARKER: &str = ".kalpa-char-backup";
+
+/// Marker file CONTENT written by the per-character (subtree) backup format. A
+/// legacy whole-file character backup wrote `"kalpa character backup\n"` (no
+/// version). The version lives in the marker — which is always present and is the
+/// same file `char_backup_replaceable` already requires — so a per-character
+/// backup is positively identifiable for restore even if its `.json` metadata
+/// sidecar is later lost (in which case restore fails closed rather than
+/// whole-file-copying minimal subtree files over live data).
+const CHAR_BACKUP_MARKER_V2_BODY: &[u8] = b"kalpa character backup v2\n";
+
+/// Prefix that identifies a per-character (v2+) marker body.
+const CHAR_BACKUP_MARKER_V2_PREFIX: &[u8] = b"kalpa character backup v2";
+
+/// Metadata sidecar written by the per-character (subtree) backup format. Carries
+/// the data restore needs to re-extract and merge the stored subtrees. Restore
+/// requires both the v2 marker AND a valid sidecar at the current version.
+/// Dot-prefixed so it stays out of `list_backups` counts and file restores.
+const CHAR_BACKUP_META: &str = ".kalpa-char-backup.json";
+
+/// Format version for the per-character backup metadata. Bump if the on-disk
+/// representation changes incompatibly.
+const CHAR_BACKUP_VERSION: u32 = 2;
+
+/// Sidecar metadata for a per-character (subtree) backup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CharBackupMeta {
+    /// Format version (currently [`CHAR_BACKUP_VERSION`]).
+    version: u32,
+    /// The character's normalized (caret-stripped) name — used to re-extract the
+    /// stored subtrees on restore.
+    character: String,
+    /// The character's megaserver as shown in the UI (a known megaserver, or
+    /// `Unknown`); informational/display only.
+    server: String,
+}
+
+/// How `restore_backup_safe` should restore a backup directory.
+enum CharRestoreMode {
+    /// A per-character (v2) backup with valid metadata: MERGE its subtrees.
+    Merge(CharBackupMeta),
+    /// A manual / auto-before-restore / legacy whole-file backup: copy whole files.
+    WholeFile,
+    /// A per-character backup we can't restore safely (missing/unsupported
+    /// metadata): refuse rather than risk corrupting live data.
+    Refuse(String),
+}
+
+/// Classify a backup directory for restore. A directory is treated as a
+/// per-character (v2) backup when its marker carries the v2 body OR a metadata
+/// sidecar is present; such a directory is restored by MERGE only with a valid,
+/// current-version sidecar — otherwise it is refused (never whole-file-copied, as
+/// that would splat minimal subtree files over live SavedVariables). Everything
+/// else (manual, auto-before-restore, legacy whole-file character backups) is
+/// restored by whole-file copy.
+///
+/// File-access ERRORS are never collapsed with absence: if the marker or the
+/// sidecar exists but can't be read, the directory is REFUSED rather than risk
+/// taking the whole-file path on what might be a per-character backup.
+fn classify_backup_for_restore(backup_path: &Path) -> CharRestoreMode {
+    use std::io::ErrorKind::NotFound;
+
+    let refuse = |msg: &str| CharRestoreMode::Refuse(msg.to_string());
+
+    // Read the marker, distinguishing "confirmed absent" (NotFound) from a read
+    // error (present but unreadable). Never collapse the two — a read error on a
+    // possible per-character backup must fail closed.
+    let marker = match fs::read(backup_path.join(CHAR_BACKUP_MARKER)) {
+        Ok(c) => Some(c),
+        Err(e) if e.kind() == NotFound => None,
+        Err(_) => {
+            return refuse(
+                "This character backup's marker is present but unreadable, so it \
+                 can't be restored safely.",
+            )
+        }
+    };
+    let v2_marker = marker
+        .as_deref()
+        .is_some_and(|c| c.starts_with(CHAR_BACKUP_MARKER_V2_PREFIX));
+
+    // Read the metadata sidecar directly (no `exists()`/`try_exists()` probe,
+    // which would collapse access errors into "absent"). Classify on the result:
+    match fs::read(backup_path.join(CHAR_BACKUP_META)) {
+        Ok(bytes) => match serde_json::from_slice::<CharBackupMeta>(&bytes) {
+            Ok(m) if m.version == CHAR_BACKUP_VERSION => CharRestoreMode::Merge(m),
+            Ok(m) => CharRestoreMode::Refuse(format!(
+                "This character backup uses an unsupported format (version {}). \
+                 Update Kalpa to restore it.",
+                m.version
+            )),
+            Err(_) => refuse(
+                "This character backup's metadata is corrupt, so it can't be \
+                 restored safely.",
+            ),
+        },
+        // Metadata CONFIRMED absent: a per-character (v2) marker without it is a
+        // degraded backup we must refuse; otherwise there is no per-character
+        // signal at all → manual / auto / legacy whole-file backup.
+        Err(e) if e.kind() == NotFound => {
+            if v2_marker {
+                refuse(
+                    "This character backup is missing its metadata, so it can't be \
+                     restored safely.",
+                )
+            } else {
+                CharRestoreMode::WholeFile
+            }
+        }
+        // Metadata present but unreadable → fail closed.
+        Err(_) => refuse(
+            "This character backup's metadata is present but unreadable, so it \
+             can't be restored safely.",
+        ),
+    }
+}
 
 /// Whether a character backup may be installed at `final_dir` by replacing
 /// whatever is there: true only when the path is absent or is a marked character
@@ -5101,6 +5308,7 @@ pub fn backup_character_settings(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     character_name: String,
+    server: String,
     backup_name: String,
 ) -> Result<u32, String> {
     if character_name.trim().is_empty() {
@@ -5115,6 +5323,17 @@ pub fn backup_character_settings(
     if !sv_dir.is_dir() {
         return Err("SavedVariables folder not found.".to_string());
     }
+
+    // Restrict world-scoped subtrees to this character's megaserver so a same-name
+    // NA/EU twin is backed up independently. A non-megaserver `server` (the
+    // `Unknown` recovered bucket) means we can't isolate by world, so we take any
+    // world-scoped occurrence (and account-keyed data, which carries no world).
+    let world: Option<&str> =
+        if crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(&server.as_str()) {
+            Some(server.as_str())
+        } else {
+            None
+        };
 
     // Stage into a dot-prefixed temp dir on the same volume, then atomically
     // rename into place only after every matched file copies. This keeps a
@@ -5144,10 +5363,11 @@ pub fn backup_character_settings(
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
-    // Scan + stage. Aborts if any file can't be fully read, so an incomplete
-    // scan never silently produces (or installs) an incomplete backup.
+    // Extract + stage just this character's per-character subtree(s) from each
+    // file. Aborts if any file can't be read, so an incomplete scan never
+    // silently produces (or installs) an incomplete backup.
     let (matched, copied, last_copy_err) =
-        match scan_and_stage_character_files(&sv_dir, &character_name, &staging) {
+        match stage_character_subtrees(&sv_dir, &character_name, world, &staging) {
             Ok(counts) => counts,
             Err(e) => {
                 let _ = fs::remove_dir_all(&staging);
@@ -5160,9 +5380,10 @@ pub fn backup_character_settings(
         };
 
     if matched == 0 {
-        // No file held this character's data — discard the staging dir and don't
-        // report success. A character with only account-wide addon settings has
-        // no per-character SavedVariables data to copy.
+        // No file held this character's per-character data — discard staging and
+        // don't report success. A character with only account-wide addon settings
+        // (or, for a known server, data only under the OTHER megaserver) has no
+        // per-character subtree to copy.
         let _ = fs::remove_dir_all(&staging);
         return Err(format!(
             "No per-character SavedVariables data found for \"{character_name}\". \
@@ -5171,29 +5392,47 @@ pub fn backup_character_settings(
     }
 
     if copied < matched {
-        // Files matched but at least one copy failed (permissions, locked
-        // destination, disk error) — discard the partial staging dir and surface
-        // it instead of leaving a restorable incomplete backup.
+        // A subtree matched but couldn't be written or safely represented —
+        // discard the partial staging dir and surface it instead of leaving a
+        // restorable incomplete backup.
         let _ = fs::remove_dir_all(&staging);
         let detail = last_copy_err.map(|e| format!(" ({e})")).unwrap_or_default();
         return Err(format!(
             "Backed up only {copied} of {matched} SavedVariables files for \
-             \"{character_name}\"; some files could not be copied{detail}."
+             \"{character_name}\"; some files could not be saved{detail}."
         ));
     }
 
-    // Stamp the staged dir as a character backup so a later backup can tell it
-    // apart from a manual/legacy `char-*` directory before replacing it.
-    if let Err(e) = fs::write(
-        staging.join(CHAR_BACKUP_MARKER),
-        b"kalpa character backup\n",
-    ) {
+    // Stamp the staged dir as a per-character (v2) backup. The versioned marker
+    // body positively identifies the format for restore (independent of the JSON
+    // sidecar), while the filename is what `char_backup_replaceable` checks.
+    if let Err(e) = fs::write(staging.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY) {
         let _ = fs::remove_dir_all(&staging);
         return Err(format!("Failed to write backup marker: {e}"));
     }
 
-    // All matched files copied — install atomically, preserving any prior backup
-    // of this name if finalization fails.
+    // Write the per-character metadata sidecar. Its presence routes restore
+    // through the subtree-MERGE path (vs. the legacy whole-file copy).
+    let meta = CharBackupMeta {
+        version: CHAR_BACKUP_VERSION,
+        character: character_name.clone(),
+        server: server.clone(),
+    };
+    match serde_json::to_vec_pretty(&meta) {
+        Ok(json) => {
+            if let Err(e) = fs::write(staging.join(CHAR_BACKUP_META), json) {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(format!("Failed to write backup metadata: {e}"));
+            }
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Failed to serialize backup metadata: {e}"));
+        }
+    }
+
+    // All subtrees staged — install atomically, preserving any prior backup of
+    // this name if finalization fails.
     finalize_backup_replace(&staging, &final_dir, &tombstone)
         .map_err(|e| format!("Failed to finalize backup: {e}"))?;
 
@@ -7929,71 +8168,231 @@ mod tests {
         assert!(validate_backup_name("character-naming").is_ok());
     }
 
+    /// A world-scoped NA/EU twin file plus a non-.lua decoy.
+    fn write_twin_sv(sv: &Path) {
+        fs::create_dir_all(sv).unwrap();
+        fs::write(
+            sv.join("Addon.lua"),
+            concat!(
+                "Addon =\n{\n\t[\"Default\"] =\n\t{\n",
+                "\t\t[\"NA Megaserver\"] =\n\t\t{\n\t\t\t[\"@me\"] =\n\t\t\t{\n",
+                "\t\t\t\t[\"Bob\"] = { [\"loc\"] = \"NA\" },\n\t\t\t},\n\t\t},\n",
+                "\t\t[\"EU Megaserver\"] =\n\t\t{\n\t\t\t[\"@me\"] =\n\t\t\t{\n",
+                "\t\t\t\t[\"Bob\"] = { [\"loc\"] = \"EU\" },\n\t\t\t},\n\t\t},\n\t},\n}\n"
+            ),
+        )
+        .unwrap();
+        // Non-.lua file is ignored even though it mentions the name.
+        fs::write(sv.join("notes.txt"), "[\"Bob\"]").unwrap();
+    }
+
     #[test]
-    fn scan_and_stage_matches_exact_and_caret_lua_files() {
+    fn stage_subtrees_isolates_world_scoped_twin() {
         let tmp = tempfile::tempdir().unwrap();
         let sv = tmp.path().join("SavedVariables");
-        fs::create_dir_all(&sv).unwrap();
-        fs::write(sv.join("A.lua"), "[\"Faewynd\"] = {}\n").unwrap();
-        fs::write(sv.join("B.lua"), "[\"Someone\"] = {}\n").unwrap();
-        fs::write(sv.join("C.lua"), "[\"Faewynd^Mx\"] = {}\n").unwrap();
-        // Non-.lua files are ignored even if they contain the name.
-        fs::write(sv.join("notes.txt"), "[\"Faewynd\"]").unwrap();
+        write_twin_sv(&sv);
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
         let (matched, copied, err) =
-            scan_and_stage_character_files(&sv, "Faewynd", &staging).unwrap();
-
-        assert_eq!(matched, 2);
-        assert_eq!(copied, 2);
+            stage_character_subtrees(&sv, "Bob", Some("NA Megaserver"), &staging).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(copied, 1);
         assert!(err.is_none());
-        assert!(staging.join("A.lua").is_file());
-        assert!(staging.join("C.lua").is_file());
-        assert!(!staging.join("B.lua").exists());
+
+        // The staged minimal file holds NA Bob but not EU Bob.
+        let staged = fs::read(staging.join("Addon.lua")).unwrap();
+        let s = String::from_utf8(staged).unwrap();
+        assert!(s.contains("\"NA\""));
+        assert!(!s.contains("\"EU\""));
         assert!(!staging.join("notes.txt").exists());
     }
 
     #[test]
-    fn scan_handles_non_utf8_and_finds_byte_match() {
+    fn stage_subtrees_matched_zero_for_wrong_server() {
+        // Backing up an NA character whose data only exists under EU yields no
+        // subtree, so the backup correctly reports "no per-character data".
         let tmp = tempfile::tempdir().unwrap();
         let sv = tmp.path().join("SavedVariables");
         fs::create_dir_all(&sv).unwrap();
-        // Invalid UTF-8 bytes followed by the character key: byte search still
-        // matches, and the non-UTF8 content does not abort the scan.
-        let mut bytes = vec![0xff_u8, 0xfe, 0x00, b'\n'];
-        bytes.extend_from_slice(b"[\"Faewynd\"] = {}\n");
-        fs::write(sv.join("weird.lua"), &bytes).unwrap();
+        fs::write(
+            sv.join("Addon.lua"),
+            concat!(
+                "Addon =\n{\n\t[\"Default\"] =\n\t{\n",
+                "\t\t[\"EU Megaserver\"] =\n\t\t{\n\t\t\t[\"@me\"] =\n\t\t\t{\n",
+                "\t\t\t\t[\"Bob\"] = { [\"loc\"] = \"EU\" },\n\t\t\t},\n\t\t},\n\t},\n}\n"
+            ),
+        )
+        .unwrap();
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let (matched, copied, err) =
-            scan_and_stage_character_files(&sv, "Faewynd", &staging).unwrap();
-        assert_eq!(matched, 1);
-        assert_eq!(copied, 1);
-        assert!(err.is_none());
+        let (matched, _, _) =
+            stage_character_subtrees(&sv, "Bob", Some("NA Megaserver"), &staging).unwrap();
+        assert_eq!(matched, 0);
     }
 
     #[test]
-    fn scan_finds_character_past_old_line_cap() {
+    fn stage_subtrees_non_utf8_value_is_staged() {
         let tmp = tempfile::tempdir().unwrap();
         let sv = tmp.path().join("SavedVariables");
         fs::create_dir_all(&sv).unwrap();
-        // Character key sits well past the former 10,000-line cap.
-        let mut content = String::with_capacity(300_000);
-        for _ in 0..10_050 {
-            content.push_str("[\"filler\"] = 1,\n");
-        }
-        content.push_str("[\"Faewynd\"] = {}\n");
-        fs::write(sv.join("big.lua"), content).unwrap();
+        let mut bytes: Vec<u8> = concat!(
+            "Addon =\n{\n\t[\"Default\"] =\n\t{\n\t\t[\"@me\"] =\n\t\t{\n",
+            "\t\t\t[\"Bob\"] = { [\"icon\"] = \""
+        )
+        .as_bytes()
+        .to_vec();
+        bytes.extend_from_slice(&[0xff, 0xfe, 0x00]);
+        bytes.extend_from_slice(b"\" },\n\t\t},\n\t},\n}\n");
+        fs::write(sv.join("Addon.lua"), &bytes).unwrap();
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let (matched, copied, _) =
-            scan_and_stage_character_files(&sv, "Faewynd", &staging).unwrap();
-        assert_eq!(matched, 1);
-        assert_eq!(copied, 1);
-        assert!(staging.join("big.lua").is_file());
+        let (matched, copied, err) = stage_character_subtrees(&sv, "Bob", None, &staging).unwrap();
+        assert_eq!((matched, copied), (1, 1));
+        assert!(err.is_none());
+        let staged = fs::read(staging.join("Addon.lua")).unwrap();
+        assert!(staged.contains(&0xff), "non-UTF8 byte preserved in backup");
+    }
+
+    #[test]
+    fn classify_backup_for_restore_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let good_meta = serde_json::to_vec(&CharBackupMeta {
+            version: CHAR_BACKUP_VERSION,
+            character: "Bob".to_string(),
+            server: "NA Megaserver".to_string(),
+        })
+        .unwrap();
+
+        // v2 marker + valid metadata -> Merge.
+        let d = root.join("v2-ok");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY).unwrap();
+        fs::write(d.join(CHAR_BACKUP_META), &good_meta).unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Merge(_)
+        ));
+
+        // v2 marker but the metadata sidecar was lost -> Refuse (NEVER whole-file,
+        // which would splat minimal subtree files over live data).
+        let d = root.join("v2-lost-meta");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY).unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Refuse(_)
+        ));
+
+        // Metadata claims a newer version than we support -> Refuse.
+        let d = root.join("v2-future");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY).unwrap();
+        fs::write(
+            d.join(CHAR_BACKUP_META),
+            br#"{"version":99,"character":"Bob","server":"NA Megaserver"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Refuse(_)
+        ));
+
+        // v2 marker + corrupt (non-JSON) metadata -> Refuse.
+        let d = root.join("v2-corrupt");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY).unwrap();
+        fs::write(d.join(CHAR_BACKUP_META), b"not json at all").unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Refuse(_)
+        ));
+
+        // A sidecar present without a v2 marker is still treated as a
+        // per-character candidate (fail-closed): valid sidecar -> Merge.
+        let d = root.join("meta-only");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_META), &good_meta).unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Merge(_)
+        ));
+
+        // Legacy whole-file character backup (old marker body, no sidecar) -> WholeFile.
+        let d = root.join("legacy");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), b"kalpa character backup\n").unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::WholeFile
+        ));
+
+        // Manual / auto backup (no marker at all) -> WholeFile.
+        let d = root.join("manual");
+        fs::create_dir_all(&d).unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::WholeFile
+        ));
+    }
+
+    #[test]
+    fn char_backup_merge_restore_isolates_target() {
+        use crate::saved_variables::char_backup::{build_backup_file, extract_character_blocks};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sv = tmp.path().join("SavedVariables");
+        write_twin_sv(&sv);
+        let live_file = sv.join("Addon.lua");
+        let original = fs::read(&live_file).unwrap();
+
+        // Build a v2 backup dir for NA Bob.
+        let backup_dir = tmp.path().join("char-Bob-backup");
+        fs::create_dir_all(&backup_dir).unwrap();
+        let blocks = extract_character_blocks(&original, b"Bob", Some("NA Megaserver"));
+        let content = build_backup_file(&blocks).unwrap();
+        fs::write(backup_dir.join("Addon.lua"), &content).unwrap();
+        fs::write(
+            backup_dir.join(CHAR_BACKUP_MARKER),
+            CHAR_BACKUP_MARKER_V2_BODY,
+        )
+        .unwrap();
+        let meta = CharBackupMeta {
+            version: CHAR_BACKUP_VERSION,
+            character: "Bob".to_string(),
+            server: "NA Megaserver".to_string(),
+        };
+        fs::write(
+            backup_dir.join(CHAR_BACKUP_META),
+            serde_json::to_vec(&meta).unwrap(),
+        )
+        .unwrap();
+
+        // Mutate the live file (NA and EU Bob).
+        let mutated = String::from_utf8(original.clone())
+            .unwrap()
+            .replace("\"NA\"", "\"NA-changed\"")
+            .replace("\"EU\"", "\"EU-changed\"");
+        fs::write(&live_file, &mutated).unwrap();
+
+        // Sanity: the v2 dir we built classifies as a Merge restore.
+        assert!(matches!(
+            classify_backup_for_restore(&backup_dir),
+            CharRestoreMode::Merge(_)
+        ));
+
+        // Restore: merge only NA Bob's subtree back.
+        let (restored, failed) = restore_character_subtrees_merge(&backup_dir, &sv, &meta);
+        assert_eq!(restored, 1, "one file restored; failures: {failed:?}");
+        assert!(failed.is_empty());
+
+        let after = String::from_utf8(fs::read(&live_file).unwrap()).unwrap();
+        assert!(after.contains("\"NA\""), "NA Bob reverted to backup");
+        assert!(!after.contains("\"NA-changed\""));
+        assert!(after.contains("\"EU-changed\""), "EU Bob left untouched");
     }
 
     #[test]
