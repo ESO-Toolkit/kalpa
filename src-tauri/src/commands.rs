@@ -4404,7 +4404,11 @@ pub fn delete_backup(
 ) -> Result<(), String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let backup_path = backups_dir(&addons_dir).join(&backup_name);
+    let backups_root = backups_dir(&addons_dir);
+    // Reconcile crash leftovers before deleting so a deletion can't race with a
+    // pending recovery for the same backup name.
+    recover_orphaned_backups(&backups_root);
+    let backup_path = backups_root.join(&backup_name);
 
     if !backup_path.is_dir() {
         return Err(format!("Backup '{backup_name}' not found."));
@@ -4415,7 +4419,7 @@ pub fn delete_backup(
     // Also purge any leftover staging/tombstone scratch dirs for this backup so a
     // crash-recovery pass can't later resurrect a deleted character backup from a
     // tombstone that outlived a successful swap (e.g. failed cleanup).
-    purge_backup_scratch(&backups_dir(&addons_dir), &backup_name);
+    purge_backup_scratch(&backups_root, &backup_name);
     Ok(())
 }
 
@@ -4918,7 +4922,10 @@ fn scan_and_stage_character_files(
     let mut copied: u32 = 0;
     let mut last_copy_err: Option<String> = None;
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        // Abort on a directory-enumeration error rather than silently omitting a
+        // file (which could finalize an incomplete backup over a good one).
+        let entry = entry.map_err(|e| format!("Failed to enumerate SavedVariables: {e}"))?;
         let path = entry.path();
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("lua") {
             continue;
@@ -5080,6 +5087,13 @@ pub fn backup_character_settings(
     // sequence number makes the staging/tombstone unique so concurrent backups
     // don't collide; the `.` prefix keeps them out of `list_backups`.
     let backups_root = backups_dir(&addons_dir);
+    // Recover any crash-orphaned backup BEFORE touching scratch paths. The
+    // sequence counter resets on restart, so a retried backup of the same name
+    // could otherwise reuse a crash leftover's staging name and destroy the proof
+    // that recovery relies on. Running recovery first restores/cleans the leftover
+    // before this attempt can collide with it.
+    recover_orphaned_backups(&backups_root);
+
     let final_dir = backups_root.join(format!("char-{backup_name}"));
     // Refuse to overwrite a directory we didn't create as a character backup
     // (e.g. a legacy/manual backup that happens to share the `char-` prefix).
@@ -6905,7 +6919,15 @@ fn for_each_sv_tree(
     };
 
     let mut skipped = 0usize;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => {
+                // Couldn't enumerate this entry — count it so the roster can warn.
+                skipped += 1;
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("lua") {
             continue;
