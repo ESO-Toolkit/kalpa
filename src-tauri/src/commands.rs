@@ -5219,7 +5219,9 @@ fn classify_backup_for_restore(backup_path: &Path) -> CharRestoreMode {
 
     let refuse = |msg: &str| CharRestoreMode::Refuse(msg.to_string());
 
-    // Read the marker, distinguishing "absent" from "present but unreadable".
+    // Read the marker, distinguishing "confirmed absent" (NotFound) from a read
+    // error (present but unreadable). Never collapse the two — a read error on a
+    // possible per-character backup must fail closed.
     let marker = match fs::read(backup_path.join(CHAR_BACKUP_MARKER)) {
         Ok(c) => Some(c),
         Err(e) if e.kind() == NotFound => None,
@@ -5234,18 +5236,9 @@ fn classify_backup_for_restore(backup_path: &Path) -> CharRestoreMode {
         .as_deref()
         .is_some_and(|c| c.starts_with(CHAR_BACKUP_MARKER_V2_PREFIX));
 
-    let meta_path = backup_path.join(CHAR_BACKUP_META);
-    let has_meta_file = meta_path.exists();
-
-    if !v2_marker && !has_meta_file {
-        // Confirmed absence of any per-character signal → manual / auto / legacy
-        // whole-file backup.
-        return CharRestoreMode::WholeFile;
-    }
-
-    // Per-character candidate: require a readable, current-version sidecar to
-    // MERGE; anything else fails closed (never whole-file).
-    match fs::read(&meta_path) {
+    // Read the metadata sidecar directly (no `exists()`/`try_exists()` probe,
+    // which would collapse access errors into "absent"). Classify on the result:
+    match fs::read(backup_path.join(CHAR_BACKUP_META)) {
         Ok(bytes) => match serde_json::from_slice::<CharBackupMeta>(&bytes) {
             Ok(m) if m.version == CHAR_BACKUP_VERSION => CharRestoreMode::Merge(m),
             Ok(m) => CharRestoreMode::Refuse(format!(
@@ -5258,9 +5251,23 @@ fn classify_backup_for_restore(backup_path: &Path) -> CharRestoreMode {
                  restored safely.",
             ),
         },
+        // Metadata CONFIRMED absent: a per-character (v2) marker without it is a
+        // degraded backup we must refuse; otherwise there is no per-character
+        // signal at all → manual / auto / legacy whole-file backup.
+        Err(e) if e.kind() == NotFound => {
+            if v2_marker {
+                refuse(
+                    "This character backup is missing its metadata, so it can't be \
+                     restored safely.",
+                )
+            } else {
+                CharRestoreMode::WholeFile
+            }
+        }
+        // Metadata present but unreadable → fail closed.
         Err(_) => refuse(
-            "This character backup's metadata is missing or unreadable, so it can't \
-             be restored safely.",
+            "This character backup's metadata is present but unreadable, so it \
+             can't be restored safely.",
         ),
     }
 }
