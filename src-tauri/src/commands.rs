@@ -4069,12 +4069,18 @@ pub fn list_backups(
             continue;
         }
 
-        // Count files and total size
+        // Count files and total size (skip dot-prefixed metadata like the
+        // character-backup marker so the count reflects real SavedVariables).
         let mut file_count: u32 = 0;
         let mut total_size: u64 = 0;
         if let Ok(files) = fs::read_dir(&path) {
             for f in files.flatten() {
-                if f.path().is_file() {
+                let is_dotfile = f
+                    .file_name()
+                    .to_str()
+                    .map(|n| n.starts_with('.'))
+                    .unwrap_or(false);
+                if f.path().is_file() && !is_dotfile {
                     file_count += 1;
                     total_size += f.metadata().map(|m| m.len()).unwrap_or(0);
                 }
@@ -4337,6 +4343,11 @@ pub async fn restore_backup_safe(
         let path = entry.path();
         if path.is_file() {
             if let Some(name) = path.file_name() {
+                // Skip dot-prefixed metadata (e.g. the character-backup marker);
+                // it isn't a SavedVariables file and must not land in the game dir.
+                if name.to_str().map(|n| n.starts_with('.')).unwrap_or(false) {
+                    continue;
+                }
                 let dest = sv_dir.join(name);
                 match fs::copy(&path, &dest) {
                     Ok(_) => restored += 1,
@@ -4968,6 +4979,20 @@ fn recover_orphaned_backups(backups_root: &Path) {
     }
 }
 
+/// Marker file written inside every character backup directory. Lets us tell a
+/// genuine character backup apart from a legacy/manual directory that merely
+/// shares the `char-` prefix, so the transactional swap never overwrites the
+/// latter. Dot-prefixed so it is excluded from backup file counts and restores.
+const CHAR_BACKUP_MARKER: &str = ".kalpa-char-backup";
+
+/// Whether installing a character backup at `final_dir` is safe: true when no
+/// directory is there yet, or when the existing one is a marked character backup
+/// (and may be replaced). A `char-*` directory without the marker (a legacy or
+/// manual backup) is NOT replaceable.
+fn char_backup_replaceable(final_dir: &Path) -> bool {
+    !final_dir.exists() || final_dir.join(CHAR_BACKUP_MARKER).is_file()
+}
+
 #[tauri::command]
 pub fn backup_character_settings(
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -4996,6 +5021,14 @@ pub fn backup_character_settings(
     // don't collide; the `.` prefix keeps them out of `list_backups`.
     let backups_root = backups_dir(&addons_dir);
     let final_dir = backups_root.join(format!("char-{backup_name}"));
+    // Refuse to overwrite a directory we didn't create as a character backup
+    // (e.g. a legacy/manual backup that happens to share the `char-` prefix).
+    if !char_backup_replaceable(&final_dir) {
+        return Err(format!(
+            "A backup named \"char-{backup_name}\" already exists and was not created as a \
+             character backup. Choose a different backup name or delete it first."
+        ));
+    }
     let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let staging = backups_root.join(format!(".tmp-char-{backup_name}-{seq}"));
     let tombstone = backups_root.join(format!(".old-char-{backup_name}-{seq}"));
@@ -5038,6 +5071,16 @@ pub fn backup_character_settings(
             "Backed up only {copied} of {matched} SavedVariables files for \
              \"{character_name}\"; some files could not be copied{detail}."
         ));
+    }
+
+    // Stamp the staged dir as a character backup so a later backup can tell it
+    // apart from a manual/legacy `char-*` directory before replacing it.
+    if let Err(e) = fs::write(
+        staging.join(CHAR_BACKUP_MARKER),
+        b"kalpa character backup\n",
+    ) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("Failed to write backup marker: {e}"));
     }
 
     // All matched files copied — install atomically, preserving any prior backup
@@ -6783,10 +6826,11 @@ pub async fn import_sv_settings(
 /// and invoke `visit` with its tree. Centralizes the directory walk shared by
 /// the scrub identity scan and the Characters roster scan.
 ///
-/// When `max_file_bytes` is `Some`, files larger than the cap are skipped (and
-/// counted in the return value) so a single pathological SavedVariables file
-/// cannot blow up memory. `None` means no cap (the scrub/export path needs every
-/// identity for correctness). Returns the number of files skipped due to size.
+/// When `max_file_bytes` is `Some`, files larger than the cap are skipped so a
+/// single pathological SavedVariables file cannot blow up memory. `None` means
+/// no cap (the scrub/export path needs every identity for correctness). Returns
+/// the number of `.lua` files skipped for ANY reason (size, unreadable, or
+/// parse failure) so a caller relying on completeness can react.
 fn for_each_sv_tree(
     addons_dir: &Path,
     max_file_bytes: Option<u64>,
@@ -6816,7 +6860,10 @@ fn for_each_sv_tree(
         }
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
         let file_name = path
             .file_name()
@@ -6825,7 +6872,10 @@ fn for_each_sv_tree(
             .to_string();
         let tree = match parse_sv_file(&content, &file_name) {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
         visit(&tree);
     }
@@ -6894,7 +6944,7 @@ fn collect_roster_characters(addons_dir: &Path) -> Vec<(String, Option<String>)>
         std::collections::BTreeMap::new();
     let mut all_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
-    for_each_sv_tree(addons_dir, Some(ROSTER_MAX_FILE_BYTES), |tree| {
+    let skipped = for_each_sv_tree(addons_dir, Some(ROSTER_MAX_FILE_BYTES), |tree| {
         for ch in detect_roster_characters_from_tree(tree) {
             all_names.insert(ch.name.clone());
             if let Some(world) = ch.world {
@@ -6902,6 +6952,14 @@ fn collect_roster_characters(addons_dir: &Path) -> Vec<(String, Option<String>)>
             }
         }
     });
+    if skipped > 0 {
+        // This scan is the only character source in account-wide mode, so a
+        // skipped file can hide a character. Surface it in the logs.
+        eprintln!(
+            "[characters] roster scan skipped {skipped} oversized/unreadable/unparseable \
+             SavedVariables file(s); some characters may be missing from the list"
+        );
+    }
 
     let mut out: Vec<(String, Option<String>)> = Vec::new();
     for name in all_names {
@@ -7578,6 +7636,26 @@ mod tests {
     fn build_character_list_empty_when_no_sources() {
         let chars = build_character_list(None, &[]);
         assert!(chars.is_empty());
+    }
+
+    #[test]
+    fn char_backup_replaceable_only_for_absent_or_marked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Absent target — safe to create.
+        assert!(char_backup_replaceable(&root.join("char-none")));
+
+        // Existing dir without the marker (legacy/manual) — not replaceable.
+        let unmarked = root.join("char-manual");
+        fs::create_dir_all(&unmarked).unwrap();
+        assert!(!char_backup_replaceable(&unmarked));
+
+        // Existing marked character backup — replaceable.
+        let marked = root.join("char-real");
+        fs::create_dir_all(&marked).unwrap();
+        fs::write(marked.join(CHAR_BACKUP_MARKER), b"x").unwrap();
+        assert!(char_backup_replaceable(&marked));
     }
 
     #[test]
