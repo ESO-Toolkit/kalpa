@@ -427,11 +427,31 @@ pub struct EsouiSearchResult {
 /// Search ESOUI and return rich results with metadata.
 pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     let client = http_client();
-    let body = fetch_page(
+    let (final_url, body) = fetch_page_with_url(
         client,
         "https://www.esoui.com/downloads/search.php",
         Some(&[("search", query), ("se_search", "files")]),
     )?;
+
+    // ESOUI redirects a unique-enough query straight to the addon page, which
+    // has no result rows — so the list scraping below would come back empty.
+    // Recover the id from the landing URL and synthesize a single result from
+    // the addon detail so an exact-name search isn't silently empty.
+    if let Some(id) = id_from_info_url(&final_url, query) {
+        if let Ok(detail) = fetch_addon_detail(id) {
+            return Ok(vec![EsouiSearchResult {
+                id: detail.id,
+                title: detail.title,
+                author: detail.author,
+                category: String::new(),
+                downloads: detail.total_downloads,
+                updated: detail.updated,
+            }]);
+        }
+        // Detail fetch failed: fall through to list scraping (likely empty,
+        // which simply yields no results rather than an error).
+    }
+
     let document = Html::parse_document(&body);
 
     static RE_SEARCH_ID: OnceLock<Regex> = OnceLock::new();
