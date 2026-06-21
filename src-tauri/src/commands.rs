@@ -6918,14 +6918,17 @@ fn collect_local_identities(addons_dir: &Path) -> crate::saved_variables::scrub:
     merged
 }
 
-/// Per-file size cap for the roster scan, purely a memory-safety bound (the
-/// roster parses each file into a full tree). Per-character SavedVariables — the
-/// only files that hold character-name keys — are small; the genuinely huge SV
-/// files are account-wide data blobs (trading/inventory databases) that contain
-/// no per-character keys, so capping them omits no characters. The cap is set
-/// generously so a real per-character file is never skipped while a pathological
-/// multi-hundred-MB file can't exhaust memory on panel open.
-const ROSTER_MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// Per-file size cap for the roster scan. `list_characters` runs on panel open
+/// and the roster parses each file into a full in-memory tree, so the cap keeps
+/// a single giant SavedVariables file from spiking latency/memory there. The
+/// discriminator is sound: the only files holding per-character character-name
+/// keys (per-character addon settings) are small — comfortably under this — while
+/// the genuinely huge SV files are account-wide data blobs (trading/history/
+/// inventory databases) whose data lives under `$AccountWide`, with no
+/// per-character keys, so skipping them omits no characters. Skips are counted
+/// and logged (see `collect_roster_characters`) for diagnosis. A streaming
+/// key-extractor that removes the cap entirely is a possible future refinement.
+const ROSTER_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Scan SavedVariables for the Characters roster, returning `(raw_key, world)`
 /// per character. Uses the stricter [`detect_roster_characters_from_tree`] (not
@@ -7636,6 +7639,24 @@ mod tests {
     fn build_character_list_empty_when_no_sources() {
         let chars = build_character_list(None, &[]);
         assert!(chars.is_empty());
+    }
+
+    #[test]
+    fn for_each_sv_tree_skips_oversized_without_parsing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp.path().join("live").join("AddOns");
+        let sv = tmp.path().join("live").join("SavedVariables");
+        fs::create_dir_all(&addons).unwrap();
+        fs::create_dir_all(&sv).unwrap();
+        fs::write(sv.join("small.lua"), "Var =\n{\n}\n").unwrap();
+        // Oversized relative to the test cap; never read or parsed.
+        fs::write(sv.join("big.lua"), vec![b'-'; 5000]).unwrap();
+
+        let mut visited = 0usize;
+        let skipped = for_each_sv_tree(&addons, Some(1000), |_| visited += 1);
+
+        assert_eq!(skipped, 1, "big.lua should be skipped by the size cap");
+        assert_eq!(visited, 1, "only small.lua should be parsed/visited");
     }
 
     #[test]
