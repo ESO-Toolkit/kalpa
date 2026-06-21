@@ -4114,13 +4114,33 @@ pub fn list_backups(
     Ok(results)
 }
 
+/// Reserved directory-name prefixes inside `kalpa-backups`. User-created manual
+/// backups must not use them, or they could collide with — and the transactional
+/// swap could overwrite — a character backup (`char-`), a safe-restore snapshot
+/// (`auto-before-restore-`), or a dot-prefixed scratch dir.
+const RESERVED_BACKUP_PREFIXES: &[&str] = &["char-", "auto-before-restore-"];
+
+/// Validate a user-supplied *manual* backup name: the general name rules plus a
+/// rejection of the reserved internal prefixes. (Restore/delete keep using
+/// `validate_name` so they can still address `char-`/`auto-` backups.)
+fn validate_backup_name(name: &str) -> Result<(), String> {
+    validate_name(name)?;
+    if name.starts_with('.') || RESERVED_BACKUP_PREFIXES.iter().any(|p| name.starts_with(p)) {
+        return Err(
+            "Backup name uses a reserved prefix (e.g. \"char-\"). Please choose another name."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn create_backup(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     backup_name: String,
 ) -> Result<BackupInfo, String> {
-    validate_name(&backup_name)?;
+    validate_backup_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
         let sv_dir = saved_variables_dir(&addons_dir);
@@ -6848,10 +6868,14 @@ fn collect_local_identities(addons_dir: &Path) -> crate::saved_variables::scrub:
     merged
 }
 
-/// Per-file size cap for the roster scan. Real per-addon SavedVariables files
-/// are well under this; the cap only guards against a pathological multi-hundred-
-/// MB file freezing or exhausting memory when the Characters panel opens.
-const ROSTER_MAX_FILE_BYTES: u64 = 96 * 1024 * 1024;
+/// Per-file size cap for the roster scan, purely a memory-safety bound (the
+/// roster parses each file into a full tree). Per-character SavedVariables — the
+/// only files that hold character-name keys — are small; the genuinely huge SV
+/// files are account-wide data blobs (trading/inventory databases) that contain
+/// no per-character keys, so capping them omits no characters. The cap is set
+/// generously so a real per-character file is never skipped while a pathological
+/// multi-hundred-MB file can't exhaust memory on panel open.
+const ROSTER_MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Scan SavedVariables for the Characters roster, returning `(raw_key, world)`
 /// per character. Uses the stricter [`detect_roster_characters_from_tree`] (not
@@ -7554,6 +7578,17 @@ mod tests {
     fn build_character_list_empty_when_no_sources() {
         let chars = build_character_list(None, &[]);
         assert!(chars.is_empty());
+    }
+
+    #[test]
+    fn validate_backup_name_rejects_reserved_prefixes() {
+        // Manual backups must not collide with internal namespaces.
+        assert!(validate_backup_name("char-raid").is_err());
+        assert!(validate_backup_name("auto-before-restore-2026").is_err());
+        assert!(validate_backup_name(".staging").is_err());
+        // Ordinary names are fine.
+        assert!(validate_backup_name("my raid backup").is_ok());
+        assert!(validate_backup_name("character-naming").is_ok());
     }
 
     #[test]

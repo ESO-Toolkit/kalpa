@@ -733,12 +733,16 @@ pub struct RosterCharacter {
 /// over-collects on purpose (any non-marker key under an account is templated so
 /// scrubbing never leaks an identity). The roster is user-facing and feeds
 /// backups, so a false positive here would surface an addon config section as a
-/// fake character. A key is accepted only when:
-///   * it is a **table** value (every ESO character record is a table), and
-///   * its parent account handle is a proven character container — it carries a
-///     ZO_SavedVars `$`-marker sibling (e.g. `$AccountWide`). This is required
-///     even under a world-scoped layer, since addons also store world/account
-///     config tables there; the world only labels the megaserver.
+/// fake character. A table-valued key is accepted when either:
+///   * its parent account handle carries a ZO_SavedVars `$`-marker sibling (e.g.
+///     `$AccountWide`), which proves the account holds characters — then every
+///     table key is taken (even unusually-formed names); or
+///   * the account is markerless (a per-character-only layout, indistinguishable
+///     in shape from a config container) and the key *looks like* an ESO
+///     character name — so markerless characters are still recovered without
+///     admitting config sections like `settings`/`guilds`.
+///
+/// The world (when present) only labels the megaserver, never proves a key.
 ///
 /// Returns verbatim keys (caret suffix preserved) so callers can both display a
 /// cleaned name and match the raw key on disk.
@@ -812,6 +816,26 @@ fn roster_world_layer(
     }
 }
 
+/// Does `key` have the shape of an ESO character name? ESO names start with an
+/// uppercase letter and contain only letters, spaces, hyphens, and apostrophes.
+/// A raw `^Mx` caret suffix is allowed (the part before it is checked). This is
+/// the discriminator used to recover characters from markerless accounts without
+/// admitting lowercase addon config keys (`settings`, `guilds`, `profiles`).
+fn looks_like_character_name(key: &str) -> bool {
+    let base = key.split('^').next().unwrap_or(key);
+    let mut chars = base.chars();
+    match chars.next() {
+        Some(c) if c.is_uppercase() => {}
+        _ => return false,
+    }
+    let len = base.chars().count();
+    if len == 0 || len > 32 {
+        return false;
+    }
+    base.chars()
+        .all(|c| c.is_alphabetic() || matches!(c, ' ' | '-' | '\'' | '\u{2019}'))
+}
+
 fn roster_chars_under_account(
     account_node: &SvTreeNode,
     world: Option<&str>,
@@ -823,14 +847,13 @@ fn roster_chars_under_account(
         None => return,
     };
     // ZO_SavedVars writes a `$`-marker (e.g. `$AccountWide`) alongside character
-    // keys. Its presence proves this account handle is a character container. We
-    // require it even under a world layer, because addons also store world- and
-    // account-scoped config tables (e.g. `guilds`, `profiles`) there; without a
-    // marker we cannot tell those apart from character keys. The world is still
-    // used only to label the megaserver.
-    if !children.iter().any(|c| c.key.starts_with('$')) {
-        return;
-    }
+    // keys, which proves this account handle is a character container. When it's
+    // present we accept every table key (so unusually-formed names are still
+    // recovered). When it's absent — a markerless per-character layout, which is
+    // indistinguishable in shape from an account holding config tables — we fall
+    // back to accepting only keys that look like ESO character names, so real
+    // characters are recovered without surfacing config sections.
+    let has_marker = children.iter().any(|c| c.key.starts_with('$'));
     for child in children {
         let key = child.key.as_str();
         if key.is_empty() || key.starts_with('$') {
@@ -842,6 +865,10 @@ fn roster_chars_under_account(
         }
         if !matches!(child.value_type, SvValueType::Table) {
             // Scalar config (version flags, etc.) is never a character.
+            continue;
+        }
+        if !has_marker && !looks_like_character_name(key) {
+            // Markerless account: only name-shaped keys are trusted as characters.
             continue;
         }
         let entry = RosterCharacter {
@@ -1657,6 +1684,26 @@ mod tests {
             }"#,
         );
         assert!(detect_roster_characters_from_tree(&tree).is_empty());
+    }
+
+    #[test]
+    fn roster_recovers_markerless_character_names() {
+        // No $-marker, but the keys look like ESO character names — recover them
+        // (an addon storing only per-character data in account-wide mode).
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["Alt Ego"] = { ["x"] = 2 },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Mainchar"));
+        assert!(names.contains(&"Alt Ego"));
     }
 
     #[test]
