@@ -498,11 +498,13 @@ pub async fn uploader_probe_live_readiness(
             }
         };
 
-        // Peek the tail to find the latest session/combat boundary.
+        // Peek the tail to find the latest session/combat boundary. Drop the first
+        // (partial) line only when the peek starts mid-file; a small whole file read
+        // from byte 0 keeps its real first line (which may BE the BEGIN_LOG).
         let mut buf = Vec::new();
         let start = size0.saturating_sub(super::tail_io::TAIL_PEEK);
         let tail = match super::tail_io::read_range(path, start, size0, &mut buf) {
-            Ok(n) => scanner::tail_session_state(&buf[..n]),
+            Ok(n) => scanner::tail_session_state(&buf[..n], start > 0),
             Err(_) => Default::default(), // unreadable tail → uncertain below
         };
 
@@ -512,17 +514,23 @@ pub async fn uploader_probe_live_readiness(
         let size1 = std::fs::metadata(path).map(|m| m.len()).unwrap_or(size0);
         let grew = size1 > size0;
 
-        // Verdict: an open session that is ALSO growing → logging already running, no
-        // fresh header coming (the hard `/reloadui` case). An ended/closed session, or
-        // a quiescent file, → not logging yet (turn on `/encounterlog`). Anything we
-        // couldn't read a boundary for, or an open-but-not-growing file (could be a
-        // stale draft or a between-pulls lull we can't be sure about), → uncertain.
-        let verdict = if tail.open_session && grew {
+        // Verdict — only claim the hard "/reloadui" case (ActiveNoHeader) when we have
+        // a SESSION-boundary-authoritative open session that is also growing. The key
+        // false-positive guard the reviewer flagged: a peek with combat boundaries but
+        // NO session boundary (a long fight whose BEGIN_LOG scrolled past the peek
+        // window) must NOT be read as "logging off" — if it grew, it's actively
+        // logging, so it's at least Uncertain (soft "if logging's already on, reload").
+        let verdict = if tail.saw_session_boundary && tail.open_session && grew {
             LiveReadinessVerdict::ActiveNoHeader
-        } else if tail.saw_boundary && !tail.open_session {
+        } else if grew {
+            // Growing but we can't authoritatively see an open session header in the
+            // peek (combat-only or no boundary) → don't claim either; soft guidance.
+            LiveReadinessVerdict::Uncertain
+        } else if tail.saw_session_boundary && !tail.open_session {
+            // A session that ended (END_LOG) and the file is quiescent → logging off.
             LiveReadinessVerdict::LoggingOff
-        } else if !tail.saw_boundary && !grew {
-            // Empty/headerless and not growing → most likely logging is simply off.
+        } else if !tail.saw_session_boundary && !tail.saw_combat_boundary {
+            // No boundary at all + not growing → most likely logging is simply off.
             LiveReadinessVerdict::LoggingOff
         } else {
             LiveReadinessVerdict::Uncertain
@@ -1568,11 +1576,24 @@ async fn start_native_live_branch(
         };
         // Surface lifecycle/auth events over the same LiveEvent channel the UI consumes.
         let ch_anchored = channel_for_thread.clone();
+        let ch_fight = channel_for_thread.clone();
         let ch_reauth = channel_for_thread.clone();
         let ch_resolved = channel_for_thread.clone();
         let events = LiveEventSink {
             on_session_anchored: Box::new(move || {
                 let _ = ch_anchored.send(LiveEvent::SessionAnchored);
+            }),
+            on_fight_posted: Box::new(move |index| {
+                // Native fights drive the same per-fight UI timeline as the official
+                // watcher. Zone/boss naming + duration aren't cheaply available at the
+                // driver's cut without re-parsing, so they're omitted (the row shows
+                // unnamed but the count is honest) — a naming pass is a follow-up.
+                let _ = ch_fight.send(LiveEvent::FightDetected {
+                    index,
+                    zone_name: None,
+                    boss_name: None,
+                    duration_ms: 0,
+                });
             }),
             on_reauth_required: Box::new(move || {
                 let _ = ch_reauth.send(LiveEvent::ReauthRequired {

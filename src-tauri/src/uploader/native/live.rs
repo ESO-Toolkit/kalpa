@@ -629,6 +629,11 @@ pub struct LiveEventSink {
     /// Called once when the first `BEGIN_LOG` arrives — the driver is now anchored and
     /// will stream fights. The UI flips from "waiting for a session" to "streaming".
     pub on_session_anchored: Box<dyn Fn() + Send + Sync>,
+    /// Called after each fight-segment is accepted by the server, with the 0-based
+    /// index of the fight in this session. Drives the UI's per-fight timeline + count
+    /// for the native path (the official-handoff path gets this from its own watcher),
+    /// and backstops a missed `on_session_anchored` (a fight implies anchored).
+    pub on_fight_posted: Box<dyn Fn(usize) + Send + Sync>,
     /// Called when the session is lost mid-stream and the user must re-sign-in.
     pub on_reauth_required: Box<dyn Fn() + Send + Sync>,
     /// Called when posting resumes after a fresh session is stored.
@@ -648,6 +653,10 @@ struct LiveDriver<'a, P: LivePoster> {
     /// Set true once any `BEGIN_LOG` has been seen — a SECOND one is a new session
     /// (`/reloadui`) and forces a terminate (single-session contract).
     seen_begin_log: bool,
+    /// Count of fight-segments accepted by the server this session — the 0-based index
+    /// passed to `on_fight_posted` so the UI's per-fight timeline/count advances on the
+    /// native path (the official path gets this from its own watcher).
+    fights_posted: usize,
 }
 
 impl<'a, P: LivePoster> LiveDriver<'a, P> {
@@ -664,6 +673,7 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
             channel,
             seg: LiveSegmenter::new(),
             seen_begin_log: false,
+            fights_posted: 0,
         }
     }
 
@@ -863,6 +873,13 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
         }
         self.seg.set_next_segment_id(next);
         sink.note_segment(&self.code.0, next);
+        // A fight-segment was accepted: advance the UI timeline/count, and (since a
+        // fight implies the session anchored) this also backstops a missed
+        // on_session_anchored. 0-based index.
+        if let Some(ch) = self.channel {
+            (ch.on_fight_posted)(self.fights_posted);
+        }
+        self.fights_posted += 1;
         PostOutcome::Posted {
             next_segment_id: next,
         }

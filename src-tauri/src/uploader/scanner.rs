@@ -86,52 +86,56 @@ fn classify(line: &str) -> LineType {
 
 /// What the TAIL of an `Encounter.log` tells us about the current logging session —
 /// the input to the native-live readiness probe. `open_session` is true when the last
-/// session boundary seen in the tail is a `BEGIN_LOG` not yet closed by an `END_LOG`
-/// (logging looks active and no fresh header is coming until a `/reloadui`).
-/// `fight_in_progress` is true when the last combat boundary is a `BEGIN_COMBAT`
-/// without a following `END_COMBAT`. `saw_boundary` is false when the tail contained
-/// NO session/combat boundary at all (so the verdict is genuinely uncertain from this
-/// peek alone — e.g. a long quiet stretch mid-fight).
+/// SESSION boundary seen is a `BEGIN_LOG` not yet closed by an `END_LOG` (logging looks
+/// active and no fresh header is coming until a `/reloadui`). `fight_in_progress` is
+/// true when the last combat boundary is a `BEGIN_COMBAT` without a following
+/// `END_COMBAT`. The two `saw_*_boundary` flags are kept SEPARATE: a peek can contain
+/// combat boundaries but NO session boundary (a long fight whose `BEGIN_LOG` scrolled
+/// off the top of the peek window) — in that case `open_session` is unknown, so the
+/// caller must treat it as Uncertain rather than "logging off".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TailState {
     pub open_session: bool,
     pub fight_in_progress: bool,
-    pub saw_boundary: bool,
+    /// Saw a `BEGIN_LOG` or `END_LOG` (so `open_session` is authoritative).
+    pub saw_session_boundary: bool,
+    /// Saw a `BEGIN_COMBAT` or `END_COMBAT` (activity, even without a session header).
+    pub saw_combat_boundary: bool,
 }
 
-/// Derive the [`TailState`] from the last chunk of a log (the bytes read by the
-/// readiness probe). Walks complete lines only — the FIRST line is dropped because a
-/// mid-file peek almost always starts inside a line (same discipline the scanner uses
-/// for chunked reads). Tracks the latest session + combat boundary; a `BEGIN_LOG`
-/// re-opens the session and (since the game starts a session fresh) clears any stale
-/// in-combat flag.
-pub(crate) fn tail_session_state(chunk: &[u8]) -> TailState {
+/// Derive the [`TailState`] from a chunk of a log (the bytes read by the readiness
+/// probe). `drop_first_line` should be true for a mid-file peek (the chunk almost
+/// always starts inside a line, so the leading partial is discarded — the scanner's
+/// chunked-read discipline) and FALSE when the chunk starts at byte 0 (a small whole
+/// file — dropping its real first line could hide the `BEGIN_LOG`). Tracks the latest
+/// session + combat boundary; a `BEGIN_LOG` re-opens the session and (since the game
+/// starts a session fresh) clears any stale in-combat flag.
+pub(crate) fn tail_session_state(chunk: &[u8], drop_first_line: bool) -> TailState {
     let text = String::from_utf8_lossy(chunk);
     let mut lines = text.lines();
-    // Drop the first (likely partial) line of a mid-file peek. If the chunk happens to
-    // start exactly at a line boundary we lose one line of context, which is harmless
-    // for a "what's the latest boundary" scan.
-    let _ = lines.next();
+    if drop_first_line {
+        let _ = lines.next();
+    }
     let mut st = TailState::default();
     for line in lines {
         match classify(line) {
             LineType::BeginLog => {
                 st.open_session = true;
                 st.fight_in_progress = false;
-                st.saw_boundary = true;
+                st.saw_session_boundary = true;
             }
             LineType::EndLog => {
                 st.open_session = false;
                 st.fight_in_progress = false;
-                st.saw_boundary = true;
+                st.saw_session_boundary = true;
             }
             LineType::BeginCombat => {
                 st.fight_in_progress = true;
-                st.saw_boundary = true;
+                st.saw_combat_boundary = true;
             }
             LineType::EndCombat => {
                 st.fight_in_progress = false;
-                st.saw_boundary = true;
+                st.saw_combat_boundary = true;
             }
             _ => {}
         }
@@ -544,21 +548,22 @@ mod tests {
     // ── tail_session_state (native-live readiness probe) ─────────────────────
 
     // A tail that ends inside an open session (BEGIN_LOG, no END_LOG) with a fight in
-    // progress → logging is active, no fresh header coming. The leading line is always
-    // dropped (mid-file peek), so prefix it with a junk partial line.
+    // progress → logging is active, no fresh header coming. Mid-file peek (drop the
+    // leading partial), so prefix a junk partial line and pass drop_first_line=true.
     #[test]
     fn tail_state_open_session_with_fight() {
         let chunk = "…partial junk first line\n\
             100,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
             200,BEGIN_COMBAT\n\
             300,COMBAT_EVENT,DAMAGE,FIRE,1,5,0,1,1,1\n";
-        let st = tail_session_state(chunk.as_bytes());
+        let st = tail_session_state(chunk.as_bytes(), true);
         assert!(st.open_session, "BEGIN_LOG with no END_LOG → open session");
         assert!(
             st.fight_in_progress,
             "BEGIN_COMBAT with no END_COMBAT → fight"
         );
-        assert!(st.saw_boundary);
+        assert!(st.saw_session_boundary);
+        assert!(st.saw_combat_boundary);
     }
 
     // A tail that ends after END_LOG → logging stopped (next start writes a fresh
@@ -570,10 +575,10 @@ mod tests {
             200,BEGIN_COMBAT\n\
             300,END_COMBAT\n\
             400,END_LOG\n";
-        let st = tail_session_state(chunk.as_bytes());
+        let st = tail_session_state(chunk.as_bytes(), true);
         assert!(!st.open_session, "END_LOG → session closed");
         assert!(!st.fight_in_progress);
-        assert!(st.saw_boundary);
+        assert!(st.saw_session_boundary);
     }
 
     // An open session whose last fight already ended → active but between pulls.
@@ -583,23 +588,44 @@ mod tests {
             100,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
             200,BEGIN_COMBAT\n\
             300,END_COMBAT\n";
-        let st = tail_session_state(chunk.as_bytes());
+        let st = tail_session_state(chunk.as_bytes(), true);
         assert!(st.open_session, "no END_LOG → still in the session");
         assert!(!st.fight_in_progress, "last combat boundary was END_COMBAT");
-        assert!(st.saw_boundary);
+        assert!(st.saw_session_boundary);
     }
 
-    // A tail with NO session/combat boundary at all (a long quiet mid-fight stretch
-    // peeked from the end) → genuinely uncertain from this peek alone.
+    // Combat boundaries but NO session boundary (the BEGIN_LOG scrolled off the top of
+    // the peek window) → saw_combat_boundary but NOT saw_session_boundary, so the
+    // caller must treat open_session as unknown (Uncertain), not "logging off".
     #[test]
-    fn tail_state_no_boundary_is_uncertain() {
+    fn tail_state_combat_only_no_session_boundary() {
         let chunk = "drop\n\
-            300,COMBAT_EVENT,DAMAGE,FIRE,1,5,0,1,1,1\n\
-            301,EFFECT_CHANGED,GAINED,1,2,3,1\n";
-        let st = tail_session_state(chunk.as_bytes());
+            300,BEGIN_COMBAT\n\
+            301,COMBAT_EVENT,DAMAGE,FIRE,1,5,0,1,1,1\n\
+            302,END_COMBAT\n";
+        let st = tail_session_state(chunk.as_bytes(), true);
         assert!(
-            !st.saw_boundary,
-            "no BEGIN/END boundary in the peek → uncertain"
+            !st.saw_session_boundary,
+            "no BEGIN/END_LOG in the peek → session state is unknown"
+        );
+        assert!(st.saw_combat_boundary, "combat boundaries were seen");
+    }
+
+    // A SMALL whole file read from byte 0: the first line is the real BEGIN_LOG and
+    // must NOT be dropped (drop_first_line=false), or we'd miss the session header.
+    #[test]
+    fn tail_state_byte0_keeps_first_line() {
+        let chunk = "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+            200,BEGIN_COMBAT\n";
+        let dropped = tail_session_state(chunk.as_bytes(), true);
+        assert!(
+            !dropped.saw_session_boundary,
+            "dropping the first line would miss the only BEGIN_LOG"
+        );
+        let kept = tail_session_state(chunk.as_bytes(), false);
+        assert!(
+            kept.open_session && kept.saw_session_boundary,
+            "reading from byte 0 keeps the BEGIN_LOG → open session"
         );
     }
 }
