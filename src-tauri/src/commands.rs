@@ -5044,9 +5044,13 @@ fn recover_orphaned_backups(backups_root: &Path) {
             let _ = fs::remove_dir_all(&path);
         } else if staging.exists() {
             // True crash between the two finalize renames (staging never got
-            // installed) — restore the prior backup and discard the dead attempt.
-            let _ = fs::remove_dir_all(&staging);
-            let _ = fs::rename(&path, &final_dir);
+            // installed) — restore the prior backup. Restore FIRST and only drop
+            // the dead attempt's staging once that succeeds; if the restore fails,
+            // leave both so the staging proof survives for the next recovery pass
+            // rather than degrading into a "stale, delete" state.
+            if fs::rename(&path, &final_dir).is_ok() {
+                let _ = fs::remove_dir_all(&staging);
+            }
         } else {
             // No final dir AND no staging: not a mid-finalize crash. The backup
             // was installed and then deleted — discard the tombstone rather than
