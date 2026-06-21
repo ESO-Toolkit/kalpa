@@ -4761,18 +4761,95 @@ pub async fn list_characters(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Monotonic counter giving each character backup a unique staging/tombstone
+/// directory so concurrent invocations (even with the same backup name) never
+/// share scratch paths.
+static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Serializes the final swap so two backups targeting the same `char-<name>`
+/// directory can't race on it (the per-call staging/tombstone handle the rest).
+static BACKUP_FINALIZE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Scan `.lua` SavedVariables files under `sv_dir` for `character_name` and copy
+/// every match into `staging`. Matches the cleaned name `["Name"]` and the raw
+/// caret form `["Name^...` a minority of addons store. Returns
+/// `(matched, copied, last_copy_err)` where `matched` is files containing the
+/// character and `copied` is files successfully staged.
+///
+/// Aborts with `Err` if any `.lua` file cannot be opened or fully read: an
+/// incomplete scan must never be allowed to silently produce an incomplete
+/// backup (which could then replace a good one).
+fn scan_and_stage_character_files(
+    sv_dir: &Path,
+    character_name: &str,
+    staging: &Path,
+) -> Result<(u32, u32, Option<String>), String> {
+    // Bracket-quote delimiters avoid false positives (e.g. "Lib" vs "LibStub").
+    // Only the first 10,000 lines are scanned — character keys appear near the
+    // top, so reading entire 100MB+ files is wasteful.
+    let needle_exact = format!("[\"{character_name}\"]");
+    let needle_caret = format!("[\"{character_name}^");
+    let max_lines: usize = 10_000;
+
+    let entries =
+        fs::read_dir(sv_dir).map_err(|e| format!("Failed to read SavedVariables folder: {e}"))?;
+    let mut matched: u32 = 0;
+    let mut copied: u32 = 0;
+    let mut last_copy_err: Option<String> = None;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("lua") {
+            continue;
+        }
+        let fname = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let file = fs::File::open(&path).map_err(|e| format!("Could not open {fname}: {e}"))?;
+        let reader = BufReader::new(file);
+        let mut found = false;
+        for (i, line_result) in reader.lines().enumerate() {
+            if i >= max_lines {
+                break;
+            }
+            let line = line_result.map_err(|e| format!("Could not read {fname}: {e}"))?;
+            if line.contains(&needle_exact) || line.contains(&needle_caret) {
+                found = true;
+                break;
+            }
+        }
+        if found {
+            matched += 1;
+            if let Some(name) = path.file_name() {
+                match fs::copy(&path, staging.join(name)) {
+                    Ok(_) => copied += 1,
+                    Err(e) => last_copy_err = Some(e.to_string()),
+                }
+            }
+        }
+    }
+
+    Ok((matched, copied, last_copy_err))
+}
+
 /// Atomically replace `final_dir` with `staging`, preserving the previous
 /// contents of `final_dir` if the swap fails. All three paths must live on the
 /// same volume. On success, `final_dir` holds the staged content and any prior
 /// backup is gone; on failure, the prior `final_dir` (if any) is left intact and
 /// `staging` is removed. Crucially, the existing backup is only deleted *after*
 /// the new one is installed, so a finalization error never loses the last
-/// known-good backup.
+/// known-good backup. The swap is serialized so concurrent backups of the same
+/// name can't race on `final_dir`.
 fn finalize_backup_replace(
     staging: &Path,
     final_dir: &Path,
     tombstone: &Path,
 ) -> std::io::Result<()> {
+    let _guard = BACKUP_FINALIZE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let had_previous = final_dir.exists();
     if had_previous {
         // Move the existing backup aside (don't delete it yet).
@@ -4820,66 +4897,31 @@ pub fn backup_character_settings(
     // Stage into a dot-prefixed temp dir on the same volume, then atomically
     // rename into place only after every matched file copies. This keeps a
     // failed/partial backup from leaving restorable state and replaces any prior
-    // backup of the same name wholesale rather than mixing into it. The `.`
-    // prefix keeps a crash-orphaned staging dir out of `list_backups`.
+    // backup of the same name wholesale rather than mixing into it. A per-call
+    // sequence number makes the staging/tombstone unique so concurrent backups
+    // don't collide; the `.` prefix keeps them out of `list_backups`.
     let backups_root = backups_dir(&addons_dir);
     let final_dir = backups_root.join(format!("char-{backup_name}"));
-    let staging = backups_root.join(format!(".tmp-char-{backup_name}"));
+    let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = backups_root.join(format!(".tmp-char-{backup_name}-{seq}"));
+    let tombstone = backups_root.join(format!(".old-char-{backup_name}-{seq}"));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
-    // Copy all SavedVariables files that contain this character's data.
-    // Search within bracket-quote delimiters to avoid false positives
-    // (e.g. a character named "Lib" matching "LibStub" in addon code).
-    // `character_name` is the cleaned display name, so also match the raw-API
-    // caret form `["Name^Mx"]` that a minority of addons store on disk.
-    // Only scan the first 10,000 lines — character names appear in the
-    // first few hundred lines, so reading entire 100MB+ files is wasteful.
-    let needle_exact = format!("[\"{character_name}\"]");
-    let needle_caret = format!("[\"{character_name}^");
-    let max_lines: usize = 10_000;
-    // `matched` counts files that contain the character's data; `copied` counts
-    // those successfully backed up. Tracking them separately lets us tell "this
-    // character has no per-character data" apart from "the copy failed".
-    let mut matched: u32 = 0;
-    let mut copied: u32 = 0;
-    let mut last_copy_err: Option<String> = None;
-    if let Ok(entries) = fs::read_dir(&sv_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let file = match fs::File::open(&path) {
-                    Ok(f) => f,
-                    Err(_) => continue,
-                };
-                let reader = BufReader::new(file);
-                let mut found = false;
-                for (i, line_result) in reader.lines().enumerate() {
-                    if i >= max_lines {
-                        break;
-                    }
-                    let line = match line_result {
-                        Ok(l) => l,
-                        Err(_) => break,
-                    };
-                    if line.contains(&needle_exact) || line.contains(&needle_caret) {
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    matched += 1;
-                    if let Some(name) = path.file_name() {
-                        let dest = staging.join(name);
-                        match fs::copy(&path, &dest) {
-                            Ok(_) => copied += 1,
-                            Err(e) => last_copy_err = Some(e.to_string()),
-                        }
-                    }
-                }
+    // Scan + stage. Aborts if any file can't be fully read, so an incomplete
+    // scan never silently produces (or installs) an incomplete backup.
+    let (matched, copied, last_copy_err) =
+        match scan_and_stage_character_files(&sv_dir, &character_name, &staging) {
+            Ok(counts) => counts,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(format!(
+                    "Could not read all SavedVariables files while backing up \
+                     \"{character_name}\" ({e}). Backup aborted to avoid an incomplete \
+                     copy; close ESO and try again."
+                ));
             }
-        }
-    }
+        };
 
     if matched == 0 {
         // No file held this character's data — discard the staging dir and don't
@@ -4906,7 +4948,6 @@ pub fn backup_character_settings(
 
     // All matched files copied — install atomically, preserving any prior backup
     // of this name if finalization fails.
-    let tombstone = backups_root.join(format!(".old-char-{backup_name}"));
     finalize_backup_replace(&staging, &final_dir, &tombstone)
         .map_err(|e| format!("Failed to finalize backup: {e}"))?;
 
@@ -7439,6 +7480,46 @@ mod tests {
     fn build_character_list_empty_when_no_sources() {
         let chars = build_character_list(None, &[]);
         assert!(chars.is_empty());
+    }
+
+    #[test]
+    fn scan_and_stage_matches_exact_and_caret_lua_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sv = tmp.path().join("SavedVariables");
+        fs::create_dir_all(&sv).unwrap();
+        fs::write(sv.join("A.lua"), "[\"Faewynd\"] = {}\n").unwrap();
+        fs::write(sv.join("B.lua"), "[\"Someone\"] = {}\n").unwrap();
+        fs::write(sv.join("C.lua"), "[\"Faewynd^Mx\"] = {}\n").unwrap();
+        // Non-.lua files are ignored even if they contain the name.
+        fs::write(sv.join("notes.txt"), "[\"Faewynd\"]").unwrap();
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        let (matched, copied, err) =
+            scan_and_stage_character_files(&sv, "Faewynd", &staging).unwrap();
+
+        assert_eq!(matched, 2);
+        assert_eq!(copied, 2);
+        assert!(err.is_none());
+        assert!(staging.join("A.lua").is_file());
+        assert!(staging.join("C.lua").is_file());
+        assert!(!staging.join("B.lua").exists());
+        assert!(!staging.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn scan_and_stage_aborts_on_unreadable_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sv = tmp.path().join("SavedVariables");
+        fs::create_dir_all(&sv).unwrap();
+        fs::write(sv.join("good.lua"), "[\"Faewynd\"] = {}\n").unwrap();
+        // Invalid UTF-8 makes the line read fail, so completeness can't be proven.
+        fs::write(sv.join("bad.lua"), [0xff_u8, 0xfe, 0x00]).unwrap();
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        let result = scan_and_stage_character_files(&sv, "Faewynd", &staging);
+        assert!(result.is_err());
     }
 
     #[test]
