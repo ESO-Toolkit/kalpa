@@ -7060,6 +7060,12 @@ fn collect_local_identities(addons_dir: &Path) -> crate::saved_variables::scrub:
 fn collect_roster_characters(addons_dir: &Path) -> (Vec<(String, Option<String>)>, usize) {
     use crate::saved_variables::roster_stream::extract_roster_characters_streaming;
 
+    /// Aggregate cap on distinct character names merged across every `.lua` file,
+    /// bounding `list_characters` memory against a directory of pathological files
+    /// even though each individual scan is already capped. Wildly above any real
+    /// account roster.
+    const ROSTER_TOTAL_MAX: usize = 100_000;
+
     let sv_dir = sv_io::saved_variables_dir(addons_dir);
     let entries = match fs::read_dir(&sv_dir) {
         Ok(e) => e,
@@ -7079,6 +7085,7 @@ fn collect_roster_characters(addons_dir: &Path) -> (Vec<(String, Option<String>)
         std::collections::BTreeMap::new();
     let mut all_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut skipped = 0usize;
+    let mut aggregate_truncated = false;
 
     for entry in entries {
         let entry = match entry {
@@ -7114,11 +7121,30 @@ fn collect_roster_characters(addons_dir: &Path) -> (Vec<(String, Option<String>)
             skipped += 1;
         }
         for (name, world) in scan.characters {
-            all_names.insert(name.clone());
-            if let Some(world) = world {
-                known_worlds.entry(name).or_default().insert(world);
+            // Aggregate bound: a real account has at most a few dozen characters,
+            // so this ceiling is never reached in practice, but it keeps the merged
+            // roster from growing without limit across many pathological files
+            // (each individually under the per-scan cap). New names beyond the cap
+            // are dropped and the roster is flagged incomplete; worlds for names we
+            // already kept still merge.
+            if all_names.contains(&name) {
+                if let Some(world) = world {
+                    known_worlds.entry(name).or_default().insert(world);
+                }
+            } else if all_names.len() < ROSTER_TOTAL_MAX {
+                all_names.insert(name.clone());
+                if let Some(world) = world {
+                    known_worlds.entry(name).or_default().insert(world);
+                }
+            } else {
+                aggregate_truncated = true;
             }
         }
+    }
+
+    if aggregate_truncated {
+        // Count the truncation once so the UI's "may be incomplete" warning fires.
+        skipped += 1;
     }
 
     if skipped > 0 {

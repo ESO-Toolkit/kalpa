@@ -106,6 +106,8 @@ enum Ctx {
 #[derive(Debug, Clone, Copy)]
 enum Resume {
     Normal,
+    /// After `[` (+ ws); awaiting the `"`/digit key token.
+    KeyToken,
     /// After a key token; awaiting `]`.
     RBracket,
     /// After `]`; awaiting `=` for a `["..."]`/`[num]` key.
@@ -168,6 +170,7 @@ impl Resume {
     fn state(self) -> Lex {
         match self {
             Resume::Normal => Lex::Normal,
+            Resume::KeyToken => Lex::SeekKeyToken,
             Resume::RBracket => Lex::SeekRBracket,
             Resume::Equals => Lex::SeekEquals,
             Resume::IdentEquals => Lex::SeekIdentEquals,
@@ -556,11 +559,19 @@ impl Scanner {
                             self.lex = Lex::KeyStr { escaped: false };
                             true
                         }
-                        b'0'..=b'9' | b'-' => {
+                        b'0'..=b'9' => {
                             self.key_buf.clear();
                             self.key_overflow = false;
                             self.push_key(b);
                             self.lex = Lex::KeyNum;
+                            true
+                        }
+                        b'-' => {
+                            // Either a comment (`--`) or a negative numeric key
+                            // (`-1`); the second byte decides.
+                            self.lex = Lex::SeekDash {
+                                resume: Resume::KeyToken,
+                            };
                             true
                         }
                         _ => {
@@ -727,11 +738,20 @@ impl Scanner {
                     self.lex = Lex::KeyStr { escaped: false };
                     true
                 }
-                b'0'..=b'9' | b'-' => {
+                b'0'..=b'9' => {
                     self.key_buf.clear();
                     self.key_overflow = false;
                     self.push_key(b);
                     self.lex = Lex::KeyNum;
+                    true
+                }
+                b'-' => {
+                    // `[-` is either a comment (`[--…`) or a negative numeric key
+                    // (`[-1]`); defer the decision to the dash state, which the
+                    // tree parser also resolves via skip_whitespace_and_comments.
+                    self.lex = Lex::SeekDash {
+                        resume: Resume::KeyToken,
+                    };
                     true
                 }
                 _ if is_ws(b) => {
@@ -1112,6 +1132,21 @@ mod tests {
              [\"Default\"] = {\n\
              [\"@Acct\"] = {\n\
              [\"Mainchar\" --[[c]] ] = { [\"x\"] = 1 },\n\
+             },\n\
+             },\n\
+             }\n",
+        );
+    }
+
+    #[test]
+    fn parity_comment_after_open_bracket() {
+        // A comment between `[` and the key string (parse_table_key skips ws AND
+        // comments right after `[`).
+        assert_parity(
+            "MyAddon_SV = {\n\
+             [\"Default\"] = {\n\
+             [ --[[c]] \"@Acct\"] = {\n\
+             [--skip\n \"Mainchar\"] = { [\"x\"] = 1 },\n\
              },\n\
              },\n\
              }\n",
