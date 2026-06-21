@@ -24,6 +24,9 @@ pub mod history;
 pub mod native;
 pub mod scanner;
 pub mod splitter;
+/// Shared byte-offset tail primitives (`read_range` + loop tuning constants)
+/// used by both [`watcher`] and the native live-streaming driver.
+pub mod tail_io;
 pub mod transport;
 pub mod types;
 pub mod watcher;
