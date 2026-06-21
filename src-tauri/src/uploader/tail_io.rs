@@ -15,6 +15,11 @@ use std::time::Duration;
 /// 64 MiB cap on a single incremental read, bounding memory per pass.
 pub const MAX_READ: u64 = 64 * 1024 * 1024;
 
+/// How much of a log's TAIL the native-live readiness probe reads to judge the
+/// current session state (256 KiB is many thousands of lines — far more than enough
+/// to find the latest `BEGIN_LOG`/`END_COMBAT` boundary).
+pub const TAIL_PEEK: u64 = 256 * 1024;
+
 /// Poll fallback cadence — short enough to feel live, light on IO.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(400);
 

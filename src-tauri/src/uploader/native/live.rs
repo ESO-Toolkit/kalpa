@@ -626,6 +626,9 @@ pub fn run_native_live(
 /// and is testable with a recording fake. The production command adapts a
 /// `Channel<LiveEvent>` into this.
 pub struct LiveEventSink {
+    /// Called once when the first `BEGIN_LOG` arrives — the driver is now anchored and
+    /// will stream fights. The UI flips from "waiting for a session" to "streaming".
+    pub on_session_anchored: Box<dyn Fn() + Send + Sync>,
     /// Called when the session is lost mid-stream and the user must re-sign-in.
     pub on_reauth_required: Box<dyn Fn() + Send + Sync>,
     /// Called when posting resumes after a fresh session is stored.
@@ -719,8 +722,15 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
             // via the cut below; we set the terminal AFTER posting the prior segment.
             let is_begin_log = kind_of(&line) == Some("BEGIN_LOG");
             let second_begin_log = is_begin_log && self.seen_begin_log;
-            if is_begin_log {
+            if is_begin_log && !self.seen_begin_log {
+                // First BEGIN_LOG: the driver is now anchored to a session and will
+                // stream fights. Surface it so the UI flips waiting→streaming the
+                // instant the session header lands (no timeout). Fire on the
+                // false→true EDGE only, before the second-begin-log handling below.
                 self.seen_begin_log = true;
+                if let Some(ch) = self.channel {
+                    (ch.on_session_anchored)();
+                }
             }
 
             let boundary = self.seg.feed(&line);

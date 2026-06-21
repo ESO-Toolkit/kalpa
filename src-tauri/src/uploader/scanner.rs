@@ -84,6 +84,61 @@ fn classify(line: &str) -> LineType {
     }
 }
 
+/// What the TAIL of an `Encounter.log` tells us about the current logging session —
+/// the input to the native-live readiness probe. `open_session` is true when the last
+/// session boundary seen in the tail is a `BEGIN_LOG` not yet closed by an `END_LOG`
+/// (logging looks active and no fresh header is coming until a `/reloadui`).
+/// `fight_in_progress` is true when the last combat boundary is a `BEGIN_COMBAT`
+/// without a following `END_COMBAT`. `saw_boundary` is false when the tail contained
+/// NO session/combat boundary at all (so the verdict is genuinely uncertain from this
+/// peek alone — e.g. a long quiet stretch mid-fight).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TailState {
+    pub open_session: bool,
+    pub fight_in_progress: bool,
+    pub saw_boundary: bool,
+}
+
+/// Derive the [`TailState`] from the last chunk of a log (the bytes read by the
+/// readiness probe). Walks complete lines only — the FIRST line is dropped because a
+/// mid-file peek almost always starts inside a line (same discipline the scanner uses
+/// for chunked reads). Tracks the latest session + combat boundary; a `BEGIN_LOG`
+/// re-opens the session and (since the game starts a session fresh) clears any stale
+/// in-combat flag.
+pub(crate) fn tail_session_state(chunk: &[u8]) -> TailState {
+    let text = String::from_utf8_lossy(chunk);
+    let mut lines = text.lines();
+    // Drop the first (likely partial) line of a mid-file peek. If the chunk happens to
+    // start exactly at a line boundary we lose one line of context, which is harmless
+    // for a "what's the latest boundary" scan.
+    let _ = lines.next();
+    let mut st = TailState::default();
+    for line in lines {
+        match classify(line) {
+            LineType::BeginLog => {
+                st.open_session = true;
+                st.fight_in_progress = false;
+                st.saw_boundary = true;
+            }
+            LineType::EndLog => {
+                st.open_session = false;
+                st.fight_in_progress = false;
+                st.saw_boundary = true;
+            }
+            LineType::BeginCombat => {
+                st.fight_in_progress = true;
+                st.saw_boundary = true;
+            }
+            LineType::EndCombat => {
+                st.fight_in_progress = false;
+                st.saw_boundary = true;
+            }
+            _ => {}
+        }
+    }
+    st
+}
+
 /// Translate common IO errors into the friendly, project-consistent strings the
 /// frontend already maps (see `src/lib/tauri.ts`).
 fn map_io_error(e: &std::io::Error, path: &str) -> String {
@@ -484,5 +539,67 @@ mod tests {
         );
         // The complete fight before the partial line is still detected.
         assert_eq!(scan.fights.len(), 1);
+    }
+
+    // ── tail_session_state (native-live readiness probe) ─────────────────────
+
+    // A tail that ends inside an open session (BEGIN_LOG, no END_LOG) with a fight in
+    // progress → logging is active, no fresh header coming. The leading line is always
+    // dropped (mid-file peek), so prefix it with a junk partial line.
+    #[test]
+    fn tail_state_open_session_with_fight() {
+        let chunk = "…partial junk first line\n\
+            100,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+            200,BEGIN_COMBAT\n\
+            300,COMBAT_EVENT,DAMAGE,FIRE,1,5,0,1,1,1\n";
+        let st = tail_session_state(chunk.as_bytes());
+        assert!(st.open_session, "BEGIN_LOG with no END_LOG → open session");
+        assert!(
+            st.fight_in_progress,
+            "BEGIN_COMBAT with no END_COMBAT → fight"
+        );
+        assert!(st.saw_boundary);
+    }
+
+    // A tail that ends after END_LOG → logging stopped (next start writes a fresh
+    // BEGIN_LOG, so native needs no /reloadui).
+    #[test]
+    fn tail_state_ended_session() {
+        let chunk = "drop me\n\
+            100,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+            200,BEGIN_COMBAT\n\
+            300,END_COMBAT\n\
+            400,END_LOG\n";
+        let st = tail_session_state(chunk.as_bytes());
+        assert!(!st.open_session, "END_LOG → session closed");
+        assert!(!st.fight_in_progress);
+        assert!(st.saw_boundary);
+    }
+
+    // An open session whose last fight already ended → active but between pulls.
+    #[test]
+    fn tail_state_open_session_between_fights() {
+        let chunk = "drop\n\
+            100,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+            200,BEGIN_COMBAT\n\
+            300,END_COMBAT\n";
+        let st = tail_session_state(chunk.as_bytes());
+        assert!(st.open_session, "no END_LOG → still in the session");
+        assert!(!st.fight_in_progress, "last combat boundary was END_COMBAT");
+        assert!(st.saw_boundary);
+    }
+
+    // A tail with NO session/combat boundary at all (a long quiet mid-fight stretch
+    // peeked from the end) → genuinely uncertain from this peek alone.
+    #[test]
+    fn tail_state_no_boundary_is_uncertain() {
+        let chunk = "drop\n\
+            300,COMBAT_EVENT,DAMAGE,FIRE,1,5,0,1,1,1\n\
+            301,EFFECT_CHANGED,GAINED,1,2,3,1\n";
+        let st = tail_session_state(chunk.as_bytes());
+        assert!(
+            !st.saw_boundary,
+            "no BEGIN/END boundary in the peek → uncertain"
+        );
     }
 }

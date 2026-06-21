@@ -64,6 +64,12 @@ pub enum LiveEvent {
     /// A non-fatal warning (e.g. transient read retry). The UI may log but
     /// should not toast these, as they can recur frequently.
     Warning { message: String },
+    /// (Native live only) the first `BEGIN_LOG` of a logging session arrived, so the
+    /// driver is now anchored and will stream fights as they finish. Until this fires,
+    /// the native path is *armed but waiting* (the encoder needs a session header it
+    /// can't synthesize). The UI flips from the amber "waiting for a session" state to
+    /// the emerald "streaming" state on this event — instant, no timeout.
+    SessionAnchored,
     /// (Native live only) the ESO Logs session expired mid-stream — posting is paused
     /// until the user re-signs-in. The UI shows a re-login prompt; the report stays open.
     ReauthRequired { message: String },

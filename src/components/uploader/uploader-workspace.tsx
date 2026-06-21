@@ -56,6 +56,7 @@ import {
   type FightSummary,
   type LiveEvent,
   type LiveFight,
+  type LiveReadiness,
   type LogFileInfo,
   type LogPathDetection,
   type LogPreflight,
@@ -214,6 +215,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // accurate per session, since the same session can route either way depending on
   // opt-in + sign-in. Set from the start dispatch's `handedOff`.
   const [liveHandedOff, setLiveHandedOff] = useState(false);
+  // (Native path) whether a logging session has anchored yet — i.e. the driver saw
+  // its first BEGIN_LOG and is now streaming. Until then the native path is "armed but
+  // waiting" (the encoder needs a session header). Flips on the SessionAnchored event,
+  // instantly (no timeout). Drives the waiting↔streaming UI.
+  const [sessionAnchored, setSessionAnchored] = useState(false);
+  // The pre-Go-Live readiness probe result (native only) — seeds which "waiting"
+  // guidance to show first; SessionAnchored then takes over as ground truth.
+  const [liveReadiness, setLiveReadiness] = useState<LiveReadiness | null>(null);
   // Wall-clock start of the current live session, for the elapsed timer. Stored
   // as state (drives the timer's mount) and set alongside the session id in
   // handleStartLive. Kept separate from the `live-${ts}` id string so the timer
@@ -637,7 +646,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setWorkbenchOpen(true);
   };
 
-  const handleStartLive = async () => {
+  const handleStartLive = async (forceHandoff = false) => {
     // Resolve a target if none is selected (e.g. logs finished loading after the Live
     // tab was clicked): auto-pick the active Encounter.log. `handleSelectLog` is async
     // and won't have updated `selectedLog` state by this tick, so use the path it
@@ -669,6 +678,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setLiveFightCount(0);
     liveFightCountRef.current = 0;
     setLiveReport(null);
+    setSessionAnchored(false); // native: not anchored until the first BEGIN_LOG
     setLiveStartMs(startedAt);
     setLiveStatus("watching");
     liveActiveRef.current = true;
@@ -690,7 +700,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         case "started":
           setLiveStatus("watching");
           break;
+        case "sessionAnchored":
+          // Native: the first BEGIN_LOG landed — flip waiting→streaming instantly.
+          setSessionAnchored(true);
+          break;
         case "fightDetected": {
+          // A fight implies the session anchored, even if the anchored event was
+          // missed/coalesced — keep the UI honest.
+          setSessionAnchored(true);
           const detected = ev;
           setLiveFights((prev) => {
             if (prev.some((f) => f.index === detected.index)) return prev;
@@ -779,7 +796,21 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       getSetting<boolean>("nativeUploadOptIn", false),
       invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
     ]);
-    const nativeOptIn = liveOptIn && liveHasSession;
+    // `forceHandoff` (the "go live anyway via official uploader" escape hatch) overrides
+    // the native path for this session even when opted in + signed in.
+    const nativeOptIn = !forceHandoff && liveOptIn && liveHasSession;
+
+    // Native only: peek whether a fresh logging session is coming, so the waiting
+    // state opens with the right guidance (/encounterlog on vs /reloadui). Best-effort
+    // — on error we just show generic guidance; SessionAnchored is the ground truth.
+    if (nativeOptIn) {
+      const readiness = await invokeOrThrow<LiveReadiness>("uploader_probe_live_readiness", {
+        filePath: target,
+      }).catch(() => null);
+      setLiveReadiness(readiness);
+    } else {
+      setLiveReadiness(null);
+    }
 
     try {
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_start_live", {
@@ -872,10 +903,13 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       setLiveStatus(liveFightCount > 0 ? "upToDate" : "idle");
     }
     if (wasRunning) {
-      // Be honest: Kalpa stopped its own tracking, but it can't stop the separate
-      // official uploader — it may still be streaming until the user stops it.
+      // Path-aware: on the HANDOFF path Kalpa can't stop the separate official
+      // uploader (it may still be streaming); on the NATIVE path Kalpa IS the uploader,
+      // so Stop genuinely ended the upload and closed the report.
       toast.info(
-        "Stopped tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report.",
+        liveHandedOff
+          ? "Stopped tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report."
+          : "Stopped the live upload and closed the report on ESO Logs.",
         { duration: 8000 }
       );
     }
@@ -890,6 +924,16 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       );
     }
     await refreshHistory();
+  };
+
+  // The "go live anyway via the official uploader" escape hatch from the native
+  // waiting state (logging already running, no fresh BEGIN_LOG coming). Stop the
+  // armed-but-waiting native session and immediately restart it forcing the handoff
+  // path — which CAN pick up an in-progress session. Explicit, user-chosen, disclosed
+  // (the running callout then shows the handoff copy) — never a silent downgrade.
+  const handleForceHandoffLive = async () => {
+    await handleStopLive();
+    await handleStartLive(true);
   };
 
   const copyLink = useCallback(async (url: string) => {
@@ -1147,9 +1191,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                     // Which path the running session took — drives the callout/copy
                     // (handoff = a separate uploader app; native = Kalpa uploads).
                     handedOff={liveHandedOff}
+                    // Native waiting↔streaming: anchored once the first BEGIN_LOG lands.
+                    sessionAnchored={sessionAnchored}
+                    // Best-effort pre-start guess of what's coming (which waiting copy).
+                    readiness={liveReadiness}
                     onStart={handleStartLive}
                     onStop={handleStopLive}
                     onCopyLink={copyLink}
+                    onForceHandoff={handleForceHandoffLive}
                   />
                 )}
               </div>
@@ -2246,6 +2295,35 @@ function ManualActions({
   );
 }
 
+/** A monospace command chip with a one-click copy — for the in-game slash commands
+ *  the live waiting state asks the user to type (`/reloadui`, `/encounterlog on`). */
+function CopyChip({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard may be blocked; the visible text is still copyable manually */
+        }
+      }}
+      className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-black/30 px-2 py-1 font-mono text-xs text-foreground/85 transition-colors hover:border-white/15 hover:bg-black/40"
+      aria-label={`Copy ${text}`}
+    >
+      {copied ? (
+        <Check className="size-3 text-emerald-400" />
+      ) : (
+        <Copy className="size-3 opacity-70" />
+      )}
+      {text}
+    </button>
+  );
+}
+
 function LiveDashboard({
   running,
   starting,
@@ -2256,9 +2334,12 @@ function LiveDashboard({
   liveReport,
   priorFightCount,
   handedOff,
+  sessionAnchored,
+  readiness,
   onStart,
   onStop,
   onCopyLink,
+  onForceHandoff,
 }: {
   running: boolean;
   starting: boolean;
@@ -2269,26 +2350,25 @@ function LiveDashboard({
   liveReport: ReportRef | null;
   priorFightCount: number;
   handedOff: boolean;
+  sessionAnchored: boolean;
+  readiness: LiveReadiness | null;
   onStart: () => void;
   onStop: () => void;
   onCopyLink: (url: string) => void | Promise<void>;
+  onForceHandoff: () => void;
 }) {
   const detecting = running && liveFightCount > 0;
-  // After this long with no detected fight, hint that combat logging may have been
-  // ALREADY running before Go Live — in which case ESO wrote no fresh session header
-  // and a /reloadui starts one. We tick a local clock only while running-and-quiet so
-  // the nudge appears at the threshold (SessionTimer is a separate component, so its
-  // tick doesn't re-render us); the interval clears the moment a fight arrives or we
-  // stop, so there's no idle timer over a long session.
-  const RELOAD_NUDGE_MS = 90_000;
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  const waitingQuiet = running && liveFightCount === 0;
-  useEffect(() => {
-    if (!waitingQuiet) return;
-    const id = setInterval(() => setNowTick(Date.now()), 5_000);
-    return () => clearInterval(id);
-  }, [waitingQuiet]);
-  const quietTooLong = waitingQuiet && startMs !== null && nowTick - startMs > RELOAD_NUDGE_MS;
+  // The native path has a WAITING phase: armed, but the encoder needs a BEGIN_LOG to
+  // anchor a session, so nothing streams until one arrives. `sessionAnchored` (the
+  // SessionAnchored event = first BEGIN_LOG) is the ground truth that flips
+  // waiting→streaming — instant, no timeout. The handoff path has no waiting phase (the
+  // official uploader picks up mid-session), so it's never "waiting" here.
+  const isNative = running && !handedOff;
+  const waiting = isNative && !sessionAnchored;
+  // While waiting, the readiness probe says whether logging is already running (needs
+  // /reloadui) or not yet (turn on /encounterlog). A confident "already running" verdict
+  // also offers the official-uploader escape hatch.
+  const alreadyLogging = readiness?.verdict === "activeNoHeader";
   return (
     <GlassPanel variant="primary" className="space-y-3 p-4">
       <div className="flex items-center justify-between gap-3">
@@ -2296,16 +2376,27 @@ function LiveDashboard({
           <SectionHeader>Live Session</SectionHeader>
           {running && (
             <>
-              {/* Session-level LIVE: a steady dot with a soft pulsing ring, so it
-                  doesn't compete with the per-fight "Streaming" pulses. Emerald,
-                  not red — live-and-healthy; red is reserved for real errors. */}
-              <InfoPill color="emerald" className="gap-1.5">
-                <span className="relative flex size-2">
-                  <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
-                  <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
-                </span>
-                LIVE
-              </InfoPill>
+              {/* The glanceable honesty cue: AMBER "ARMED" while a native session waits
+                  for its first BEGIN_LOG (nothing's streaming yet), EMERALD "LIVE" once
+                  anchored (or for the handoff path, which is live immediately). Not red
+                  — red is reserved for real errors. */}
+              {waiting ? (
+                <InfoPill color="amber" className="gap-1.5">
+                  <span className="relative flex size-2">
+                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-400/70" />
+                    <span className="relative inline-flex size-2 rounded-full bg-amber-400" />
+                  </span>
+                  ARMED
+                </InfoPill>
+              ) : (
+                <InfoPill color="emerald" className="gap-1.5">
+                  <span className="relative flex size-2">
+                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
+                    <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+                  </span>
+                  LIVE
+                </InfoPill>
+              )}
               {startMs !== null && <SessionTimer startMs={startMs} />}
             </>
           )}
@@ -2399,7 +2490,57 @@ function LiveDashboard({
           </div>
         ))}
 
-      {running && (
+      {/* NATIVE WAITING (armed, not yet anchored): the encoder needs a BEGIN_LOG, so
+          guide the user to produce one — immediately, no timeout. Which guidance shows
+          first comes from the readiness probe; SessionAnchored then flips this to the
+          streaming state below the instant a session header lands. */}
+      {waiting &&
+        (alreadyLogging ? (
+          // Logging is already running → no fresh header coming → /reloadui (or use the
+          // official uploader, which can pick up mid-session). The explicit, disclosed
+          // escape hatch — never a silent downgrade.
+          <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
+              <AlertCircle className="size-3.5 shrink-0" aria-hidden />
+              Armed — combat logging is already running
+            </div>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              ESO only starts a fresh upload session on a reload. Type{" "}
+              <code className="text-foreground/80">/reloadui</code> in ESO to begin streaming now.
+              {readiness?.fightInProgress ? " (A fight is being logged right now.)" : ""}
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <CopyChip text="/reloadui" />
+              <Button variant="ghost" size="sm" onClick={onForceHandoff}>
+                Go live anyway via the official uploader
+              </Button>
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground/80">
+              Anything logged before now isn’t part of this report — use “Upload a Log” for that.
+            </p>
+          </div>
+        ) : (
+          // Not logging yet (or uncertain) → turning on /encounterlog writes the header.
+          <div className="rounded-lg border border-sky-400/20 bg-sky-400/[0.05] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-sky-200/90">
+              <Radio className="size-3.5 shrink-0" aria-hidden />
+              Armed — waiting for a logging session
+            </div>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Kalpa uploads the moment ESO starts a logging session — nothing is sent yet. Turn on
+              combat logging: type <code className="text-foreground/80">/encounterlog on</code> in
+              ESO (if it’s already on, <code className="text-foreground/80">/reloadui</code> starts
+              a fresh session). Fights stream here as they finish.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <CopyChip text="/encounterlog on" />
+              <CopyChip text="/reloadui" />
+            </div>
+          </div>
+        ))}
+
+      {/* STREAMING (handoff path always; native once anchored). */}
+      {running && !waiting && (
         <div
           className={cn(
             "flex items-center gap-2 text-sm",
@@ -2411,24 +2552,13 @@ function LiveDashboard({
           {detecting && <InfoPill color="emerald">Detecting fights</InfoPill>}
           <span>
             {liveFightCount === 0
-              ? "Watching for combat… start a fight in-game and it'll appear here."
+              ? isNative
+                ? "Logging session started — streaming fights to ESO Logs as they finish."
+                : "Watching for combat… start a fight in-game and it'll appear here."
               : `${liveFightCount} fight${liveFightCount === 1 ? "" : "s"} this session.` +
                 (liveFightCount > liveFights.length
                   ? ` Showing the latest ${liveFights.length} — your full history is saved on esologs.com.`
                   : "")}
-          </span>
-        </div>
-      )}
-
-      {/* Quiet-too-long nudge: if combat logging was ALREADY on before Go Live, ESO
-          won't write a fresh session header, so nothing streams until a /reloadui. */}
-      {quietTooLong && (
-        <div className="flex items-start gap-2 rounded-lg border border-sky-400/20 bg-sky-400/[0.05] p-3 text-xs text-muted-foreground">
-          <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-sky-300/90" aria-hidden />
-          <span>
-            No fights yet. If combat logging was already running before you went live, type{" "}
-            <code className="text-foreground/80">/reloadui</code> in ESO to start a fresh session —
-            then new fights will stream here.
           </span>
         </div>
       )}

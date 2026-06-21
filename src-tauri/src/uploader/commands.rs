@@ -470,6 +470,74 @@ pub async fn uploader_preflight(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Peek the active log's TAIL + sample its growth to guess, BEFORE Go Live, whether a
+/// fresh logging session is coming — so native live opens its waiting state with the
+/// right guidance (turn on `/encounterlog` vs `/reloadui` to start a fresh session).
+/// Read-only and best-effort: it never decides whether to go live (the driver's first
+/// `BEGIN_LOG` is the ground truth), so an `Err` or `Uncertain` just degrades to soft
+/// guidance. Cheap: reads the last [`tail_io::TAIL_PEEK`] bytes + two size samples
+/// ~1.1s apart for the growth disambiguator.
+#[tauri::command]
+pub async fn uploader_probe_live_readiness(
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<LiveReadiness, String> {
+    let safe = confine_log_path(&allowed, &file_path)?;
+    let safe = safe.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&safe);
+        let size0 = match std::fs::metadata(path) {
+            Ok(m) => m.len(),
+            // No file (or unreadable) → nothing to stream from yet.
+            Err(_) => {
+                return Ok::<_, String>(LiveReadiness {
+                    verdict: LiveReadinessVerdict::NoLog,
+                    fight_in_progress: false,
+                    grew: false,
+                })
+            }
+        };
+
+        // Peek the tail to find the latest session/combat boundary.
+        let mut buf = Vec::new();
+        let start = size0.saturating_sub(super::tail_io::TAIL_PEEK);
+        let tail = match super::tail_io::read_range(path, start, size0, &mut buf) {
+            Ok(n) => scanner::tail_session_state(&buf[..n]),
+            Err(_) => Default::default(), // unreadable tail → uncertain below
+        };
+
+        // Growth disambiguator: did the file get more bytes during a short window?
+        // A growing file with an open session = logging is actively running now.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let size1 = std::fs::metadata(path).map(|m| m.len()).unwrap_or(size0);
+        let grew = size1 > size0;
+
+        // Verdict: an open session that is ALSO growing → logging already running, no
+        // fresh header coming (the hard `/reloadui` case). An ended/closed session, or
+        // a quiescent file, → not logging yet (turn on `/encounterlog`). Anything we
+        // couldn't read a boundary for, or an open-but-not-growing file (could be a
+        // stale draft or a between-pulls lull we can't be sure about), → uncertain.
+        let verdict = if tail.open_session && grew {
+            LiveReadinessVerdict::ActiveNoHeader
+        } else if tail.saw_boundary && !tail.open_session {
+            LiveReadinessVerdict::LoggingOff
+        } else if !tail.saw_boundary && !grew {
+            // Empty/headerless and not growing → most likely logging is simply off.
+            LiveReadinessVerdict::LoggingOff
+        } else {
+            LiveReadinessVerdict::Uncertain
+        };
+
+        Ok::<_, String>(LiveReadiness {
+            verdict,
+            fight_in_progress: tail.fight_in_progress,
+            grew,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // ── Split to disk ──────────────────────────────────────────────────────────
 
 /// Split an oversized log into one file per session inside an app-owned output
@@ -1498,10 +1566,14 @@ async fn start_native_live_branch(
             source_path: safe_owned.clone(),
             created_at_ms: now_ms(),
         };
-        // Surface reauth prompts over the same LiveEvent channel the UI consumes.
+        // Surface lifecycle/auth events over the same LiveEvent channel the UI consumes.
+        let ch_anchored = channel_for_thread.clone();
         let ch_reauth = channel_for_thread.clone();
         let ch_resolved = channel_for_thread.clone();
         let events = LiveEventSink {
+            on_session_anchored: Box::new(move || {
+                let _ = ch_anchored.send(LiveEvent::SessionAnchored);
+            }),
             on_reauth_required: Box::new(move || {
                 let _ = ch_reauth.send(LiveEvent::ReauthRequired {
                     message: "Sign in to ESO Logs again to keep uploading this session.".into(),
