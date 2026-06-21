@@ -26,20 +26,19 @@
 //! accepted only when its value is a `{` table and it passes
 //! [`looks_like_character_name`] (and is not empty / `$`-marker / all-digits).
 //!
-//! ## Deliberate, documented divergences from the tree path
+//! Whitespace and Lua comments are skipped at every token boundary the tree
+//! parser skips them (between entries, in value position, and around bracket
+//! keys), and unquoted identifier keys (`Foo = { ... }`) are handled like
+//! `parse_table_key`, so the scanner is parser-equivalent on every key,
+//! comment, and whitespace position — not just on the quoted, comment-free
+//! layout ESO actually writes. The only intentional difference:
 //!
-//! * **Unquoted identifier keys are inert.** ESO never writes an unquoted
-//!   structural key, and an identifier key can never equal `Default`/`@…`/a
-//!   world or pass `looks_like_character_name`, so ignoring them changes no
-//!   real or fixture input.
-//! * **Comments** are skipped between top-level entries and in value position
-//!   (where the tree parser also skips them); ESO SavedVariables contain none.
 //! * **Malformed input is not silently trusted.** The tree path skips a whole
 //!   file on any parse error; this scanner keeps going (recovering what it can)
-//!   but reports [`RosterScan::malformed`] when it ends mid-token or with
-//!   unbalanced braces, so the caller can still warn that the roster may be
-//!   incomplete. Parity is therefore defined over inputs that parse cleanly
-//!   (every fixture and every real ESO file).
+//!   but reports [`RosterScan::malformed`] when it ends mid-token, with
+//!   unbalanced braces, or when a key is too long to buffer — so the caller can
+//!   still warn that the roster may be incomplete. Parity is therefore defined
+//!   over inputs that parse cleanly (every fixture and every real ESO file).
 
 use std::collections::BTreeSet;
 use std::io::{self, Read};
@@ -50,11 +49,13 @@ use super::scrub::{looks_like_character_name, WELL_KNOWN_WORLDS};
 /// fully persists across chunk boundaries.
 const READ_CHUNK: usize = 64 * 1024;
 
-/// Cap on a single buffered key. Structural keys and character names are short
-/// (`looks_like_character_name` itself caps names at 32 chars), so a longer key
-/// can be neither a structural level nor a character — it is treated as if no
-/// usable key were present. Keeps memory bounded against a pathological key.
-const MAX_KEY_BYTES: usize = 512;
+/// Cap on a single buffered key. No real ESO key (structural or character) comes
+/// close — `Default`/account handles/megaserver names are tens of bytes and
+/// `looks_like_character_name` caps names at 32 chars. A key longer than this is
+/// pathological; it is treated as unusable AND flags the scan `malformed` (see
+/// `commit_key`), so a structural key we couldn't fully buffer surfaces a warning
+/// instead of silently hiding the characters beneath it. Keeps memory bounded.
+const MAX_KEY_BYTES: usize = 4096;
 
 /// Cap on the context stack depth. A pure memory guard against pathologically
 /// nested braces (real ESO data nests ~6 deep). Beyond this we stop pushing real
@@ -186,6 +187,11 @@ struct Scanner {
     /// The confirmed key for the value currently expected (set on `=`). `Some`
     /// also means "value position"; `None` means entry start.
     pending_key: Option<Vec<u8>>,
+    /// Whether the pending key came from an unquoted identifier (`Foo =`) rather
+    /// than a `["..."]`/`[num]` bracket key. Only the `File` → addon-variable
+    /// transition cares: `parse_sv_file` accepts ONLY identifier keys at the top
+    /// level, so a bracket/keyless table at file root is not an addon variable.
+    pending_ident: bool,
     /// True after `=` until the value is consumed (value-position indicator,
     /// independent of `pending_key` so an over-long key still tracks position).
     value_expected: bool,
@@ -233,14 +239,13 @@ fn name_qualifies(name: &str) -> bool {
         && looks_like_character_name(name)
 }
 
-/// Derive the context for a table being opened, given its parent context and the
-/// key the table is bound to (`None` for a keyless/array-element table or an
-/// unusable over-long key). Mirrors the `roster_*` descent decisions.
+/// Derive the context for a NON-`File` table being opened, given its parent
+/// context and the key the table is bound to (`None` for a keyless/array-element
+/// table or an unusable over-long key). Mirrors the `roster_*` descent decisions.
+/// The `File` → `UnderTop` transition is handled in `open_table`, which also
+/// requires the table to come from an identifier assignment (as `parse_sv_file`
+/// does at the top level).
 fn derive(parent: &Ctx, key: Option<&[u8]>) -> Ctx {
-    // A top-level table is always an addon variable, regardless of key.
-    if let Ctx::File = parent {
-        return Ctx::UnderTop;
-    }
     // A keyless table (array element) never matches a structural transition —
     // the tree parser gives it a synthetic numeric key that no `roster_*` arm
     // accepts, so it is effectively `Ignore`.
@@ -248,6 +253,8 @@ fn derive(parent: &Ctx, key: Option<&[u8]>) -> Ctx {
         return Ctx::Ignore;
     };
     match parent {
+        // A top-level table opened from an identifier assignment.
+        Ctx::File => Ctx::UnderTop,
         Ctx::UnderTop => {
             if k == b"Default" {
                 Ctx::AccountOrWorld
@@ -274,7 +281,6 @@ fn derive(parent: &Ctx, key: Option<&[u8]>) -> Ctx {
             }
         }
         Ctx::CharsUnderAccount(_) | Ctx::Ignore => Ctx::Ignore,
-        Ctx::File => unreachable!("File handled above"),
     }
 }
 
@@ -284,6 +290,7 @@ impl Scanner {
             ctx: vec![Ctx::File],
             overflow: 0,
             pending_key: None,
+            pending_ident: false,
             value_expected: false,
             key_buf: Vec::new(),
             key_overflow: false,
@@ -296,6 +303,7 @@ impl Scanner {
     #[inline]
     fn clear_pending(&mut self) {
         self.pending_key = None;
+        self.pending_ident = false;
         self.value_expected = false;
     }
 
@@ -309,11 +317,16 @@ impl Scanner {
     }
 
     /// Commit the buffered key (`["..."]`, `[num]`, or identifier) as the pending
-    /// key for the value following `=`. An over-long key becomes `None` (unusable
-    /// for structural matching) while still marking value position.
-    fn commit_key(&mut self) {
+    /// key for the value following `=`. `is_ident` records whether it was an
+    /// unquoted identifier key. An over-long key (beyond `MAX_KEY_BYTES`, which no
+    /// real ESO key approaches) becomes `None` AND flags the scan `malformed`, so
+    /// a structural key we couldn't fully buffer surfaces as "roster may be
+    /// incomplete" rather than silently dropping the characters beneath it.
+    fn commit_key(&mut self, is_ident: bool) {
         self.value_expected = true;
+        self.pending_ident = is_ident;
         self.pending_key = if self.key_overflow {
+            self.malformed = true;
             None
         } else {
             Some(std::mem::take(&mut self.key_buf))
@@ -331,6 +344,8 @@ impl Scanner {
             return;
         }
         let key = self.pending_key.take();
+        let from_ident = self.pending_ident;
+        self.pending_ident = false;
         let parent = self.ctx.last().cloned().unwrap_or(Ctx::Ignore);
 
         if let Ctx::CharsUnderAccount(world) = &parent {
@@ -352,7 +367,20 @@ impl Scanner {
             }
         }
 
-        let child = derive(&parent, key.as_deref());
+        let child = match &parent {
+            // The top level only becomes an addon variable when the table was
+            // opened from an identifier assignment (`Foo = { ... }`), exactly as
+            // `parse_sv_file` recognizes top-level vars. A keyless or bracket-keyed
+            // table at file root is not an addon variable, so it stays `Ignore`.
+            Ctx::File => {
+                if key.is_some() && from_ident {
+                    Ctx::UnderTop
+                } else {
+                    Ctx::Ignore
+                }
+            }
+            _ => derive(&parent, key.as_deref()),
+        };
         if self.ctx.len() >= MAX_CTX_DEPTH {
             self.overflow += 1;
         } else {
@@ -604,7 +632,7 @@ impl Scanner {
                 if is_ws(b) {
                     true
                 } else if b == b'=' {
-                    self.commit_key();
+                    self.commit_key(false);
                     true
                 } else if b == b'-' {
                     self.lex = Lex::SeekDash {
@@ -622,7 +650,7 @@ impl Scanner {
                 if is_ws(b) {
                     true
                 } else if b == b'=' {
-                    self.commit_key();
+                    self.commit_key(true);
                     true
                 } else if b == b'-' {
                     self.lex = Lex::SeekDash {
@@ -1165,6 +1193,56 @@ mod tests {
              },\n\
              },\n\
              }\n",
+        );
+    }
+
+    #[test]
+    fn parity_keyless_root_table_is_not_an_addon_var() {
+        // A bare `{ ... }` at file root is skipped by parse_sv_file (top-level
+        // nodes come only from `identifier = value`), so it yields no characters.
+        assert_parity(
+            r#"{
+                ["Default"] = {
+                    ["@Acct"] = {
+                        ["Mainchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
+        );
+        // Concretely: nothing emitted, not flagged malformed.
+        let scan = stream(br#"{ ["Default"] = { ["@Acct"] = { ["Mainchar"] = {} } } }"#);
+        assert!(scan.characters.is_empty());
+    }
+
+    #[test]
+    fn parity_root_bracket_key_is_not_an_addon_var() {
+        // parse_sv_file only recognizes identifier-keyed top-level vars, so a
+        // root-level `["x"] = { ... }` is skipped — and so must the streamer.
+        assert_parity(
+            r#"["x"] = {
+                ["Default"] = {
+                    ["@Acct"] = {
+                        ["Mainchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
+        );
+    }
+
+    #[test]
+    fn overlong_structural_key_flags_malformed() {
+        // A spaced world-layer key longer than MAX_KEY_BYTES can't be buffered;
+        // rather than silently dropping the characters under it (which the tree
+        // detector would surface), the scan is flagged incomplete.
+        let mut lua = String::from("MyAddon_SV = {\n[\"Default\"] = {\n[\"NA ");
+        lua.push_str(&"x".repeat(MAX_KEY_BYTES + 100));
+        lua.push_str(
+            "\"] = {\n[\"@Acct\"] = {\n[\"Mainchar\"] = { [\"x\"] = 1 },\n},\n},\n},\n}\n",
+        );
+        let scan = stream(lua.as_bytes());
+        assert!(
+            scan.malformed,
+            "an unbufferable structural key must flag the scan incomplete"
         );
     }
 
