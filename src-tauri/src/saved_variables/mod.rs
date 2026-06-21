@@ -1,3 +1,4 @@
+pub mod char_backup;
 pub mod io;
 pub mod parser;
 pub mod profile;

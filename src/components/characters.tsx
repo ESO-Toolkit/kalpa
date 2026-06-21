@@ -49,18 +49,22 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
   }, [addonsPath]);
 
   const handleBackup = async (char: CharacterInfo) => {
-    // A character backup copies the whole SavedVariables files the character's
-    // data lives in — it is keyed by name, not isolated per server, so two
-    // same-named characters (an NA/EU twin) intentionally share one backup.
+    // A character backup now extracts only this character's per-character
+    // SavedVariables subtree. Passing the server isolates a world-scoped NA/EU
+    // twin so each backs up (and restores) independently; account-wide data and
+    // other characters are left untouched.
     const name = backupName.trim() || `${char.name}-backup`;
     setBackingUp(`${char.server}-${char.name}`);
     try {
       const count = await invokeOrThrow<number>("backup_character_settings", {
         addonsPath,
         characterName: char.name,
+        server: char.server,
         backupName: name,
       });
-      toast.success(`Backed up ${count} SavedVariables files for ${char.name}`);
+      toast.success(
+        `Backed up ${char.name}'s settings (${count} addon file${count !== 1 ? "s" : ""})`
+      );
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
     } finally {
@@ -89,8 +93,9 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
         </DialogHeader>
 
         <p className="text-sm text-muted-foreground">
-          Your ESO characters. A backup copies the SavedVariables files a character&apos;s settings
-          live in — those files can also hold your account-wide and other characters&apos; data.
+          Your ESO characters. A backup saves just this character&apos;s SavedVariables — restoring
+          it leaves your other characters and account-wide settings untouched. Same-named NA/EU
+          twins are backed up separately.
         </p>
 
         {!loading && skippedFiles > 0 && (

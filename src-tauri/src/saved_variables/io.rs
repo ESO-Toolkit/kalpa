@@ -496,6 +496,16 @@ pub fn preview_save(
 
 /// Write raw Lua content (used by copy_sv_profile which manipulates raw text).
 pub fn write_raw_content(sv_dir: &Path, file_name: &str, content: &str) -> Result<(), String> {
+    write_raw_bytes(sv_dir, file_name, content.as_bytes())
+}
+
+/// Write raw bytes to `sv_dir/file_name` atomically (temp file + rename), with no
+/// lossy UTF-8 round-trip. Used by the per-character backup/restore path, whose
+/// merged content may contain non-UTF8 SavedVariables bytes (caret keys, addon
+/// binary blobs). No `.bak` is written: the per-character restore takes a full
+/// safety snapshot beforehand, so a stray `.lua.bak` in the live SavedVariables
+/// folder (which subsequent backups/snapshots would sweep up) is avoided.
+pub fn write_raw_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
     let file_path = sv_dir.join(file_name);
     let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
     fs::write(&tmp_path, content).map_err(|e| format!("Failed to write temp file: {e}"))?;
