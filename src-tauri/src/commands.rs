@@ -4060,6 +4060,12 @@ pub fn list_backups(
             .unwrap_or("")
             .to_string();
 
+        // Skip dot-prefixed transient dirs (e.g. a crash-orphaned char-backup
+        // staging folder); real backups never start with '.'.
+        if name.starts_with('.') {
+            continue;
+        }
+
         // Count files and total size
         let mut file_count: u32 = 0;
         let mut total_size: u64 = 0;
@@ -4775,8 +4781,16 @@ pub fn backup_character_settings(
         return Err("SavedVariables folder not found.".to_string());
     }
 
-    let backups = backups_dir(&addons_dir).join(format!("char-{backup_name}"));
-    fs::create_dir_all(&backups).map_err(|e| format!("Failed to create backup folder: {e}"))?;
+    // Stage into a dot-prefixed temp dir on the same volume, then atomically
+    // rename into place only after every matched file copies. This keeps a
+    // failed/partial backup from leaving restorable state and replaces any prior
+    // backup of the same name wholesale rather than mixing into it. The `.`
+    // prefix keeps a crash-orphaned staging dir out of `list_backups`.
+    let backups_root = backups_dir(&addons_dir);
+    let final_dir = backups_root.join(format!("char-{backup_name}"));
+    let staging = backups_root.join(format!(".tmp-char-{backup_name}"));
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
     // Copy all SavedVariables files that contain this character's data.
     // Search within bracket-quote delimiters to avoid false positives
@@ -4820,7 +4834,7 @@ pub fn backup_character_settings(
                 if found {
                     matched += 1;
                     if let Some(name) = path.file_name() {
-                        let dest = backups.join(name);
+                        let dest = staging.join(name);
                         match fs::copy(&path, &dest) {
                             Ok(_) => copied += 1,
                             Err(e) => last_copy_err = Some(e.to_string()),
@@ -4832,10 +4846,10 @@ pub fn backup_character_settings(
     }
 
     if matched == 0 {
-        // No file held this character's data — don't leave an empty folder or
+        // No file held this character's data — discard the staging dir and don't
         // report success. A character with only account-wide addon settings has
         // no per-character SavedVariables data to copy.
-        let _ = fs::remove_dir(&backups);
+        let _ = fs::remove_dir_all(&staging);
         return Err(format!(
             "No per-character SavedVariables data found for \"{character_name}\". \
              This character may only use account-wide addon settings."
@@ -4844,13 +4858,23 @@ pub fn backup_character_settings(
 
     if copied < matched {
         // Files matched but at least one copy failed (permissions, locked
-        // destination, disk error) — surface it instead of silently truncating.
+        // destination, disk error) — discard the partial staging dir and surface
+        // it instead of leaving a restorable incomplete backup.
+        let _ = fs::remove_dir_all(&staging);
         let detail = last_copy_err.map(|e| format!(" ({e})")).unwrap_or_default();
         return Err(format!(
             "Backed up only {copied} of {matched} SavedVariables files for \
              \"{character_name}\"; some files could not be copied{detail}."
         ));
     }
+
+    // All matched files copied — replace any prior backup of this name and
+    // finalize with a single rename on the same volume.
+    let _ = fs::remove_dir_all(&final_dir);
+    fs::rename(&staging, &final_dir).map_err(|e| {
+        let _ = fs::remove_dir_all(&staging);
+        format!("Failed to finalize backup: {e}")
+    })?;
 
     Ok(copied)
 }

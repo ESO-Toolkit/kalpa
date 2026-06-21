@@ -736,8 +736,9 @@ pub struct RosterCharacter {
 /// fake character. A key is accepted only when:
 ///   * it is a **table** value (every ESO character record is a table), and
 ///   * its parent account handle is a proven character container — it carries a
-///     ZO_SavedVars `$`-marker sibling (e.g. `$AccountWide`), **or** it sits
-///     under a world-scoped layer (which is per-character by construction).
+///     ZO_SavedVars `$`-marker sibling (e.g. `$AccountWide`). This is required
+///     even under a world-scoped layer, since addons also store world/account
+///     config tables there; the world only labels the megaserver.
 ///
 /// Returns verbatim keys (caret suffix preserved) so callers can both display a
 /// cleaned name and match the raw key on disk.
@@ -822,11 +823,12 @@ fn roster_chars_under_account(
         None => return,
     };
     // ZO_SavedVars writes a `$`-marker (e.g. `$AccountWide`) alongside character
-    // keys. Its presence proves this account handle is a character container.
-    // Under a world-scoped layer the shape itself is the proof.
-    let proven_character_container =
-        world.is_some() || children.iter().any(|c| c.key.starts_with('$'));
-    if !proven_character_container {
+    // keys. Its presence proves this account handle is a character container. We
+    // require it even under a world layer, because addons also store world- and
+    // account-scoped config tables (e.g. `guilds`, `profiles`) there; without a
+    // marker we cannot tell those apart from character keys. The world is still
+    // used only to label the megaserver.
+    if !children.iter().any(|c| c.key.starts_with('$')) {
         return;
     }
     for child in children {
@@ -1618,13 +1620,14 @@ mod tests {
 
     #[test]
     fn roster_maps_world_scoped_server() {
-        // World layer under Default: the megaserver is derivable, and the layout
-        // itself proves these are characters (no $ marker needed).
+        // World layer under Default: the megaserver is derivable, and the
+        // $AccountWide marker proves these are characters.
         let tree = parse(
             r#"MyAddon_SV = {
                 ["Default"] = {
                     ["EU Megaserver"] = {
                         ["@Author"] = {
+                            ["$AccountWide"] = { ["enabled"] = true },
                             ["Mainchar"] = { ["x"] = 1 },
                         },
                     },
@@ -1635,6 +1638,25 @@ mod tests {
         assert_eq!(roster.len(), 1);
         assert_eq!(roster[0].name, "Mainchar");
         assert_eq!(roster[0].world.as_deref(), Some("EU Megaserver"));
+    }
+
+    #[test]
+    fn roster_excludes_world_scoped_config_without_marker() {
+        // World/account-scoped config tables (no $-marker) must NOT become
+        // characters just because they sit under a megaserver layer.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["NA Megaserver"] = {
+                        ["@Author"] = {
+                            ["guilds"] = { ["g1"] = true },
+                            ["profiles"] = { ["p1"] = true },
+                        },
+                    },
+                },
+            }"#,
+        );
+        assert!(detect_roster_characters_from_tree(&tree).is_empty());
     }
 
     #[test]
