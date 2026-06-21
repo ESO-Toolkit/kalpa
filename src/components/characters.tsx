@@ -14,15 +14,12 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { CharactersSkeleton } from "@/components/ui/skeletons";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { UNKNOWN_SERVER, defaultCharacterBackupName } from "@/lib/character-backup";
 
 interface CharactersProps {
   addonsPath: string;
   onClose: () => void;
 }
-
-// Server bucket for characters recovered from SavedVariables whose megaserver
-// can't be determined. Must match UNKNOWN_SERVER in the Rust `list_characters`.
-const UNKNOWN_SERVER = "Unknown";
 
 export function Characters({ addonsPath, onClose }: CharactersProps) {
   const [characters, setCharacters] = useState<CharacterInfo[]>([]);
@@ -52,8 +49,9 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
     // A character backup now extracts only this character's per-character
     // SavedVariables subtree. Passing the server isolates a world-scoped NA/EU
     // twin so each backs up (and restores) independently; account-wide data and
-    // other characters are left untouched.
-    const name = backupName.trim() || `${char.name}-backup`;
+    // other characters are left untouched. The default name is server-scoped so
+    // same-name twins don't overwrite each other's backup.
+    const name = backupName.trim() || defaultCharacterBackupName(char.name, char.server);
     setBackingUp(`${char.server}-${char.name}`);
     try {
       const count = await invokeOrThrow<number>("backup_character_settings", {
