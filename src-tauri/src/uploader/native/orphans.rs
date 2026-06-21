@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, Once};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use super::client::{is_definitively_closed, desktop_client_base, OwnedLiveRequest};
+use super::client::{desktop_client_base, is_definitively_closed, OwnedLiveRequest};
 use super::session::{SessionProvider, StoredSessionProvider};
 use crate::metadata::{load_json_with_backup, save_json_with_backup};
 
@@ -143,8 +143,10 @@ pub fn recover_orphans_once(app: tauri::AppHandle, session: Arc<StoredSessionPro
     });
 }
 
-/// The production recovery body: same keep/clear policy as [`recover_orphans`], but
-/// owns the managed `Arc` so it can build a real cancel-aware [`super::client::LiveSender`].
+/// The production recovery body: best-effort terminate each recorded orphan, clearing
+/// only on a confirmed close (success or a definitive 404/410 via
+/// [`is_definitively_closed`]); transients KEEP the breadcrumb. Owns the managed `Arc`
+/// so it can build a real cancel-aware [`super::client::LiveSender`].
 fn recover_orphans_with_sender(app: &tauri::AppHandle, session: Arc<StoredSessionProvider>) {
     let orphans = load(app);
     if orphans.is_empty() {

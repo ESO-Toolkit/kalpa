@@ -57,6 +57,7 @@ use super::client::{
 use super::events::EventEmitter;
 use super::incremental::{IncrementalIndexState, IncrementalMasterState};
 use super::session::SessionProvider;
+use crate::uploader::tail_io::{read_range, MAX_CONSECUTIVE_FAILURES, MAX_READ, POLL_INTERVAL};
 use crate::uploader::types::UploadOptions;
 
 /// The pure, network-free core of the live driver: owns the long-lived emitter, the
@@ -667,10 +668,11 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
                         return reason;
                     }
                 }
-                TailOutcome::Done => {
+                outcome @ (TailOutcome::Ended | TailOutcome::Idle) => {
                     // Clean end (END_LOG) or idle deadline: drain trailing shields and
-                    // flush the final segment. The tail decides Ended vs Idle; default
-                    // to Ended here (the production tail signals Idle distinctly).
+                    // flush the final segment. The tail distinguishes the two; carry
+                    // that through to the settled reason so a crash is observable.
+                    let clean = matches!(outcome, TailOutcome::Ended);
                     self.seg.drain_trailing_shields();
                     return match self.post_current(sink) {
                         PostOutcome::Fatal(d) => EndReason::Fatal(d),
@@ -678,7 +680,8 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
                         // Auth lost on the final flush: nothing more to stream, so
                         // don't pause — just record that re-auth was needed at the end.
                         PostOutcome::NeedsReauth { .. } => EndReason::ReauthTimeout,
-                        _ => EndReason::Ended,
+                        _ if clean => EndReason::Ended,
+                        _ => EndReason::Idle,
                     };
                 }
                 TailOutcome::Error(_) => return EndReason::Fatal("tail read failed".into()),
@@ -893,8 +896,15 @@ pub trait LiveTail {
 
 /// The outcome of one [`LiveTail::next_lines`] poll.
 pub enum TailOutcome {
+    /// A batch of newly-appended complete lines.
     Lines(Vec<String>),
-    Done,
+    /// Logging ended cleanly (an `END_LOG` line was seen). Flush the final segment.
+    Ended,
+    /// The file stopped growing past the idle deadline (game crash / forgot to stop).
+    /// Flush the final segment, but settle distinctly from a clean end so a real
+    /// crash is observable (L3).
+    Idle,
+    /// An unrecoverable read failure (the failure-streak teardown tripped).
     Error(String),
 }
 
@@ -997,7 +1007,11 @@ impl LiveTail for FileTail {
                 }
                 // Grew but no complete line yet — keep polling.
             } else {
-                // No growth. If we've been idle past the deadline, we're done.
+                // No growth. If we've been idle past the deadline, we're done. The
+                // debug FileTail force-ages `last_growth` on END_LOG (above), so it
+                // can't cleanly distinguish a clean end from a real idle — it reports
+                // `Idle`. The production NotifyTail distinguishes the two; the spike
+                // doesn't depend on the distinction.
                 let idle = self
                     .last_growth
                     .lock()
@@ -1006,10 +1020,242 @@ impl LiveTail for FileTail {
                     .unwrap_or(false);
                 drop(off);
                 if idle {
-                    return TailOutcome::Done;
+                    return TailOutcome::Idle;
                 }
             }
             std::thread::sleep(self.poll_interval);
+        }
+    }
+}
+
+// ── Production notify-backed tail (L-tail) ───────────────────────────────────
+//
+// The shipping live path tails the REAL in-game `Encounter.log` (under Documents —
+// CFA blocks third-party WRITES there, not reads, and the fight-detection watcher
+// already reads it fine). [`NotifyTail`] mirrors `watcher::tail_loop`'s read
+// machinery — byte-offset `tail_io::read_range`, the reused buffer, the
+// `MAX_CONSECUTIVE_FAILURES` streak (reset only after a successful READ, never a bare
+// stat — the load-bearing discipline from `watcher.rs`), `MAX_READ` cap, truncation
+// reset — but YIELDS raw complete lines into the live driver instead of scanning for
+// fights. It does NOT run `start_live_watch` (that would mean two notify watchers on
+// one file). The driver derives the UI timeline from its own cuts.
+//
+// `next_lines` is a blocking pull (the `LiveTail` seam) that waits on the notify
+// channel + poll fallback until it has a batch of complete lines, sees `END_LOG`
+// (`Ended`), goes idle past `IDLE_DEADLINE` (`Idle`), or trips the failure streak
+// (`Error`). State lives behind a `Mutex` since `LiveTail::next_lines(&self)` borrows
+// shared.
+
+/// A complete-line assembler over the raw tail bytes: carries a partial (un-newlined)
+/// trailing line across reads, strips a single `\r`, drops empties, and flags an
+/// `END_LOG`. Factored out so the line-assembly contract is unit-testable without
+/// notify or a real file. A 1 MiB partial cap guards against a non-line-atomic writer
+/// (a real adversarial file, unlike the trusted synthetic feeder) growing it forever.
+struct LineAssembler {
+    partial: Vec<u8>,
+    /// True once any `BEGIN_LOG` has passed — used to DISCARD lines fed before the
+    /// first session header (a mid-session start at EOF, F4), so the encoder never
+    /// sees a headerless prefix it can't frame.
+    seen_begin_log: bool,
+}
+
+/// 1 MiB cap on an un-newlined partial line — a real ESO log line is never close to
+/// this; exceeding it means a corrupt / non-line-atomic file → teardown.
+const MAX_PARTIAL: usize = 1024 * 1024;
+
+impl LineAssembler {
+    fn new() -> Self {
+        Self {
+            partial: Vec::new(),
+            seen_begin_log: false,
+        }
+    }
+
+    /// Reset on a truncation / new file (mirrors `watcher.rs:303-309`).
+    fn reset(&mut self) {
+        self.partial.clear();
+        // Do NOT reset seen_begin_log: a truncation that starts a fresh session will
+        // bring its own BEGIN_LOG, which the driver treats as a second-session cut.
+    }
+
+    /// Feed a freshly-read chunk; append to the carry, split complete lines, hold the
+    /// trailing partial. Returns `(lines, saw_end_log)` or an `Err` if the partial cap
+    /// is exceeded. Lines before the first `BEGIN_LOG` are DISCARDED (F4).
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<(Vec<String>, bool), String> {
+        self.partial.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        let mut saw_end_log = false;
+        let mut start = 0usize;
+        for i in 0..self.partial.len() {
+            if self.partial[i] == b'\n' {
+                let line = String::from_utf8_lossy(&self.partial[start..i])
+                    .trim_end_matches('\r')
+                    .to_string();
+                start = i + 1;
+                if line.is_empty() {
+                    continue;
+                }
+                let kind = kind_of(&line);
+                if kind == Some("BEGIN_LOG") {
+                    self.seen_begin_log = true;
+                }
+                if kind == Some("END_LOG") {
+                    saw_end_log = true;
+                }
+                // Discard anything before the first session header (mid-session start).
+                if self.seen_begin_log {
+                    lines.push(line);
+                }
+            }
+        }
+        // Keep the un-newlined tail for the next chunk.
+        self.partial.drain(..start);
+        if self.partial.len() > MAX_PARTIAL {
+            return Err(format!(
+                "log line exceeded {MAX_PARTIAL} bytes without a newline — file is \
+                 corrupt or not written line-atomically"
+            ));
+        }
+        Ok((lines, saw_end_log))
+    }
+}
+
+/// A production notify-backed [`LiveTail`] over a real growing `Encounter.log`.
+pub struct NotifyTail {
+    inner: std::sync::Mutex<NotifyTailState>,
+    idle_deadline: std::time::Duration,
+}
+
+struct NotifyTailState {
+    rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    // The watcher is held so it stays alive (dropping it stops notifications).
+    _watcher: notify::RecommendedWatcher,
+    consumed: u64,
+    read_buf: Vec<u8>,
+    assembler: LineAssembler,
+    consecutive_failures: u32,
+    last_growth: std::time::Instant,
+    last_poll: std::time::Instant,
+    ended: bool,
+}
+
+impl NotifyTail {
+    /// Construct synchronously (so a watcher-setup failure surfaces to the caller, not
+    /// inside a thread), watching `path`'s parent dir and tailing from `start_offset`.
+    pub fn new(path: &std::path::Path, start_offset: u64) -> Result<Self, String> {
+        use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = RecommendedWatcher::new(
+            move |res| {
+                let _ = tx.send(res);
+            },
+            Config::default().with_poll_interval(POLL_INTERVAL),
+        )
+        .map_err(|e| format!("Could not start file watcher: {e}"))?;
+        if let Some(parent) = path.parent() {
+            watcher
+                .watch(parent, RecursiveMode::NonRecursive)
+                .map_err(|e| format!("Could not watch the logs folder: {e}"))?;
+        }
+        Ok(Self {
+            inner: std::sync::Mutex::new(NotifyTailState {
+                rx,
+                _watcher: watcher,
+                consumed: start_offset,
+                read_buf: Vec::new(),
+                assembler: LineAssembler::new(),
+                consecutive_failures: 0,
+                last_growth: std::time::Instant::now(),
+                last_poll: std::time::Instant::now(),
+                ended: false,
+            }),
+            idle_deadline: IDLE_DEADLINE,
+        })
+    }
+}
+
+impl LiveTail for NotifyTail {
+    fn next_lines(&self, path: &str) -> TailOutcome {
+        let mut st = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return TailOutcome::Error("notify tail lock poisoned".into()),
+        };
+        if st.ended {
+            return TailOutcome::Ended;
+        }
+        let p = std::path::Path::new(path);
+        loop {
+            // Wait for an FS event or the poll deadline (mirrors watcher.rs:239).
+            let _ = st.rx.recv_timeout(POLL_INTERVAL);
+            if st.last_poll.elapsed() < POLL_INTERVAL {
+                // Coalesced wakeups: only act once per poll window.
+                continue;
+            }
+            st.last_poll = std::time::Instant::now();
+
+            let size = match std::fs::metadata(p) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    st.consecutive_failures += 1;
+                    if st.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        return TailOutcome::Error(format!("lost access to the log file: {e}"));
+                    }
+                    continue;
+                }
+            };
+            // NOTE: do NOT reset the failure streak on a successful stat — only a
+            // successful READ proves readability (the watcher.rs:290-298 discipline).
+
+            if size < st.consumed {
+                // Truncation / replacement → fresh session (watcher.rs:303-309). The
+                // driver treats the new session's BEGIN_LOG as a second-session cut.
+                st.consumed = 0;
+                st.assembler.reset();
+                continue;
+            }
+            if size == st.consumed {
+                if st.last_growth.elapsed() >= self.idle_deadline {
+                    return TailOutcome::Idle;
+                }
+                continue;
+            }
+
+            let read_end = size.min(st.consumed + MAX_READ);
+            let start = st.consumed;
+            let n = match read_range(p, start, read_end, &mut st.read_buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    st.consecutive_failures += 1;
+                    if st.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        return TailOutcome::Error(format!("could not keep reading the log: {e}"));
+                    }
+                    continue; // transient (sharing violation while ESO flushes)
+                }
+            };
+            st.consecutive_failures = 0; // a successful READ clears the streak
+            st.consumed = read_end;
+            st.last_growth = std::time::Instant::now();
+
+            // Assemble complete lines from the chunk (copy out to drop the borrow on
+            // `st.read_buf` before mutating `st.assembler`).
+            let chunk = st.read_buf[..n].to_vec();
+            let (lines, saw_end_log) = match st.assembler.push_chunk(&chunk) {
+                Ok(r) => r,
+                Err(e) => return TailOutcome::Error(e),
+            };
+            if saw_end_log {
+                // Emit any lines we have; the NEXT poll returns Ended. (END_LOG is the
+                // last meaningful line, so `lines` already includes everything up to it.)
+                st.ended = true;
+                if !lines.is_empty() {
+                    return TailOutcome::Lines(lines);
+                }
+                return TailOutcome::Ended;
+            }
+            if !lines.is_empty() {
+                return TailOutcome::Lines(lines);
+            }
+            // Grew but no complete line yet — keep polling.
         }
     }
 }
@@ -1059,7 +1305,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or(TailOutcome::Done)
+                .unwrap_or(TailOutcome::Ended)
         }
     }
 
@@ -1399,7 +1645,7 @@ mod tests {
         let tail = ScriptedTail::new(vec![
             TailOutcome::Lines(lines[..mid].to_vec()),
             TailOutcome::Lines(lines[mid..].to_vec()),
-            TailOutcome::Done,
+            TailOutcome::Ended,
         ]);
 
         let mut seg = LiveSegmenter::new();
@@ -1415,8 +1661,8 @@ mod tests {
                         }
                     }
                 }
-                TailOutcome::Done => {
-                    // The pump ends only when the tail signals Done (reaching here is
+                TailOutcome::Ended | TailOutcome::Idle => {
+                    // The pump ends only when the tail signals end (reaching here is
                     // the proof). Flush the final segment.
                     seg.drain_trailing_shields();
                     if let Ok(Some(_)) = seg.build_next_segment() {
@@ -1861,6 +2107,91 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(true)); // already stopped
         let (reason, _b, _s) = drive_with(sender, cancel, two_fight_session(), false);
         assert_eq!(reason, Some(EndReason::Stopped));
+    }
+
+    // ── Production tail line assembly (L-tail, Step 6) ───────────────────────
+
+    const HDR: &str = "0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"";
+
+    #[test]
+    fn line_assembler_reassembles_a_line_split_across_two_chunks() {
+        let mut a = LineAssembler::new();
+        // First chunk ends mid-line (no newline on the second line).
+        let (l1, end1) = a
+            .push_chunk(format!("{HDR}\n0,ZONE_CHANGED,1129,\"Ha").as_bytes())
+            .unwrap();
+        assert_eq!(
+            l1,
+            vec![HDR.to_string()],
+            "only the complete first line emits"
+        );
+        assert!(!end1);
+        // Second chunk completes it.
+        let (l2, _) = a.push_chunk(b"ll\",NONE\n").unwrap();
+        assert_eq!(l2, vec!["0,ZONE_CHANGED,1129,\"Hall\",NONE".to_string()]);
+    }
+
+    #[test]
+    fn line_assembler_strips_crlf_and_drops_empties() {
+        let mut a = LineAssembler::new();
+        let (lines, _) = a
+            .push_chunk(format!("{HDR}\r\n\r\n0,END_COMBAT\r\n").as_bytes())
+            .unwrap();
+        assert_eq!(
+            lines,
+            vec![HDR.to_string(), "0,END_COMBAT".to_string()],
+            "CRLF stripped and the blank line dropped"
+        );
+    }
+
+    #[test]
+    fn line_assembler_flags_end_log() {
+        let mut a = LineAssembler::new();
+        let (_, end) = a
+            .push_chunk(format!("{HDR}\n1700,END_LOG\n").as_bytes())
+            .unwrap();
+        assert!(end, "END_LOG must be flagged");
+    }
+
+    #[test]
+    fn line_assembler_discards_lines_before_first_begin_log() {
+        // F4: a mid-session start (no leading BEGIN_LOG) must discard until one arrives,
+        // so the encoder never sees a headerless prefix.
+        let mut a = LineAssembler::new();
+        let (pre, _) = a
+            .push_chunk(b"500,COMBAT_EVENT,DAMAGE,FIRE,1,5,0,1,38901,1\n600,END_COMBAT\n")
+            .unwrap();
+        assert!(
+            pre.is_empty(),
+            "pre-BEGIN_LOG lines must be discarded, got {pre:?}"
+        );
+        let (post, _) = a
+            .push_chunk(format!("{HDR}\n700,END_COMBAT\n").as_bytes())
+            .unwrap();
+        assert_eq!(
+            post,
+            vec![HDR.to_string(), "700,END_COMBAT".to_string()],
+            "lines from BEGIN_LOG onward are kept"
+        );
+    }
+
+    #[test]
+    fn line_assembler_caps_an_unbounded_partial() {
+        let mut a = LineAssembler::new();
+        // A 1MiB+1 byte chunk with no newline must trip the cap → Err (teardown).
+        let huge = vec![b'x'; MAX_PARTIAL + 1];
+        let r = a.push_chunk(&huge);
+        assert!(r.is_err(), "an oversized newline-less partial must error");
+    }
+
+    #[test]
+    fn line_assembler_reset_clears_partial() {
+        let mut a = LineAssembler::new();
+        let _ = a.push_chunk(b"0,BEGIN").unwrap(); // partial, no newline
+        a.reset();
+        // After reset the dangling "0,BEGIN" is gone; a fresh full line assembles clean.
+        let (lines, _) = a.push_chunk(format!("{HDR}\n").as_bytes()).unwrap();
+        assert_eq!(lines, vec![HDR.to_string()]);
     }
 
     #[test]
