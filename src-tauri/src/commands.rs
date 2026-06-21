@@ -13,7 +13,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -4045,6 +4044,10 @@ pub fn list_backups(
         return Ok(Vec::new());
     }
 
+    // Self-heal any character backup orphaned by a crash mid-finalization before
+    // listing, so a recovered backup is visible to the restore flow.
+    recover_orphaned_backups(&backups);
+
     let mut results: Vec<BackupInfo> = Vec::new();
     let entries =
         fs::read_dir(&backups).map_err(|e| format!("Failed to read backups folder: {e}"))?;
@@ -4770,6 +4773,44 @@ static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// directory can't race on it (the per-call staging/tombstone handle the rest).
 static BACKUP_FINALIZE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Stream `path` in chunks and report whether it contains any of `needles`.
+/// Uses a raw byte search so non-UTF8 SavedVariables content is handled and the
+/// *entire* file is scanned (no line cap — a character block can sit megabytes
+/// in, after a large account-wide block). Chunk reads overlap by `max_needle-1`
+/// bytes so a needle split across a read boundary is still found.
+fn file_contains_needle(path: &Path, needles: &[&[u8]]) -> std::io::Result<bool> {
+    use std::io::Read;
+
+    let max_len = needles.iter().map(|n| n.len()).max().unwrap_or(0);
+    if max_len == 0 {
+        return Ok(false);
+    }
+    let mut file = fs::File::open(path)?;
+    let mut chunk = vec![0u8; 64 * 1024];
+    let mut window: Vec<u8> = Vec::with_capacity(64 * 1024 + max_len);
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        window.extend_from_slice(&chunk[..n]);
+        if needles
+            .iter()
+            .any(|needle| window.windows(needle.len()).any(|w| w == *needle))
+        {
+            return Ok(true);
+        }
+        // Keep the last (max_len - 1) bytes so a needle straddling the boundary
+        // with the next chunk is still detected.
+        let keep = max_len - 1;
+        if window.len() > keep {
+            let drop = window.len() - keep;
+            window.drain(..drop);
+        }
+    }
+    Ok(false)
+}
+
 /// Scan `.lua` SavedVariables files under `sv_dir` for `character_name` and copy
 /// every match into `staging`. Matches the cleaned name `["Name"]` and the raw
 /// caret form `["Name^...` a minority of addons store. Returns
@@ -4785,11 +4826,9 @@ fn scan_and_stage_character_files(
     staging: &Path,
 ) -> Result<(u32, u32, Option<String>), String> {
     // Bracket-quote delimiters avoid false positives (e.g. "Lib" vs "LibStub").
-    // Only the first 10,000 lines are scanned — character keys appear near the
-    // top, so reading entire 100MB+ files is wasteful.
     let needle_exact = format!("[\"{character_name}\"]");
     let needle_caret = format!("[\"{character_name}^");
-    let max_lines: usize = 10_000;
+    let needles: [&[u8]; 2] = [needle_exact.as_bytes(), needle_caret.as_bytes()];
 
     let entries =
         fs::read_dir(sv_dir).map_err(|e| format!("Failed to read SavedVariables folder: {e}"))?;
@@ -4807,19 +4846,8 @@ fn scan_and_stage_character_files(
             .and_then(|n| n.to_str())
             .unwrap_or("?")
             .to_string();
-        let file = fs::File::open(&path).map_err(|e| format!("Could not open {fname}: {e}"))?;
-        let reader = BufReader::new(file);
-        let mut found = false;
-        for (i, line_result) in reader.lines().enumerate() {
-            if i >= max_lines {
-                break;
-            }
-            let line = line_result.map_err(|e| format!("Could not read {fname}: {e}"))?;
-            if line.contains(&needle_exact) || line.contains(&needle_caret) {
-                found = true;
-                break;
-            }
-        }
+        let found = file_contains_needle(&path, &needles)
+            .map_err(|e| format!("Could not read {fname}: {e}"))?;
         if found {
             matched += 1;
             if let Some(name) = path.file_name() {
@@ -4870,6 +4898,52 @@ fn finalize_backup_replace(
             }
             let _ = fs::remove_dir_all(staging);
             Err(e)
+        }
+    }
+}
+
+/// Recover character backups orphaned by a crash/power-loss during finalization.
+///
+/// `finalize_backup_replace` moves the prior backup to a dot-prefixed tombstone
+/// before installing the new one. If the process dies in that window, the prior
+/// good backup is left at `.old-char-<name>-<seq>` with no `char-<name>` at the
+/// final path — invisible to `list_backups`. This restores such a tombstone (or
+/// discards it if the new backup is already in place). Holds the finalize lock
+/// so it never observes a live, mid-swap finalize.
+fn recover_orphaned_backups(backups_root: &Path) {
+    let _guard = BACKUP_FINALIZE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entries = match fs::read_dir(backups_root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(".old-char-") else {
+            continue;
+        };
+        // rest is "<backup_name>-<seq>"; the seq is the trailing numeric segment.
+        let Some((base, _seq)) = rest.rsplit_once('-') else {
+            continue;
+        };
+        if base.is_empty() {
+            continue;
+        }
+        let final_dir = backups_root.join(format!("char-{base}"));
+        if final_dir.exists() {
+            // The replacement already landed; the tombstone is stale.
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            // Crash between the two finalize renames — restore the prior backup
+            // so it is discoverable and restorable again.
+            let _ = fs::rename(&path, &final_dir);
         }
     }
 }
@@ -7508,18 +7582,77 @@ mod tests {
     }
 
     #[test]
-    fn scan_and_stage_aborts_on_unreadable_file() {
+    fn scan_handles_non_utf8_and_finds_byte_match() {
         let tmp = tempfile::tempdir().unwrap();
         let sv = tmp.path().join("SavedVariables");
         fs::create_dir_all(&sv).unwrap();
-        fs::write(sv.join("good.lua"), "[\"Faewynd\"] = {}\n").unwrap();
-        // Invalid UTF-8 makes the line read fail, so completeness can't be proven.
-        fs::write(sv.join("bad.lua"), [0xff_u8, 0xfe, 0x00]).unwrap();
+        // Invalid UTF-8 bytes followed by the character key: byte search still
+        // matches, and the non-UTF8 content does not abort the scan.
+        let mut bytes = vec![0xff_u8, 0xfe, 0x00, b'\n'];
+        bytes.extend_from_slice(b"[\"Faewynd\"] = {}\n");
+        fs::write(sv.join("weird.lua"), &bytes).unwrap();
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let result = scan_and_stage_character_files(&sv, "Faewynd", &staging);
-        assert!(result.is_err());
+        let (matched, copied, err) =
+            scan_and_stage_character_files(&sv, "Faewynd", &staging).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(copied, 1);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn scan_finds_character_past_old_line_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sv = tmp.path().join("SavedVariables");
+        fs::create_dir_all(&sv).unwrap();
+        // Character key sits well past the former 10,000-line cap.
+        let mut content = String::with_capacity(300_000);
+        for _ in 0..10_050 {
+            content.push_str("[\"filler\"] = 1,\n");
+        }
+        content.push_str("[\"Faewynd\"] = {}\n");
+        fs::write(sv.join("big.lua"), content).unwrap();
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        let (matched, copied, _) =
+            scan_and_stage_character_files(&sv, "Faewynd", &staging).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(copied, 1);
+        assert!(staging.join("big.lua").is_file());
+    }
+
+    #[test]
+    fn recover_restores_orphaned_tombstone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Simulate a crash mid-finalize: prior backup left at the tombstone,
+        // no char-<name> at the final path.
+        let tombstone = root.join(".old-char-mychar-7");
+        fs::create_dir_all(&tombstone).unwrap();
+        fs::write(tombstone.join("data.lua"), b"good").unwrap();
+
+        recover_orphaned_backups(root);
+
+        assert!(root.join("char-mychar").join("data.lua").is_file());
+        assert!(!tombstone.exists());
+    }
+
+    #[test]
+    fn recover_discards_stale_tombstone_when_final_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let tombstone = root.join(".old-char-mychar-7");
+        fs::create_dir_all(&tombstone).unwrap();
+        let final_dir = root.join("char-mychar");
+        fs::create_dir_all(&final_dir).unwrap();
+        fs::write(final_dir.join("new.lua"), b"new").unwrap();
+
+        recover_orphaned_backups(root);
+
+        assert!(!tombstone.exists());
+        assert!(final_dir.join("new.lua").is_file());
     }
 
     #[test]
