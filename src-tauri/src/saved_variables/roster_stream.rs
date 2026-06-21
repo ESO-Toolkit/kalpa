@@ -725,9 +725,13 @@ impl Scanner {
                 true
             }
             b'=' => {
-                // A stray/defensive `=` (identifier-key assignments are committed
-                // via the Ident path); marks value position with no key.
-                self.value_expected = true;
+                // A stray `=` in entry position. Real assignments commit value
+                // position via the bracket/identifier key paths (commit_key), so a
+                // `=` reaching here is unexpected junk. Ignore it WITHOUT entering
+                // value mode — otherwise it would consume the following addon
+                // variable name as a scalar value and hide its roster entries.
+                // `parse_sv_file` likewise skips stray non-identifier bytes at the
+                // file root.
                 true
             }
             _ => {
@@ -1189,6 +1193,22 @@ mod tests {
              },\n\
              },\n\
              }\n",
+        );
+    }
+
+    #[test]
+    fn parity_stray_root_junk_before_addon_var() {
+        // parse_sv_file skips non-identifier junk at file root (a leading `=`,
+        // numbers, etc.), then parses the real assignment. The streamer must not
+        // let the stray `=` swallow the following addon variable.
+        assert_parity(
+            r#"= 42 MyAddon_SV = {
+                ["Default"] = {
+                    ["@Acct"] = {
+                        ["Mainchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
         );
     }
 
