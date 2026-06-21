@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import type {
   AddonManifest,
   CharacterInfo,
+  CharacterRoster,
   SavedVariableFile,
   SvTreeNode,
   SvFileStamp,
@@ -2129,8 +2130,8 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadFiles();
-    invokeOrThrow<CharacterInfo[]>("list_characters", { addonsPath })
-      .then(setCharacters)
+    invokeOrThrow<CharacterRoster>("list_characters", { addonsPath })
+      .then((roster) => setCharacters(roster.characters))
       .catch(console.error);
   }, [loadFiles, addonsPath]);
 

@@ -179,6 +179,16 @@ export interface ActivateProfileResult {
 export interface CharacterInfo {
   server: string;
   name: string;
+  /** True when recovered from SavedVariables addon data rather than
+   * AddOnSettings.txt (e.g. account-wide addon-settings mode). */
+  recovered?: boolean;
+}
+
+export interface CharacterRoster {
+  characters: CharacterInfo[];
+  /** SavedVariables files the roster scan had to skip (too large, unreadable,
+   * or unparseable); when > 0 the list may be incomplete. */
+  skippedFiles: number;
 }
 
 // ── Game instance types (multi-region / launcher detection) ──────────────
