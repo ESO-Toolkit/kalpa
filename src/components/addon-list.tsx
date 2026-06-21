@@ -97,6 +97,85 @@ const AddonListItem = memo(function AddonListItem({
   onToggleSelect,
   onRightClick,
 }: AddonListItemProps) {
+  const content = (
+    <>
+      <div className="truncate text-sm font-medium">
+        {addon.tags.includes("favorite") && <span className="text-[#c4a44a] mr-1">{"★"}</span>}
+        {addon.isLibrary && (
+          <span className="text-violet-400 mr-1 text-[10px] font-medium uppercase tracking-wide">
+            LIB
+          </span>
+        )}
+        {addon.title}
+      </div>
+      <div className="mt-0.5 flex items-center gap-1.5">
+        <span className="text-xs text-muted-foreground/50">
+          {addon.version || `v${addon.addonVersion ?? "?"}`}
+        </span>
+        {addon.author && (
+          <span className="text-xs text-muted-foreground/40">&middot; {addon.author}</span>
+        )}
+        <div className="flex-1" />
+        {hasUpdate && (
+          <Badge
+            variant="outline"
+            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+          >
+            Update
+          </Badge>
+        )}
+        {addon.disabled && (
+          <Badge
+            variant="outline"
+            className="border-zinc-400/20 bg-zinc-400/[0.04] text-zinc-400 text-[10px]"
+          >
+            Disabled
+          </Badge>
+        )}
+        {addon.missingDependencies.length > 0 && (
+          <Badge
+            variant="outline"
+            className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
+          >
+            {addon.missingDependencies.length} missing
+          </Badge>
+        )}
+        {addon.outdatedDependencies.length > 0 && (
+          <Badge
+            variant="outline"
+            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+          >
+            {addon.outdatedDependencies.length} outdated
+          </Badge>
+        )}
+        {addon.modifiedFileCount > 0 && (
+          <Badge
+            variant="outline"
+            className="border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] text-[#c4a44a]/70 text-[10px]"
+          >
+            {addon.modifiedFileCount} edited
+          </Badge>
+        )}
+        {addon.tags.includes("broken") && (
+          <Badge
+            variant="outline"
+            className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
+          >
+            Broken
+          </Badge>
+        )}
+        {addon.tags.includes("testing") && (
+          <Badge
+            variant="outline"
+            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+          >
+            Testing
+          </Badge>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div
       id={`addon-${addon.folderName}`}
@@ -139,93 +218,35 @@ const AddonListItem = memo(function AddonListItem({
         onRightClick(addon, { x: e.clientX, y: e.clientY });
       }}
     >
-      <div className="flex items-start gap-2">
+      {/* Selection rail: a width-animated column that stays collapsed until the row
+          is hovered/focused or selection (batch) mode is active, then expands and
+          glides the title right to reveal the checkbox. Only the column WIDTH
+          animates \u2014 row height is unchanged, so the virtualizer is unaffected. */}
+      <div className="flex items-start">
         <div
           className={cn(
-            "shrink-0 mt-0.5 transition-opacity duration-150",
-            isSelected || batchMode ? "opacity-100" : "opacity-0 group-hover:opacity-70"
+            "shrink-0 mt-0.5 flex items-center overflow-hidden transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none",
+            isSelected || batchMode
+              ? "w-6 opacity-100"
+              : "w-0 opacity-0 group-hover:w-6 group-hover:opacity-100 group-focus-within:w-6 group-focus-within:opacity-100"
           )}
         >
-          <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={isSelected}
+            aria-label={`Select ${addon.title}`}
+            tabIndex={batchMode ? 0 : -1}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleSelect(addon.folderName);
+            }}
+            className="flex items-center justify-center rounded-[5px] outline-none focus-visible:ring-2 focus-visible:ring-sky-400/40"
+          >
+            <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
+          </button>
         </div>
-        <div className="flex-1 min-w-0">
-          <div className="truncate text-sm font-medium">
-            {addon.tags.includes("favorite") && (
-              <span className="text-[#c4a44a] mr-1">{"\u2605"}</span>
-            )}
-            {addon.isLibrary && (
-              <span className="text-violet-400 mr-1 text-[10px] font-medium uppercase tracking-wide">
-                LIB
-              </span>
-            )}
-            {addon.title}
-          </div>
-          <div className="mt-0.5 flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground/50">
-              {addon.version || `v${addon.addonVersion ?? "?"}`}
-            </span>
-            {addon.author && (
-              <span className="text-xs text-muted-foreground/40">&middot; {addon.author}</span>
-            )}
-            <div className="flex-1" />
-            {hasUpdate && (
-              <Badge
-                variant="outline"
-                className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
-              >
-                Update
-              </Badge>
-            )}
-            {addon.disabled && (
-              <Badge
-                variant="outline"
-                className="border-zinc-400/20 bg-zinc-400/[0.04] text-zinc-400 text-[10px]"
-              >
-                Disabled
-              </Badge>
-            )}
-            {addon.missingDependencies.length > 0 && (
-              <Badge
-                variant="outline"
-                className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
-              >
-                {addon.missingDependencies.length} missing
-              </Badge>
-            )}
-            {addon.outdatedDependencies.length > 0 && (
-              <Badge
-                variant="outline"
-                className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
-              >
-                {addon.outdatedDependencies.length} outdated
-              </Badge>
-            )}
-            {addon.modifiedFileCount > 0 && (
-              <Badge
-                variant="outline"
-                className="border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] text-[#c4a44a]/70 text-[10px]"
-              >
-                {addon.modifiedFileCount} edited
-              </Badge>
-            )}
-            {addon.tags.includes("broken") && (
-              <Badge
-                variant="outline"
-                className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
-              >
-                Broken
-              </Badge>
-            )}
-            {addon.tags.includes("testing") && (
-              <Badge
-                variant="outline"
-                className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
-              >
-                Testing
-              </Badge>
-            )}
-          </div>
-        </div>
+        <div className="flex-1 min-w-0">{content}</div>
       </div>
     </div>
   );
