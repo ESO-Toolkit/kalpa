@@ -512,7 +512,7 @@ export function PackCreateView({
                         "ring-1 ring-accent-sky/15 shadow-[0_0_16px_color-mix(in_oklab,var(--accent-sky)_6%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
                       isSelected &&
                         pt === "roster-pack" &&
-                        "ring-1 ring-violet-400/15 shadow-[0_0_16px_rgba(167,139,250,0.06),inset_0_1px_0_rgba(255,255,255,0.06)]",
+                        "ring-1 ring-violet-400/15 shadow-[0_0_16px_color-mix(in_oklab,var(--status-library)_6%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
                       "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                     )}
                   >

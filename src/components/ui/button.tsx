@@ -18,7 +18,7 @@ const buttonVariants = cva(
         ghost:
           "text-foreground/70 hover:text-foreground hover:bg-white/[0.06] aria-expanded:bg-white/[0.06] aria-expanded:text-foreground focus-visible:border-accent-sky/40 focus-visible:ring-3 focus-visible:ring-accent-sky/20",
         destructive:
-          "bg-red-500/[0.08] text-red-400 border-red-500/20 shadow-[inset_0_1px_0_rgba(239,68,68,0.06)] hover:bg-red-500/[0.15] hover:border-red-500/30 hover:shadow-[inset_0_1px_0_rgba(239,68,68,0.08),0_0_12px_rgba(239,68,68,0.15)] focus-visible:border-red-500/40 focus-visible:ring-3 focus-visible:ring-red-500/20",
+          "bg-red-500/[0.08] text-red-400 border-red-500/20 shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_6%,transparent)] hover:bg-red-500/[0.15] hover:border-red-500/30 hover:shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_8%,transparent),0_0_12px_color-mix(in_oklab,var(--status-error-strong)_15%,transparent)] focus-visible:border-red-500/40 focus-visible:ring-3 focus-visible:ring-red-500/20",
         link: "text-primary underline-offset-4 hover:underline focus-visible:ring-3 focus-visible:ring-ring/50",
       },
       size: {

@@ -102,7 +102,7 @@ export function PackImportView({
 
           {/* All installed state */}
           {allInstalled && !installing && (
-            <div className="flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] p-3 shadow-[0_0_12px_rgba(34,197,94,0.06),inset_0_1px_0_rgba(34,197,94,0.06)]">
+            <div className="flex items-center gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-success-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_6%,transparent)]">
               <CheckIcon className="size-4 text-emerald-400" />
               <span className="text-sm text-emerald-400 font-medium">
                 All addons already installed
@@ -300,7 +300,7 @@ export function PackImportView({
 
       {importError && (
         <Fade>
-          <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/[0.06] p-3 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
+          <div className="flex items-start gap-2 rounded-lg border border-red-500/25 bg-red-500/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--status-error-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_4%,transparent)]">
             <AlertCircleIcon className="size-4 text-red-400 shrink-0 mt-0.5" />
             <p className="text-sm text-red-300">{importError}</p>
           </div>

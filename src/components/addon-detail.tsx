@@ -304,7 +304,7 @@ export function AddonDetail({
           variant="subtle"
           className="mb-4 flex items-center gap-2 border-emerald-500/20! bg-emerald-500/[0.04]! p-3"
         >
-          <AnimatedCheckmark size={18} color="#34d399" />
+          <AnimatedCheckmark size={18} />
           <span className="text-sm text-emerald-400">Updated successfully</span>
         </GlassPanel>
       ) : updateResult?.hasUpdate ? (

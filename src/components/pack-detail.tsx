@@ -140,7 +140,7 @@ export function PackDetailView({
                   offset={8}
                   transition={{ type: "spring", stiffness: 400, damping: 30 }}
                 >
-                  <div className="flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/[0.08] px-2.5 py-1 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
+                  <div className="flex items-center gap-1.5 rounded-lg border border-red-500/25 bg-red-500/[0.08] px-2.5 py-1 shadow-[0_0_12px_color-mix(in_oklab,var(--status-error-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_4%,transparent)]">
                     <span className="text-[11px] text-red-400 font-medium">Delete this pack?</span>
                     <Button
                       variant="outline"
@@ -360,7 +360,7 @@ export function PackDetailView({
             className={cn(
               "rounded-xl border p-3",
               installSucceeded
-                ? "border-emerald-400/25 bg-emerald-400/[0.06] shadow-[0_0_16px_rgba(34,197,94,0.08),inset_0_1px_0_rgba(34,197,94,0.06)]"
+                ? "border-emerald-400/25 bg-emerald-400/[0.06] shadow-[0_0_16px_color-mix(in_oklab,var(--status-success-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_6%,transparent)]"
                 : "border-primary/25 bg-primary/[0.06] shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_6%,transparent)]"
             )}
           >
@@ -395,7 +395,7 @@ export function PackDetailView({
                 className={cn(
                   "h-full rounded-full transition-all duration-300 ease-out",
                   installSucceeded
-                    ? "bg-emerald-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]"
+                    ? "bg-emerald-400 shadow-[0_0_8px_color-mix(in_oklab,var(--status-success-strong)_50%,transparent)]"
                     : "bg-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_50%,transparent)]"
                 )}
                 style={{

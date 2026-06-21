@@ -386,7 +386,7 @@ export function MyPacksView({
                           transition={{ duration: 0.15 }}
                           className="overflow-hidden"
                         >
-                          <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/25 bg-red-500/[0.08] px-3 py-2 shadow-[0_0_12px_rgba(239,68,68,0.06),inset_0_1px_0_rgba(239,68,68,0.04)]">
+                          <div className="mt-1 flex items-center justify-between rounded-lg border border-red-500/25 bg-red-500/[0.08] px-3 py-2 shadow-[0_0_12px_color-mix(in_oklab,var(--status-error-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_4%,transparent)]">
                             <span className="text-xs text-red-400 font-medium">
                               Delete this pack?
                             </span>

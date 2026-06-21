@@ -187,13 +187,13 @@ const AddonListItem = memo(function AddonListItem({
         addon.disabled
           ? "border-l-zinc-500 opacity-50"
           : addon.missingDependencies.length > 0
-            ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_rgba(239,68,68,0.1)]"
+            ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-error-strong)_10%,transparent)]"
             : addon.outdatedDependencies.length > 0
-              ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
+              ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent)]"
               : addon.isLibrary
-                ? "border-l-violet-400 shadow-[inset_4px_0_12px_-4px_rgba(167,139,250,0.08)]"
+                ? "border-l-violet-400 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-library)_8%,transparent)]"
                 : hasUpdate
-                  ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
+                  ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent)]"
                   : "border-l-transparent",
         isCurrent &&
           !batchMode &&

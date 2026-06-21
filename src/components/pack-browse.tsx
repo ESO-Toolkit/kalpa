@@ -108,7 +108,7 @@ export function PackListView({
         ) : error ? (
           <Fade>
             <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-              <div className="rounded-xl bg-red-500/[0.08] border border-red-500/[0.15] p-4 shadow-[0_0_24px_rgba(239,68,68,0.08),inset_0_1px_0_rgba(239,68,68,0.06)]">
+              <div className="rounded-xl bg-red-500/[0.08] border border-red-500/[0.15] p-4 shadow-[0_0_24px_color-mix(in_oklab,var(--status-error-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_6%,transparent)]">
                 <AlertCircleIcon className="size-8 text-red-400/70" />
               </div>
               <p className="font-heading text-sm font-medium text-red-400">Could not load packs</p>

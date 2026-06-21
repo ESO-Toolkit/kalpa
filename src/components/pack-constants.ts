@@ -56,7 +56,7 @@ export const PACK_TYPE_ACCENT: Record<
     hoverBg: "hover:bg-violet-400/[0.08]",
     text: "text-violet-400",
     hoverGlow:
-      "hover:shadow-[0_6px_24px_rgba(167,139,250,0.1),inset_0_1px_0_rgba(255,255,255,0.06)]",
+      "hover:shadow-[0_6px_24px_color-mix(in_oklab,var(--status-library)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
   },
 };
 
