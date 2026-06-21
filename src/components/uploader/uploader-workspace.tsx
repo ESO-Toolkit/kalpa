@@ -208,6 +208,12 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const liveFightCountRef = useRef(0);
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
+  // Which path this live session actually took: true = handed off to the official
+  // uploader (a separate app keeps streaming); false = native in-process (Kalpa IS
+  // the uploader, Stop ends it). Drives the live dashboard's callout/copy so it's
+  // accurate per session, since the same session can route either way depending on
+  // opt-in + sign-in. Set from the start dispatch's `handedOff`.
+  const [liveHandedOff, setLiveHandedOff] = useState(false);
   // Wall-clock start of the current live session, for the elapsed timer. Stored
   // as state (drives the timer's mount) and set alongside the session id in
   // handleStartLive. Kept separate from the `live-${ts}` id string so the timer
@@ -794,6 +800,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       if (liveSessionIdRef.current !== sessionId) return;
       liveWasRunningRef.current = true; // running (handed off OR native); don't re-warn on close
       setLiveSessionId(sessionId);
+      setLiveHandedOff(dispatch?.handedOff ?? true); // path-aware live copy (default to the safe handoff wording)
       if (dispatch?.report) setLiveReport(dispatch.report);
       toast.success(
         dispatch?.handedOff
@@ -1091,12 +1098,13 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               )}
 
               {/* Direct upload (recommended) — opt-in + in-app sign-in. Placed just
-                before the action so the user sets up the faster path right where
-                it pays off. Gated on the same `nativeUploadOptIn` setting the
-                upload reads fresh per dispatch. MANUAL mode only: live logging
-                always hands off to the official uploader, so a direct-upload
-                promo/ready panel there would be a false claim. */}
-              {mode === "manual" && liveSessionId === null && (
+                before the action so the user sets up the faster path right where it
+                pays off. Shown in BOTH modes (when no live session is running): live
+                now also goes native when opted-in + signed-in, so this is where a
+                user discovers WHY a live session would otherwise hand off (not opted
+                in / not signed in) and fixes it before Go Live — the gap that made a
+                "why did the official uploader open?" surprise. */}
+              {liveSessionId === null && (
                 <DirectUploadSection
                   optIn={nativeOptIn}
                   hasSession={hasNativeSession}
@@ -1136,6 +1144,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                     // streams only NEW fights (tail starts at EOF), so this drives the
                     // "earlier fights won't be uploaded" expectation note.
                     priorFightCount={preflight?.totalFights ?? 0}
+                    // Which path the running session took — drives the callout/copy
+                    // (handoff = a separate uploader app; native = Kalpa uploads).
+                    handedOff={liveHandedOff}
                     onStart={handleStartLive}
                     onStop={handleStopLive}
                     onCopyLink={copyLink}
@@ -2244,6 +2255,7 @@ function LiveDashboard({
   liveFightCount,
   liveReport,
   priorFightCount,
+  handedOff,
   onStart,
   onStop,
   onCopyLink,
@@ -2256,6 +2268,7 @@ function LiveDashboard({
   liveFightCount: number;
   liveReport: ReportRef | null;
   priorFightCount: number;
+  handedOff: boolean;
   onStart: () => void;
   onStop: () => void;
   onCopyLink: (url: string) => void | Promise<void>;
@@ -2299,7 +2312,9 @@ function LiveDashboard({
         </div>
         {running ? (
           <Button variant="outline" size="sm" onClick={onStop}>
-            Stop tracking
+            {/* Handoff: Kalpa only "tracks", so "Stop tracking" is honest. Native:
+                Stop genuinely ends the upload, so don't call it mere "tracking". */}
+            {handedOff ? "Stop tracking" : "Stop upload"}
           </Button>
         ) : (
           <Button size="sm" onClick={onStart} disabled={!canStart || starting}>
@@ -2340,25 +2355,49 @@ function LiveDashboard({
       )}
 
       {/* Scannable "what Stop does" callout — the single most important thing to
-          understand in live mode, lifted out of a gray paragraph into a bulleted
-          amber-accented card so a raider gets it at a glance. */}
-      {running && (
-        <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
-          <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
-            <AlertCircle className="size-3.5 shrink-0" aria-hidden />
-            Kalpa tracks; the ESO Logs Uploader uploads
+          understand in live mode. PATH-AWARE: on the handoff path a separate uploader
+          app does the actual upload (Stop here only ends Kalpa's timeline); on the
+          native path Kalpa IS the uploader (Stop ends the upload + closes the report).
+          Showing the handoff text for a native session (or vice-versa) is actively
+          misleading, so it branches on the path the running session actually took. */}
+      {running &&
+        (handedOff ? (
+          <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
+              <AlertCircle className="size-3.5 shrink-0" aria-hidden />
+              Kalpa tracks; the ESO Logs Uploader uploads
+            </div>
+            <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
+              <li className="list-disc">
+                <span className="text-amber-400/90">Stop tracking</span> ends this timeline in
+                Kalpa.
+              </li>
+              <li className="list-disc">
+                The ESO Logs Uploader keeps streaming in its own window.
+              </li>
+              <li className="list-disc">
+                To end uploading: stop it there and turn off in-game logging.
+              </li>
+            </ul>
           </div>
-          <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
-            <li className="list-disc">
-              <span className="text-amber-400/90">Stop tracking</span> ends this timeline in Kalpa.
-            </li>
-            <li className="list-disc">The ESO Logs Uploader keeps streaming in its own window.</li>
-            <li className="list-disc">
-              To end uploading: stop it there and turn off in-game logging.
-            </li>
-          </ul>
-        </div>
-      )}
+        ) : (
+          <div className="rounded-lg border border-emerald-500/15 border-l-[3px] border-l-emerald-500 bg-emerald-500/[0.04] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-emerald-300/90">
+              <Radio className="size-3.5 shrink-0" aria-hidden />
+              Kalpa is uploading directly to ESO Logs
+            </div>
+            <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
+              <li className="list-disc">
+                Fights stream straight from Kalpa — no separate uploader window.
+              </li>
+              <li className="list-disc">
+                <span className="text-emerald-400/90">Stop</span> ends the upload and closes the
+                report on esologs.com.
+              </li>
+              <li className="list-disc">Keep Kalpa open until you stop or finish the raid.</li>
+            </ul>
+          </div>
+        ))}
 
       {running && (
         <div
