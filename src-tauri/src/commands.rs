@@ -315,16 +315,15 @@ fn try_install_dep(
 ///
 /// ESO resolves addon names case-INSENSITIVELY, so Kalpa must too: a folder
 /// stored on disk as `LUIMedia` still satisfies a `LuiMedia` dependency in-game.
-/// We also strip zero-width / BOM characters and trim surrounding whitespace so
-/// a stray invisible character can never produce a false "missing" or
-/// "outdated" flag. Used as the key for both the installed-name set and the
-/// version map.
+/// Used as the key for both the installed-name set and the version map.
+///
+/// This deliberately does NOT delete codepoints (e.g. zero-width chars): ESO
+/// case-insensitivity does not imply that `Lib\u{200B}Foo` resolves to `LibFoo`,
+/// so stripping here would let a non-loadable folder satisfy a dependency.
+/// Stray invisible characters in a manifest's `DependsOn` token are cleaned at
+/// parse time instead (see `manifest::parse_dependencies`).
 pub(crate) fn normalize_addon_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| !matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
-        .collect::<String>()
-        .trim()
-        .to_lowercase()
+    name.trim().to_lowercase()
 }
 
 /// Extract just the `AddOnVersion` number from a manifest file without
@@ -352,6 +351,16 @@ fn read_addon_version(manifest_path: &Path) -> Option<u32> {
     None
 }
 
+/// Record a discovered library version into the version map, keeping the MAX
+/// seen for that (normalized) name. A previously-unknown version (`None`, e.g.
+/// a top-level copy that declared no `AddOnVersion`) is replaced by a concrete
+/// bundled version rather than masking it — otherwise a real outdated copy
+/// could go unflagged.
+fn merge_max_version(version_map: &mut HashMap<String, Option<u32>>, key: String, ver: u32) {
+    let slot = version_map.entry(key).or_insert(None);
+    *slot = Some((*slot).map_or(ver, |cur| cur.max(ver)));
+}
+
 /// Collect subfolder names (2 levels deep) inside a single addon folder,
 /// mirroring how ESO discovers embedded libraries within an addon.
 fn collect_subfolder_names(folder_path: &Path, out: &mut HashSet<String>) {
@@ -364,13 +373,22 @@ fn collect_subfolder_names(folder_path: &Path, out: &mut HashSet<String>) {
             continue;
         }
         if let Some(sub_name) = sub_path.file_name().and_then(|n| n.to_str()) {
-            out.insert(normalize_addon_name(sub_name));
+            // Only count a folder as installed if it carries a matching manifest
+            // (`<name>.txt`/`.addon`) — that is ESO's own rule for loading an
+            // addon/library. A bare folder (non-addon dir, or a partial
+            // extraction that lost its manifest) must NOT satisfy a dependency.
+            if find_manifest_in(&sub_path, sub_name).is_some() {
+                out.insert(normalize_addon_name(sub_name));
+            }
         }
         if let Ok(sub2_entries) = fs::read_dir(&sub_path) {
             for sub2 in sub2_entries.flatten() {
-                if sub2.path().is_dir() {
-                    if let Some(sub2_name) = sub2.path().file_name().and_then(|n| n.to_str()) {
-                        out.insert(normalize_addon_name(sub2_name));
+                let sub2_path = sub2.path();
+                if sub2_path.is_dir() {
+                    if let Some(sub2_name) = sub2_path.file_name().and_then(|n| n.to_str()) {
+                        if find_manifest_in(&sub2_path, sub2_name).is_some() {
+                            out.insert(normalize_addon_name(sub2_name));
+                        }
                     }
                 }
             }
@@ -404,7 +422,13 @@ pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
         if name.ends_with(".disabled") {
             continue;
         }
-        installed.insert(normalize_addon_name(&name));
+        // A top-level folder counts as installed only if it has a matching
+        // manifest (ESO's rule). Still descend into subfolders even when the
+        // top-level dir isn't itself an addon (e.g. a plain `Libs/` wrapper),
+        // because ESO discovers nested addons/libraries there.
+        if find_manifest_in(&path, &name).is_some() {
+            installed.insert(normalize_addon_name(&name));
+        }
         collect_subfolder_names(&path, &mut installed);
     }
     installed
@@ -853,12 +877,7 @@ fn scan_installed_addons_blocking(
             if let Some(name) = d1.file_name().and_then(|n| n.to_str()) {
                 if let Some(manifest) = find_manifest_in(&d1, name) {
                     if let Some(ver) = read_addon_version(&manifest) {
-                        let entry = version_map
-                            .entry(normalize_addon_name(name))
-                            .or_insert(Some(0));
-                        if let Some(cur) = entry {
-                            *cur = (*cur).max(ver);
-                        }
+                        merge_max_version(&mut version_map, normalize_addon_name(name), ver);
                     }
                 }
             }
@@ -871,12 +890,7 @@ fn scan_installed_addons_blocking(
                 if let Some(name) = d2.file_name().and_then(|n| n.to_str()) {
                     if let Some(manifest) = find_manifest_in(&d2, name) {
                         if let Some(ver) = read_addon_version(&manifest) {
-                            let entry = version_map
-                                .entry(normalize_addon_name(name))
-                                .or_insert(Some(0));
-                            if let Some(cur) = entry {
-                                *cur = (*cur).max(ver);
-                            }
+                            merge_max_version(&mut version_map, normalize_addon_name(name), ver);
                         }
                     }
                 }
@@ -7075,22 +7089,36 @@ mod tests {
         assert_eq!(download_thread_count(0), 1);
     }
 
+    /// Create `<dir>/<folder>/<folder>.txt` so the folder is a loadable addon.
+    fn make_addon_folder(dir: &std::path::Path, folder: &str, manifest_body: &str) {
+        let addon_dir = dir.join(folder);
+        std::fs::create_dir_all(&addon_dir).unwrap();
+        std::fs::write(addon_dir.join(format!("{folder}.txt")), manifest_body).unwrap();
+    }
+
     #[test]
-    fn normalize_addon_name_is_case_and_invisible_insensitive() {
+    fn normalize_addon_name_is_case_and_whitespace_insensitive() {
         assert_eq!(normalize_addon_name("LuiMedia"), "luimedia");
         assert_eq!(normalize_addon_name("LUIMEDIA"), "luimedia");
         assert_eq!(normalize_addon_name("  LuiMedia  "), "luimedia");
-        // Zero-width space and BOM glued to the name must not matter.
-        assert_eq!(normalize_addon_name("LuiMedia\u{200B}"), "luimedia");
-        assert_eq!(normalize_addon_name("\u{FEFF}LuiData"), "luidata");
+    }
+
+    #[test]
+    fn normalize_addon_name_does_not_strip_codepoints() {
+        // A folder with an embedded zero-width char is a DIFFERENT addon to ESO,
+        // so normalization must not collapse it onto the clean name.
+        assert_ne!(
+            normalize_addon_name("Lui\u{200B}Media"),
+            normalize_addon_name("LuiMedia")
+        );
     }
 
     #[test]
     fn installed_set_matches_case_insensitively() {
         let dir = tempfile::tempdir().unwrap();
-        // Folder cased differently than the manifest's DependsOn token would be.
-        std::fs::create_dir_all(dir.path().join("LUIMedia")).unwrap();
-        std::fs::create_dir_all(dir.path().join("LuiData")).unwrap();
+        // Folders cased differently than the manifest's DependsOn token would be.
+        make_addon_folder(dir.path(), "LUIMedia", "## Title: x\n");
+        make_addon_folder(dir.path(), "LuiData", "## Title: x\n");
         let installed = build_installed_set(dir.path());
         assert!(installed.contains(&normalize_addon_name("LuiMedia")));
         assert!(installed.contains(&normalize_addon_name("luidata")));
@@ -7101,17 +7129,57 @@ mod tests {
     fn installed_set_finds_bundled_subfolders_case_insensitively() {
         let dir = tempfile::tempdir().unwrap();
         // A library bundled one level deep inside another addon, oddly cased.
-        std::fs::create_dir_all(dir.path().join("BigAddon").join("LIBStub")).unwrap();
+        let sub = dir.path().join("BigAddon").join("LIBStub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("LIBStub.txt"), "## Title: x\n").unwrap();
         let installed = build_installed_set(dir.path());
         assert!(installed.contains(&normalize_addon_name("LibStub")));
     }
 
     #[test]
+    fn installed_set_ignores_folders_without_a_matching_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder named like a dependency but with no manifest (partial
+        // extraction, or a plain non-addon dir) must NOT count as installed.
+        std::fs::create_dir_all(dir.path().join("LibFoo")).unwrap();
+        std::fs::create_dir_all(dir.path().join("RealAddon").join("libs")).unwrap();
+        std::fs::write(
+            dir.path().join("RealAddon").join("RealAddon.txt"),
+            "## Title: x\n",
+        )
+        .unwrap();
+        let installed = build_installed_set(dir.path());
+        assert!(!installed.contains(&normalize_addon_name("LibFoo")));
+        assert!(!installed.contains(&normalize_addon_name("libs")));
+        assert!(installed.contains(&normalize_addon_name("RealAddon")));
+    }
+
+    #[test]
     fn installed_set_excludes_disabled_folders() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("LuiMedia.disabled")).unwrap();
+        // Even a fully-formed addon is excluded once disabled.
+        make_addon_folder(dir.path(), "LuiMedia", "## Title: x\n");
+        std::fs::rename(
+            dir.path().join("LuiMedia"),
+            dir.path().join("LuiMedia.disabled"),
+        )
+        .unwrap();
         let installed = build_installed_set(dir.path());
         assert!(!installed.contains(&normalize_addon_name("LuiMedia")));
+    }
+
+    #[test]
+    fn merge_max_version_replaces_unknown_and_keeps_max() {
+        let mut map: HashMap<String, Option<u32>> = HashMap::new();
+        // Unknown (None) seed gets a concrete version instead of being masked.
+        map.insert("libfoo".into(), None);
+        merge_max_version(&mut map, "libfoo".into(), 5);
+        assert_eq!(map.get("libfoo"), Some(&Some(5)));
+        // Subsequent lower/higher versions keep the max.
+        merge_max_version(&mut map, "libfoo".into(), 3);
+        assert_eq!(map.get("libfoo"), Some(&Some(5)));
+        merge_max_version(&mut map, "libfoo".into(), 9);
+        assert_eq!(map.get("libfoo"), Some(&Some(9)));
     }
 
     #[test]

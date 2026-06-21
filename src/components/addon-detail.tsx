@@ -79,13 +79,15 @@ export function AddonDetail({
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
   const [pendingConflictDismissed, setPendingConflictDismissed] = useState(false);
 
-  // Top-level installed folder names, lowercased. ESO resolves addon names
-  // case-insensitively, so membership tests must too (a `LUIMedia` folder still
-  // satisfies a `LuiMedia` dependency). This set only holds top-level folders,
-  // so it answers "is this a removable top-level addon" — required/optional
-  // satisfaction comes from the backend (subfolder-aware) fields.
-  const installedSet = useMemo(
-    () => new Set(installedAddons.map((a) => a.folderName.toLowerCase())),
+  // Map of lowercased top-level folder name → its real on-disk spelling. ESO
+  // resolves addon names case-insensitively, so membership tests must too (a
+  // `LUIMedia` folder still satisfies a `LuiMedia` dependency). Keeping the real
+  // spelling lets the Remove button delete the actual folder rather than the
+  // dependency token's casing. Only holds top-level folders, so it answers "is
+  // this a removable top-level addon" — required/optional satisfaction comes
+  // from the backend (subfolder-aware) fields.
+  const installedByLower = useMemo(
+    () => new Map(installedAddons.map((a) => [a.folderName.toLowerCase(), a.folderName])),
     [installedAddons]
   );
 
@@ -557,11 +559,11 @@ export function AddonDetail({
               <div className="space-y-0.5">
                 {addon.dependsOn.map((dep) => {
                   // satisfied = backend truth (accounts for bundled sub-modules in subfolders)
-                  // isTopLevel = dep exists as its own removable top-level addon
+                  // removeTarget = real top-level folder spelling, if removable
                   const satisfied =
                     !addon.missingDependencies.includes(dep.name) ||
                     justInstalledDeps.has(dep.name);
-                  const isTopLevel = installedSet.has(dep.name.toLowerCase());
+                  const removeTarget = installedByLower.get(dep.name.toLowerCase());
                   const outdated = addon.outdatedDependencies.includes(dep.name);
                   const justInstalled = justInstalledDeps.has(dep.name);
                   return (
@@ -622,14 +624,14 @@ export function AddonDetail({
                               </button>
                             </SimpleTooltip>
                           )}
-                          {isTopLevel && (
-                            <SimpleTooltip content={`Remove ${dep.name}`}>
+                          {removeTarget && (
+                            <SimpleTooltip content={`Remove ${removeTarget}`}>
                               <button
                                 className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
-                                onClick={() => handleRemoveDep(dep.name)}
-                                disabled={removingDep === dep.name}
+                                onClick={() => handleRemoveDep(removeTarget)}
+                                disabled={removingDep === removeTarget}
                               >
-                                {removingDep === dep.name ? (
+                                {removingDep === removeTarget ? (
                                   <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
                                 ) : (
                                   <Trash2 className="size-3.5" />
@@ -677,11 +679,11 @@ export function AddonDetail({
               <div className="space-y-0.5">
                 {addon.optionalDependsOn.map((dep) => {
                   // present = backend truth (subfolder-aware, case-insensitive).
-                  // isTopLevel = present as its own removable top-level addon.
+                  // removeTarget = real top-level folder spelling, if removable.
                   const present =
                     !addon.missingOptionalDependencies.includes(dep.name) ||
                     justInstalledDeps.has(dep.name);
-                  const isTopLevel = installedSet.has(dep.name.toLowerCase());
+                  const removeTarget = installedByLower.get(dep.name.toLowerCase());
                   const justInstalled = justInstalledDeps.has(dep.name);
                   return (
                     <div
@@ -707,14 +709,14 @@ export function AddonDetail({
                         )}
                       </div>
                       {present ? (
-                        isTopLevel ? (
-                          <SimpleTooltip content={`Remove ${dep.name}`}>
+                        removeTarget ? (
+                          <SimpleTooltip content={`Remove ${removeTarget}`}>
                             <button
                               className="shrink-0 cursor-pointer rounded p-1 text-muted-foreground/30 hover:bg-red-500/10 hover:text-red-400 transition-colors disabled:opacity-50"
-                              onClick={() => handleRemoveDep(dep.name)}
-                              disabled={removingDep === dep.name}
+                              onClick={() => handleRemoveDep(removeTarget)}
+                              disabled={removingDep === removeTarget}
                             >
-                              {removingDep === dep.name ? (
+                              {removingDep === removeTarget ? (
                                 <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-red-400" />
                               ) : (
                                 <Trash2 className="size-3.5" />
