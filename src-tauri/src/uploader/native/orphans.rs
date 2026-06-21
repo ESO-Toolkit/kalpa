@@ -131,9 +131,15 @@ pub fn load(app: &tauri::AppHandle) -> Vec<LiveOrphan> {
 /// the real sweep. Mirrors `history::reconcile_stale_once`'s once-per-process contract
 /// but spawns because recovery does network I/O and must not block startup.
 pub fn recover_orphans_once(app: tauri::AppHandle, session: Arc<StoredSessionProvider>) {
-    // Don't burn the one-shot before a session exists — a panel-open while signed-out
-    // would otherwise permanently skip recovery this process.
-    if !session.has_session() {
+    // Don't burn the one-shot before a usable session exists — a panel-open while
+    // signed-out would otherwise permanently skip recovery this process. Gate on
+    // `session()` (a real usable session), NOT just `has_session()` (a cookie is
+    // present): the two differ by a logout/invalidate race, and gating on the weaker
+    // check could spend the `Once` on a sweep that then bails signed-out and never
+    // retries (the inner re-check at `recover_orphans_with_sender` would fire after the
+    // `Once` is already consumed).
+    use super::session::SessionProvider;
+    if session.session().is_err() {
         return;
     }
     RECOVER_ONCE.call_once(move || {

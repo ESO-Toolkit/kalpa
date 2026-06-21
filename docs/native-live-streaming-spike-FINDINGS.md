@@ -1,15 +1,50 @@
-# Native live-streaming upload — feasibility spike FINDINGS
+# Native live-streaming upload — FINDINGS
 
-**Branch:** `spike/native-live` (off `feat/log-uploader`) · **Status:** R&D, ships nothing · **Date:** 2026-06-20
+**Branch:** `spike/native-live` (off `feat/log-uploader`) · **Status:** lifecycle hardening BUILT + wired (gated, opt-in) · **Date:** 2026-06-21
 
 This is the deliverable for the spike: *"can Kalpa natively live-stream a growing
 `Encounter.log` to esologs.com — pushing segments incrementally while the report stays
 open — instead of handing off to the official uploader?"*
 
 The answer is **FEASIBLE — the live round-trip is confirmed and the ToS gate is cleared
-(owner, 2026-06-20).** There are no remaining blockers: native live is greenlit for
-production. What's left is engineering (the deferred lifecycle hardening + gated opt-in
-wiring), not a decision.
+(owner, 2026-06-20).** The deferred lifecycle hardening (L2/L3/L4/L7/L8) + the gated
+opt-in wiring are now **BUILT** — see the production-status section immediately below.
+The remaining gate is an owner-run live re-test against a REAL archived combat log.
+
+---
+
+## ✅ PRODUCTION STATUS (2026-06-21) — lifecycle hardening built, gated + opt-in
+
+The deferred items are implemented and the path is wired behind the same opt-in as the
+native one-shot. **The official-uploader handoff is still the DEFAULT**; native live
+runs only when the user has opted in AND the format is confirmed AND a session exists.
+Everything is verified offline (187 uploader tests green; `cargo build --release`
+succeeds, proving the debug-only spike command + `FileTail` gate out of release;
+`npm run check` + clippy + fmt clean). What shipped, by deferred item:
+
+| Item | What was built | Where | Proven by |
+| --- | --- | --- | --- |
+| **L7** perf (was O(events×lines)) | Incremental actor/ability index maps (`IncrementalIndexState`) + incremental cumulative master (`IncrementalMasterState`); `all_lines` buffer DROPPED. | `native/incremental.rs`, `native/live.rs`, `native/encode.rs` (shared `render_ability_record`/`resolve_ability_section`) | Differential tests assert byte-identity to the retained re-walk oracle at EVERY line/cut — incl. the real combat capture, late-registration reorder (F1), TARGET_DEAD exclusion (F2), late damage-type (F3), recycled unitId (F4), regen-before-ability (F5), intra-event tie (F7). |
+| **L4** in-flight cancel | `LiveSender` runs each POST on a detached worker, polling cancel every 250ms → Stop returns ~250ms, not the 120s timeout. Additive; the one-shot `send` is untouched. | `native/client.rs` | `live_wait_returns_cancelled_fast_*`, `driver_cancel_mid_stream_*`. |
+| **L4** retry/backoff | `post_with_retry`: 3 attempts, cancel-interruptible `1s/2s/4s` backoff; classifies 5xx/408/429/network = retry, 4xx/malformed = fatal, 401/419-survived = pause. | `native/live.rs` | `post_with_retry_*`, `cancel_aware_backoff_*`, `driver_retries_transient_*`. |
+| **L4** reauth pause-resume | On `Session(Expired)` the driver PAUSES (report stays open, held payload retained), polls for a fresh session, re-POSTs on resume; `REAUTH_TIMEOUT` 15m guard; UI `ReauthRequired`/`ReauthResolved`. | `native/live.rs`, `watcher.rs`, `types.rs` (`UploadStatus::Paused`) | `driver_pauses_on_lost_session_then_resumes_*`, `driver_pause_times_out_*`. |
+| **L3** idle deadline | `NotifyTail` signals `Idle` after `IDLE_DEADLINE` (30m) of no growth, distinct from a clean `END_LOG` `Ended`; `nextSegmentId=0` logged; 2nd `BEGIN_LOG` → terminate (single-session). | `native/live.rs` | `driver_stops_on_server_next_segment_id_zero`, `driver_terminates_on_second_begin_log`, line-assembler tests. |
+| **L-tail** production tail | `NotifyTail` reuses `watcher.rs`'s read machinery via the shared `tail_io` module (byte-offset `read_range`, MAX_READ, failure-streak reset-on-READ-only, truncation reset) and yields raw lines; `LineAssembler` (partial carry, `\r\n` strip, 1MiB cap, discard-until-BEGIN_LOG). No second watcher. | `uploader/tail_io.rs`, `native/live.rs` | `line_assembler_*` (6 tests). |
+| **L2** orphan recovery | Persist `{reportCode,segmentId}` before the first POST; best-effort terminate leftover codes on next launch / panel open; clear only on a confirmed 404/410 or success. | `native/orphans.rs`, `commands.rs` (`CommandOrphanSink`, `recover_orphans_once`) | `record_upserts_by_code`, `is_definitively_closed_only_for_404_410`, etc. |
+| **L8** single-instance + mutual exclusion | `LiveSlot::NativeRunning` third variant; `StoppedHandle{Watch,Native}`; store-before-remove cancellation-race UNCHANGED; native `.stop()` joins via `spawn_blocking` (uploader_start_live is async); same-path single-instance guard inside the live_sessions critical section; native self-settles its record by exact id. | `commands.rs` | (concurrency review + the LiveSlot protocol comments). |
+| **Gated opt-in wiring** | `assess_native_live_routing(opt_in, has_session)`; `uploader_start_live` routes native-vs-handoff; Settings disclosure extended to cover live; debug `*_live` client methods promoted out of `#[cfg(debug_assertions)]` (driver de-gated; spike command stays gated). | `transport.rs`, `commands.rs`, `settings.tsx`, `uploader-workspace.tsx` | `cargo build --release` (gate-out). |
+
+**Remaining gate:** an owner-run live re-test against a REAL archived combat log (copy
+one from `Documents\...\esologsarchive` to a path OUTSIDE CFA-protected folders and
+point the debug `uploader_run_native_live_spike` command at it, OR opt in + go live on
+a real session) to confirm a multi-fight raid report renders correctly — not just the
+synthetic case. The encoder + cumulative pinned master + per-segment time bounds are
+unchanged from the confirmed round-trip; this re-test validates the production tail +
+lifecycle end-to-end.
+
+---
+
+### (original spike framing follows)
 
 > ## ✅ ROUND-TRIP CONFIRMED (2026-06-20, owner-run)
 > The debug-only driver streamed a synthetic 2-fight session to a real esologs report,

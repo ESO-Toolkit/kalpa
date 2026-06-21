@@ -341,6 +341,13 @@ pub const REAUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// retries). A transient blip on a multi-hour session must not abandon the report.
 const MAX_SEGMENT_ATTEMPTS: u32 = 3;
 
+/// Upper bound on the terminate-on-exit wait. The terminate uses a fresh cancel flag
+/// (so a Stop doesn't skip closing the report), but a watchdog trips that flag after
+/// this deadline so a wedged network can't block the driver thread — and thus a Stop
+/// join — for the full 120s request timeout. On a watchdog trip the orphan breadcrumb
+/// is kept and next-launch recovery closes the report.
+const TERMINATE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Why the live stream ended — distinguishes a clean END_LOG from the idle/crash
 /// fallback and the various failure terminals, so the history record + diagnostics
 /// are honest about what happened.
@@ -563,20 +570,44 @@ pub fn run_native_live(
         super::client::desktop_client_base(),
         code.0
     );
-    // Terminate must not be blocked by the same cancel that ended the stream, or a
-    // Stop would skip closing the report. Use a fresh, always-false flag with a short
-    // window so Stop still returns promptly (the worker self-reaps via the 120s
-    // backstop if the terminate itself hangs).
+    // Terminate must not be blocked by the same cancel that ended the stream (or a Stop
+    // would skip closing the report). But it also must not block the driver thread —
+    // and thus a Stop join — for the full 120s request timeout if the network is wedged
+    // at terminate time. So use a fresh flag with a WATCHDOG that trips it after
+    // `TERMINATE_DEADLINE`: `send_cancellable` then returns within ~250ms of the
+    // deadline, the in-flight POST is abandoned (it may still complete server-side),
+    // and the orphan breadcrumb is KEPT (we don't clear on a watchdog-`Cancelled`),
+    // so next-launch recovery closes the report. This bounds Stop latency to the
+    // deadline, not 120s.
     let term_cancel = Arc::new(AtomicBool::new(false));
+    let watchdog_flag = Arc::clone(&term_cancel);
+    let watchdog = std::thread::spawn(move || {
+        // Sleep in cancel-checkable slices so the watchdog thread itself reaps quickly
+        // once the terminate completes (the flag is set either by us or never).
+        let mut waited = std::time::Duration::ZERO;
+        while waited < TERMINATE_DEADLINE {
+            std::thread::sleep(LIVE_CANCEL_POLL);
+            waited += LIVE_CANCEL_POLL;
+            if watchdog_flag.load(Ordering::SeqCst) {
+                return; // terminate already returned and cleared via a real result
+            }
+        }
+        watchdog_flag.store(true, Ordering::SeqCst);
+    });
     let term = driver.sender.post(
         &term_url,
         super::client::OwnedLiveRequest::Terminate,
         &term_cancel,
     );
+    // Stop the watchdog promptly if terminate returned before the deadline.
+    term_cancel.store(true, Ordering::SeqCst);
+    let _ = watchdog.join();
     match &term {
         Ok(_) => sink.clear(&code.0),
         Err(e) if super::client::is_definitively_closed(e) => sink.clear(&code.0),
-        Err(_) => { /* transient: KEEP the breadcrumb for next-launch recovery */ }
+        // Transient OR a watchdog-`Cancelled` (terminate timed out): KEEP the
+        // breadcrumb for next-launch recovery rather than assume the report closed.
+        Err(_) => {}
     }
 
     let segments_built = driver.segments_built();
@@ -742,6 +773,16 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
 
     /// POST an already-built payload (master then add-segment), with retry. Takes the
     /// payload BY VALUE so a `NeedsReauth` can hand it back for a later re-POST.
+    ///
+    /// Re-POST idempotency (on a reauth resume): both calls are made for the SAME
+    /// `segment_id` the server hasn't advanced past (the failed POST never returned a
+    /// `nextSegmentId`). Re-sending the master is `set-report-master-table` — set
+    /// semantics, idempotent. Re-sending the segment is safe unless the ORIGINAL
+    /// add-segment was accepted server-side but its response was lost behind the auth
+    /// challenge (a 401 on the response leg) — a narrow case the server is expected to
+    /// dedupe by `segmentId`. We don't split master-done/segment-pending resume state
+    /// (the reviewer's LOW finding) because the window is rare and the cost is at most
+    /// one duplicate segment, which a terminate closes cleanly.
     fn post_built(&mut self, payload: LiveSegmentPayload, sink: &dyn OrphanSink) -> PostOutcome {
         let base = super::client::desktop_client_base();
         let master_url = format!("{base}/set-report-master-table/{}", self.code.0);

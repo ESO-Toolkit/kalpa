@@ -102,6 +102,28 @@ pub struct UploaderState {
     live_sessions: Mutex<HashMap<String, LiveSlot>>,
 }
 
+impl UploaderState {
+    /// Signal every live session to stop, best-effort, WITHOUT joining. Called from the
+    /// app's exit handler: a native driver's terminate-on-exit + abandoned POSTs then
+    /// settle faster, and the OS reaps the threads. We deliberately do NOT join here
+    /// (the join could block process exit on a wedged network up to the terminate
+    /// watchdog); correctness on a hard exit is covered by the L2 orphan breadcrumb +
+    /// next-launch recovery. Setting the flag is enough to start a prompt close.
+    pub fn signal_all_live_stop(&self) {
+        if let Ok(sessions) = self.live_sessions.lock() {
+            for slot in sessions.values() {
+                match slot {
+                    LiveSlot::Starting(c) => c.store(true, Ordering::SeqCst),
+                    LiveSlot::NativeRunning(h) => h.cancel.store(true, Ordering::SeqCst),
+                    // The official watcher's own thread/handle is dropped with the map;
+                    // the official uploader is a separate process we don't control.
+                    LiveSlot::Running(_) => {}
+                }
+            }
+        }
+    }
+}
+
 /// The command-side [`super::native::live::OrphanSink`] adapter: persists the native
 /// live driver's `{reportCode, segmentId}` crash-recovery breadcrumb via
 /// [`super::native::orphans`]. Holds the `AppHandle` (for the app-data file) + the
@@ -1113,7 +1135,15 @@ pub async fn uploader_start_live(
     );
     if route_native {
         return start_native_live_branch(
-            &app, &state, &session, &session_id, &safe, &file_name, &options, &cancelled, channel,
+            &app,
+            &state,
+            &session,
+            &session_id,
+            &safe,
+            &file_name,
+            &options,
+            &cancelled,
+            channel,
         )
         .await;
     }
@@ -1379,17 +1409,20 @@ async fn start_native_live_branch(
     cancelled: &Arc<AtomicBool>,
     channel: Channel<LiveEvent>,
 ) -> Result<UploadDispatch, String> {
-    // Single-instance: refuse a second NATIVE live session on the SAME file. Checked
-    // inside the SAME critical section that would promote, so a colliding start can't
-    // slip between the check and the promote (RACE-5; no second lock → no AB/BA).
+    // Single-instance FAST REJECT: refuse a second NATIVE live session on the SAME
+    // file. This early check is a cheap fast-fail for the common case; it is NOT the
+    // binding guard — two starts for the same file with different session_ids could
+    // both pass here (TOCTOU). The AUTHORITATIVE same-path check is in the promote
+    // critical section below (the one that also inserts the slot), so a genuine race
+    // can't end with two `NativeRunning` for one file.
     {
         let sessions = state
             .live_sessions
             .lock()
             .map_err(|_| "Live session lock poisoned")?;
-        let same_path_native = sessions.values().any(|slot| {
-            matches!(slot, LiveSlot::NativeRunning(h) if h.path == Path::new(safe))
-        });
+        let same_path_native = sessions
+            .values()
+            .any(|slot| matches!(slot, LiveSlot::NativeRunning(h) if h.path == Path::new(safe)));
         if same_path_native {
             remove_own_slot(state, session_id, cancelled);
             return Err("A native live upload is already running for this log.".into());
@@ -1471,8 +1504,7 @@ async fn start_native_live_branch(
         let events = LiveEventSink {
             on_reauth_required: Box::new(move || {
                 let _ = ch_reauth.send(LiveEvent::ReauthRequired {
-                    message: "Sign in to ESO Logs again to keep uploading this session."
-                        .into(),
+                    message: "Sign in to ESO Logs again to keep uploading this session.".into(),
                 });
             }),
             on_reauth_resolved: Box::new(move || {
@@ -1544,8 +1576,13 @@ async fn start_native_live_branch(
     };
 
     // Promote Starting → NativeRunning unless a stop arrived mid-start (mirrors the
-    // official promote at the `still_ours && !cancelled` check). If we lost ownership,
-    // stop the just-spawned driver (off the executor) and self-settle by id.
+    // official promote at the `still_ours && !cancelled` check) OR a CONCURRENT native
+    // start for the SAME file won the race. The same-path single-instance guard is
+    // AUTHORITATIVELY enforced HERE, inside the same critical section as the insert —
+    // the early reject above is only a fast-fail; two starts for the same file with
+    // different session_ids could both pass that earlier check (TOCTOU), so the binding
+    // check must be the one that also inserts (RACE-5). If we lost ownership for any of
+    // these reasons, stop the just-spawned driver (off the executor) and settle by id.
     let promote = {
         let mut sessions = state
             .live_sessions
@@ -1555,19 +1592,30 @@ async fn start_native_live_branch(
             sessions.get(session_id),
             Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, cancelled)
         );
-        if still_ours && !cancelled.load(Ordering::SeqCst) {
-            sessions.insert(session_id.to_string(), LiveSlot::NativeRunning(native_handle));
-            None
+        let peer_same_path = sessions
+            .values()
+            .any(|slot| matches!(slot, LiveSlot::NativeRunning(h) if h.path == Path::new(safe)));
+        if still_ours && !cancelled.load(Ordering::SeqCst) && !peer_same_path {
+            sessions.insert(
+                session_id.to_string(),
+                LiveSlot::NativeRunning(native_handle),
+            );
+            (None, false)
         } else {
-            Some(native_handle)
+            (Some(native_handle), peer_same_path)
         }
     };
-    if let Some(handle) = promote {
-        // Lost ownership: stop the driver off the async executor (it can be mid-POST),
-        // then settle our just-written record by id.
+    if let (Some(handle), lost_to_peer) = promote {
+        // Lost ownership (stop/supersede) OR a peer native start claimed this file
+        // first. Stop the driver off the async executor (it can be mid-POST), then
+        // settle our just-written record by id.
         let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
         let _ = super::history::settle_started(app, &record_id);
-        return Err("Live logging was cancelled before it started.".into());
+        return Err(if lost_to_peer {
+            "A native live upload is already running for this log.".into()
+        } else {
+            "Live logging was cancelled before it started.".to_string()
+        });
     }
 
     Ok(UploadDispatch {
