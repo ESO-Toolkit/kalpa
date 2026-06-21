@@ -4761,6 +4761,42 @@ pub async fn list_characters(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Atomically replace `final_dir` with `staging`, preserving the previous
+/// contents of `final_dir` if the swap fails. All three paths must live on the
+/// same volume. On success, `final_dir` holds the staged content and any prior
+/// backup is gone; on failure, the prior `final_dir` (if any) is left intact and
+/// `staging` is removed. Crucially, the existing backup is only deleted *after*
+/// the new one is installed, so a finalization error never loses the last
+/// known-good backup.
+fn finalize_backup_replace(
+    staging: &Path,
+    final_dir: &Path,
+    tombstone: &Path,
+) -> std::io::Result<()> {
+    let had_previous = final_dir.exists();
+    if had_previous {
+        // Move the existing backup aside (don't delete it yet).
+        let _ = fs::remove_dir_all(tombstone);
+        fs::rename(final_dir, tombstone)?;
+    }
+    match fs::rename(staging, final_dir) {
+        Ok(()) => {
+            if had_previous {
+                let _ = fs::remove_dir_all(tombstone);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // Roll back: restore the previous backup and discard staging.
+            if had_previous {
+                let _ = fs::rename(tombstone, final_dir);
+            }
+            let _ = fs::remove_dir_all(staging);
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 pub fn backup_character_settings(
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -4868,13 +4904,11 @@ pub fn backup_character_settings(
         ));
     }
 
-    // All matched files copied — replace any prior backup of this name and
-    // finalize with a single rename on the same volume.
-    let _ = fs::remove_dir_all(&final_dir);
-    fs::rename(&staging, &final_dir).map_err(|e| {
-        let _ = fs::remove_dir_all(&staging);
-        format!("Failed to finalize backup: {e}")
-    })?;
+    // All matched files copied — install atomically, preserving any prior backup
+    // of this name if finalization fails.
+    let tombstone = backups_root.join(format!(".old-char-{backup_name}"));
+    finalize_backup_replace(&staging, &final_dir, &tombstone)
+        .map_err(|e| format!("Failed to finalize backup: {e}"))?;
 
     Ok(copied)
 }
@@ -7405,6 +7439,47 @@ mod tests {
     fn build_character_list_empty_when_no_sources() {
         let chars = build_character_list(None, &[]);
         assert!(chars.is_empty());
+    }
+
+    #[test]
+    fn finalize_backup_replace_installs_staging_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let final_dir = root.join("char-x");
+        let tombstone = root.join(".old-char-x");
+        let staging = root.join(".tmp-char-x");
+        fs::create_dir_all(&final_dir).unwrap();
+        fs::write(final_dir.join("old.lua"), b"old").unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("new.lua"), b"new").unwrap();
+
+        finalize_backup_replace(&staging, &final_dir, &tombstone).unwrap();
+
+        assert!(final_dir.join("new.lua").is_file());
+        assert!(!final_dir.join("old.lua").exists());
+        assert!(!tombstone.exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn finalize_backup_replace_preserves_previous_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let final_dir = root.join("char-x");
+        let tombstone = root.join(".old-char-x");
+        // Staging does NOT exist, so renaming it into place fails — exercising
+        // the rollback path with a prior backup present.
+        let staging = root.join(".tmp-char-x");
+        fs::create_dir_all(&final_dir).unwrap();
+        fs::write(final_dir.join("old.lua"), b"old").unwrap();
+
+        let result = finalize_backup_replace(&staging, &final_dir, &tombstone);
+
+        assert!(result.is_err());
+        // The previous good backup is intact and the tombstone is cleaned up.
+        assert!(final_dir.join("old.lua").is_file());
+        assert_eq!(fs::read(final_dir.join("old.lua")).unwrap(), b"old");
+        assert!(!tombstone.exists());
     }
 
     #[test]
