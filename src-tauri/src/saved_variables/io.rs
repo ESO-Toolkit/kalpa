@@ -503,47 +503,22 @@ pub fn write_raw_content(sv_dir: &Path, file_name: &str, content: &str) -> Resul
 /// the per-character backup/restore path, whose merged content may contain
 /// non-UTF8 SavedVariables bytes (caret keys, addon binary blobs).
 ///
-/// The replacement is crash-safer than a plain remove-then-rename: the new
-/// content is written to `<file>.tmp`, the existing file (if any) is moved aside
-/// to `<file>.old`, the temp is renamed into place, and only then is the old copy
-/// removed. If the final rename fails, the original is restored from `<file>.old`,
-/// so a failed write never destroys the live file. (On Windows `fs::rename` won't
-/// replace an existing file, which is why the move-aside is needed.) No `.bak` is
-/// left behind on success: the per-character restore already takes a full safety
-/// snapshot, so a lingering `.lua.bak` in the live folder (which later
+/// The new content is written to `<file>.tmp` and then `rename`d into place.
+/// `std::fs::rename` replaces the destination ATOMICALLY on both Unix
+/// (`rename(2)`) and Windows (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`), so
+/// the live file is never momentarily absent — there is no remove-then-rename
+/// crash window, and a failed write leaves the original file untouched. No
+/// `.bak`/`.old` is left behind: the per-character restore already takes a full
+/// safety snapshot, so a lingering sidecar in the live folder (which later
 /// backups/snapshots would sweep up) is avoided.
 pub fn write_raw_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
     let file_path = sv_dir.join(file_name);
     let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
     fs::write(&tmp_path, content).map_err(|e| format!("Failed to write temp file: {e}"))?;
-
-    if !file_path.exists() {
-        return fs::rename(&tmp_path, &file_path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            format!("Failed to finalize write: {e}")
-        });
-    }
-
-    // Move the existing file aside, then swap the new content in. Keep the old
-    // copy until the swap succeeds so a mid-write failure can roll back.
-    let old_path = sv_dir.join(format!("{file_name}.old"));
-    let _ = fs::remove_file(&old_path);
-    fs::rename(&file_path, &old_path).map_err(|e| {
+    fs::rename(&tmp_path, &file_path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
-        format!("Failed to set aside existing file: {e}")
-    })?;
-    match fs::rename(&tmp_path, &file_path) {
-        Ok(()) => {
-            let _ = fs::remove_file(&old_path);
-            Ok(())
-        }
-        Err(e) => {
-            // Roll the original back into place and drop the temp.
-            let _ = fs::rename(&old_path, &file_path);
-            let _ = fs::remove_file(&tmp_path);
-            Err(format!("Failed to finalize write: {e}"))
-        }
-    }
+        format!("Failed to finalize write: {e}")
+    })
 }
 
 /// Restore a .bak file back to the original .lua file.
@@ -600,4 +575,37 @@ pub fn delete_saved_variables_blocking(
     }
 
     Ok(deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_raw_bytes_atomically_replaces_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let path = dir.join("x.lua");
+        fs::write(&path, b"OLD").unwrap();
+
+        // Non-UTF8 content overwrites the existing file in place.
+        let mut new_content = b"NEW ".to_vec();
+        new_content.extend_from_slice(&[0xff, 0xfe]);
+        write_raw_bytes(dir, "x.lua", &new_content).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), new_content);
+        // No scratch sidecars are left behind.
+        assert!(!dir.join("x.lua.tmp").exists());
+        assert!(!dir.join("x.lua.old").exists());
+        assert!(!dir.join("x.lua.bak").exists());
+    }
+
+    #[test]
+    fn write_raw_bytes_creates_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write_raw_bytes(dir, "new.lua", b"hello").unwrap();
+        assert_eq!(fs::read(dir.join("new.lua")).unwrap(), b"hello");
+        assert!(!dir.join("new.lua.tmp").exists());
+    }
 }
