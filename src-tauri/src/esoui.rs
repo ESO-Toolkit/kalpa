@@ -116,6 +116,18 @@ fn fetch_page(
     url: &str,
     query: Option<&[(&str, &str)]>,
 ) -> Result<String, String> {
+    fetch_page_with_url(client, url, query).map(|(_, body)| body)
+}
+
+/// Like [`fetch_page`] but also returns the FINAL URL after any redirects.
+/// ESOUI redirects a precise-name search straight to the addon detail page
+/// (e.g. `search.php?search=LuiData` → `info4373-LuiData.html`), so the caller
+/// needs the landing URL to recover the addon id from it.
+fn fetch_page_with_url(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    query: Option<&[(&str, &str)]>,
+) -> Result<(String, String), String> {
     let mut builder = client.get(url);
     if let Some(q) = query {
         builder = builder.query(q);
@@ -146,9 +158,12 @@ fn fetch_page(
         }
     }
 
-    response
+    // Capture the final URL (after redirects) before the body consumes `response`.
+    let final_url = response.url().to_string();
+    let body = response
         .text()
-        .map_err(|e| format!("Failed to read response: {e}"))
+        .map_err(|e| format!("Failed to read response: {e}"))?;
+    Ok((final_url, body))
 }
 
 /// Fetch basic addon info (title, version, download URL) from ESOUI JSON API.
@@ -502,13 +517,36 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
 
 /// Search ESOUI for an addon by name, return the best-matching ESOUI ID.
 /// Searches the ESOUI search page and matches results by title.
+/// Recover an addon id from an ESOUI detail URL such as
+/// `https://www.esoui.com/downloads/info4373-LuiData.html`, but only when the
+/// URL slug resembles `name` — so a redirect to an unrelated page can never
+/// resolve to the wrong addon.
+fn id_from_info_url(url: &str, name: &str) -> Option<u32> {
+    static RE_INFO_SLUG: OnceLock<Regex> = OnceLock::new();
+    let re = RE_INFO_SLUG.get_or_init(|| Regex::new(r"info(\d+)-([^/]+?)\.html").unwrap());
+    let caps = re.captures(url)?;
+    let id = caps[1].parse::<u32>().ok()?;
+    let slug = caps[2].to_lowercase();
+    let name_lower = name.to_lowercase();
+    (slug == name_lower || slug.contains(&name_lower) || name_lower.contains(&slug)).then_some(id)
+}
+
 pub fn search_addon_by_name(name: &str) -> Result<Option<u32>, String> {
     let client = http_client();
-    let body = fetch_page(
+    let (final_url, body) = fetch_page_with_url(
         client,
         "https://www.esoui.com/downloads/search.php",
         Some(&[("search", name), ("se_search", "files")]),
     )?;
+
+    // ESOUI redirects a unique-enough search straight to the addon page
+    // (e.g. "LuiData" → info4373-LuiData.html), which carries no result-list
+    // `fileinfo.php?id=` links. Recover the id from the landing URL first;
+    // otherwise fall back to scraping the multi-result list below.
+    if let Some(id) = id_from_info_url(&final_url, name) {
+        return Ok(Some(id));
+    }
+
     let document = Html::parse_document(&body);
 
     // Search results have links like: <a href="fileinfo.php?s=...&id=7">LibAddonMenu-2.0</a>
@@ -1087,6 +1125,54 @@ fn build_filelist_lookup(entries: &[ApiFileEntry]) -> HashMap<String, ApiAddonLo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_id_from_redirected_detail_url() {
+        // ESOUI redirects a precise search straight to the addon page; the id
+        // lives in that URL and must be recovered.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info4373-LuiData.html",
+                "LuiData"
+            ),
+            Some(4373)
+        );
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info4374-LuiMedia.html",
+                "LuiMedia"
+            ),
+            Some(4374)
+        );
+        // Versioned-name slug still resolves.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info7-LibAddonMenu-2.0.html",
+                "LibAddonMenu-2.0"
+            ),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn does_not_resolve_unrelated_or_nonredirected_urls() {
+        // A redirect to an unrelated addon must not resolve (wrong-slug guard).
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info999-SomethingElse.html",
+                "LuiData"
+            ),
+            None
+        );
+        // Still on the search page (multi-result, no redirect) → no id from URL.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/search.php?search=LuiData&se_search=files",
+                "LuiData"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn decode_cyrillic_numeric_entities() {
