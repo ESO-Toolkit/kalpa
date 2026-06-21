@@ -701,7 +701,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setWorkbenchOpen(true);
   };
 
-  const handleStartLive = async (forceHandoff = false) => {
+  const handleStartLive = async (forceHandoffArg: boolean = false) => {
+    // Harden against an event accidentally being passed (e.g. onClick={handleStartLive}
+    // instead of a wrapper): coerce to a real boolean so a leaked PointerEvent can never
+    // read as a truthy `forceHandoff` and silently route to the official uploader.
+    const forceHandoff = forceHandoffArg === true;
     // Resolve a target if none is selected (e.g. logs finished loading after the Live
     // tab was clicked): auto-pick the active Encounter.log. `handleSelectLog` is async
     // and won't have updated `selectedLog` state by this tick, so use the path it
@@ -1348,7 +1352,12 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                     sessionAnchored={sessionAnchored}
                     // Best-effort pre-start guess of what's coming (which waiting copy).
                     readiness={liveReadiness}
-                    onStart={handleStartLive}
+                    // Wrap so the click PointerEvent is NOT passed as the first arg
+                    // (`forceHandoff`): a bare `onStart={handleStartLive}` made every
+                    // Go Live receive the event as a truthy forceHandoff → preferOfficial
+                    // → silent handoff to the official uploader. This is THE "it still
+                    // opened the other uploader" bug.
+                    onStart={() => void handleStartLive()}
                     onStop={handleStopLive}
                     onCopyLink={copyLink}
                     onForceHandoff={handleForceHandoffLive}
