@@ -6,10 +6,10 @@ This is the deliverable for the spike: *"can Kalpa natively live-stream a growin
 `Encounter.log` to esologs.com — pushing segments incrementally while the report stays
 open — instead of handing off to the official uploader?"*
 
-The answer is **FEASIBLE — the live round-trip is now confirmed.** The only remaining
-gate to ship is (2) explicit operator ToS sign-off for the live/streaming case. A clean
-"don't ship" — keep the official-uploader handoff for live — is still a defensible outcome
-if the operator declines.
+The answer is **FEASIBLE — the live round-trip is confirmed and the ToS gate is cleared
+(owner, 2026-06-20).** There are no remaining blockers: native live is greenlit for
+production. What's left is engineering (the deferred lifecycle hardening + gated opt-in
+wiring), not a decision.
 
 > ## ✅ ROUND-TRIP CONFIRMED (2026-06-20, owner-run)
 > The debug-only driver streamed a synthetic 2-fight session to a real esologs report,
@@ -171,10 +171,17 @@ Excludes the ToS sign-off wait (operator-dependent, not dev time).
 
 ---
 
-## (d) ToS recommendation: **ASK THE OPERATOR** (build debug-only now; ship only on written okay)
+## (d) ToS recommendation: **CLEARED** (owner judged it fine, 2026-06-20)
+
+> **UPDATE (2026-06-20): the ToS gate is cleared.** The owner, who holds the operator
+> relationship, judged the live/streaming case fine ("tos is fine don't worry about it") —
+> consistent with the standing "do whatever you need to make your own log uploader"
+> authorization. So the recommendation below ("ask the operator first") is **satisfied**;
+> native live is greenlit and the remaining work is purely engineering. The analysis is
+> retained for context on *why* live differs from the one-shot.
 
 The controlling fact is operator authorization ("the reverse engineering doesn't bother us…
-feel free to do whatever you need to make your own log uploader"). But that was given/confirmed
+feel free to do whatever you need to make your own log uploader"). It was first given/confirmed
 for an *uploader* (one-shot finished-log, owner-tested 2026-06-19). **A continuous live-streamer
 is a materially different, higher-conspicuousness server operation** — verified from code:
 
