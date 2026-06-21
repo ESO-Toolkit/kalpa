@@ -694,6 +694,18 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           // Transient (e.g. a read retry) — log but don't toast, as these recur.
           console.warn("[uploader] live watcher:", ev.message);
           break;
+        case "reauthRequired":
+          // Native live only: the ESO Logs session expired mid-stream. Posting is
+          // paused (the report stays open) until the user re-signs-in. Prompt them;
+          // the driver resumes automatically once a fresh session is stored.
+          setLiveStatus("attention");
+          toast.warning(ev.message, { duration: 12000 });
+          break;
+        case "reauthResolved":
+          // A fresh session was captured; the driver resumed posting.
+          setLiveStatus("watching");
+          toast.success("Signed back in — resuming the live upload.");
+          break;
         case "stopped": {
           // A `stopped` event that passes the session guard above means THIS
           // session's watcher thread died on its own (lost folder access,
@@ -724,12 +736,23 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       }
     };
 
+    // Read the native opt-in + session presence fresh per start. The backend gates
+    // native live on BOTH (and the format-version flag); without a session it routes
+    // to the official handoff rather than hard-failing. Default false → official
+    // handoff, preserving the prior behaviour for users who haven't opted in.
+    const [liveOptIn, liveHasSession] = await Promise.all([
+      getSetting<boolean>("nativeUploadOptIn", false),
+      invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+    ]);
+    const nativeOptIn = liveOptIn && liveHasSession;
+
     try {
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_start_live", {
         sessionId,
         filePath: selectedLog,
         options,
         channel,
+        nativeOptIn,
       });
       // The start can resolve Ok AFTER a stop / switch-to-Manual / superseding
       // start ran during the await (handleStopLive already fired
@@ -740,13 +763,15 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       // an unclearable phantom session. The backend stop already cancelled/will
       // settle it, so just drop the stale result silently.
       if (liveSessionIdRef.current !== sessionId) return;
-      liveWasRunningRef.current = true; // handed off; the uploader is now streaming
+      liveWasRunningRef.current = true; // running (handed off OR native); don't re-warn on close
       setLiveSessionId(sessionId);
       if (dispatch?.report) setLiveReport(dispatch.report);
       toast.success(
         dispatch?.handedOff
           ? "Live logging started in the ESO Logs Uploader."
-          : "Live logging started."
+          : nativeOptIn
+            ? "Live logging started — uploading directly to ESO Logs."
+            : "Live logging started."
       );
     } catch (e) {
       // Only act on the failure if THIS start is still current. If a stop /

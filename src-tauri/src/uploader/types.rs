@@ -186,6 +186,10 @@ pub enum UploadStatus {
     Queued,
     Uploading,
     Live,
+    /// A native live session whose ESO Logs session expired mid-stream: posting is
+    /// paused (the report stays open) until the user re-signs-in. Distinct from `Live`
+    /// so the panel can prompt a re-login rather than show a healthy badge.
+    Paused,
     Completed,
     Failed,
     Cancelled,

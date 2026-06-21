@@ -29,18 +29,107 @@ const LIVE_CANCELLED_BEFORE_LAUNCH: &str = "__live_cancelled_before_launch__";
 
 /// A live session slot. A session is registered as `Starting` *before* the
 /// (blocking) uploader handoff so a concurrent stop/unmount during that window
-/// is observed; it transitions to `Running` once the watcher thread exists.
+/// is observed; it transitions to `Running` (official handoff) or `NativeRunning`
+/// (native in-process driver) once that path's thread exists.
 enum LiveSlot {
     /// Start is in flight. `cancelled` is set if a stop arrives before the
-    /// watcher is registered, so the start can abort cleanly.
+    /// thread is registered, so the start can abort cleanly. Path-agnostic: BOTH
+    /// the official-handoff and native paths share this phase and the same
+    /// `cancelled` Arc, so the store-before-remove cancellation-race protection
+    /// (see [`stop_slot_in_map`]) covers both.
     Starting(Arc<AtomicBool>),
+    /// The official-uploader handoff path: a fight-detection watcher.
     Running(LiveWatchHandle),
+    /// The native in-process live driver path. Its `stop()` JOINS the driver
+    /// thread, which can be mid-POST — so it MUST be joined via `spawn_blocking`
+    /// (never inline in the async command, which would block a Tokio worker). The
+    /// driver self-terminates the report on exit; `NativeLiveHandle::shutdown` does
+    /// NOT terminate (the driver owns that).
+    NativeRunning(NativeLiveHandle),
 }
 
-/// Managed state: active live-watch sessions keyed by session id.
+/// Handle to a running native live driver: signals its cancel flag and joins its
+/// thread on `stop`/`Drop`, mirroring [`watcher::LiveWatchHandle`]. The driver owns
+/// `terminate-report` on every exit path, so `shutdown` only store-then-joins — it
+/// must NEVER itself call the network or hold the `live_sessions` lock.
+pub struct NativeLiveHandle {
+    cancel: Arc<AtomicBool>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The Encounter.log this driver streams — for the same-path single-instance
+    /// guard (one native live session per file).
+    path: PathBuf,
+}
+
+impl NativeLiveHandle {
+    fn shutdown(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.thread.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+    /// Signal the driver to stop and wait for its thread to exit. Because the driver's
+    /// sends are cancel-aware (~250ms), this join returns promptly even mid-POST — but
+    /// it still JOINS a thread, so callers run it OFF the async executor.
+    pub fn stop(&self) {
+        self.shutdown();
+    }
+}
+
+impl Drop for NativeLiveHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// What [`stop_slot_in_map`] removed and the caller must `.stop()` AFTER releasing the
+/// `live_sessions` lock (both variants' `.stop()` JOIN a thread, which must never run
+/// under the lock — the existing rule). `#[must_use]` so a caller can't drop it on the
+/// floor and leak a running session.
+#[must_use = "the returned handle must be stopped after the live_sessions lock is released"]
+enum StoppedHandle {
+    /// An official-handoff watcher — joined inline (its stop is a fast local join).
+    Watch(LiveWatchHandle),
+    /// A native driver — its join must go through `spawn_blocking` (it can be
+    /// mid-POST and runs from an async command; an inline join blocks a Tokio worker).
+    Native(NativeLiveHandle),
+}
+
+/// Managed state: active live sessions keyed by session id.
 #[derive(Default)]
 pub struct UploaderState {
     live_sessions: Mutex<HashMap<String, LiveSlot>>,
+}
+
+/// The command-side [`super::native::live::OrphanSink`] adapter: persists the native
+/// live driver's `{reportCode, segmentId}` crash-recovery breadcrumb via
+/// [`super::native::orphans`]. Holds the `AppHandle` (for the app-data file) + the
+/// session's `sourcePath`/`createdAtMs` so the driver stays free of Tauri types.
+struct CommandOrphanSink {
+    app: tauri::AppHandle,
+    source_path: String,
+    created_at_ms: u64,
+}
+
+impl super::native::live::OrphanSink for CommandOrphanSink {
+    fn record_open(&self, code: &str, segment_id: u64) {
+        let _ = super::native::orphans::record_open(
+            &self.app,
+            super::native::orphans::LiveOrphan {
+                code: code.to_string(),
+                last_segment_id: segment_id,
+                source_path: self.source_path.clone(),
+                created_at_ms: self.created_at_ms,
+            },
+        );
+    }
+    fn note_segment(&self, code: &str, segment_id: u64) {
+        let _ = super::native::orphans::note_segment(&self.app, code, segment_id);
+    }
+    fn clear(&self, code: &str) {
+        let _ = super::native::orphans::clear(&self.app, code);
+    }
 }
 
 // ── Path confinement ─────────────────────────────────────────────────────────
@@ -713,9 +802,13 @@ pub async fn uploader_login_esologs(
 ) -> Result<super::native::login::UploadLoginResult, String> {
     // State derefs through the Arc to the provider; `run_login` takes
     // `&StoredSessionProvider`.
-    super::native::login::run_login(app, &session)
+    let result = super::native::login::run_login(app.clone(), &session)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    // A just-signed-in user may have orphaned native live reports from a prior crash —
+    // sweep them now (off-thread, once-per-process; no-op if none / signed-out).
+    super::native::orphans::recover_orphans_once(app, std::sync::Arc::clone(&session));
+    result
 }
 
 /// Whether a native upload session cookie is currently available (signed in for
@@ -723,8 +816,12 @@ pub async fn uploader_login_esologs(
 /// present without prompting a fresh login.
 #[tauri::command]
 pub fn uploader_has_session(
+    app: tauri::AppHandle,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
 ) -> bool {
+    // Panel-open / sign-in check is also the lazy trigger for native-live orphan
+    // recovery (off-thread, once-per-process, only spends its Once once signed in).
+    super::native::orphans::recover_orphans_once(app, std::sync::Arc::clone(&session));
     session.has_session()
 }
 
@@ -941,10 +1038,16 @@ pub async fn uploader_start_live(
     app: tauri::AppHandle,
     state: State<'_, UploaderState>,
     allowed: State<'_, AllowedAddonsPath>,
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
     session_id: String,
     file_path: String,
     options: UploadOptions,
     channel: Channel<LiveEvent>,
+    // Whether the user opted into native (direct) live upload. When true AND the
+    // format is confirmed AND a session exists, this session streams natively
+    // in-process; otherwise it hands off to the official uploader (the default).
+    // Absent → false (official handoff), preserving the prior behaviour exactly.
+    native_opt_in: Option<bool>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
 
@@ -975,7 +1078,8 @@ pub async fn uploader_start_live(
         prev_running
     };
     if let Some(handle) = prev_running {
-        handle.stop();
+        // Off the async executor: a native handle's join can be mid-POST (RACE-1).
+        stop_handle_off_executor(handle).await;
     }
 
     // Fallible setup now runs WITH the cancellable slot in place. On any error we
@@ -994,6 +1098,25 @@ pub async fn uploader_start_live(
         .and_then(|n| n.to_str())
         .unwrap_or("Encounter.log")
         .to_string();
+
+    // ROUTING (the gated opt-in): native in-process live vs official handoff. Decided
+    // AFTER the path-agnostic `Starting` slot is registered (above) so a stop during
+    // routing is still observed, and BEFORE the official-uploader-installed check
+    // (which is official-branch-only — the native path needs no external uploader).
+    // The DEFAULT is the official handoff; native runs only when opted-in + format
+    // confirmed + signed-in. Single-instance: refuse a second native live session on
+    // the SAME file (one ESO client writes one Encounter.log).
+    let native_opt_in = native_opt_in.unwrap_or(false);
+    let route_native = matches!(
+        transport::assess_native_live_routing(native_opt_in, session.has_session()),
+        transport::NativeRouting::Native
+    );
+    if route_native {
+        return start_native_live_branch(
+            &app, &state, &session, &session_id, &safe, &file_name, &options, &cancelled, channel,
+        )
+        .await;
+    }
 
     // Live mode genuinely requires the official uploader: only it can stream a
     // running log in real time (a lone fight slice has no BEGIN_LOG header). The
@@ -1236,6 +1359,224 @@ pub async fn uploader_start_live(
     })
 }
 
+/// The NATIVE live branch of [`uploader_start_live`]: stream the report in-process via
+/// [`super::native::live::run_native_live`] instead of handing off to the official
+/// uploader. Shares the `Starting`-slot protocol with the official branch (same
+/// `cancelled` Arc, same store-before-remove cancellation-race, same `still_ours &&
+/// !cancelled` promote) — the only divergences are: it spawns the native driver thread
+/// (promoting to [`LiveSlot::NativeRunning`]), it needs no external uploader, and it
+/// SELF-SETTLES its history record by exact id on the driver thread (so
+/// `uploader_stop_live` must skip `settle_live` for a native handle — RACE-6).
+#[allow(clippy::too_many_arguments)]
+async fn start_native_live_branch(
+    app: &tauri::AppHandle,
+    state: &State<'_, UploaderState>,
+    session: &std::sync::Arc<super::native::session::StoredSessionProvider>,
+    session_id: &str,
+    safe: &str,
+    file_name: &str,
+    options: &UploadOptions,
+    cancelled: &Arc<AtomicBool>,
+    channel: Channel<LiveEvent>,
+) -> Result<UploadDispatch, String> {
+    // Single-instance: refuse a second NATIVE live session on the SAME file. Checked
+    // inside the SAME critical section that would promote, so a colliding start can't
+    // slip between the check and the promote (RACE-5; no second lock → no AB/BA).
+    {
+        let sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        let same_path_native = sessions.values().any(|slot| {
+            matches!(slot, LiveSlot::NativeRunning(h) if h.path == Path::new(safe))
+        });
+        if same_path_native {
+            remove_own_slot(state, session_id, cancelled);
+            return Err("A native live upload is already running for this log.".into());
+        }
+    }
+
+    // Settle prior-run stale records before writing this session's `Live` record
+    // (same reasoning as the official branch). The cancellable `Starting` slot is
+    // already registered, so a stop during this blocking reconcile still sets
+    // `cancelled` and is honored by the abort re-check below.
+    super::history::reconcile_stale_once(app);
+
+    // Abort BEFORE spawning the driver if a stop/supersede arrived during setup
+    // (mirrors the official `aborted_before_handoff`). The driver's own pre-create
+    // cancel read (run_native_live) is the authoritative backstop for a stop landing
+    // after this check.
+    let aborted = {
+        let sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        let still_ours = matches!(
+            sessions.get(session_id),
+            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, cancelled)
+        );
+        !still_ours || cancelled.load(Ordering::SeqCst)
+    };
+    if aborted {
+        remove_own_slot(state, session_id, cancelled);
+        return Err("Live logging was cancelled before it started.".into());
+    }
+
+    // Write the `Live` history record up front (so a report link can attach later and
+    // the panel shows the session immediately). The native driver SELF-SETTLES this
+    // record by exact id when it exits (below), so `uploader_stop_live` skips
+    // `settle_live` for native.
+    let record_id = super::history::next_record_id(now_ms(), session_id);
+    let record = UploadRecord {
+        id: record_id.clone(),
+        source_path: safe.to_string(),
+        file_name: file_name.to_string(),
+        created_at_ms: now_ms(),
+        status: UploadStatus::Live,
+        mode: UploadMode::Live,
+        visibility: options.visibility,
+        fight_count: 0,
+        report: None,
+        error: None,
+    };
+    let _ = super::history::upsert(app, record);
+
+    // Spawn the driver thread. It owns: the cancel flag (the SAME Arc as the Starting
+    // slot, so a stop is observed), an OrphanSink adapter (persists the {code,segment}
+    // breadcrumb — L2 crash recovery), and a LiveEventSink (reauth prompts to the UI).
+    // On exit it self-settles the history record by exact id. The thread NEVER touches
+    // `live_sessions` (no lock-ordering cycle).
+    let driver_cancel = Arc::clone(cancelled);
+    let provider: std::sync::Arc<dyn super::native::session::SessionProvider> =
+        std::sync::Arc::clone(session) as std::sync::Arc<_>;
+    let app_for_thread = app.clone();
+    let app_for_sink = app.clone();
+    let safe_owned = safe.to_string();
+    let opts_owned = options.clone();
+    let record_id_for_thread = record_id.clone();
+    let channel_for_thread = channel;
+
+    let handle = std::thread::spawn(move || {
+        use super::native::live::{run_native_live, LiveEventSink};
+        // OrphanSink → orphans.rs (L2). record_open on create, note_segment per accepted
+        // segment, clear on confirmed terminate.
+        let sink = CommandOrphanSink {
+            app: app_for_sink,
+            source_path: safe_owned.clone(),
+            created_at_ms: now_ms(),
+        };
+        // Surface reauth prompts over the same LiveEvent channel the UI consumes.
+        let ch_reauth = channel_for_thread.clone();
+        let ch_resolved = channel_for_thread.clone();
+        let events = LiveEventSink {
+            on_reauth_required: Box::new(move || {
+                let _ = ch_reauth.send(LiveEvent::ReauthRequired {
+                    message: "Sign in to ESO Logs again to keep uploading this session."
+                        .into(),
+                });
+            }),
+            on_reauth_resolved: Box::new(move || {
+                let _ = ch_resolved.send(LiveEvent::ReauthResolved);
+            }),
+        };
+        let _ = channel_for_thread.send(LiveEvent::Started {
+            file: safe_owned.clone(),
+            start_offset: std::fs::metadata(&safe_owned).map(|m| m.len()).unwrap_or(0),
+        });
+
+        let result = run_native_live(
+            &safe_owned,
+            provider,
+            &opts_owned,
+            driver_cancel,
+            // The production tail constructed below reads the real Encounter.log.
+            &match super::native::live::NotifyTail::new(
+                Path::new(&safe_owned),
+                std::fs::metadata(&safe_owned).map(|m| m.len()).unwrap_or(0),
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = channel_for_thread.send(LiveEvent::Stopped {
+                        reason: format!("Could not start the live tail: {e}"),
+                    });
+                    let _ = super::history::settle_started(&app_for_thread, &record_id_for_thread);
+                    return;
+                }
+            },
+            &sink,
+            Some(&events),
+        );
+
+        // Self-settle the record by EXACT id (never the suffix-matching settle_live —
+        // that's the official path's, and double-settling would race). Report a clean
+        // stop / end as settled; a failure carries the reason.
+        match result {
+            Ok((code, ended)) => {
+                let url = super::watcher::report_url(&code.0);
+                let _ = channel_for_thread.send(LiveEvent::Stopped {
+                    reason: format!("Live upload finished ({:?}).", ended.reason),
+                });
+                let _ = super::history::settle_native_live(
+                    &app_for_thread,
+                    &record_id_for_thread,
+                    ended.segments_built,
+                    Some((url, code.0)),
+                );
+            }
+            Err(e) => {
+                let _ = channel_for_thread.send(LiveEvent::Stopped {
+                    reason: format!("Live upload stopped: {e}"),
+                });
+                let _ = super::history::settle_native_live(
+                    &app_for_thread,
+                    &record_id_for_thread,
+                    0,
+                    None,
+                );
+            }
+        }
+    });
+
+    let native_handle = NativeLiveHandle {
+        cancel: Arc::clone(cancelled),
+        thread: Mutex::new(Some(handle)),
+        path: PathBuf::from(safe),
+    };
+
+    // Promote Starting → NativeRunning unless a stop arrived mid-start (mirrors the
+    // official promote at the `still_ours && !cancelled` check). If we lost ownership,
+    // stop the just-spawned driver (off the executor) and self-settle by id.
+    let promote = {
+        let mut sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        let still_ours = matches!(
+            sessions.get(session_id),
+            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, cancelled)
+        );
+        if still_ours && !cancelled.load(Ordering::SeqCst) {
+            sessions.insert(session_id.to_string(), LiveSlot::NativeRunning(native_handle));
+            None
+        } else {
+            Some(native_handle)
+        }
+    };
+    if let Some(handle) = promote {
+        // Lost ownership: stop the driver off the async executor (it can be mid-POST),
+        // then settle our just-written record by id.
+        let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
+        let _ = super::history::settle_started(app, &record_id);
+        return Err("Live logging was cancelled before it started.".into());
+    }
+
+    Ok(UploadDispatch {
+        handed_off: false,
+        detail: "Live logging started — uploading directly to ESO Logs.".into(),
+        report: None,
+    })
+}
+
 /// Stop whatever slot is under `key`, **while the session lock is held**, and
 /// return any `Running` watcher handle for the caller to join *after* releasing
 /// the lock (a `handle.stop()` joins a thread and must not run under the lock).
@@ -1249,18 +1590,44 @@ pub async fn uploader_start_live(
 /// concurrent stop, the documented unrecallable case); it can never see "slot
 /// gone, flag still false" and launch after an observable stop. Storing after
 /// the removal (the previous bug) left exactly that window.
-#[must_use = "the returned Running handle must be stopped after the lock is released"]
-fn stop_slot_in_map(
-    sessions: &mut HashMap<String, LiveSlot>,
-    key: &str,
-) -> Option<LiveWatchHandle> {
+#[must_use = "the returned handle must be stopped after the lock is released"]
+fn stop_slot_in_map(sessions: &mut HashMap<String, LiveSlot>, key: &str) -> Option<StoppedHandle> {
     // Set a Starting slot's flag in place FIRST (while still mapped), then remove.
+    // This store-before-remove order is the load-bearing cancellation-race invariant
+    // and is UNCHANGED across the native-path addition — only the match below gains a
+    // `NativeRunning` arm (both `Running` and `NativeRunning` promote from the same
+    // `Starting` phase, so this `Starting` store covers an in-flight native start too).
     if let Some(LiveSlot::Starting(cancelled)) = sessions.get(key) {
         cancelled.store(true, Ordering::SeqCst);
     }
     match sessions.remove(key) {
-        Some(LiveSlot::Running(handle)) => Some(handle),
+        Some(LiveSlot::Running(handle)) => Some(StoppedHandle::Watch(handle)),
+        Some(LiveSlot::NativeRunning(handle)) => Some(StoppedHandle::Native(handle)),
         _ => None,
+    }
+}
+
+/// Stop a [`StoppedHandle`] AFTER the `live_sessions` lock is released. A `Watch`
+/// joins inline (its stop is a fast local thread join). A `Native` join can be
+/// mid-POST and this may run from an async command, so it goes through
+/// `spawn_blocking` to avoid blocking a Tokio worker (concurrency review RACE-1). The
+/// driver's cancel-aware sends keep the join itself prompt (~250ms).
+async fn stop_handle_off_executor(handle: StoppedHandle) {
+    match handle {
+        StoppedHandle::Watch(h) => h.stop(),
+        StoppedHandle::Native(h) => {
+            let _ = tokio::task::spawn_blocking(move || h.stop()).await;
+        }
+    }
+}
+
+/// Synchronous variant for sync contexts (e.g. `uploader_stop_live` is a sync command):
+/// a `Native` join is still off the async executor here because the whole command is
+/// sync (not on a Tokio worker). A `Watch` joins inline as before.
+fn stop_handle_blocking(handle: StoppedHandle) {
+    match handle {
+        StoppedHandle::Watch(h) => h.stop(),
+        StoppedHandle::Native(h) => h.stop(),
     }
 }
 
@@ -1306,13 +1673,23 @@ pub fn uploader_stop_live(
             .map_err(|_| "Live session lock poisoned")?;
         stop_slot_in_map(&mut sessions, &session_id)
     };
+    // Whether this stop hit a NATIVE driver: it self-settles its own history record
+    // (by exact id, on the driver thread, after the join), so the suffix-matching
+    // `settle_live` must NOT also touch it here — that would double-settle / race the
+    // driver's terminal write (concurrency review RACE-6 / FIX-6). For an official
+    // Watch, settle as today.
+    let was_native = matches!(running, Some(StoppedHandle::Native(_)));
     if let Some(handle) = running {
-        handle.stop();
+        // This command is sync (not on a Tokio worker), so a native join here is
+        // already off the async executor; `stop_handle_blocking` joins both variants.
+        stop_handle_blocking(handle);
     }
-    // Settle the matching history record (Live → Completed, with the observed
-    // fight count) so the panel reflects reality immediately rather than waiting
-    // for the next-launch reconcile. Best-effort: a missing record is fine.
-    let _ = super::history::settle_live(&app, &session_id, fight_count.unwrap_or(0));
+    if !was_native {
+        // Settle the matching official-handoff record (Live → HandedOff, with the
+        // observed fight count) so the panel reflects reality immediately rather than
+        // waiting for the next-launch reconcile. Best-effort: a missing record is fine.
+        let _ = super::history::settle_live(&app, &session_id, fight_count.unwrap_or(0));
+    }
     Ok(())
 }
 

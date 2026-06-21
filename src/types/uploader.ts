@@ -70,6 +70,9 @@ export type UploadStatus =
   | "queued"
   | "uploading"
   | "live"
+  // A native live session whose ESO Logs session expired mid-stream: posting is
+  // paused (the report stays open) until the user re-signs-in.
+  | "paused"
   | "completed"
   | "failed"
   | "cancelled"
@@ -119,6 +122,10 @@ export type LiveEvent =
   | { type: "sessionReset" }
   | { type: "fightSkipped"; reason: string }
   | { type: "warning"; message: string }
+  // Native live only: the ESO Logs session expired mid-stream (re-login prompt) /
+  // a fresh session resumed posting.
+  | { type: "reauthRequired"; message: string }
+  | { type: "reauthResolved" }
   | { type: "stopped"; reason: string };
 
 /** The display-level status of the whole uploader, for the glanceable pill. */

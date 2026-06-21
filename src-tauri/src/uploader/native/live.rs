@@ -1,28 +1,18 @@
-//! Debug-only native **live-streaming** upload driver (the `spike/native-live` R&D
-//! spike). NOT wired into the shipping live path — the production live upload still
-//! hands off to the official uploader (`super::super::transport` / `commands`).
+//! Native **live-streaming** upload driver: tails a growing `Encounter.log` and
+//! pushes fights-segments to `esologs.com/desktop-client/*` **incrementally**,
+//! holding ONE report open across a whole session and terminating only when logging
+//! ends — instead of the one-shot "read the finished file, upload once" path in
+//! [`super::super::transport`].
 //!
-//! ## What this is
+//! ## Gating
 //!
-//! A prototype that tails a growing `Encounter.log` and pushes fights-segments to
-//! `esologs.com/desktop-client/*` **incrementally**, holding ONE report open across
-//! a whole session and terminating only when logging ends — instead of the one-shot
-//! "read the finished file, upload once" path in [`super::super::transport`].
-//!
-//! ## Why it is gated `#[cfg(debug_assertions)]`
-//!
-//! Native live is feasibility R&D, **not** a shipping feature:
-//!
-//! * The server's open-report rendering behaviour (does it incrementally render a
-//!   report fed many `add-report-segment` POSTs under `isLiveLog:true`, and what does
-//!   `nextSegmentId=0` mean on an open report?) is **unverified** — only a real live
-//!   round-trip can settle it.
-//! * It is a distinct, higher-conspicuousness server operation (`liveLog`) from the
-//!   already-authorized one-shot upload, so it is **ToS-gated on operator sign-off**.
-//!
-//! The whole module compiles out of release builds, so the live path can never ship
-//! by accident. See `docs/native-live-streaming-spike-FINDINGS.md` for the full
-//! analysis (feasibility, time-base, ToS, effort).
+//! The live round-trip is confirmed and the ToS gate is cleared, so this module
+//! compiles into release — but it is REACHABLE only when the user opts in, the format
+//! is confirmed, and a session exists ([`super::super::transport::assess_native_live_routing`]);
+//! otherwise `uploader_start_live` runs the official-uploader handoff (the default).
+//! The debug round-trip command (`uploader_run_native_live_spike`) and the synthetic
+//! [`FileTail`]/`ScriptedTail` test seam stay `#[cfg(debug_assertions)]` so a
+//! "create a real report from an arbitrary path" surface never ships.
 //!
 //! ## Design (the parts proven offline)
 //!
@@ -45,8 +35,6 @@
 //!   (`current_session_wall + raw_ts`), with a POST skipped if the window is unknown.
 //! * A structural self-check ([`events::validate_segment_text`]) plus a master/segment
 //!   tuple-count cross-check before every POST, so a malformed segment is never sent.
-
-#![cfg(debug_assertions)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -470,19 +458,13 @@ fn post_with_retry(
     Err(last_fatal_marker)
 }
 
-/// Run the debug-only native live upload, tailing `growing_path` and streaming
-/// segments to an OPEN report until logging ends, `cancel` is set, or the file goes
-/// idle past the inactivity deadline. Returns the report code on a clean finish.
-///
-/// This is the network driver around [`LiveSegmenter`]. It is intentionally NOT wired
-/// into any Tauri command; an owner who wants to round-trip-test feasibility calls it
-/// from a debug harness against a SYNTHETIC growing file (Controlled Folder Access
-/// blocks a debug binary from reading a real in-game `Encounter.log` under Documents).
-///
-/// Orphan-safety: once the report is open, ANY exit path (clean finish, stop, error,
-/// idle) attempts `terminate-report` so a draft is never left open server-side. (A
-/// production build would ALSO persist `{code, segment_id}` to recover from a crash
-/// that kills the process before terminate — see the FINDINGS L2 item.)
+/// Run the DEBUG-only native live round-trip, tailing `growing_path` (a SYNTHETIC
+/// growing file) and streaming to an open report. A thin wrapper over the production
+/// [`run_native_live`] with a [`NoopOrphanSink`] and no UI channel — it exists only
+/// for the owner-run feasibility round-trip (`uploader_run_native_live_spike`), so it
+/// is `#[cfg(debug_assertions)]`: a "create a real report from an arbitrary path"
+/// entry must never ship. The production path is reached via `uploader_start_live`.
+#[cfg(debug_assertions)]
 pub fn run_native_live_spike(
     growing_path: &str,
     session: Arc<dyn SessionProvider>,
@@ -914,10 +896,11 @@ pub enum TailOutcome {
 /// file stops growing for [`Self::idle_deadline`]. A partial trailing line (no newline
 /// yet) is held back until its newline arrives, so a half-written line is never fed.
 ///
-/// Debug/spike only: it blocks the calling thread with short sleeps between polls, which
-/// is fine for a one-off owner-run round-trip but is NOT the production tail (that would
-/// reuse `watcher.rs`'s notify-based loop). Place the synthetic file OUTSIDE a
-/// CFA-protected folder (not `Documents`/`Desktop`) so the debug binary can read it.
+/// Debug/spike only: it blocks the calling thread with short sleeps between polls,
+/// which is fine for a one-off owner-run round-trip but is NOT the production tail
+/// (that is [`NotifyTail`]). Place the synthetic file OUTSIDE a CFA-protected folder
+/// (not `Documents`/`Desktop`) so the debug binary can read it.
+#[cfg(debug_assertions)]
 pub struct FileTail {
     offset: std::sync::Mutex<u64>,
     /// Carry-over bytes of a partial (un-newlined) trailing line between polls.
@@ -928,6 +911,7 @@ pub struct FileTail {
     idle_deadline: std::time::Duration,
 }
 
+#[cfg(debug_assertions)]
 impl FileTail {
     /// Tail from byte 0 (stream the whole file as it grows). `idle_secs` = stop after
     /// this many seconds with no new bytes (treat as logging-ended).
@@ -942,6 +926,7 @@ impl FileTail {
     }
 }
 
+#[cfg(debug_assertions)]
 impl LiveTail for FileTail {
     fn next_lines(&self, path: &str) -> TailOutcome {
         use std::io::{Read, Seek, SeekFrom};
@@ -1572,13 +1557,11 @@ mod tests {
         );
     }
 
-    // The segmenter cuts at fight boundaries and the segments it builds, concatenated,
-    // reproduce the one-shot event stream — proving the live cut path is correct
-    // offline (the same invariant the events differential test checks, but exercised
-    // through the LiveSegmenter API the driver actually uses).
-    #[test]
-    fn live_segmenter_cuts_reproduce_the_one_shot_event_stream() {
-        let lines = fixture_lines();
+    // The OFFLINE DIFFERENTIAL GATE: the segmenter cuts at fight boundaries and the
+    // segments it builds, concatenated, reproduce the one-shot event stream BYTE-FOR-
+    // BYTE — proving the live cut path is correct offline. Generalized over a fixture
+    // so each straddling-correlation case below exercises the same invariant.
+    fn assert_cuts_reproduce_one_shot(lines: &[String], min_segments: usize) {
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
 
         // One-shot reference body.
@@ -1590,7 +1573,7 @@ mod tests {
         let mut seg = LiveSegmenter::new();
         let mut assembled = String::new();
         let mut built = 0usize;
-        for line in &lines {
+        for line in lines {
             let boundary = seg.feed(line);
             if boundary && seg.shields_settled() {
                 if let Ok(Some(p)) = seg.build_next_segment() {
@@ -1605,11 +1588,31 @@ mod tests {
             built += 1;
         }
 
-        assert!(built >= 2, "fixture should produce multiple fight segments");
+        assert!(
+            built >= min_segments,
+            "fixture should produce >= {min_segments} fight segments (got {built})"
+        );
         assert_eq!(
             assembled, one_shot_body,
             "concatenated live-segment bodies must equal the one-shot event stream"
         );
+    }
+
+    #[test]
+    fn live_segmenter_cuts_reproduce_the_one_shot_event_stream() {
+        assert_cuts_reproduce_one_shot(&fixture_lines(), 2);
+    }
+
+    // Straddling correlations across an END_COMBAT cut — the brief's required cases.
+    // A timed BEGIN_CAST in fight 1 completing (code-16) in fight 2, a buff GAINED in
+    // fight 1 / UPDATED+FADED in fight 2 (the GAINED/FADED key2a + last_stack must
+    // survive the cut), and an INTERRUPT (code-27, needs cast_id_units + last_interrupt
+    // carried across the cut). The differential gate proves all of this state survives
+    // a cut byte-identically to the one-shot build — exactly the live-correctness claim.
+    #[test]
+    fn live_segmenter_cuts_reproduce_straddling_correlations_byte_for_byte() {
+        let lines = raw_fixture(include_str!("testdata/live_straddle_correlations.log"));
+        assert_cuts_reproduce_one_shot(&lines, 2);
     }
 
     // The driver terminates the report on a clean finish (Done) — proving the

@@ -496,6 +496,39 @@ impl NativeFallbackReason {
     }
 }
 
+/// Decide whether a LIVE session may use the native in-process driver instead of the
+/// official-uploader handoff. Unlike the finished-log path, a live `Encounter.log`
+/// GROWS — there is no whole file to coverage-scan up front — so the live gate is:
+///
+/// 1. The user opted in (`opt_in`).
+/// 2. The upload format/version is confirmed
+///    ([`super::native::format::FORMAT_VERSION_CONFIRMED`]).
+/// 3. A captured ESO Logs session exists (`has_session`) — without it the native
+///    path would hard-fail "Not signed in" mid-stream; route to the handoff instead.
+///
+/// Coverage is enforced PER SEGMENT at runtime by the encoder's structural self-check
+/// plus the master/segment desync cross-check (a malformed segment is never POSTed),
+/// and a mid-session `/reloadui` (a second `BEGIN_LOG`) terminates the report rather
+/// than mixing two sessions — so the finished-log MultiSession/UnprovenEvents/TooLarge
+/// gates have no live analog. The DEFAULT remains the official handoff: native live
+/// runs only when all three hold.
+pub fn assess_native_live_routing(opt_in: bool, has_session: bool) -> NativeRouting {
+    use super::native::format;
+    if !opt_in {
+        return NativeRouting::Fallback(NativeFallbackReason::NotOptedIn);
+    }
+    if !format::FORMAT_VERSION_CONFIRMED {
+        return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed);
+    }
+    if !has_session {
+        // Reuse FormatUnconfirmed's honest "direct upload isn't enabled" copy — the
+        // user-facing effect (handoff) and remedy (sign in / it'll work next time) are
+        // the same; a dedicated reason isn't worth a new enum arm here.
+        return NativeRouting::Fallback(NativeFallbackReason::NotOptedIn);
+    }
+    NativeRouting::Native
+}
+
 /// Decide whether a prepared log may use the native uploader, applying the
 /// safety gate that guarantees native output is byte-correct or not used:
 ///

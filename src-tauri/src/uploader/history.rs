@@ -207,6 +207,48 @@ pub fn settle_started(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     save_json_with_backup(&path, &file)
 }
 
+/// Settle a NATIVE live record by EXACT id when its in-process driver exits. Native
+/// live owns the upload end-to-end (unlike the official handoff, which may still be
+/// streaming after we stop tracking), so a clean finish is a real `Completed` — with
+/// the report link if one was minted — and a failure is `Failed`. Matched by exact id
+/// (NOT the suffix-matching [`settle_live`]) so the driver thread is the single owner
+/// of its record's terminal state and can't race / double-settle the official path.
+/// `segments_built` is recorded as the fight count. Idempotent: only flips a still-
+/// transient (`Live`/`Paused`) record.
+pub fn settle_native_live(
+    app: &tauri::AppHandle,
+    id: &str,
+    segments_built: usize,
+    report: Option<(String, String)>, // (url, code)
+) -> Result<(), String> {
+    use super::types::ReportRef;
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    let mut changed = false;
+    for r in &mut file.records {
+        if r.id == id && matches!(r.status, UploadStatus::Live | UploadStatus::Paused) {
+            r.status = if report.is_some() {
+                UploadStatus::Completed
+            } else {
+                UploadStatus::Failed
+            };
+            r.fight_count = segments_built;
+            if let Some((url, code)) = &report {
+                r.report = Some(ReportRef {
+                    url: url.clone(),
+                    code: code.clone(),
+                });
+            }
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
 /// Delete a record by id, then persist (serialized with other mutations).
 pub fn remove(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;

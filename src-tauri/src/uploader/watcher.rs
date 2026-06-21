@@ -64,6 +64,11 @@ pub enum LiveEvent {
     /// A non-fatal warning (e.g. transient read retry). The UI may log but
     /// should not toast these, as they can recur frequently.
     Warning { message: String },
+    /// (Native live only) the ESO Logs session expired mid-stream — posting is paused
+    /// until the user re-signs-in. The UI shows a re-login prompt; the report stays open.
+    ReauthRequired { message: String },
+    /// (Native live only) a fresh session was captured — posting resumed.
+    ReauthResolved,
     /// Watching stopped (user-initiated or fatal error).
     Stopped { reason: String },
 }

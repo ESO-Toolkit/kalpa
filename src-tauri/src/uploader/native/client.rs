@@ -499,7 +499,6 @@ pub(crate) fn create_report_body_for(opts: &UploadOptions) -> Vec<u8> {
 
 /// The `/desktop-client` base URL (a protocol fact). Exposed so the live driver can
 /// build its endpoint URLs without duplicating the constant.
-#[cfg(debug_assertions)]
 pub(crate) fn desktop_client_base() -> &'static str {
     DESKTOP_CLIENT_BASE
 }
@@ -507,14 +506,12 @@ pub(crate) fn desktop_client_base() -> &'static str {
 /// Parse a `create-report` response body into a [`ReportCode`] (see
 /// [`extract_report_code`]). Exposed for the live driver, which sends create-report
 /// through the cancel-aware [`LiveSender`] rather than [`NativeUpload::create_report`].
-#[cfg(debug_assertions)]
 pub(crate) fn parse_report_code(body: &[u8]) -> Result<ReportCode, UploadError> {
     extract_report_code(body)
 }
 
 /// Parse an `add-report-segment` response body into a `nextSegmentId` (see
 /// [`extract_next_segment_id`]). Exposed for the live driver.
-#[cfg(debug_assertions)]
 pub(crate) fn parse_next_segment_id(body: &[u8]) -> Result<u64, UploadError> {
     extract_next_segment_id(body)
 }
@@ -524,7 +521,6 @@ pub(crate) fn parse_next_segment_id(body: &[u8]) -> Result<u64, UploadError> {
 /// definitive (report doesn't exist / already terminated / server auto-expired).
 /// Everything else — timeout, 5xx, connection error, a `Session(Expired)` that
 /// survived the one re-auth — is TRANSIENT, so the orphan is KEPT for a later retry.
-#[cfg(debug_assertions)]
 pub(crate) fn is_definitively_closed(e: &UploadError) -> bool {
     matches!(
         e,
@@ -558,7 +554,6 @@ pub(crate) fn is_definitively_closed(e: &UploadError) -> bool {
 ///
 /// Gated with the rest of the live path until the de-gate step; the live module is
 /// unreachable in release until then, so this can't ship by accident.
-#[cfg(debug_assertions)]
 #[derive(Clone)]
 pub(crate) enum OwnedLiveRequest {
     /// `create-report` — JSON body.
@@ -581,7 +576,6 @@ pub(crate) enum OwnedLiveRequest {
 /// production impl (real cancel-aware HTTP); a scripted fake implements it in tests so
 /// the driver's retry / pause-resume / idle state machine is deterministically
 /// testable without a server.
-#[cfg(debug_assertions)]
 pub(crate) trait LivePoster {
     /// Send one live request, cancel-aware (returns `Cancelled` fast on stop).
     fn post(
@@ -599,13 +593,11 @@ pub(crate) trait LivePoster {
 /// provider as an `Arc` (so it can move into a detached worker) and applies the same
 /// single 401/419 re-auth-then-retry the shared `send` does. Built from the managed
 /// [`super::session::StoredSessionProvider`] for the production live driver.
-#[cfg(debug_assertions)]
 #[derive(Clone)]
 pub(crate) struct LiveSender {
     session: Arc<dyn SessionProvider>,
 }
 
-#[cfg(debug_assertions)]
 impl LiveSender {
     pub(crate) fn new(session: Arc<dyn SessionProvider>) -> Self {
         Self { session }
@@ -620,7 +612,6 @@ impl LiveSender {
     }
 }
 
-#[cfg(debug_assertions)]
 impl LivePoster for LiveSender {
     fn post(
         &self,
@@ -635,7 +626,6 @@ impl LivePoster for LiveSender {
     }
 }
 
-#[cfg(debug_assertions)]
 impl LiveSender {
     /// Send `req` to `url`, cancel-aware: the blocking POST runs on a detached
     /// worker; this returns [`UploadError::Cancelled`] within ~[`LIVE_CANCEL_POLL`]
@@ -671,7 +661,6 @@ impl LiveSender {
 /// trips first, or a transport error if the worker dropped the channel. Extracted
 /// from [`LiveSender::send_cancellable`] so the cancel-latency contract is unit-
 /// testable without a real HTTP worker (a fake sender that never completes).
-#[cfg(debug_assertions)]
 fn wait_for_send_or_cancel(
     rx: std::sync::mpsc::Receiver<Result<Vec<u8>, UploadError>>,
     cancel: &Arc<AtomicBool>,
@@ -698,7 +687,6 @@ fn wait_for_send_or_cancel(
 /// loop but for the owned live request; the actual wire attempt is
 /// [`live_send_once`]. Kept separate from the borrow-based `send` so the one-shot
 /// path is untouched.
-#[cfg(debug_assertions)]
 fn live_send_with_reauth(
     session: &Arc<dyn SessionProvider>,
     url: &str,
@@ -731,7 +719,6 @@ fn live_send_with_reauth(
 /// Perform exactly one HTTP attempt for an owned live request. Builds the same
 /// multipart/JSON envelopes the borrow-based [`NativeUpload::send_once`] does, from
 /// owned data. No retry logic here.
-#[cfg(debug_assertions)]
 fn live_send_once(
     session: &Session,
     url: &str,
@@ -848,7 +835,6 @@ fn segment_parameters_json(segment_id: u64, start_time: u64, end_time: u64) -> S
 /// tail; 0 when the segment ends on a fight boundary). The exact server semantics of
 /// these flags on an OPEN report are UNVERIFIED — settling them is the live spike's
 /// one open question (see `docs/native-live-streaming-spike-FINDINGS.md`).
-#[cfg(debug_assertions)]
 fn segment_parameters_json_live(
     segment_id: u64,
     start_time: u64,
