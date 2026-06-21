@@ -95,8 +95,9 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
 
         {!loading && skippedFiles > 0 && (
           <p className="text-xs text-[#d9a441]">
-            {skippedFiles} SavedVariables file{skippedFiles !== 1 ? "s" : ""} couldn&apos;t be read
-            (too large, locked, or corrupt), so a character may be missing from this list.
+            {skippedFiles} SavedVariables file{skippedFiles !== 1 ? "s" : ""} couldn&apos;t be fully
+            read (locked, permission denied, or malformed), so a character may be missing from this
+            list.
           </p>
         )}
 

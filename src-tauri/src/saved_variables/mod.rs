@@ -1,6 +1,7 @@
 pub mod io;
 pub mod parser;
 pub mod profile;
+pub mod roster_stream;
 pub mod scrub;
 pub mod serializer;
 pub mod types;

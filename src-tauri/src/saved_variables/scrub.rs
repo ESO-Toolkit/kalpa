@@ -717,6 +717,7 @@ fn classify_under_account(node: &SvTreeNode, acc: &mut DetectAcc) {
 
 /// A character discovered for the Characters roster, with its megaserver when
 /// the layout makes it derivable.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterCharacter {
     /// The verbatim SavedVariables key (may carry a raw `^Mx` caret suffix).
@@ -744,6 +745,14 @@ pub struct RosterCharacter {
 ///
 /// Returns verbatim keys (caret suffix preserved) so callers can both display a
 /// cleaned name and match the raw key on disk.
+///
+/// Retained as the **differential-testing oracle** for the production roster
+/// path, which now streams the raw bytes via
+/// [`crate::saved_variables::roster_stream`]. A parity test asserts the streamer
+/// yields the identical `(name, world)` set on every fixture, so this tree-based
+/// detector is the executable spec the streamer must match. It is compiled only
+/// for tests.
+#[cfg(test)]
 pub fn detect_roster_characters_from_tree(tree: &SvTreeNode) -> Vec<RosterCharacter> {
     let mut out: Vec<RosterCharacter> = Vec::new();
     let mut seen: std::collections::BTreeSet<(String, Option<String>)> =
@@ -762,8 +771,10 @@ pub fn detect_roster_characters_from_tree(tree: &SvTreeNode) -> Vec<RosterCharac
     out
 }
 
+#[cfg(test)]
 type RosterSeen = std::collections::BTreeSet<(String, Option<String>)>;
 
+#[cfg(test)]
 fn roster_under_top(node: &SvTreeNode, out: &mut Vec<RosterCharacter>, seen: &mut RosterSeen) {
     let key = node.key.as_str();
     if key == "Default" {
@@ -780,6 +791,7 @@ fn roster_under_top(node: &SvTreeNode, out: &mut Vec<RosterCharacter>, seen: &mu
     // holds addon section keys at this depth, not character names — skip it.
 }
 
+#[cfg(test)]
 fn roster_account_or_world(
     node: &SvTreeNode,
     out: &mut Vec<RosterCharacter>,
@@ -793,6 +805,7 @@ fn roster_account_or_world(
     }
 }
 
+#[cfg(test)]
 fn roster_world_layer(
     world_key: &str,
     node: &SvTreeNode,
@@ -845,7 +858,11 @@ const CONFIG_SECTION_KEYS: &[&str] = &[
 /// capitalized config-section words (`Settings`, `Profile`, …) are rejected even
 /// though they match the shape. This is the discriminator used to recover
 /// characters from accounts without admitting addon config keys.
-fn looks_like_character_name(key: &str) -> bool {
+///
+/// Exposed to the crate so the streaming roster extractor
+/// (`roster_stream`) applies the EXACT same acceptance rule as the
+/// tree-based detector, keeping the two in parity.
+pub(crate) fn looks_like_character_name(key: &str) -> bool {
     let base = key.split('^').next().unwrap_or(key);
     let mut chars = base.chars();
     match chars.next() {
@@ -867,6 +884,7 @@ fn looks_like_character_name(key: &str) -> bool {
     !CONFIG_SECTION_KEYS.contains(&lowered.as_str())
 }
 
+#[cfg(test)]
 fn roster_chars_under_account(
     account_node: &SvTreeNode,
     world: Option<&str>,
