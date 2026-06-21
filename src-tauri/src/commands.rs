@@ -7063,7 +7063,12 @@ fn collect_roster_characters(addons_dir: &Path) -> (Vec<(String, Option<String>)
     let sv_dir = sv_io::saved_variables_dir(addons_dir);
     let entries = match fs::read_dir(&sv_dir) {
         Ok(e) => e,
-        Err(_) => return (Vec::new(), 0),
+        // A missing SavedVariables folder is the expected "no characters yet"
+        // case (0 skipped). Any OTHER error (permissions, etc.) means we couldn't
+        // scan at all — report it as a skipped file so the UI still warns rather
+        // than silently showing an empty roster.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), 0),
+        Err(_) => return (Vec::new(), 1),
     };
 
     // raw key -> the distinct megaservers it was seen under. A name with one or

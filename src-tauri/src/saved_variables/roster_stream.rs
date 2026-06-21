@@ -62,6 +62,14 @@ const MAX_KEY_BYTES: usize = 512;
 /// is only defined within the parser's own nesting limit anyway.
 const MAX_CTX_DEPTH: usize = 4096;
 
+/// Cap on the number of distinct `(name, world)` entries a single scan retains.
+/// A real ESO account has at most a few dozen characters; this ceiling is wildly
+/// generous yet still bounds the output against a pathological file stuffed with
+/// millions of distinct character-shaped keys (the only term that would
+/// otherwise grow with file size). Hitting it flags the scan `malformed` so the
+/// UI still warns the roster may be incomplete.
+const MAX_ROSTER_ENTRIES: usize = 50_000;
+
 /// Result of a streaming scan: the `(name, world)` set plus whether the scan hit
 /// a malformed/truncated structure (unterminated token or unbalanced braces).
 #[derive(Debug, Clone, Default)]
@@ -92,6 +100,20 @@ enum Ctx {
     Ignore,
 }
 
+/// Where a comment returns to once it ends — the whitespace-skipping context it
+/// interrupted. Mirrors `skip_whitespace_and_comments` being called at each of
+/// these boundaries in the tree parser.
+#[derive(Debug, Clone, Copy)]
+enum Resume {
+    Normal,
+    /// After a key token; awaiting `]`.
+    RBracket,
+    /// After `]`; awaiting `=` for a `["..."]`/`[num]` key.
+    Equals,
+    /// Mid identifier key; awaiting `=`.
+    IdentEquals,
+}
+
 /// Lexer / structural state. All fields are `Copy`, so the whole enum is `Copy`
 /// and we can freely match it by value while mutating `self.lex`.
 #[derive(Debug, Clone, Copy)]
@@ -100,15 +122,21 @@ enum Lex {
     Normal,
     /// Consumed a `-` in `Normal`; awaiting a second `-` for a comment.
     Dash,
+    /// Consumed a `-` while skipping toward `]`/`=`; awaiting a second `-`.
+    SeekDash { resume: Resume },
     /// Consumed `--`; deciding line vs block comment.
-    CommentStart,
+    CommentStart { resume: Resume },
     /// Inside a line comment, until `\n`.
-    LineComment,
+    LineComment { resume: Resume },
     /// Consumed `--[` then `eqs` `=`; awaiting `[` to open a block comment.
-    BlockOpen { eqs: usize },
+    BlockOpen { eqs: usize, resume: Resume },
     /// Inside a block comment of the given long-bracket `level`; `m` tracks the
     /// close `]` `=`*level `]` progress (`None` = not after a `]`).
-    BlockBody { level: usize, m: Option<usize> },
+    BlockBody {
+        level: usize,
+        m: Option<usize>,
+        resume: Resume,
+    },
     /// Consumed `[` in `Normal`; deciding long string vs `["..."]`/`[num]` key.
     AfterLBracket,
     /// Consumed `[` then `eqs` `=`; awaiting `[` to open a long-string value.
@@ -121,14 +149,30 @@ enum Lex {
     KeyStr { escaped: bool },
     /// Reading a `[<digits>]` numeric key into `key_buf`.
     KeyNum,
+    /// Reading an unquoted identifier key (`Foo = ...`) into `key_buf`.
+    Ident,
     /// Consuming a scalar VALUE (number / true / false / nil) in value position.
     Scalar,
     /// After `[` + whitespace; awaiting `"` or a digit/`-` key token.
     SeekKeyToken,
-    /// After a key token; skipping whitespace until `]`.
+    /// After a key token; skipping whitespace/comments until `]`.
     SeekRBracket,
-    /// After `]`; skipping whitespace until `=`.
+    /// After `]`; skipping whitespace/comments until `=`.
     SeekEquals,
+    /// After an identifier key; skipping whitespace/comments until `=`.
+    SeekIdentEquals,
+}
+
+impl Resume {
+    /// The lexer state to return to once the comment ends.
+    fn state(self) -> Lex {
+        match self {
+            Resume::Normal => Lex::Normal,
+            Resume::RBracket => Lex::SeekRBracket,
+            Resume::Equals => Lex::SeekEquals,
+            Resume::IdentEquals => Lex::SeekIdentEquals,
+        }
+    }
 }
 
 struct Scanner {
@@ -261,6 +305,21 @@ impl Scanner {
         }
     }
 
+    /// Commit the buffered key (`["..."]`, `[num]`, or identifier) as the pending
+    /// key for the value following `=`. An over-long key becomes `None` (unusable
+    /// for structural matching) while still marking value position.
+    fn commit_key(&mut self) {
+        self.value_expected = true;
+        self.pending_key = if self.key_overflow {
+            None
+        } else {
+            Some(std::mem::take(&mut self.key_buf))
+        };
+        self.key_buf.clear();
+        self.key_overflow = false;
+        self.lex = Lex::Normal;
+    }
+
     /// Open a table: emit a character if applicable, then push the child context.
     fn open_table(&mut self) {
         if self.overflow > 0 {
@@ -275,7 +334,17 @@ impl Scanner {
             if let Some(k) = &key {
                 let name = String::from_utf8_lossy(k);
                 if name_qualifies(&name) {
-                    self.out.insert((name.into_owned(), world.clone()));
+                    if self.out.len() < MAX_ROSTER_ENTRIES {
+                        self.out.insert((name.into_owned(), world.clone()));
+                    } else if !self
+                        .out
+                        .contains(&(name.clone().into_owned(), world.clone()))
+                    {
+                        // Pathological file: more distinct character-shaped keys
+                        // than any real account. Stop growing and flag the scan so
+                        // the UI warns the roster may be incomplete.
+                        self.malformed = true;
+                    }
                 }
             }
         }
@@ -315,7 +384,9 @@ impl Scanner {
             Lex::Normal => self.step_normal(b),
             Lex::Dash => {
                 if b == b'-' {
-                    self.lex = Lex::CommentStart;
+                    self.lex = Lex::CommentStart {
+                        resume: Resume::Normal,
+                    };
                     true
                 } else {
                     // A lone `-`: the start of a (possibly negative) scalar.
@@ -323,38 +394,61 @@ impl Scanner {
                     false
                 }
             }
-            Lex::CommentStart => {
+            Lex::SeekDash { resume } => {
+                if b == b'-' {
+                    self.lex = Lex::CommentStart { resume };
+                    true
+                } else {
+                    // A lone `-` here is not a comment and not valid in a key
+                    // boundary — fall back to the seek state, which rejects it.
+                    self.lex = resume.state();
+                    false
+                }
+            }
+            Lex::CommentStart { resume } => {
                 match b {
-                    b'[' => self.lex = Lex::BlockOpen { eqs: 0 },
-                    b'\n' => self.lex = Lex::Normal,
-                    _ => self.lex = Lex::LineComment,
+                    b'[' => self.lex = Lex::BlockOpen { eqs: 0, resume },
+                    b'\n' => self.lex = resume.state(),
+                    _ => self.lex = Lex::LineComment { resume },
                 }
                 true
             }
-            Lex::LineComment => {
+            Lex::LineComment { resume } => {
                 if b == b'\n' {
-                    self.lex = Lex::Normal;
+                    self.lex = resume.state();
                 }
                 true
             }
-            Lex::BlockOpen { eqs } => {
+            Lex::BlockOpen { eqs, resume } => {
                 match b {
-                    b'=' => self.lex = Lex::BlockOpen { eqs: eqs + 1 },
+                    b'=' => {
+                        self.lex = Lex::BlockOpen {
+                            eqs: eqs + 1,
+                            resume,
+                        }
+                    }
                     b'[' => {
                         self.lex = Lex::BlockBody {
                             level: eqs,
                             m: None,
+                            resume,
                         }
                     }
-                    b'\n' => self.lex = Lex::Normal, // was a line comment
-                    _ => self.lex = Lex::LineComment,
+                    b'\n' => self.lex = resume.state(), // was a line comment
+                    _ => self.lex = Lex::LineComment { resume },
                 }
                 true
             }
-            Lex::BlockBody { level, m } => {
+            Lex::BlockBody { level, m, resume } => {
                 match long_close_step(level, m, b) {
-                    Some(newm) => self.lex = Lex::BlockBody { level, m: newm },
-                    None => self.lex = Lex::Normal, // comment closed
+                    Some(newm) => {
+                        self.lex = Lex::BlockBody {
+                            level,
+                            m: newm,
+                            resume,
+                        }
+                    }
+                    None => self.lex = resume.state(), // comment closed
                 }
                 true
             }
@@ -433,6 +527,15 @@ impl Scanner {
                     false
                 }
             }
+            Lex::Ident => {
+                if b.is_ascii_alphanumeric() || b == b'_' {
+                    self.push_key(b);
+                    true
+                } else {
+                    self.lex = Lex::SeekIdentEquals;
+                    false
+                }
+            }
             Lex::Scalar => {
                 if is_scalar_char(b) {
                     true
@@ -473,6 +576,11 @@ impl Scanner {
                 } else if b == b']' {
                     self.lex = Lex::SeekEquals;
                     true
+                } else if b == b'-' {
+                    self.lex = Lex::SeekDash {
+                        resume: Resume::RBracket,
+                    };
+                    true
                 } else {
                     // Not a key after all.
                     self.key_buf.clear();
@@ -485,17 +593,34 @@ impl Scanner {
                 if is_ws(b) {
                     true
                 } else if b == b'=' {
-                    self.value_expected = true;
-                    self.pending_key = if self.key_overflow {
-                        None
-                    } else {
-                        Some(std::mem::take(&mut self.key_buf))
+                    self.commit_key();
+                    true
+                } else if b == b'-' {
+                    self.lex = Lex::SeekDash {
+                        resume: Resume::Equals,
                     };
+                    true
+                } else {
                     self.key_buf.clear();
                     self.key_overflow = false;
                     self.lex = Lex::Normal;
+                    false
+                }
+            }
+            Lex::SeekIdentEquals => {
+                if is_ws(b) {
+                    true
+                } else if b == b'=' {
+                    self.commit_key();
+                    true
+                } else if b == b'-' {
+                    self.lex = Lex::SeekDash {
+                        resume: Resume::IdentEquals,
+                    };
                     true
                 } else {
+                    // The identifier was a value (true/false/nil) or otherwise not
+                    // a key — discard it and re-process this byte.
                     self.key_buf.clear();
                     self.key_overflow = false;
                     self.lex = Lex::Normal;
@@ -536,7 +661,8 @@ impl Scanner {
                 true
             }
             b'=' => {
-                // An identifier-key (or top-level addon var) assignment.
+                // A stray/defensive `=` (identifier-key assignments are committed
+                // via the Ident path); marks value position with no key.
                 self.value_expected = true;
                 true
             }
@@ -545,8 +671,20 @@ impl Scanner {
                     // Start of a scalar value (number / true / false / nil).
                     self.lex = Lex::Scalar;
                     false
+                } else if b.is_ascii_alphabetic() || b == b'_' {
+                    // Entry start: an unquoted identifier — either a key
+                    // (`Foo = ...`, including the top-level addon var) or a keyword
+                    // value (`true`/`false`/`nil` array element). The trailing
+                    // `=` (or its absence) decides, in SeekIdentEquals. ESO quotes
+                    // its structural keys, but the tree parser accepts identifier
+                    // keys, so handling them keeps full parity.
+                    self.key_buf.clear();
+                    self.key_overflow = false;
+                    self.push_key(b);
+                    self.lex = Lex::Ident;
+                    true
                 } else {
-                    // Inert: identifier-key bytes / array-element keyword.
+                    // Inert: e.g. a numeric array-element value at entry start.
                     true
                 }
             }
@@ -609,11 +747,15 @@ impl Scanner {
     }
 
     fn finish(&mut self) {
-        // A clean end is `Normal` (or a value/comment that ran to EOF). Any other
-        // state means a token was cut off mid-stream.
+        // A clean end is `Normal` (or a value/comment/identifier that ran right up
+        // to EOF). Any other state means a token was cut off mid-stream.
         let clean = matches!(
             self.lex,
-            Lex::Normal | Lex::LineComment | Lex::CommentStart | Lex::Scalar
+            Lex::Normal
+                | Lex::LineComment { .. }
+                | Lex::CommentStart { .. }
+                | Lex::Scalar
+                | Lex::Ident
         );
         if !clean {
             self.malformed = true;
@@ -930,6 +1072,89 @@ mod tests {
                 },
             }"#,
         );
+    }
+
+    #[test]
+    fn parity_identifier_character_key() {
+        // The tree parser accepts unquoted identifier table keys; the streamer
+        // must too, or it would miss a character under `Mainchar = { ... }`.
+        assert_parity(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Acct"] = {
+                        Mainchar = { x = 1 },
+                        ["Alttank"] = { ["x"] = 2 },
+                    },
+                },
+            }"#,
+        );
+    }
+
+    #[test]
+    fn parity_identifier_structural_keys() {
+        // `Default` and the account written as identifier keys (no quotes).
+        assert_parity(
+            r#"MyAddon_SV = {
+                Default = {
+                    ["@Acct"] = {
+                        ["Mainchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
+        );
+    }
+
+    #[test]
+    fn parity_comment_before_closing_bracket() {
+        // A comment between the key string and `]` (parse_table_key skips it).
+        assert_parity(
+            "MyAddon_SV = {\n\
+             [\"Default\"] = {\n\
+             [\"@Acct\"] = {\n\
+             [\"Mainchar\" --[[c]] ] = { [\"x\"] = 1 },\n\
+             },\n\
+             },\n\
+             }\n",
+        );
+    }
+
+    #[test]
+    fn parity_comment_before_equals() {
+        // A comment between `]` and `=` (parse_table_key skips it).
+        assert_parity(
+            "MyAddon_SV = {\n\
+             [\"Default\"] = {\n\
+             [\"@Acct\"] = {\n\
+             [\"Mainchar\"] -- a trailing comment\n\
+             = { [\"x\"] = 1 },\n\
+             },\n\
+             },\n\
+             }\n",
+        );
+    }
+
+    #[test]
+    fn roster_entry_cap_flags_malformed() {
+        // A pathological file with more distinct character-shaped keys than the
+        // cap stops growing the set and flags the scan incomplete.
+        let mut lua = String::from("MyAddon_SV = {\n[\"Default\"] = {\n[\"@Acct\"] = {\n");
+        for i in 0..(MAX_ROSTER_ENTRIES + 25) {
+            // Distinct uppercase-led alphabetic names (no digits): Aaaa, Aaab, ...
+            let name: String = {
+                let mut s = String::from("C");
+                let mut n = i;
+                for _ in 0..6 {
+                    s.push((b'a' + (n % 26) as u8) as char);
+                    n /= 26;
+                }
+                s
+            };
+            lua.push_str(&format!("[\"{name}\"] = {{}},\n"));
+        }
+        lua.push_str("},\n},\n}\n");
+        let scan = stream(lua.as_bytes());
+        assert!(scan.malformed, "exceeding the entry cap flags malformed");
+        assert_eq!(scan.characters.len(), MAX_ROSTER_ENTRIES);
     }
 
     #[test]
