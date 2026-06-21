@@ -4441,47 +4441,21 @@ pub async fn restore_backup_safe(
     let mut restored: u32 = 0;
     let mut failed: Vec<String> = Vec::new();
 
-    let meta_path = backup_path.join(CHAR_BACKUP_META);
-    if meta_path.is_file() {
-        // The directory claims to be a per-character (v2) backup. Validate it
-        // STRICTLY before merging: it must carry the character-backup marker and
-        // parse as the current format version. A `.json` that doesn't validate is
-        // refused outright (rather than falling back to a whole-file copy, which
-        // would splat minimal subtree files over the live SavedVariables) so a
-        // corrupt or future-format backup can never destroy live data.
-        let has_marker = backup_path.join(CHAR_BACKUP_MARKER).is_file();
-        let meta: Option<CharBackupMeta> = fs::read(&meta_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok());
-        match meta {
-            Some(m) if has_marker && m.version == CHAR_BACKUP_VERSION => {
-                // Per-character backup: merge each stored subtree into its live
-                // file, leaving other characters and account-wide data untouched.
-                let (r, f) = restore_character_subtrees_merge(&backup_path, &sv_dir, &m);
-                restored = r;
-                failed = f;
-            }
-            Some(m) => {
-                return Err(format!(
-                    "This character backup uses an unsupported format (version {}). \
-                     Update Kalpa to restore it.",
-                    m.version
-                ));
-            }
-            None => {
-                return Err(
-                    "This character backup's metadata is missing or unreadable, so it \
-                     can't be restored safely."
-                        .to_string(),
-                );
-            }
+    match classify_backup_for_restore(&backup_path) {
+        CharRestoreMode::Refuse(reason) => return Err(reason),
+        CharRestoreMode::Merge(meta) => {
+            // Per-character backup: merge each stored subtree into its live file,
+            // leaving other characters and account-wide data untouched.
+            let (r, f) = restore_character_subtrees_merge(&backup_path, &sv_dir, &meta);
+            restored = r;
+            failed = f;
         }
-    } else {
-        // Manual / auto-before-restore / legacy whole-file character backup: copy
-        // whole files into the SavedVariables folder.
-        let entries =
-            fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {e}"))?;
-        for entry in entries.flatten() {
+        CharRestoreMode::WholeFile => {
+            // Manual / auto-before-restore / legacy whole-file character backup:
+            // copy whole files into the SavedVariables folder.
+            let entries =
+                fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {e}"))?;
+            for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
                 if let Some(name) = path.file_name() {
@@ -4498,6 +4472,7 @@ pub async fn restore_backup_safe(
                         }
                     }
                 }
+            }
             }
         }
     }
@@ -5176,15 +5151,27 @@ fn recover_orphaned_backups(backups_root: &Path) {
 }
 
 /// Marker file written inside every character backup directory to label it as
-/// one (e.g. for future tooling). Dot-prefixed so it is excluded from backup
-/// file counts and restores. `char_backup_replaceable` keys off this exact name,
-/// so every character backup — legacy whole-file OR new per-character — writes it.
+/// one. Dot-prefixed so it is excluded from backup file counts and restores.
+/// `char_backup_replaceable` keys off this exact FILENAME, so every character
+/// backup — legacy whole-file OR new per-character — writes it. The marker's
+/// CONTENT distinguishes the format (see [`CHAR_BACKUP_MARKER_V2_BODY`]).
 const CHAR_BACKUP_MARKER: &str = ".kalpa-char-backup";
 
-/// Metadata sidecar written only by the NEW per-character (subtree) backup
-/// format. Its presence is what tells restore to MERGE the stored subtrees back
-/// in (rather than copy whole files): a legacy whole-file character backup has
-/// the marker above but no `.json`, so it still restores via the whole-file path.
+/// Marker file CONTENT written by the per-character (subtree) backup format. A
+/// legacy whole-file character backup wrote `"kalpa character backup\n"` (no
+/// version). The version lives in the marker — which is always present and is the
+/// same file `char_backup_replaceable` already requires — so a per-character
+/// backup is positively identifiable for restore even if its `.json` metadata
+/// sidecar is later lost (in which case restore fails closed rather than
+/// whole-file-copying minimal subtree files over live data).
+const CHAR_BACKUP_MARKER_V2_BODY: &[u8] = b"kalpa character backup v2\n";
+
+/// Prefix that identifies a per-character (v2+) marker body.
+const CHAR_BACKUP_MARKER_V2_PREFIX: &[u8] = b"kalpa character backup v2";
+
+/// Metadata sidecar written by the per-character (subtree) backup format. Carries
+/// the data restore needs to re-extract and merge the stored subtrees. Restore
+/// requires both the v2 marker AND a valid sidecar at the current version.
 /// Dot-prefixed so it stays out of `list_backups` counts and file restores.
 const CHAR_BACKUP_META: &str = ".kalpa-char-backup.json";
 
@@ -5203,6 +5190,55 @@ struct CharBackupMeta {
     /// The character's megaserver as shown in the UI (a known megaserver, or
     /// `Unknown`); informational/display only.
     server: String,
+}
+
+/// How `restore_backup_safe` should restore a backup directory.
+enum CharRestoreMode {
+    /// A per-character (v2) backup with valid metadata: MERGE its subtrees.
+    Merge(CharBackupMeta),
+    /// A manual / auto-before-restore / legacy whole-file backup: copy whole files.
+    WholeFile,
+    /// A per-character backup we can't restore safely (missing/unsupported
+    /// metadata): refuse rather than risk corrupting live data.
+    Refuse(String),
+}
+
+/// Classify a backup directory for restore. A directory is treated as a
+/// per-character (v2) backup when its marker carries the v2 body OR a metadata
+/// sidecar is present; such a directory is restored by MERGE only with a valid,
+/// current-version sidecar — otherwise it is refused (never whole-file-copied, as
+/// that would splat minimal subtree files over live SavedVariables). Everything
+/// else (manual, auto-before-restore, legacy whole-file character backups) is
+/// restored by whole-file copy.
+fn classify_backup_for_restore(backup_path: &Path) -> CharRestoreMode {
+    let marker = fs::read(backup_path.join(CHAR_BACKUP_MARKER)).ok();
+    let v2_marker = marker
+        .as_deref()
+        .is_some_and(|c| c.starts_with(CHAR_BACKUP_MARKER_V2_PREFIX));
+    let meta_path = backup_path.join(CHAR_BACKUP_META);
+    let has_meta_file = meta_path.is_file();
+
+    if !v2_marker && !has_meta_file {
+        // No per-character signal at all → manual / auto / legacy whole-file.
+        return CharRestoreMode::WholeFile;
+    }
+
+    match fs::read(&meta_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<CharBackupMeta>(&b).ok())
+    {
+        Some(m) if m.version == CHAR_BACKUP_VERSION => CharRestoreMode::Merge(m),
+        Some(m) => CharRestoreMode::Refuse(format!(
+            "This character backup uses an unsupported format (version {}). \
+             Update Kalpa to restore it.",
+            m.version
+        )),
+        None => CharRestoreMode::Refuse(
+            "This character backup's metadata is missing or unreadable, so it can't \
+             be restored safely."
+                .to_string(),
+        ),
+    }
 }
 
 /// Whether a character backup may be installed at `final_dir` by replacing
@@ -5333,12 +5369,10 @@ pub fn backup_character_settings(
         ));
     }
 
-    // Stamp the staged dir as a character backup so a later backup can tell it
-    // apart from a manual/legacy `char-*` directory before replacing it.
-    if let Err(e) = fs::write(
-        staging.join(CHAR_BACKUP_MARKER),
-        b"kalpa character backup\n",
-    ) {
+    // Stamp the staged dir as a per-character (v2) backup. The versioned marker
+    // body positively identifies the format for restore (independent of the JSON
+    // sidecar), while the filename is what `char_backup_replaceable` checks.
+    if let Err(e) = fs::write(staging.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY) {
         let _ = fs::remove_dir_all(&staging);
         return Err(format!("Failed to write backup marker: {e}"));
     }
@@ -8116,6 +8150,69 @@ mod tests {
     }
 
     #[test]
+    fn classify_backup_for_restore_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let good_meta = serde_json::to_vec(&CharBackupMeta {
+            version: CHAR_BACKUP_VERSION,
+            character: "Bob".to_string(),
+            server: "NA Megaserver".to_string(),
+        })
+        .unwrap();
+
+        // v2 marker + valid metadata -> Merge.
+        let d = root.join("v2-ok");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY).unwrap();
+        fs::write(d.join(CHAR_BACKUP_META), &good_meta).unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Merge(_)
+        ));
+
+        // v2 marker but the metadata sidecar was lost -> Refuse (NEVER whole-file,
+        // which would splat minimal subtree files over live data).
+        let d = root.join("v2-lost-meta");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY).unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Refuse(_)
+        ));
+
+        // Metadata claims a newer version than we support -> Refuse.
+        let d = root.join("v2-future");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY).unwrap();
+        fs::write(
+            d.join(CHAR_BACKUP_META),
+            br#"{"version":99,"character":"Bob","server":"NA Megaserver"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::Refuse(_)
+        ));
+
+        // Legacy whole-file character backup (old marker body, no sidecar) -> WholeFile.
+        let d = root.join("legacy");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(CHAR_BACKUP_MARKER), b"kalpa character backup\n").unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::WholeFile
+        ));
+
+        // Manual / auto backup (no marker at all) -> WholeFile.
+        let d = root.join("manual");
+        fs::create_dir_all(&d).unwrap();
+        assert!(matches!(
+            classify_backup_for_restore(&d),
+            CharRestoreMode::WholeFile
+        ));
+    }
+
+    #[test]
     fn char_backup_merge_restore_isolates_target() {
         use crate::saved_variables::char_backup::{build_backup_file, extract_character_blocks};
 
@@ -8131,7 +8228,11 @@ mod tests {
         let blocks = extract_character_blocks(&original, b"Bob", Some("NA Megaserver"));
         let content = build_backup_file(&blocks).unwrap();
         fs::write(backup_dir.join("Addon.lua"), &content).unwrap();
-        fs::write(backup_dir.join(CHAR_BACKUP_MARKER), b"x").unwrap();
+        fs::write(
+            backup_dir.join(CHAR_BACKUP_MARKER),
+            CHAR_BACKUP_MARKER_V2_BODY,
+        )
+        .unwrap();
         let meta = CharBackupMeta {
             version: CHAR_BACKUP_VERSION,
             character: "Bob".to_string(),
@@ -8149,6 +8250,12 @@ mod tests {
             .replace("\"NA\"", "\"NA-changed\"")
             .replace("\"EU\"", "\"EU-changed\"");
         fs::write(&live_file, &mutated).unwrap();
+
+        // Sanity: the v2 dir we built classifies as a Merge restore.
+        assert!(matches!(
+            classify_backup_for_restore(&backup_dir),
+            CharRestoreMode::Merge(_)
+        ));
 
         // Restore: merge only NA Bob's subtree back.
         let (restored, failed) = restore_character_subtrees_merge(&backup_dir, &sv, &meta);
