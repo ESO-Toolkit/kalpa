@@ -438,18 +438,17 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     // Recover the id from the landing URL and synthesize a single result from
     // the addon detail so an exact-name search isn't silently empty.
     if let Some(id) = id_from_info_url(&final_url, query) {
-        if let Ok(detail) = fetch_addon_detail(id) {
-            return Ok(vec![EsouiSearchResult {
-                id: detail.id,
-                title: detail.title,
-                author: detail.author,
-                category: String::new(),
-                downloads: detail.total_downloads,
-                updated: detail.updated,
-            }]);
-        }
-        // Detail fetch failed: fall through to list scraping (likely empty,
-        // which simply yields no results rather than an error).
+        // The landing page has no result rows, so the only result is this addon.
+        // Propagate a detail-fetch error rather than masking it as "no results".
+        let detail = fetch_addon_detail(id)?;
+        return Ok(vec![EsouiSearchResult {
+            id: detail.id,
+            title: detail.title,
+            author: detail.author,
+            category: String::new(),
+            downloads: detail.total_downloads,
+            updated: detail.updated,
+        }]);
     }
 
     let document = Html::parse_document(&body);
@@ -535,22 +534,66 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     Ok(results)
 }
 
-/// Search ESOUI for an addon by name, return the best-matching ESOUI ID.
-/// Searches the ESOUI search page and matches results by title.
-/// Recover an addon id from an ESOUI detail URL such as
-/// `https://www.esoui.com/downloads/info4373-LuiData.html`, but only when the
-/// URL slug resembles `name` — so a redirect to an unrelated page can never
-/// resolve to the wrong addon.
-fn id_from_info_url(url: &str, name: &str) -> Option<u32> {
-    static RE_INFO_SLUG: OnceLock<Regex> = OnceLock::new();
-    let re = RE_INFO_SLUG.get_or_init(|| Regex::new(r"info(\d+)-([^/]+?)\.html").unwrap());
-    let caps = re.captures(url)?;
-    let id = caps[1].parse::<u32>().ok()?;
-    let slug = caps[2].to_lowercase();
-    let name_lower = name.to_lowercase();
-    (slug == name_lower || slug.contains(&name_lower) || name_lower.contains(&slug)).then_some(id)
+/// Minimal percent-decoding for URL slugs (e.g. `%20` → space). Any malformed
+/// escape is left as-is.
+fn percent_decode(s: &str) -> String {
+    fn hex(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Lowercase, percent-decoded, alphanumeric-only key for comparing an ESOUI URL
+/// slug against an addon name regardless of separators (`-`, `.`, space, `%20`).
+fn slug_key(s: &str) -> String {
+    percent_decode(s)
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Recover an addon id from an ESOUI detail URL such as
+/// `https://www.esoui.com/downloads/info4373-LuiData.html`. Only the final path
+/// segment is considered (the query string is dropped) and the slug must
+/// resemble `name`, so neither a `search.php?search=info1-x.html` query nor a
+/// redirect to an unrelated page can resolve to the wrong addon.
+fn id_from_info_url(url: &str, name: &str) -> Option<u32> {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    static RE_INFO_SLUG: OnceLock<Regex> = OnceLock::new();
+    let re = RE_INFO_SLUG.get_or_init(|| Regex::new(r"(?i)/info(\d+)-([^/]+)\.html$").unwrap());
+    let caps = re.captures(path)?;
+    let id = caps[1].parse::<u32>().ok()?;
+    let slug = slug_key(&caps[2]);
+    let name_key = slug_key(name);
+    if slug.is_empty() || name_key.is_empty() {
+        return None;
+    }
+    (slug == name_key || slug.contains(&name_key) || name_key.contains(&slug)).then_some(id)
+}
+
+/// Search ESOUI for an addon by name, return the best-matching ESOUI ID.
+/// Matches results by title, or recovers the id directly when ESOUI redirects a
+/// precise query straight to the addon page.
 pub fn search_addon_by_name(name: &str) -> Result<Option<u32>, String> {
     let client = http_client();
     let (final_url, body) = fetch_page_with_url(
@@ -1191,6 +1234,51 @@ mod tests {
                 "LuiData"
             ),
             None
+        );
+        // A query that itself contains an info-URL must NOT be treated as a
+        // redirect (the info string is in the query, not the final path).
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/search.php?search=info1-LuiData.html&se_search=files",
+                "info1-LuiData.html"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn resolves_id_robustly_across_url_quirks() {
+        // Trailing query/fragment on the detail URL.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info4373-LuiData.html?x=1#top",
+                "LuiData"
+            ),
+            Some(4373)
+        );
+        // Case-insensitive scheme/host casing.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/INFO4373-LuiData.html",
+                "LuiData"
+            ),
+            Some(4373)
+        );
+        // Percent-encoded space in the slug still matches a spaced name.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info123-Foo%20Bar.html",
+                "Foo Bar"
+            ),
+            Some(123)
+        );
+        // Hyphen-for-space slug matches a spaced name too.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info123-Foo-Bar.html",
+                "Foo Bar"
+            ),
+            Some(123)
         );
     }
 
