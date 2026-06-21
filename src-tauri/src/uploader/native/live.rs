@@ -863,6 +863,16 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
                 return PostOutcome::Fatal("malformed add-segment response".into());
             }
         };
+        // The segment was ACCEPTED regardless of `next` (a `0` only means "no further
+        // segments"). So advance the UI timeline/count + the orphan breadcrumb for the
+        // accepted fight HERE, before branching on the terminal — otherwise the final
+        // segment of a session that ends with `next == 0` would be undercounted in the
+        // UI. A fight event also backstops a missed on_session_anchored. 0-based index.
+        sink.note_segment(&self.code.0, payload.segment_id);
+        if let Some(ch) = self.channel {
+            (ch.on_fight_posted)(self.fights_posted);
+        }
+        self.fights_posted += 1;
         if next == 0 {
             eprintln!(
                 "[uploader] live: server returned nextSegmentId=0 after segment {} \
@@ -872,14 +882,6 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
             return PostOutcome::Posted { next_segment_id: 0 };
         }
         self.seg.set_next_segment_id(next);
-        sink.note_segment(&self.code.0, next);
-        // A fight-segment was accepted: advance the UI timeline/count, and (since a
-        // fight implies the session anchored) this also backstops a missed
-        // on_session_anchored. 0-based index.
-        if let Some(ch) = self.channel {
-            (ch.on_fight_posted)(self.fights_posted);
-        }
-        self.fights_posted += 1;
         PostOutcome::Posted {
             next_segment_id: next,
         }

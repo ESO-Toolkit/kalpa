@@ -696,6 +696,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     liveFightCountRef.current = 0;
     setLiveReport(null);
     setSessionAnchored(false); // native: not anchored until the first BEGIN_LOG
+    // Reset the handoff path indicator (state + its unmount-toast ref mirror) so this
+    // new session doesn't inherit the previous session's path for its copy/toast until
+    // the start dispatch resolves the real value.
+    setLiveHandedOff(false);
+    liveHandedOffRef.current = false;
     setLiveStartMs(startedAt);
     setLiveStatus("watching");
     liveActiveRef.current = true;
@@ -900,10 +905,18 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     // Running watcher with no visible Stop control.
     const id = liveSessionIdRef.current;
     if (!id) return;
+    // Clear the ownership refs SYNCHRONOUSLY, before any await. A caller that stops
+    // then immediately starts (handleForceHandoffLive) or switches to Manual
+    // (`void handleStopLive()` then setMode) must see "no session" instantly — the
+    // backend stop is awaited below, but a synchronous follow-on (handleStartLive's
+    // re-entry guard, the pre-start abort re-check, the Live-tab auto-select) reads
+    // these refs and would otherwise act on the just-stopped session. The post-await
+    // cleanup below re-checks `=== id` so it won't clobber a newer session.
+    liveSessionIdRef.current = null;
+    liveActiveRef.current = false;
     // Was this session actually running (handed off to the uploader), vs still
     // starting? Only a running session left the official uploader streaming, so
-    // only then do we remind the user it keeps going. Clear the ref so a later
-    // dialog-close can't re-warn for an already-stopped session.
+    // only then do we remind the user it keeps going.
     const wasRunning = liveWasRunningRef.current;
     liveWasRunningRef.current = false;
 
@@ -922,16 +935,13 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     } catch {
       /* best-effort */
     }
-    // Only clear the live refs/state if WE are still the current session. The
-    // await above can take a while (it joins the watcher thread + settles history
-    // I/O); during it the watcher's own `stopped` event can clear state, re-enable
-    // Start, and the user can begin a NEW session. Clobbering the refs/state
-    // unconditionally here would orphan that new session (its start result gets
-    // dropped by the session guard, its channel events ignored) with no visible
-    // Stop. If a newer session replaced ours, leave it alone.
-    if (liveSessionIdRef.current === id) {
-      liveActiveRef.current = false; // stop processing any trailing events
-      liveSessionIdRef.current = null;
+    // Clear the live UI STATE unless a NEWER session took over during the await. We
+    // already nulled the refs synchronously up top; the await can take a while (it
+    // joins the driver/watcher + settles history), during which the user could start a
+    // NEW session (which sets liveSessionIdRef to a new id). Only skip the state reset
+    // in that case — otherwise clear it. `null` means no newer session claimed it, so
+    // it's ours to reset.
+    if (liveSessionIdRef.current === null) {
       setLiveSessionId(null);
       setLiveStatus(liveFightCount > 0 ? "upToDate" : "idle");
     }
@@ -1094,8 +1104,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                     // about to upload) — live has exactly one correct target, and a
                     // stale manual pick would silently make Go Live stream the wrong
                     // (or a dead) file. The user can still click a different log AFTER
-                    // switching to Live to override. Skipped only while a session runs.
-                    if (!liveSessionId) autoSelectActiveLog();
+                    // switching to Live to override. Guard on the REFS (not the
+                    // `liveSessionId` state, which lags) so this can't clobber the
+                    // selection of an in-flight start.
+                    if (!liveSessionIdRef.current && !startingRef.current) autoSelectActiveLog();
                   }}
                   Icon={Radio}
                   title="Live Log"
@@ -1215,7 +1227,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   <LiveDashboard
                     running={liveSessionId !== null}
                     starting={starting}
-                    canStart={!!selectedLog}
+                    // Enabled when there's a selection OR any log to auto-target —
+                    // handleStartLive resolves the active Encounter.log itself (and
+                    // shows an honest toast if the folder is empty), so don't require
+                    // a manual pick first (that made the auto-select fallback dead).
+                    canStart={!!selectedLog || logs.length > 0}
                     startMs={liveStartMs}
                     liveFights={liveFights}
                     liveFightCount={liveFightCount}
