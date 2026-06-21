@@ -293,12 +293,12 @@
   --sidebar-ring: var(--primary);
 }
 
-/* Art themes (skins with a texture/pattern): make glass panels a touch more
- * translucent so the material + motif read through the whole UI, not just in the
- * gaps. Plain themes are unaffected. */
+/* Art themes (skins with a texture/pattern): keep content panels solid/opaque so
+ * text stays readable — the motif lives in the BACKDROP (margins, empty states,
+ * behind the chrome), not behind body text. Plain themes are unaffected. */
 :root[data-textured] {
-  --glass-bg: color-mix(in oklab, var(--card) 62%, transparent);
-  --glass-bg-light: color-mix(in oklab, var(--card) 46%, transparent);
+  --glass-bg: color-mix(in oklab, var(--card) 94%, transparent);
+  --glass-bg-light: color-mix(in oklab, var(--card) 88%, transparent);
 }
 
 @layer base {
