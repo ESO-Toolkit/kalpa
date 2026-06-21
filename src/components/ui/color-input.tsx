@@ -102,6 +102,7 @@ export function ColorInput({
           type="button"
           onClick={pickWithEyeDropper}
           className="flex size-7 shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-muted-foreground transition-colors duration-150 hover:border-white/15 hover:text-white/80"
+          aria-label={`Sample a color for ${label} from the screen`}
           title="Sample a color from the screen"
         >
           <Pipette className="size-3.5" />

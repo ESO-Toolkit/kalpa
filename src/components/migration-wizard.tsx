@@ -448,7 +448,7 @@ function DryRunPhase({
 function DiffSection({ title, color, items }: { title: string; color: string; items: string[] }) {
   const colorMap: Record<string, string> = {
     emerald: "border-emerald-400/20 bg-emerald-400/[0.04] text-emerald-400",
-    sky: "border-sky-400/20 bg-sky-400/[0.04] text-sky-400",
+    sky: "border-accent-sky/20 bg-accent-sky/[0.04] text-accent-sky",
     amber: "border-amber-400/20 bg-amber-400/[0.04] text-amber-400",
     white: "border-white/[0.08] bg-white/[0.02] text-white/60",
   };

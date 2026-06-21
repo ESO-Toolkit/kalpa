@@ -339,7 +339,7 @@ export function Settings({
                             type="button"
                             className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
                               isActive
-                                ? "border-accent-sky/30 bg-accent-sky/[0.06] text-sky-300"
+                                ? "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky"
                                 : "border-white/[0.06] bg-white/[0.02] text-white/80 hover:border-white/[0.12] hover:bg-white/[0.04]"
                             }`}
                             onClick={() => {

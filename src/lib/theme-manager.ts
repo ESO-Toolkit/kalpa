@@ -31,10 +31,9 @@ interface ViewTransitionLike {
 
 const STORE_KEY_ACTIVE = "appearance.activeThemeId";
 const STORE_KEY_CUSTOM = "appearance.customThemes";
-const LS_KEY_ACTIVE = "kalpa.appearance.activeThemeId";
-const LS_KEY_CUSTOM = "kalpa.appearance.customThemes";
-/** Resolved `{ "--var": value }` map of the active theme — read SYNCHRONOUSLY by
- * the inline boot script in index.html before first paint (see that file). */
+/** Resolved `{ "--var": value }` map of the active theme — the ONLY localStorage
+ * key, read SYNCHRONOUSLY by the inline boot script in index.html before first
+ * paint (see that file). The Tauri store is the durable source of truth. */
 export const LS_KEY_VARS = "kalpa.appearance.activeVars";
 
 interface ManagerState {
@@ -77,8 +76,6 @@ export function getActiveTheme(): Theme {
 
 function writeLocalMirror(next: ManagerState) {
   try {
-    localStorage.setItem(LS_KEY_ACTIVE, next.activeThemeId);
-    localStorage.setItem(LS_KEY_CUSTOM, JSON.stringify(next.customThemes));
     // Mirror the active theme's resolved CSS vars so the pre-paint boot script
     // can apply them with zero logic. The default theme stores nothing — the
     // authored :root values govern.
@@ -153,8 +150,10 @@ export function setActiveTheme(id: string) {
   emit();
 }
 
-/** Create or update a custom theme; re-applies it if it's the active one. */
-export function upsertCustomTheme(theme: Theme) {
+/** Create or update a custom theme; re-applies it if it's the active one.
+ * State/apply/mirror are synchronous; resolves to the DURABLE-store outcome so
+ * callers can report success/failure honestly. */
+export async function upsertCustomTheme(theme: Theme): Promise<boolean> {
   const custom: Theme = { ...theme, custom: true };
   const existing = state.customThemes.findIndex((t) => t.id === custom.id);
   const customThemes =
@@ -164,23 +163,23 @@ export function upsertCustomTheme(theme: Theme) {
   state = { ...state, customThemes };
   if (state.activeThemeId === custom.id) applyTheme(custom, false);
   writeLocalMirror(state);
-  void setSetting(STORE_KEY_CUSTOM, customThemes);
   emit();
+  return setSetting(STORE_KEY_CUSTOM, customThemes);
 }
 
 /** Delete a custom theme; falls back to the default if it was active. */
-export function deleteCustomTheme(id: string) {
+export async function deleteCustomTheme(id: string): Promise<boolean> {
   const customThemes = state.customThemes.filter((t) => t.id !== id);
   let activeThemeId = state.activeThemeId;
   if (activeThemeId === id) {
     activeThemeId = DEFAULT_THEME_ID;
     applyTheme(DEFAULT_THEME, true);
+    void setSetting(STORE_KEY_ACTIVE, activeThemeId);
   }
   state = { activeThemeId, customThemes };
   writeLocalMirror(state);
-  void setSetting(STORE_KEY_CUSTOM, customThemes);
-  void setSetting(STORE_KEY_ACTIVE, activeThemeId);
   emit();
+  return setSetting(STORE_KEY_CUSTOM, customThemes);
 }
 
 /** Generate a unique custom theme id. */
@@ -224,15 +223,20 @@ export function stopPreview() {
  * deferred ES module and would paint a frame late.
  */
 export async function hydrateThemeFromStore() {
-  const [activeThemeId, customThemes] = await Promise.all([
+  const [storedActiveId, storedCustom] = await Promise.all([
     getSetting<string>(STORE_KEY_ACTIVE, DEFAULT_THEME_ID),
     getSetting<Theme[]>(STORE_KEY_CUSTOM, []),
   ]);
-  state = {
-    activeThemeId,
-    customThemes: Array.isArray(customThemes) ? customThemes : [],
-  };
+  const customThemes = Array.isArray(storedCustom) ? storedCustom : [];
+
+  // Normalize a dangling active id (e.g. a custom theme deleted on another
+  // window) so the gallery's active highlight and the mirror stay consistent.
+  const known = new Set([...BUILTIN_THEME_IDS, ...customThemes.map((t) => t.id)]);
+  const activeThemeId = known.has(storedActiveId) ? storedActiveId : DEFAULT_THEME_ID;
+
+  state = { activeThemeId, customThemes };
   applyTheme(getActiveTheme(), false);
   writeLocalMirror(state);
+  if (activeThemeId !== storedActiveId) void setSetting(STORE_KEY_ACTIVE, activeThemeId);
   emit();
 }

@@ -1,9 +1,11 @@
 /**
- * Small, dependency-free color utilities used to expand a 12-color theme seed
- * into the full set of CSS custom properties the app consumes.
- *
- * All inputs are 6-digit (or 3-digit) hex strings; derivations produce either
- * hex strings or `rgba(...)` strings for tokens that need alpha.
+ * Small, dependency-free color helpers. NOTE: the real seed→token expansion
+ * happens in CSS (index.css derivations via color-mix(in oklab)/OKLCH relative
+ * color), applied by theme-apply.ts — NOT here. These are plain sRGB utilities
+ * used only off the render path: WCAG contrast scoring (theme-contrast.ts),
+ * gallery swatch preview, and hex validation/normalization in the editor.
+ * `mix`/`lighten`/`darken` are naive sRGB blends (test-covered) — prefer the
+ * CSS oklab path for anything user-visible to avoid muddy mid-tones.
  */
 
 export interface Rgb {

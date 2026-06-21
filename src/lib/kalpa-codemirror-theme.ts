@@ -1,37 +1,50 @@
 import { createTheme } from "@uiw/codemirror-themes";
 import { tags as t } from "@lezer/highlight";
 
+/**
+ * CodeMirror theme for the addon-file editor.
+ *
+ * Colors are CSS `var()` / `color-mix()` tokens, not literals, so the editor
+ * follows the active app theme LIVE — createTheme emits them as plain CSS values
+ * and the cascade re-resolves them when the theme switches (no rebuild needed).
+ * Syntax content hues reuse the theme's tinted status tokens so highlighting
+ * harmonizes with the rest of the UI; chrome (bg/caret/selection/gutter) tracks
+ * the theme surface and accents.
+ */
 export const kalpaTheme = createTheme({
   theme: "dark",
   settings: {
-    background: "rgba(10, 12, 18, 0.6)",
-    foreground: "#e2e8f0",
-    caret: "#38bdf8",
-    selection: "rgba(56, 189, 248, 0.15)",
-    selectionMatch: "rgba(56, 189, 248, 0.08)",
-    lineHighlight: "rgba(196, 164, 74, 0.08)",
+    background: "color-mix(in oklab, var(--card) 55%, transparent)",
+    foreground: "var(--foreground)",
+    caret: "var(--accent-sky)",
+    selection: "color-mix(in oklab, var(--accent-sky) 22%, transparent)",
+    selectionMatch: "color-mix(in oklab, var(--accent-sky) 12%, transparent)",
+    lineHighlight: "color-mix(in oklab, var(--primary) 8%, transparent)",
     gutterBackground: "transparent",
-    gutterForeground: "rgba(255, 255, 255, 0.25)",
+    gutterForeground: "color-mix(in oklab, var(--foreground) 35%, transparent)",
     gutterBorder: "transparent",
   },
   styles: [
-    { tag: [t.keyword, t.operatorKeyword], color: "#c4a44a" },
-    { tag: [t.string, t.special(t.string)], color: "#34d399" },
-    { tag: t.number, color: "#fbbf24" },
-    { tag: t.bool, color: "#c4a44a" },
-    { tag: [t.variableName, t.self], color: "#38bdf8" },
-    { tag: [t.propertyName], color: "#e2e8f0" },
-    { tag: [t.function(t.variableName)], color: "#818cf8" },
+    { tag: [t.keyword, t.operatorKeyword], color: "var(--primary)" },
+    { tag: [t.string, t.special(t.string)], color: "var(--status-success-strong)" },
+    { tag: t.number, color: "var(--status-warning-strong)" },
+    { tag: t.bool, color: "var(--primary)" },
+    { tag: [t.variableName, t.self], color: "var(--accent-sky)" },
+    { tag: [t.propertyName], color: "var(--foreground)" },
+    { tag: [t.function(t.variableName)], color: "var(--status-library)" },
     {
       tag: [t.comment, t.lineComment, t.blockComment],
-      color: "rgba(255, 255, 255, 0.3)",
+      color: "color-mix(in oklab, var(--foreground) 38%, transparent)",
       fontStyle: "italic",
     },
-    { tag: [t.operator, t.punctuation], color: "rgba(255, 255, 255, 0.5)" },
-    { tag: [t.bracket], color: "rgba(255, 255, 255, 0.4)" },
-    { tag: [t.tagName], color: "#c4a44a" },
-    { tag: [t.attributeName], color: "#38bdf8" },
-    { tag: [t.attributeValue], color: "#34d399" },
-    { tag: t.null, color: "#f87171" },
+    {
+      tag: [t.operator, t.punctuation],
+      color: "color-mix(in oklab, var(--foreground) 55%, transparent)",
+    },
+    { tag: [t.bracket], color: "color-mix(in oklab, var(--foreground) 45%, transparent)" },
+    { tag: [t.tagName], color: "var(--primary)" },
+    { tag: [t.attributeName], color: "var(--accent-sky)" },
+    { tag: [t.attributeValue], color: "var(--status-success-strong)" },
+    { tag: t.null, color: "var(--status-error-strong)" },
   ],
 });

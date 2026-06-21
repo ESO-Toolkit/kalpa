@@ -1692,7 +1692,7 @@ function RawTreeView({ node, depth }: { node: SvTreeNode; depth: number }) {
       case "string":
         return "text-emerald-400";
       case "number":
-        return "text-sky-400";
+        return "text-accent-sky";
       case "boolean":
         return "text-amber-400";
       case "nil":
@@ -1966,7 +1966,7 @@ function DiffPreviewDialog({
         {changes.length > 0 && (
           <div className="flex gap-3 text-xs">
             {modified.length > 0 && (
-              <span className="text-sky-400">{modified.length} modified</span>
+              <span className="text-accent-sky">{modified.length} modified</span>
             )}
             {added.length > 0 && <span className="text-emerald-400">{added.length} added</span>}
             {removed.length > 0 && <span className="text-red-400">{removed.length} removed</span>}

@@ -25,11 +25,15 @@ export async function getSetting<T>(key: string, fallback: T): Promise<T> {
   }
 }
 
-export async function setSetting<T>(key: string, value: T): Promise<void> {
+/** Persist a setting. Never throws; returns true on success, false on failure
+ * (so callers can surface "couldn't save" instead of falsely reporting success). */
+export async function setSetting<T>(key: string, value: T): Promise<boolean> {
   try {
     const store = await getStore();
     await store.set(key, value);
+    return true;
   } catch (err) {
     console.warn(`[store] Failed to write "${key}":`, err);
+    return false;
   }
 }

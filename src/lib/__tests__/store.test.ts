@@ -47,16 +47,16 @@ describe("getSetting", () => {
 });
 
 describe("setSetting", () => {
-  it("sets value in store", async () => {
+  it("sets value in store and reports success", async () => {
     const { setSetting } = await import("../store");
     mockSet.mockResolvedValue(undefined);
-    await setSetting("theme", "dark");
+    await expect(setSetting("theme", "dark")).resolves.toBe(true);
     expect(mockSet).toHaveBeenCalledWith("theme", "dark");
   });
 
-  it("silently handles errors", async () => {
+  it("handles errors without throwing and reports failure", async () => {
     const { setSetting } = await import("../store");
     mockSet.mockRejectedValue(new Error("write error"));
-    await expect(setSetting("key", "val")).resolves.toBeUndefined();
+    await expect(setSetting("key", "val")).resolves.toBe(false);
   });
 });

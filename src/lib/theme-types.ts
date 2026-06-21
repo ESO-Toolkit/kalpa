@@ -75,8 +75,9 @@ export type ThemeCategory =
   | "Editor Classics"
   | "Neon"
   | "Nature"
-  | "Minimal"
   | "Gemstone"
+  | "Metal"
+  | "Minimal"
   | "Custom";
 
 /**
@@ -105,7 +106,7 @@ export interface Theme {
   id: string;
   name: string;
   description: string;
-  category: ThemeCategory | string;
+  category: ThemeCategory;
   colors: ThemeColors;
   /** Optional material skin (textures, patterns, radius) for art themes. */
   skin?: ThemeSkin;

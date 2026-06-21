@@ -9,8 +9,19 @@ import { ColorInput } from "@/components/ui/color-input";
 import { ThemeSwatch } from "@/components/ui/theme-swatch";
 import { previewThemeColors, stopPreview } from "@/lib/theme-manager";
 import { evaluateContrast } from "@/lib/theme-contrast";
-import { THEME_COLOR_META } from "@/lib/theme-types";
+import { isHexColor, normalizeHex } from "@/lib/theme-color";
+import { THEME_COLOR_KEYS, THEME_COLOR_META } from "@/lib/theme-types";
 import type { Theme, ThemeColors } from "@/lib/theme-types";
+
+/** Normalize valid hex; replace any malformed entry with a safe black so a bad
+ * value can't be persisted/exported as raw text. */
+function sanitizeColors(c: ThemeColors): ThemeColors {
+  const out = {} as ThemeColors;
+  for (const key of THEME_COLOR_KEYS) {
+    out[key] = isHexColor(c[key]) ? normalizeHex(c[key]) : "#000000";
+  }
+  return out;
+}
 
 const GROUPS: { title: string; keys: (keyof ThemeColors)[] }[] = [
   { title: "Base & Surfaces", keys: ["bgBase", "background", "surface", "border"] },
@@ -55,13 +66,13 @@ export function ThemeEditor({
       toast.error("Give your theme a name.");
       return;
     }
-    onSave({ ...draft, name: trimmed, colors, custom: true });
+    onSave({ ...draft, name: trimmed, colors: sanitizeColors(colors), custom: true });
   };
 
   const handleExport = async () => {
     try {
       const payload = JSON.stringify(
-        { ...draft, name: name.trim() || draft.name, colors, custom: true },
+        { ...draft, name: name.trim() || draft.name, colors: sanitizeColors(colors), custom: true },
         null,
         2
       );

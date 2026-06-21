@@ -114,9 +114,10 @@ export function AppearanceSettings() {
         toast.error("Clipboard doesn't contain a valid theme.");
         return;
       }
-      upsertCustomTheme(theme);
+      const ok = await upsertCustomTheme(theme);
       setActiveTheme(theme.id);
-      toast.success(`Imported "${theme.name}".`);
+      if (ok) toast.success(`Imported "${theme.name}".`);
+      else toast.error(`Imported "${theme.name}", but saving it didn't persist.`);
     } catch {
       toast.error("Could not read the clipboard.");
     }
@@ -127,11 +128,12 @@ export function AppearanceSettings() {
       <ThemeEditor
         draft={mode.draft}
         isNew={mode.isNew}
-        onSave={(theme) => {
-          upsertCustomTheme(theme);
+        onSave={async (theme) => {
+          const ok = await upsertCustomTheme(theme);
           setActiveTheme(theme.id);
           setMode({ view: "gallery" });
-          toast.success(`Saved "${theme.name}".`);
+          if (ok) toast.success(`Saved "${theme.name}".`);
+          else toast.error(`Couldn't save "${theme.name}" — changes may be lost on restart.`);
         }}
         onDelete={(id) => deleteCustomTheme(id)}
         onClose={() => setMode({ view: "gallery" })}
@@ -231,14 +233,14 @@ function ThemeCard({
         </p>
       </button>
 
-      {/* Hover actions */}
-      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+      {/* Hover/focus actions (keyboard-accessible via group-focus-within) */}
+      <div className="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
         {onEdit && (
           <button
             type="button"
             onClick={onEdit}
-            className="flex size-6 items-center justify-center rounded-md border border-white/[0.1] bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white"
-            title="Edit theme"
+            className="flex size-6 items-center justify-center rounded-md border border-white/[0.1] bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-white"
+            aria-label={`Edit ${theme.name} theme`}
           >
             <Pencil className="size-3" />
           </button>
@@ -246,8 +248,8 @@ function ThemeCard({
         <button
           type="button"
           onClick={onFork}
-          className="flex size-6 items-center justify-center rounded-md border border-white/[0.1] bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white"
-          title="Duplicate as custom theme"
+          className="flex size-6 items-center justify-center rounded-md border border-white/[0.1] bg-black/40 text-white/70 backdrop-blur-sm transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/60 focus-visible:text-white"
+          aria-label={`Duplicate ${theme.name} as a custom theme`}
         >
           <CopyPlus className="size-3" />
         </button>

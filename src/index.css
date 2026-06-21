@@ -149,6 +149,10 @@
   --color-red-500: var(--status-error-strong);
   --color-violet-400: var(--status-library);
   --color-violet-500: var(--status-library-strong);
+  /* Light status shades used for text/headings (backups) — tint lightly too. */
+  --color-emerald-100: color-mix(in oklab, #d1fae5 88%, var(--primary));
+  --color-amber-100: color-mix(in oklab, #fef3c7 88%, var(--primary));
+  --color-amber-200: color-mix(in oklab, #fde68a 86%, var(--primary));
 
   /* Glass tokens */
   --color-glass-bg: var(--glass-bg);
@@ -194,11 +198,12 @@
      ============================================================ */
 
   /* === Surfaces ===
-   * Derivations use OKLCH relative color syntax with clamp() on every channel
-   * (relative color does NOT auto-clamp; out-of-range values clip & shift hue)
-   * and a practical chroma ceiling of 0.37. Lightness deltas are ADDITIVE
-   * (perceptually even elevation steps in a dark UI). Blends/alpha use
-   * color-mix(in oklab, …) — never srgb, which grays out. */
+   * Derivations use OKLCH relative color syntax. Relative color does NOT
+   * auto-clamp, so any COMPUTED channel is wrapped in clamp() (lightness 0–1);
+   * where chroma is AMPLIFIED (--primary-hover) it's capped at ~0.37 to stay in
+   * gamut. Channels passed through unchanged (--card-alt, --accent-cyan keep c/h)
+   * need no clamp. Lightness deltas are ADDITIVE (even elevation steps in a dark
+   * UI). Blends/alpha use color-mix(in oklab, …) — never srgb, which grays out. */
   --card-foreground: var(--foreground);
   --card-alt: oklch(from var(--card) clamp(0, calc(l - 0.02), 1) c h);
   --popover: var(--card);
@@ -313,6 +318,12 @@
   }
 }
 
+/* Theme-aware text selection (default Chromium blue clashes on warm/mono themes) */
+::selection {
+  background: color-mix(in oklab, var(--accent-sky) 40%, var(--bg-base));
+  color: var(--foreground);
+}
+
 /* Custom scrollbar — sky-blue accent (ESO-LOG-AG style) */
 ::-webkit-scrollbar {
   width: 10px;
@@ -347,16 +358,18 @@
 }
 
 /* === Ambient Background Animations === */
+/* translate-only: scaling a 120px-blurred element re-rasterizes the bitmap each
+ * frame; translate stays on the compositor (paired with will-change:transform). */
 @keyframes orb-drift {
   0%,
   100% {
-    transform: translate(0, 0) scale(1);
+    transform: translate(0, 0);
   }
   33% {
-    transform: translate(30px, -20px) scale(1.05);
+    transform: translate(30px, -20px);
   }
   66% {
-    transform: translate(-20px, 15px) scale(0.95);
+    transform: translate(-20px, 15px);
   }
 }
 
@@ -543,6 +556,48 @@
   ::view-transition-new(*) {
     animation: none !important;
   }
+}
+
+/* === Windows High Contrast / forced-colors ===
+ * The chrome relies on translucent white-alpha borders, which forced-colors
+ * flattens away; restore visible system-colored edges + focus, and drop the
+ * decorative art layers so they can't obscure system-painted text. */
+@media (forced-colors: active) {
+  [data-slot="glass-panel"],
+  [data-slot="dialog-content"],
+  [data-slot="popover-content"],
+  [data-slot="select-content"] {
+    border: 1px solid CanvasText;
+  }
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+  :root {
+    --app-texture: none;
+    --app-pattern: none;
+  }
+}
+
+/* === Increased contrast preference: firm up hairline borders === */
+@media (prefers-contrast: more) {
+  :root {
+    --glass-border: rgba(255, 255, 255, 0.18);
+    --glass-border-subtle: rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* === Custom theme editor color picker (react-colorful) — match theme radius === */
+.kalpa-color-picker .react-colorful {
+  width: 100%;
+  height: 150px;
+  border-radius: var(--radius);
+}
+.kalpa-color-picker .react-colorful__saturation {
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.kalpa-color-picker .react-colorful__last-control {
+  border-radius: 0 0 var(--radius) var(--radius);
 }
 
 /* === Screen reader only utility === */

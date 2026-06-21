@@ -37,7 +37,9 @@ export function evaluateContrast(c: ThemeColors): ContrastCheck[] {
   return [
     check("fg-bg", "Text on background", c.foreground, c.background, 4.5, 7),
     check("muted-surface", "Muted text on panels", c.mutedForeground, c.surface, 4.5, 7),
-    check("primary-surface", "Primary on panels", c.primary, c.surface, 3, 4.5),
+    // `primary` is rendered as real text (text-primary) across the app, so it
+    // needs the 4.5:1 text floor against the darkest surface it sits on (bg).
+    check("primary-text", "Primary as text", c.primary, c.background, 4.5, 7),
     check("accent-surface", "Accent on panels", c.accent, c.surface, 3, 4.5),
     check("pfg-primary", "Label on primary button", c.primaryForeground, c.primary, 4.5, 7),
   ];
