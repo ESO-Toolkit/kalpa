@@ -5065,15 +5065,32 @@ fn recover_orphaned_backups(backups_root: &Path) {
 /// file counts and restores.
 const CHAR_BACKUP_MARKER: &str = ".kalpa-char-backup";
 
-/// Whether installing a character backup at `final_dir` is safe to do by
-/// replacing whatever is there. True when the path is absent, is a marked
-/// character backup, or is a legacy unmarked `char-*` directory — older versions
-/// wrote no marker, so an existing `char-*` dir is, in practice, always a prior
-/// character backup that the user is refreshing. New *manual* backups cannot use
-/// the `char-` prefix (`validate_backup_name`), so this does not expose manual
-/// backups to overwrite.
+/// Whether a character backup may be installed at `final_dir` by replacing
+/// whatever is there: true only when the path is absent or is a marked character
+/// backup. An existing UNMARKED directory is ambiguous (it could be a legacy
+/// character backup OR an old manual backup that used the now-reserved `char-`
+/// prefix), so it is never replaced — `resolve_char_backup_name` routes around it
+/// to a fresh numbered name instead, preserving it.
 fn char_backup_replaceable(final_dir: &Path) -> bool {
-    !final_dir.exists() || final_dir.is_dir()
+    !final_dir.exists() || final_dir.join(CHAR_BACKUP_MARKER).is_file()
+}
+
+/// Choose the directory name (without the `char-` prefix) for a new character
+/// backup of `backup_name`: the requested name when its `char-*` dir is free or
+/// an existing marked character backup (refresh in place), otherwise the first
+/// numbered sibling (`<name>-2`, `-3`, …) that is. Returns `None` only if an
+/// absurd number are taken. This never selects an unmarked directory, so a legacy
+/// or manual `char-*` backup is preserved rather than silently overwritten, while
+/// the backup still succeeds under a new name.
+fn resolve_char_backup_name(backups_root: &Path, backup_name: &str) -> Option<String> {
+    if char_backup_replaceable(&backups_root.join(format!("char-{backup_name}"))) {
+        return Some(backup_name.to_string());
+    }
+    (2..=999).find_map(|n| {
+        let candidate = format!("{backup_name}-{n}");
+        char_backup_replaceable(&backups_root.join(format!("char-{candidate}")))
+            .then_some(candidate)
+    })
 }
 
 #[tauri::command]
@@ -5110,18 +5127,17 @@ pub fn backup_character_settings(
     // before this attempt can collide with it.
     recover_orphaned_backups(&backups_root);
 
-    let final_dir = backups_root.join(format!("char-{backup_name}"));
-    // Refuse to overwrite a directory we didn't create as a character backup
-    // (e.g. a legacy/manual backup that happens to share the `char-` prefix).
-    if !char_backup_replaceable(&final_dir) {
-        return Err(format!(
-            "A backup named \"char-{backup_name}\" already exists and was not created as a \
-             character backup. Choose a different backup name or delete it first."
-        ));
-    }
+    // Pick a target that is free or an existing marked character backup; route
+    // around an unmarked `char-*` directory (legacy/manual) to a numbered name so
+    // it is preserved, never silently overwritten.
+    let effective_name =
+        resolve_char_backup_name(&backups_root, &backup_name).ok_or_else(|| {
+            "Too many existing backups with this name; please choose a different name.".to_string()
+        })?;
+    let final_dir = backups_root.join(format!("char-{effective_name}"));
     let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let staging = backups_root.join(format!(".tmp-char-{backup_name}-{seq}"));
-    let tombstone = backups_root.join(format!(".old-char-{backup_name}-{seq}"));
+    let staging = backups_root.join(format!(".tmp-char-{effective_name}-{seq}"));
+    let tombstone = backups_root.join(format!(".old-char-{effective_name}-{seq}"));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
@@ -7779,29 +7795,51 @@ mod tests {
     }
 
     #[test]
-    fn char_backup_replaceable_grandfathers_existing_dirs() {
+    fn char_backup_replaceable_only_absent_or_marked() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
-        // Absent target — safe to create.
-        assert!(char_backup_replaceable(&root.join("char-none")));
+        assert!(char_backup_replaceable(&root.join("char-none"))); // absent
 
-        // Existing legacy (unmarked) char-* dir — grandfathered as a refreshable
-        // character backup.
-        let legacy = root.join("char-legacy");
-        fs::create_dir_all(&legacy).unwrap();
-        assert!(char_backup_replaceable(&legacy));
+        // Unmarked existing dir (legacy/manual) — NOT replaceable.
+        let unmarked = root.join("char-manual");
+        fs::create_dir_all(&unmarked).unwrap();
+        assert!(!char_backup_replaceable(&unmarked));
 
-        // Existing marked character backup — replaceable.
+        // Marked character backup — replaceable (refresh in place).
         let marked = root.join("char-real");
         fs::create_dir_all(&marked).unwrap();
         fs::write(marked.join(CHAR_BACKUP_MARKER), b"x").unwrap();
         assert!(char_backup_replaceable(&marked));
+    }
 
-        // A non-directory occupying the path is not replaceable.
-        let file_path = root.join("char-file");
-        fs::write(&file_path, b"x").unwrap();
-        assert!(!char_backup_replaceable(&file_path));
+    #[test]
+    fn resolve_char_backup_name_routes_around_unmarked_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Free name is used as-is.
+        assert_eq!(
+            resolve_char_backup_name(root, "Faewynd-backup").as_deref(),
+            Some("Faewynd-backup")
+        );
+
+        // An unmarked (legacy/manual) dir is preserved; a numbered sibling is used.
+        fs::create_dir_all(root.join("char-Bob-backup")).unwrap();
+        assert_eq!(
+            resolve_char_backup_name(root, "Bob-backup").as_deref(),
+            Some("Bob-backup-2")
+        );
+        assert!(root.join("char-Bob-backup").is_dir()); // original untouched
+
+        // A marked backup at the requested name is refreshed in place.
+        let marked = root.join("char-Alt-backup");
+        fs::create_dir_all(&marked).unwrap();
+        fs::write(marked.join(CHAR_BACKUP_MARKER), b"x").unwrap();
+        assert_eq!(
+            resolve_char_backup_name(root, "Alt-backup").as_deref(),
+            Some("Alt-backup")
+        );
     }
 
     #[test]
