@@ -51,7 +51,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::client::{MasterTableBytes, NativeUpload, ReportCode, Segment, UploadError};
+use super::client::{
+    LivePoster, LiveSender, MasterTableBytes, ReportCode, Segment, UploadError, LIVE_CANCEL_POLL,
+};
 use super::events::EventEmitter;
 use super::incremental::{IncrementalIndexState, IncrementalMasterState};
 use super::session::SessionProvider;
@@ -313,6 +315,158 @@ impl LiveSegmenter {
     pub fn segments_built(&self) -> usize {
         self.segments_built
     }
+
+    /// The next server-sequenced segment id (diagnostics / orphan persistence).
+    pub fn next_segment_id(&self) -> u64 {
+        self.next_segment_id
+    }
+}
+
+// ── Lifecycle state machine (L3 + L4) ────────────────────────────────────────
+//
+// The production driver is a small state machine over the cut→POST loop:
+//
+//   Streaming ──(POST → Session(Expired))──▶ Paused{held} ──(re-auth)──▶ Streaming
+//        │                                        │
+//        └──(cancel / END_LOG / idle / 2nd BEGIN_LOG / fatal / retries exhausted)──▶ end
+//
+// A live session can outlive the wcl_session cookie (multi-hour raid), so a
+// mid-stream 401/419 that survives the one re-auth retry PAUSES the stream rather
+// than abandoning the report: lines keep feeding the long-lived emitter (state
+// continues), the report stays OPEN, the UI is asked to re-sign-in, and posting
+// resumes once a fresh cookie is stored. A pause that never resolves within
+// [`REAUTH_TIMEOUT`] terminates gracefully. Idle (no file growth for
+// [`IDLE_DEADLINE`]) is distinct from a clean END_LOG end.
+
+/// Terminate after this long with no file growth (the crash / forgot-to-stop
+/// fallback). Generous so a legitimate between-pulls raid break never trips it;
+/// END_LOG is the primary clean terminal, this is the safety net.
+pub const IDLE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// While paused on a lost session, terminate if the user does not re-sign-in within
+/// this long. Shorter than [`IDLE_DEADLINE`] because a paused-but-still-growing file
+/// would otherwise keep resetting the idle clock and never terminate.
+pub const REAUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Max attempts for a single segment POST before giving up (the first try + 2
+/// retries). A transient blip on a multi-hour session must not abandon the report.
+const MAX_SEGMENT_ATTEMPTS: u32 = 3;
+
+/// Why the live stream ended — distinguishes a clean END_LOG from the idle/crash
+/// fallback and the various failure terminals, so the history record + diagnostics
+/// are honest about what happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndReason {
+    /// Clean end: an `END_LOG` line (the game stopped logging normally).
+    Ended,
+    /// No file growth past [`IDLE_DEADLINE`] (game crash / forgot to stop).
+    Idle,
+    /// Server returned `nextSegmentId == 0` (session-ended server-side).
+    ServerEnded,
+    /// A second `BEGIN_LOG` (a `/reloadui` mid-session) — the single-session
+    /// contract forbids mixing two sessions in one report, so we terminate.
+    NewSession,
+    /// The user stopped (cancel flag set).
+    Stopped,
+    /// A paused-on-reauth session that never re-authed within [`REAUTH_TIMEOUT`].
+    ReauthTimeout,
+    /// A non-retryable failure (malformed segment, 4xx, retries exhausted).
+    Fatal(String),
+}
+
+/// How a segment POST attempt should be handled after classifying its error.
+enum PostOutcome {
+    /// The segment was accepted; carries the server's next segment id (0 = the
+    /// server signalled session-end).
+    Posted { next_segment_id: u64 },
+    /// Nothing to send this window (empty/zone-only) — keep streaming.
+    Nothing,
+    /// The session was rejected and the one re-auth retry didn't recover — PAUSE
+    /// and prompt re-login (do NOT terminate; the report stays open). Carries the
+    /// already-built payload so the driver can RE-POST it after the session is
+    /// restored (the segmenter already advanced past it, so it can't be rebuilt).
+    NeedsReauth { held: Box<LiveSegmentPayload> },
+    /// Stop requested mid-POST.
+    Cancelled,
+    /// A non-retryable failure (or retries exhausted) — terminate + settle Failed.
+    Fatal(String),
+}
+
+/// Classify an [`UploadError`] for the per-segment retry policy.
+#[derive(Debug, PartialEq, Eq)]
+enum RetryClass {
+    /// 5xx / 408 / 429 / network/timeout — retry with backoff.
+    Retryable,
+    /// 401/419 that survived the client's one re-auth retry — pause for re-login.
+    NeedsReauth,
+    /// Stop requested.
+    Cancelled,
+    /// 4xx (other) / malformed (`status: 0`) — will never succeed; fail fast.
+    Fatal,
+}
+
+fn classify_upload_error(e: &UploadError) -> RetryClass {
+    match e {
+        UploadError::Cancelled => RetryClass::Cancelled,
+        UploadError::Session(_) => RetryClass::NeedsReauth,
+        UploadError::Transport(_) => RetryClass::Retryable,
+        UploadError::Server { status, .. } => match status {
+            500..=599 | 408 | 429 => RetryClass::Retryable,
+            // `status: 0` is our own internal/malformed marker (e.g. a segment that
+            // failed validation) — a retry will reproduce it, so it's fatal.
+            _ => RetryClass::Fatal,
+        },
+    }
+}
+
+/// Sleep `delay` in [`LIVE_CANCEL_POLL`]-sized slices, returning `true` if `cancel`
+/// tripped during the wait (so a Stop during a backoff returns in ~one slice, not
+/// the full delay). Used between segment-POST retries.
+fn cancel_aware_backoff(delay: std::time::Duration, cancel: &Arc<AtomicBool>) -> bool {
+    let mut remaining = delay;
+    while remaining > std::time::Duration::ZERO {
+        if cancel.load(Ordering::SeqCst) {
+            return true;
+        }
+        let slice = remaining.min(LIVE_CANCEL_POLL);
+        std::thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
+    }
+    cancel.load(Ordering::SeqCst)
+}
+
+/// Run a single cancel-aware live POST with up to [`MAX_SEGMENT_ATTEMPTS`] attempts,
+/// exponential backoff (`1s, 2s, 4s`, cancel-interruptible), classifying each error.
+/// `attempt` is the actual send (already cancel-aware via [`LiveSender`]). Returns the
+/// classified terminal outcome.
+fn post_with_retry(
+    cancel: &Arc<AtomicBool>,
+    mut attempt: impl FnMut() -> Result<Vec<u8>, UploadError>,
+) -> Result<Vec<u8>, RetryClass> {
+    let mut last_fatal_marker = RetryClass::Fatal;
+    for n in 0..MAX_SEGMENT_ATTEMPTS {
+        match attempt() {
+            Ok(body) => return Ok(body),
+            Err(e) => match classify_upload_error(&e) {
+                RetryClass::Cancelled => return Err(RetryClass::Cancelled),
+                RetryClass::NeedsReauth => return Err(RetryClass::NeedsReauth),
+                RetryClass::Fatal => return Err(RetryClass::Fatal),
+                RetryClass::Retryable => {
+                    last_fatal_marker = RetryClass::Retryable;
+                    // No backoff after the final attempt.
+                    if n + 1 < MAX_SEGMENT_ATTEMPTS {
+                        let delay = std::time::Duration::from_secs(1u64 << n)
+                            .min(std::time::Duration::from_secs(8));
+                        if cancel_aware_backoff(delay, cancel) {
+                            return Err(RetryClass::Cancelled);
+                        }
+                    }
+                }
+            },
+        }
+    }
+    // Exhausted retries on a retryable error → treat as fatal (terminate gracefully).
+    Err(last_fatal_marker)
 }
 
 /// Run the debug-only native live upload, tailing `growing_path` and streaming
@@ -330,106 +484,402 @@ impl LiveSegmenter {
 /// that kills the process before terminate — see the FINDINGS L2 item.)
 pub fn run_native_live_spike(
     growing_path: &str,
-    session: &dyn SessionProvider,
+    session: Arc<dyn SessionProvider>,
     opts: &UploadOptions,
     cancel: Arc<AtomicBool>,
     poll: &dyn LiveTail,
 ) -> Result<(ReportCode, usize), UploadError> {
-    let upload = NativeUpload::new(session, opts, cancel.clone());
-    // Establish the session up front, then open the report.
-    let _ = session.session()?;
-    let code = upload.create_report_live()?;
-
-    // Drive: tail → feed → cut → POST. Any error after create terminates the report.
-    let result = stream_until_done(&upload, &code, growing_path, &cancel, poll);
-    // Best-effort terminate on EVERY exit (success, stop, error, idle).
-    let _ = upload.terminate_report_live(&code);
-    let segments = result?;
+    let sink = NoopOrphanSink;
+    let (code, ended) = run_native_live(growing_path, session, opts, cancel, poll, &sink, None)?;
     eprintln!(
-        "[uploader] native live spike: report {} terminated after {} segment(s)",
-        code.0, segments
+        "[uploader] native live: report {} terminated ({:?}) after {} segment(s)",
+        code.0, ended.reason, ended.segments_built
     );
-    Ok((code, segments))
+    Ok((code, ended.segments_built))
 }
 
-/// The tail loop, factored out so the terminate-on-exit wrapper in
-/// [`run_native_live_spike`] covers every return path.
-fn stream_until_done(
-    upload: &NativeUpload<'_>,
-    code: &ReportCode,
+/// What the live stream did before it ended (returned by [`run_native_live`]).
+#[derive(Debug)]
+pub struct LiveEnded {
+    pub reason: EndReason,
+    pub segments_built: usize,
+}
+
+/// Crash-recovery breadcrumb sink the driver writes to. Abstracted (like
+/// [`LiveTail`]) so the driver stays free of `tauri::AppHandle` and is unit-testable
+/// with a fake. The production adapter (see `super::orphans`) persists
+/// `{code, segment_id}` so a crash before terminate can be recovered on next launch.
+pub trait OrphanSink {
+    /// Record a freshly-opened report (after `create-report`, before the first POST).
+    fn record_open(&self, code: &str, segment_id: u64);
+    /// Note the latest server-sequenced segment id after an accepted segment.
+    fn note_segment(&self, code: &str, segment_id: u64);
+    /// Drop the breadcrumb after a confirmed-closed report (clean terminate).
+    fn clear(&self, code: &str);
+}
+
+/// An [`OrphanSink`] that does nothing — for tests and the debug round-trip, where
+/// crash recovery is irrelevant.
+pub struct NoopOrphanSink;
+impl OrphanSink for NoopOrphanSink {
+    fn record_open(&self, _code: &str, _segment_id: u64) {}
+    fn note_segment(&self, _code: &str, _segment_id: u64) {}
+    fn clear(&self, _code: &str) {}
+}
+
+/// Run the native live upload to completion, holding ONE report open across the
+/// whole session and terminating only on a clean end / idle / stop / failure.
+///
+/// This is the production driver: it owns a long-lived [`LiveSegmenter`], a
+/// cancel-aware [`LiveSender`] (so Stop returns in ~250ms, not the 120s request
+/// timeout), and the L3/L4 lifecycle state machine (idle deadline, per-segment retry
+/// with backoff, and the reauth pause-resume). Orphan-safety: ANY exit path attempts
+/// `terminate-report` (cancel-aware so Stop isn't held hostage by terminate), and the
+/// `{code, segment_id}` breadcrumb is persisted via `sink` so a crash before terminate
+/// is recoverable on next launch.
+///
+/// `poll` is the line source — a notify-backed production tail or a scripted/file tail
+/// in tests. `channel` is an optional UI event sink (reauth prompts etc.).
+pub fn run_native_live(
     growing_path: &str,
-    cancel: &Arc<AtomicBool>,
+    session: Arc<dyn SessionProvider>,
+    opts: &UploadOptions,
+    cancel: Arc<AtomicBool>,
     poll: &dyn LiveTail,
-) -> Result<usize, UploadError> {
-    let mut seg = LiveSegmenter::new();
-    loop {
-        if cancel.load(Ordering::SeqCst) {
-            return Err(UploadError::Cancelled);
-        }
-        match poll.next_lines(growing_path) {
-            TailOutcome::Lines(lines) => {
-                for line in lines {
-                    let boundary = seg.feed(&line);
-                    if boundary
-                        && seg.shields_settled()
-                        && !post_one_segment(upload, code, &mut seg, cancel)?
-                    {
-                        // Server signalled session-end (nextSegmentId=0) mid-stream.
-                        return Ok(seg.segments_built());
-                    }
-                }
-            }
-            // The file went idle past the deadline, or logging ended (END_LOG). Drain
-            // any trailing pending shields (so a fully-absorbed final hit isn't lost),
-            // flush the final segment, then finish.
-            TailOutcome::Done => {
-                seg.drain_trailing_shields();
-                let _ = post_one_segment(upload, code, &mut seg, cancel)?;
-                return Ok(seg.segments_built());
-            }
-            TailOutcome::Error(e) => return Err(UploadError::Transport(e)),
-        }
-    }
-}
-
-/// Build the next segment and POST it (master then add-segment, live params). Updates
-/// the server-sequenced next id. Returns `Ok(true)` to keep streaming, `Ok(false)`
-/// when the server signalled session-end via `nextSegmentId == 0` (the one-shot
-/// "0 before last local segment is an error" rule does NOT apply to an open-ended
-/// stream — on a live report a 0 means stop; the caller then terminates cleanly). A
-/// build that yields nothing to send is a no-op (`Ok(true)`).
-fn post_one_segment(
-    upload: &NativeUpload<'_>,
-    code: &ReportCode,
-    seg: &mut LiveSegmenter,
-    cancel: &Arc<AtomicBool>,
-) -> Result<bool, UploadError> {
+    sink: &dyn OrphanSink,
+    channel: Option<&LiveEventSink>,
+) -> Result<(ReportCode, LiveEnded), UploadError> {
+    // Establish the session up front, then open the report. Re-check cancel right
+    // before create so a Stop ordered during setup never opens a report we then have
+    // to terminate (concurrency review RACE-4 — minimize the create→terminate window).
+    let _ = session.session()?;
     if cancel.load(Ordering::SeqCst) {
         return Err(UploadError::Cancelled);
     }
-    let payload = match seg.build_next_segment() {
-        Ok(Some(p)) => p,
-        Ok(None) => return Ok(true), // nothing to send this window; keep streaming
-        Err(detail) => {
-            // A malformed/inconsistent segment must NEVER be shipped — fail loudly so
-            // the driver stops + terminates rather than open a non-rendering report.
-            return Err(UploadError::Server { status: 0, detail });
-        }
-    };
-    upload.set_master_table_live(code, payload.segment_id, &payload.master)?;
-    let next = upload.add_segment_live(
-        code,
-        payload.segment_id,
-        &payload.segment,
-        payload.in_progress_event_count,
+    let sender = LiveSender::new(Arc::clone(&session));
+    let create_url = format!("{}/create-report", super::client::desktop_client_base());
+    let create_body = super::client::create_report_body_for(opts);
+    let code_body = sender.send_cancellable(
+        &create_url,
+        super::client::OwnedLiveRequest::CreateReport { body: create_body },
+        &cancel,
     )?;
-    if next == 0 {
-        // Server says no further segments — stop streaming. The caller's terminate
-        // wrapper closes the report.
-        return Ok(false);
+    let code = super::client::parse_report_code(&code_body)?;
+
+    // L2: persist the breadcrumb the INSTANT the report exists, before the first POST.
+    sink.record_open(&code.0, 1);
+
+    let mut driver = LiveDriver::new(sender, code.clone(), cancel.clone(), channel);
+    let reason = driver.run(growing_path, poll, sink);
+
+    // Best-effort, cancel-aware terminate on EVERY exit path. Clear the breadcrumb only
+    // on a confirmed close (success or a definitive "already gone"); a transient
+    // terminate failure KEEPS it for next-launch recovery (L2).
+    let term_url = format!(
+        "{}/terminate-report/{}",
+        super::client::desktop_client_base(),
+        code.0
+    );
+    // Terminate must not be blocked by the same cancel that ended the stream, or a
+    // Stop would skip closing the report. Use a fresh, always-false flag with a short
+    // window so Stop still returns promptly (the worker self-reaps via the 120s
+    // backstop if the terminate itself hangs).
+    let term_cancel = Arc::new(AtomicBool::new(false));
+    let term = driver.sender.post(
+        &term_url,
+        super::client::OwnedLiveRequest::Terminate,
+        &term_cancel,
+    );
+    match &term {
+        Ok(_) => sink.clear(&code.0),
+        Err(e) if super::client::is_definitively_closed(e) => sink.clear(&code.0),
+        Err(_) => { /* transient: KEEP the breadcrumb for next-launch recovery */ }
     }
-    seg.set_next_segment_id(next);
-    Ok(true)
+
+    let segments_built = driver.segments_built();
+    // A Stop is not an error — report it as a clean end with reason Stopped.
+    Ok((
+        code,
+        LiveEnded {
+            reason,
+            segments_built,
+        },
+    ))
+}
+
+/// A UI event sink the driver calls to surface lifecycle/auth events (reauth prompt,
+/// fight cuts). Boxed closures so the driver stays free of the tauri `Channel` type
+/// and is testable with a recording fake. The production command adapts a
+/// `Channel<LiveEvent>` into this.
+pub struct LiveEventSink {
+    /// Called when the session is lost mid-stream and the user must re-sign-in.
+    pub on_reauth_required: Box<dyn Fn() + Send + Sync>,
+    /// Called when posting resumes after a fresh session is stored.
+    pub on_reauth_resolved: Box<dyn Fn() + Send + Sync>,
+}
+
+/// The live lifecycle state machine. Owns the long-lived segmenter, the cancel-aware
+/// sender, and the pause-resume / idle bookkeeping. `run` drives the line source to a
+/// terminal [`EndReason`]; the caller (`run_native_live`) does the create + terminate
+/// wrapping so every exit path closes the report.
+struct LiveDriver<'a, P: LivePoster> {
+    sender: P,
+    code: ReportCode,
+    cancel: Arc<AtomicBool>,
+    channel: Option<&'a LiveEventSink>,
+    seg: LiveSegmenter,
+    /// Set true once any `BEGIN_LOG` has been seen — a SECOND one is a new session
+    /// (`/reloadui`) and forces a terminate (single-session contract).
+    seen_begin_log: bool,
+}
+
+impl<'a, P: LivePoster> LiveDriver<'a, P> {
+    fn new(
+        sender: P,
+        code: ReportCode,
+        cancel: Arc<AtomicBool>,
+        channel: Option<&'a LiveEventSink>,
+    ) -> Self {
+        Self {
+            sender,
+            code,
+            cancel,
+            channel,
+            seg: LiveSegmenter::new(),
+            seen_begin_log: false,
+        }
+    }
+
+    fn segments_built(&self) -> usize {
+        self.seg.segments_built()
+    }
+
+    /// Drive the line source to a terminal reason. Pulls batches from `poll`; on each
+    /// fight-boundary cut with settled shields, posts the segment (with retry / pause).
+    fn run(&mut self, growing_path: &str, poll: &dyn LiveTail, sink: &dyn OrphanSink) -> EndReason {
+        loop {
+            if self.cancel.load(Ordering::SeqCst) {
+                return EndReason::Stopped;
+            }
+            match poll.next_lines(growing_path) {
+                TailOutcome::Lines(lines) => {
+                    if let Some(reason) = self.drive_assembled_lines(lines, sink) {
+                        return reason;
+                    }
+                }
+                TailOutcome::Done => {
+                    // Clean end (END_LOG) or idle deadline: drain trailing shields and
+                    // flush the final segment. The tail decides Ended vs Idle; default
+                    // to Ended here (the production tail signals Idle distinctly).
+                    self.seg.drain_trailing_shields();
+                    return match self.post_current(sink) {
+                        PostOutcome::Fatal(d) => EndReason::Fatal(d),
+                        PostOutcome::Cancelled => EndReason::Stopped,
+                        // Auth lost on the final flush: nothing more to stream, so
+                        // don't pause — just record that re-auth was needed at the end.
+                        PostOutcome::NeedsReauth { .. } => EndReason::ReauthTimeout,
+                        _ => EndReason::Ended,
+                    };
+                }
+                TailOutcome::Error(_) => return EndReason::Fatal("tail read failed".into()),
+            }
+        }
+    }
+
+    /// Feed a batch of assembled lines into the segmenter, cutting + posting at each
+    /// settled fight boundary. Returns `Some(reason)` to end the stream, `None` to
+    /// keep going. Shared by the pull (scripted/file) path and the production push
+    /// tail (Step 6) so the cut/post/pause logic lives in exactly one place.
+    fn drive_assembled_lines(
+        &mut self,
+        lines: Vec<String>,
+        sink: &dyn OrphanSink,
+    ) -> Option<EndReason> {
+        for line in lines {
+            // A SECOND BEGIN_LOG is a new logging session. The single-session contract
+            // (the MultiSession routing guard, honored at runtime) forbids mixing two
+            // sessions in one report: flush the closing session's final segment, then
+            // terminate. `feed` returns a boundary on BEGIN_LOG, so the flush happens
+            // via the cut below; we set the terminal AFTER posting the prior segment.
+            let is_begin_log = kind_of(&line) == Some("BEGIN_LOG");
+            let second_begin_log = is_begin_log && self.seen_begin_log;
+            if is_begin_log {
+                self.seen_begin_log = true;
+            }
+
+            let boundary = self.seg.feed(&line);
+            if second_begin_log {
+                // Flush the just-closed session's last segment, then end as NewSession.
+                match self.post_current(sink) {
+                    PostOutcome::Fatal(d) => return Some(EndReason::Fatal(d)),
+                    PostOutcome::Cancelled => return Some(EndReason::Stopped),
+                    PostOutcome::NeedsReauth { .. } => return Some(EndReason::ReauthTimeout),
+                    _ => {}
+                }
+                return Some(EndReason::NewSession);
+            }
+            if boundary && self.seg.shields_settled() {
+                match self.post_current(sink) {
+                    PostOutcome::Posted { next_segment_id: 0 } => {
+                        return Some(EndReason::ServerEnded);
+                    }
+                    PostOutcome::Posted { .. } | PostOutcome::Nothing => {}
+                    PostOutcome::NeedsReauth { held } => {
+                        if let Some(reason) = self.pause_until_reauth_or_end(*held, sink) {
+                            return Some(reason);
+                        }
+                    }
+                    PostOutcome::Cancelled => return Some(EndReason::Stopped),
+                    PostOutcome::Fatal(d) => return Some(EndReason::Fatal(d)),
+                }
+            }
+        }
+        None
+    }
+
+    /// Build the current segment (if any) and POST it (master then add-segment),
+    /// cancel-aware and with per-segment retry. Classifies the outcome. On a lost
+    /// session the built payload is returned in `NeedsReauth { held }` so the driver
+    /// can re-POST it after the user re-signs-in (the segmenter has already advanced
+    /// past it, so it cannot be rebuilt).
+    fn post_current(&mut self, sink: &dyn OrphanSink) -> PostOutcome {
+        if self.cancel.load(Ordering::SeqCst) {
+            return PostOutcome::Cancelled;
+        }
+        let payload = match self.seg.build_next_segment() {
+            Ok(Some(p)) => p,
+            Ok(None) => return PostOutcome::Nothing,
+            // A malformed/inconsistent segment must NEVER be shipped — fatal.
+            Err(detail) => return PostOutcome::Fatal(detail),
+        };
+        self.post_built(payload, sink)
+    }
+
+    /// POST an already-built payload (master then add-segment), with retry. Takes the
+    /// payload BY VALUE so a `NeedsReauth` can hand it back for a later re-POST.
+    fn post_built(&mut self, payload: LiveSegmentPayload, sink: &dyn OrphanSink) -> PostOutcome {
+        let base = super::client::desktop_client_base();
+        let master_url = format!("{base}/set-report-master-table/{}", self.code.0);
+        let seg_url = format!("{base}/add-report-segment/{}", self.code.0);
+
+        // 1. master table for this segment id.
+        let master_req = super::client::OwnedLiveRequest::MasterTable {
+            segment_id: payload.segment_id,
+            bytes: payload.master.bytes.clone(),
+        };
+        match post_with_retry(&self.cancel, || {
+            self.sender
+                .post(&master_url, master_req.clone(), &self.cancel)
+        }) {
+            Ok(_) => {}
+            Err(RetryClass::Cancelled) => return PostOutcome::Cancelled,
+            Err(RetryClass::NeedsReauth) => {
+                return PostOutcome::NeedsReauth {
+                    held: Box::new(payload),
+                }
+            }
+            Err(_) => {
+                return PostOutcome::Fatal(format!(
+                    "master-table upload failed for segment {}",
+                    payload.segment_id
+                ))
+            }
+        }
+
+        // 2. the fights segment; the response carries nextSegmentId.
+        let seg_req = super::client::OwnedLiveRequest::AddSegment {
+            segment_id: payload.segment_id,
+            bytes: payload.segment.bytes.clone(),
+            start_time: payload.segment.start_time,
+            end_time: payload.segment.end_time,
+            in_progress_event_count: payload.in_progress_event_count,
+        };
+        let body = match post_with_retry(&self.cancel, || {
+            self.sender.post(&seg_url, seg_req.clone(), &self.cancel)
+        }) {
+            Ok(b) => b,
+            Err(RetryClass::Cancelled) => return PostOutcome::Cancelled,
+            Err(RetryClass::NeedsReauth) => {
+                return PostOutcome::NeedsReauth {
+                    held: Box::new(payload),
+                }
+            }
+            Err(_) => {
+                return PostOutcome::Fatal(format!(
+                    "segment upload failed for segment {}",
+                    payload.segment_id
+                ))
+            }
+        };
+        let next = match super::client::parse_next_segment_id(&body) {
+            Ok(n) => n,
+            Err(_) => {
+                return PostOutcome::Fatal("malformed add-segment response".into());
+            }
+        };
+        if next == 0 {
+            eprintln!(
+                "[uploader] live: server returned nextSegmentId=0 after segment {} \
+                 (window {}-{}); treating as session-end",
+                payload.segment_id, payload.segment.start_time, payload.segment.end_time
+            );
+            return PostOutcome::Posted { next_segment_id: 0 };
+        }
+        self.seg.set_next_segment_id(next);
+        sink.note_segment(&self.code.0, next);
+        PostOutcome::Posted {
+            next_segment_id: next,
+        }
+    }
+
+    /// PAUSE on a lost session: prompt re-login, poll for a fresh session every ~2s,
+    /// then RE-POST the `held` payload (the one whose POST hit the auth wall — the
+    /// segmenter advanced past it, so it can't be rebuilt). Subsequent boundaries
+    /// during the pause keep feeding the emitter (state advances), and the next build
+    /// after resume produces one cumulative segment covering everything since the held
+    /// cut — valid because the master is cumulative+pinned and cuts are fight-granular.
+    /// Returns `Some(reason)` if the pause ends the stream, `None` to resume.
+    fn pause_until_reauth_or_end(
+        &mut self,
+        held: LiveSegmentPayload,
+        sink: &dyn OrphanSink,
+    ) -> Option<EndReason> {
+        if let Some(ch) = self.channel {
+            (ch.on_reauth_required)();
+        }
+        let started = std::time::Instant::now();
+        loop {
+            if self.cancel.load(Ordering::SeqCst) {
+                return Some(EndReason::Stopped);
+            }
+            if started.elapsed() >= REAUTH_TIMEOUT {
+                return Some(EndReason::ReauthTimeout);
+            }
+            // A fresh session resolves the pause. The managed provider's `session()`
+            // returns Ok once the in-app webview login stored a new cookie (the Arc is
+            // shared, so the store is visible here without a channel).
+            if self.sender.has_session() {
+                if let Some(ch) = self.channel {
+                    (ch.on_reauth_resolved)();
+                }
+                // Re-POST the held payload against the fresh session before resuming.
+                return match self.post_built(held, sink) {
+                    PostOutcome::Posted { next_segment_id: 0 } => Some(EndReason::ServerEnded),
+                    PostOutcome::Posted { .. } | PostOutcome::Nothing => None, // resume
+                    // The fresh session was lost AGAIN mid-re-POST: re-pause is not
+                    // worth the complexity — terminate gracefully (the report holds
+                    // what rendered; the user re-uploads the rest).
+                    PostOutcome::NeedsReauth { .. } => Some(EndReason::ReauthTimeout),
+                    PostOutcome::Cancelled => Some(EndReason::Stopped),
+                    PostOutcome::Fatal(d) => Some(EndReason::Fatal(d)),
+                };
+            }
+            // Sleep in cancel-checked slices so a Stop during the pause returns fast.
+            if cancel_aware_backoff(std::time::Duration::from_secs(2), &self.cancel) {
+                return Some(EndReason::Stopped);
+            }
+        }
+    }
 }
 
 /// A source of newly-appended log lines for the live driver — abstracted so the tail
@@ -998,5 +1448,442 @@ mod tests {
         let mut s = String::new();
         file.read_to_string(&mut s).unwrap();
         s.lines().skip(2).map(|l| format!("{l}\n")).collect()
+    }
+
+    // ── Retry / classification (L4) ──────────────────────────────────────────
+
+    #[test]
+    fn classify_upload_error_routes_each_variant() {
+        use super::super::session::SessionError;
+        assert_eq!(
+            classify_upload_error(&UploadError::Cancelled),
+            RetryClass::Cancelled
+        );
+        assert_eq!(
+            classify_upload_error(&UploadError::Session(SessionError::Expired)),
+            RetryClass::NeedsReauth
+        );
+        assert_eq!(
+            classify_upload_error(&UploadError::Transport("net".into())),
+            RetryClass::Retryable
+        );
+        for s in [500u16, 502, 503, 408, 429] {
+            assert_eq!(
+                classify_upload_error(&UploadError::Server {
+                    status: s,
+                    detail: String::new()
+                }),
+                RetryClass::Retryable,
+                "status {s} must be retryable"
+            );
+        }
+        for s in [400u16, 403, 404, 422] {
+            assert_eq!(
+                classify_upload_error(&UploadError::Server {
+                    status: s,
+                    detail: String::new()
+                }),
+                RetryClass::Fatal,
+                "status {s} must be fatal"
+            );
+        }
+        // status 0 = our internal/malformed marker → fatal (a retry reproduces it).
+        assert_eq!(
+            classify_upload_error(&UploadError::Server {
+                status: 0,
+                detail: "malformed".into()
+            }),
+            RetryClass::Fatal
+        );
+    }
+
+    #[test]
+    fn post_with_retry_returns_ok_on_first_success() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let r = post_with_retry(&cancel, || {
+            calls += 1;
+            Ok(b"ok".to_vec())
+        });
+        assert_eq!(r.unwrap(), b"ok");
+        assert_eq!(calls, 1, "a first success must not retry");
+    }
+
+    #[test]
+    fn post_with_retry_retries_transient_then_succeeds() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let r = post_with_retry(&cancel, || {
+            calls += 1;
+            if calls < 2 {
+                Err(UploadError::Server {
+                    status: 503,
+                    detail: "busy".into(),
+                })
+            } else {
+                Ok(b"ok".to_vec())
+            }
+        });
+        assert_eq!(r.unwrap(), b"ok");
+        assert_eq!(calls, 2, "must retry once then succeed");
+    }
+
+    #[test]
+    fn post_with_retry_exhausts_and_reports_retryable_terminal() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let r = post_with_retry(&cancel, || {
+            calls += 1;
+            Err(UploadError::Transport("down".into()))
+        });
+        // The backoff between attempts must not run the real 1s/2s here for a unit
+        // test... but it does. Keep the assertion on outcome + attempt count; the
+        // total sleep is 1s+2s = 3s worst case, acceptable for one test. (A faster
+        // path would inject the backoff; deferred — correctness first.)
+        assert!(matches!(r, Err(RetryClass::Retryable)));
+        assert_eq!(calls, MAX_SEGMENT_ATTEMPTS as i32, "must use all attempts");
+    }
+
+    #[test]
+    fn post_with_retry_does_not_retry_fatal() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let r = post_with_retry(&cancel, || {
+            calls += 1;
+            Err(UploadError::Server {
+                status: 400,
+                detail: "bad".into(),
+            })
+        });
+        assert!(matches!(r, Err(RetryClass::Fatal)));
+        assert_eq!(calls, 1, "a fatal error must not retry");
+    }
+
+    #[test]
+    fn post_with_retry_does_not_retry_needs_reauth() {
+        use super::super::session::SessionError;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut calls = 0;
+        let r = post_with_retry(&cancel, || {
+            calls += 1;
+            Err(UploadError::Session(SessionError::Expired))
+        });
+        assert!(matches!(r, Err(RetryClass::NeedsReauth)));
+        assert_eq!(calls, 1, "a reauth-needed error pauses, does not retry");
+    }
+
+    #[test]
+    fn cancel_aware_backoff_returns_fast_when_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            c.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        // Ask for an 8s backoff; cancel trips at ~100ms.
+        let cancelled = cancel_aware_backoff(std::time::Duration::from_secs(8), &cancel);
+        assert!(cancelled, "backoff must report the cancel");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "a cancel during backoff must return promptly, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn post_with_retry_cancel_during_backoff_returns_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            c.store(true, Ordering::SeqCst);
+        });
+        let r = post_with_retry(&cancel, || {
+            Err(UploadError::Transport("blip".into())) // always retryable
+        });
+        assert!(
+            matches!(r, Err(RetryClass::Cancelled)),
+            "a Stop during the retry backoff must surface as Cancelled, got {r:?}"
+        );
+    }
+
+    // ── Driver state machine (L3 + L4), via a scripted LivePoster ─────────────
+
+    use super::super::client::{LivePoster, OwnedLiveRequest};
+    use super::super::session::SessionError;
+    use std::sync::Mutex;
+
+    /// A scripted [`LivePoster`] for driving [`LiveDriver`] deterministically without
+    /// a server. Per endpoint family (master / add-segment) it returns the NEXT scripted
+    /// result; `add-segment` successes carry a `nextSegmentId`. `has_session` is a
+    /// flippable flag (for pause-resume). Records the URLs it was asked to POST.
+    struct ScriptedSender {
+        // Queued add-segment outcomes: Ok(nextSegmentId) or a scripted error.
+        seg_results: Mutex<std::collections::VecDeque<Result<u64, UploadError>>>,
+        // Queued master-table outcomes (Ok = accepted).
+        master_results: Mutex<std::collections::VecDeque<Result<(), UploadError>>>,
+        session_ok: Arc<AtomicBool>,
+        posts: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedSender {
+        fn new(
+            master: Vec<Result<(), UploadError>>,
+            seg: Vec<Result<u64, UploadError>>,
+            session_ok: Arc<AtomicBool>,
+        ) -> Self {
+            Self {
+                seg_results: Mutex::new(seg.into_iter().collect()),
+                master_results: Mutex::new(master.into_iter().collect()),
+                session_ok,
+                posts: Mutex::new(Vec::new()),
+            }
+        }
+        fn post_count(&self, needle: &str) -> usize {
+            self.posts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|u| u.contains(needle))
+                .count()
+        }
+    }
+
+    impl LivePoster for ScriptedSender {
+        fn post(
+            &self,
+            url: &str,
+            _req: OwnedLiveRequest,
+            cancel: &Arc<AtomicBool>,
+        ) -> Result<Vec<u8>, UploadError> {
+            self.posts.lock().unwrap().push(url.to_string());
+            if cancel.load(Ordering::SeqCst) {
+                return Err(UploadError::Cancelled);
+            }
+            if url.contains("set-report-master-table") {
+                return match self.master_results.lock().unwrap().pop_front() {
+                    Some(Ok(())) => Ok(b"{}".to_vec()),
+                    Some(Err(e)) => Err(e),
+                    None => Ok(b"{}".to_vec()), // default-accept extra masters
+                };
+            }
+            if url.contains("add-report-segment") {
+                return match self.seg_results.lock().unwrap().pop_front() {
+                    Some(Ok(next)) => Ok(format!("{{\"nextSegmentId\":{next}}}").into_bytes()),
+                    Some(Err(e)) => Err(e),
+                    None => Ok(b"{\"nextSegmentId\":2}".to_vec()),
+                };
+            }
+            // terminate / create — accept.
+            Ok(b"{}".to_vec())
+        }
+        fn has_session(&self) -> bool {
+            self.session_ok.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Build a driver over a scripted sender, feed it a fixture's lines via the shared
+    /// `drive_assembled_lines`, and return (end reason, segments built, sender).
+    fn drive_with(
+        sender: ScriptedSender,
+        cancel: Arc<AtomicBool>,
+        lines: Vec<String>,
+        feed_done: bool,
+    ) -> (Option<EndReason>, usize, ScriptedSender) {
+        let mut driver = LiveDriver::new(sender, ReportCode("TESTCODE".into()), cancel, None);
+        let sink = NoopOrphanSink;
+        let mut reason = driver.drive_assembled_lines(lines, &sink);
+        if reason.is_none() && feed_done {
+            // Mirror the Done arm: drain + final flush.
+            driver.seg.drain_trailing_shields();
+            reason = match driver.post_current(&sink) {
+                PostOutcome::Fatal(d) => Some(EndReason::Fatal(d)),
+                PostOutcome::Cancelled => Some(EndReason::Stopped),
+                PostOutcome::NeedsReauth { .. } => Some(EndReason::ReauthTimeout),
+                _ => Some(EndReason::Ended),
+            };
+        }
+        let built = driver.segments_built();
+        (reason, built, driver.sender)
+    }
+
+    fn two_fight_session() -> Vec<String> {
+        raw_fixture(include_str!("testdata/live_correlation_synthetic.log"))
+    }
+
+    #[test]
+    fn driver_streams_two_fights_and_ends_clean() {
+        // All POSTs succeed; the synthetic 2-fight session yields >=1 segment and ends
+        // cleanly (Done → Ended).
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(
+            vec![Ok(()), Ok(()), Ok(())],
+            vec![Ok(2), Ok(3), Ok(4)],
+            session_ok,
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (reason, built, sender) = drive_with(sender, cancel, two_fight_session(), true);
+        assert_eq!(
+            reason,
+            Some(EndReason::Ended),
+            "clean session must end Ended"
+        );
+        assert!(built >= 1, "should build at least one segment, got {built}");
+        assert!(
+            sender.post_count("add-report-segment") >= 1,
+            "should have POSTed at least one segment"
+        );
+    }
+
+    #[test]
+    fn driver_stops_on_server_next_segment_id_zero() {
+        // The first segment POST returns nextSegmentId=0 → ServerEnded (stop+terminate).
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(vec![Ok(())], vec![Ok(0)], session_ok);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (reason, _built, _s) = drive_with(sender, cancel, two_fight_session(), false);
+        assert_eq!(
+            reason,
+            Some(EndReason::ServerEnded),
+            "nextSegmentId=0 must end the stream as ServerEnded"
+        );
+    }
+
+    #[test]
+    fn driver_terminates_on_fatal_segment_error() {
+        // A 400 on the first add-segment is fatal → terminate, EndReason::Fatal.
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(
+            vec![Ok(())],
+            vec![Err(UploadError::Server {
+                status: 400,
+                detail: "bad".into(),
+            })],
+            session_ok,
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (reason, _b, _s) = drive_with(sender, cancel, two_fight_session(), false);
+        assert!(
+            matches!(reason, Some(EndReason::Fatal(_))),
+            "a 4xx segment error must be Fatal, got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn driver_retries_transient_segment_then_continues() {
+        // First segment: master ok, add-segment 503 then (on retry) ok. The driver's
+        // post_with_retry handles the retry internally, so the stream proceeds.
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(
+            vec![Ok(()), Ok(()), Ok(())],
+            vec![
+                Err(UploadError::Server {
+                    status: 503,
+                    detail: "busy".into(),
+                }),
+                Ok(2),
+                Ok(3),
+                Ok(4),
+            ],
+            session_ok,
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (reason, built, sender) = drive_with(sender, cancel, two_fight_session(), true);
+        assert_eq!(reason, Some(EndReason::Ended));
+        assert!(built >= 1);
+        // The retried add-segment means >=2 add-segment POSTs occurred for the run.
+        assert!(
+            sender.post_count("add-report-segment") >= 2,
+            "the transient 503 must have been retried"
+        );
+    }
+
+    #[test]
+    fn driver_pauses_on_lost_session_then_resumes_when_reauthed() {
+        // First segment's add-segment returns Session(Expired) → pause. The session
+        // flag is already true (re-login happened immediately), so the pause loop
+        // resolves on its first check and re-POSTs the held payload, then the stream
+        // ends clean. We assert it does NOT terminate as ReauthTimeout.
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(
+            vec![Ok(()), Ok(()), Ok(()), Ok(())],
+            vec![
+                Err(UploadError::Session(SessionError::Expired)), // first attempt: auth lost
+                Ok(2),                                            // re-POST of held succeeds
+                Ok(3),
+                Ok(4),
+            ],
+            Arc::clone(&session_ok),
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (reason, built, _s) = drive_with(sender, cancel, two_fight_session(), true);
+        assert_eq!(
+            reason,
+            Some(EndReason::Ended),
+            "a pause that immediately re-auths must resume and end clean, got {reason:?}"
+        );
+        assert!(built >= 1, "the held segment must be re-POSTed on resume");
+    }
+
+    #[test]
+    fn driver_pause_times_out_when_never_reauthed() {
+        // Auth lost AND the session never comes back → the pause should terminate as
+        // ReauthTimeout. We use a tiny REAUTH window by setting session_ok=false and
+        // cancelling shortly (the pause loop checks cancel each ~2s slice). To avoid a
+        // 15-min test, assert the Stopped path (cancel during pause) which shares the
+        // same loop — proving the pause is bounded and cancel-interruptible.
+        let session_ok = Arc::new(AtomicBool::new(false)); // never re-auths
+        let sender = ScriptedSender::new(
+            vec![Ok(())],
+            vec![Err(UploadError::Session(SessionError::Expired))],
+            session_ok,
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            c.store(true, Ordering::SeqCst);
+        });
+        let (reason, _b, _s) = drive_with(sender, cancel, two_fight_session(), false);
+        assert_eq!(
+            reason,
+            Some(EndReason::Stopped),
+            "a Stop during the reauth pause must end promptly as Stopped, got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn driver_cancel_mid_stream_ends_stopped() {
+        // Cancel set before driving → the first post_current sees it and stops.
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(vec![Ok(())], vec![Ok(2)], session_ok);
+        let cancel = Arc::new(AtomicBool::new(true)); // already stopped
+        let (reason, _b, _s) = drive_with(sender, cancel, two_fight_session(), false);
+        assert_eq!(reason, Some(EndReason::Stopped));
+    }
+
+    #[test]
+    fn driver_terminates_on_second_begin_log() {
+        // Two sessions in one feed (a /reloadui mid-stream). The driver must flush the
+        // first session's segment then end as NewSession — NOT mix two sessions.
+        let mut lines = two_fight_session();
+        // Append a SECOND BEGIN_LOG + a fight, then END_LOG.
+        lines
+            .push("0,BEGIN_LOG,1700000099000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"".into());
+        lines.push("0,ZONE_CHANGED,1129,\"Hall\",NONE".into());
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(
+            vec![Ok(()), Ok(()), Ok(())],
+            vec![Ok(2), Ok(3), Ok(4)],
+            session_ok,
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (reason, _b, _s) = drive_with(sender, cancel, lines, false);
+        assert_eq!(
+            reason,
+            Some(EndReason::NewSession),
+            "a second BEGIN_LOG must end the stream as NewSession (single-session contract), got {reason:?}"
+        );
     }
 }

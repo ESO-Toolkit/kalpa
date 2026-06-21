@@ -1407,7 +1407,10 @@ pub async fn uploader_run_native_live_spike(
         real_time: true,
         include_entire_file: false,
     };
-    let provider = std::sync::Arc::clone(&session);
+    // Pass the session as an Arc<dyn SessionProvider> so the live driver's cancel-aware
+    // LiveSender (which runs POSTs on detached worker threads) can own it.
+    let provider: std::sync::Arc<dyn super::native::session::SessionProvider> =
+        std::sync::Arc::clone(&session) as std::sync::Arc<_>;
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
     // Idle deadline: terminate after this many seconds with no new bytes. Generous so
     // a manual tester has time to append fights between steps; the END_LOG line ends
@@ -1416,7 +1419,7 @@ pub async fn uploader_run_native_live_spike(
     let tail = FileTail::new(120);
 
     let (code, segments) = tokio::task::spawn_blocking(move || {
-        run_native_live_spike(&growing_path, provider.as_ref(), &opts, cancel, &tail)
+        run_native_live_spike(&growing_path, provider, &opts, cancel, &tail)
     })
     .await
     .map_err(|e| format!("Live spike task failed: {e}"))?
