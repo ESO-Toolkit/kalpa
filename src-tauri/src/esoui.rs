@@ -438,17 +438,32 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     // Recover the id from the landing URL and synthesize a single result from
     // the addon detail so an exact-name search isn't silently empty.
     if let Some(id) = id_from_info_url(&final_url, query) {
-        // The landing page has no result rows, so the only result is this addon.
-        // Propagate a detail-fetch error rather than masking it as "no results".
-        let detail = fetch_addon_detail(id)?;
-        return Ok(vec![EsouiSearchResult {
-            id: detail.id,
-            title: detail.title,
-            author: detail.author,
-            category: String::new(),
-            downloads: detail.total_downloads,
-            updated: detail.updated,
-        }]);
+        // The landing page has no result rows — this addon is the only result.
+        // Enrich via the lightweight JSON detail API (one request, no extra
+        // HTML scrape). If enrichment is momentarily unavailable (e.g. a 429),
+        // still return the addon with what we know rather than blanking the
+        // search or turning it into an error toast; selecting it re-fetches the
+        // full detail. Category is not in the JSON API, so it's left empty for
+        // this synthesized result.
+        let result = match fetch_file_detail(client, id) {
+            Ok(d) => EsouiSearchResult {
+                id: d.id,
+                title: d.title,
+                author: d.author,
+                category: String::new(),
+                downloads: format_number(d.downloads),
+                updated: format_epoch_millis(d.last_update),
+            },
+            Err(_) => EsouiSearchResult {
+                id,
+                title: query.to_string(),
+                author: String::new(),
+                category: String::new(),
+                downloads: String::new(),
+                updated: String::new(),
+            },
+        };
+        return Ok(vec![result]);
     }
 
     let document = Html::parse_document(&body);
