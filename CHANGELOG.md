@@ -4,6 +4,25 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.8] — 2026-06-21
+
+A dependency-resolution and addon-install fix release. It makes required/optional dependency status accurate and the in-app **Install/Update** buttons actually work for libraries ESOUI serves via a redirect — most visibly LuiExtended's `LuiData` and `LuiMedia`.
+
+### Bug Fixes
+
+- **Dependency Install/Update no longer fails with `not_found`.** ESOUI redirects a precise-name search straight to the addon's page (e.g. `info4373-LuiData.html`), which carries none of the result-list links Kalpa's search scraped — so the dependency Install/Update buttons returned `not_found` for libraries like `LuiData` and `LuiMedia`. Kalpa now recovers the addon id from the redirected URL. The Discover-tab search was fixed the same way, so an exact-name query no longer comes back empty. ([#174](https://github.com/ESO-Toolkit/kalpa/pull/174))
+- **Dependency status is resolved case-insensitively, matching the game.** ESO loads addon folders case-insensitively, but Kalpa compared names exactly, so a folder cased differently than a `## DependsOn:` entry was falsely flagged "missing". Names are now matched case-insensitively, a folder counts as installed only if it actually has a matching manifest (a partly-extracted folder no longer masks a missing library), and `DependsOn` parsing tolerates spaces around `>=` and stray invisible characters. ([#173](https://github.com/ESO-Toolkit/kalpa/pull/173))
+- **Optional dependencies show present/absent correctly,** including libraries bundled inside another addon, and the Remove button now targets the real on-disk folder rather than the dependency's declared name. ([#173](https://github.com/ESO-Toolkit/kalpa/pull/173))
+- **Dependency install surfaces the real error** — e.g. a Controlled Folder Access / permission block, with the fix steps — instead of a generic `extract_failed`. ([#174](https://github.com/ESO-Toolkit/kalpa/pull/174))
+
+### Features
+
+- **Slide-reveal selection rail in the addon list.** ([#172](https://github.com/ESO-Toolkit/kalpa/pull/172))
+
+### CI
+
+- **Scope the root npm audit to production dependencies** (`--omit=dev`), mirroring the worker audit. It was failing on high-severity advisories in dev-only tooling (`jsdom`→`undici`, `shadcn`→`hono`/`js-yaml`) that never ship in the app. ([#176](https://github.com/ESO-Toolkit/kalpa/pull/176))
+
 ## [0.1.0-beta.7] — 2026-06-14
 
 A correctness and data-integrity hardening release following the recent performance work. An audit of the batched install/update/toggle paths surfaced several cases where the speedups skipped a safety step; these fixes restore the guarantees while keeping the performance gains.
