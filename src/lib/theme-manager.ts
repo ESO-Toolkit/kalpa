@@ -5,7 +5,13 @@ import {
   DEFAULT_THEME,
   DEFAULT_THEME_ID,
 } from "./theme-presets";
-import { applyThemeColors, clearThemeColors, themeColorsToVars } from "./theme-apply";
+import {
+  applyThemeColors,
+  applySkin,
+  clearThemeColors,
+  themeColorsToVars,
+  themeSkinToVars,
+} from "./theme-apply";
 import type { Theme, ThemeColors } from "./theme-types";
 
 /** Minimal shape of the ViewTransition returned by document.startViewTransition. */
@@ -82,7 +88,8 @@ function writeLocalMirror(next: ManagerState) {
     if (!active || active.id === DEFAULT_THEME_ID) {
       localStorage.removeItem(LS_KEY_VARS);
     } else {
-      localStorage.setItem(LS_KEY_VARS, JSON.stringify(themeColorsToVars(active.colors)));
+      const vars = { ...themeColorsToVars(active.colors), ...themeSkinToVars(active.skin) };
+      localStorage.setItem(LS_KEY_VARS, JSON.stringify(vars));
     }
   } catch {
     // localStorage may be unavailable; durability still comes from the Tauri store.
@@ -104,6 +111,7 @@ function applyTheme(theme: Theme, animate: boolean) {
     } else {
       applyThemeColors(theme.colors);
     }
+    applySkin(theme.id === DEFAULT_THEME_ID ? undefined : theme.skin);
     document.documentElement.dataset.themeId = theme.id;
   };
 
@@ -192,9 +200,11 @@ export function isBuiltin(id: string): boolean {
 // Live preview (used by the custom theme editor; does not persist)
 // ---------------------------------------------------------------------------
 
-/** Apply colors to the document without changing state or persisting. */
+/** Apply colors to the document without changing state or persisting. Custom
+ * theme drafts have no skin, so any active skin (texture/pattern) is cleared. */
 export function previewThemeColors(colors: ThemeColors) {
   applyThemeColors(colors);
+  applySkin(undefined);
 }
 
 /** Restore the document to the current active theme after a preview. */

@@ -1,4 +1,4 @@
-import type { ThemeColors } from "./theme-types";
+import type { ThemeColors, ThemeSkin } from "./theme-types";
 
 /**
  * Applies a theme by writing only the 12 BASE CSS variables to the document root.
@@ -52,4 +52,42 @@ export function clearThemeColors() {
   for (const name of MANAGED_VARS) {
     root.style.removeProperty(name);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Skins (textures, patterns, radius) — optional material identity for art themes
+// ---------------------------------------------------------------------------
+
+/** All CSS vars a skin can drive. Cleared when a theme has no skin. */
+const SKIN_VARS = [
+  "--radius",
+  "--app-texture",
+  "--app-texture-size",
+  "--app-pattern",
+  "--app-pattern-size",
+  "--app-pattern-opacity",
+] as const;
+
+/** Resolve a skin into a `{ "--css-var": value }` map (empty if no skin). */
+export function themeSkinToVars(skin?: ThemeSkin): Record<string, string> {
+  const v: Record<string, string> = {};
+  if (!skin) return v;
+  if (skin.radius) v["--radius"] = skin.radius;
+  if (skin.texture) v["--app-texture"] = skin.texture;
+  if (skin.textureSize) v["--app-texture-size"] = skin.textureSize;
+  if (skin.pattern) v["--app-pattern"] = skin.pattern;
+  if (skin.patternSize) v["--app-pattern-size"] = skin.patternSize;
+  if (skin.patternOpacity != null) v["--app-pattern-opacity"] = String(skin.patternOpacity);
+  return v;
+}
+
+/** Apply a skin (or clear all skin vars when undefined → falls back to defaults). */
+export function applySkin(skin?: ThemeSkin) {
+  const root = document.documentElement;
+  for (const name of SKIN_VARS) root.style.removeProperty(name);
+  for (const [name, value] of Object.entries(themeSkinToVars(skin))) {
+    root.style.setProperty(name, value);
+  }
+  if (skin?.texture || skin?.pattern) root.dataset.textured = "true";
+  else delete root.dataset.textured;
 }

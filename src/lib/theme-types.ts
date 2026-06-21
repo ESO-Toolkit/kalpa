@@ -71,12 +71,34 @@ export const THEME_COLOR_META: Record<keyof ThemeColors, { label: string; hint: 
 export type ThemeCategory =
   | "ESO"
   | "ESO Lore"
+  | "Elder Scrolls"
   | "Editor Classics"
   | "Neon"
   | "Nature"
   | "Minimal"
   | "Gemstone"
   | "Custom";
+
+/**
+ * Optional "skin" for flagship art themes — goes beyond color to give a theme a
+ * material identity. All fields are plain CSS strings applied as variables, so
+ * they stay offline/CSP-safe (gradients + SVG data-URIs, no external images).
+ * Themes without a skin render with default radius and no texture.
+ */
+export interface ThemeSkin {
+  /** Overrides `--radius` (e.g. "0.2rem" angular, "0.85rem" soft). */
+  radius?: string;
+  /** Full-screen material layer behind the UI — a `background-image` CSS value. */
+  texture?: string;
+  /** `background-size` for the texture layer. */
+  textureSize?: string;
+  /** Tiling motif overlay — a `background-image` CSS value. */
+  pattern?: string;
+  /** `background-size` for the pattern tile. */
+  patternSize?: string;
+  /** Opacity (0–1) of the pattern overlay. */
+  patternOpacity?: number;
+}
 
 /** A complete, named theme. */
 export interface Theme {
@@ -85,6 +107,8 @@ export interface Theme {
   description: string;
   category: ThemeCategory | string;
   colors: ThemeColors;
+  /** Optional material skin (textures, patterns, radius) for art themes. */
+  skin?: ThemeSkin;
   /** True for user-created themes (persisted separately, editable/deletable). */
   custom?: boolean;
 }

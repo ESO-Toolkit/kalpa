@@ -275,6 +275,13 @@
   /* === Radius === */
   --radius: 0.5rem;
 
+  /* === Skin (art themes only; default = no texture/pattern) === */
+  --app-texture: none;
+  --app-texture-size: auto;
+  --app-pattern: none;
+  --app-pattern-size: auto;
+  --app-pattern-opacity: 0;
+
   /* === Sidebar === */
   --sidebar: var(--card);
   --sidebar-foreground: var(--foreground);
@@ -284,6 +291,14 @@
   --sidebar-accent-foreground: var(--foreground);
   --sidebar-border: var(--border);
   --sidebar-ring: var(--primary);
+}
+
+/* Art themes (skins with a texture/pattern): make glass panels a touch more
+ * translucent so the material + motif read through the whole UI, not just in the
+ * gaps. Plain themes are unaffected. */
+:root[data-textured] {
+  --glass-bg: color-mix(in oklab, var(--card) 62%, transparent);
+  --glass-bg-light: color-mix(in oklab, var(--card) 46%, transparent);
 }
 
 @layer base {
