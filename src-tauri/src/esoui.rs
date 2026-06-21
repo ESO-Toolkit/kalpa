@@ -116,6 +116,18 @@ fn fetch_page(
     url: &str,
     query: Option<&[(&str, &str)]>,
 ) -> Result<String, String> {
+    fetch_page_with_url(client, url, query).map(|(_, body)| body)
+}
+
+/// Like [`fetch_page`] but also returns the FINAL URL after any redirects.
+/// ESOUI redirects a precise-name search straight to the addon detail page
+/// (e.g. `search.php?search=LuiData` → `info4373-LuiData.html`), so the caller
+/// needs the landing URL to recover the addon id from it.
+fn fetch_page_with_url(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    query: Option<&[(&str, &str)]>,
+) -> Result<(String, String), String> {
     let mut builder = client.get(url);
     if let Some(q) = query {
         builder = builder.query(q);
@@ -146,9 +158,12 @@ fn fetch_page(
         }
     }
 
-    response
+    // Capture the final URL (after redirects) before the body consumes `response`.
+    let final_url = response.url().to_string();
+    let body = response
         .text()
-        .map_err(|e| format!("Failed to read response: {e}"))
+        .map_err(|e| format!("Failed to read response: {e}"))?;
+    Ok((final_url, body))
 }
 
 /// Fetch basic addon info (title, version, download URL) from ESOUI JSON API.
@@ -412,11 +427,45 @@ pub struct EsouiSearchResult {
 /// Search ESOUI and return rich results with metadata.
 pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     let client = http_client();
-    let body = fetch_page(
+    let (final_url, body) = fetch_page_with_url(
         client,
         "https://www.esoui.com/downloads/search.php",
         Some(&[("search", query), ("se_search", "files")]),
     )?;
+
+    // ESOUI redirects a unique-enough query straight to the addon page, which
+    // has no result rows — so the list scraping below would come back empty.
+    // Recover the id from the landing URL and synthesize a single result from
+    // the addon detail so an exact-name search isn't silently empty.
+    if let Some(id) = id_from_info_url(&final_url, query) {
+        // The landing page has no result rows — this addon is the only result.
+        // Enrich via the lightweight JSON detail API (one request, no extra
+        // HTML scrape). If enrichment is momentarily unavailable (e.g. a 429),
+        // still return the addon with what we know rather than blanking the
+        // search or turning it into an error toast; selecting it re-fetches the
+        // full detail. Category is not in the JSON API, so it's left empty for
+        // this synthesized result.
+        let result = match fetch_file_detail(client, id) {
+            Ok(d) => EsouiSearchResult {
+                id: d.id,
+                title: d.title,
+                author: d.author,
+                category: String::new(),
+                downloads: format_number(d.downloads),
+                updated: format_epoch_millis(d.last_update),
+            },
+            Err(_) => EsouiSearchResult {
+                id,
+                title: query.to_string(),
+                author: String::new(),
+                category: String::new(),
+                downloads: String::new(),
+                updated: String::new(),
+            },
+        };
+        return Ok(vec![result]);
+    }
+
     let document = Html::parse_document(&body);
 
     static RE_SEARCH_ID: OnceLock<Regex> = OnceLock::new();
@@ -500,15 +549,82 @@ pub fn search_esoui(query: &str) -> Result<Vec<EsouiSearchResult>, String> {
     Ok(results)
 }
 
+/// Minimal percent-decoding for URL slugs (e.g. `%20` → space). Any malformed
+/// escape is left as-is.
+fn percent_decode(s: &str) -> String {
+    fn hex(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Lowercase, percent-decoded, alphanumeric-only key for comparing an ESOUI URL
+/// slug against an addon name regardless of separators (`-`, `.`, space, `%20`).
+fn slug_key(s: &str) -> String {
+    percent_decode(s)
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Recover an addon id from an ESOUI detail URL such as
+/// `https://www.esoui.com/downloads/info4373-LuiData.html`. Only the final path
+/// segment is considered (the query string is dropped) and the slug must
+/// resemble `name`, so neither a `search.php?search=info1-x.html` query nor a
+/// redirect to an unrelated page can resolve to the wrong addon.
+fn id_from_info_url(url: &str, name: &str) -> Option<u32> {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    static RE_INFO_SLUG: OnceLock<Regex> = OnceLock::new();
+    let re = RE_INFO_SLUG.get_or_init(|| Regex::new(r"(?i)/info(\d+)-([^/]+)\.html$").unwrap());
+    let caps = re.captures(path)?;
+    let id = caps[1].parse::<u32>().ok()?;
+    let slug = slug_key(&caps[2]);
+    let name_key = slug_key(name);
+    if slug.is_empty() || name_key.is_empty() {
+        return None;
+    }
+    (slug == name_key || slug.contains(&name_key) || name_key.contains(&slug)).then_some(id)
+}
+
 /// Search ESOUI for an addon by name, return the best-matching ESOUI ID.
-/// Searches the ESOUI search page and matches results by title.
+/// Matches results by title, or recovers the id directly when ESOUI redirects a
+/// precise query straight to the addon page.
 pub fn search_addon_by_name(name: &str) -> Result<Option<u32>, String> {
     let client = http_client();
-    let body = fetch_page(
+    let (final_url, body) = fetch_page_with_url(
         client,
         "https://www.esoui.com/downloads/search.php",
         Some(&[("search", name), ("se_search", "files")]),
     )?;
+
+    // ESOUI redirects a unique-enough search straight to the addon page
+    // (e.g. "LuiData" → info4373-LuiData.html), which carries no result-list
+    // `fileinfo.php?id=` links. Recover the id from the landing URL first;
+    // otherwise fall back to scraping the multi-result list below.
+    if let Some(id) = id_from_info_url(&final_url, name) {
+        return Ok(Some(id));
+    }
+
     let document = Html::parse_document(&body);
 
     // Search results have links like: <a href="fileinfo.php?s=...&id=7">LibAddonMenu-2.0</a>
@@ -1087,6 +1203,99 @@ fn build_filelist_lookup(entries: &[ApiFileEntry]) -> HashMap<String, ApiAddonLo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_id_from_redirected_detail_url() {
+        // ESOUI redirects a precise search straight to the addon page; the id
+        // lives in that URL and must be recovered.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info4373-LuiData.html",
+                "LuiData"
+            ),
+            Some(4373)
+        );
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info4374-LuiMedia.html",
+                "LuiMedia"
+            ),
+            Some(4374)
+        );
+        // Versioned-name slug still resolves.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info7-LibAddonMenu-2.0.html",
+                "LibAddonMenu-2.0"
+            ),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn does_not_resolve_unrelated_or_nonredirected_urls() {
+        // A redirect to an unrelated addon must not resolve (wrong-slug guard).
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info999-SomethingElse.html",
+                "LuiData"
+            ),
+            None
+        );
+        // Still on the search page (multi-result, no redirect) → no id from URL.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/search.php?search=LuiData&se_search=files",
+                "LuiData"
+            ),
+            None
+        );
+        // A query that itself contains an info-URL must NOT be treated as a
+        // redirect (the info string is in the query, not the final path).
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/search.php?search=info1-LuiData.html&se_search=files",
+                "info1-LuiData.html"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn resolves_id_robustly_across_url_quirks() {
+        // Trailing query/fragment on the detail URL.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info4373-LuiData.html?x=1#top",
+                "LuiData"
+            ),
+            Some(4373)
+        );
+        // Case-insensitive scheme/host casing.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/INFO4373-LuiData.html",
+                "LuiData"
+            ),
+            Some(4373)
+        );
+        // Percent-encoded space in the slug still matches a spaced name.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info123-Foo%20Bar.html",
+                "Foo Bar"
+            ),
+            Some(123)
+        );
+        // Hyphen-for-space slug matches a spaced name too.
+        assert_eq!(
+            id_from_info_url(
+                "https://www.esoui.com/downloads/info123-Foo-Bar.html",
+                "Foo Bar"
+            ),
+            Some(123)
+        );
+    }
 
     #[test]
     fn decode_cyrillic_numeric_entities() {
