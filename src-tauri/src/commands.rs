@@ -4410,7 +4410,45 @@ pub fn delete_backup(
         return Err(format!("Backup '{backup_name}' not found."));
     }
 
-    fs::remove_dir_all(&backup_path).map_err(|e| format!("Failed to delete backup: {e}"))
+    fs::remove_dir_all(&backup_path).map_err(|e| format!("Failed to delete backup: {e}"))?;
+
+    // Also purge any leftover staging/tombstone scratch dirs for this backup so a
+    // crash-recovery pass can't later resurrect a deleted character backup from a
+    // tombstone that outlived a successful swap (e.g. failed cleanup).
+    purge_backup_scratch(&backups_dir(&addons_dir), &backup_name);
+    Ok(())
+}
+
+/// Remove `.tmp-<name>-<seq>` / `.old-<name>-<seq>` scratch directories left for
+/// the backup directory `name` (e.g. `char-Bob-backup`). Best-effort.
+fn purge_backup_scratch(backups_root: &Path, name: &str) {
+    let _guard = BACKUP_FINALIZE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entries = match fs::read_dir(backups_root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let tmp_prefix = format!(".tmp-{name}-");
+    let old_prefix = format!(".old-{name}-");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(entry_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // The trailing segment is the numeric sequence id we appended.
+        let is_scratch = |prefix: &str| {
+            entry_name
+                .strip_prefix(prefix)
+                .is_some_and(|seq| !seq.is_empty() && seq.bytes().all(|b| b.is_ascii_digit()))
+        };
+        if is_scratch(&tmp_prefix) || is_scratch(&old_prefix) {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
 }
 
 // ─── Addon Profiles ──────────────────────────────────────────
@@ -7672,6 +7710,25 @@ mod tests {
 
         assert_eq!(skipped, 1, "big.lua should be skipped by the size cap");
         assert_eq!(visited, 1, "only small.lua should be parsed/visited");
+    }
+
+    #[test]
+    fn purge_backup_scratch_removes_only_matching_scratch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".old-char-Bob-backup-3")).unwrap();
+        fs::create_dir_all(root.join(".tmp-char-Bob-backup-7")).unwrap();
+        fs::create_dir_all(root.join(".old-char-Other-backup-1")).unwrap();
+        fs::create_dir_all(root.join("char-Bob-backup")).unwrap();
+
+        purge_backup_scratch(root, "char-Bob-backup");
+
+        // This backup's tombstone/staging are gone...
+        assert!(!root.join(".old-char-Bob-backup-3").exists());
+        assert!(!root.join(".tmp-char-Bob-backup-7").exists());
+        // ...but an unrelated backup's scratch and the real backup are untouched.
+        assert!(root.join(".old-char-Other-backup-1").exists());
+        assert!(root.join("char-Bob-backup").exists());
     }
 
     #[test]
