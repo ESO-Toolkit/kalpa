@@ -4637,6 +4637,16 @@ pub struct CharacterInfo {
     pub recovered: bool,
 }
 
+/// Result of `list_characters`: the roster plus how many SavedVariables files
+/// the scan had to skip (oversized/unreadable/unparseable), so the UI can warn
+/// that a character might be missing rather than silently showing a short list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterRoster {
+    pub characters: Vec<CharacterInfo>,
+    pub skipped_files: u32,
+}
+
 /// Server bucket assigned to characters recovered from SavedVariables whose
 /// megaserver cannot be determined from any addon's data layout.
 const UNKNOWN_SERVER: &str = "Unknown";
@@ -4767,10 +4777,10 @@ fn build_character_list(
 pub async fn list_characters(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
-) -> Result<Vec<CharacterInfo>, String> {
+) -> Result<CharacterRoster, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
-    tokio::task::spawn_blocking(move || -> Result<Vec<CharacterInfo>, String> {
+    tokio::task::spawn_blocking(move || -> Result<CharacterRoster, String> {
         // Source 1: AddOnSettings.txt (authoritative server, may be missing or,
         // in account-wide mode, hold no per-character headers at all). A missing
         // file is an expected fallback; any other read error (permissions, bad
@@ -4786,10 +4796,13 @@ pub async fn list_characters(
 
         // Source 2: a bounded, roster-specific scan of SavedVariables .lua files.
         // Recovers characters that have no AddOnSettings.txt block (the common
-        // account-wide case).
-        let sv_chars = collect_roster_characters(&addons_dir);
+        // account-wide case). `skipped` counts files the scan couldn't cover.
+        let (sv_chars, skipped) = collect_roster_characters(&addons_dir);
 
-        Ok(build_character_list(addon_settings.as_deref(), &sv_chars))
+        Ok(CharacterRoster {
+            characters: build_character_list(addon_settings.as_deref(), &sv_chars),
+            skipped_files: skipped as u32,
+        })
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -6935,8 +6948,10 @@ const ROSTER_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// the over-collecting scrub detector) so addon config sections are not surfaced
 /// as fake characters, and is size-bounded so opening the panel stays cheap.
 ///
-/// Runs synchronously; callers wrap it in `spawn_blocking`.
-fn collect_roster_characters(addons_dir: &Path) -> Vec<(String, Option<String>)> {
+/// Runs synchronously; callers wrap it in `spawn_blocking`. Returns the
+/// `(raw_key, world)` characters plus the number of `.lua` files skipped (size/
+/// unreadable/parse) so the caller can warn that the roster may be incomplete.
+fn collect_roster_characters(addons_dir: &Path) -> (Vec<(String, Option<String>)>, usize) {
     use crate::saved_variables::scrub::detect_roster_characters_from_tree;
 
     // raw key -> the distinct megaservers it was seen under. A name with one or
@@ -6957,7 +6972,7 @@ fn collect_roster_characters(addons_dir: &Path) -> Vec<(String, Option<String>)>
     });
     if skipped > 0 {
         // This scan is the only character source in account-wide mode, so a
-        // skipped file can hide a character. Surface it in the logs.
+        // skipped file can hide a character. Surface it in the logs too.
         eprintln!(
             "[characters] roster scan skipped {skipped} oversized/unreadable/unparseable \
              SavedVariables file(s); some characters may be missing from the list"
@@ -6975,7 +6990,7 @@ fn collect_roster_characters(addons_dir: &Path) -> Vec<(String, Option<String>)>
             _ => out.push((name, None)),
         }
     }
-    out
+    (out, skipped)
 }
 
 /// Detect the account/character identities present in the local SavedVariables

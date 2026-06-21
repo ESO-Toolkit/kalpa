@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { toast } from "sonner";
-import type { CharacterInfo } from "../types";
+import type { CharacterInfo, CharacterRoster } from "../types";
 import {
   Dialog,
   DialogContent,
@@ -26,6 +26,7 @@ const UNKNOWN_SERVER = "Unknown";
 
 export function Characters({ addonsPath, onClose }: CharactersProps) {
   const [characters, setCharacters] = useState<CharacterInfo[]>([]);
+  const [skippedFiles, setSkippedFiles] = useState(0);
   const [loading, setLoading] = useState(true);
   const [backupName, setBackupName] = useState("");
   const [backingUp, setBackingUp] = useState<string | null>(null);
@@ -33,10 +34,11 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
   useEffect(() => {
     async function load() {
       try {
-        const chars = await invokeOrThrow<CharacterInfo[]>("list_characters", {
+        const roster = await invokeOrThrow<CharacterRoster>("list_characters", {
           addonsPath,
         });
-        setCharacters(chars);
+        setCharacters(roster.characters);
+        setSkippedFiles(roster.skippedFiles);
       } catch (e) {
         toast.error(`Failed to load characters: ${getTauriErrorMessage(e)}`);
       } finally {
@@ -46,8 +48,19 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
     load();
   }, [addonsPath]);
 
+  // Names shared by more than one character (e.g. an NA and an EU twin) get the
+  // server folded into the default backup name so their backups don't collide.
+  const duplicateNames = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of characters) counts.set(c.name, (counts.get(c.name) ?? 0) + 1);
+    return new Set([...counts].filter(([, n]) => n > 1).map(([name]) => name));
+  }, [characters]);
+
   const handleBackup = async (char: CharacterInfo) => {
-    const name = backupName.trim() || `${char.name}-backup`;
+    const defaultName = duplicateNames.has(char.name)
+      ? `${char.server}-${char.name}-backup`
+      : `${char.name}-backup`;
+    const name = backupName.trim() || defaultName;
     setBackingUp(`${char.server}-${char.name}`);
     try {
       const count = await invokeOrThrow<number>("backup_character_settings", {
@@ -87,6 +100,13 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
           Your ESO characters. Back up SavedVariables for a specific character to preserve their
           addon settings.
         </p>
+
+        {!loading && skippedFiles > 0 && (
+          <p className="text-xs text-[#d9a441]">
+            {skippedFiles} SavedVariables file{skippedFiles !== 1 ? "s" : ""} couldn&apos;t be read
+            (too large, locked, or corrupt), so a character may be missing from this list.
+          </p>
+        )}
 
         <div>
           <label htmlFor="backup-name" className="text-xs text-muted-foreground">

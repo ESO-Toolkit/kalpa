@@ -183,6 +183,13 @@ export interface CharacterInfo {
   recovered?: boolean;
 }
 
+export interface CharacterRoster {
+  characters: CharacterInfo[];
+  /** SavedVariables files the roster scan had to skip (too large, unreadable,
+   * or unparseable); when > 0 the list may be incomplete. */
+  skippedFiles: number;
+}
+
 // ── Game instance types (multi-region / launcher detection) ──────────────
 type ClientType = "native" | "steam";
 type ServerRegion = "na" | "eu" | "pts";

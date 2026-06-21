@@ -733,14 +733,12 @@ pub struct RosterCharacter {
 /// over-collects on purpose (any non-marker key under an account is templated so
 /// scrubbing never leaks an identity). The roster is user-facing and feeds
 /// backups, so a false positive here would surface an addon config section as a
-/// fake character. A table-valued key is accepted when either:
-///   * its parent account handle carries a ZO_SavedVars `$`-marker sibling (e.g.
-///     `$AccountWide`), which proves the account holds characters — then every
-///     table key is taken (even unusually-formed names); or
-///   * the account is markerless (a per-character-only layout, indistinguishable
-///     in shape from a config container) and the key *looks like* an ESO
-///     character name — so markerless characters are still recovered without
-///     admitting config sections like `settings`/`guilds`.
+/// fake character. A key under an account handle is accepted only when it is a
+/// **table** value and *looks like* an ESO character name (uppercase-led;
+/// letters, spaces, hyphens, apostrophes). Real character names always satisfy
+/// this, so none are lost, while config tables an addon stores beside characters
+/// (`settings`, `profiles`, `guilds`) are rejected — even when a `$AccountWide`
+/// marker is present. Numeric character-IDs and `$`-markers are skipped.
 ///
 /// The world (when present) only labels the megaserver, never proves a key.
 ///
@@ -846,14 +844,6 @@ fn roster_chars_under_account(
         Some(c) => c,
         None => return,
     };
-    // ZO_SavedVars writes a `$`-marker (e.g. `$AccountWide`) alongside character
-    // keys, which proves this account handle is a character container. When it's
-    // present we accept every table key (so unusually-formed names are still
-    // recovered). When it's absent — a markerless per-character layout, which is
-    // indistinguishable in shape from an account holding config tables — we fall
-    // back to accepting only keys that look like ESO character names, so real
-    // characters are recovered without surfacing config sections.
-    let has_marker = children.iter().any(|c| c.key.starts_with('$'));
     for child in children {
         let key = child.key.as_str();
         if key.is_empty() || key.starts_with('$') {
@@ -867,8 +857,12 @@ fn roster_chars_under_account(
             // Scalar config (version flags, etc.) is never a character.
             continue;
         }
-        if !has_marker && !looks_like_character_name(key) {
-            // Markerless account: only name-shaped keys are trusted as characters.
+        // Require the key to look like an ESO character name. Real names always
+        // do (uppercase-led, letters/space/hyphen/apostrophe), so this loses no
+        // characters, while it excludes config-section tables (`settings`,
+        // `profiles`, `guilds`) that addons store alongside characters — even
+        // under an account that also has a `$AccountWide` marker.
+        if !looks_like_character_name(key) {
             continue;
         }
         let entry = RosterCharacter {
@@ -1704,6 +1698,27 @@ mod tests {
         let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"Mainchar"));
         assert!(names.contains(&"Alt Ego"));
+    }
+
+    #[test]
+    fn roster_excludes_config_siblings_in_marked_account() {
+        // $AccountWide marker present, but config tables sit beside the character.
+        // Only the name-shaped key is a character.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["x"] = 1 },
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["settings"] = { ["volume"] = 5 },
+                        ["profiles"] = { ["p1"] = true },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Mainchar"]);
     }
 
     #[test]
