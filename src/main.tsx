@@ -3,8 +3,14 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { hydrateThemeFromStore } from "@/lib/theme-manager";
 import "./index.css";
 import "./App.css";
+
+// The pre-paint theme apply happens in the inline boot script in index.html
+// (a deferred module would paint a frame late). Here we just reconcile from the
+// durable Tauri store once the bundle runs.
+void hydrateThemeFromStore();
 
 // Catch fatal errors that occur before React mounts (CSP violations, script
 // load failures, etc.) and display them instead of a blank white screen.

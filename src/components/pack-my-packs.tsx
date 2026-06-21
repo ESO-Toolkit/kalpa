@@ -110,8 +110,8 @@ export function MyPacksView({
     return (
       <Fade>
         <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-5 shadow-[0_0_32px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
-            <PackageIcon className="size-10 text-[#c4a44a]/60" />
+          <div className="rounded-xl bg-primary/[0.08] border border-primary/[0.15] p-5 shadow-[0_0_32px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_8%,transparent)]">
+            <PackageIcon className="size-10 text-primary/60" />
           </div>
           <div>
             <p className="font-heading text-sm font-semibold">Sign in to manage your packs</p>
@@ -170,7 +170,7 @@ export function MyPacksView({
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground/60">
                 Your packs as{" "}
-                <span className="text-[#c4a44a] font-semibold">{authUser.userName}</span>
+                <span className="text-primary font-semibold">{authUser.userName}</span>
               </span>
               <span className="text-[10px] text-muted-foreground/40 tabular-nums">
                 {packs.length} / 25
@@ -222,8 +222,8 @@ export function MyPacksView({
             ) : packs.length === 0 ? (
               <Fade>
                 <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-                  <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-4 shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
-                    <SparklesIcon className="size-8 text-[#c4a44a]/60" />
+                  <div className="rounded-xl bg-primary/[0.08] border border-primary/[0.15] p-4 shadow-[0_0_24px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_8%,transparent)]">
+                    <SparklesIcon className="size-8 text-primary/60" />
                   </div>
                   <p className="font-heading text-sm font-medium">No packs yet</p>
                   <p className="text-xs text-muted-foreground/60 max-w-[260px]">
@@ -273,14 +273,14 @@ export function MyPacksView({
                         accent.hoverBg,
                         accent.hoverGlow,
                         "hover:border-white/[0.12] hover:-translate-y-[1px]",
-                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
+                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                       )}
                     >
                       {/* Top row: title + quick actions */}
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className="font-heading text-sm font-semibold truncate group-hover:text-[#c4a44a] transition-colors duration-200">
+                            <span className="font-heading text-sm font-semibold truncate group-hover:text-primary transition-colors duration-200">
                               {decodeHtml(pack.title)}
                             </span>
                             <InfoPill color={pillColor}>
@@ -310,7 +310,7 @@ export function MyPacksView({
                                 e.stopPropagation();
                                 onEdit(pack);
                               }}
-                              className="rounded-md p-1.5 text-muted-foreground/40 hover:text-[#c4a44a] hover:bg-[#c4a44a]/[0.08] transition-all duration-150"
+                              className="rounded-md p-1.5 text-muted-foreground/40 hover:text-primary hover:bg-primary/[0.08] transition-all duration-150"
                             >
                               <PencilIcon className="size-3.5" />
                             </button>
@@ -321,7 +321,7 @@ export function MyPacksView({
                                 e.stopPropagation();
                                 onDuplicate(pack);
                               }}
-                              className="rounded-md p-1.5 text-muted-foreground/40 hover:text-sky-400 hover:bg-sky-400/[0.08] transition-all duration-150"
+                              className="rounded-md p-1.5 text-muted-foreground/40 hover:text-accent-sky hover:bg-accent-sky/[0.08] transition-all duration-150"
                             >
                               <CopyIcon className="size-3.5" />
                             </button>
@@ -428,7 +428,7 @@ export function MyPacksView({
               >
                 {loadingMore ? (
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+                    <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
                     Loading...
                   </span>
                 ) : (
@@ -444,8 +444,8 @@ export function MyPacksView({
           {installedPackRefs.length === 0 ? (
             <Fade>
               <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-                <div className="rounded-xl bg-sky-400/[0.08] border border-sky-400/[0.15] p-4 shadow-[0_0_24px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(56,189,248,0.08)]">
-                  <DownloadIcon className="size-8 text-sky-400/60" />
+                <div className="rounded-xl bg-accent-sky/[0.08] border border-accent-sky/[0.15] p-4 shadow-[0_0_24px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--accent-sky)_8%,transparent)]">
+                  <DownloadIcon className="size-8 text-accent-sky/60" />
                 </div>
                 <p className="font-heading text-sm font-medium">No installed packs yet</p>
                 <p className="text-xs text-muted-foreground/60 max-w-[260px]">
@@ -478,13 +478,13 @@ export function MyPacksView({
                     accent.bg,
                     accent.hoverBg,
                     "hover:border-white/[0.12] hover:-translate-y-[1px] hover:shadow-[0_4px_16px_rgba(0,0,0,0.2)]",
-                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
+                    "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                   )}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="font-heading text-sm font-semibold truncate group-hover:text-[#c4a44a] transition-colors duration-200">
+                        <span className="font-heading text-sm font-semibold truncate group-hover:text-primary transition-colors duration-200">
                           {decodeHtml(ref.title)}
                         </span>
                         <InfoPill color={pillColor}>

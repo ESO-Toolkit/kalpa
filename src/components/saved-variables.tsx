@@ -286,8 +286,8 @@ function OverviewTab({
       <div className="max-h-[320px] overflow-y-auto space-y-1">
         {sorted.length === 0 ? (
           <div className="py-8 text-center">
-            <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-2xl bg-[#c4a44a]/[0.08] shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
-              <FileTextIcon className="size-6 text-[#c4a44a]/60" />
+            <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-2xl bg-primary/[0.08] shadow-[0_0_24px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_8%,transparent)]">
+              <FileTextIcon className="size-6 text-primary/60" />
             </div>
             <p className="text-sm text-muted-foreground">
               {filter !== "all" ? "No files match this filter." : "No SavedVariables files found."}
@@ -496,8 +496,7 @@ function CleanupTab({
               {selected.size > 0 ? (
                 <span>
                   <strong className="text-foreground">{selected.size}</strong> selected &middot;{" "}
-                  <strong className="text-[#c4a44a]">{formatBytes(selectedSize)}</strong>{" "}
-                  reclaimable
+                  <strong className="text-primary">{formatBytes(selectedSize)}</strong> reclaimable
                 </span>
               ) : (
                 "Select files to clean up"
@@ -998,7 +997,7 @@ function FieldRow({
       {field.confidence !== "certain" && (
         <Popover>
           <PopoverTrigger className="opacity-0 group-hover:opacity-100 transition-opacity">
-            <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-[#38bdf8]" />
+            <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-accent-sky" />
           </PopoverTrigger>
           <PopoverContent align="end" className="w-72">
             <WidgetCustomizer
@@ -1614,7 +1613,7 @@ function EditorTab({
                   <input
                     type="text"
                     placeholder="Search..."
-                    className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-[#38bdf8]/50 focus:shadow-[0_0_0_3px_rgba(56,189,248,0.1),inset_0_1px_2px_rgba(0,0,0,0.1)]"
+                    className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-accent-sky/50 focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_2px_rgba(0,0,0,0.1)]"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
@@ -1903,9 +1902,9 @@ function CopyProfileTab({
 
       {/* Step 4: Confirm */}
       {sourceKey && actualDest && (
-        <div className="rounded-xl border border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] p-3 shadow-[0_0_16px_rgba(196,164,74,0.06),inset_0_1px_0_rgba(196,164,74,0.04)]">
+        <div className="rounded-xl border border-primary/20 bg-primary/[0.04] p-3 shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_4%,transparent)]">
           <p className="text-sm">
-            Copy <span className="font-medium text-[#c4a44a]">{sourceKey}</span>
+            Copy <span className="font-medium text-primary">{sourceKey}</span>
             {" \u2192 "}
             <span className="font-medium text-[#4dc2e6]">{actualDest}</span>
             {" in "}

@@ -31,9 +31,11 @@ import {
   Shield,
   Sparkles,
   Trash2,
+  Palette,
 } from "lucide-react";
+import { AppearanceSettings } from "./appearance-settings";
 
-type SettingsTab = "general" | "tools" | "data";
+type SettingsTab = "general" | "appearance" | "tools" | "data";
 
 interface SettingsProps {
   addonsPath: string;
@@ -53,6 +55,7 @@ interface SettingsProps {
 
 const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
   { id: "general", label: "General", icon: FolderOpen },
+  { id: "appearance", label: "Appearance", icon: Palette },
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "data", label: "Data", icon: Database },
 ];
@@ -336,7 +339,7 @@ export function Settings({
                             type="button"
                             className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
                               isActive
-                                ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
+                                ? "border-accent-sky/30 bg-accent-sky/[0.06] text-sky-300"
                                 : "border-white/[0.06] bg-white/[0.02] text-white/80 hover:border-white/[0.12] hover:bg-white/[0.04]"
                             }`}
                             onClick={() => {
@@ -351,7 +354,7 @@ export function Settings({
                               {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
                             </span>
                             {isActive && (
-                              <span className="ml-auto text-[10px] font-semibold uppercase tracking-wider text-sky-400">
+                              <span className="ml-auto text-[10px] font-semibold uppercase tracking-wider text-accent-sky">
                                 active
                               </span>
                             )}
@@ -424,18 +427,30 @@ export function Settings({
                       <span
                         className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
                           conflictPolicy === value
-                            ? "border-[#c4a44a] bg-[#c4a44a]/20"
+                            ? "border-primary bg-primary/20"
                             : "border-white/20 bg-white/[0.03]"
                         }`}
                       >
                         {conflictPolicy === value && (
-                          <span className="h-2 w-2 rounded-full bg-[#c4a44a]" />
+                          <span className="h-2 w-2 rounded-full bg-primary" />
                         )}
                       </span>
                       <span className="text-sm text-white/80">{label}</span>
                     </button>
                   ))}
                 </GlassPanel>
+              </motion.div>
+            )}
+
+            {activeTab === "appearance" && (
+              <motion.div
+                key={activeTab}
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.08 }}
+              >
+                <AppearanceSettings />
               </motion.div>
             )}
 
@@ -620,14 +635,14 @@ function ToolItem({
       onClick={onClick}
       className={`group flex w-full items-center gap-3 rounded-xl border p-3 text-left transition-all duration-150 hover:-translate-y-px ${
         accent === "gold"
-          ? "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] hover:border-[#c4a44a]/30 hover:bg-[#c4a44a]/[0.06]"
+          ? "border-primary/20 bg-primary/[0.04] hover:border-primary/30 hover:bg-primary/[0.06]"
           : "border-white/[0.04] bg-white/[0.02] hover:border-white/[0.08] hover:bg-white/[0.04]"
       }`}
     >
       <div
         className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
           accent === "gold"
-            ? "bg-[#c4a44a]/10 text-[#c4a44a]"
+            ? "bg-primary/10 text-primary"
             : "bg-white/[0.04] text-muted-foreground group-hover:text-white/70"
         } transition-colors duration-150`}
       >

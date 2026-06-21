@@ -10,13 +10,13 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "bg-gradient-to-b from-[#d4b45a] to-[#c4a44a] text-[#0b1220] font-semibold border-[#c4a44a]/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_3px_rgba(0,0,0,0.3)] hover:from-[#dcc06a] hover:to-[#cdb050] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_0_12px_rgba(196,164,74,0.3),0_2px_6px_rgba(0,0,0,0.3)] focus-visible:ring-3 focus-visible:ring-[#c4a44a]/40",
+          "bg-gradient-to-b from-primary-hover to-primary text-primary-foreground font-semibold border-primary/50 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_3px_rgba(0,0,0,0.3)] hover:brightness-110 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.25),0_0_12px_var(--primary-glow),0_2px_6px_rgba(0,0,0,0.3)] focus-visible:ring-3 focus-visible:ring-primary/40",
         outline:
-          "bg-white/[0.04] border-white/[0.1] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_1px_2px_rgba(0,0,0,0.15)] hover:bg-white/[0.08] hover:border-white/[0.15] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_2px_4px_rgba(0,0,0,0.2)] aria-expanded:bg-white/[0.08] aria-expanded:border-white/[0.15] focus-visible:border-sky-400/40 focus-visible:ring-3 focus-visible:ring-sky-400/20",
+          "bg-white/[0.04] border-white/[0.1] text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_1px_2px_rgba(0,0,0,0.15)] hover:bg-white/[0.08] hover:border-white/[0.15] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_2px_4px_rgba(0,0,0,0.2)] aria-expanded:bg-white/[0.08] aria-expanded:border-white/[0.15] focus-visible:border-accent-sky/40 focus-visible:ring-3 focus-visible:ring-accent-sky/20",
         secondary:
           "bg-white/[0.06] border-white/[0.08] text-foreground hover:bg-white/[0.1] hover:border-white/[0.12] focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
         ghost:
-          "text-foreground/70 hover:text-foreground hover:bg-white/[0.06] aria-expanded:bg-white/[0.06] aria-expanded:text-foreground focus-visible:border-sky-400/40 focus-visible:ring-3 focus-visible:ring-sky-400/20",
+          "text-foreground/70 hover:text-foreground hover:bg-white/[0.06] aria-expanded:bg-white/[0.06] aria-expanded:text-foreground focus-visible:border-accent-sky/40 focus-visible:ring-3 focus-visible:ring-accent-sky/20",
         destructive:
           "bg-red-500/[0.08] text-red-400 border-red-500/20 shadow-[inset_0_1px_0_rgba(239,68,68,0.06)] hover:bg-red-500/[0.15] hover:border-red-500/30 hover:shadow-[inset_0_1px_0_rgba(239,68,68,0.08),0_0_12px_rgba(239,68,68,0.15)] focus-visible:border-red-500/40 focus-visible:ring-3 focus-visible:ring-red-500/20",
         link: "text-primary underline-offset-4 hover:underline focus-visible:ring-3 focus-visible:ring-ring/50",

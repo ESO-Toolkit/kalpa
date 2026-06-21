@@ -181,7 +181,7 @@ export function PackDetailView({
             variant="outline"
             size="sm"
             onClick={onToggleShare}
-            className={cn(showShareSection && "border-[#c4a44a]/30 bg-[#c4a44a]/[0.06]")}
+            className={cn(showShareSection && "border-primary/30 bg-primary/[0.06]")}
           >
             <ShareIcon className="size-3.5 mr-1.5" />
             Share
@@ -199,8 +199,8 @@ export function PackDetailView({
               "group/vote relative flex items-center gap-1.5 text-sm font-medium rounded-full px-3 py-1.5 transition-all duration-200 border",
               votingPacks.has(pack.id) && "opacity-60 pointer-events-none",
               pack.userVoted
-                ? "text-[#c4a44a] bg-[#c4a44a]/[0.15] border-[#c4a44a]/40 hover:bg-[#c4a44a]/[0.22] shadow-[0_0_14px_rgba(196,164,74,0.25),inset_0_1px_0_rgba(196,164,74,0.12)]"
-                : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-[#c4a44a] hover:border-[#c4a44a]/25 hover:bg-[#c4a44a]/[0.08] hover:shadow-[0_0_8px_rgba(196,164,74,0.08)]"
+                ? "text-primary bg-primary/[0.15] border-primary/40 hover:bg-primary/[0.22] shadow-[0_0_14px_color-mix(in_oklab,var(--primary)_25%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_12%,transparent)]"
+                : "text-muted-foreground/60 bg-white/[0.03] border-white/[0.08] hover:text-primary hover:border-primary/25 hover:bg-primary/[0.08] hover:shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_8%,transparent)]"
             )}
           >
             <ArrowUpIcon
@@ -260,7 +260,7 @@ export function PackDetailView({
                 {shareResult ? (
                   <div className="space-y-2">
                     <div className="flex items-center gap-2">
-                      <code className="flex-1 rounded-lg bg-[#c4a44a]/[0.06] border border-[#c4a44a]/[0.15] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-[#c4a44a] shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]">
+                      <code className="flex-1 rounded-lg bg-primary/[0.06] border border-primary/[0.15] px-3 py-2 text-center font-mono text-lg font-bold tracking-[0.3em] text-primary shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_6%,transparent)]">
                         {shareResult.code}
                       </code>
                       <SimpleTooltip content="Copy share code">
@@ -337,7 +337,7 @@ export function PackDetailView({
                     type="checkbox"
                     checked={exportIncludeSettings}
                     onChange={onToggleExportSettings}
-                    className="size-3.5 accent-[#c4a44a] cursor-pointer"
+                    className="size-3.5 accent-primary cursor-pointer"
                   />
                   <span className="text-[11px] text-muted-foreground/70">
                     Include addon settings (v2)
@@ -361,12 +361,12 @@ export function PackDetailView({
               "rounded-xl border p-3",
               installSucceeded
                 ? "border-emerald-400/25 bg-emerald-400/[0.06] shadow-[0_0_16px_rgba(34,197,94,0.08),inset_0_1px_0_rgba(34,197,94,0.06)]"
-                : "border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]"
+                : "border-primary/25 bg-primary/[0.06] shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_6%,transparent)]"
             )}
           >
             {installProgress && (
               <div className="flex items-center justify-between text-sm mb-2">
-                <span className="text-[#c4a44a] font-medium">
+                <span className="text-primary font-medium">
                   Installing{" "}
                   <CountingNumber
                     number={installProgress.completed + installProgress.failed}
@@ -396,7 +396,7 @@ export function PackDetailView({
                   "h-full rounded-full transition-all duration-300 ease-out",
                   installSucceeded
                     ? "bg-emerald-400 shadow-[0_0_8px_rgba(34,197,94,0.5)]"
-                    : "bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.5)]"
+                    : "bg-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_50%,transparent)]"
                 )}
                 style={{
                   width: installSucceeded
@@ -416,7 +416,7 @@ export function PackDetailView({
         <div>
           <div className="flex items-center justify-between mb-2">
             <SectionHeader>Required</SectionHeader>
-            <span className="text-[10px] text-[#c4a44a]/60 font-medium">Always included</span>
+            <span className="text-[10px] text-primary/60 font-medium">Always included</span>
           </div>
           <div className="space-y-1">
             {requiredAddons.map((addon) => (
@@ -443,7 +443,7 @@ export function PackDetailView({
               return (
                 <button
                   onClick={() => onSelectAllOptional(!allSelected)}
-                  className="text-[10px] text-sky-400/60 font-medium hover:text-sky-400 transition-colors"
+                  className="text-[10px] text-accent-sky/60 font-medium hover:text-accent-sky transition-colors"
                 >
                   {allSelected ? "Deselect all" : "Select all"}
                 </button>
@@ -498,10 +498,11 @@ function AddonRow({
         "group w-full text-left rounded-lg transition-all duration-150",
         !locked && "cursor-pointer",
         // Unchecked optional: prominent interactive appearance
-        !locked && !checked && "hover:bg-sky-400/[0.06] hover:ring-1 hover:ring-sky-400/20",
+        !locked && !checked && "hover:bg-accent-sky/[0.06] hover:ring-1 hover:ring-accent-sky/20",
         // Checked: gold tint
-        !locked && checked && "hover:bg-[#c4a44a]/[0.06]",
-        !locked && "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
+        !locked && checked && "hover:bg-primary/[0.06]",
+        !locked &&
+          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
       )}
     >
       <GlassPanel
@@ -510,10 +511,10 @@ function AddonRow({
           "flex items-center gap-3 p-2.5 transition-all duration-150 rounded-lg",
           "border-l-[3px]",
           locked
-            ? "border-l-[#c4a44a]/60"
+            ? "border-l-primary/60"
             : checked
-              ? "border-l-[#c4a44a]/60 bg-[#c4a44a]/[0.03]"
-              : "border-l-sky-400/30"
+              ? "border-l-primary/60 bg-primary/[0.03]"
+              : "border-l-accent-sky/30"
         )}
       >
         {/* Checkbox — larger, more visible */}
@@ -521,16 +522,14 @@ function AddonRow({
           className={cn(
             "flex items-center justify-center size-5 rounded-md border-2 shrink-0 transition-all duration-150",
             locked
-              ? "bg-[#c4a44a]/15 border-[#c4a44a]/40"
+              ? "bg-primary/15 border-primary/40"
               : checked
-                ? "bg-[#c4a44a]/20 border-[#c4a44a]/50 shadow-[0_0_6px_rgba(196,164,74,0.15)]"
-                : "border-white/20 bg-white/[0.03] group-hover:border-sky-400/40 group-hover:bg-sky-400/[0.06]"
+                ? "bg-primary/20 border-primary/50 shadow-[0_0_6px_color-mix(in_oklab,var(--primary)_15%,transparent)]"
+                : "border-white/20 bg-white/[0.03] group-hover:border-accent-sky/40 group-hover:bg-accent-sky/[0.06]"
           )}
         >
           {(checked || locked) && (
-            <CheckIcon
-              className={cn("size-3.5", locked ? "text-[#c4a44a]/70" : "text-[#c4a44a]")}
-            />
+            <CheckIcon className={cn("size-3.5", locked ? "text-primary/70" : "text-primary")} />
           )}
         </div>
         <div className="flex-1 min-w-0">
@@ -548,7 +547,7 @@ function AddonRow({
               {addon.name}
             </span>
             {locked && (
-              <span className="text-[9px] font-semibold uppercase tracking-wider text-[#c4a44a]/50 shrink-0">
+              <span className="text-[9px] font-semibold uppercase tracking-wider text-primary/50 shrink-0">
                 Required
               </span>
             )}
@@ -558,7 +557,7 @@ function AddonRow({
               </span>
             )}
             {!locked && !checked && (
-              <PlusIcon className="size-3.5 text-sky-400/0 group-hover:text-sky-400/60 transition-all duration-150 shrink-0" />
+              <PlusIcon className="size-3.5 text-accent-sky/0 group-hover:text-accent-sky/60 transition-all duration-150 shrink-0" />
             )}
           </div>
           {addon.note && (
@@ -574,7 +573,7 @@ function AddonRow({
               openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}.html`);
             }}
             aria-label={`Open ${addon.name} on ESOUI`}
-            className="text-muted-foreground/30 hover:text-[#c4a44a] transition-colors"
+            className="text-muted-foreground/30 hover:text-primary transition-colors"
           >
             <ExternalLinkIcon className="size-3" />
           </button>

@@ -101,14 +101,14 @@ export function AppUpdateBanner({ state, onDownload, onRestart }: AppUpdateBanne
       offset={12}
       transition={{ type: "spring", stiffness: 300, damping: 25 }}
     >
-      <div className="flex items-center gap-2 border-b border-white/[0.06] bg-[#c4a44a]/[0.08] px-3 py-1.5 text-xs">
+      <div className="flex items-center gap-2 border-b border-white/[0.06] bg-primary/[0.08] px-3 py-1.5 text-xs">
         {state.status === "available" && (
           <>
-            <DownloadIcon className="h-3.5 w-3.5 text-[#c4a44a]" />
-            <span className="text-[#c4a44a]">Version {state.update.version} available</span>
+            <DownloadIcon className="h-3.5 w-3.5 text-primary" />
+            <span className="text-primary">Version {state.update.version} available</span>
             <button
               onClick={onDownload}
-              className="ml-auto rounded-md bg-[#c4a44a]/20 px-2 py-0.5 text-[#c4a44a] transition-colors hover:bg-[#c4a44a]/30"
+              className="ml-auto rounded-md bg-primary/20 px-2 py-0.5 text-primary transition-colors hover:bg-primary/30"
             >
               Update Now
             </button>
@@ -116,15 +116,15 @@ export function AppUpdateBanner({ state, onDownload, onRestart }: AppUpdateBanne
         )}
         {state.status === "downloading" && (
           <>
-            <RefreshCwIcon className="h-3.5 w-3.5 animate-spin text-[#c4a44a]" />
-            <span className="text-[#c4a44a]">Downloading update...</span>
+            <RefreshCwIcon className="h-3.5 w-3.5 animate-spin text-primary" />
+            <span className="text-primary">Downloading update...</span>
             <div className="ml-auto h-1.5 w-24 overflow-hidden rounded-full bg-white/[0.1]">
               <div
-                className="h-full rounded-full bg-[#c4a44a] transition-all"
+                className="h-full rounded-full bg-primary transition-all"
                 style={{ width: `${state.progress}%` }}
               />
             </div>
-            <span className="text-[#c4a44a]/70">
+            <span className="text-primary/70">
               <CountingNumber
                 number={state.progress}
                 transition={{ stiffness: 200, damping: 25 }}

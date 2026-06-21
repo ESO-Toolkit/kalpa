@@ -24,11 +24,11 @@ interface UpdateBannerProps {
 function PhaseIcon({ phase }: { phase: AddonPhase }) {
   switch (phase) {
     case "downloading":
-      return <DownloadIcon className="h-3 w-3 animate-pulse text-[#38bdf8]" />;
+      return <DownloadIcon className="h-3 w-3 animate-pulse text-accent-sky" />;
     case "scanning":
       return <SearchIcon className="h-3 w-3 animate-pulse text-violet-400" />;
     case "extracting":
-      return <PackageIcon className="h-3 w-3 animate-pulse text-[#c4a44a]" />;
+      return <PackageIcon className="h-3 w-3 animate-pulse text-primary" />;
     case "completed":
       return (
         <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-emerald-500/20">
@@ -51,10 +51,10 @@ function AddonStatusPill({ name, phase }: { name: string; phase: AddonPhase }) {
       : phase === "failed"
         ? "bg-red-500/[0.06] border-red-500/15"
         : phase === "extracting"
-          ? "bg-[#c4a44a]/[0.06] border-[#c4a44a]/15"
+          ? "bg-primary/[0.06] border-primary/15"
           : phase === "scanning"
             ? "bg-violet-400/[0.06] border-violet-400/15"
-            : "bg-[#38bdf8]/[0.06] border-[#38bdf8]/15";
+            : "bg-accent-sky/[0.06] border-accent-sky/15";
 
   return (
     <div
@@ -109,7 +109,7 @@ export function UpdateBanner({
       offset={20}
       transition={{ type: "spring", stiffness: 300, damping: 25 }}
     >
-      <div className="border-b border-[#c4a44a]/15 bg-gradient-to-r from-[#c4a44a]/[0.06] via-[#c4a44a]/[0.03] to-transparent backdrop-blur-sm">
+      <div className="border-b border-primary/15 bg-gradient-to-r from-primary/[0.06] via-primary/[0.03] to-transparent backdrop-blur-sm">
         {/* Header row */}
         <div className="flex items-center justify-between px-5 py-2">
           {updatingAll && updateProgress ? (
@@ -132,7 +132,7 @@ export function UpdateBanner({
                       cy="10"
                       r="8"
                       fill="none"
-                      stroke="#c4a44a"
+                      stroke="var(--primary)"
                       strokeWidth="2"
                       strokeLinecap="round"
                       strokeDasharray={`${(doneCount / Math.max(total, 1)) * 50.27} 50.27`}
@@ -140,7 +140,7 @@ export function UpdateBanner({
                     />
                   </svg>
                 </div>
-                <span className="text-sm font-medium tabular-nums text-[#c4a44a]">
+                <span className="text-sm font-medium tabular-nums text-primary">
                   <CountingNumber number={doneCount} transition={{ stiffness: 200, damping: 25 }} />
                   /
                   <CountingNumber
@@ -164,7 +164,7 @@ export function UpdateBanner({
               </span>
             </div>
           ) : (
-            <span className="text-sm font-medium text-[#c4a44a]">
+            <span className="text-sm font-medium text-primary">
               <CountingNumber
                 number={availableCount}
                 transition={{ stiffness: 200, damping: 25 }}
@@ -204,7 +204,7 @@ export function UpdateBanner({
           >
             {/* Completed fill */}
             <div
-              className="absolute inset-y-0 left-0 bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] transition-all duration-500 ease-out"
+              className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary to-primary-hover transition-all duration-500 ease-out"
               style={{ width: `${progressPct}%` }}
             />
             {/* Shimmer overlay on active bar */}

@@ -113,9 +113,9 @@ export function PackImportView({
           {/* Install progress */}
           {installing && installProgress && (
             <Fade>
-              <div className="rounded-lg border border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] p-3 shadow-[0_0_12px_rgba(196,164,74,0.06),inset_0_1px_0_rgba(196,164,74,0.04)]">
+              <div className="rounded-lg border border-primary/25 bg-primary/[0.06] p-3 shadow-[0_0_12px_color-mix(in_oklab,var(--primary)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_4%,transparent)]">
                 <div className="flex items-center justify-between text-sm mb-2">
-                  <span className="text-[#c4a44a] font-medium">
+                  <span className="text-primary font-medium">
                     Installing {installProgress.completed + installProgress.failed}/
                     {installProgress.total}
                   </span>
@@ -125,7 +125,7 @@ export function PackImportView({
                 </div>
                 <div className="h-1.5 rounded-full bg-white/[0.06]">
                   <div
-                    className="h-full rounded-full bg-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.5)] transition-all duration-300 ease-out"
+                    className="h-full rounded-full bg-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_50%,transparent)] transition-all duration-300 ease-out"
                     style={{
                       width: `${((installProgress.completed + installProgress.failed) / installProgress.total) * 100}%`,
                     }}
@@ -149,7 +149,7 @@ export function PackImportView({
                     {installedEsouiIds.has(addon.esouiId) ? (
                       <span className="text-[10px] text-emerald-400/60 font-medium">Installed</span>
                     ) : (
-                      <span className="text-[10px] text-[#c4a44a]/60 font-medium">New</span>
+                      <span className="text-[10px] text-primary/60 font-medium">New</span>
                     )}
                   </div>
                 ))}
@@ -177,8 +177,8 @@ export function PackImportView({
           )}
 
           {hasSettings && (
-            <div className="flex items-center gap-2 rounded-lg border border-[#c4a44a]/20 bg-[#c4a44a]/[0.05] px-3 py-2">
-              <span className="text-[11px] text-[#c4a44a]/80">
+            <div className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/[0.05] px-3 py-2">
+              <span className="text-[11px] text-primary/80">
                 {allInstalled
                   ? "Includes addon settings — ready to apply"
                   : "Includes addon settings — will be applied after install"}
@@ -282,7 +282,7 @@ export function PackImportView({
           </div>
           {resolvingCode && (
             <div className="flex items-center justify-center py-4">
-              <div className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+              <div className="inline-block size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
             </div>
           )}
         </div>
