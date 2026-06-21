@@ -457,6 +457,12 @@ pub enum NativeFallbackReason {
     /// The log exceeds the native path's whole-file memory ceiling, so it routes
     /// to the official uploader instead of hard-failing. Split it to upload direct.
     TooLarge,
+    /// The log contains more than one logging session (multiple `BEGIN_LOG`
+    /// markers). The native encoder builds a single segment whose time bounds are
+    /// derived from the first session, so a multi-session file can produce wrong
+    /// segment bounds / a non-rendering report — route to the official uploader
+    /// (or split per session to upload directly).
+    MultiSession,
 }
 
 impl NativeFallbackReason {
@@ -479,6 +485,11 @@ impl NativeFallbackReason {
             NativeFallbackReason::TooLarge => {
                 "Using the official ESO Logs uploader — this log is too large for \
                  direct upload (split it to upload directly)."
+                    .into()
+            }
+            NativeFallbackReason::MultiSession => {
+                "Using the official ESO Logs uploader — this log has multiple \
+                 sessions (split it by session to upload directly)."
                     .into()
             }
         }
@@ -528,6 +539,12 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
     use std::io::BufRead;
     let mut reader = std::io::BufReader::new(file);
     let mut unproven: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Count BEGIN_LOG markers: the native encoder builds ONE segment whose time
+    // bounds come from the first session, so a multi-session file (>1 BEGIN_LOG)
+    // must route to the official uploader. We tally during this same pass to avoid
+    // a second read. Only meaningful on the all-proven path below — the unproven
+    // and early-break arms fall back regardless.
+    let mut begin_log_count: u32 = 0;
     // Read raw bytes per line and decode lossily (like the scanner), so invalid
     // UTF-8 doesn't truncate the scan. An IO error mid-scan FAILS CLOSED — we must
     // not return Native off a partial read, or the all-or-nothing coverage gate is
@@ -543,6 +560,15 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
             Err(_) => return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed),
         }
         let line = String::from_utf8_lossy(&buf);
+        // A BEGIN_LOG header has the type as field index 1: `<ms>,BEGIN_LOG,…`.
+        if line
+            .split(',')
+            .nth(1)
+            .map(|t| t.trim().eq_ignore_ascii_case("BEGIN_LOG"))
+            .unwrap_or(false)
+        {
+            begin_log_count += 1;
+        }
         if let coverage::Coverage::Fallback { unproven: u } = coverage::assess([line.as_ref()]) {
             unproven.extend(u);
             if unproven.len() >= 32 {
@@ -550,13 +576,15 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
             }
         }
     }
-    if unproven.is_empty() {
-        NativeRouting::Native
-    } else {
-        NativeRouting::Fallback(NativeFallbackReason::UnprovenEvents(
+    if !unproven.is_empty() {
+        return NativeRouting::Fallback(NativeFallbackReason::UnprovenEvents(
             unproven.into_iter().collect(),
-        ))
+        ));
     }
+    if begin_log_count > 1 {
+        return NativeRouting::Fallback(NativeFallbackReason::MultiSession);
+    }
+    NativeRouting::Native
 }
 
 /// Run a **native** upload: read the prepared log, build the ZIP'd segment +
@@ -756,6 +784,46 @@ mod routing_tests {
         assert!(
             size <= MAX_NATIVE_BYTES,
             "a small file must not be size-gated"
+        );
+    }
+
+    // A single-session log of only-proven types routes Native when the format
+    // gate is open. (Gate-aware so the test holds if FORMAT_VERSION_CONFIRMED is
+    // ever flipped back to false.)
+    #[test]
+    fn routing_single_session_proven_is_native() {
+        if !super::super::native::format::FORMAT_VERSION_CONFIRMED {
+            return; // gate closed → everything falls back; nothing to assert here.
+        }
+        let (_d, path) = temp_log(
+            "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n\
+             5,ZONE_CHANGED,1,\"Z\",VETERAN\n\
+             10,BEGIN_COMBAT\n20,END_COMBAT\n5,END_LOG\n",
+        );
+        assert!(
+            matches!(assess_native_routing(&path, true), NativeRouting::Native),
+            "single-session proven log should route native"
+        );
+    }
+
+    // A MULTI-session log (>1 BEGIN_LOG), even all-proven, must fall back: the
+    // native encoder's single-segment time bounds can't represent multiple
+    // sessions correctly.
+    #[test]
+    fn routing_multi_session_falls_back() {
+        if !super::super::native::format::FORMAT_VERSION_CONFIRMED {
+            return; // gate closed → falls back as FormatUnconfirmed, not MultiSession.
+        }
+        let (_d, path) = temp_log(
+            "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n\
+             0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n",
+        );
+        assert!(
+            matches!(
+                assess_native_routing(&path, true),
+                NativeRouting::Fallback(NativeFallbackReason::MultiSession)
+            ),
+            "multi-session log must route to the official uploader"
         );
     }
 }
