@@ -25,6 +25,10 @@ pub mod differential;
 pub mod encode;
 pub mod events;
 pub mod format;
+/// Incremental live-streaming index maps (the L7 perf fix) — maintains the
+/// cumulative actor/ability index maps in O(1)/line instead of re-walking the whole
+/// buffer. Proven byte-identical to the [`encode`] re-walk oracle.
+pub mod incremental;
 /// Debug-only native live-streaming upload spike (`spike/native-live`). Compiled out
 /// of release builds — feasibility R&D, never the shipping live path. See
 /// `docs/native-live-streaming-spike-FINDINGS.md`.

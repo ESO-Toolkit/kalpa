@@ -50,6 +50,7 @@ use std::sync::Arc;
 
 use super::client::{MasterTableBytes, NativeUpload, ReportCode, Segment, UploadError};
 use super::events::EventEmitter;
+use super::incremental::IncrementalIndexState;
 use super::session::SessionProvider;
 use crate::uploader::types::UploadOptions;
 
@@ -62,18 +63,19 @@ pub struct LiveSegmenter {
     /// The single emitter carried across all segments.
     emitter: EventEmitter,
     /// Every raw line seen so far — the cumulative master is rebuilt from this each
-    /// cut, and the index maps are refreshed from it as new actors/abilities register.
-    ///
-    /// SPIKE PERF NOTE (deliberately un-optimized): `refresh_maps` re-walks `all_lines`
-    /// on every registering line, so live assembly is O(events × lines) and memory
-    /// grows with the session. That is fine for a debug feasibility prototype but is
-    /// NOT production-shaped. A production build would (a) maintain the index maps
-    /// incrementally instead of re-deriving, and (b) persist the tuple list rather
-    /// than re-walking — both called out in the FINDINGS effort estimate. Correctness
-    /// (byte-identical to the one-shot path) is proven by
-    /// `live_segmenter_cuts_reproduce_the_one_shot_event_stream`; speed is explicitly
-    /// out of scope for the spike.
+    /// CUT (not per line). The index maps are NO LONGER re-derived from this (see
+    /// [`Self::index_state`]); `all_lines` now feeds only the per-cut master rebuild
+    /// (`build_master_table_with_tuples_forced`). Cuts are fight-granular (~dozens
+    /// per session), so the per-cut walk is bounded — unlike the prior per-line
+    /// `refresh_maps` walk, which was the O(events × lines) cost now eliminated.
     all_lines: Vec<String>,
+    /// The incremental actor/ability index maps (the L7 perf fix). Maintained in O(1)
+    /// amortized per line instead of re-walking `all_lines` on every registering
+    /// line; proven byte-identical to the re-walk oracle by the differential tests in
+    /// [`super::incremental`]. Its maps are pushed into the emitter before each
+    /// tuple-allocating line so the live `A` numbering stays identical to the one-shot
+    /// path.
+    index_state: IncrementalIndexState,
     /// Lines fed since the last cut (the body of the segment being assembled).
     segment_lines: Vec<String>,
     /// The next segment id to use (server-sequenced; starts at 1, updated from each
@@ -105,6 +107,7 @@ impl LiveSegmenter {
         Self {
             emitter: EventEmitter::new(),
             all_lines: Vec::new(),
+            index_state: IncrementalIndexState::default(),
             segment_lines: Vec::new(),
             next_segment_id: 1,
             segments_built: 0,
@@ -120,17 +123,22 @@ impl LiveSegmenter {
     pub fn feed(&mut self, line: &str) -> bool {
         self.all_lines.push(line.to_string());
         self.segment_lines.push(line.to_string());
+        // Update the incremental index maps with THIS line first (it maintains the
+        // time-aware live-monster binding, the synthetic-ability splice, and the
+        // actor/ability assignments — all of which must reflect this line before the
+        // emitter, below, allocates this line's tuple). `update` no-ops on lines that
+        // can't change the maps, so calling it unconditionally is cheap and keeps its
+        // internal state (live bindings cleared on UNIT_REMOVED, splice flag) correct.
+        self.index_state.update(line);
         // The emitter allocates a tuple's `A` from its `identity_to_actor` /
         // `ability_to_index` maps AT FEED TIME, so those maps must be current BEFORE
-        // the emitter sees a line that allocates a tuple. A combat/effect/cast line
-        // can be the FIRST registering event for a monster added earlier (which the
-        // registering filter only includes once it registers), and an introduction
-        // line (`UNIT_ADDED`/`ABILITY_INFO`/`EFFECT_INFO`/`BEGIN_LOG`) adds to the
-        // index space. Refresh on BOTH — but only after pushing this line to
-        // `all_lines` (above), so a combat line's own registration is visible. This
-        // keeps the live `A` numbering identical to the one-shot path. Lines that
-        // can neither register nor introduce (boundaries, regen, player-info) skip
-        // the refresh, so the per-event cost is paid only where it matters.
+        // the emitter sees a line that allocates a tuple. Push the (now-updated)
+        // incremental maps into the emitter on any line that can register/introduce
+        // an entity — exactly the kinds that previously triggered the re-walk. This
+        // keeps the live `A` numbering identical to the one-shot path, but in O(1)
+        // amortized per line instead of re-walking `all_lines` (the L7 perf fix). The
+        // pushed maps are content-identical to the prior re-walk (proven by the
+        // `super::incremental` differential tests).
         if matches!(
             kind_of(line),
             Some("UNIT_ADDED")
@@ -148,18 +156,18 @@ impl LiveSegmenter {
         kind == Some("END_COMBAT") || kind == Some("BEGIN_LOG")
     }
 
-    /// Rebuild the emitter's master index maps cumulatively from `all_lines`, pinning
-    /// the already-frozen actor indices so nothing renumbers (the H1 fix). The pin
-    /// makes this idempotent and append-only: an already-indexed actor keeps its
-    /// index; a newly-registering one appends above the max.
+    /// Push the incrementally-maintained master index maps into the emitter. The
+    /// append-only H1 pin is preserved by [`IncrementalIndexState`] itself (an
+    /// already-indexed actor/ability keeps its slot; a newly-registering one appends
+    /// above the max), so this no longer re-walks `all_lines` — it clones the current
+    /// incremental maps (O(distinct entities), not O(events)). The clones are
+    /// content-identical to the prior `actor_ability_maps_forced(&all_lines, …)`
+    /// re-walk, proven at every line by the `super::incremental` differential tests.
     fn refresh_maps(&mut self) {
-        use super::encode::actor_ability_maps_forced;
-        let frozen_actors = self.emitter.frozen_actor_index_map();
-        let frozen_abilities = self.emitter.frozen_ability_index_map();
-        let lines_ref: Vec<&str> = self.all_lines.iter().map(String::as_str).collect();
-        let (id2a, ab2i) =
-            actor_ability_maps_forced(&lines_ref, Some((&frozen_actors, &frozen_abilities)));
-        self.emitter.refresh_master_indices(id2a, ab2i);
+        self.emitter.refresh_master_indices(
+            self.index_state.actor_map().clone(),
+            self.index_state.ability_map().clone(),
+        );
     }
 
     /// Flush any trailing buffered `DAMAGE_SHIELDED` lines into the current segment

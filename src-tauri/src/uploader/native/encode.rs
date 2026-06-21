@@ -1161,7 +1161,13 @@ fn build_tuples_and_pets(
 /// Whether a `COMBAT_EVENT` registers an actor-pairing tuple. The cast that never
 /// landed (`QUEUED`/`TARGET_DEAD`/`CASTER_DEAD`/`ABILITY_ON_COOLDOWN`) and the
 /// self-targeted control/movement results do not.
-fn combat_event_registers(result: &str, self_target: bool) -> bool {
+///
+/// `pub(crate)` so the incremental live-index updater
+/// ([`super::incremental`]) shares this exact gate with the re-walk oracle
+/// ([`registering_monster_identities`] / [`build_tuples_and_pets`]) — the two MUST
+/// not drift on which combat events register, or the incremental actor map would
+/// diverge from the re-walk it is proven against.
+pub(crate) fn combat_event_registers(result: &str, self_target: bool) -> bool {
     if matches!(
         result,
         "QUEUED" | "TARGET_DEAD" | "CASTER_DEAD" | "ABILITY_ON_COOLDOWN"
