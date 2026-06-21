@@ -29,6 +29,11 @@ pub mod format;
 /// cumulative actor/ability index maps in O(1)/line instead of re-walking the whole
 /// buffer. Proven byte-identical to the [`encode`] re-walk oracle.
 pub mod incremental;
+/// Crash-recovery for unterminated native live reports (L2): persists a
+/// `{reportCode, segmentId}` breadcrumb and best-effort terminates leftover codes on
+/// next launch. Gated like the rest of the live path.
+#[cfg(debug_assertions)]
+pub mod orphans;
 /// Debug-only native live-streaming upload spike (`spike/native-live`). Compiled out
 /// of release builds — feasibility R&D, never the shipping live path. See
 /// `docs/native-live-streaming-spike-FINDINGS.md`.
