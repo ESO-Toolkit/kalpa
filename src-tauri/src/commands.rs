@@ -4986,12 +4986,14 @@ fn finalize_backup_replace(
 
 /// Recover character backups orphaned by a crash/power-loss during finalization.
 ///
-/// `finalize_backup_replace` moves the prior backup to a dot-prefixed tombstone
-/// before installing the new one. If the process dies in that window, the prior
-/// good backup is left at `.old-char-<name>-<seq>` with no `char-<name>` at the
-/// final path — invisible to `list_backups`. This restores such a tombstone (or
-/// discards it if the new backup is already in place). Holds the finalize lock
-/// so it never observes a live, mid-swap finalize.
+/// `finalize_backup_replace` moves the prior backup to `.old-char-<name>-<seq>`,
+/// then installs staging at `char-<name>`, then removes the tombstone. A tombstone
+/// is only restored when it is a TRUE mid-finalize crash — proven by the matching
+/// `.tmp-char-<name>-<seq>` staging dir still being present (the install rename
+/// hadn't happened yet). Otherwise the tombstone is stale (the swap completed, or
+/// the user later deleted the visible backup) and is discarded, so a deleted
+/// backup never resurrects even if an earlier cleanup failed. Holds the finalize
+/// lock so it never observes a live, mid-swap finalize.
 fn recover_orphaned_backups(backups_root: &Path) {
     let _guard = BACKUP_FINALIZE_LOCK
         .lock()
@@ -5012,20 +5014,27 @@ fn recover_orphaned_backups(backups_root: &Path) {
             continue;
         };
         // rest is "<backup_name>-<seq>"; the seq is the trailing numeric segment.
-        let Some((base, _seq)) = rest.rsplit_once('-') else {
+        let Some((base, seq)) = rest.rsplit_once('-') else {
             continue;
         };
         if base.is_empty() {
             continue;
         }
         let final_dir = backups_root.join(format!("char-{base}"));
+        let staging = backups_root.join(format!(".tmp-char-{base}-{seq}"));
         if final_dir.exists() {
             // The replacement already landed; the tombstone is stale.
             let _ = fs::remove_dir_all(&path);
-        } else {
-            // Crash between the two finalize renames — restore the prior backup
-            // so it is discoverable and restorable again.
+        } else if staging.exists() {
+            // True crash between the two finalize renames (staging never got
+            // installed) — restore the prior backup and discard the dead attempt.
+            let _ = fs::remove_dir_all(&staging);
             let _ = fs::rename(&path, &final_dir);
+        } else {
+            // No final dir AND no staging: not a mid-finalize crash. The backup
+            // was installed and then deleted — discard the tombstone rather than
+            // resurrecting a backup the user removed.
+            let _ = fs::remove_dir_all(&path);
         }
     }
 }
@@ -7830,19 +7839,37 @@ mod tests {
     }
 
     #[test]
-    fn recover_restores_orphaned_tombstone() {
+    fn recover_restores_tombstone_on_true_crash() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // Simulate a crash mid-finalize: prior backup left at the tombstone,
-        // no char-<name> at the final path.
+        // True mid-finalize crash: prior backup at the tombstone, the new
+        // attempt's staging still present, no char-<name> installed yet.
         let tombstone = root.join(".old-char-mychar-7");
         fs::create_dir_all(&tombstone).unwrap();
         fs::write(tombstone.join("data.lua"), b"good").unwrap();
+        fs::create_dir_all(root.join(".tmp-char-mychar-7")).unwrap();
 
         recover_orphaned_backups(root);
 
         assert!(root.join("char-mychar").join("data.lua").is_file());
         assert!(!tombstone.exists());
+        assert!(!root.join(".tmp-char-mychar-7").exists());
+    }
+
+    #[test]
+    fn recover_does_not_resurrect_deleted_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Stale tombstone with NO matching staging and no final dir: the backup
+        // was installed then deleted. It must NOT come back.
+        let tombstone = root.join(".old-char-mychar-7");
+        fs::create_dir_all(&tombstone).unwrap();
+        fs::write(tombstone.join("data.lua"), b"old").unwrap();
+
+        recover_orphaned_backups(root);
+
+        assert!(!tombstone.exists());
+        assert!(!root.join("char-mychar").exists());
     }
 
     #[test]

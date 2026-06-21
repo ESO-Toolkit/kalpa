@@ -814,11 +814,37 @@ fn roster_world_layer(
     }
 }
 
+/// Common addon config-section keys that pass the character-name shape check but
+/// are not characters. Compared case-insensitively against the whole key.
+const CONFIG_SECTION_KEYS: &[&str] = &[
+    "settings",
+    "setting",
+    "profile",
+    "profiles",
+    "options",
+    "option",
+    "config",
+    "configuration",
+    "data",
+    "global",
+    "globals",
+    "default",
+    "defaults",
+    "general",
+    "account",
+    "accountwide",
+    "preferences",
+    "version",
+    "server",
+    "servers",
+];
+
 /// Does `key` have the shape of an ESO character name? ESO names start with an
 /// uppercase letter and contain only letters, spaces, hyphens, and apostrophes.
-/// A raw `^Mx` caret suffix is allowed (the part before it is checked). This is
-/// the discriminator used to recover characters from markerless accounts without
-/// admitting lowercase addon config keys (`settings`, `guilds`, `profiles`).
+/// A raw `^Mx` caret suffix is allowed (the part before it is checked). Common
+/// capitalized config-section words (`Settings`, `Profile`, …) are rejected even
+/// though they match the shape. This is the discriminator used to recover
+/// characters from accounts without admitting addon config keys.
 fn looks_like_character_name(key: &str) -> bool {
     let base = key.split('^').next().unwrap_or(key);
     let mut chars = base.chars();
@@ -830,8 +856,15 @@ fn looks_like_character_name(key: &str) -> bool {
     if len == 0 || len > 32 {
         return false;
     }
-    base.chars()
+    if !base
+        .chars()
         .all(|c| c.is_alphabetic() || matches!(c, ' ' | '-' | '\'' | '\u{2019}'))
+    {
+        return false;
+    }
+    // Reject well-known config-section names that happen to look like a name.
+    let lowered = base.to_lowercase();
+    !CONFIG_SECTION_KEYS.contains(&lowered.as_str())
 }
 
 fn roster_chars_under_account(
@@ -1712,6 +1745,28 @@ mod tests {
                         ["Mainchar"] = { ["x"] = 1 },
                         ["settings"] = { ["volume"] = 5 },
                         ["profiles"] = { ["p1"] = true },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Mainchar"]);
+    }
+
+    #[test]
+    fn roster_excludes_capitalized_config_siblings() {
+        // Capitalized config-section tables match the name shape but are not
+        // characters; only the real character is kept.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["x"] = 1 },
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["Settings"] = { ["volume"] = 5 },
+                        ["Profile"] = { ["p"] = 1 },
+                        ["Servers"] = { ["na"] = true },
                     },
                 },
             }"#,
