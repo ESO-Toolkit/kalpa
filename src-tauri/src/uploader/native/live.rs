@@ -32,10 +32,13 @@
 //!   segment boundary. The
 //!   `one_emitter_with_fight_cuts_matches_one_shot_build_byte_for_byte` test proves a
 //!   cut emitter produces byte-identical events to the proven one-shot `build()`.
-//! * CUMULATIVE master per cut, rebuilt from `all_lines_so_far` with the prior frozen
-//!   actor indices PINNED ([`encode::actor_ability_maps_forced`] +
-//!   [`encode::build_master_table_with_tuples_forced`]) so a late-registering actor
-//!   never renumbers an earlier segment's tuple `A`-refs (hazard H1).
+//! * CUMULATIVE master per cut, RENDERED from the incremental
+//!   [`super::incremental::IncrementalMasterState`] (maintained O(1)-amortized per
+//!   line, no `all_lines` buffer) with the prior frozen actor/ability indices PINNED
+//!   so a late-registering actor never renumbers an earlier segment's tuple `A`-refs
+//!   (hazard H1). Proven byte-identical to the prior
+//!   [`encode::build_master_table_with_tuples_forced`] re-walk (retained as the test
+//!   oracle) at every cut by `incremental_master_matches_rewalk_at_every_cut`.
 //! * Cut STRICTLY at fight boundaries (`END_COMBAT`) and at every `BEGIN_LOG` — never
 //!   a timer / every-N-events window — so an in-flight correlation never strands.
 //! * Per-segment wall window from [`EventEmitter::live_segment_time_bounds`]
@@ -50,32 +53,38 @@ use std::sync::Arc;
 
 use super::client::{MasterTableBytes, NativeUpload, ReportCode, Segment, UploadError};
 use super::events::EventEmitter;
-use super::incremental::IncrementalIndexState;
+use super::incremental::{IncrementalIndexState, IncrementalMasterState};
 use super::session::SessionProvider;
 use crate::uploader::types::UploadOptions;
 
 /// The pure, network-free core of the live driver: owns the long-lived emitter, the
-/// cumulative raw-line buffer, and the frozen index maps, and produces a ready-to-send
-/// payload on each fight-boundary cut. Separated from the I/O loop so the state
-/// machine (cut policy, H1 pinning, time bounds, validation) is unit-testable without
-/// a server or a real growing file.
+/// incremental index + master state, and produces a ready-to-send payload on each
+/// fight-boundary cut. Separated from the I/O loop so the state machine (cut policy,
+/// H1 pinning, time bounds, validation) is unit-testable without a server or a real
+/// growing file.
+///
+/// Memory: the unbounded `all_lines: Vec<String>` buffer of the original spike is
+/// GONE (Step 2b). The cumulative master is now rendered each cut from the
+/// incremental [`IncrementalMasterState`] (O(distinct entities), proven byte-identical
+/// to the prior `build_master_table_with_tuples_forced` re-walk by the differential
+/// test below), so no raw line is retained past the segment it belongs to.
 pub struct LiveSegmenter {
     /// The single emitter carried across all segments.
     emitter: EventEmitter,
-    /// Every raw line seen so far — the cumulative master is rebuilt from this each
-    /// CUT (not per line). The index maps are NO LONGER re-derived from this (see
-    /// [`Self::index_state`]); `all_lines` now feeds only the per-cut master rebuild
-    /// (`build_master_table_with_tuples_forced`). Cuts are fight-granular (~dozens
-    /// per session), so the per-cut walk is bounded — unlike the prior per-line
-    /// `refresh_maps` walk, which was the O(events × lines) cost now eliminated.
-    all_lines: Vec<String>,
     /// The incremental actor/ability index maps (the L7 perf fix). Maintained in O(1)
-    /// amortized per line instead of re-walking `all_lines` on every registering
+    /// amortized per line instead of re-walking the whole buffer on every registering
     /// line; proven byte-identical to the re-walk oracle by the differential tests in
     /// [`super::incremental`]. Its maps are pushed into the emitter before each
     /// tuple-allocating line so the live `A` numbering stays identical to the one-shot
-    /// path.
+    /// path, and they are the PIN passed to the master renderer each cut.
     index_state: IncrementalIndexState,
+    /// The incremental master-table record state (Step 2b). Maintains the header,
+    /// captured actor records, first-write-wins ability signals + appearance order,
+    /// and pet candidates per line, so each cut's cumulative master is RENDERED from
+    /// it (`render_master`) instead of re-walking an `all_lines` buffer. Proven
+    /// byte-identical to the re-walk oracle at every cut by the differential test
+    /// `incremental_master_matches_rewalk_at_every_cut`.
+    master_state: IncrementalMasterState,
     /// Lines fed since the last cut (the body of the segment being assembled).
     segment_lines: Vec<String>,
     /// The next segment id to use (server-sequenced; starts at 1, updated from each
@@ -106,8 +115,8 @@ impl LiveSegmenter {
     pub fn new() -> Self {
         Self {
             emitter: EventEmitter::new(),
-            all_lines: Vec::new(),
             index_state: IncrementalIndexState::default(),
+            master_state: IncrementalMasterState::default(),
             segment_lines: Vec::new(),
             next_segment_id: 1,
             segments_built: 0,
@@ -121,7 +130,6 @@ impl LiveSegmenter {
     /// should be flushed BEFORE the new session's lines accumulate, which the driver
     /// handles by cutting when this returns true.
     pub fn feed(&mut self, line: &str) -> bool {
-        self.all_lines.push(line.to_string());
         self.segment_lines.push(line.to_string());
         // Update the incremental index maps with THIS line first (it maintains the
         // time-aware live-monster binding, the synthetic-ability splice, and the
@@ -130,6 +138,11 @@ impl LiveSegmenter {
         // can't change the maps, so calling it unconditionally is cheap and keeps its
         // internal state (live bindings cleared on UNIT_REMOVED, splice flag) correct.
         self.index_state.update(line);
+        // Fold this line into the incremental MASTER record state too (header,
+        // captured actors, ability signals + appearance order, pet candidates), so the
+        // cumulative master can be rendered each cut WITHOUT an `all_lines` re-walk.
+        // Like the index state it no-ops on irrelevant lines.
+        self.master_state.update(line);
         // The emitter allocates a tuple's `A` from its `identity_to_actor` /
         // `ability_to_index` maps AT FEED TIME, so those maps must be current BEFORE
         // the emitter sees a line that allocates a tuple. Push the (now-updated)
@@ -196,7 +209,6 @@ impl LiveSegmenter {
     /// which case the driver should fall back / stop rather than ship a broken
     /// segment.
     pub fn build_next_segment(&mut self) -> Result<Option<LiveSegmentPayload>, String> {
-        use super::encode::build_master_table_with_tuples_forced;
         use super::events::validate_segment_text;
 
         // Render the events emitted since the last cut. We re-run the emitter's
@@ -225,19 +237,14 @@ impl LiveSegmenter {
             return Ok(None);
         };
 
-        // Frame the body into the fights-segment text (header + count + events).
+        // Frame the body into the fights-segment text (header + count + events). The
+        // log version is the first BEGIN_LOG's f[3], captured incrementally by the
+        // master state (the segment-framing and master log_version are the same value).
         let log_version = self
-            .all_lines
-            .iter()
-            .find_map(|l| {
-                let f = super::encode::split_csv_quoted_pub(l);
-                if f.get(1).map(|s| s.trim()) == Some("BEGIN_LOG") {
-                    f.get(3).map(|s| s.trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .ok_or("live segment has no BEGIN_LOG log version")?;
+            .master_state
+            .log_version()
+            .ok_or("live segment has no BEGIN_LOG log version")?
+            .to_string();
         let segment_text = super::serialize::FightsSegmentDoc {
             log_version: &log_version,
             game_version: "1",
@@ -251,19 +258,18 @@ impl LiveSegmenter {
         // CUMULATIVE master pinned to the emitter's current frozen actor AND ability
         // indices (the H1 fix, both axes). `feed` keeps the emitter's maps current as
         // introduction/registering lines arrive, so the emitter's frozen maps ARE the
-        // canonical index space; build the master from those same pinned maps + the
-        // emitter's tuple table, so the segment's `A`/C refs and the master's
-        // tuples/actors/abilities are in lockstep.
+        // canonical index space; render the master from the incremental master state
+        // (maintained per line, NO `all_lines` re-walk) using those same pinned maps +
+        // the emitter's tuple table, so the segment's `A`/C refs and the master's
+        // tuples/actors/abilities are in lockstep. Proven byte-identical to the prior
+        // `build_master_table_with_tuples_forced` re-walk at every cut by the
+        // differential test `incremental_master_matches_rewalk_at_every_cut`.
         let frozen_actors = self.emitter.frozen_actor_index_map();
         let frozen_abilities = self.emitter.frozen_ability_index_map();
-        let lines_ref: Vec<&str> = self.all_lines.iter().map(String::as_str).collect();
-        let master_text = build_master_table_with_tuples_forced(
-            &lines_ref,
-            self.emitter.tuples(),
-            &frozen_actors,
-            &frozen_abilities,
-        )
-        .ok_or("live cumulative master failed to build")?;
+        let master_text = self
+            .master_state
+            .render_master(self.emitter.tuples(), &frozen_actors, &frozen_abilities)
+            .ok_or("live cumulative master failed to build")?;
 
         // Master/segment tuple-count cross-check — the validator can't see the master
         // bytes, so a stale/delta master would pass validation but not render. The
@@ -612,6 +618,201 @@ mod tests {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    // ── Step 2b differential gate ────────────────────────────────────────────────
+
+    /// Drive a `LiveSegmenter` over `lines` and, at EVERY cut boundary the driver
+    /// would build a master at (each fight boundary with settled shields, plus the
+    /// final flush), assert the INCREMENTAL master text
+    /// (`master_state.render_master(...)`) equals the re-walk ORACLE
+    /// (`build_master_table_with_tuples_forced(&all_lines_so_far, emitter.tuples(),
+    /// frozen_actors, frozen_abilities)`) BYTE-FOR-BYTE.
+    ///
+    /// `all_lines` is reconstructed in the TEST only (the driver no longer keeps it)
+    /// so the retained re-walk oracle can be evaluated at each cut with the SAME
+    /// pinned maps the driver applies (the emitter's frozen maps, == the incremental
+    /// index state's maps, which Step 2a proved equal the re-walk's maps). Returns the
+    /// number of cuts compared, so a fixture that exercises no cut fails loudly.
+    fn assert_incremental_master_matches_rewalk(lines: &[&str]) -> usize {
+        use super::super::encode::build_master_table_with_tuples_forced;
+        let mut seg = LiveSegmenter::new();
+        let mut all_lines: Vec<String> = Vec::new();
+        let mut compared = 0usize;
+
+        // Compare the incremental master against the re-walk oracle using the
+        // segmenter's CURRENT state (the same inputs `build_next_segment` would use).
+        // Only when there is something to build (events emitted + a wall window),
+        // mirroring the driver's skip-empty-window guard, so the comparison happens at
+        // exactly the cuts the driver renders a master at.
+        fn compare_if_buildable(seg: &LiveSegmenter, all_lines: &[String], compared: &mut usize) {
+            if seg.emitter.drain_segment_events().event_count == 0 {
+                return;
+            }
+            if seg.emitter.live_segment_time_bounds().is_none() {
+                return;
+            }
+            let frozen_actors = seg.emitter.frozen_actor_index_map();
+            let frozen_abilities = seg.emitter.frozen_ability_index_map();
+            let refs: Vec<&str> = all_lines.iter().map(String::as_str).collect();
+            let oracle = build_master_table_with_tuples_forced(
+                &refs,
+                seg.emitter.tuples(),
+                &frozen_actors,
+                &frozen_abilities,
+            )
+            .expect("re-walk oracle master must build");
+            let incremental = seg
+                .master_state
+                .render_master(seg.emitter.tuples(), &frozen_actors, &frozen_abilities)
+                .expect("incremental master must build");
+            assert_eq!(
+                incremental,
+                oracle,
+                "incremental master diverged from the re-walk oracle at cut {} \
+                 (after {} lines)",
+                *compared + 1,
+                all_lines.len()
+            );
+            *compared += 1;
+        }
+
+        for line in lines {
+            all_lines.push((*line).to_string());
+            let boundary = seg.feed(line);
+            if boundary && seg.shields_settled() {
+                compare_if_buildable(&seg, &all_lines, &mut compared);
+                // Advance the driver state exactly as the real pump does, so the next
+                // cut's emitter/master state is correct.
+                let _ = seg.build_next_segment().expect("build must not error");
+            }
+        }
+        // Final flush (the driver drains trailing shields then builds once more).
+        seg.drain_trailing_shields();
+        compare_if_buildable(&seg, &all_lines, &mut compared);
+        let _ = seg
+            .build_next_segment()
+            .expect("final build must not error");
+        compared
+    }
+
+    fn raw_fixture(text: &str) -> Vec<String> {
+        text.lines().map(str::to_string).collect()
+    }
+
+    // The CORE Step 2b gate over the synthetic correlation + two-session fixtures and
+    // the divergence-#4 fixture: the incremental master is byte-identical to the
+    // retained re-walk oracle at EVERY cut.
+    #[test]
+    fn incremental_master_matches_rewalk_at_every_cut() {
+        for (name, text) in [
+            (
+                "live_correlation",
+                include_str!("testdata/live_correlation_synthetic.log"),
+            ),
+            (
+                "two_session",
+                include_str!("testdata/two_session_synthetic.log"),
+            ),
+            (
+                "f1_late_registration",
+                include_str!("testdata/inc_f1_late_registration.log"),
+            ),
+            (
+                "f2_added_never_registers",
+                include_str!("testdata/inc_f2_added_never_registers.log"),
+            ),
+            (
+                "f4_recycled_unit",
+                include_str!("testdata/inc_f4_recycled_unit.log"),
+            ),
+            (
+                "f5_regen_before_ability",
+                include_str!("testdata/inc_f5_regen_before_ability.log"),
+            ),
+            (
+                "f7_intra_event_both_register",
+                include_str!("testdata/inc_f7_intra_event_both_register.log"),
+            ),
+            (
+                "f3_damage_type_late",
+                include_str!("testdata/inc_f3_damage_type_late.log"),
+            ),
+        ] {
+            let lines = raw_fixture(text);
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            let cuts = assert_incremental_master_matches_rewalk(&refs);
+            assert!(
+                cuts >= 1,
+                "fixture {name} exercised no buildable cut — the gate proved nothing"
+            );
+        }
+    }
+
+    // The COMBAT capture (chunk1_raw.log: a real Ossein-Cage session — 12 actors, 340
+    // abilities, 94 combat events, one fight) is the strongest oracle: drive the live
+    // segmenter over it and assert the incremental master == the re-walk at every cut.
+    #[test]
+    fn incremental_master_matches_rewalk_on_combat_capture() {
+        let lines = raw_fixture(include_str!("testdata/chunk1_raw.log"));
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let cuts = assert_incremental_master_matches_rewalk(&refs);
+        assert!(
+            cuts >= 1,
+            "the combat capture must exercise at least one cut"
+        );
+    }
+
+    // Divergence #4 made explicit: ability 38901 gets its ABILITY_INFO in fight 1 (no
+    // damage type yet → generic 2) and its first FIRE COMBAT_EVENT only in fight 2. The
+    // fight-2 cut's master must show the FIRE damage type (4) for 38901 — i.e. the
+    // ability record is RE-RENDERED from the now-learned signal, not frozen at first
+    // ABILITY_INFO sight. (The byte-equality gate above already enforces this; this
+    // test pins the concrete observable so a regression is legible.)
+    #[test]
+    fn incremental_master_re_renders_late_learned_damage_type() {
+        let lines = raw_fixture(include_str!("testdata/inc_f3_damage_type_late.log"));
+        let mut seg = LiveSegmenter::new();
+        let mut fight1_master: Option<String> = None;
+        let mut fight2_master: Option<String> = None;
+
+        for line in &lines {
+            let boundary = seg.feed(line);
+            if boundary && seg.shields_settled() {
+                if seg.emitter.drain_segment_events().event_count > 0
+                    && seg.emitter.live_segment_time_bounds().is_some()
+                {
+                    let fa = seg.emitter.frozen_actor_index_map();
+                    let fb = seg.emitter.frozen_ability_index_map();
+                    let m = seg
+                        .master_state
+                        .render_master(seg.emitter.tuples(), &fa, &fb)
+                        .expect("master");
+                    if fight1_master.is_none() {
+                        fight1_master = Some(m);
+                    } else if fight2_master.is_none() {
+                        fight2_master = Some(m);
+                    }
+                }
+                let _ = seg.build_next_segment().expect("build");
+            }
+        }
+
+        let f1 = fight1_master.expect("fight 1 must produce a master");
+        let f2 = fight2_master.expect("fight 2 must produce a master");
+        // Ability record shape: `{name}|{dt}|{id}|{icon}|0|{flags}`. In fight 1 no
+        // damage event has been seen, so 38901 is generic (dt=2); in fight 2 the FIRE
+        // damage event has been folded, so 38901 is fire (dt=4).
+        assert!(
+            f1.contains("Crystal Frags|2|38901|"),
+            "fight-1 master should show ability 38901 as GENERIC (dt=2) before any \
+             damage event:\n{f1}"
+        );
+        assert!(
+            f2.contains("Crystal Frags|4|38901|"),
+            "fight-2 master should RE-RENDER ability 38901 as FIRE (dt=4) once the \
+             late FIRE COMBAT_EVENT is learned:\n{f2}"
+        );
     }
 
     // Validates the EXACT synthetic session the `spike-live-feed.mjs` tester appends,

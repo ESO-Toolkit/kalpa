@@ -38,7 +38,11 @@
 
 use std::collections::HashMap;
 
-use super::encode::{combat_event_registers, split_csv_quoted_pub, ActorInfo};
+use super::encode::{
+    accumulate_ability_signals, combat_event_registers, join_lines, resolve_ability_section,
+    split_csv_quoted_pub, AbilitySignals, ActorInfo,
+};
+use super::serialize::MasterTableDoc;
 
 /// The synthetic `HEALTH_RECOVERY` ability id spliced into the ability table at the
 /// first `HEALTH_REGEN` (mirrors `encode::build_ability_table_pinned`). Kept in sync
@@ -264,6 +268,301 @@ impl IncrementalIndexState {
         self.ability_to_index
             .insert(id.to_string(), self.ability_next);
         self.ability_next += 1;
+    }
+}
+
+// ── Incremental MASTER-TABLE record state (Step 2b) ──────────────────────────────
+
+/// An actor captured at its `UNIT_ADDED`, ready to render its master record once its
+/// pinned index is known. Mirrors `build_master_table_inner`'s `PendingActor` —
+/// `owner_is_player` is resolved AT the `UNIT_ADDED` (from the live unit→is-player
+/// map at that moment), so it is captured once and never recomputed.
+struct CapturedActor {
+    actor: ActorInfo,
+    owner_is_player: bool,
+}
+
+/// A pet candidate captured at a player-owned monster's `UNIT_ADDED`, in file order.
+/// Both sides are stored as IDENTITIES (not indices) because a pet record's
+/// `{petIdx}|{ownerIdx}` is rendered against the cut's FINAL pinned actor map
+/// (matching `build_tuples_and_pets`, which resolves pet/owner indices from the
+/// final `identity_to_actor`). De-dup is by the resolved `(petIdx, ownerIdx)` at
+/// render time, exactly as the re-walk de-dups.
+struct PetCandidate {
+    pet_identity: String,
+    owner_identity: String,
+}
+
+/// Maintains the cumulative MASTER-TABLE *record* state incrementally, line by line,
+/// so the live driver renders each cut's master directly from this state +
+/// `emitter.tuples()` instead of re-walking the unbounded `all_lines` buffer
+/// (`build_master_table_with_tuples_forced`). Proven byte-identical to that re-walk
+/// oracle at every cut by the differential test in [`super::live`].
+///
+/// What it maintains, mirroring `build_master_table_inner`:
+///
+/// * header: `log_version`, `server`, `begin_wall` from the FIRST `BEGIN_LOG`.
+/// * actors: each registering/player identity's [`CapturedActor`] (the `ActorInfo`
+///   plus `owner_is_player` resolved at its `UNIT_ADDED`), keyed by identity.
+///   Records are rendered at cut time in PINNED-INDEX order using the index from
+///   the companion [`IncrementalIndexState`]'s actor map (which already reproduces
+///   the re-walk's registering-monster inclusion + append-only pin).
+/// * abilities: first-write-wins [`AbilitySignals`] + the first-appearance id order,
+///   re-rendered each cut (divergence #4: an ability's damageType can be learned in
+///   a LATER segment than its `ABILITY_INFO`, so records cannot be frozen).
+/// * pets: ordered [`PetCandidate`]s captured at each player-owned `UNIT_ADDED`.
+///
+/// It owns the SAME live unit-binding bookkeeping the re-walk recomputes per call
+/// (`unit_is_player` for owner resolution; `pet_owner_live` for the time-aware
+/// owner lookup). The tuple section is supplied externally (`emitter.tuples()`), so
+/// no tuple state is kept here.
+#[derive(Default)]
+pub struct IncrementalMasterState {
+    // ── Header (first BEGIN_LOG) ────────────────────────────────────────────────
+    log_version: Option<String>,
+    server: String,
+    begin_wall: u64,
+
+    // ── Actor records ───────────────────────────────────────────────────────────
+    /// identity → its captured record inputs (first UNIT_ADDED for the identity).
+    captured_actors: HashMap<String, CapturedActor>,
+    /// Live raw unitId → is-player, for resolving whether a monster's owner is a
+    /// player (mirrors `build_master_table_inner`'s `unit_is_player`). Last write
+    /// wins (recycled unit ids rebind), never cleared — matching the re-walk, which
+    /// only ever inserts into this map.
+    unit_is_player: HashMap<String, bool>,
+
+    // ── Ability records ─────────────────────────────────────────────────────────
+    /// First-write-wins damage/heal/status/info signals (shared accumulator).
+    ability_signals: AbilitySignals,
+    /// Ability ids in first-appearance order (incl. the synthetic at first
+    /// HEALTH_REGEN), the order `resolve_ability_section` assigns indices in.
+    ordered_ability_ids: Vec<String>,
+    /// Dedup guard for `ordered_ability_ids` (mirrors the re-walk's `seen` set).
+    ability_seen: std::collections::BTreeSet<String>,
+    /// Whether the synthetic HEALTH_RECOVERY has been placed (first HEALTH_REGEN).
+    synthetic_placed: bool,
+
+    // ── Pet records ─────────────────────────────────────────────────────────────
+    /// Pet candidates in file (UNIT_ADDED) order.
+    pet_candidates: Vec<PetCandidate>,
+    /// Time-aware live raw unitId → (identity, is_player), set on UNIT_ADDED and
+    /// cleared on UNIT_REMOVED — the `build_tuples_and_pets` `live` map, but storing
+    /// the identity (indices are resolved at render time from the final pin).
+    pet_owner_live: HashMap<String, (String, bool)>,
+}
+
+impl IncrementalMasterState {
+    /// Process one raw line, folding it into the cumulative master record state.
+    /// Idempotent semantics match `build_master_table_inner`'s single pass: a
+    /// first-write-wins field is never overwritten; an already-captured actor /
+    /// already-seen ability is not re-captured.
+    pub fn update(&mut self, line: &str) {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            return;
+        };
+        // Ability signals (damage element / heal / EFFECT_INFO status / ABILITY_INFO)
+        // are folded for EVERY relevant line, exactly as the re-walk's pass 1.
+        accumulate_ability_signals(&mut self.ability_signals, kind, &f, line);
+
+        match kind {
+            "BEGIN_LOG" if self.log_version.is_none() => {
+                // tail: <wallMs>,<logVersion>,"<server>",...
+                let rest = line.splitn(3, ',').nth(2).unwrap_or("");
+                let mut t = split_csv_quoted_pub(rest).into_iter();
+                self.begin_wall = t.next().and_then(|w| w.trim().parse().ok()).unwrap_or(0);
+                self.log_version = Some(t.next().unwrap_or("").trim().to_string());
+                self.server = t.next().unwrap_or("").trim().to_string();
+            }
+            "UNIT_ADDED" => self.on_unit_added(line, &f),
+            "UNIT_REMOVED" => {
+                if let Some(u) = f.get(2) {
+                    self.pet_owner_live.remove(u.trim());
+                }
+            }
+            "HEALTH_REGEN" => {
+                if !self.synthetic_placed {
+                    self.synthetic_placed = true;
+                    if self.ability_seen.insert(HEALTH_RECOVERY_ID.to_string()) {
+                        self.ordered_ability_ids
+                            .push(HEALTH_RECOVERY_ID.to_string());
+                    }
+                }
+            }
+            "ABILITY_INFO" => {
+                // First-appearance ordering: only place an id we have an ABILITY_INFO
+                // for (the signal accumulate above stored it), mirroring the re-walk's
+                // `info.contains_key` guard.
+                let rest = line.splitn(3, ',').nth(2).unwrap_or("");
+                let id = rest.split(',').next().unwrap_or("").trim().to_string();
+                if !id.is_empty()
+                    && self.ability_signals.info.contains_key(&id)
+                    && self.ability_seen.insert(id.clone())
+                {
+                    self.ordered_ability_ids.push(id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_unit_added(&mut self, line: &str, f: &[&str]) {
+        let rest = line.splitn(3, ',').nth(2).unwrap_or("");
+        let Some(actor) = ActorInfo::parse(rest) else {
+            return;
+        };
+        let identity = actor.identity();
+        let is_player = matches!(actor, ActorInfo::Player { .. });
+
+        // Track this unit's is-player status for owner resolution (mirrors
+        // `unit_is_player`). Keyed on the raw unit id; last write wins.
+        if let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) {
+            // Owner-is-player is resolved NOW, against bindings set by EARLIER
+            // UNIT_ADDEDs — so resolve before inserting this unit's own binding,
+            // matching the re-walk (which inserts this unit then reads `owner_unit_id`
+            // against the map that already holds prior units; a unit is never its own
+            // owner, so insertion order vs. this read does not matter, but we keep the
+            // re-walk's exact sequence: insert is below).
+            // Pet-owner time-aware live map (build_tuples_and_pets `live`): the pet
+            // record uses the owner's binding as it stood at THIS UNIT_ADDED.
+            let owner_unit_id = match &actor {
+                ActorInfo::Monster { owner_unit_id, .. }
+                    if !owner_unit_id.is_empty() && owner_unit_id != "0" =>
+                {
+                    Some(owner_unit_id.clone())
+                }
+                _ => None,
+            };
+            let owner_is_player = owner_unit_id
+                .as_deref()
+                .and_then(|o| self.unit_is_player.get(o).copied())
+                .unwrap_or(false);
+
+            // Pet candidate: capture in file order if the owner unit is currently live
+            // AND a player (build_tuples_and_pets resolves pet/owner indices at render
+            // time from the final pin, so store identities). Mirror the re-walk's gate:
+            // the owner must be in the live map (added, not yet removed) and is_player.
+            if let Some(owner) = owner_unit_id.as_deref() {
+                if let Some((owner_identity, owner_live_is_player)) =
+                    self.pet_owner_live.get(owner).cloned()
+                {
+                    if owner_live_is_player {
+                        self.pet_candidates.push(PetCandidate {
+                            pet_identity: identity.clone(),
+                            owner_identity,
+                        });
+                    }
+                }
+            }
+
+            // Capture the actor record inputs once (dedup by identity across sessions).
+            self.captured_actors
+                .entry(identity.clone())
+                .or_insert_with(|| CapturedActor {
+                    actor: actor.clone(),
+                    owner_is_player,
+                });
+
+            // Now record this unit's bindings for LATER lines.
+            self.unit_is_player.insert(unit_id.clone(), is_player);
+            self.pet_owner_live.insert(unit_id, (identity, is_player));
+        }
+    }
+
+    /// The log version captured from the first `BEGIN_LOG` (its field `f[3]`), used
+    /// to frame both the master header and the fights segment. `None` until a
+    /// `BEGIN_LOG` has been seen.
+    pub fn log_version(&self) -> Option<&str> {
+        self.log_version.as_deref()
+    }
+
+    /// Render the FULL cumulative master text for a cut, byte-identical to
+    /// `build_master_table_with_tuples_forced(&all_lines, tuples, pinned_actors,
+    /// pinned_abilities)`. `pinned_actors`/`pinned_abilities` are the cut's frozen
+    /// index maps (the emitter's, == the companion `IncrementalIndexState`'s maps);
+    /// `tuples` is `emitter.tuples()`. Returns `None` only when no `BEGIN_LOG` has
+    /// been seen (no log version), matching the oracle's `log_version?`.
+    pub fn render_master(
+        &self,
+        tuples: &[(u32, u32, u32)],
+        pinned_actors: &HashMap<String, u32>,
+        pinned_abilities: &HashMap<String, u32>,
+    ) -> Option<String> {
+        let log_version = self.log_version.clone()?;
+
+        // ── Actors: rendered in PINNED-INDEX order. The pinned actor map IS the set
+        // of actors the master lists (every registering monster + every player; a
+        // never-registering monster is absent from the map, exactly as the re-walk
+        // drops it). Each captured actor renders at its pinned index. ───────────────
+        let mut by_index: Vec<(u32, &CapturedActor)> = pinned_actors
+            .iter()
+            .filter_map(|(identity, &idx)| self.captured_actors.get(identity).map(|ca| (idx, ca)))
+            .collect();
+        by_index.sort_by_key(|(i, _)| *i);
+        let actors: Vec<String> = by_index
+            .iter()
+            .map(|(index, ca)| {
+                ca.actor.to_master_record(
+                    *index as usize,
+                    &self.server,
+                    self.begin_wall,
+                    ca.owner_is_player,
+                )
+            })
+            .collect();
+
+        // ── Abilities: re-render each cut from the first-write-wins signals + the
+        // first-appearance id order, pinned (divergence #4). ──────────────────────
+        let (ability_records, _ability_index) = resolve_ability_section(
+            &self.ordered_ability_ids,
+            &self.ability_signals,
+            Some(pinned_abilities),
+        );
+
+        // ── Tuples: the emitter's table, formatted `{s}|{t}|{a}`. ─────────────────
+        let tuple_records: Vec<String> = tuples
+            .iter()
+            .map(|(s, t, a)| format!("{s}|{t}|{a}"))
+            .collect();
+
+        // ── Pets: resolve each candidate's (petIdx, ownerIdx) from the final pinned
+        // map, in capture order, de-duplicated — exactly `build_tuples_and_pets`. A
+        // candidate whose pet identity is not in the pinned map is dropped (the
+        // re-walk's `let Some(&idx) = identity_to_actor.get(&identity) else continue`).
+        let mut pet_seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut pets: Vec<String> = Vec::new();
+        for cand in &self.pet_candidates {
+            let Some(&pet_idx) = pinned_actors.get(&cand.pet_identity) else {
+                continue;
+            };
+            let Some(&owner_idx) = pinned_actors.get(&cand.owner_identity) else {
+                continue;
+            };
+            if pet_seen.insert((pet_idx, owner_idx)) {
+                pets.push(format!("{pet_idx}|{owner_idx}"));
+            }
+        }
+
+        let actors_string = join_lines(&actors);
+        let abilities_string = join_lines(&ability_records);
+        let tuples_string = join_lines(&tuple_records);
+        let pets_string = join_lines(&pets);
+
+        let doc = MasterTableDoc {
+            log_version: &log_version,
+            game_version: "1",
+            log_file_details: "",
+            last_assigned_actor_id: actors.len() as u64,
+            actors_string: &actors_string,
+            last_assigned_ability_id: ability_records.len() as u64,
+            abilities_string: &abilities_string,
+            last_assigned_tuple_id: tuple_records.len() as u64,
+            tuples_string: &tuples_string,
+            last_assigned_pet_id: pets.len() as u64,
+            pets_string: &pets_string,
+        };
+        Some(doc.render())
     }
 }
 
