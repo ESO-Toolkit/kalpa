@@ -154,11 +154,16 @@ enum Lex {
     KeyNum,
     /// Reading an unquoted identifier key (`Foo = ...`) into `key_buf`.
     Ident,
-    /// Consuming a scalar VALUE (number / true / false / nil) in value position.
-    Scalar,
+    /// Consuming a scalar VALUE in value position. `is_number` distinguishes a
+    /// number (terminates at the `parse_lua_number` boundary — digits, `.`, `eE`,
+    /// `+`) from a keyword (`true`/`false`/`nil`, terminating at the first
+    /// non-lowercase byte). Both therefore stop before an uppercase-led identifier
+    /// key or a `[` bracket key, so a following character key (which the lenient
+    /// tree parser would accept without a separator) is not swallowed.
+    Scalar { is_number: bool },
     /// Consumed a `-` while in a scalar value; awaiting a second `-` (which would
     /// make it a `--` comment) vs a number's exponent sign.
-    ScalarDash,
+    ScalarDash { is_number: bool },
     /// After `[` + whitespace; awaiting `"` or a digit/`-` key token.
     SeekKeyToken,
     /// After a key token; skipping whitespace/comments until `]`.
@@ -212,12 +217,18 @@ fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\r' | b'\n')
 }
 
-/// A byte that can appear inside a scalar value token (number or keyword).
-/// Permissive on purpose — the value is skipped, not interpreted. `-` is handled
-/// separately (it may begin a `--` comment), so it is NOT included here.
+/// Whether `b` continues the scalar value currently being scanned. A NUMBER
+/// continues on the same bytes `parse_lua_number` consumes (`-` is handled
+/// separately as a possible comment / exponent sign); a KEYWORD (`true`/`false`/
+/// `nil`) continues only on lowercase letters. Both stop before an uppercase
+/// letter or `[`, so a following character/bracket key is never absorbed.
 #[inline]
-fn is_scalar_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'_')
+fn continues_scalar(b: u8, is_number: bool) -> bool {
+    if is_number {
+        b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+')
+    } else {
+        b.is_ascii_lowercase()
+    }
 }
 
 #[inline]
@@ -424,8 +435,8 @@ impl Scanner {
                     };
                     true
                 } else {
-                    // A lone `-`: the start of a (possibly negative) scalar.
-                    self.lex = Lex::Scalar;
+                    // A lone `-`: the start of a (possibly negative) number.
+                    self.lex = Lex::Scalar { is_number: true };
                     false
                 }
             }
@@ -571,13 +582,13 @@ impl Scanner {
                     false
                 }
             }
-            Lex::Scalar => {
+            Lex::Scalar { is_number } => {
                 if b == b'-' {
                     // Provisionally part of the scalar (e.g. an exponent sign);
                     // a second `-` would make it a comment instead.
-                    self.lex = Lex::ScalarDash;
+                    self.lex = Lex::ScalarDash { is_number };
                     true
-                } else if is_scalar_char(b) {
+                } else if continues_scalar(b, is_number) {
                     true
                 } else {
                     self.clear_pending();
@@ -585,7 +596,7 @@ impl Scanner {
                     false
                 }
             }
-            Lex::ScalarDash => {
+            Lex::ScalarDash { is_number } => {
                 if b == b'-' {
                     // `--` after a scalar value: the value ends and a comment
                     // begins. Without this, the comment body would be scanned as
@@ -597,7 +608,7 @@ impl Scanner {
                     true
                 } else {
                     // The `-` was part of the scalar; resume scanning the value.
-                    self.lex = Lex::Scalar;
+                    self.lex = Lex::Scalar { is_number };
                     false
                 }
             }
@@ -736,8 +747,10 @@ impl Scanner {
             }
             _ => {
                 if self.value_expected {
-                    // Start of a scalar value (number / true / false / nil).
-                    self.lex = Lex::Scalar;
+                    // Start of a scalar value: a number (digit/`.`) or a keyword
+                    // (`true`/`false`/`nil`). The first byte selects the kind.
+                    let is_number = b.is_ascii_digit() || b == b'.';
+                    self.lex = Lex::Scalar { is_number };
                     false
                 } else if b.is_ascii_alphabetic() || b == b'_' {
                     // Entry start: an unquoted identifier — either a key
@@ -831,8 +844,8 @@ impl Scanner {
             Lex::Normal
                 | Lex::LineComment { .. }
                 | Lex::CommentStart { .. }
-                | Lex::Scalar
-                | Lex::ScalarDash
+                | Lex::Scalar { .. }
+                | Lex::ScalarDash { .. }
                 | Lex::Ident
         );
         if !clean {
@@ -1232,6 +1245,38 @@ mod tests {
         );
         let names: BTreeSet<String> = scan.characters.iter().map(|(n, _)| n.clone()).collect();
         assert_eq!(names, BTreeSet::from(["Realchar".to_string()]));
+    }
+
+    #[test]
+    fn parity_scalar_abuts_identifier_key_without_separator() {
+        // The lenient tree parser stops a number/keyword before a following
+        // identifier key even with no comma between them; the streamer must too,
+        // or it swallows the key and misses the character.
+        assert_parity(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Acct"] = {
+                        ["n"] = 1Numchar = { ["x"] = 1 }
+                        ["b"] = trueKeychar = { ["y"] = 1 }
+                    },
+                },
+            }"#,
+        );
+    }
+
+    #[test]
+    fn parity_scalar_abuts_quoted_key_without_separator() {
+        // A quoted key directly after a scalar (no comma) — `[` ends the scalar.
+        assert_parity(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Acct"] = {
+                        ["n"] = 42["Numbob"] = { ["x"] = 1 }
+                        ["b"] = nil["Nilbob"] = { ["y"] = 1 }
+                    },
+                },
+            }"#,
+        );
     }
 
     #[test]
