@@ -5060,18 +5060,20 @@ fn recover_orphaned_backups(backups_root: &Path) {
     }
 }
 
-/// Marker file written inside every character backup directory. Lets us tell a
-/// genuine character backup apart from a legacy/manual directory that merely
-/// shares the `char-` prefix, so the transactional swap never overwrites the
-/// latter. Dot-prefixed so it is excluded from backup file counts and restores.
+/// Marker file written inside every character backup directory to label it as
+/// one (e.g. for future tooling). Dot-prefixed so it is excluded from backup
+/// file counts and restores.
 const CHAR_BACKUP_MARKER: &str = ".kalpa-char-backup";
 
-/// Whether installing a character backup at `final_dir` is safe: true when no
-/// directory is there yet, or when the existing one is a marked character backup
-/// (and may be replaced). A `char-*` directory without the marker (a legacy or
-/// manual backup) is NOT replaceable.
+/// Whether installing a character backup at `final_dir` is safe to do by
+/// replacing whatever is there. True when the path is absent, is a marked
+/// character backup, or is a legacy unmarked `char-*` directory — older versions
+/// wrote no marker, so an existing `char-*` dir is, in practice, always a prior
+/// character backup that the user is refreshing. New *manual* backups cannot use
+/// the `char-` prefix (`validate_backup_name`), so this does not expose manual
+/// backups to overwrite.
 fn char_backup_replaceable(final_dir: &Path) -> bool {
-    !final_dir.exists() || final_dir.join(CHAR_BACKUP_MARKER).is_file()
+    !final_dir.exists() || final_dir.is_dir()
 }
 
 #[tauri::command]
@@ -7777,23 +7779,29 @@ mod tests {
     }
 
     #[test]
-    fn char_backup_replaceable_only_for_absent_or_marked() {
+    fn char_backup_replaceable_grandfathers_existing_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
         // Absent target — safe to create.
         assert!(char_backup_replaceable(&root.join("char-none")));
 
-        // Existing dir without the marker (legacy/manual) — not replaceable.
-        let unmarked = root.join("char-manual");
-        fs::create_dir_all(&unmarked).unwrap();
-        assert!(!char_backup_replaceable(&unmarked));
+        // Existing legacy (unmarked) char-* dir — grandfathered as a refreshable
+        // character backup.
+        let legacy = root.join("char-legacy");
+        fs::create_dir_all(&legacy).unwrap();
+        assert!(char_backup_replaceable(&legacy));
 
         // Existing marked character backup — replaceable.
         let marked = root.join("char-real");
         fs::create_dir_all(&marked).unwrap();
         fs::write(marked.join(CHAR_BACKUP_MARKER), b"x").unwrap();
         assert!(char_backup_replaceable(&marked));
+
+        // A non-directory occupying the path is not replaceable.
+        let file_path = root.join("char-file");
+        fs::write(&file_path, b"x").unwrap();
+        assert!(!char_backup_replaceable(&file_path));
     }
 
     #[test]
