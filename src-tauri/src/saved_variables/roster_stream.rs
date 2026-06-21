@@ -156,6 +156,9 @@ enum Lex {
     Ident,
     /// Consuming a scalar VALUE (number / true / false / nil) in value position.
     Scalar,
+    /// Consumed a `-` while in a scalar value; awaiting a second `-` (which would
+    /// make it a `--` comment) vs a number's exponent sign.
+    ScalarDash,
     /// After `[` + whitespace; awaiting `"` or a digit/`-` key token.
     SeekKeyToken,
     /// After a key token; skipping whitespace/comments until `]`.
@@ -210,10 +213,11 @@ fn is_ws(b: u8) -> bool {
 }
 
 /// A byte that can appear inside a scalar value token (number or keyword).
-/// Permissive on purpose — the value is skipped, not interpreted.
+/// Permissive on purpose — the value is skipped, not interpreted. `-` is handled
+/// separately (it may begin a `--` comment), so it is NOT included here.
 #[inline]
 fn is_scalar_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-' | b'_')
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'_')
 }
 
 #[inline]
@@ -568,11 +572,32 @@ impl Scanner {
                 }
             }
             Lex::Scalar => {
-                if is_scalar_char(b) {
+                if b == b'-' {
+                    // Provisionally part of the scalar (e.g. an exponent sign);
+                    // a second `-` would make it a comment instead.
+                    self.lex = Lex::ScalarDash;
+                    true
+                } else if is_scalar_char(b) {
                     true
                 } else {
                     self.clear_pending();
                     self.lex = Lex::Normal;
+                    false
+                }
+            }
+            Lex::ScalarDash => {
+                if b == b'-' {
+                    // `--` after a scalar value: the value ends and a comment
+                    // begins. Without this, the comment body would be scanned as
+                    // real structure and could emit a fake character.
+                    self.clear_pending();
+                    self.lex = Lex::CommentStart {
+                        resume: Resume::Normal,
+                    };
+                    true
+                } else {
+                    // The `-` was part of the scalar; resume scanning the value.
+                    self.lex = Lex::Scalar;
                     false
                 }
             }
@@ -803,6 +828,7 @@ impl Scanner {
                 | Lex::LineComment { .. }
                 | Lex::CommentStart { .. }
                 | Lex::Scalar
+                | Lex::ScalarDash
                 | Lex::Ident
         );
         if !clean {
@@ -1163,6 +1189,43 @@ mod tests {
              },\n\
              },\n\
              }\n",
+        );
+    }
+
+    #[test]
+    fn parity_line_comment_immediately_after_scalar() {
+        // `true--...` with no space: the `--` starts a line comment whose body
+        // must NOT be scanned as structure (it could otherwise emit a fake char).
+        assert_parity(
+            "MyAddon_SV = {\n\
+             [\"Default\"] = {\n\
+             [\"@Acct\"] = {\n\
+             [\"flag\"] = true-- [\"Fakechar\"] = {}\n\
+             [\"Realchar\"] = { [\"x\"] = 1 },\n\
+             },\n\
+             },\n\
+             }\n",
+        );
+        // Pin the concrete expectation: only Realchar, never Fakechar.
+        let scan = stream(
+            b"MyAddon_SV = {\n[\"Default\"] = {\n[\"@Acct\"] = {\n[\"flag\"] = true-- [\"Fakechar\"] = {}\n[\"Realchar\"] = { [\"x\"] = 1 },\n},\n},\n}\n",
+        );
+        let names: BTreeSet<String> = scan.characters.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(names, BTreeSet::from(["Realchar".to_string()]));
+    }
+
+    #[test]
+    fn parity_number_with_exponent_sign() {
+        // The `-` in a negative exponent must stay part of the scalar.
+        assert_parity(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Acct"] = {
+                        ["scale"] = 1.5e-3,
+                        ["Realchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
         );
     }
 
