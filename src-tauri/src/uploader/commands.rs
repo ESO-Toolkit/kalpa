@@ -1365,3 +1365,66 @@ pub fn uploader_attach_report(
     let updated = record.clone();
     super::history::upsert(&app, updated)
 }
+
+// ── Debug-only native LIVE-streaming spike round-trip (spike/native-live) ──────
+//
+// Drives `native::live::run_native_live_spike` against a GROWING synthetic `.log`
+// to answer the one question the spike can't settle offline: does esologs.com keep
+// ONE report OPEN and render it as segments stream in? It is `#[cfg(debug_assertions)]`
+// so it never ships, and is invoked manually (e.g. from the devtools console:
+// `window.__TAURI__.core.invoke('uploader_run_native_live_spike', { growingPath: 'C:\\\\eso-live-spike\\\\Encounter.log' })`).
+//
+// SAFETY: it creates a REAL report on the signed-in account (Unlisted), so use a test
+// account or accept a throwaway Unlisted report. Point it at a file OUTSIDE a
+// CFA-protected folder (NOT Documents/Desktop) so the debug binary can read it. The
+// tester appends fights to that file while this command runs; it terminates the report
+// on END_LOG, ~10s idle, or completion.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn uploader_run_native_live_spike(
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
+    growing_path: String,
+) -> Result<String, String> {
+    use super::native::live::{run_native_live_spike, FileTail};
+
+    if !session.has_session() {
+        return Err("Not signed in to ESO Logs — run the in-app login first \
+                    (uploader_login_esologs)."
+            .into());
+    }
+    if !Path::new(&growing_path).is_file() {
+        return Err(format!(
+            "Synthetic log not found: {growing_path} (create it first, then append fights)."
+        ));
+    }
+
+    // Unlisted so the throwaway test report isn't public; Personal Logs (no guild).
+    let opts = UploadOptions {
+        region: 1,
+        guild_id: None,
+        visibility: Visibility::Unlisted,
+        description: Some("Kalpa native live-streaming spike (test)".into()),
+        real_time: true,
+        include_entire_file: false,
+    };
+    let provider = std::sync::Arc::clone(&session);
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    // Idle deadline: terminate after this many seconds with no new bytes. Generous so
+    // a manual tester has time to append fights between steps; the END_LOG line ends
+    // the session promptly regardless, so a large deadline only affects the "tester
+    // walked away" case.
+    let tail = FileTail::new(120);
+
+    let (code, segments) = tokio::task::spawn_blocking(move || {
+        run_native_live_spike(&growing_path, provider.as_ref(), &opts, cancel, &tail)
+    })
+    .await
+    .map_err(|e| format!("Live spike task failed: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    let url = watcher::report_url(&code.0);
+    eprintln!("[uploader] native live spike report: {url} ({segments} segment(s))");
+    // Surface the segment count so the round-trip can tell "0 segments = timing race"
+    // from "N segments but didn't render = the real result".
+    Ok(format!("{url}  [segments={segments}]"))
+}

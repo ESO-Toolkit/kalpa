@@ -320,7 +320,7 @@ pub fn run_native_live_spike(
     opts: &UploadOptions,
     cancel: Arc<AtomicBool>,
     poll: &dyn LiveTail,
-) -> Result<ReportCode, UploadError> {
+) -> Result<(ReportCode, usize), UploadError> {
     let upload = NativeUpload::new(session, opts, cancel.clone());
     // Establish the session up front, then open the report.
     let _ = session.session()?;
@@ -330,7 +330,12 @@ pub fn run_native_live_spike(
     let result = stream_until_done(&upload, &code, growing_path, &cancel, poll);
     // Best-effort terminate on EVERY exit (success, stop, error, idle).
     let _ = upload.terminate_report_live(&code);
-    result.map(|()| code)
+    let segments = result?;
+    eprintln!(
+        "[uploader] native live spike: report {} terminated after {} segment(s)",
+        code.0, segments
+    );
+    Ok((code, segments))
 }
 
 /// The tail loop, factored out so the terminate-on-exit wrapper in
@@ -341,7 +346,7 @@ fn stream_until_done(
     growing_path: &str,
     cancel: &Arc<AtomicBool>,
     poll: &dyn LiveTail,
-) -> Result<(), UploadError> {
+) -> Result<usize, UploadError> {
     let mut seg = LiveSegmenter::new();
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -356,7 +361,7 @@ fn stream_until_done(
                         && !post_one_segment(upload, code, &mut seg, cancel)?
                     {
                         // Server signalled session-end (nextSegmentId=0) mid-stream.
-                        return Ok(());
+                        return Ok(seg.segments_built());
                     }
                 }
             }
@@ -366,7 +371,7 @@ fn stream_until_done(
             TailOutcome::Done => {
                 seg.drain_trailing_shields();
                 let _ = post_one_segment(upload, code, &mut seg, cancel)?;
-                return Ok(());
+                return Ok(seg.segments_built());
             }
             TailOutcome::Error(e) => return Err(UploadError::Transport(e)),
         }
@@ -429,6 +434,122 @@ pub enum TailOutcome {
     Error(String),
 }
 
+/// A real growing-file [`LiveTail`]: tails a file by byte offset (the spike's tester
+/// appends to a synthetic `.log` while this streams it), returning each batch of
+/// newly-appended COMPLETE lines. Signals `Done` when an `END_LOG` line is seen OR the
+/// file stops growing for [`Self::idle_deadline`]. A partial trailing line (no newline
+/// yet) is held back until its newline arrives, so a half-written line is never fed.
+///
+/// Debug/spike only: it blocks the calling thread with short sleeps between polls, which
+/// is fine for a one-off owner-run round-trip but is NOT the production tail (that would
+/// reuse `watcher.rs`'s notify-based loop). Place the synthetic file OUTSIDE a
+/// CFA-protected folder (not `Documents`/`Desktop`) so the debug binary can read it.
+pub struct FileTail {
+    offset: std::sync::Mutex<u64>,
+    /// Carry-over bytes of a partial (un-newlined) trailing line between polls.
+    partial: std::sync::Mutex<Vec<u8>>,
+    /// When the file last grew (for the idle deadline). `None` until first read.
+    last_growth: std::sync::Mutex<Option<std::time::Instant>>,
+    poll_interval: std::time::Duration,
+    idle_deadline: std::time::Duration,
+}
+
+impl FileTail {
+    /// Tail from byte 0 (stream the whole file as it grows). `idle_secs` = stop after
+    /// this many seconds with no new bytes (treat as logging-ended).
+    pub fn new(idle_secs: u64) -> Self {
+        Self {
+            offset: std::sync::Mutex::new(0),
+            partial: std::sync::Mutex::new(Vec::new()),
+            last_growth: std::sync::Mutex::new(None),
+            poll_interval: std::time::Duration::from_millis(300),
+            idle_deadline: std::time::Duration::from_secs(idle_secs),
+        }
+    }
+}
+
+impl LiveTail for FileTail {
+    fn next_lines(&self, path: &str) -> TailOutcome {
+        use std::io::{Read, Seek, SeekFrom};
+        loop {
+            let size = match std::fs::metadata(path) {
+                Ok(m) => m.len(),
+                Err(e) => return TailOutcome::Error(format!("stat {path}: {e}")),
+            };
+            let mut off = self.offset.lock().unwrap();
+            if size < *off {
+                // Truncated/replaced — restart from 0 (a fresh session).
+                *off = 0;
+                self.partial.lock().unwrap().clear();
+            }
+            if size > *off {
+                let mut f = match std::fs::File::open(path) {
+                    Ok(f) => f,
+                    Err(e) => return TailOutcome::Error(format!("open {path}: {e}")),
+                };
+                if let Err(e) = f.seek(SeekFrom::Start(*off)) {
+                    return TailOutcome::Error(format!("seek {path}: {e}"));
+                }
+                let mut buf = Vec::new();
+                if let Err(e) = f.take(size - *off).read_to_end(&mut buf) {
+                    return TailOutcome::Error(format!("read {path}: {e}"));
+                }
+                *off = size;
+                *self.last_growth.lock().unwrap() = Some(std::time::Instant::now());
+                drop(off);
+
+                // Prepend any carried-over partial line, split on '\n', and hold back a
+                // trailing partial (no newline) for the next poll.
+                let mut partial = self.partial.lock().unwrap();
+                let mut data = std::mem::take(&mut *partial);
+                data.extend_from_slice(&buf);
+                let mut lines: Vec<String> = Vec::new();
+                let mut start = 0usize;
+                let mut saw_end_log = false;
+                for i in 0..data.len() {
+                    if data[i] == b'\n' {
+                        let line = String::from_utf8_lossy(&data[start..i])
+                            .trim_end_matches('\r')
+                            .to_string();
+                        if kind_of(&line) == Some("END_LOG") {
+                            saw_end_log = true;
+                        }
+                        if !line.is_empty() {
+                            lines.push(line);
+                        }
+                        start = i + 1;
+                    }
+                }
+                *partial = data[start..].to_vec();
+                drop(partial);
+
+                if saw_end_log {
+                    // Emit what we have; the driver's next poll will get Done.
+                    *self.last_growth.lock().unwrap() =
+                        Some(std::time::Instant::now() - self.idle_deadline);
+                }
+                if !lines.is_empty() {
+                    return TailOutcome::Lines(lines);
+                }
+                // Grew but no complete line yet — keep polling.
+            } else {
+                // No growth. If we've been idle past the deadline, we're done.
+                let idle = self
+                    .last_growth
+                    .lock()
+                    .unwrap()
+                    .map(|t| t.elapsed() >= self.idle_deadline)
+                    .unwrap_or(false);
+                drop(off);
+                if idle {
+                    return TailOutcome::Done;
+                }
+            }
+            std::thread::sleep(self.poll_interval);
+        }
+    }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn kind_of(line: &str) -> Option<&str> {
@@ -483,6 +604,67 @@ mod tests {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    // Validates the EXACT synthetic session the `spike-live-feed.mjs` tester appends,
+    // so a round-trip is never wasted on a session the encoder would reject. Asserts
+    // every segment the LiveSegmenter builds is structurally uploadable (the same
+    // self-check the driver runs before each POST). Keep in sync with the feed script.
+    #[test]
+    fn synthetic_feed_session_builds_valid_segments() {
+        let session = "\
+0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"
+0,ZONE_CHANGED,1129,\"Hall of the Lunar Champion\",NONE
+0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",820189967932710348,50,1735,0,PLAYER_ALLY,T
+0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Tenmar Bear\",\"\",0,50,160,0,HOSTILE,F
+0,UNIT_ADDED,31,MONSTER,F,0,88340,F,0,0,\"Tenmar Lynx\",\"\",0,50,160,0,HOSTILE,F
+100,ABILITY_INFO,28549,\"Roll Dodge\",\"/esoui/art/icons/ability_rogue_035.dds\",F,T
+100,EFFECT_INFO,28549,BUFF,NONE,NEVER
+100,ABILITY_INFO,29489,\"Hardened Ward\",\"/esoui/art/icons/ability_sorcerer_ward.dds\",F,T
+100,EFFECT_INFO,29489,BUFF,NONE,DEFAULT
+100,ABILITY_INFO,38901,\"Crystal Frags\",\"/esoui/art/icons/ability_sorcerer_dark_magic.dds\",F,F
+200,BEGIN_COMBAT
+210,BEGIN_CAST,800,F,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,40000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+220,EFFECT_CHANGED,GAINED,1,5002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*
+230,COMBAT_EVENT,DAMAGE,FIRE,1,1500,0,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,38500/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+260,COMBAT_EVENT,DAMAGE,FIRE,1,1800,0,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,36700/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+700,EFFECT_CHANGED,FADED,1,5002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*
+800,END_COMBAT
+1000,BEGIN_COMBAT
+1010,END_CAST,COMPLETED,5001,38901
+1030,COMBAT_EVENT,DAMAGE,FIRE,1,2200,0,5003,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,31,30000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+1060,COMBAT_EVENT,CRITICAL_DAMAGE,FIRE,1,4400,0,5003,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,31,25600/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+1040,HEALTH_REGEN,500,1,16000/16000,12000/12000,8000/12000,53/500,0/1000,0,0.5,0.5,4.0
+1500,END_COMBAT
+1700,END_LOG";
+        let lines: Vec<&str> = session.lines().collect();
+
+        let mut seg = LiveSegmenter::new();
+        let mut built = 0usize;
+        for line in &lines {
+            if seg.feed(line) && seg.shields_settled() {
+                match seg.build_next_segment() {
+                    Ok(Some(p)) => {
+                        assert!(!p.segment.bytes.is_empty(), "segment must have ZIP bytes");
+                        assert!(
+                            p.segment.start_time <= p.segment.end_time,
+                            "segment must have a real (non-inverted) wall window"
+                        );
+                        built += 1;
+                    }
+                    Ok(None) => {}
+                    Err(e) => panic!("synthetic session built an INVALID segment: {e}"),
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Ok(Some(_)) = seg.build_next_segment() {
+            built += 1;
+        }
+        assert!(
+            built >= 2,
+            "synthetic session must yield multiple valid segments (got {built})"
+        );
     }
 
     // The segmenter cuts at fight boundaries and the segments it builds, concatenated,

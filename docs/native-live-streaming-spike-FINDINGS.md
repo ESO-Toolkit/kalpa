@@ -6,10 +6,29 @@ This is the deliverable for the spike: *"can Kalpa natively live-stream a growin
 `Encounter.log` to esologs.com — pushing segments incrementally while the report stays
 open — instead of handing off to the official uploader?"*
 
-The answer is **feasible-with-caveats, but do not ship without (1) an owner-run live
-round-trip and (2) explicit operator ToS sign-off for the live/streaming case.** A clean
-"don't ship" — keep the official-uploader handoff for live — is a perfectly defensible
-outcome and is the recommendation if either gate fails.
+The answer is **FEASIBLE — the live round-trip is now confirmed.** The only remaining
+gate to ship is (2) explicit operator ToS sign-off for the live/streaming case. A clean
+"don't ship" — keep the official-uploader handoff for live — is still a defensible outcome
+if the operator declines.
+
+> ## ✅ ROUND-TRIP CONFIRMED (2026-06-20, owner-run)
+> The debug-only driver streamed a synthetic 2-fight session to a real esologs report,
+> holding the report OPEN across both fights and terminating on `END_LOG`. **`segments=2`
+> POSTed, server accepted both, and the report RENDERED** — a streamed segment's events
+> resolved into a real, named, timestamped fight ("Tenmar Lynx" trash fight). This settles
+> the one unknown the spike could not answer offline: **esologs.com DOES incrementally
+> render an open, multi-segment report fed under `isLiveLog:true`/`isRealTime:true`.** The
+> native encoder + cumulative pinned master (H1 fix) + per-segment time bounds + open-report
+> lifecycle all work end-to-end against the live service. Evidence reports (owner account,
+> Unlisted): `nRxYJKqBWNmkTc1f` (the clean 2-segment render), plus `DYnwBNG1Tb7xVLFm` /
+> `TAFLDmw18v49yVj3` (earlier runs — the latter `segments=0` from a tester-timing race, NOT
+> an encoder fault; once fed correctly it rendered).
+>
+> Gotchas learned: (a) the `FileTail` idle deadline must exceed the manual feed cadence
+> (bumped 10s→120s); a too-short deadline terminates with `segments=0` before fights arrive.
+> (b) Pass the path with FORWARD SLASHES through the CDP/JS/Rust layers (`C:/eso-live-spike/...`)
+> — backslashes get eaten by the escaping layers. (c) `__TAURI__` is not global (no
+> `withGlobalTauri`); invoke via `window.__TAURI_INTERNALS__.invoke(...)`.
 
 It was produced from: a 9-agent analysis workflow (5 analysts → 3 adversarial reviewers →
 synthesis, `wf_bdf27e62-24b`), **cross-checked against the actual code**, plus four
@@ -22,7 +41,7 @@ empirical probes run against the real encoder (`events::tests::spike_probe_state
 
 | Question | Answer |
 | --- | --- |
-| Does carrying encoder state across headerless segments produce a **rendering** multi-segment report? | **Probably yes** — the core model is sound and largely *forced* by the code. The single thing that can't be settled offline is server behavior on an open report (see "the one unknown"). |
+| Does carrying encoder state across headerless segments produce a **rendering** multi-segment report? | **YES — confirmed by a live round-trip** (report `nRxYJKqBWNmkTc1f`, 2 segments, rendered a real fight). The core model is sound and largely *forced* by the code; the server-behavior unknown is now resolved positively. |
 | Time-base continuation | **Already works in the existing code** for the segment *body*; only the per-segment *wall window* needs new (stateful) logic. |
 | Master-table model | **Cumulative** (forced — a delta master dangles the majority of A-refs). But a *naive* cumulative rebuild has an actor-index-stability bug (found by probe, see Hazard H1). |
 | Cut policy | **Strictly at fight boundaries (`END_COMBAT`) and at every `BEGIN_LOG`** — never a timer / every-N-events window. |
@@ -31,25 +50,23 @@ empirical probes run against the real encoder (`events::tests::spike_probe_state
 
 ---
 
-## The one unknown that gates everything (settle with a live round-trip)
+## The one unknown — NOW RESOLVED (live round-trip, 2026-06-20)
 
 **Does the esologs.com `/desktop-client/*` server keep ONE report OPEN and incrementally
 re-render it** when fed many `add-report-segment` POSTs under `isLiveLog:true` /
-`isRealTime:true` *without* `terminate-report` — and what does `nextSegmentId=0` mean on a
-still-open report?
+`isRealTime:true` *without* `terminate-report`?
 
-- All three live params are hardcoded to the **not-live** values today:
-  `isLiveLog:false`, `isRealTime:false`, `inProgressEventCount:0` (`client.rs:519-524`),
-  and master-table `isRealTime:false` (`client.rs:423`). They are proven *only* for
-  finished single-segment uploads (owner-confirmed 2026-06-19).
-- Everything else (state carry, cumulative master, body time base) can be made byte-correct
-  **offline** and asserted with a differential test against the proven one-shot `build()`.
-  Only this server-behavior question cannot.
-- A wrong guess here = "accepted but never renders" **or** a torn-down session mid-raid.
+**ANSWER: YES.** The debug driver opened a report, streamed 2 segments (one per fight) while
+holding it open, terminated on `END_LOG`, and the report **rendered a real fight** (report
+`nRxYJKqBWNmkTc1f`). The live params (`isLiveLog:true`/`isRealTime:true`, sent only by the
+debug `*_live` seam — the one-shot params are untouched) are accepted, and the server stitches
+the segments into one report timeline. `nextSegmentId=0` was not observed as a mid-stream
+terminal in this run (the driver treats any `0` as session-end defensively); confirm its exact
+semantics on a longer multi-segment session if pursued.
 
-This is the *conditional fatal*: if the server finalizes each segment as a closed slice
-regardless of the live flags, or rejects a growing cumulative master under one open code,
-native **live** is infeasible and the honest answer is a clean **NO** → keep the handoff.
+The *conditional-fatal* this section once flagged (server finalizes each segment as a closed
+slice, or rejects a growing cumulative master) **did not occur** — feasibility is established.
+The only remaining ship gate is operator ToS sign-off (next section).
 
 ---
 

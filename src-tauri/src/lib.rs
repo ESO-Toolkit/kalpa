@@ -445,6 +445,8 @@ pub fn run() {
             uploader::commands::uploader_delete_history,
             uploader::commands::uploader_attach_report,
             #[cfg(debug_assertions)]
+            uploader::commands::uploader_run_native_live_spike,
+            #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])
         .run(tauri::generate_context!())
