@@ -4589,52 +4589,149 @@ pub fn delete_profile(
 pub struct CharacterInfo {
     pub server: String,
     pub name: String,
+    /// True when this character was recovered from a SavedVariables addon file
+    /// rather than from `AddOnSettings.txt`. This happens when the character has
+    /// no per-character addon-settings block — most commonly because the account
+    /// uses ESO's default "Account-Wide Addon Settings" mode, which collapses all
+    /// per-character blocks into a single `$AccountWide` block.
+    pub recovered: bool,
 }
 
-#[tauri::command]
-pub fn list_characters(
-    state: tauri::State<'_, AllowedAddonsPath>,
-    addons_path: String,
-) -> Result<Vec<CharacterInfo>, String> {
-    let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let settings_path = addons_dir
-        .parent()
-        .map(|p| p.join("AddOnSettings.txt"))
-        .ok_or("Could not find AddOnSettings.txt.")?;
+/// Server bucket assigned to characters recovered from SavedVariables whose
+/// megaserver cannot be determined from any addon's data layout.
+const UNKNOWN_SERVER: &str = "Unknown";
 
-    if !settings_path.exists() {
-        return Err("AddOnSettings.txt not found.".to_string());
-    }
+/// Normalize an ESO character name for cross-source matching and display:
+/// strip a raw-API caret suffix (e.g. `Faewynd^Mx` -> `Faewynd`) and trim
+/// surrounding whitespace. ESO names are case-sensitive and unique per server,
+/// so casing is intentionally preserved.
+fn normalize_character_name(name: &str) -> String {
+    name.split('^').next().unwrap_or(name).trim().to_string()
+}
 
-    let content = fs::read_to_string(&settings_path)
-        .map_err(|e| format!("Failed to read AddOnSettings.txt: {e}"))?;
-
+/// Build the character roster as the union of two local sources:
+///   1. `AddOnSettings.txt` `#<Server>-<Name>` headers — authoritative for the
+///      megaserver, but absent entirely in account-wide addon-settings mode.
+///   2. Character names harvested from every SavedVariables `.lua` file.
+///
+/// Dedup keeps a character present in both sources once, under its real server.
+/// `sv_servers` maps a SavedVariables character key to its megaserver when the
+/// character was stored under a world-scoped layout (otherwise the character is
+/// bucketed under [`UNKNOWN_SERVER`]). Pure function so the union logic is unit
+/// testable without Tauri state, a tokio runtime, or the filesystem.
+fn build_character_list(
+    addon_settings: Option<&str>,
+    sv_names: &[String],
+    sv_servers: &std::collections::BTreeMap<String, String>,
+) -> Vec<CharacterInfo> {
     let mut characters: Vec<CharacterInfo> = Vec::new();
-    let skip_prefixes = ["Version", "Acknowledged", "AddOnsEnabled"];
+    // (server, normalized name) already emitted from AddOnSettings.txt. Keyed on
+    // the pair so the same name on two megaservers (NA + EU) is kept as two
+    // distinct characters.
+    let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
+    // Normalized names already represented by ANY source. SavedVariables-only
+    // characters dedup by name alone (they have no reliable server), so one
+    // already listed from AddOnSettings is not re-listed under "Unknown".
+    let mut known_names: HashSet<String> = HashSet::new();
 
-    for line in content.lines() {
-        let Some(line) = line.strip_prefix('#') else {
-            continue;
-        };
-        if skip_prefixes.iter().any(|p| line.starts_with(p)) {
-            continue;
-        }
-        if let Some(pos) = line.find('-') {
-            let server = line[..pos].trim().to_string();
-            let name = line[pos + 1..].trim().to_string();
-            if !server.is_empty() && !name.is_empty() {
-                // Deduplicate
-                if !characters
-                    .iter()
-                    .any(|c| c.server == server && c.name == name)
-                {
-                    characters.push(CharacterInfo { server, name });
+    if let Some(content) = addon_settings {
+        // Global metadata headers (and the account-wide sentinel `$AccountWide`,
+        // handled separately) are not characters.
+        let skip_prefixes = [
+            "Version",
+            "Acknowledged",
+            "AddOnsEnabled",
+            "LoadOutOfDateAddOns",
+        ];
+        for line in content.lines() {
+            let Some(line) = line.strip_prefix('#') else {
+                continue;
+            };
+            if line.starts_with('$') || skip_prefixes.iter().any(|p| line.starts_with(p)) {
+                continue;
+            }
+            // Split on the FIRST '-': the server token ("NA Megaserver" etc.)
+            // never contains '-', so the remainder is the full character name
+            // even when the name itself contains '-' (e.g. "Jodynn-Jo").
+            if let Some(pos) = line.find('-') {
+                let server = line[..pos].trim().to_string();
+                let name = line[pos + 1..].trim().to_string();
+                if server.is_empty() || name.is_empty() {
+                    continue;
+                }
+                let norm = normalize_character_name(&name);
+                if seen_pairs.insert((server.clone(), norm.clone())) {
+                    known_names.insert(norm);
+                    characters.push(CharacterInfo {
+                        server,
+                        name,
+                        recovered: false,
+                    });
                 }
             }
         }
     }
 
-    Ok(characters)
+    // Normalized name -> megaserver for world-scoped SavedVariables characters.
+    let mut server_by_norm: HashMap<String, String> = HashMap::new();
+    for (raw, world) in sv_servers {
+        if crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(&world.as_str()) {
+            server_by_norm
+                .entry(normalize_character_name(raw))
+                .or_insert_with(|| world.clone());
+        }
+    }
+
+    for raw in sv_names {
+        let name = normalize_character_name(raw);
+        // Guard against markers / numeric character IDs leaking in as names.
+        if name.is_empty() || name.starts_with('$') || name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if !known_names.insert(name.clone()) {
+            continue;
+        }
+        let server = server_by_norm
+            .get(&name)
+            .cloned()
+            .unwrap_or_else(|| UNKNOWN_SERVER.to_string());
+        characters.push(CharacterInfo {
+            server,
+            name,
+            recovered: true,
+        });
+    }
+
+    characters
+}
+
+#[tauri::command]
+pub async fn list_characters(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+) -> Result<Vec<CharacterInfo>, String> {
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+
+    tokio::task::spawn_blocking(move || -> Result<Vec<CharacterInfo>, String> {
+        // Source 1: AddOnSettings.txt (authoritative server, may be missing or,
+        // in account-wide mode, hold no per-character headers at all).
+        let addon_settings = addons_dir
+            .parent()
+            .map(|p| p.join("AddOnSettings.txt"))
+            .and_then(|p| fs::read_to_string(p).ok());
+
+        // Source 2: every parseable SavedVariables .lua file. Recovers characters
+        // that have no AddOnSettings.txt block, which is the common case.
+        let identities = collect_local_identities(&addons_dir);
+
+        Ok(build_character_list(
+            addon_settings.as_deref(),
+            &identities.context.characters,
+            &identities.character_servers,
+        ))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -6437,6 +6534,94 @@ pub async fn import_sv_settings(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// SavedVariables identities harvested from the local addon data, plus a
+/// best-effort map of character name -> megaserver for world-scoped layouts.
+struct LocalIdentities {
+    context: crate::saved_variables::scrub::ScrubContext,
+    /// Character key -> world ("NA Megaserver" / "EU Megaserver" / "PTS"), only
+    /// for characters stored under a world-scoped SavedVariables layout.
+    character_servers: std::collections::BTreeMap<String, String>,
+}
+
+/// Walk every parseable SavedVariables `.lua` file once and accumulate the
+/// account/character identities found across all of them, plus the per-character
+/// megaserver map. This centralizes the SavedVariables enumeration shared by
+/// `detect_local_identities` (scrub/import) and `list_characters` (the Characters
+/// list), so there is a single place that knows how to read identities off disk.
+///
+/// Runs synchronously; callers wrap it in `spawn_blocking`.
+fn collect_local_identities(addons_dir: &Path) -> LocalIdentities {
+    use crate::saved_variables::parser::parse_sv_file;
+    use crate::saved_variables::scrub::{
+        detect_character_servers_from_tree, detect_identities_from_tree, ScrubContext,
+    };
+
+    let mut merged = ScrubContext::default();
+    let mut character_servers: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+
+    let sv_dir = sv_io::saved_variables_dir(addons_dir);
+    let entries = match fs::read_dir(&sv_dir) {
+        Ok(e) => e,
+        Err(_) => {
+            return LocalIdentities {
+                context: merged,
+                character_servers,
+            }
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.lua")
+            .to_string();
+        let tree = match parse_sv_file(&content, &file_name) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+
+        let ctx = detect_identities_from_tree(&tree);
+        for acc in ctx.accounts {
+            if !merged.accounts.contains(&acc) {
+                merged.accounts.push(acc);
+            }
+        }
+        for ch in ctx.characters {
+            if !merged.characters.contains(&ch) {
+                merged.characters.push(ch);
+            }
+        }
+        for id in ctx.character_ids {
+            if !merged.character_ids.contains(&id) {
+                merged.character_ids.push(id);
+            }
+        }
+        for w in ctx.extra_worlds {
+            if !merged.extra_worlds.contains(&w) {
+                merged.extra_worlds.push(w);
+            }
+        }
+        for (name, world) in detect_character_servers_from_tree(&tree) {
+            character_servers.entry(name).or_insert(world);
+        }
+    }
+
+    LocalIdentities {
+        context: merged,
+        character_servers,
+    }
+}
+
 /// Detect the account/character identities present in the local SavedVariables
 /// directory. Reads any available `.lua` file that parses successfully and
 /// accumulates identities across all of them. Returns the merged `ScrubContext`.
@@ -6449,63 +6634,10 @@ pub async fn detect_local_identities(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<crate::saved_variables::scrub::ScrubContext, String> {
-    use crate::saved_variables::parser::parse_sv_file;
-    use crate::saved_variables::scrub::{detect_identities_from_tree, ScrubContext};
-
     let addons_dir = require_allowed_path(&state, &addons_path)?;
 
-    tokio::task::spawn_blocking(move || {
-        let sv_dir = sv_io::saved_variables_dir(&addons_dir);
-        let mut merged = ScrubContext::default();
-
-        let entries = match fs::read_dir(&sv_dir) {
-            Ok(e) => e,
-            Err(_) => return Ok(merged),
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("lua") {
-                continue;
-            }
-            let content = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown.lua")
-                .to_string();
-            let tree = match parse_sv_file(&content, &file_name) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-
-            let ctx = detect_identities_from_tree(&tree);
-            for acc in ctx.accounts {
-                if !merged.accounts.contains(&acc) {
-                    merged.accounts.push(acc);
-                }
-            }
-            for ch in ctx.characters {
-                if !merged.characters.contains(&ch) {
-                    merged.characters.push(ch);
-                }
-            }
-            for id in ctx.character_ids {
-                if !merged.character_ids.contains(&id) {
-                    merged.character_ids.push(id);
-                }
-            }
-            for w in ctx.extra_worlds {
-                if !merged.extra_worlds.contains(&w) {
-                    merged.extra_worlds.push(w);
-                }
-            }
-        }
-
-        Ok(merged)
+    tokio::task::spawn_blocking(move || -> Result<_, String> {
+        Ok(collect_local_identities(&addons_dir).context)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -7023,6 +7155,110 @@ mod tests {
         assert_eq!(download_thread_count(50), 6);
         // Defensive: an empty batch never yields a zero-thread pool.
         assert_eq!(download_thread_count(0), 1);
+    }
+
+    fn sv_servers(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(n, w)| (n.to_string(), w.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn build_character_list_recovers_account_wide_characters() {
+        // Account-wide mode: AddOnSettings has only globals + the $AccountWide
+        // sentinel, so every character must come from SavedVariables.
+        let settings = "#Version 100027\n#$AccountWide\nSomeAddon 1\n";
+        let names = vec!["Mainchar".to_string(), "Alttank".to_string()];
+        let chars = build_character_list(Some(settings), &names, &sv_servers(&[]));
+        assert_eq!(chars.len(), 2);
+        assert!(chars
+            .iter()
+            .all(|c| c.server == UNKNOWN_SERVER && c.recovered));
+        assert!(chars.iter().any(|c| c.name == "Mainchar"));
+        assert!(chars.iter().any(|c| c.name == "Alttank"));
+    }
+
+    #[test]
+    fn build_character_list_addonsettings_wins_over_sv_duplicate() {
+        // Same character in both sources (plain + caret form) collapses to one,
+        // keeping the authoritative AddOnSettings server.
+        let settings = "#NA Megaserver-Faewynd\n";
+        let names = vec!["Faewynd".to_string(), "Faewynd^Mx".to_string()];
+        let chars = build_character_list(Some(settings), &names, &sv_servers(&[]));
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].name, "Faewynd");
+        assert_eq!(chars[0].server, "NA Megaserver");
+        assert!(!chars[0].recovered);
+    }
+
+    #[test]
+    fn build_character_list_strips_caret_suffix() {
+        let names = vec!["Faewynd^Mx".to_string()];
+        let chars = build_character_list(None, &names, &sv_servers(&[]));
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].name, "Faewynd");
+        assert_eq!(chars[0].server, UNKNOWN_SERVER);
+        assert!(chars[0].recovered);
+    }
+
+    #[test]
+    fn build_character_list_skips_markers_and_numeric_ids() {
+        let names = vec![
+            "$AccountWide".to_string(),
+            "123456789012345".to_string(),
+            "Realchar".to_string(),
+        ];
+        let chars = build_character_list(None, &names, &sv_servers(&[]));
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].name, "Realchar");
+    }
+
+    #[test]
+    fn build_character_list_preserves_hyphenated_name() {
+        // Regression guard: first-dash split must keep the whole name.
+        let settings = "#NA Megaserver-Jodynn-Jo\n";
+        let chars = build_character_list(Some(settings), &[], &sv_servers(&[]));
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].server, "NA Megaserver");
+        assert_eq!(chars[0].name, "Jodynn-Jo");
+    }
+
+    #[test]
+    fn build_character_list_same_name_two_servers_kept() {
+        // ESO names are unique per megaserver, so NA-Bob and EU-Bob are distinct.
+        let settings = "#NA Megaserver-Bob\n#EU Megaserver-Bob\n";
+        let chars = build_character_list(Some(settings), &[], &sv_servers(&[]));
+        assert_eq!(chars.len(), 2);
+        assert!(chars.iter().any(|c| c.server == "NA Megaserver"));
+        assert!(chars.iter().any(|c| c.server == "EU Megaserver"));
+    }
+
+    #[test]
+    fn build_character_list_uses_world_scoped_server() {
+        // A SavedVariables-only character stored under a world layer gets its
+        // real megaserver instead of the Unknown bucket.
+        let names = vec!["Faewynd".to_string()];
+        let chars =
+            build_character_list(None, &names, &sv_servers(&[("Faewynd", "EU Megaserver")]));
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].server, "EU Megaserver");
+        assert!(chars[0].recovered);
+    }
+
+    #[test]
+    fn build_character_list_ignores_unknown_world_value() {
+        // A non-megaserver world string must not be used as a server label.
+        let names = vec!["Faewynd".to_string()];
+        let chars = build_character_list(None, &names, &sv_servers(&[("Faewynd", "Some Guild")]));
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].server, UNKNOWN_SERVER);
+    }
+
+    #[test]
+    fn build_character_list_empty_when_no_sources() {
+        let chars = build_character_list(None, &[], &sv_servers(&[]));
+        assert!(chars.is_empty());
     }
 
     #[test]

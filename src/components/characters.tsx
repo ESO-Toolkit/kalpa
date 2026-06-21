@@ -20,6 +20,10 @@ interface CharactersProps {
   onClose: () => void;
 }
 
+// Server bucket for characters recovered from SavedVariables whose megaserver
+// can't be determined. Must match UNKNOWN_SERVER in the Rust `list_characters`.
+const UNKNOWN_SERVER = "Unknown";
+
 export function Characters({ addonsPath, onClose }: CharactersProps) {
   const [characters, setCharacters] = useState<CharacterInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -109,40 +113,54 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
             </Fade>
           ) : (
             <div className="space-y-4">
-              {Object.entries(byServer).map(([server, chars], serverIdx) => (
-                <Fade key={server} delay={serverIdx * 80}>
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <InfoPill color="sky">{server}</InfoPill>
-                      <span className="text-xs text-muted-foreground">
-                        {chars.length} character{chars.length !== 1 ? "s" : ""}
-                      </span>
+              {Object.entries(byServer)
+                .sort(([a], [b]) => {
+                  // Keep the recovered "Unknown" bucket last; otherwise A–Z.
+                  const au = a === UNKNOWN_SERVER ? 1 : 0;
+                  const bu = b === UNKNOWN_SERVER ? 1 : 0;
+                  return au - bu || a.localeCompare(b);
+                })
+                .map(([server, chars], serverIdx) => (
+                  <Fade key={server} delay={serverIdx * 80}>
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <InfoPill color={server === UNKNOWN_SERVER ? "muted" : "sky"}>
+                          {server === UNKNOWN_SERVER ? "Unknown server" : server}
+                        </InfoPill>
+                        <span className="text-xs text-muted-foreground">
+                          {chars.length} character{chars.length !== 1 ? "s" : ""}
+                        </span>
+                      </div>
+                      {server === UNKNOWN_SERVER && (
+                        <p className="text-xs text-muted-foreground mb-2">
+                          Found in addon data; their megaserver couldn&apos;t be determined.
+                        </p>
+                      )}
+                      <div className="space-y-1">
+                        {chars.map((char, charIdx) => (
+                          <Fade
+                            key={`${char.server}-${char.name}`}
+                            delay={serverIdx * 80 + charIdx * 40}
+                          >
+                            <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
+                              <span className="text-sm font-medium">{char.name}</span>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleBackup(char)}
+                                disabled={backingUp === `${char.server}-${char.name}`}
+                              >
+                                {backingUp === `${char.server}-${char.name}`
+                                  ? "Backing up..."
+                                  : "Backup Settings"}
+                              </Button>
+                            </div>
+                          </Fade>
+                        ))}
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      {chars.map((char, charIdx) => (
-                        <Fade
-                          key={`${char.server}-${char.name}`}
-                          delay={serverIdx * 80 + charIdx * 40}
-                        >
-                          <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
-                            <span className="text-sm font-medium">{char.name}</span>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => handleBackup(char)}
-                              disabled={backingUp === `${char.server}-${char.name}`}
-                            >
-                              {backingUp === `${char.server}-${char.name}`
-                                ? "Backing up..."
-                                : "Backup Settings"}
-                            </Button>
-                          </div>
-                        </Fade>
-                      ))}
-                    </div>
-                  </div>
-                </Fade>
-              ))}
+                  </Fade>
+                ))}
             </div>
           )}
         </div>

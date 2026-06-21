@@ -178,6 +178,9 @@ export interface ActivateProfileResult {
 export interface CharacterInfo {
   server: string;
   name: string;
+  /** True when recovered from SavedVariables addon data rather than
+   * AddOnSettings.txt (e.g. account-wide addon-settings mode). */
+  recovered?: boolean;
 }
 
 // ── Game instance types (multi-region / launcher detection) ──────────────

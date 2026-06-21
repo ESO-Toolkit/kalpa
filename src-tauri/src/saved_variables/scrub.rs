@@ -583,6 +583,30 @@ fn string_contains_identity(s: &str, ctx: &ScrubContext) -> bool {
 /// Anything outside these shapes is treated as addon config and not inspected,
 /// so config keys are never mis-detected as identities.
 pub fn detect_identities_from_tree(tree: &SvTreeNode) -> ScrubContext {
+    run_detection(tree).into_context()
+}
+
+/// Best-effort map of character name -> megaserver world, populated only for
+/// characters stored under a **world-scoped** SavedVariables layout (e.g.
+/// `Default → "NA Megaserver" → @account → CharacterName`, or the pChat
+/// world-first layout). The common account-keyed layout omits the world, so
+/// those characters are simply absent from this map. The world string is
+/// verbatim from `GetWorldName()` — "NA Megaserver", "EU Megaserver", or "PTS".
+///
+/// This is a sibling of [`detect_identities_from_tree`] sharing the same
+/// traversal; it exists so the Characters list can label recovered characters
+/// with a real server when one is derivable, without changing the identity
+/// detector's output shape (which the export/scrub feature relies on).
+pub fn detect_character_servers_from_tree(
+    tree: &SvTreeNode,
+) -> std::collections::BTreeMap<String, String> {
+    run_detection(tree).character_servers
+}
+
+/// Walk the SavedVariables tree once and accumulate every identity signal we
+/// can. Callers project out the part they need ([`DetectAcc::into_context`] for
+/// scrub identities, `character_servers` for per-character world labels).
+fn run_detection(tree: &SvTreeNode) -> DetectAcc {
     let mut acc = DetectAcc::default();
 
     if let Some(top_levels) = tree_children(tree) {
@@ -597,7 +621,7 @@ pub fn detect_identities_from_tree(tree: &SvTreeNode) -> ScrubContext {
         }
     }
 
-    acc.into_context()
+    acc
 }
 
 #[derive(Default)]
@@ -606,6 +630,9 @@ struct DetectAcc {
     characters: std::collections::BTreeSet<String>,
     character_ids: std::collections::BTreeSet<String>,
     extra_worlds: std::collections::BTreeSet<String>,
+    /// Character name -> world, recorded only when the character sits under a
+    /// world-scoped layer. Not exposed via `ScrubContext`.
+    character_servers: std::collections::BTreeMap<String, String>,
 }
 
 impl DetectAcc {
@@ -668,7 +695,9 @@ fn classify_account_or_world(node: &SvTreeNode, acc: &mut DetectAcc) {
         acc.accounts.insert(key.to_string());
         if let Some(children) = tree_children(node) {
             for child in children {
-                classify_under_account(child, acc);
+                // Account directly under `Default` (no world layer): the
+                // character's megaserver is not encoded in this layout.
+                classify_under_account(child, acc, None);
             }
         }
     } else if WELL_KNOWN_WORLDS.contains(&key) || key.contains(' ') {
@@ -687,7 +716,9 @@ fn classify_world_layer(key: &str, node: &SvTreeNode, acc: &mut DetectAcc) {
                 acc.accounts.insert(child.key.clone());
                 if let Some(grand) = tree_children(child) {
                     for g in grand {
-                        classify_under_account(g, acc);
+                        // Characters here are scoped to `key` (the world), so we
+                        // can attribute their megaserver.
+                        classify_under_account(g, acc, Some(key));
                     }
                 }
             }
@@ -698,7 +729,7 @@ fn classify_world_layer(key: &str, node: &SvTreeNode, acc: &mut DetectAcc) {
 /// `node` is something sitting directly under an account handle. ESO uses
 /// either `$AccountWide` (account-wide subtable) or a character name / ID
 /// here.
-fn classify_under_account(node: &SvTreeNode, acc: &mut DetectAcc) {
+fn classify_under_account(node: &SvTreeNode, acc: &mut DetectAcc, current_world: Option<&str>) {
     let key = node.key.as_str();
     if key.starts_with('$') {
         // $AccountWide and friends — markers, not identities.
@@ -712,6 +743,11 @@ fn classify_under_account(node: &SvTreeNode, acc: &mut DetectAcc) {
     }
     if !key.is_empty() {
         acc.characters.insert(key.to_string());
+        if let Some(world) = current_world {
+            acc.character_servers
+                .entry(key.to_string())
+                .or_insert_with(|| world.to_string());
+        }
     }
 }
 
@@ -1456,6 +1492,47 @@ mod tests {
         let detected = detect_identities_from_tree(&tree);
         assert_eq!(detected.accounts, vec!["@Author".to_string()]);
         assert_eq!(detected.characters, vec!["Mainchar".to_string()]);
+    }
+
+    #[test]
+    fn detect_character_servers_maps_world_scoped_chars() {
+        // World layer under Default: the character's megaserver is derivable.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["EU Megaserver"] = {
+                        ["@Author"] = {
+                            ["$AccountWide"] = { ["enabled"] = true },
+                            ["Mainchar"] = { ["x"] = 1 },
+                        },
+                    },
+                },
+            }"#,
+        );
+        let servers = detect_character_servers_from_tree(&tree);
+        assert_eq!(
+            servers.get("Mainchar").map(String::as_str),
+            Some("EU Megaserver")
+        );
+        // The identity detector's output is unchanged by this sibling function.
+        let detected = detect_identities_from_tree(&tree);
+        assert_eq!(detected.characters, vec!["Mainchar".to_string()]);
+    }
+
+    #[test]
+    fn detect_character_servers_empty_for_account_keyed_layout() {
+        // Standard account-keyed layout has no world, so no server is derivable.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["Alttank"] = { ["x"] = 2 },
+                    },
+                },
+            }"#,
+        );
+        assert!(detect_character_servers_from_tree(&tree).is_empty());
     }
 
     #[test]
