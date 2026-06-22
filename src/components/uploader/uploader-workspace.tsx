@@ -228,6 +228,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // Mirror of the count so the empty-deps unmount cleanup can report the true
   // fight total to the backend without re-subscribing on every fight.
   const liveFightCountRef = useRef(0);
+  // Fight indices already counted this session. Used to dedup re-delivered fight
+  // events in the EVENT HANDLER (not inside a setState updater): incrementing the
+  // count inside the setLiveFights updater double-fires under React StrictMode (which
+  // invokes updaters twice), which over-counted every fight (e.g. "2 fights" for 1).
+  const seenFightIndicesRef = useRef<Set<number>>(new Set());
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
   // Which path this live session actually took: true = handed off to the official
@@ -747,6 +752,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setLiveFights([]);
     setLiveFightCount(0);
     liveFightCountRef.current = 0;
+    seenFightIndicesRef.current = new Set();
     setLiveReport(null);
     setSessionAnchored(false); // native: not anchored until the first BEGIN_LOG
     // Reset the handoff path indicator (state + its unmount-toast ref mirror) so this
@@ -784,14 +790,16 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           // missed/coalesced — keep the UI honest.
           setSessionAnchored(true);
           const detected = ev;
+          // Dedup + count in the EVENT-HANDLER body (runs once per event), NOT inside a
+          // setState updater. React StrictMode double-invokes updaters in dev, so the old
+          // nested `setLiveFightCount` inside the `setLiveFights` updater fired twice and
+          // double-counted every fight ("2 fights" for 1). The ref Set dedups re-delivered
+          // events; both setStates below use PURE updaters (StrictMode-safe).
+          if (seenFightIndicesRef.current.has(detected.index)) break;
+          seenFightIndicesRef.current.add(detected.index);
+          liveFightCountRef.current += 1;
+          setLiveFightCount((c) => c + 1);
           setLiveFights((prev) => {
-            if (prev.some((f) => f.index === detected.index)) return prev;
-            // Bump the truthful total only when this is a genuinely new fight
-            // (not a re-delivered duplicate within the window).
-            setLiveFightCount((c) => {
-              liveFightCountRef.current = c + 1;
-              return c + 1;
-            });
             const next = [
               ...prev,
               {
@@ -812,6 +820,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           setLiveFights([]);
           setLiveFightCount(0);
           liveFightCountRef.current = 0;
+          seenFightIndicesRef.current = new Set();
           break;
         case "fightSkipped":
           // A genuinely oversized fight; surface once. The full log still uploads.
@@ -2662,27 +2671,30 @@ function LiveDashboard({
           streaming state below the instant a session header lands. */}
       {waiting &&
         (alreadyLogging ? (
-          // Logging is already running → no fresh header coming → /reloadui (or use the
-          // official uploader, which can pick up mid-session). The explicit, disclosed
-          // escape hatch — never a silent downgrade.
-          <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
-              <AlertCircle className="size-3.5 shrink-0" aria-hidden />
-              Armed — combat logging is already running
+          // Logging is ALREADY running → Kalpa joins the in-progress session (mid-session
+          // warm-up replays the current session from disk to seed the encoder), so NO
+          // /reloadui is needed to start. Reassure while warm-up runs; /reloadui is only a
+          // fallback (it also forces ESO's disk-buffer flush outside raids), and the
+          // official uploader is the explicit escape hatch.
+          <div className="rounded-lg border border-sky-400/20 border-l-[3px] border-l-sky-400 bg-sky-400/[0.05] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-sky-200/90">
+              <Radio className="size-3.5 shrink-0" aria-hidden />
+              Joining your in-progress session…
             </div>
             <p className="mt-1.5 text-xs text-muted-foreground">
-              ESO only starts a fresh upload session on a reload. Type{" "}
-              <code className="text-foreground/80">/reloadui</code> in ESO to begin streaming now.
+              Kalpa is reading the session you’re already logging and will stream fights from here —
+              no reload needed. For a long session this can take a few seconds.
               {readiness?.fightInProgress ? " (A fight is being logged right now.)" : ""}
             </p>
-            <div className="mt-2 flex flex-wrap gap-2">
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] text-muted-foreground/80">Not starting?</span>
               <CopyChip text="/reloadui" />
               <Button variant="ghost" size="sm" onClick={onForceHandoff}>
-                Go live anyway via the official uploader
+                Use the official uploader instead
               </Button>
             </div>
             <p className="mt-1.5 text-[11px] text-muted-foreground/80">
-              Anything logged before now isn’t part of this report — use “Upload a Log” for that.
+              Only fights from now on are in this report — use “Upload a Log” for earlier ones.
             </p>
           </div>
         ) : (

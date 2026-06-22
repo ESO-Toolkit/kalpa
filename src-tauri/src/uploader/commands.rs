@@ -1630,6 +1630,11 @@ async fn start_native_live_branch(
             _ => None,
         };
 
+        // When we warmed up from a prefix, the tail starts INSIDE an already-open session
+        // (its BEGIN_LOG was in the replayed prefix), so the tail's line assembler must
+        // start anchored — otherwise it discards every tailed line waiting for a header
+        // that never comes, and live silently streams nothing until a /reloadui.
+        let mid_session = warmup.is_some();
         let result = run_native_live(
             &safe_owned,
             provider,
@@ -1637,7 +1642,7 @@ async fn start_native_live_branch(
             driver_cancel,
             // The production tail reads the real Encounter.log, starting at the same EOF
             // the warm-up prefix stopped at (no gap/overlap).
-            &match super::native::live::NotifyTail::new(Path::new(&safe_owned), eof) {
+            &match super::native::live::NotifyTail::new(Path::new(&safe_owned), eof, mid_session) {
                 Ok(t) => t,
                 Err(e) => {
                     let _ = channel_for_thread.send(LiveEvent::Stopped {

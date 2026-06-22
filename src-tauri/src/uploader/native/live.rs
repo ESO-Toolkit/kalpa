@@ -573,6 +573,10 @@ pub struct WarmupPrefix {
 ///
 /// `poll` is the line source — a notify-backed production tail or a scripted/file tail
 /// in tests. `channel` is an optional UI event sink (reauth prompts etc.).
+// Eight parameters reads clearly here (each is a distinct collaborator: path, session,
+// opts, cancel, tail, warm-up prefix, orphan sink, UI channel); bundling them into a
+// struct would add indirection without aiding readers.
+#[allow(clippy::too_many_arguments)]
 pub fn run_native_live(
     growing_path: &str,
     session: Arc<dyn SessionProvider>,
@@ -1245,6 +1249,10 @@ struct LineAssembler {
     /// first session header (a mid-session start at EOF, F4), so the encoder never
     /// sees a headerless prefix it can't frame.
     seen_begin_log: bool,
+    /// Mid-session join only: drop the FIRST assembled fragment (the orphaned tail of
+    /// the line straddling the tail-start byte — its head was consumed by the warm-up
+    /// replay). Consumed once, on the first chunk that yields a newline.
+    drop_first_fragment: bool,
 }
 
 /// 1 MiB cap on an un-newlined partial line — a real ESO log line is never close to
@@ -1256,6 +1264,24 @@ impl LineAssembler {
         Self {
             partial: Vec::new(),
             seen_begin_log: false,
+            drop_first_fragment: false,
+        }
+    }
+
+    /// For a MID-SESSION live join (the driver warmed up from a replayed prefix and the
+    /// tail now starts INSIDE an already-open session). The session's `BEGIN_LOG` was
+    /// already consumed by the warm-up's assembler, so this tail must NOT wait for one
+    /// (the F4 gate would otherwise discard every tailed line forever — the bug that made
+    /// mid-session live require a `/reloadui`). It therefore starts already-anchored
+    /// (`seen_begin_log = true`) and drops the orphaned partial line straddling the
+    /// join boundary (the warm-up held that line's head and never fed it; the tail sees
+    /// only its tail, which must not be emitted as a bogus line). Mirrors the watcher's
+    /// `session_open = start_offset != 0` discipline.
+    fn new_mid_session() -> Self {
+        Self {
+            partial: Vec::new(),
+            seen_begin_log: true,
+            drop_first_fragment: true,
         }
     }
 
@@ -1271,6 +1297,18 @@ impl LineAssembler {
     /// is exceeded. Lines before the first `BEGIN_LOG` are DISCARDED (F4).
     fn push_chunk(&mut self, chunk: &[u8]) -> Result<(Vec<String>, bool), String> {
         self.partial.extend_from_slice(chunk);
+        // Mid-session join: drop the orphaned tail of the line straddling the tail-start
+        // byte (its head was in the replayed prefix). Discard up to and including the
+        // first newline, ONCE; until that newline arrives, hold and process nothing.
+        if self.drop_first_fragment {
+            match self.partial.iter().position(|&b| b == b'\n') {
+                Some(nl) => {
+                    self.partial.drain(..=nl);
+                    self.drop_first_fragment = false;
+                }
+                None => return Ok((Vec::new(), false)),
+            }
+        }
         let mut lines = Vec::new();
         let mut saw_end_log = false;
         let mut start = 0usize;
@@ -1330,7 +1368,15 @@ struct NotifyTailState {
 impl NotifyTail {
     /// Construct synchronously (so a watcher-setup failure surfaces to the caller, not
     /// inside a thread), watching `path`'s parent dir and tailing from `start_offset`.
-    pub fn new(path: &std::path::Path, start_offset: u64) -> Result<Self, String> {
+    /// `mid_session` must be true when the driver warmed up from a replayed prefix (the
+    /// tail then starts inside an already-open session whose `BEGIN_LOG` was in the
+    /// prefix) so the assembler doesn't discard every tailed line waiting for a header
+    /// that will never arrive in the tailed range.
+    pub fn new(
+        path: &std::path::Path,
+        start_offset: u64,
+        mid_session: bool,
+    ) -> Result<Self, String> {
         use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = RecommendedWatcher::new(
@@ -1351,7 +1397,11 @@ impl NotifyTail {
                 _watcher: watcher,
                 consumed: start_offset,
                 read_buf: Vec::new(),
-                assembler: LineAssembler::new(),
+                assembler: if mid_session {
+                    LineAssembler::new_mid_session()
+                } else {
+                    LineAssembler::new()
+                },
                 consecutive_failures: 0,
                 last_growth: std::time::Instant::now(),
                 last_poll: std::time::Instant::now(),
@@ -2576,6 +2626,39 @@ mod tests {
             post,
             vec![HDR.to_string(), "700,END_COMBAT".to_string()],
             "lines from BEGIN_LOG onward are kept"
+        );
+    }
+
+    #[test]
+    fn line_assembler_mid_session_keeps_lines_without_a_header_and_drops_boundary_fragment() {
+        // The mid-session tail (warm-up already consumed the session's BEGIN_LOG) must
+        // (a) keep lines even though no BEGIN_LOG appears in the tailed range, and
+        // (b) drop the orphaned tail of the line straddling the join byte. The first
+        // chunk begins mid-line ("…GED,GAINED,…" — the tail of an EFFECT_CHANGED whose
+        // head was in the replayed prefix); that fragment must NOT be emitted.
+        let mut a = LineAssembler::new_mid_session();
+        let (lines, _) = a
+            .push_chunk(b"GED,GAINED,1,5002,29489,1\n700,BEGIN_COMBAT\n750,END_COMBAT\n")
+            .unwrap();
+        assert_eq!(
+            lines,
+            vec!["700,BEGIN_COMBAT".to_string(), "750,END_COMBAT".to_string()],
+            "the orphaned boundary fragment is dropped; subsequent lines flow WITHOUT a BEGIN_LOG"
+        );
+    }
+
+    #[test]
+    fn line_assembler_mid_session_waits_for_the_boundary_newline() {
+        // If the first chunk has no newline yet, the boundary fragment isn't complete —
+        // hold and emit nothing until the newline arrives, then resume normally.
+        let mut a = LineAssembler::new_mid_session();
+        let (none, _) = a.push_chunk(b"GED,GAINED,1,5002").unwrap();
+        assert!(none.is_empty(), "no newline yet → nothing emitted");
+        let (lines, _) = a.push_chunk(b",29489\n800,END_COMBAT\n").unwrap();
+        assert_eq!(
+            lines,
+            vec!["800,END_COMBAT".to_string()],
+            "the rest of the orphaned line is dropped; the next full line flows"
         );
     }
 
