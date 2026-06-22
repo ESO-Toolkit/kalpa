@@ -115,8 +115,8 @@ export function AddonDetail({
         className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8"
       >
         {/* Ambient glow behind icon */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-[#c4a44a]/[0.04] blur-[60px]" />
-        <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-primary/[0.04] blur-[60px]" />
+        <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
           <FileText
             aria-hidden="true"
             className="size-10 text-muted-foreground/30"
@@ -300,7 +300,7 @@ export function AddonDetail({
 
   return (
     <div className="flex-1 overflow-y-auto p-6">
-      <h2 className="font-heading text-xl font-semibold bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
+      <h2 className="font-heading text-xl font-semibold bg-gradient-to-r from-primary to-primary-hover bg-clip-text text-transparent">
         {addon.title}
       </h2>
       <div className="mt-1 mb-4 flex items-center gap-2 flex-wrap">
@@ -313,7 +313,7 @@ export function AddonDetail({
           variant="subtle"
           className="mb-4 flex items-center gap-2 border-emerald-500/20! bg-emerald-500/[0.04]! p-3"
         >
-          <AnimatedCheckmark size={18} color="#34d399" />
+          <AnimatedCheckmark size={18} />
           <span className="text-sm text-emerald-400">Updated successfully</span>
         </GlassPanel>
       ) : updateResult?.hasUpdate ? (
@@ -448,7 +448,7 @@ export function AddonDetail({
               <div className="mt-3 pt-3 border-t border-white/[0.06]">
                 <button
                   onClick={() => openUrl(`https://www.esoui.com/downloads/info${addon.esouiId}`)}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-accent-sky/10 px-3 py-1.5 text-xs font-medium text-accent-sky hover:bg-accent-sky/20 transition-colors"
                 >
                   <ExternalLink className="size-3" />
                   View on ESOUI
@@ -478,7 +478,7 @@ export function AddonDetail({
                       "cursor-pointer rounded-md px-2.5 py-1 text-xs font-medium transition-all duration-150 border",
                       active
                         ? tag === "favorite"
-                          ? "bg-[#c4a44a]/15 text-[#c4a44a] border-[#c4a44a]/25"
+                          ? "bg-primary/15 text-primary border-primary/25"
                           : tag === "broken"
                             ? "bg-red-500/15 text-red-400 border-red-500/25"
                             : tag === "testing"
@@ -500,7 +500,7 @@ export function AddonDetail({
                 .map((tag) => (
                   <span
                     key={tag}
-                    className="inline-flex items-center gap-1 rounded-md bg-sky-500/15 text-sky-400 border border-sky-500/25 px-2.5 py-1 text-xs font-medium"
+                    className="inline-flex items-center gap-1 rounded-md bg-accent-sky/15 text-accent-sky border border-accent-sky/25 px-2.5 py-1 text-xs font-medium"
                   >
                     {tag}
                     <button
@@ -510,7 +510,7 @@ export function AddonDetail({
                           addon.tags.filter((t) => t !== tag)
                         )
                       }
-                      className="cursor-pointer ml-0.5 text-sky-400/60 hover:text-sky-400 transition-colors"
+                      className="cursor-pointer ml-0.5 text-accent-sky/60 hover:text-accent-sky transition-colors"
                       aria-label={`Remove tag ${tag}`}
                     >
                       &times;
@@ -531,12 +531,12 @@ export function AddonDetail({
                   value={customTagInput}
                   onChange={(e) => setCustomTagInput(e.target.value)}
                   placeholder="+ tag"
-                  className="w-16 focus:w-24 transition-all duration-150 rounded-md bg-white/[0.03] border border-white/[0.06] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-sky-400/30 focus:bg-white/[0.05]"
+                  className="w-16 focus:w-24 transition-all duration-150 rounded-md bg-white/[0.03] border border-white/[0.06] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/30 outline-none focus:border-accent-sky/30 focus:bg-white/[0.05]"
                 />
                 {customTagInput.trim() && (
                   <button
                     type="submit"
-                    className="flex items-center justify-center size-6 rounded-md bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 transition-colors text-xs font-bold"
+                    className="flex items-center justify-center size-6 rounded-md bg-accent-sky/10 text-accent-sky hover:bg-accent-sky/20 transition-colors text-xs font-bold"
                     aria-label="Add tag"
                   >
                     +
@@ -649,12 +649,12 @@ export function AddonDetail({
                           }
                         >
                           <button
-                            className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
+                            className="shrink-0 cursor-pointer rounded bg-accent-sky/10 px-2 py-1 text-xs font-medium text-accent-sky hover:bg-accent-sky/20 transition-colors disabled:opacity-50"
                             onClick={() => handleInstallDep(dep.name)}
                             disabled={installingDep === dep.name || isOffline}
                           >
                             {installingDep === dep.name ? (
-                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
+                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-accent-sky" />
                             ) : justInstalled ? (
                               <span className="flex items-center gap-1 text-emerald-400">
                                 <Check className="size-3" />
@@ -733,12 +733,12 @@ export function AddonDetail({
                           }
                         >
                           <button
-                            className="shrink-0 cursor-pointer rounded bg-sky-500/10 px-2 py-1 text-xs font-medium text-sky-400 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
+                            className="shrink-0 cursor-pointer rounded bg-accent-sky/10 px-2 py-1 text-xs font-medium text-accent-sky hover:bg-accent-sky/20 transition-colors disabled:opacity-50"
                             onClick={() => handleInstallDep(dep.name)}
                             disabled={installingDep === dep.name || isOffline}
                           >
                             {installingDep === dep.name ? (
-                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
+                              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-accent-sky" />
                             ) : justInstalled ? (
                               <span className="flex items-center gap-1 text-emerald-400">
                                 <Check className="size-3" />

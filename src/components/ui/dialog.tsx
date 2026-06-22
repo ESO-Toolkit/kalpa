@@ -45,7 +45,7 @@ function DialogContent({
       <DialogOverlay />
       <DialogPopup
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-hidden rounded-2xl bg-[rgba(12,20,38,0.96)] backdrop-blur-2xl backdrop-saturate-[1.3] p-5 text-sm text-popover-foreground border border-white/[0.08] shadow-[0_24px_80px_rgba(0,0,0,0.6),0_0_0_1px_rgba(255,255,255,0.03),inset_0_1px_0_rgba(255,255,255,0.06)] outline-none sm:max-w-sm",
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-hidden rounded-2xl bg-surface-overlay backdrop-blur-2xl backdrop-saturate-[1.3] p-5 text-sm text-popover-foreground border border-white/[0.08] shadow-[0_24px_80px_rgba(0,0,0,0.6),0_0_0_1px_rgba(255,255,255,0.03),inset_0_1px_0_rgba(255,255,255,0.06)] outline-none sm:max-w-sm",
           className
         )}
         transition={{ type: "spring", stiffness: 400, damping: 30 }}
@@ -78,7 +78,7 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
       data-slot="dialog-header"
       className={cn(
         "relative -mx-5 -mt-5 flex flex-col gap-1.5 border-b border-white/[0.06] bg-gradient-to-b from-white/[0.04] to-transparent pl-5 pr-12 pt-5 pb-4",
-        "before:absolute before:inset-x-0 before:top-0 before:h-[2px] before:bg-gradient-to-r before:from-[#c4a44a]/0 before:via-[#d4b45a]/80 before:to-[#c4a44a]/0",
+        "before:absolute before:inset-x-0 before:top-0 before:h-[2px] before:bg-gradient-to-r before:from-primary/0 before:via-primary-hover/80 before:to-primary/0",
         className
       )}
       {...props}
@@ -115,7 +115,7 @@ function DialogTitle({ className, ...props }: React.ComponentProps<"h2">) {
   return (
     <AnimatedDialogTitle
       className={cn(
-        "font-heading text-base leading-none font-semibold bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent",
+        "font-heading text-base leading-none font-semibold bg-gradient-to-r from-primary to-primary-hover bg-clip-text text-transparent",
         className
       )}
       {...props}

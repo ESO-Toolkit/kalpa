@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>Kalpa</title>
+    <!-- Flash-free theming: a render-blocking classic script (served from /public,
+         so it satisfies the strict `script-src 'self'` CSP) applies the saved
+         theme's CSS variables before first paint and before the deferred module
+         bundle runs. See public/theme-boot.js. -->
+    <script src="/theme-boot.js"></script>
   </head>
   <body>
     <div id="root"></div>

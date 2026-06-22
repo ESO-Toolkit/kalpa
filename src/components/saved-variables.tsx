@@ -207,7 +207,7 @@ function OverviewTab({
           onClick={orphaned.length > 0 ? onSwitchToCleanup : undefined}
           className={`rounded-xl border p-2.5 text-center transition-all duration-200 ${
             orphaned.length > 0
-              ? "border-amber-500/25 bg-amber-500/[0.06] hover:border-amber-500/35 hover:shadow-[0_0_16px_rgba(245,158,11,0.1),inset_0_1px_0_rgba(245,158,11,0.06)] shadow-[inset_0_1px_0_rgba(245,158,11,0.04),0_2px_8px_rgba(0,0,0,0.12)] cursor-pointer"
+              ? "border-amber-500/25 bg-amber-500/[0.06] hover:border-amber-500/35 hover:shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent)] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent),0_2px_8px_rgba(0,0,0,0.12)] cursor-pointer"
               : "border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_2px_8px_rgba(0,0,0,0.12)]"
           }`}
         >
@@ -224,7 +224,7 @@ function OverviewTab({
       {orphaned.length > 0 && (
         <button
           onClick={onSwitchToCleanup}
-          className="flex w-full items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-left text-xs text-amber-300 transition-all duration-200 hover:border-amber-500/35 shadow-[inset_0_1px_0_rgba(245,158,11,0.04),0_2px_8px_rgba(0,0,0,0.1)] hover:shadow-[0_0_16px_rgba(245,158,11,0.08),inset_0_1px_0_rgba(245,158,11,0.06)]"
+          className="flex w-full items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-left text-xs text-amber-300 transition-all duration-200 hover:border-amber-500/35 shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent),0_2px_8px_rgba(0,0,0,0.1)] hover:shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent)]"
         >
           <PackageXIcon className="size-4 shrink-0" />
           <span>
@@ -236,7 +236,7 @@ function OverviewTab({
       )}
 
       {largeFiles.length > 0 && orphaned.length === 0 && (
-        <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/[0.04] p-2.5 text-xs text-muted-foreground shadow-[inset_0_1px_0_rgba(239,68,68,0.03),0_2px_8px_rgba(0,0,0,0.1)]">
+        <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/[0.04] p-2.5 text-xs text-muted-foreground shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_3%,transparent),0_2px_8px_rgba(0,0,0,0.1)]">
           <HardDriveIcon className="size-4 shrink-0 text-red-400" />
           <span>
             <strong className="text-red-400">{largeFiles.length} large files</strong> (&gt;5 MB) may
@@ -287,8 +287,8 @@ function OverviewTab({
       <div className="max-h-[320px] overflow-y-auto space-y-1">
         {sorted.length === 0 ? (
           <div className="py-8 text-center">
-            <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-2xl bg-[#c4a44a]/[0.08] shadow-[0_0_24px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]">
-              <FileTextIcon className="size-6 text-[#c4a44a]/60" />
+            <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-2xl bg-primary/[0.08] shadow-[0_0_24px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_8%,transparent)]">
+              <FileTextIcon className="size-6 text-primary/60" />
             </div>
             <p className="text-sm text-muted-foreground">
               {filter !== "all" ? "No files match this filter." : "No SavedVariables files found."}
@@ -432,7 +432,7 @@ function CleanupTab({
   if (orphaned.length === 0 && largeFiles.length === 0) {
     return (
       <div className="py-10 text-center">
-        <div className="mx-auto mb-3 flex size-14 items-center justify-center rounded-2xl bg-emerald-500/[0.08] shadow-[0_0_32px_rgba(34,197,94,0.1),inset_0_1px_0_rgba(34,197,94,0.08)]">
+        <div className="mx-auto mb-3 flex size-14 items-center justify-center rounded-2xl bg-emerald-500/[0.08] shadow-[0_0_32px_color-mix(in_oklab,var(--status-success-strong)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_8%,transparent)]">
           <ShieldCheckIcon className="size-7 text-emerald-400" />
         </div>
         <p className="text-sm font-medium text-emerald-400">Your SavedVariables are clean</p>
@@ -497,8 +497,7 @@ function CleanupTab({
               {selected.size > 0 ? (
                 <span>
                   <strong className="text-foreground">{selected.size}</strong> selected &middot;{" "}
-                  <strong className="text-[#c4a44a]">{formatBytes(selectedSize)}</strong>{" "}
-                  reclaimable
+                  <strong className="text-primary">{formatBytes(selectedSize)}</strong> reclaimable
                 </span>
               ) : (
                 "Select files to clean up"
@@ -535,7 +534,7 @@ function CleanupTab({
             {largeFiles.map((f) => (
               <div
                 key={f.fileName}
-                className="flex items-center justify-between rounded-xl border border-red-500/15 bg-red-500/[0.03] p-2 shadow-[inset_0_1px_0_rgba(239,68,68,0.03)]"
+                className="flex items-center justify-between rounded-xl border border-red-500/15 bg-red-500/[0.03] p-2 shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_3%,transparent)]"
               >
                 <div className="min-w-0">
                   <div className="text-sm truncate">{f.addonName}</div>
@@ -999,7 +998,7 @@ function FieldRow({
       {field.confidence !== "certain" && (
         <Popover>
           <PopoverTrigger className="opacity-0 group-hover:opacity-100 transition-opacity">
-            <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-[#38bdf8]" />
+            <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-accent-sky" />
           </PopoverTrigger>
           <PopoverContent align="end" className="w-72">
             <WidgetCustomizer
@@ -1483,7 +1482,7 @@ function EditorTab({
   return (
     <div className="space-y-3">
       {esoRunning && (
-        <div className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-xs text-amber-400 shadow-[0_0_16px_rgba(245,158,11,0.06),inset_0_1px_0_rgba(245,158,11,0.04)]">
+        <div className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-xs text-amber-400 shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent)]">
           <AlertTriangleIcon className="size-4 shrink-0" />
           ESO is running. Changes may be overwritten when you exit the game.
         </div>
@@ -1592,7 +1591,7 @@ function EditorTab({
 
       {/* Two-panel layout */}
       <div
-        className="flex gap-0 rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.4)] backdrop-blur-sm overflow-hidden shadow-[0_4px_16px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.04)]"
+        className="flex gap-0 rounded-xl border border-white/[0.08] bg-[color-mix(in_oklab,var(--card)_40%,transparent)] backdrop-blur-sm overflow-hidden shadow-[0_4px_16px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.04)]"
         style={{ height: "380px" }}
       >
         {loading ? (
@@ -1615,7 +1614,7 @@ function EditorTab({
                   <input
                     type="text"
                     placeholder="Search..."
-                    className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-[#38bdf8]/50 focus:shadow-[0_0_0_3px_rgba(56,189,248,0.1),inset_0_1px_2px_rgba(0,0,0,0.1)]"
+                    className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-accent-sky/50 focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_2px_rgba(0,0,0,0.1)]"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
@@ -1694,7 +1693,7 @@ function RawTreeView({ node, depth }: { node: SvTreeNode; depth: number }) {
       case "string":
         return "text-emerald-400";
       case "number":
-        return "text-sky-400";
+        return "text-accent-sky";
       case "boolean":
         return "text-amber-400";
       case "nil":
@@ -1904,9 +1903,9 @@ function CopyProfileTab({
 
       {/* Step 4: Confirm */}
       {sourceKey && actualDest && (
-        <div className="rounded-xl border border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] p-3 shadow-[0_0_16px_rgba(196,164,74,0.06),inset_0_1px_0_rgba(196,164,74,0.04)]">
+        <div className="rounded-xl border border-primary/20 bg-primary/[0.04] p-3 shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_4%,transparent)]">
           <p className="text-sm">
-            Copy <span className="font-medium text-[#c4a44a]">{sourceKey}</span>
+            Copy <span className="font-medium text-primary">{sourceKey}</span>
             {" \u2192 "}
             <span className="font-medium text-[#4dc2e6]">{actualDest}</span>
             {" in "}
@@ -1968,7 +1967,7 @@ function DiffPreviewDialog({
         {changes.length > 0 && (
           <div className="flex gap-3 text-xs">
             {modified.length > 0 && (
-              <span className="text-sky-400">{modified.length} modified</span>
+              <span className="text-accent-sky">{modified.length} modified</span>
             )}
             {added.length > 0 && <span className="text-emerald-400">{added.length} added</span>}
             {removed.length > 0 && <span className="text-red-400">{removed.length} removed</span>}
@@ -1983,9 +1982,9 @@ function DiffPreviewDialog({
                 key={change.path.join("\0")}
                 className={`rounded-lg border px-3 py-2 text-xs ${
                   change.changeType === "added"
-                    ? "border-emerald-500/20 bg-emerald-500/[0.06] shadow-[inset_0_1px_0_rgba(34,197,94,0.04)]"
+                    ? "border-emerald-500/20 bg-emerald-500/[0.06] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-success-strong)_4%,transparent)]"
                     : change.changeType === "removed"
-                      ? "border-red-500/20 bg-red-500/[0.06] shadow-[inset_0_1px_0_rgba(239,68,68,0.04)]"
+                      ? "border-red-500/20 bg-red-500/[0.06] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_4%,transparent)]"
                       : "border-white/[0.06] bg-white/[0.03] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                 }`}
               >
