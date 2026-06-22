@@ -630,10 +630,12 @@ pub struct LiveEventSink {
     /// will stream fights. The UI flips from "waiting for a session" to "streaming".
     pub on_session_anchored: Box<dyn Fn() + Send + Sync>,
     /// Called after each fight-segment is accepted by the server, with the 0-based
-    /// index of the fight in this session. Drives the UI's per-fight timeline + count
-    /// for the native path (the official-handoff path gets this from its own watcher),
-    /// and backstops a missed `on_session_anchored` (a fight implies anchored).
-    pub on_fight_posted: Box<dyn Fn(usize) + Send + Sync>,
+    /// index of the fight in this session and its wall-clock duration in ms (the
+    /// segment's `end_time - start_time`, report-absolute). Drives the UI's per-fight
+    /// timeline + count + duration for the native path (the official-handoff path gets
+    /// this from its own watcher), and backstops a missed `on_session_anchored` (a fight
+    /// implies anchored).
+    pub on_fight_posted: Box<dyn Fn(usize, u64) + Send + Sync>,
     /// Called when the session is lost mid-stream and the user must re-sign-in.
     pub on_reauth_required: Box<dyn Fn() + Send + Sync>,
     /// Called when posting resumes after a fresh session is stored.
@@ -870,7 +872,14 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
         // UI. A fight event also backstops a missed on_session_anchored. 0-based index.
         sink.note_segment(&self.code.0, payload.segment_id);
         if let Some(ch) = self.channel {
-            (ch.on_fight_posted)(self.fights_posted);
+            // The fight's wall-clock duration is the segment's report-absolute window.
+            // A clean fight-boundary cut ends on END_COMBAT, so end-start is the fight
+            // length. saturating_sub guards a degenerate/zero-length window.
+            let duration_ms = payload
+                .segment
+                .end_time
+                .saturating_sub(payload.segment.start_time);
+            (ch.on_fight_posted)(self.fights_posted, duration_ms);
         }
         self.fights_posted += 1;
         if next == 0 {

@@ -1583,16 +1583,17 @@ async fn start_native_live_branch(
             on_session_anchored: Box::new(move || {
                 let _ = ch_anchored.send(LiveEvent::SessionAnchored);
             }),
-            on_fight_posted: Box::new(move |index| {
+            on_fight_posted: Box::new(move |index, duration_ms| {
                 // Native fights drive the same per-fight UI timeline as the official
-                // watcher. Zone/boss naming + duration aren't cheaply available at the
+                // watcher. Duration comes from the segment's report-absolute wall window
+                // (end-start). Zone/boss naming still isn't cheaply available at the
                 // driver's cut without re-parsing, so they're omitted (the row shows
-                // unnamed but the count is honest) — a naming pass is a follow-up.
+                // unnamed but with a real duration) — a naming pass is a follow-up.
                 let _ = ch_fight.send(LiveEvent::FightDetected {
                     index,
                     zone_name: None,
                     boss_name: None,
-                    duration_ms: 0,
+                    duration_ms,
                 });
             }),
             on_reauth_required: Box::new(move || {
