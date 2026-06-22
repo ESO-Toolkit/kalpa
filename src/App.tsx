@@ -54,6 +54,19 @@ interface PendingDeepLinkPayload {
   installPackId: string | null;
 }
 
+type BatchAddonPhase =
+  | "downloading"
+  | "scanning"
+  | "extracting"
+  | "completed"
+  | "failed"
+  | "stopped";
+
+interface BatchFileProgress {
+  fileIndex: number;
+  fileTotal: number;
+}
+
 function App() {
   const [addonsPath, setAddonsPath] = useState("");
   const [addons, setAddons] = useState<AddonManifest[]>([]);
@@ -74,9 +87,10 @@ function App() {
     total: number;
     currentAddon?: string;
   } | null>(null);
-  const [addonStatuses, setAddonStatuses] = useState<
-    Map<string, "downloading" | "scanning" | "extracting" | "completed" | "failed">
-  >(new Map());
+  const [addonStatuses, setAddonStatuses] = useState<Map<string, BatchAddonPhase>>(new Map());
+  const [addonFileProgress, setAddonFileProgress] = useState<Map<string, BatchFileProgress>>(
+    new Map()
+  );
   const [pendingConflicts, setPendingConflicts] = useState<Map<string, BatchConflictAddon>>(
     new Map()
   );
@@ -124,6 +138,7 @@ function App() {
   const addonsPathRef = useRef("");
   const viewModeRef = useRef<ViewMode>("installed");
   const updatingAllRef = useRef(false);
+  const batchOperationIdsRef = useRef<Map<string, string>>(new Map());
   const runBatchUpdatesRef = useRef<((updates: UpdateCheckResult[]) => Promise<void>) | null>(null);
   // Resolves the ESO-running confirm dialog: true = update anyway, false = cancel.
   const esoRunningResolveRef = useRef<((proceed: boolean) => void) | null>(null);
@@ -203,27 +218,37 @@ function App() {
         console.error("[tauri:deep-link-share]", listenError);
       });
 
-    void listen<{ folderName: string; phase: string; index: number; total: number }>(
-      "batch-update-progress",
-      (event) => {
-        const { folderName, phase, total } = event.payload;
-        setAddonStatuses((prev) => {
-          const next = new Map(prev);
-          next.set(
-            folderName,
-            phase as "downloading" | "scanning" | "extracting" | "completed" | "failed"
-          );
-          let completed = 0;
-          let failed = 0;
-          for (const s of next.values()) {
-            if (s === "completed") completed++;
-            if (s === "failed") failed++;
-          }
-          setUpdateProgress({ completed, failed, total, currentAddon: folderName });
-          return next;
-        });
-      }
-    )
+    void listen<{
+      folderName: string;
+      phase: BatchAddonPhase;
+      index: number;
+      total: number;
+      fileIndex?: number;
+      fileTotal?: number;
+    }>("batch-update-progress", (event) => {
+      const { folderName, phase, total, fileIndex, fileTotal } = event.payload;
+      setAddonStatuses((prev) => {
+        const next = new Map(prev);
+        next.set(folderName, phase);
+        let completed = 0;
+        let failed = 0;
+        for (const s of next.values()) {
+          if (s === "completed") completed++;
+          if (s === "failed" || s === "stopped") failed++;
+        }
+        setUpdateProgress({ completed, failed, total, currentAddon: folderName });
+        return next;
+      });
+      setAddonFileProgress((prev) => {
+        const next = new Map(prev);
+        if (phase === "extracting" && fileIndex != null && fileTotal != null) {
+          next.set(folderName, { fileIndex, fileTotal });
+        } else if (phase !== "extracting") {
+          next.delete(folderName);
+        }
+        return next;
+      });
+    })
       .then((unlisten) => {
         if (disposed) {
           unlisten();
@@ -849,6 +874,9 @@ function App() {
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
       setAddonStatuses(new Map());
+      setAddonFileProgress(new Map());
+      const batchOperationIds = new Map(updates.map((u) => [u.folderName, crypto.randomUUID()]));
+      batchOperationIdsRef.current = batchOperationIds;
 
       void invokeResult("create_pre_operation_snapshot", {
         addonsPath: path,
@@ -872,12 +900,15 @@ function App() {
           esouiId: u.esouiId,
           folderName: u.folderName,
           apiVersion: u.remoteVersion,
+          operationId: batchOperationIds.get(u.folderName),
         })),
       });
 
       if (!batch.ok) {
+        batchOperationIdsRef.current = new Map();
         setUpdatingAll(false);
         setUpdateProgress(null);
+        setAddonFileProgress(new Map());
         toast.error(`Batch update failed: ${batch.error}`);
         srAnnounce("Batch update failed");
         return;
@@ -897,9 +928,15 @@ function App() {
         const raw = batchErrors?.[name];
         failureReasons.set(name, raw ? getTauriErrorMessage(raw) : "unknown error");
       }
+      const stoppedCount = failed.filter((name) =>
+        (failureReasons.get(name) ?? "").includes("Update cancelled")
+      ).length;
+      const failedCount = failed.length - stoppedCount;
 
       setUpdatingAll(false);
       setUpdateProgress(null);
+      setAddonFileProgress(new Map());
+      batchOperationIdsRef.current = new Map();
 
       if (remainingConflicts.length > 0) {
         setPendingConflicts((prev) => {
@@ -915,7 +952,8 @@ function App() {
       const conflictCount = remainingConflicts.length;
       if (completed.length > 0 || failed.length > 0) {
         let msg = `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}`;
-        if (failed.length > 0) msg += `, ${failed.length} failed`;
+        if (stoppedCount > 0) msg += `, ${stoppedCount} stopped`;
+        if (failedCount > 0) msg += `, ${failedCount} failed`;
         if (conflictCount > 0)
           msg += `, ${conflictCount} need${conflictCount === 1 ? "s" : ""} your attention`;
         if (failed.length > 0) {
@@ -923,7 +961,9 @@ function App() {
           const reasonLines = failed.map(
             (name) => `${name}: ${failureReasons.get(name) ?? "unknown error"}`
           );
-          console.error(`Update failures (${failed.length}):\n${reasonLines.join("\n")}`);
+          const diagnosticMessage = `Update non-successes (${failed.length}):\n${reasonLines.join("\n")}`;
+          if (failedCount > 0) console.error(diagnosticMessage);
+          else console.info(diagnosticMessage);
 
           // Build the user-visible detail by grouping addons under a stable
           // label for their cause, then listing the affected addon names.
@@ -939,12 +979,14 @@ function App() {
           // CFA-only path. Keeps the "controlled folder access" substring so
           // the tauri.ts passthrough still recognizes it.
           const canonicalReason = (reason: string): string =>
-            /controlled folder access/i.test(reason)
-              ? "Windows blocked Kalpa from writing — most often Controlled Folder Access " +
-                "(ransomware protection), but possibly read-only files or antivirus. Fix the " +
-                "common case in Windows Security → Virus & threat protection → Ransomware " +
-                "protection → Allow an app through Controlled folder access."
-              : reason;
+            reason.includes("Update cancelled")
+              ? "Stopped by user"
+              : /controlled folder access/i.test(reason)
+                ? "Windows blocked Kalpa from writing — most often Controlled Folder Access " +
+                  "(ransomware protection), but possibly read-only files or antivirus. Fix the " +
+                  "common case in Windows Security → Virus & threat protection → Ransomware " +
+                  "protection → Allow an app through Controlled folder access."
+                : reason;
 
           const byReason = new Map<string, string[]>();
           for (const name of failed) {
@@ -968,7 +1010,11 @@ function App() {
           if (detail.length > MAX_DETAIL) {
             detail = detail.slice(0, MAX_DETAIL - 1).trimEnd() + "…";
           }
-          toast.warning(msg, { description: detail });
+          if (failedCount > 0) {
+            toast.warning(msg, { description: detail });
+          } else {
+            toast.info(msg, { description: detail });
+          }
 
           // If any failure was a write/permission block (CFA et al.), surface
           // the rich guidance dialog as a fallback — the proactive probe may
@@ -1016,9 +1062,15 @@ function App() {
               const { isPermissionGranted, sendNotification } =
                 await import("@tauri-apps/plugin-notification");
               if (await isPermissionGranted()) {
+                const notificationParts = [
+                  `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}`,
+                  stoppedCount > 0 && `${stoppedCount} stopped`,
+                  failedCount > 0 && `${failedCount} failed`,
+                  conflictCount > 0 && `${conflictCount} need review`,
+                ].filter(Boolean);
                 sendNotification({
                   title: "Kalpa",
-                  body: `Updated ${completed.length} addon${completed.length !== 1 ? "s" : ""}${failed.length > 0 ? `, ${failed.length} failed` : ""}${conflictCount > 0 ? `, ${conflictCount} need review` : ""}`,
+                  body: notificationParts.join(", "),
                 });
               }
             }
@@ -1040,6 +1092,16 @@ function App() {
   const handleUpdateAll = useCallback(() => {
     void runBatchUpdates(updatesAvailable);
   }, [runBatchUpdates, updatesAvailable]);
+
+  const handleStopBatchAddon = useCallback(
+    (folderName: string) => {
+      const operationId = batchOperationIdsRef.current.get(folderName);
+      if (!operationId) return;
+      void invokeOrThrow("cancel_update", { operationId }).catch(() => {});
+      srAnnounce(`Stopping ${folderName}`);
+    },
+    [srAnnounce]
+  );
 
   const handleToggleSelect = useCallback((folderName: string) => {
     setSelectedFolders((prev) => {
@@ -1330,7 +1392,9 @@ function App() {
           updatingAll={updatingAll}
           updateProgress={updateProgress}
           addonStatuses={addonStatuses}
+          addonFileProgress={addonFileProgress}
           onUpdateAll={handleUpdateAll}
+          onStopAddon={handleStopBatchAddon}
           isOffline={isOffline}
         />
 

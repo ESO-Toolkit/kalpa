@@ -2,7 +2,8 @@ use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, Seek};
+use std::io::{self, Read, Seek, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
@@ -899,10 +900,36 @@ pub fn browse_popular(page: u32, sort_by: &str) -> Result<BrowsePopularPage, Str
     Ok(BrowsePopularPage { results, has_more })
 }
 
+pub const CANCELLED: &str = "Update cancelled.";
+
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<(), String> {
+    if is_cancelled(cancel) {
+        Err(CANCELLED.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTempFile, String> {
+    download_addon_with_cancel(url, expected_md5, None)
+}
+
+pub fn download_addon_with_cancel(
+    url: &str,
+    expected_md5: Option<&str>,
+    cancel: Option<&AtomicBool>,
+) -> Result<NamedTempFile, String> {
     if !url.starts_with("https://cdn.esoui.com/") && !url.starts_with("https://www.esoui.com/") {
         return Err("Invalid download URL: only ESOUI download links are allowed.".to_string());
     }
+
+    check_cancelled(cancel)?;
 
     let client = http_client();
 
@@ -912,6 +939,7 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
     let response = 'retry: {
         last_err = String::new();
         for attempt in 0..=MAX_RETRIES {
+            check_cancelled(cancel)?;
             let resp = client.get(url).send().map_err(|e| {
                 if e.is_connect() || e.is_timeout() {
                     "Download failed. Check your internet connection.".to_string()
@@ -936,6 +964,7 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
                 last_err = format!("HTTP {status}");
                 let delay = Duration::from_millis(500 * (1 << attempt));
                 std::thread::sleep(delay);
+                check_cancelled(cancel)?;
                 continue;
             }
 
@@ -951,8 +980,20 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
     let mut tmp = NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
 
     let mut response = response;
-    let written = io::copy(&mut response, &mut tmp)
-        .map_err(|e| format!("Failed to write download to temp file: {e}"))?;
+    let mut written = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        check_cancelled(cancel)?;
+        let n = response
+            .read(&mut buf)
+            .map_err(|e| format!("Failed to read download: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        tmp.write_all(&buf[..n])
+            .map_err(|e| format!("Failed to write download to temp file: {e}"))?;
+        written += n as u64;
+    }
 
     if let Some(expected) = expected_size {
         if written != expected {
@@ -966,7 +1007,6 @@ pub fn download_addon(url: &str, expected_md5: Option<&str>) -> Result<NamedTemp
     if let Some(expected) = expected_md5 {
         if !expected.is_empty() {
             use md5::{Digest, Md5};
-            use std::io::Read;
             tmp.as_file()
                 .seek(io::SeekFrom::Start(0))
                 .map_err(|e| format!("Failed to seek: {e}"))?;
@@ -1373,5 +1413,16 @@ mod tests {
     fn download_addon_rejects_http_esoui() {
         let result = download_addon("http://cdn.esoui.com/addon.zip", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn download_addon_with_cancel_stops_before_request() {
+        let flag = AtomicBool::new(true);
+        let result = download_addon_with_cancel(
+            "https://cdn.esoui.com/downloads/test-addon.zip",
+            None,
+            Some(&flag),
+        );
+        assert_eq!(result.unwrap_err(), CANCELLED);
     }
 }
