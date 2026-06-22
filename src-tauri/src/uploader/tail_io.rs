@@ -60,6 +60,31 @@ pub fn read_range(path: &Path, start: u64, end: u64, buf: &mut Vec<u8>) -> Resul
     Ok(len)
 }
 
+/// The offset just AFTER the last newline at or before `eof` — i.e. the start of the
+/// line that straddles `eof` (or `eof` itself when the byte before `eof` is a newline,
+/// meaning `eof` is already a clean line boundary).
+///
+/// Used to start a live tail on a guaranteed line boundary so a non-atomic append in
+/// progress at attach time can't split a line across the warm-up/tail seam (the warm-up
+/// replays complete lines up to this boundary; the tail then reads the straddling line
+/// whole from its true start). Returns `None` only in the degenerate case where no
+/// newline exists within the search window (a single line longer than the window).
+pub fn last_line_boundary(path: &Path, eof: u64) -> Option<u64> {
+    if eof == 0 {
+        return Some(0);
+    }
+    // A well-formed ESO line is far below `MAX_PARTIAL` (1 MiB); searching the last 1 MiB
+    // is bounded and always captures the newline preceding the straddling tail.
+    let window = eof.min(1024 * 1024);
+    let start = eof - window;
+    let mut buf = Vec::new();
+    let n = read_range(path, start, eof, &mut buf).ok()?;
+    buf[..n]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|idx| start + idx as u64 + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +120,27 @@ mod tests {
         // A window larger than MAX_READ is refused before any allocation/read.
         let err = read_range(&path, 0, MAX_READ + 1, &mut Vec::new()).unwrap_err();
         assert!(err.contains("too large"), "{err}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn last_line_boundary_finds_the_line_safe_start() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("kalpa-tail-io-boundary-test.log");
+        // "aaa\nbbb\nccc" — newlines at offsets 3 and 7; "ccc" (8..11) is the straddling tail.
+        std::fs::write(&path, b"aaa\nbbb\nccc").unwrap();
+        let eof = std::fs::metadata(&path).unwrap().len();
+        // EOF mid-line ("ccc") → boundary is the start of "ccc" (just after the \n at 7).
+        assert_eq!(last_line_boundary(&path, eof), Some(8));
+        // EOF exactly on a line boundary (just after "bbb\n") → that same offset (8 is the
+        // byte after the \n at 7; for eof=8 the boundary is 8 itself).
+        assert_eq!(last_line_boundary(&path, 8), Some(8));
+        // EOF == 0 → 0 (nothing before it).
+        assert_eq!(last_line_boundary(&path, 0), Some(0));
+        // A file with no newline at all → None (degenerate; caller falls back to eof).
+        std::fs::write(&path, b"no-newline-here").unwrap();
+        let eof2 = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(last_line_boundary(&path, eof2), None);
         let _ = std::fs::remove_file(&path);
     }
 }

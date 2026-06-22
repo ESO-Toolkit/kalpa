@@ -1605,26 +1605,51 @@ async fn start_native_live_branch(
                 let _ = ch_resolved.send(LiveEvent::ReauthResolved);
             }),
         };
-        // Snapshot EOF ONCE: both the tail start AND the mid-session warm-up anchor to the
-        // same byte so the replayed prefix [BEGIN_LOG, eof) and the tailed [eof, ..) meet
-        // with no gap or overlap.
-        let eof = std::fs::metadata(&safe_owned).map(|m| m.len()).unwrap_or(0);
+        let log_path = Path::new(&safe_owned);
+        let eof = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+
+        // Determine the current session anchor. DISTINGUISH a scanner error (we couldn't
+        // read the log to learn whether a session is already open) from Ok(None) (no open
+        // session — a legitimate cold tail-from-EOF). On error, DECLINE native rather than
+        // start a header-gated tail from EOF: in an already-open session that would
+        // silently stream nothing (the exact mid-session bug). No report exists yet, so
+        // this is a clean, visible decline.
+        let anchor = match super::scanner::find_current_session_begin(log_path, eof) {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = channel_for_thread.send(LiveEvent::Stopped {
+                    reason: format!(
+                        "Couldn't read the log to start live logging ({e}). Try again, \
+                         or type /reloadui in ESO to begin a fresh session."
+                    ),
+                });
+                let _ = super::history::settle_started(&app_for_thread, &record_id_for_thread);
+                return;
+            }
+        };
+
+        // LINE-SAFE SEAM: start the tail at the last COMPLETE line boundary ≤ EOF (and
+        // replay the warm-up prefix up to that same boundary). If EOF fell inside a line
+        // (a non-atomic append in progress at attach time), this avoids splitting that
+        // line across the warm-up/tail seam — the tail reads it whole from its true start,
+        // so no real line (BEGIN_COMBAT / UNIT_ADDED / END_COMBAT / END_LOG / next
+        // BEGIN_LOG) is lost. Both the prefix end and the tail start use this boundary, so
+        // they meet exactly with no gap or overlap.
+        let tail_start = super::tail_io::last_line_boundary(log_path, eof).unwrap_or(eof);
         let _ = channel_for_thread.send(LiveEvent::Started {
             file: safe_owned.clone(),
-            start_offset: eof,
+            start_offset: tail_start,
         });
 
-        // MID-SESSION: if the user is ALREADY combat-logging (an open session header lies
-        // before EOF), replay that prefix to warm the encoder so they stream WITHOUT a
-        // fresh /reloadui. Find the most-recent BEGIN_LOG; only warm up when the session
-        // is still OPEN (no END_LOG after it) and there are bytes to replay. No header /
-        // closed session / just-started ⇒ None ⇒ tail from EOF exactly as before. A
-        // scanner error is non-fatal: fall back to from-EOF (today's behavior).
-        let warmup = match super::scanner::find_current_session_begin(Path::new(&safe_owned), eof) {
-            Ok(Some(anchor)) if anchor.open_session && anchor.begin_log_offset < eof => {
+        // MID-SESSION: if the user is ALREADY combat-logging (an OPEN session header lies
+        // before the line-safe tail start), replay that prefix to warm the encoder so they
+        // stream WITHOUT a fresh /reloadui. No header / closed session / just-started ⇒
+        // None ⇒ tail from the boundary exactly as a cold start.
+        let warmup = match anchor {
+            Some(a) if a.open_session && a.begin_log_offset < tail_start => {
                 Some(super::native::live::WarmupPrefix {
-                    begin_log_offset: anchor.begin_log_offset,
-                    eof,
+                    begin_log_offset: a.begin_log_offset,
+                    eof: tail_start,
                 })
             }
             _ => None,
@@ -1640,9 +1665,9 @@ async fn start_native_live_branch(
             provider,
             &opts_owned,
             driver_cancel,
-            // The production tail reads the real Encounter.log, starting at the same EOF
-            // the warm-up prefix stopped at (no gap/overlap).
-            &match super::native::live::NotifyTail::new(Path::new(&safe_owned), eof, mid_session) {
+            // The production tail reads the real Encounter.log, starting at the same
+            // line-safe boundary the warm-up prefix stopped at (no gap/overlap).
+            &match super::native::live::NotifyTail::new(log_path, tail_start, mid_session) {
                 Ok(t) => t,
                 Err(e) => {
                     let _ = channel_for_thread.send(LiveEvent::Stopped {

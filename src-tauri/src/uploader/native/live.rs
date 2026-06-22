@@ -811,6 +811,14 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
                 // overwrites `current_session_wall`/offset and would timestamp the prior
                 // session's last segment with the NEW session's clock. We terminate right
                 // after, so the new header is never needed in this report.
+                //
+                // Drain terminal pending correlations FIRST (a DAMAGE_SHIELDED buffered
+                // awaiting its paired damage event): /reloadui can land mid-fight with a
+                // shield still pending, and unlike a clean END_COMBAT cut this terminal
+                // path isn't shields-settled-gated. The END_LOG/Idle exits drain before
+                // their final post; this one must too, or the buffered shield is dropped
+                // and the closing session's last segment is silently incomplete.
+                self.seg.drain_trailing_shields();
                 match self.post_current(sink) {
                     PostOutcome::Fatal(d) => return Some(EndReason::Fatal(d)),
                     PostOutcome::Cancelled => return Some(EndReason::Stopped),
@@ -1252,10 +1260,6 @@ struct LineAssembler {
     /// first session header (a mid-session start at EOF, F4), so the encoder never
     /// sees a headerless prefix it can't frame.
     seen_begin_log: bool,
-    /// Mid-session join only: drop the FIRST assembled fragment (the orphaned tail of
-    /// the line straddling the tail-start byte — its head was consumed by the warm-up
-    /// replay). Consumed once, on the first chunk that yields a newline.
-    drop_first_fragment: bool,
 }
 
 /// 1 MiB cap on an un-newlined partial line — a real ESO log line is never close to
@@ -1267,7 +1271,6 @@ impl LineAssembler {
         Self {
             partial: Vec::new(),
             seen_begin_log: false,
-            drop_first_fragment: false,
         }
     }
 
@@ -1278,18 +1281,13 @@ impl LineAssembler {
     /// mid-session live require a `/reloadui`). It therefore starts already-anchored
     /// (`seen_begin_log = true`). Mirrors the watcher's `session_open = start_offset != 0`.
     ///
-    /// `drop_first_fragment` must be true ONLY when the tail's start byte fell INSIDE a
-    /// line (the warm-up held that line's head and never fed it, so the tail sees an
-    /// orphaned tail fragment that must not be emitted). When the start byte is exactly on
-    /// a line boundary (the prior line ended in `\n` at the snapshot EOF) there is NO
-    /// orphan, and dropping would silently discard the FIRST real appended line — possibly
-    /// a `BEGIN_COMBAT`, an actor/ability declaration, an `END_LOG`, or the next
-    /// `BEGIN_LOG`. The caller computes this from the byte just before `start_offset`.
-    fn new_mid_session(drop_first_fragment: bool) -> Self {
+    /// No leading-fragment drop is needed: the caller starts the tail on a line-safe
+    /// boundary (`tail_io::last_line_boundary`), so the first chunk always begins at a
+    /// real line start — there is never an orphaned partial straddling the seam.
+    fn new_mid_session() -> Self {
         Self {
             partial: Vec::new(),
             seen_begin_log: true,
-            drop_first_fragment,
         }
     }
 
@@ -1305,18 +1303,6 @@ impl LineAssembler {
     /// is exceeded. Lines before the first `BEGIN_LOG` are DISCARDED (F4).
     fn push_chunk(&mut self, chunk: &[u8]) -> Result<(Vec<String>, bool), String> {
         self.partial.extend_from_slice(chunk);
-        // Mid-session join: drop the orphaned tail of the line straddling the tail-start
-        // byte (its head was in the replayed prefix). Discard up to and including the
-        // first newline, ONCE; until that newline arrives, hold and process nothing.
-        if self.drop_first_fragment {
-            match self.partial.iter().position(|&b| b == b'\n') {
-                Some(nl) => {
-                    self.partial.drain(..=nl);
-                    self.drop_first_fragment = false;
-                }
-                None => return Ok((Vec::new(), false)),
-            }
-        }
         let mut lines = Vec::new();
         let mut saw_end_log = false;
         let mut start = 0usize;
@@ -1386,19 +1372,6 @@ impl NotifyTail {
         mid_session: bool,
     ) -> Result<Self, String> {
         use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-        // Mid-session only: did the tail's start byte fall INSIDE a line? If the byte just
-        // before start_offset is a newline (or there is no prior byte), the tail begins on
-        // a clean line boundary and there is no orphaned fragment to drop. We read that one
-        // byte from disk (append-only, so it's stable). On any read error, default to NOT
-        // dropping — losing the F4-style orphan guard is far safer than silently dropping a
-        // real first line.
-        let started_inside_a_line = mid_session && start_offset > 0 && {
-            let mut b = Vec::new();
-            match read_range(path, start_offset - 1, start_offset, &mut b) {
-                Ok(1) => b.first().copied() != Some(b'\n'),
-                _ => false,
-            }
-        };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = RecommendedWatcher::new(
             move |res| {
@@ -1418,12 +1391,11 @@ impl NotifyTail {
                 _watcher: watcher,
                 consumed: start_offset,
                 read_buf: Vec::new(),
+                // `start_offset` is a line-safe boundary (the caller uses
+                // `tail_io::last_line_boundary`), so there is never an orphaned partial to
+                // drop. A mid-session tail only needs to skip the BEGIN_LOG gate.
                 assembler: if mid_session {
-                    // Only drop the leading fragment when the tail's start byte fell
-                    // INSIDE a line (the byte just before it is NOT a newline). If the
-                    // snapshot EOF landed exactly on a line boundary, the first appended
-                    // line is whole and must be kept — dropping it would lose a real line.
-                    LineAssembler::new_mid_session(started_inside_a_line)
+                    LineAssembler::new_mid_session()
                 } else {
                     LineAssembler::new()
                 },
@@ -2655,52 +2627,41 @@ mod tests {
     }
 
     #[test]
-    fn line_assembler_mid_session_keeps_lines_without_a_header_and_drops_boundary_fragment() {
-        // Mid-session join where the tail-start byte fell INSIDE a line (drop=true): the
-        // tail must (a) keep lines even though no BEGIN_LOG appears in the tailed range,
-        // and (b) drop the orphaned tail of the line straddling the join byte. The first
-        // chunk begins mid-line ("…GED,GAINED,…" — the tail of an EFFECT_CHANGED whose
-        // head was in the replayed prefix); that fragment must NOT be emitted.
-        let mut a = LineAssembler::new_mid_session(true);
+    fn line_assembler_mid_session_keeps_lines_without_a_header() {
+        // A mid-session tail starts INSIDE an already-open session (the warm-up replay
+        // already consumed its BEGIN_LOG), so it must keep every line WITHOUT waiting for
+        // a header — otherwise the F4 gate would discard every appended fight line forever
+        // (the bug that made mid-session live require a /reloadui). The caller starts the
+        // tail on a line-safe boundary (tail_io::last_line_boundary), so the first chunk
+        // begins at a real line start — no orphaned fragment to handle here.
+        let mut a = LineAssembler::new_mid_session();
         let (lines, _) = a
-            .push_chunk(b"GED,GAINED,1,5002,29489,1\n700,BEGIN_COMBAT\n750,END_COMBAT\n")
+            .push_chunk(b"700,BEGIN_COMBAT\n730,COMBAT_EVENT,DAMAGE\n750,END_COMBAT\n")
             .unwrap();
         assert_eq!(
             lines,
-            vec!["700,BEGIN_COMBAT".to_string(), "750,END_COMBAT".to_string()],
-            "the orphaned boundary fragment is dropped; subsequent lines flow WITHOUT a BEGIN_LOG"
+            vec![
+                "700,BEGIN_COMBAT".to_string(),
+                "730,COMBAT_EVENT,DAMAGE".to_string(),
+                "750,END_COMBAT".to_string(),
+            ],
+            "mid-session: all lines flow without a leading BEGIN_LOG, none dropped"
         );
     }
 
     #[test]
-    fn line_assembler_mid_session_on_line_boundary_keeps_the_first_line() {
-        // Mid-session join where the snapshot EOF landed EXACTLY on a line boundary
-        // (drop=false): there is NO orphaned fragment, so the first appended line is whole
-        // and MUST be kept. Dropping it (the bug Codex flagged) would silently lose a real
-        // line — e.g. a BEGIN_COMBAT, an actor/ability declaration, an END_LOG, or the
-        // next BEGIN_LOG (breaking fight capture / index stability / the NewSession
-        // terminate). Here the first line IS a BEGIN_COMBAT and must survive.
-        let mut a = LineAssembler::new_mid_session(false);
-        let (lines, _) = a.push_chunk(b"700,BEGIN_COMBAT\n750,END_COMBAT\n").unwrap();
+    fn line_assembler_mid_session_still_terminates_on_a_second_begin_log() {
+        // A genuine /reloadui DURING the live session writes a fresh BEGIN_LOG into the
+        // tailed range; the mid-session assembler must surface it (not swallow it) so the
+        // driver's NewSession terminate fires.
+        let mut a = LineAssembler::new_mid_session();
+        let (lines, _) = a
+            .push_chunk(format!("700,END_COMBAT\n{HDR}\n").as_bytes())
+            .unwrap();
         assert_eq!(
             lines,
-            vec!["700,BEGIN_COMBAT".to_string(), "750,END_COMBAT".to_string()],
-            "on a clean boundary the first appended line is kept, not dropped"
-        );
-    }
-
-    #[test]
-    fn line_assembler_mid_session_waits_for_the_boundary_newline() {
-        // drop=true with no newline yet → the boundary fragment isn't complete: hold and
-        // emit nothing until the newline arrives, then resume normally.
-        let mut a = LineAssembler::new_mid_session(true);
-        let (none, _) = a.push_chunk(b"GED,GAINED,1,5002").unwrap();
-        assert!(none.is_empty(), "no newline yet → nothing emitted");
-        let (lines, _) = a.push_chunk(b",29489\n800,END_COMBAT\n").unwrap();
-        assert_eq!(
-            lines,
-            vec!["800,END_COMBAT".to_string()],
-            "the rest of the orphaned line is dropped; the next full line flows"
+            vec!["700,END_COMBAT".to_string(), HDR.to_string()],
+            "a second BEGIN_LOG is emitted, not discarded, so NewSession can terminate"
         );
     }
 
