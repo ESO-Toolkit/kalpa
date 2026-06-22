@@ -1517,6 +1517,7 @@ pub async fn update_addon(
     let lock = meta_lock.0.clone();
     let registry = cancels.0.clone();
     let operation_id = operation_id.unwrap_or_default();
+    let cancel = CancelGuard::register(registry, operation_id.clone());
     tokio::task::spawn_blocking(move || {
         // Network I/O outside the lock: fetch info + download ZIP
         let info = esoui::fetch_addon_info(esoui_id)?;
@@ -1527,9 +1528,10 @@ pub async fn update_addon(
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
 
-        // Register a cancellation flag (auto-removed on drop) and a progress
-        // emitter for the file-bound extraction.
-        let cancel = CancelGuard::register(registry, operation_id.clone());
+        // Build a progress emitter for the file-bound extraction. The
+        // cancellation flag was registered before this blocking task started, so
+        // a Stop request made while downloading or waiting on the metadata lock
+        // is still observed before extraction writes files.
         let progress = make_progress_emitter(app, operation_id, info.title.clone());
         let hooks = installer::ExtractHooks {
             cancel: Some(cancel.flag()),
@@ -1922,7 +1924,10 @@ fn build_conflict_report(
         };
 
         let upstream_changed = match stored_hash {
-            Some(stored) => !file_hashes::signatures_match(stored, zip_hash),
+            // ZIP-vs-baseline comparisons must be exact. The mixed
+            // legacy-SHA/size-signature bridge is only safe for live disk
+            // checks; using it here would hide upstream binary size changes.
+            Some(stored) => stored != zip_hash,
             None => true, // new file in upstream or no baseline
         };
 
@@ -2744,6 +2749,7 @@ pub async fn update_addon_with_decisions(
     let lock = meta_lock.0.clone();
     let registry = cancels.0.clone();
     let operation_id = operation_id.unwrap_or_default();
+    let cancel = CancelGuard::register(registry, operation_id.clone());
 
     tokio::task::spawn_blocking(move || {
         let _guard = lock
@@ -2771,9 +2777,10 @@ pub async fn update_addon_with_decisions(
         // remove. Validation failures before `spawn_blocking` likewise leave the
         // session intact on purpose, so the user can retry or cancel it.
         //
-        // Register a cancellation flag (auto-removed on drop) and a progress
-        // emitter for the file-bound extraction, then run the work.
-        let cancel = CancelGuard::register(registry, operation_id.clone());
+        // Build a progress emitter for the file-bound extraction. The
+        // cancellation flag was registered before this blocking task started, so
+        // a Stop request made while waiting on the metadata lock is still
+        // observed before extraction writes files.
         let progress = make_progress_emitter(app, operation_id, pu.folder_name.clone());
         let hooks = installer::ExtractHooks {
             cancel: Some(cancel.flag()),
@@ -8390,6 +8397,48 @@ mod tests {
         let addon_dir = dir.join(folder);
         std::fs::create_dir_all(&addon_dir).unwrap();
         std::fs::write(addon_dir.join(format!("{folder}.txt")), manifest_body).unwrap();
+    }
+
+    #[test]
+    fn conflict_report_does_not_treat_legacy_binary_hash_as_unchanged_upstream() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("MediaAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+
+        let mut files = HashMap::new();
+        files.insert("icons/a.dds".to_string(), "0".repeat(64));
+        file_hashes::save_hash_manifest(
+            &addons_dir,
+            &file_hashes::HashManifest {
+                addon_folder: "MediaAddon".to_string(),
+                esoui_ids: vec![123],
+                recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                installed_version: "1.0".to_string(),
+                files,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("MediaAddon/icons/a.dds", options)
+            .unwrap();
+        archive.write_all(b"new-texture-bytes").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(&addons_dir, "MediaAddon", &zip_path, "2.0", "session").unwrap();
+
+        assert_eq!(report.auto_kept_files, Vec::<String>::new());
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].relative_path, "icons/a.dds");
     }
 
     #[test]
