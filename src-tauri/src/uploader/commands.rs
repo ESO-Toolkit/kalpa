@@ -1126,6 +1126,64 @@ pub async fn uploader_upload_log(
 /// or actor context). The watcher runs purely for the UI's per-fight timeline,
 /// streaming [`LiveEvent`]s over `channel`.
 ///
+/// Pre-routing gate for a MID-SESSION native live start: can native faithfully encode
+/// the session already on disk? Returns false ⇒ DON'T route native — fall through to the
+/// official handoff (which can pick up an in-progress log), matching the finished-log
+/// guarantee that unproven input routes to the official uploader rather than producing a
+/// silently-incomplete native report. Deciding this BEFORE `start_native_live_branch`
+/// runs means no native report is ever created for a session we can't encode (vs the old
+/// behaviour: create then hard-fail). Conservatively returns false on any IO/scan
+/// uncertainty. Returns true when there's no open-session prefix (a cold start native
+/// handles by waiting for a fresh `BEGIN_LOG`), so it never blocks the common case.
+fn native_live_prefix_is_encodable(path: &str) -> bool {
+    let p = Path::new(path);
+    let eof = match std::fs::metadata(p) {
+        Ok(m) => m.len(),
+        Err(_) => return false,
+    };
+    let anchor = match super::scanner::find_current_session_begin(p, eof) {
+        Ok(Some(a)) if a.open_session => a,
+        Ok(_) => return true, // no open session → nothing to gate (cold start)
+        Err(_) => return false, // can't read the log to decide → hand off
+    };
+    let boundary = match super::tail_io::last_line_boundary(p, eof) {
+        Some(b) if anchor.begin_log_offset < b => b,
+        _ => return true, // no complete on-disk content yet → let native wait for it
+    };
+    // Scan the line-aligned prefix [begin, boundary) for any unproven line type.
+    let mut pos = anchor.begin_log_offset;
+    let mut buf = Vec::new();
+    let mut carry: Vec<u8> = Vec::new();
+    while pos < boundary {
+        let end = (pos + super::tail_io::MAX_READ).min(boundary);
+        let n = match super::tail_io::read_range(p, pos, end, &mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let mut combined = std::mem::take(&mut carry);
+        combined.extend_from_slice(&buf[..n]);
+        let mut ls = 0;
+        for i in 0..combined.len() {
+            if combined[i] == b'\n' {
+                let line = String::from_utf8_lossy(&combined[ls..i]);
+                if super::native::coverage::unproven_line_type(&line).is_some() {
+                    return false;
+                }
+                ls = i + 1;
+            }
+        }
+        carry = combined[ls..].to_vec();
+        pos = end;
+    }
+    if !carry.is_empty() {
+        let line = String::from_utf8_lossy(&carry);
+        if super::native::coverage::unproven_line_type(&line).is_some() {
+            return false;
+        }
+    }
+    true
+}
+
 /// `include_entire_file` controls only what the UI timeline backfills; the
 /// official uploader is launched with `--include-entire-file` accordingly.
 // Each parameter is a distinct injected dependency (app, state, allowed,
@@ -1209,6 +1267,20 @@ pub async fn uploader_start_live(
         transport::assess_native_live_routing(native_opt_in, session.has_session()),
         transport::NativeRouting::Native
     );
+    // …AND the already-on-disk session prefix is something native can faithfully encode.
+    // If it carries an unproven line type (or we can't read it to decide), route to the
+    // official handoff instead of create-then-fail a native report — the same
+    // fall-back-on-unproven guarantee the finished-log path gives. The prefix read can be
+    // large (a long in-progress session), so run it off the async executor; only when
+    // native would otherwise be chosen.
+    let route_native = if route_native {
+        let safe_for_scan = safe.clone();
+        tokio::task::spawn_blocking(move || native_live_prefix_is_encodable(&safe_for_scan))
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
     if route_native {
         return start_native_live_branch(
             &app,
@@ -2043,4 +2115,63 @@ pub async fn uploader_run_native_live_spike(
     // Surface the segment count so the round-trip can tell "0 segments = timing race"
     // from "N segments but didn't render = the real result".
     Ok(format!("{url}  [segments={segments}]"))
+}
+
+#[cfg(test)]
+mod native_live_routing_tests {
+    use super::native_live_prefix_is_encodable;
+
+    fn temp(name: &str, content: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("kalpa-route-{name}.log"));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    // An OPEN session whose prefix is all proven types → native is encodable (route native).
+    #[test]
+    fn proven_open_prefix_routes_native() {
+        let p = temp(
+            "proven",
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"H\",\"@h\",1,50,160,0,PLAYER_ALLY,T\n\
+             100,BEGIN_COMBAT\n200,END_COMBAT\n",
+        );
+        assert!(native_live_prefix_is_encodable(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // An OPEN session whose prefix contains an UNPROVEN type → NOT encodable (→ handoff),
+    // matching the finished-log fall-back guarantee instead of create-then-fail.
+    #[test]
+    fn unproven_open_prefix_declines_native() {
+        let p = temp(
+            "unproven",
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             50,SOME_FUTURE_EVENT,1,2,3\n\
+             100,BEGIN_COMBAT\n200,END_COMBAT\n",
+        );
+        assert!(!native_live_prefix_is_encodable(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // A CLOSED session (ends in END_LOG) → no open prefix to gate → native ok (cold start
+    // waits for a fresh BEGIN_LOG).
+    #[test]
+    fn closed_session_is_encodable() {
+        let p = temp(
+            "closed",
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             100,BEGIN_COMBAT\n200,END_COMBAT\n300,END_LOG\n",
+        );
+        assert!(native_live_prefix_is_encodable(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // A missing/unreadable file → conservatively NOT encodable (→ handoff).
+    #[test]
+    fn unreadable_file_declines_native() {
+        let missing = std::env::temp_dir().join("kalpa-route-does-not-exist-xyz.log");
+        let _ = std::fs::remove_file(&missing);
+        assert!(!native_live_prefix_is_encodable(missing.to_str().unwrap()));
+    }
 }
