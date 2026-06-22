@@ -250,7 +250,9 @@ export function AddonDetail({
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
       if (isCancellation(e)) {
-        toast.info(`Stopped updating ${addon.title}`);
+        toast.info(`Stopped updating ${addon.title}`, {
+          description: "It may be partially updated — run the update again to finish.",
+        });
         // Re-scan so the row reflects the on-disk truth (the update didn't finish).
         onAddonUpdated(updateResult.esouiId);
       } else {
@@ -285,7 +287,9 @@ export function AddonDetail({
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
       if (isCancellation(e)) {
-        toast.info(`Stopped updating ${addon.title}`);
+        toast.info(`Stopped updating ${addon.title}`, {
+          description: "It may be partially updated — run the update again to finish.",
+        });
         onAddonUpdated(updateResult.esouiId);
       } else {
         setUpdateError(getTauriErrorMessage(e));
@@ -461,7 +465,9 @@ export function AddonDetail({
                 if (updateResult) onAddonUpdated(updateResult.esouiId);
               } catch (e) {
                 if (isCancellation(e)) {
-                  toast.info(`Stopped updating ${addon.title}`);
+                  toast.info(`Stopped updating ${addon.title}`, {
+                    description: "It may be partially updated — run the update again to finish.",
+                  });
                   if (updateResult) onAddonUpdated(updateResult.esouiId);
                 } else {
                   setUpdateError(getTauriErrorMessage(e));

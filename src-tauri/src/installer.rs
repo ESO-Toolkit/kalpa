@@ -509,6 +509,49 @@ mod tests {
     }
 
     #[test]
+    fn cancel_midway_preserves_pre_existing_addon_files() {
+        // Cancelling midway through an IN-PLACE update (the folder already
+        // exists) must never delete the user's addon — even though it is left
+        // partially updated. Data safety: no file is removed, only some are
+        // overwritten with the new version's bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let existing = addons_dir.join("MyAddon");
+        fs::create_dir_all(&existing).unwrap();
+        for n in 0..10 {
+            fs::write(existing.join(format!("file{n}.lua")), "OLD").unwrap();
+        }
+
+        // ZIP that overwrites every file with new bytes.
+        let zip_path = create_multi_file_zip(tmp.path(), "u.zip", "MyAddon", 10);
+
+        let flag = AtomicBool::new(false);
+        let cb = |done: usize, _total: usize| {
+            if done >= 2 {
+                flag.store(true, Ordering::Relaxed);
+            }
+        };
+        let hooks = ExtractHooks {
+            cancel: Some(&flag),
+            progress: Some(&cb),
+        };
+
+        let result = extract_addon_zip_with(&zip_path, &addons_dir, hooks);
+        assert_eq!(result.unwrap_err(), CANCELLED);
+        // The pre-existing folder and ALL its files must still be present.
+        assert!(
+            existing.is_dir(),
+            "pre-existing addon must survive a midway cancel"
+        );
+        for n in 0..10 {
+            assert!(
+                existing.join(format!("file{n}.lua")).exists(),
+                "cancel must not delete the user's existing files"
+            );
+        }
+    }
+
+    #[test]
     fn cancel_preserves_pre_existing_addon() {
         let tmp = tempfile::tempdir().unwrap();
         let addons_dir = tmp.path().join("AddOns");
