@@ -967,15 +967,24 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
     /// POST an already-built payload (master then add-segment), with retry. Takes the
     /// payload BY VALUE so a `NeedsReauth` can hand it back for a later re-POST.
     ///
-    /// Re-POST idempotency (on a reauth resume): both calls are made for the SAME
-    /// `segment_id` the server hasn't advanced past (the failed POST never returned a
-    /// `nextSegmentId`). Re-sending the master is `set-report-master-table` — set
-    /// semantics, idempotent. Re-sending the segment is safe unless the ORIGINAL
-    /// add-segment was accepted server-side but its response was lost behind the auth
-    /// challenge (a 401 on the response leg) — a narrow case the server is expected to
-    /// dedupe by `segmentId`. We don't split master-done/segment-pending resume state
-    /// (the reviewer's LOW finding) because the window is rare and the cost is at most
-    /// one duplicate segment, which a terminate closes cleanly.
+    /// Re-POST idempotency: a re-POST always reuses the SAME `segment_id` the server
+    /// hasn't advanced past (the failed POST never returned a `nextSegmentId`, and
+    /// `set_next_segment_id` only runs after a parsed response). TWO paths re-send that
+    /// same id: (1) the in-loop transient retry in [`post_with_retry`] — a lost response on
+    /// a plain network/timeout classifies as `Transport` → `Retryable`; and (2) the
+    /// reauth-resume re-POST below — a 401/419 that survived the one re-auth. Re-sending the
+    /// master is `set-report-master-table` — set semantics, idempotent. Re-sending the
+    /// segment is safe in the ONLY hazardous sub-case — the original add-segment was
+    /// ACCEPTED server-side but its response was LOST (either behind the auth challenge OR
+    /// to a plain transient timeout) — IF the server dedupes by `segmentId`. That dedup is
+    /// UNVERIFIED (R4: no esologs doc states it; settle via the owner probe), but the risk
+    /// is bounded: the accepted-then-lost window is a narrow subset of all retries, and the
+    /// worst case is at most ONE cosmetic duplicate segment, which a terminate closes
+    /// cleanly. So we keep blind retry (resilience over a multi-hour session) rather than a
+    /// reconcile (no protocol channel exposes the server's next id without re-POSTing the
+    /// segment) or a non-retryable failure (which would abandon a live raid on a routine
+    /// blip). For the same rare-window / one-duplicate reason we also don't split
+    /// master-done/segment-pending resume state (the reviewer's LOW finding).
     fn post_built(&mut self, payload: LiveSegmentPayload, sink: &dyn OrphanSink) -> PostOutcome {
         let base = super::client::desktop_client_base();
         let master_url = format!("{base}/set-report-master-table/{}", self.code.0);
