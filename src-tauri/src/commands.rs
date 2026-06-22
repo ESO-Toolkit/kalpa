@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -1390,16 +1391,132 @@ fn check_for_updates_metadata(
     Ok(pending)
 }
 
+// ── Update cancellation + progress ──────────────────────────────────────
+
+/// Per-file progress for a single addon update, emitted on the `update-progress`
+/// event. The frontend correlates events by `operation_id` and renders the phase
+/// plus "Extracting N of M".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProgressEvent {
+    pub operation_id: String,
+    pub folder_name: String,
+    /// Currently always "extracting" — the slow, file-count-bound phase.
+    pub phase: String,
+    pub file_index: usize,
+    pub file_total: usize,
+}
+
+/// RAII registration of a cancellation flag in [`crate::UpdateCancels`]. Inserted
+/// on construction, removed on drop (every exit path: success, error, or panic),
+/// so a stale flag can never cancel a later, unrelated operation. An empty
+/// `operation_id` (caller opted out of cancellation) registers nothing.
+struct CancelGuard {
+    registry: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    operation_id: String,
+    flag: Arc<AtomicBool>,
+}
+
+impl CancelGuard {
+    fn register(
+        registry: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+        operation_id: String,
+    ) -> Self {
+        let flag = Arc::new(AtomicBool::new(false));
+        if !operation_id.is_empty() {
+            if let Ok(mut map) = registry.lock() {
+                map.insert(operation_id.clone(), flag.clone());
+            }
+        }
+        Self {
+            registry,
+            operation_id,
+            flag,
+        }
+    }
+
+    fn flag(&self) -> &AtomicBool {
+        &self.flag
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if !self.operation_id.is_empty() {
+            if let Ok(mut map) = self.registry.lock() {
+                map.remove(&self.operation_id);
+            }
+        }
+    }
+}
+
+/// Build a throttled extraction-progress callback that emits `update-progress`
+/// events: on the first file, every 64 files, and at completion, so a
+/// thousands-of-files addon doesn't flood the event bus.
+fn make_progress_emitter(
+    app: tauri::AppHandle,
+    operation_id: String,
+    folder_name: String,
+) -> impl Fn(usize, usize) {
+    let last = AtomicUsize::new(usize::MAX);
+    move |done: usize, total: usize| {
+        let prev = last.load(Ordering::Relaxed);
+        let should_emit = prev == usize::MAX || done >= total || done.saturating_sub(prev) >= 64;
+        if !should_emit {
+            return;
+        }
+        last.store(done, Ordering::Relaxed);
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgressEvent {
+                operation_id: operation_id.clone(),
+                folder_name: folder_name.clone(),
+                phase: "extracting".to_string(),
+                file_index: done,
+                file_total: total,
+            },
+        );
+    }
+}
+
+/// Signal an in-flight update (identified by `operation_id`) to stop. Returns
+/// `true` if a matching in-flight operation was found and flagged, `false` if it
+/// had already finished or never existed. The extraction loop polls the flag
+/// between files and aborts cleanly, rolling back any partially-written folder.
 #[tauri::command]
+pub async fn cancel_update(
+    cancels: tauri::State<'_, crate::UpdateCancels>,
+    operation_id: String,
+) -> Result<bool, String> {
+    let map = cancels
+        .0
+        .lock()
+        .map_err(|_| "Internal cancel registry lock error".to_string())?;
+    match map.get(&operation_id) {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
+    cancels: tauri::State<'_, crate::UpdateCancels>,
+    app: tauri::AppHandle,
     addons_path: String,
     esoui_id: u32,
     api_version: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
+    let registry = cancels.0.clone();
+    let operation_id = operation_id.unwrap_or_default();
     tokio::task::spawn_blocking(move || {
         // Network I/O outside the lock: fetch info + download ZIP
         let info = esoui::fetch_addon_info(esoui_id)?;
@@ -1409,12 +1526,22 @@ pub async fn update_addon(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+
+        // Register a cancellation flag (auto-removed on drop) and a progress
+        // emitter for the file-bound extraction.
+        let cancel = CancelGuard::register(registry, operation_id.clone());
+        let progress = make_progress_emitter(app, operation_id, info.title.clone());
+        let hooks = installer::ExtractHooks {
+            cancel: Some(cancel.flag()),
+            progress: Some(&progress),
+        };
         update_addon_blocking(
             &addons_dir,
             esoui_id,
             api_version.as_deref(),
             info,
             tmp_file,
+            hooks,
         )
     })
     .await
@@ -1427,9 +1554,10 @@ fn update_addon_blocking(
     api_version: Option<&str>,
     info: EsouiAddonInfo,
     tmp_file: NamedTempFile,
+    hooks: installer::ExtractHooks,
 ) -> Result<InstallResult, String> {
     // Extract the downloaded ZIP
-    let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
+    let installed_folders = installer::extract_addon_zip_with(tmp_file.path(), addons_dir, hooks)?;
 
     // Store the API version (from filelist.json) when available, since
     // check_for_updates compares against the API version. Using the
@@ -2596,13 +2724,17 @@ pub struct FileDecision {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_addon_with_decisions(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     pending: tauri::State<'_, crate::PendingUpdates>,
+    cancels: tauri::State<'_, crate::UpdateCancels>,
+    app: tauri::AppHandle,
     addons_path: String,
     session_id: String,
     decisions: Vec<FileDecision>,
+    operation_id: Option<String>,
 ) -> Result<InstallResult, String> {
     for d in &decisions {
         validate_relative_path(&d.relative_path)?;
@@ -2610,6 +2742,8 @@ pub async fn update_addon_with_decisions(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let pending_clone = pending.0.clone();
     let lock = meta_lock.0.clone();
+    let registry = cancels.0.clone();
+    let operation_id = operation_id.unwrap_or_default();
 
     tokio::task::spawn_blocking(move || {
         let _guard = lock
@@ -2636,7 +2770,16 @@ pub async fn update_addon_with_decisions(
         // `pu` was obtained and the session either never existed or wasn't ours to
         // remove. Validation failures before `spawn_blocking` likewise leave the
         // session intact on purpose, so the user can retry or cancel it.
-        let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions);
+        //
+        // Register a cancellation flag (auto-removed on drop) and a progress
+        // emitter for the file-bound extraction, then run the work.
+        let cancel = CancelGuard::register(registry, operation_id.clone());
+        let progress = make_progress_emitter(app, operation_id, pu.folder_name.clone());
+        let hooks = installer::ExtractHooks {
+            cancel: Some(cancel.flag()),
+            progress: Some(&progress),
+        };
+        let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions, hooks);
 
         // Delete the kept temp ZIP first, then drop the pending entry. If the
         // delete genuinely fails (e.g. another process briefly holds the file),
@@ -2665,6 +2808,7 @@ fn update_with_decisions_inner(
     addons_dir: &Path,
     pu: &crate::PendingUpdate,
     decisions: &[FileDecision],
+    hooks: installer::ExtractHooks,
 ) -> Result<InstallResult, String> {
     let kept_files: Vec<String> = decisions
         .iter()
@@ -2723,11 +2867,11 @@ fn update_with_decisions_inner(
         (!overrides.is_empty()).then_some(overrides)
     };
 
-    // Extract with selective skipping
+    // Extract with selective skipping (cancellable, progress-reporting)
     let installed_folders = if skip_files.is_empty() {
-        installer::extract_addon_zip(&pu.zip_path, addons_dir)?
+        installer::extract_addon_zip_with(&pu.zip_path, addons_dir, hooks)?
     } else {
-        installer::extract_addon_zip_selective(&pu.zip_path, addons_dir, &skip_files)?
+        installer::extract_addon_zip_selective_with(&pu.zip_path, addons_dir, &skip_files, hooks)?
     };
 
     // Record the baseline from the ZIP hash map (plus a disk pass over only

@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import type {
   AddonManifest,
@@ -78,6 +79,53 @@ export function AddonDetail({
   const customTagRef = useRef<HTMLInputElement>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
   const [pendingConflictDismissed, setPendingConflictDismissed] = useState(false);
+  // Per-file extraction progress for THIS addon's in-flight update, correlated
+  // by operation id. Drives the "Extracting N of M" label and the Stop button.
+  const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(
+    null
+  );
+  const operationIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ operationId: string; fileIndex: number; fileTotal: number }>(
+      "update-progress",
+      (event) => {
+        if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
+          setExtractProgress({ done: event.payload.fileIndex, total: event.payload.fileTotal });
+        }
+      }
+    )
+      .then((un) => {
+        if (disposed) un();
+        else unlisten = un;
+      })
+      .catch((e) => console.error("[tauri:update-progress]", e));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Start a cancellable update: mint an operation id (correlates progress events
+  // and lets Stop signal the backend) and reset progress. `endOperation` clears
+  // both on completion. `handleStopUpdate` asks the backend to abort.
+  const beginOperation = (): string => {
+    const id = crypto.randomUUID();
+    operationIdRef.current = id;
+    setExtractProgress(null);
+    return id;
+  };
+  const endOperation = () => {
+    operationIdRef.current = null;
+    setExtractProgress(null);
+  };
+  const handleStopUpdate = () => {
+    const id = operationIdRef.current;
+    if (id) void invokeOrThrow("cancel_update", { operationId: id }).catch(() => {});
+  };
+  const isCancellation = (e: unknown) => getTauriErrorMessage(e).includes("Update cancelled");
 
   // Map of lowercased top-level folder name → its real on-disk spelling. ESO
   // resolves addon names case-insensitively, so membership tests must too (a
@@ -173,6 +221,7 @@ export function AddonDetail({
             addonsPath,
             sessionId: report.sessionId,
             decisions: autoDecisions,
+            operationId: beginOperation(),
           });
           setUpdateSuccess(true);
           toast.success(`Updated ${addon.title}`);
@@ -194,13 +243,21 @@ export function AddonDetail({
         addonsPath,
         sessionId: report.sessionId,
         decisions: autoKeptDecisions,
+        operationId: beginOperation(),
       });
       setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
-      setUpdateError(getTauriErrorMessage(e));
+      if (isCancellation(e)) {
+        toast.info(`Stopped updating ${addon.title}`);
+        // Re-scan so the row reflects the on-disk truth (the update didn't finish).
+        onAddonUpdated(updateResult.esouiId);
+      } else {
+        setUpdateError(getTauriErrorMessage(e));
+      }
     } finally {
+      endOperation();
       setUpdating(false);
     }
   };
@@ -220,14 +277,21 @@ export function AddonDetail({
         addonsPath,
         sessionId: conflictReport.sessionId,
         decisions,
+        operationId: beginOperation(),
       });
       setConflictReport(null);
       setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
-      setUpdateError(getTauriErrorMessage(e));
+      if (isCancellation(e)) {
+        toast.info(`Stopped updating ${addon.title}`);
+        onAddonUpdated(updateResult.esouiId);
+      } else {
+        setUpdateError(getTauriErrorMessage(e));
+      }
     } finally {
+      endOperation();
       setUpdating(false);
     }
   };
@@ -324,11 +388,24 @@ export function AddonDetail({
           <span className="text-sm text-amber-400">
             Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
           </span>
-          <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
-            <Button onClick={handleUpdate} disabled={updating || isOffline} size="sm">
-              {updating ? "Updating..." : "Update"}
-            </Button>
-          </SimpleTooltip>
+          {updating ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs tabular-nums text-white/50">
+                {extractProgress && extractProgress.total > 0
+                  ? `Extracting ${extractProgress.done.toLocaleString()} / ${extractProgress.total.toLocaleString()}`
+                  : "Updating…"}
+              </span>
+              <Button onClick={handleStopUpdate} size="sm" variant="outline">
+                Stop
+              </Button>
+            </div>
+          ) : (
+            <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+              <Button onClick={handleUpdate} disabled={isOffline} size="sm">
+                Update
+              </Button>
+            </SimpleTooltip>
+          )}
         </GlassPanel>
       ) : null}
 
@@ -377,13 +454,20 @@ export function AddonDetail({
                   addonsPath,
                   sessionId: pendingConflict.sessionId,
                   decisions,
+                  operationId: beginOperation(),
                 });
                 toast.success(`Updated ${addon.title}`);
                 onConflictResolved?.(addon.folderName);
                 if (updateResult) onAddonUpdated(updateResult.esouiId);
               } catch (e) {
-                setUpdateError(getTauriErrorMessage(e));
+                if (isCancellation(e)) {
+                  toast.info(`Stopped updating ${addon.title}`);
+                  if (updateResult) onAddonUpdated(updateResult.esouiId);
+                } else {
+                  setUpdateError(getTauriErrorMessage(e));
+                }
               } finally {
+                endOperation();
                 setUpdating(false);
               }
             }}

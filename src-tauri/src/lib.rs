@@ -78,6 +78,14 @@ pub struct PendingUpdate {
 
 pub struct PendingUpdates(pub Arc<Mutex<HashMap<String, PendingUpdate>>>);
 
+/// Per-operation cancellation flags for in-flight addon updates, keyed by a
+/// frontend-supplied operation id. An update command registers a flag at the
+/// start of its blocking work and removes it on every exit; `cancel_update`
+/// sets the flag so the extraction loop aborts cooperatively. Work runs in
+/// `spawn_blocking` with blocking I/O, so it cannot be aborted by dropping the
+/// future — polling a shared flag between files is the only safe mechanism.
+pub struct UpdateCancels(pub Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>);
+
 /// Extract an action from a deep link URL.
 fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
     let url = url.trim();
@@ -209,6 +217,7 @@ pub fn run() {
             PendingDeepLinkPayload::default(),
         )))
         .manage(PendingUpdates(Arc::new(Mutex::new(HashMap::new()))))
+        .manage(UpdateCancels(Arc::new(Mutex::new(HashMap::new()))))
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
@@ -406,6 +415,7 @@ pub fn run() {
             commands::write_addon_file,
             commands::rescan_addon_hashes,
             commands::cancel_pending_update,
+            commands::cancel_update,
             commands::list_edit_backups,
             commands::restore_edit_backup,
             #[cfg(debug_assertions)]
