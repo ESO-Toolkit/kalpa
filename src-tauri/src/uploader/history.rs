@@ -209,17 +209,21 @@ pub fn settle_started(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
 
 /// Settle a NATIVE live record by EXACT id when its in-process driver exits. Native
 /// live owns the upload end-to-end (unlike the official handoff, which may still be
-/// streaming after we stop tracking), so a clean finish is a real `Completed` — with
-/// the report link if one was minted — and a failure is `Failed`. Matched by exact id
-/// (NOT the suffix-matching [`settle_live`]) so the driver thread is the single owner
-/// of its record's terminal state and can't race / double-settle the official path.
-/// `segments_built` is recorded as the fight count. Idempotent: only flips a still-
-/// transient (`Live`/`Paused`) record.
+/// streaming after we stop tracking). The terminal STATUS is decided by `succeeded`,
+/// NOT by whether a report link exists: a Fatal/reauth-timeout end can leave a PARTIAL
+/// report on the server, so we still record its link (for the user to inspect) but mark
+/// the record `Failed` with `error` — never `Completed`, which would hide the data loss
+/// from history and recovery. A genuinely clean/stopped end is `Completed`. Matched by
+/// exact id (NOT the suffix-matching [`settle_live`]) so the driver thread is the single
+/// owner of its record's terminal state and can't race / double-settle the official
+/// path. Idempotent: only flips a still-transient (`Live`/`Paused`) record.
 pub fn settle_native_live(
     app: &tauri::AppHandle,
     id: &str,
     segments_built: usize,
-    report: Option<(String, String)>, // (url, code)
+    report: Option<(String, String)>, // (url, code) — kept regardless of success
+    succeeded: bool,
+    error: Option<String>,
 ) -> Result<(), String> {
     use super::types::ReportRef;
     let path = history_path(app)?;
@@ -228,7 +232,7 @@ pub fn settle_native_live(
     let mut changed = false;
     for r in &mut file.records {
         if r.id == id && matches!(r.status, UploadStatus::Live | UploadStatus::Paused) {
-            r.status = if report.is_some() {
+            r.status = if succeeded {
                 UploadStatus::Completed
             } else {
                 UploadStatus::Failed
@@ -239,6 +243,9 @@ pub fn settle_native_live(
                     url: url.clone(),
                     code: code.clone(),
                 });
+            }
+            if let Some(e) = &error {
+                r.error = Some(e.clone());
             }
             changed = true;
         }

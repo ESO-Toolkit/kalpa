@@ -800,6 +800,17 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
         sink: &dyn OrphanSink,
     ) -> Option<EndReason> {
         for line in lines {
+            // Fail CLOSED on an unproven line type. The live path can't pre-scan a growing
+            // file the way the finished-log coverage gate does, so it checks each tailed
+            // line here: a type the encoder hasn't proven byte-exact would otherwise be
+            // silently dropped (EventEmitter::feed ignores unknown kinds) and shipped as a
+            // complete-looking but incomplete report. Terminate instead — the report is
+            // settled Failed (a partial native report must never read as Completed).
+            if let Some(t) = super::coverage::unproven_line_type(&line) {
+                return Some(EndReason::Fatal(format!(
+                    "unproven log line type '{t}' — native live can't faithfully encode it"
+                )));
+            }
             let is_begin_log = kind_of(&line) == Some("BEGIN_LOG");
             let second_begin_log = is_begin_log && self.seen_begin_log;
             if second_begin_log {
@@ -889,6 +900,13 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
             let n = read_range(p, pos, chunk_end, &mut buf)?;
             let (lines, _saw_end_log) = assembler.push_chunk(&buf[..n])?;
             for line in lines {
+                // Same fail-closed coverage gate as the live tail: if the on-disk prefix
+                // contains a type the encoder hasn't proven, native can't faithfully
+                // encode this session — abort warm-up (the caller terminates + settles
+                // Failed) rather than seed state from a line we'd silently drop.
+                if let Some(t) = super::coverage::unproven_line_type(&line) {
+                    return Err(format!("unproven log line type '{t}' in session prefix"));
+                }
                 if kind_of(&line) == Some("BEGIN_LOG") && !saw_begin {
                     saw_begin = true;
                     self.seen_begin_log = true;
@@ -2731,6 +2749,23 @@ mod tests {
             reason,
             Some(EndReason::NewSession),
             "a second BEGIN_LOG must end the stream as NewSession (single-session contract), got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn driver_fails_closed_on_an_unproven_line_type() {
+        // A novel/unproven line type in the live stream must TERMINATE the session (Fatal)
+        // rather than be silently dropped into a complete-looking but incomplete report —
+        // the live counterpart of the finished-log coverage gate.
+        let mut lines = two_fight_session();
+        lines.insert(1, "100,SOME_FUTURE_EVENT,1,2,3".into()); // just after the session header
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(vec![Ok(())], vec![Ok(2)], session_ok);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (reason, _b, _s) = drive_with(sender, cancel, lines, false);
+        assert!(
+            matches!(reason, Some(EndReason::Fatal(ref d)) if d.contains("SOME_FUTURE_EVENT")),
+            "an unproven line type must fail closed as Fatal, got {reason:?}"
         );
     }
 }

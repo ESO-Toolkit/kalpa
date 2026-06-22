@@ -1704,7 +1704,30 @@ async fn start_native_live_branch(
         // stop / end as settled; a failure carries the reason.
         match result {
             Ok((code, ended)) => {
+                use super::native::live::EndReason;
                 let url = super::watcher::report_url(&code.0);
+                // Map the terminal reason to success vs failure. A clean end, a
+                // server-side end, a user Stop, an idle stop, or a /reloadui (NewSession)
+                // all leave a real (possibly partial) report that streamed correctly →
+                // Completed. A Fatal or a reauth timeout means the report is incomplete
+                // (a bad segment / lost session mid-stream) → Failed, but we still keep
+                // its link so the user can inspect what made it up.
+                let (succeeded, error) = match &ended.reason {
+                    EndReason::Fatal(d) => (false, Some(format!("Live upload failed: {d}"))),
+                    EndReason::ReauthTimeout => (
+                        false,
+                        Some(
+                            "ESO Logs sign-in expired mid-upload and wasn't restored; the \
+                             report is incomplete."
+                                .to_string(),
+                        ),
+                    ),
+                    EndReason::Ended
+                    | EndReason::Idle
+                    | EndReason::ServerEnded
+                    | EndReason::NewSession
+                    | EndReason::Stopped => (true, None),
+                };
                 let _ = channel_for_thread.send(LiveEvent::Stopped {
                     reason: format!("Live upload finished ({:?}).", ended.reason),
                 });
@@ -1713,17 +1736,22 @@ async fn start_native_live_branch(
                     &record_id_for_thread,
                     ended.segments_built,
                     Some((url, code.0)),
+                    succeeded,
+                    error,
                 );
             }
             Err(e) => {
+                let reason = format!("Live upload stopped: {e}");
                 let _ = channel_for_thread.send(LiveEvent::Stopped {
-                    reason: format!("Live upload stopped: {e}"),
+                    reason: reason.clone(),
                 });
                 let _ = super::history::settle_native_live(
                     &app_for_thread,
                     &record_id_for_thread,
                     0,
                     None,
+                    false,
+                    Some(reason),
                 );
             }
         }
