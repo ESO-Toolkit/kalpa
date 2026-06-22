@@ -159,7 +159,7 @@ export function WhatGetsUploaded() {
       {open && (
         <div className="mt-1 animate-[fade-in_0.2s_ease-out] space-y-2 rounded-lg bg-black/20 p-3 text-xs text-muted-foreground">
           <div className="flex items-start gap-2">
-            <Swords className="mt-0.5 size-3.5 shrink-0 text-sky-400/80" aria-hidden />
+            <Swords className="mt-0.5 size-3.5 shrink-0 text-accent-sky/80" aria-hidden />
             <span>
               <span className="text-foreground/80">What's uploaded:</span> combat events, character
               and ability data, and timestamps from your session log.
@@ -180,7 +180,7 @@ export function WhatGetsUploaded() {
             </span>
           </div>
           <div className="flex items-start gap-2">
-            <Zap className="mt-0.5 size-3.5 shrink-0 text-[#c4a44a]/80" aria-hidden />
+            <Zap className="mt-0.5 size-3.5 shrink-0 text-primary/80" aria-hidden />
             <span>
               <span className="text-foreground/80">How it uploads:</span> Kalpa uploads directly to
               ESO Logs when you enable it (faster, an unofficial but operator-approved method);

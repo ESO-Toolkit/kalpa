@@ -900,9 +900,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         className="flex max-h-[90vh] flex-col gap-0 overflow-hidden sm:max-w-3xl"
       >
         <DialogHeader className="shrink-0">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center justify-between gap-3 pr-7">
             <DialogTitle className="flex items-center gap-2">
-              <CloudUpload className="size-5 text-[#c4a44a]" aria-hidden />
+              <CloudUpload className="size-5 text-primary" aria-hidden />
               Upload to ESO Logs
             </DialogTitle>
             <StatusPill status={headlineStatus} />
@@ -922,7 +922,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           // elevate from a surface the same color as everything else). The
           // negative margins bleed it to the dialog edges; a top inset shadow
           // sells the "sunken work surface" depth.
-          <div className="-mx-5 -mb-5 flex-1 overflow-y-auto bg-[#080b14] px-5 pt-4 pb-5 shadow-[inset_0_8px_16px_-8px_rgba(0,0,0,0.6)]">
+          <div className="-mx-5 -mb-5 flex-1 overflow-y-auto bg-[var(--bg-base)] px-5 pt-4 pb-5 shadow-[inset_0_8px_16px_-8px_rgba(0,0,0,0.6)]">
             <div className="space-y-3.5">
               <WhatGetsUploaded />
 
@@ -1192,7 +1192,7 @@ function TransportReadout({
       </span>
       <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
       {willUseNative ? (
-        <span className="inline-flex items-center gap-1.5 rounded-md border border-sky-400/25 bg-sky-400/[0.06] px-2 py-1 font-medium text-sky-300">
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-accent-sky/25 bg-accent-sky/[0.06] px-2 py-1 font-medium text-accent-sky">
           <Zap className="size-3" aria-hidden />
           Direct from Kalpa
         </span>
@@ -1203,7 +1203,7 @@ function TransportReadout({
         </span>
       )}
       <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
-      <span className="inline-flex items-center gap-1.5 rounded-md border border-[#c4a44a]/25 bg-[#c4a44a]/[0.06] px-2 py-1 font-medium text-[#c4a44a]">
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-primary/25 bg-primary/[0.06] px-2 py-1 font-medium text-primary">
         esologs.com
       </span>
     </div>
@@ -1244,7 +1244,7 @@ function LogSummaryCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-[#c4a44a]/12 text-[#c4a44a]">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/12 text-primary">
               <Swords className="size-4" aria-hidden />
             </span>
             <div className="min-w-0">
@@ -1337,9 +1337,9 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
     <div className="mt-4">
       <GlassPanel
         variant="primary"
-        className="flex flex-col items-center gap-4 border-sky-400/15 bg-gradient-to-b from-sky-400/[0.05] to-white/[0.01] px-6 py-8 text-center"
+        className="flex flex-col items-center gap-4 border-accent-sky/15 bg-gradient-to-b from-accent-sky/[0.05] to-white/[0.01] px-6 py-8 text-center"
       >
-        <div className="flex size-14 items-center justify-center rounded-2xl border border-sky-400/20 bg-sky-400/[0.1] text-sky-400 shadow-[0_0_28px_-8px_rgba(56,189,248,0.5)]">
+        <div className="flex size-14 items-center justify-center rounded-2xl border border-accent-sky/20 bg-accent-sky/[0.1] text-accent-sky shadow-[0_0_28px_-8px_color-mix(in_oklab,var(--accent-sky)_50%,transparent)]">
           <LogIn className="size-7" aria-hidden />
         </div>
         <div>
@@ -1358,7 +1358,7 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
           size="lg"
           onClick={handleLogin}
           disabled={loggingIn}
-          className="border-sky-400/30 bg-sky-400/[0.06] text-sky-200 hover:border-sky-400/50 hover:bg-sky-400/[0.12]"
+          className="border-accent-sky/30 bg-accent-sky/[0.06] text-sky-200 hover:border-accent-sky/50 hover:bg-accent-sky/[0.12]"
         >
           <LogIn className="size-4" />
           {loggingIn ? "Opening sign-in…" : "Sign in to ESO Logs"}
@@ -1429,10 +1429,10 @@ function DirectUploadSection({
       <>
         <GlassPanel
           variant="subtle"
-          className="flex items-center justify-between gap-3 border-sky-400/20 bg-sky-400/[0.03] p-3"
+          className="flex items-center justify-between gap-3 border-accent-sky/20 bg-accent-sky/[0.03] p-3"
         >
           <div className="flex min-w-0 items-start gap-2.5">
-            <Zap className="mt-0.5 size-4 shrink-0 text-sky-400" aria-hidden />
+            <Zap className="mt-0.5 size-4 shrink-0 text-accent-sky" aria-hidden />
             <div className="min-w-0">
               <p className="text-sm font-medium text-white/90">Upload faster, in-app</p>
               <p className="text-xs text-muted-foreground">
@@ -1570,11 +1570,11 @@ function ModeTab({
       aria-label={`${title} mode — ${hint}`}
       className={cn(
         "group relative overflow-hidden rounded-xl p-3 text-left transition-all duration-200",
-        "focus-visible:ring-2 focus-visible:ring-sky-400/40 focus-visible:outline-none",
+        "focus-visible:ring-2 focus-visible:ring-accent-sky/40 focus-visible:outline-none",
         active
           ? // RAISED out of the track: a lit sky surface with an outer shadow +
             // top highlight so the active mode physically reads as selected.
-            "bg-gradient-to-b from-sky-400/[0.16] to-sky-400/[0.06] shadow-[0_4px_14px_-4px_rgba(56,189,248,0.4),inset_0_1px_0_rgba(255,255,255,0.12)]"
+            "bg-gradient-to-b from-accent-sky/[0.16] to-accent-sky/[0.06] shadow-[0_4px_14px_-4px_color-mix(in_oklab,var(--accent-sky)_40%,transparent),inset_0_1px_0_rgba(255,255,255,0.12)]"
           : // FLAT in the well: no fill, no border — just sits in the recess.
             "text-muted-foreground hover:bg-white/[0.04]"
       )}
@@ -1586,7 +1586,7 @@ function ModeTab({
         )}
       >
         <Icon
-          className={cn("size-4 shrink-0", active ? "text-sky-300" : "text-muted-foreground")}
+          className={cn("size-4 shrink-0", active ? "text-accent-sky" : "text-muted-foreground")}
           aria-hidden
         />
         {title}
@@ -1664,20 +1664,20 @@ function LogPicker({
       className={cn(
         "relative rounded-2xl border border-white/[0.1] bg-gradient-to-b from-white/[0.07] to-white/[0.025] p-3.5 transition-colors duration-150",
         "shadow-[0_12px_40px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.08)]",
-        dragOver && "border-sky-400/60 from-sky-400/[0.1] to-sky-400/[0.03]"
+        dragOver && "border-accent-sky/60 from-accent-sky/[0.1] to-accent-sky/[0.03]"
       )}
     >
       {/* Drag-over overlay: a clear drop target appears while a file is dragged
           over the window. The actual import (copy-into-Logs) runs on drop. */}
       {dragOver && (
-        <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-sky-400/50 bg-[rgba(12,20,38,0.85)] text-center">
-          <CloudUpload className="size-7 text-sky-400" aria-hidden />
-          <span className="text-sm font-medium text-sky-300">Drop your .log to add it</span>
+        <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-accent-sky/50 bg-surface-overlay text-center">
+          <CloudUpload className="size-7 text-accent-sky" aria-hidden />
+          <span className="text-sm font-medium text-accent-sky">Drop your .log to add it</span>
         </div>
       )}
       {importing && (
-        <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-[rgba(12,20,38,0.85)] text-center">
-          <span className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-sky-400" />
+        <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-surface-overlay text-center">
+          <span className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-accent-sky" />
           <span className="text-sm text-muted-foreground">Adding log to your folder…</span>
         </div>
       )}
@@ -1686,7 +1686,7 @@ function LogPicker({
           panel. The path reads as a path; the count anchors "what's in here". */}
       <div className="mb-2.5 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2.5">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-sky-400/20 bg-sky-400/[0.08] text-sky-400">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-accent-sky/20 bg-accent-sky/[0.08] text-accent-sky">
             <FolderOpen className="size-4" aria-hidden />
           </span>
           <div className="min-w-0">
@@ -1774,9 +1774,9 @@ function LogPicker({
                   onClick={() => setFilter(f.id)}
                   className={cn(
                     "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors",
-                    "focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
+                    "focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none",
                     filter === f.id
-                      ? "border-sky-400/40 bg-sky-400/[0.06] text-sky-300"
+                      ? "border-accent-sky/40 bg-accent-sky/[0.06] text-accent-sky"
                       : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:text-foreground/80"
                   )}
                 >
@@ -1787,7 +1787,7 @@ function LogPicker({
             <button
               type="button"
               onClick={() => setSort((s) => (s === "newest" ? "largest" : "newest"))}
-              className="inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground/80 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none"
+              className="inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground/80 focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
               aria-label={`Sorted by ${sort === "newest" ? "newest" : "largest"} first — tap to sort by ${sort === "newest" ? "largest" : "newest"}`}
             >
               <ArrowDownUp className="size-3" aria-hidden />
@@ -1863,11 +1863,11 @@ function LogPicker({
                   onClick={() => onSelect(log.path)}
                   className={cn(
                     "flex w-full items-center justify-between gap-3 rounded-lg border py-2 pr-24 pl-3 text-left transition-all duration-150",
-                    "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
+                    "focus-visible:border-accent-sky/40 focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none",
                     isSelected
                       ? // Selected row pops OFF the recessed list: lit sky fill, a
                         // left accent bar, and a glow so the current choice is loud.
-                        "border-sky-400/50 border-l-[3px] border-l-sky-400 bg-sky-400/[0.12] shadow-[0_2px_12px_-2px_rgba(56,189,248,0.35)]"
+                        "border-accent-sky/50 border-l-[3px] border-l-accent-sky bg-accent-sky/[0.12] shadow-[0_2px_12px_-2px_color-mix(in_oklab,var(--accent-sky)_35%,transparent)]"
                       : "border-transparent bg-white/[0.03] hover:bg-white/[0.06]"
                   )}
                   aria-pressed={isSelected}
@@ -1876,7 +1876,7 @@ function LogPicker({
                     <FileText
                       className={cn(
                         "size-4 shrink-0",
-                        isSelected ? "text-sky-300" : "text-muted-foreground"
+                        isSelected ? "text-accent-sky" : "text-muted-foreground"
                       )}
                       aria-hidden
                     />
@@ -1891,7 +1891,7 @@ function LogPicker({
                       when the action cluster is showing so they don't overlap. */}
                   {isSelected && scanning ? (
                     <InfoPill color="sky" className="shrink-0 gap-1">
-                      <span className="size-2.5 animate-spin rounded-full border-2 border-sky-400/30 border-t-sky-400" />
+                      <span className="size-2.5 animate-spin rounded-full border-2 border-accent-sky/30 border-t-accent-sky" />
                       Scanning
                     </InfoPill>
                   ) : (
@@ -2000,7 +2000,7 @@ function Preflight({
     return (
       <div className="space-y-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+          <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
           Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
         </div>
         <div className="flex gap-2" aria-hidden>
@@ -2092,7 +2092,7 @@ function Toggle({
       aria-label={`${label} — ${hint}`}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1.5 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-sky-400/40 focus-visible:outline-none disabled:opacity-50"
+      className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1.5 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent-sky/40 focus-visible:outline-none disabled:opacity-50"
     >
       <span>
         <span className="block text-sm text-foreground/90">{label}</span>
@@ -2101,7 +2101,7 @@ function Toggle({
       <span
         className={cn(
           "relative h-5 w-9 shrink-0 rounded-full transition-colors duration-200",
-          checked ? "bg-sky-400/70" : "bg-white/[0.1]"
+          checked ? "bg-accent-sky/70" : "bg-white/[0.1]"
         )}
       >
         <span
@@ -2144,9 +2144,9 @@ function ManualActions({
     // The climax — the MOST raised surface, and the only WARM (gold) one, so it
     // reads as the destination of the whole flow against the cool-blue inputs
     // above it. Strong outer shadow + gold top highlight lift it off the canvas.
-    <div className="relative flex flex-col items-center gap-3 overflow-hidden rounded-2xl border border-[#c4a44a]/25 bg-gradient-to-b from-[#c4a44a]/[0.1] to-[#c4a44a]/[0.02] p-5 shadow-[0_16px_44px_-16px_rgba(0,0,0,0.75),0_0_40px_-20px_rgba(196,164,74,0.4),inset_0_1px_0_rgba(255,255,255,0.08)]">
+    <div className="relative flex flex-col items-center gap-3 overflow-hidden rounded-2xl border border-primary/25 bg-gradient-to-b from-primary/[0.1] to-primary/[0.02] p-5 shadow-[0_16px_44px_-16px_rgba(0,0,0,0.75),0_0_40px_-20px_color-mix(in_oklab,var(--primary)_40%,transparent),inset_0_1px_0_rgba(255,255,255,0.08)]">
       <span
-        className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-[#c4a44a]/0 via-[#c4a44a]/60 to-[#c4a44a]/0"
+        className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-primary/0 via-primary/60 to-primary/0"
         aria-hidden
       />
       <Button

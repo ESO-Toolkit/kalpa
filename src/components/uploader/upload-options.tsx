@@ -88,7 +88,7 @@ export function UploadOptionsControl({
                 type="button"
                 disabled={disabled}
                 onClick={() => setName(suggestion)}
-                className="inline-flex items-center gap-1 rounded-md border border-sky-400/25 bg-sky-400/[0.06] px-2 py-0.5 text-[11px] font-medium text-sky-300 transition-colors hover:bg-sky-400/[0.12] disabled:opacity-50"
+                className="inline-flex items-center gap-1 rounded-md border border-accent-sky/25 bg-accent-sky/[0.06] px-2 py-0.5 text-[11px] font-medium text-accent-sky transition-colors hover:bg-accent-sky/[0.12] disabled:opacity-50"
               >
                 <Sparkles className="size-3" aria-hidden />
                 {suggestion}
@@ -129,10 +129,10 @@ export function UploadOptionsControl({
               onClick={() => onChange({ ...options, region: r.id })}
               className={cn(
                 "flex-1 rounded-lg border px-3 py-2 text-sm transition-colors duration-150",
-                "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
+                "focus-visible:border-accent-sky/40 focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none",
                 "disabled:opacity-50",
                 options.region === r.id
-                  ? "border-sky-400/40 bg-sky-400/[0.06] text-foreground"
+                  ? "border-accent-sky/40 bg-accent-sky/[0.06] text-foreground"
                   : "border-white/[0.06] bg-white/[0.02] text-muted-foreground hover:border-white/[0.12]"
               )}
             >
@@ -161,18 +161,18 @@ export function UploadOptionsControl({
                 onClick={() => onChange({ ...options, visibility: value })}
                 className={cn(
                   "rounded-lg border p-3 text-left transition-colors duration-150 disabled:opacity-50",
-                  "focus-visible:border-sky-400/40 focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none",
+                  "focus-visible:border-accent-sky/40 focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none",
                   // Selection state is uniformly sky across the uploader (Region,
                   // mode tabs, visibility); gold is reserved for primary actions.
                   active
-                    ? "border-sky-400/40 bg-sky-400/[0.06]"
+                    ? "border-accent-sky/40 bg-accent-sky/[0.06]"
                     : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.12]"
                 )}
               >
                 <div
                   className={cn(
                     "flex items-center gap-1.5 text-sm font-medium",
-                    active ? "text-sky-400" : "text-foreground/80"
+                    active ? "text-accent-sky" : "text-foreground/80"
                   )}
                 >
                   <Icon className="size-3.5" aria-hidden />

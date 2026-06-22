@@ -81,12 +81,12 @@ export function FightList({
             className={cn(
               "flex animate-[fade-in_0.2s_ease-out] items-center justify-between gap-3 rounded-lg border px-3 py-2 transition-colors duration-150",
               isNewest
-                ? "border-sky-400/30 bg-sky-400/[0.05]"
+                ? "border-accent-sky/30 bg-accent-sky/[0.05]"
                 : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]"
             )}
           >
             <div className="flex min-w-0 items-center gap-2.5">
-              <Swords className="size-4 shrink-0 text-[#c4a44a]/70" aria-hidden />
+              <Swords className="size-4 shrink-0 text-primary/70" aria-hidden />
               <div className="min-w-0">
                 <div className="truncate text-sm text-foreground/90">{f.title}</div>
                 <div className="truncate text-xs text-muted-foreground">{f.subtitle}</div>
