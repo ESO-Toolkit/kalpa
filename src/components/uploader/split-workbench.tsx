@@ -219,7 +219,7 @@ export function SplitWorkbench({
       <DialogContent className="flex max-h-[88vh] flex-col gap-0 overflow-hidden sm:max-w-2xl">
         <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
-            <Scissors className="size-5 text-[#c4a44a]" aria-hidden />
+            <Scissors className="size-5 text-primary" aria-hidden />
             Split workbench
           </DialogTitle>
           <DialogDescription>
@@ -263,7 +263,7 @@ export function SplitWorkbench({
                 type="button"
                 title={`Add "${t.label}" to every selected split`}
                 onClick={() => tagAllIncluded(t.id)}
-                className="rounded-md border border-white/[0.08] bg-white/[0.02] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-sky-400/30 hover:text-sky-300"
+                className="rounded-md border border-white/[0.08] bg-white/[0.02] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:border-accent-sky/30 hover:text-accent-sky"
               >
                 {t.label}
               </button>
@@ -308,7 +308,7 @@ export function SplitWorkbench({
               <span className="text-muted-foreground">Select at least one session to split.</span>
             ) : (
               <span className="text-foreground/80">
-                <span className="font-semibold text-[#c4a44a]">{selected.length}</span> file
+                <span className="font-semibold text-primary">{selected.length}</span> file
                 {selected.length === 1 ? "" : "s"}{" "}
                 <span className="text-muted-foreground">· ~{compactBytes(selectedBytes)}</span>
               </span>
@@ -358,7 +358,7 @@ function SessionCard({
       className={cn(
         "rounded-xl border transition-colors duration-150",
         draft.include
-          ? "border-sky-400/30 bg-sky-400/[0.04]"
+          ? "border-accent-sky/30 bg-accent-sky/[0.04]"
           : "border-white/[0.06] bg-white/[0.02]"
       )}
     >
@@ -372,9 +372,9 @@ function SessionCard({
           onClick={onToggleInclude}
           className={cn(
             "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md border transition-colors duration-150",
-            "focus-visible:ring-2 focus-visible:ring-sky-400/40 focus-visible:outline-none",
+            "focus-visible:ring-2 focus-visible:ring-accent-sky/40 focus-visible:outline-none",
             draft.include
-              ? "border-sky-400/60 bg-sky-400/80 text-[#0b1220]"
+              ? "border-accent-sky/60 bg-accent-sky/80 text-primary-foreground"
               : "border-white/[0.15] bg-white/[0.03] hover:border-white/[0.3]"
           )}
         >
@@ -419,7 +419,7 @@ function SessionCard({
                 type="button"
                 onClick={onSuggest}
                 title="Use the suggested name"
-                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-sky-400/25 bg-sky-400/[0.06] px-1.5 py-1 text-[11px] font-medium text-sky-300 transition-colors hover:bg-sky-400/[0.12]"
+                className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent-sky/25 bg-accent-sky/[0.06] px-1.5 py-1 text-[11px] font-medium text-accent-sky transition-colors hover:bg-accent-sky/[0.12]"
               >
                 <Sparkles className="size-3" aria-hidden />
               </button>
@@ -451,7 +451,7 @@ function SessionCard({
                   className="flex items-center justify-between gap-3 rounded-md bg-white/[0.02] px-2 py-1"
                 >
                   <span className="flex min-w-0 items-center gap-1.5">
-                    <Swords className="size-3 shrink-0 text-[#c4a44a]/70" aria-hidden />
+                    <Swords className="size-3 shrink-0 text-primary/70" aria-hidden />
                     <span className="truncate text-xs text-foreground/85">
                       {f.bossName || f.zoneName || `Fight ${f.index + 1}`}
                     </span>
