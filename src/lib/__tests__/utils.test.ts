@@ -153,6 +153,11 @@ describe("decodeHtml", () => {
     expect(decodeHtml("&#128512; &#x1F600;")).toBe("😀 😀");
   });
 
+  it("decodes uppercase hex numeric entities", () => {
+    expect(decodeHtml("&#X27;")).toBe("'");
+    expect(decodeHtml("&#X1F600;")).toBe("😀");
+  });
+
   it("leaves invalid numeric entities unchanged", () => {
     expect(decodeHtml("&#999999999;")).toBe("&#999999999;");
   });

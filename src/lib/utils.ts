@@ -89,7 +89,8 @@ const HTML_ENTITIES: Record<string, string> = {
 };
 
 function decodeNumericEntity(value: string): string | null {
-  const codePoint = value.startsWith("#x")
+  const isHex = value[1] === "x" || value[1] === "X";
+  const codePoint = isHex
     ? Number.parseInt(value.slice(2), 16)
     : Number.parseInt(value.slice(1), 10);
 
@@ -108,7 +109,7 @@ function decodeNumericEntity(value: string): string | null {
 }
 
 export function decodeHtml(str: string): string {
-  return str.replace(/&(#\d+|#x[0-9a-fA-F]+|\w+);/g, (match, entity: string) => {
+  return str.replace(/&(#\d+|#[xX][0-9a-fA-F]+|\w+);/g, (match, entity: string) => {
     if (entity.startsWith("#")) return decodeNumericEntity(entity) ?? match;
     return HTML_ENTITIES[entity] ?? match;
   });
