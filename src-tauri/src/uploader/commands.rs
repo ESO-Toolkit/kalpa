@@ -1635,7 +1635,24 @@ async fn start_native_live_branch(
         // so no real line (BEGIN_COMBAT / UNIT_ADDED / END_COMBAT / END_LOG / next
         // BEGIN_LOG) is lost. Both the prefix end and the tail start use this boundary, so
         // they meet exactly with no gap or overlap.
-        let tail_start = super::tail_io::last_line_boundary(log_path, eof).unwrap_or(eof);
+        // `None` means no newline within the 1 MiB scan window — a single unterminated
+        // line longer than any well-formed ESO line. We must NOT fall back to raw EOF: EOF
+        // isn't a line boundary there, so the tail would emit the line's later suffix as a
+        // corrupted synthetic line (and leave a gap) — the exact seam bug the line-safe
+        // boundary exists to prevent. Decline native instead (no report created yet).
+        let tail_start = match super::tail_io::last_line_boundary(log_path, eof) {
+            Some(b) => b,
+            None => {
+                let _ = channel_for_thread.send(LiveEvent::Stopped {
+                    reason: "Couldn't find a safe place to start live logging (the log's \
+                             last line looks incomplete). Try again, or type /reloadui in \
+                             ESO to begin a fresh session."
+                        .into(),
+                });
+                let _ = super::history::settle_started(&app_for_thread, &record_id_for_thread);
+                return;
+            }
+        };
         let _ = channel_for_thread.send(LiveEvent::Started {
             file: safe_owned.clone(),
             start_offset: tail_start,

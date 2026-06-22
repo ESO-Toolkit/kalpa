@@ -1294,8 +1294,12 @@ impl LineAssembler {
     /// Reset on a truncation / new file (mirrors `watcher.rs:303-309`).
     fn reset(&mut self) {
         self.partial.clear();
-        // Do NOT reset seen_begin_log: a truncation that starts a fresh session will
-        // bring its own BEGIN_LOG, which the driver treats as a second-session cut.
+        // Re-arm the F4 gate to COLD so any lines in the replacement file BEFORE its first
+        // BEGIN_LOG are discarded, not emitted into the (now-closing) report. The driver
+        // keeps its OWN session flag, so the replacement's BEGIN_LOG still arrives as a
+        // second-session header and cuts the old report (NewSession). Leaving this `true`
+        // would leak the new file's pre-header bytes into the prior report.
+        self.seen_begin_log = false;
     }
 
     /// Feed a freshly-read chunk; append to the carry, split complete lines, hold the
@@ -2682,6 +2686,28 @@ mod tests {
         // After reset the dangling "0,BEGIN" is gone; a fresh full line assembles clean.
         let (lines, _) = a.push_chunk(format!("{HDR}\n").as_bytes()).unwrap();
         assert_eq!(lines, vec![HDR.to_string()]);
+    }
+
+    #[test]
+    fn line_assembler_reset_rearms_the_header_gate_after_truncation() {
+        // After a BEGIN_LOG has been seen, a truncation/replacement (NotifyTail calls
+        // reset) must DISCARD the replacement file's lines until ITS OWN BEGIN_LOG —
+        // otherwise pre-header bytes of the new file leak into the closing report. The
+        // replacement's BEGIN_LOG is then emitted so the driver can cut NewSession.
+        let mut a = LineAssembler::new();
+        let (first, _) = a
+            .push_chunk(format!("{HDR}\n100,END_COMBAT\n").as_bytes())
+            .unwrap();
+        assert_eq!(first, vec![HDR.to_string(), "100,END_COMBAT".to_string()]);
+        a.reset(); // truncation/replacement
+        let (after, _) = a
+            .push_chunk(format!("50,COMBAT_EVENT,DAMAGE\n{HDR}\n").as_bytes())
+            .unwrap();
+        assert_eq!(
+            after,
+            vec![HDR.to_string()],
+            "pre-header bytes of the replacement file are discarded; its BEGIN_LOG is emitted"
+        );
     }
 
     #[test]
