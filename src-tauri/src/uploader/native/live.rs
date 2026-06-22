@@ -646,7 +646,12 @@ pub fn run_native_live(
     let sender = LiveSender::new(Arc::clone(&session));
     let create_url = format!("{}/create-report", super::client::desktop_client_base());
     let create_body = super::client::create_report_body_for(opts);
-    let code_body = sender.send_cancellable(
+    // create-report uses the NO-LEAK cancel variant: a Stop racing the create POST must
+    // not abandon it (the server could create the report after we give up, with no code
+    // to record/terminate → an untracked orphan). On cancel this still captures the code
+    // if it lands within the grace window; we then record the breadcrumb below and the
+    // post-create cancel check / driver terminates it cleanly.
+    let code_body = sender.send_create_cancellable(
         &create_url,
         super::client::OwnedLiveRequest::CreateReport { body: create_body },
         &cancel,
@@ -655,6 +660,15 @@ pub fn run_native_live(
 
     // L2: persist the breadcrumb the INSTANT the report exists, before the first POST.
     sink.record_open(&code.0, 1);
+
+    // A Stop that landed DURING create-report (captured by the grace window above) leaves
+    // us holding a real report + its breadcrumb but no reason to stream. Terminate it now
+    // — don't spawn the warm-up/tail — so the report is closed (or recoverable), never an
+    // orphan. The shared discipline clears the breadcrumb only on a confirmed close.
+    if cancel.load(Ordering::SeqCst) {
+        terminate_report_and_settle(&sender, sink, &code);
+        return Err(UploadError::Cancelled);
+    }
 
     let mut driver = LiveDriver::new(sender, code.clone(), cancel.clone(), channel);
     // MID-SESSION: warm the encoder from the on-disk session prefix BEFORE tailing, so a

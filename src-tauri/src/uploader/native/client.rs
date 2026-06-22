@@ -40,6 +40,13 @@ const DESKTOP_CLIENT_BASE: &str = "https://www.esologs.com/desktop-client";
 /// driver reuses the same slice for its cancel-aware backoff/pause loops.
 pub(crate) const LIVE_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Grace window to let an in-flight `create-report` LAND after a Stop, so we capture its
+/// report code and TERMINATE it instead of leaking an untracked remote report. Create
+/// normally completes in well under a second; this only matters when a Stop races the
+/// create POST. Past this window (a wedged network during create) we give up — a rare,
+/// bounded leak — rather than block Stop indefinitely.
+pub(crate) const CREATE_REPORT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A report code returned by `create-report` and used to address subsequent
 /// segment/master-table/terminate calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -654,6 +661,31 @@ impl LiveSender {
         });
         wait_for_send_or_cancel(rx, cancel)
     }
+
+    /// Like [`Self::send_cancellable`] but for `create-report`, which must NEVER be
+    /// abandoned mid-flight: the server can create the report after we give up, leaving
+    /// an untracked orphan (no code to record/terminate, uncatchable by next-launch
+    /// recovery). On cancel this waits up to [`CREATE_REPORT_GRACE`] for the worker to
+    /// return the code so the caller can record + terminate it; only if the grace expires
+    /// with no result does it surface `Cancelled`. Fast-Stop is preserved for the normal
+    /// (non-create) cancel path — this divergence is create-only.
+    pub(crate) fn send_create_cancellable(
+        &self,
+        url: &str,
+        req: OwnedLiveRequest,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Vec<u8>, UploadError> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(UploadError::Cancelled);
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        let session = Arc::clone(&self.session);
+        let url = url.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(live_send_with_reauth(&session, &url, &req));
+        });
+        wait_for_create_or_cancel(rx, cancel, CREATE_REPORT_GRACE)
+    }
 }
 
 /// Wait on a worker's result channel, polling `cancel` every [`LIVE_CANCEL_POLL`].
@@ -679,6 +711,41 @@ fn wait_for_send_or_cancel(
                 ));
             }
         }
+    }
+}
+
+/// Like [`wait_for_send_or_cancel`] but for CREATE-REPORT: on cancel it does NOT abandon
+/// the in-flight POST. It first waits cancel-aware (fast Stop); once cancel trips it waits
+/// up to `grace` for the worker to deliver the report code, RETURNING it (`Ok`) so the
+/// caller can record + terminate the just-created report instead of leaking it. Only if
+/// the grace expires (or the worker dies) with no code does it surface `Cancelled`.
+/// Extracted so the no-leak-on-cancel contract is unit-testable without a real worker.
+fn wait_for_create_or_cancel(
+    rx: std::sync::mpsc::Receiver<Result<Vec<u8>, UploadError>>,
+    cancel: &Arc<AtomicBool>,
+    grace: std::time::Duration,
+) -> Result<Vec<u8>, UploadError> {
+    // Phase 1: fast cancel-aware wait (same as the normal path).
+    loop {
+        match rx.recv_timeout(LIVE_CANCEL_POLL) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(UploadError::Transport(
+                    "live upload worker terminated unexpectedly".into(),
+                ));
+            }
+        }
+    }
+    // Phase 2 (cancelled mid-create): wait `grace` for the report to land so we can
+    // capture its code and clean it up. No code in time ⇒ accept the rare bounded leak.
+    match rx.recv_timeout(grace) {
+        Ok(result) => result,
+        Err(_) => Err(UploadError::Cancelled),
     }
 }
 
@@ -1151,6 +1218,53 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let r = wait_for_send_or_cancel(rx, &cancel);
         assert!(matches!(r, Err(UploadError::Transport(_))), "{r:?}");
+    }
+
+    /// CREATE wait: a result that completes normally is returned (cancel never trips).
+    #[test]
+    fn create_wait_returns_result_when_it_completes() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        tx.send(Ok(b"code".to_vec())).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let r = wait_for_create_or_cancel(rx, &cancel, std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(r, b"code");
+    }
+
+    /// CREATE wait, THE FIX: a Stop racing create must NOT abandon the report. With cancel
+    /// already set, a code landing within the grace window is captured (returned `Ok`), so
+    /// the caller can terminate it — not surfaced as `Cancelled` (which would orphan it).
+    #[test]
+    fn create_wait_captures_a_late_landing_report_on_cancel() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        let cancel = Arc::new(AtomicBool::new(true)); // stopped during create
+        std::thread::spawn(move || {
+            // Land AFTER a phase-1 poll timeout, so phase-2 grace is what captures it.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = tx.send(Ok(b"report-code".to_vec()));
+        });
+        let r = wait_for_create_or_cancel(rx, &cancel, std::time::Duration::from_secs(5));
+        assert_eq!(
+            r.unwrap(),
+            b"report-code",
+            "a report landing within grace must be captured, not abandoned"
+        );
+    }
+
+    /// CREATE wait: if no code lands within the grace (wedged create), give up as
+    /// `Cancelled` — bounded by the grace, never the 120s request timeout.
+    #[test]
+    fn create_wait_gives_up_after_grace_with_no_report() {
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, UploadError>>();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let start = std::time::Instant::now();
+        let r = wait_for_create_or_cancel(rx, &cancel, std::time::Duration::from_millis(300));
+        assert!(matches!(r, Err(UploadError::Cancelled)), "{r:?}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "bounded by the grace, took {:?}",
+            start.elapsed()
+        );
+        drop(_tx);
     }
 
     /// An already-cancelled send short-circuits before spawning any worker.
