@@ -67,6 +67,13 @@ pub struct PendingUpdate {
     pub folder_name: String,
     pub esoui_id: u32,
     pub update_version: String,
+    /// The downloaded ZIP's hash/signature map, computed once during conflict
+    /// detection (`build_conflict_report`) and reused as the post-extraction
+    /// baseline so the apply step doesn't re-decompress and re-hash the whole
+    /// archive a second time. Empty only for entries created before this field
+    /// existed or via paths that didn't compute it; the apply step falls back to
+    /// hashing the ZIP in that case.
+    pub zip_hashes: HashMap<String, String>,
 }
 
 pub struct PendingUpdates(pub Arc<Mutex<HashMap<String, PendingUpdate>>>);

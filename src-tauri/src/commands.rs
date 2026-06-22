@@ -1788,13 +1788,13 @@ fn build_conflict_report(
         let disk_hash = disk_hashes.get(rel_path);
 
         let user_modified = match (stored_hash, disk_hash) {
-            (Some(stored), Some(disk)) => stored != disk,
+            (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
             (Some(_), None) => true, // file deleted
             (None, _) => false,      // no stored hash = no baseline = treat as unmodified
         };
 
         let upstream_changed = match stored_hash {
-            Some(stored) => stored != zip_hash,
+            Some(stored) => !file_hashes::signatures_match(stored, zip_hash),
             None => true, // new file in upstream or no baseline
         };
 
@@ -1852,10 +1852,11 @@ pub async fn scan_update_conflicts(
 
         let session_id = generate_session_id(&folder_name);
 
-        // The ZIP hash map isn't reused here: extraction happens later in a
-        // separate `update_addon_with_decisions` invocation, after the user
-        // resolves conflicts, by which point this map is long gone.
-        let (report, _zip_hashes) = build_conflict_report(
+        // Keep the ZIP hash map: the apply step (update_addon_with_decisions)
+        // reuses it as the new baseline instead of re-decompressing and
+        // re-hashing the whole archive a second time — the big saving on
+        // many-file addons.
+        let (report, zip_hashes) = build_conflict_report(
             &addons_dir,
             &folder_name,
             &kept_path,
@@ -1871,6 +1872,7 @@ pub async fn scan_update_conflicts(
                     folder_name: folder_name.clone(),
                     esoui_id,
                     update_version: info.version,
+                    zip_hashes,
                 },
             );
         }
@@ -2027,9 +2029,10 @@ pub async fn scan_batch_conflicts(
                             errors.insert(folder_name.clone(), e);
                             failed.push(folder_name);
                         }
-                        // ZIP map unused: extraction is deferred to the
-                        // interactive `update_addon_with_decisions` call.
-                        Ok((report, _zip_hashes)) => {
+                        // Keep the ZIP map on the pending update so the deferred
+                        // interactive `update_addon_with_decisions` reuses it as
+                        // the baseline instead of re-hashing the archive.
+                        Ok((report, zip_hashes)) => {
                             if let Ok(mut map) = pending_clone.lock() {
                                 map.insert(
                                     session_id.clone(),
@@ -2038,6 +2041,7 @@ pub async fn scan_batch_conflicts(
                                         folder_name: folder_name.clone(),
                                         esoui_id: dl.esoui_id,
                                         update_version: version.to_string(),
+                                        zip_hashes,
                                     },
                                 );
                             }
@@ -2342,6 +2346,7 @@ fn extract_streamed_downloads(
                         folder_name: folder_name.clone(),
                         esoui_id: dl.esoui_id,
                         update_version: dl.api_version.clone(),
+                        zip_hashes: zip_hashes.clone(),
                     },
                 );
             }
@@ -2696,11 +2701,18 @@ fn update_with_decisions_inner(
         )?;
     }
 
-    // Hash the ZIP once. This map becomes the new baseline after extraction
-    // (reused by record_hashes_with_zip_baseline), and also supplies the
-    // upstream hashes for kept "keep_mine" files so the user's edit stays
-    // detectable on the next update cycle.
-    let zip_hashes = file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?;
+    // The ZIP's hash/signature map. Reuse the one computed during conflict
+    // detection (stored on the pending update) so we don't re-decompress and
+    // re-hash the whole archive again here — the dominant cost on many-file
+    // addons. Fall back to hashing it if a pending entry predates that field.
+    // This map becomes the new baseline after extraction (reused by
+    // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
+    // "keep_mine" files so the user's edit stays detectable on the next update.
+    let zip_hashes = if pu.zip_hashes.is_empty() {
+        file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?
+    } else {
+        pu.zip_hashes.clone()
+    };
     let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
         None
     } else {
@@ -3008,8 +3020,12 @@ pub async fn write_addon_file(
         // modified_files cache current.
         if let Some(mut manifest) = file_hashes::load_hash_manifest(&addons_dir, &folder_name) {
             let key = relative_path.replace('\\', "/");
-            let hash = file_hashes::hash_file(&file_path)?;
-            let is_modified = manifest.files.get(&key).map(|h| h != &hash).unwrap_or(true);
+            let sig = file_hashes::file_signature(&key, &file_path)?;
+            let is_modified = manifest
+                .files
+                .get(&key)
+                .map(|stored| !file_hashes::signatures_match(stored, &sig))
+                .unwrap_or(true);
             if is_modified && !manifest.modified_files.contains(&key) {
                 manifest.modified_files.push(key);
                 manifest.modified_files.sort();
