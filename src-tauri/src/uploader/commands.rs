@@ -1605,21 +1605,39 @@ async fn start_native_live_branch(
                 let _ = ch_resolved.send(LiveEvent::ReauthResolved);
             }),
         };
+        // Snapshot EOF ONCE: both the tail start AND the mid-session warm-up anchor to the
+        // same byte so the replayed prefix [BEGIN_LOG, eof) and the tailed [eof, ..) meet
+        // with no gap or overlap.
+        let eof = std::fs::metadata(&safe_owned).map(|m| m.len()).unwrap_or(0);
         let _ = channel_for_thread.send(LiveEvent::Started {
             file: safe_owned.clone(),
-            start_offset: std::fs::metadata(&safe_owned).map(|m| m.len()).unwrap_or(0),
+            start_offset: eof,
         });
+
+        // MID-SESSION: if the user is ALREADY combat-logging (an open session header lies
+        // before EOF), replay that prefix to warm the encoder so they stream WITHOUT a
+        // fresh /reloadui. Find the most-recent BEGIN_LOG; only warm up when the session
+        // is still OPEN (no END_LOG after it) and there are bytes to replay. No header /
+        // closed session / just-started ⇒ None ⇒ tail from EOF exactly as before. A
+        // scanner error is non-fatal: fall back to from-EOF (today's behavior).
+        let warmup = match super::scanner::find_current_session_begin(Path::new(&safe_owned), eof) {
+            Ok(Some(anchor)) if anchor.open_session && anchor.begin_log_offset < eof => {
+                Some(super::native::live::WarmupPrefix {
+                    begin_log_offset: anchor.begin_log_offset,
+                    eof,
+                })
+            }
+            _ => None,
+        };
 
         let result = run_native_live(
             &safe_owned,
             provider,
             &opts_owned,
             driver_cancel,
-            // The production tail constructed below reads the real Encounter.log.
-            &match super::native::live::NotifyTail::new(
-                Path::new(&safe_owned),
-                std::fs::metadata(&safe_owned).map(|m| m.len()).unwrap_or(0),
-            ) {
+            // The production tail reads the real Encounter.log, starting at the same EOF
+            // the warm-up prefix stopped at (no gap/overlap).
+            &match super::native::live::NotifyTail::new(Path::new(&safe_owned), eof) {
                 Ok(t) => t,
                 Err(e) => {
                     let _ = channel_for_thread.send(LiveEvent::Stopped {
@@ -1629,6 +1647,7 @@ async fn start_native_live_branch(
                     return;
                 }
             },
+            warmup,
             &sink,
             Some(&events),
         );

@@ -309,6 +309,33 @@ impl LiveSegmenter {
     pub fn next_segment_id(&self) -> u64 {
         self.next_segment_id
     }
+
+    /// Transition from WARM-UP (mid-session prefix replay) to LIVE. During warm-up the
+    /// driver feeds the on-disk `[BEGIN_LOG, EOF)` prefix through `feed()` to rebuild the
+    /// cumulative encoder state (actor/ability/tuple indices, the master record state,
+    /// and — crucially — `current_session_wall`/`log_version` parsed from the real
+    /// on-disk BEGIN_LOG) WITHOUT POSTing any of the prefix's already-finished fights.
+    /// This call discards everything that defines the *content/numbering of segments to
+    /// POST*, while KEEPING the cumulative report state, so the first LIVE segment starts
+    /// at segment id 1 and contains only post-join events — yet its tuple `A`-refs and
+    /// cumulative master resolve against the warm-up-seeded index space.
+    ///
+    /// Why this preserves the H1 index-stability pin: the pin lives entirely in
+    /// `IncrementalIndexState`/`IncrementalMasterState`/the emitter's frozen maps, all of
+    /// which are KEPT. `segment_lines` is a write-only buffer (never read when building a
+    /// segment or master), so clearing it is pure hygiene. The only things reset are the
+    /// per-segment POST framing (`open_segment` drops the in-progress segment's events +
+    /// wall window) and the segment counters. Proven byte-identical to a real
+    /// from-BEGIN_LOG stream by the `mid_session_seed_matches_*` differential tests.
+    pub fn finish_warmup(&mut self) {
+        self.segment_lines.clear();
+        self.next_segment_id = 1;
+        self.segments_built = 0;
+        // Drop the in-progress segment's accumulated events + wall window so the first
+        // LIVE POST contains only post-join events (the cumulative tables/wall/anchor and
+        // in-flight correlations are NOT touched by open_segment).
+        self.emitter.open_segment();
+    }
 }
 
 // ── Lifecycle state machine (L3 + L4) ────────────────────────────────────────
@@ -480,7 +507,10 @@ pub fn run_native_live_spike(
     poll: &dyn LiveTail,
 ) -> Result<(ReportCode, usize), UploadError> {
     let sink = NoopOrphanSink;
-    let (code, ended) = run_native_live(growing_path, session, opts, cancel, poll, &sink, None)?;
+    // The debug spike never does mid-session warm-up (it streams a synthetic file from
+    // the start), so `warmup` is None — behavior unchanged.
+    let (code, ended) =
+        run_native_live(growing_path, session, opts, cancel, poll, None, &sink, None)?;
     eprintln!(
         "[uploader] native live: report {} terminated ({:?}) after {} segment(s)",
         code.0, ended.reason, ended.segments_built
@@ -517,6 +547,19 @@ impl OrphanSink for NoopOrphanSink {
     fn clear(&self, _code: &str) {}
 }
 
+/// A MID-SESSION join anchor: replay the on-disk session prefix `[begin_log_offset, eof)`
+/// to warm the encoder state from disk BEFORE tailing from `eof`, so a user already
+/// combat-logging can go live WITHOUT a fresh `/reloadui`. Computed by the caller from
+/// [`super::super::scanner::find_current_session_begin`]. `None` ⇒ tail from EOF as
+/// before (no open session to replay, or the file has no recoverable `BEGIN_LOG`).
+#[derive(Debug, Clone, Copy)]
+pub struct WarmupPrefix {
+    /// Byte offset of the current session's most-recent `BEGIN_LOG` (the replay start).
+    pub begin_log_offset: u64,
+    /// File length at scan time (the replay end; the tail then starts here).
+    pub eof: u64,
+}
+
 /// Run the native live upload to completion, holding ONE report open across the
 /// whole session and terminating only on a clean end / idle / stop / failure.
 ///
@@ -536,6 +579,7 @@ pub fn run_native_live(
     opts: &UploadOptions,
     cancel: Arc<AtomicBool>,
     poll: &dyn LiveTail,
+    warmup: Option<WarmupPrefix>,
     sink: &dyn OrphanSink,
     channel: Option<&LiveEventSink>,
 ) -> Result<(ReportCode, LiveEnded), UploadError> {
@@ -560,6 +604,30 @@ pub fn run_native_live(
     sink.record_open(&code.0, 1);
 
     let mut driver = LiveDriver::new(sender, code.clone(), cancel.clone(), channel);
+    // MID-SESSION: warm the encoder from the on-disk session prefix BEFORE tailing, so a
+    // user already combat-logging streams without a fresh /reloadui. A warm-up failure
+    // (e.g. the file was truncated/rotated since the scan, or no BEGIN_LOG is recoverable)
+    // must NOT synthesize a wall clock — abandon the just-opened report and surface the
+    // error so the command layer falls back to the official handoff.
+    if let Some(w) = warmup {
+        if let Err(e) = driver.warm_up_from_prefix(growing_path, w) {
+            // Close the report we just opened (best-effort) before returning the error.
+            let term_url = format!(
+                "{}/terminate-report/{}",
+                super::client::desktop_client_base(),
+                code.0
+            );
+            let _ = driver.sender.post(
+                &term_url,
+                super::client::OwnedLiveRequest::Terminate,
+                &cancel,
+            );
+            sink.clear(&code.0);
+            return Err(UploadError::Transport(format!(
+                "mid-session warm-up failed: {e}"
+            )));
+        }
+    }
     let reason = driver.run(growing_path, poll, sink);
 
     // Best-effort, cancel-aware terminate on EVERY exit path. Clear the breadcrumb only
@@ -773,6 +841,62 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
             }
         }
         None
+    }
+
+    /// MID-SESSION warm-up: replay the on-disk session prefix `[begin_log_offset, eof)`
+    /// through `seg.feed()` to rebuild the cumulative encoder state (actor/ability/tuple
+    /// indices, master record state, and `current_session_wall`/`log_version` parsed from
+    /// the REAL on-disk `BEGIN_LOG` — never synthesized), WITHOUT POSTing any of the
+    /// prefix's already-finished fights, then `finish_warmup()` so the first LIVE segment
+    /// starts fresh at id 1. Cut boundaries during replay are IGNORED (no POST). On the
+    /// prefix's `BEGIN_LOG` it fires `on_session_anchored` (UI flips waiting→streaming
+    /// instantly) and sets `seen_begin_log` so the live tail treats lines as the SAME
+    /// session — and a genuine `/reloadui` DURING the live session still terminates as
+    /// NewSession (the prefix contains exactly the current session's single header,
+    /// because the scanner picks the MOST-RECENT `BEGIN_LOG`).
+    ///
+    /// Reads in `MAX_READ`-bounded chunks (a session prefix can exceed one read). Returns
+    /// `Err` if the prefix yields NO `BEGIN_LOG` once assembled (rotation/truncation race)
+    /// so the caller falls back rather than streaming a wall-less report — the no-clock
+    /// guarantee. The trailing partial line at `eof` is intentionally NOT fed here; the
+    /// production tail (constructed at the same `eof`) reads it once its newline arrives.
+    fn warm_up_from_prefix(&mut self, path: &str, w: WarmupPrefix) -> Result<(), String> {
+        let p = std::path::Path::new(path);
+        let mut assembler = LineAssembler::new();
+        let mut buf = Vec::new();
+        let mut pos = w.begin_log_offset;
+        let mut saw_begin = false;
+        while pos < w.eof {
+            if self.cancel.load(Ordering::SeqCst) {
+                return Err("cancelled during warm-up".into());
+            }
+            let chunk_end = (pos + MAX_READ).min(w.eof);
+            let n = read_range(p, pos, chunk_end, &mut buf)?;
+            let (lines, _saw_end_log) = assembler.push_chunk(&buf[..n])?;
+            for line in lines {
+                if kind_of(&line) == Some("BEGIN_LOG") && !saw_begin {
+                    saw_begin = true;
+                    self.seen_begin_log = true;
+                    if let Some(ch) = self.channel {
+                        (ch.on_session_anchored)();
+                    }
+                }
+                // Warm the cumulative state; IGNORE the cut boundary (no POST during
+                // warm-up — old fights are never sent).
+                let _ = self.seg.feed(&line);
+            }
+            pos = chunk_end;
+        }
+        if !saw_begin {
+            // The scanner found a BEGIN_LOG offset, but the assembled prefix had none
+            // (truncation/rotation race, or the assembler's F4 discard ate a malformed
+            // header). Never synthesize a wall — fall back.
+            return Err("no BEGIN_LOG in replayed prefix".into());
+        }
+        // Transition to live: discard the prefix's accumulated segment + reset numbering,
+        // KEEP the cumulative tables/wall/correlations the replay built.
+        self.seg.finish_warmup();
+        Ok(())
     }
 
     /// Build the current segment (if any) and POST it (master then add-segment),
@@ -1633,6 +1757,204 @@ mod tests {
         assert!(
             built >= 2,
             "synthetic session must yield multiple valid segments (got {built})"
+        );
+    }
+
+    // ── Mid-session warm-up (skip /reloadui) differential tests ──────────────────
+    //
+    // These prove the load-bearing claim: replaying an on-disk session prefix to warm
+    // the segmenter, then `finish_warmup()`, then streaming the rest, produces segments
+    // BYTE-IDENTICAL to streaming that same session from the start — for every LIVE
+    // segment — with the ONLY allowed difference being segment numbering (the prefix's
+    // already-finished fights were never POSTed, so the first live segment is id 1, not
+    // its from-start ordinal). This is the H1-index-stability re-verification the design
+    // requires: the warm-up exercises the identical advancing-pin feed() path.
+
+    /// Drive `lines` through a fresh segmenter, posting at every settled fight boundary
+    /// (and a final flush), returning each built segment's `(segment.bytes, master.bytes,
+    /// start_time, end_time)`. Mirrors the driver's cut/build loop without the network.
+    fn collect_segments(lines: &[&str]) -> Vec<(Vec<u8>, Vec<u8>, u64, u64)> {
+        let mut seg = LiveSegmenter::new();
+        let mut out = Vec::new();
+        for line in lines {
+            if seg.feed(line) && seg.shields_settled() {
+                if let Ok(Some(p)) = seg.build_next_segment() {
+                    out.push((
+                        p.segment.bytes.clone(),
+                        p.master.bytes.clone(),
+                        p.segment.start_time,
+                        p.segment.end_time,
+                    ));
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Ok(Some(p)) = seg.build_next_segment() {
+            out.push((
+                p.segment.bytes.clone(),
+                p.master.bytes.clone(),
+                p.segment.start_time,
+                p.segment.end_time,
+            ));
+        }
+        out
+    }
+
+    /// The shared 2-fight fixture: a real BEGIN_LOG header, actor/ability defs, two
+    /// fights (each BEGIN_COMBAT..END_COMBAT), END_LOG. Fight 2 references actors AND an
+    /// ability first registered before fight 1, so a mid-session join at the fight-1/2
+    /// boundary must still resolve fight 2's tuples against the warm-up-seeded indices.
+    fn two_fight_session_inline() -> Vec<&'static str> {
+        // Reuse the validated synthetic feed session (identical shape: 2 fights).
+        "\
+0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"
+0,ZONE_CHANGED,1129,\"Hall of the Lunar Champion\",NONE
+0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",820189967932710348,50,1735,0,PLAYER_ALLY,T
+0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Tenmar Bear\",\"\",0,50,160,0,HOSTILE,F
+0,UNIT_ADDED,31,MONSTER,F,0,88340,F,0,0,\"Tenmar Lynx\",\"\",0,50,160,0,HOSTILE,F
+100,ABILITY_INFO,28549,\"Roll Dodge\",\"/esoui/art/icons/ability_rogue_035.dds\",F,T
+100,EFFECT_INFO,28549,BUFF,NONE,NEVER
+100,ABILITY_INFO,29489,\"Hardened Ward\",\"/esoui/art/icons/ability_sorcerer_ward.dds\",F,T
+100,EFFECT_INFO,29489,BUFF,NONE,DEFAULT
+100,ABILITY_INFO,38901,\"Crystal Frags\",\"/esoui/art/icons/ability_sorcerer_dark_magic.dds\",F,F
+200,BEGIN_COMBAT
+210,BEGIN_CAST,800,F,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,40000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+220,EFFECT_CHANGED,GAINED,1,5002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*
+230,COMBAT_EVENT,DAMAGE,FIRE,1,1500,0,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,38500/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+260,COMBAT_EVENT,DAMAGE,FIRE,1,1800,0,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,36700/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+700,EFFECT_CHANGED,FADED,1,5002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*
+800,END_COMBAT
+1000,BEGIN_COMBAT
+1010,END_CAST,COMPLETED,5001,38901
+1030,COMBAT_EVENT,DAMAGE,FIRE,1,2200,0,5003,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,31,30000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+1060,COMBAT_EVENT,CRITICAL_DAMAGE,FIRE,1,4400,0,5003,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,31,25600/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
+1040,HEALTH_REGEN,500,1,16000/16000,12000/12000,8000/12000,53/500,0/1000,0,0.5,0.5,4.0
+1500,END_COMBAT
+1700,END_LOG"
+            .lines()
+            .collect()
+    }
+
+    /// Split the fixture at the END_COMBAT that ends fight 1: everything up to and
+    /// including the first END_COMBAT is the "already on disk" prefix; the rest is what
+    /// the live tail will deliver.
+    fn split_after_first_fight<'a>(lines: &[&'a str]) -> (Vec<&'a str>, Vec<&'a str>) {
+        let cut = lines
+            .iter()
+            .position(|l| kind_of(l) == Some("END_COMBAT"))
+            .expect("fixture has a first END_COMBAT")
+            + 1;
+        (lines[..cut].to_vec(), lines[cut..].to_vec())
+    }
+
+    #[test]
+    fn mid_session_seed_matches_from_start_stream_for_live_fights() {
+        let session = two_fight_session_inline();
+        let (prefix, live) = split_after_first_fight(&session);
+
+        // Baseline: stream the WHOLE session from the start, posting every fight.
+        let full = collect_segments(&session);
+        assert!(
+            full.len() >= 2,
+            "baseline must have ≥2 fights: {}",
+            full.len()
+        );
+
+        // Mid-session: replay the prefix WITHOUT posting (warm-up), finish_warmup, then
+        // stream the live remainder, collecting only the live segments.
+        let mut seg = LiveSegmenter::new();
+        for line in &prefix {
+            let _ = seg.feed(line); // ignore cut boundaries — no POST during warm-up
+        }
+        seg.finish_warmup();
+        // First live segment id starts fresh at 1 (the prefix fight was never POSTed).
+        assert_eq!(
+            seg.next_segment_id(),
+            1,
+            "warm-up resets the segment id to 1"
+        );
+
+        let mut live_segs: Vec<(Vec<u8>, Vec<u8>, u64, u64)> = Vec::new();
+        for line in &live {
+            if seg.feed(line) && seg.shields_settled() {
+                if let Ok(Some(p)) = seg.build_next_segment() {
+                    live_segs.push((
+                        p.segment.bytes.clone(),
+                        p.master.bytes.clone(),
+                        p.segment.start_time,
+                        p.segment.end_time,
+                    ));
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Ok(Some(p)) = seg.build_next_segment() {
+            live_segs.push((
+                p.segment.bytes.clone(),
+                p.master.bytes.clone(),
+                p.segment.start_time,
+                p.segment.end_time,
+            ));
+        }
+
+        // The live fights are the from-start baseline's fights AFTER the prefix's count.
+        let prefix_fights = full.len() - live_segs.len();
+        assert!(
+            prefix_fights >= 1,
+            "prefix should contain ≥1 finished fight"
+        );
+        for (i, live_seg) in live_segs.iter().enumerate() {
+            let baseline = &full[prefix_fights + i];
+            assert_eq!(
+                live_seg.0, baseline.0,
+                "live fight {i}: segment ZIP bytes must be byte-identical to from-start"
+            );
+            assert_eq!(
+                live_seg.1, baseline.1,
+                "live fight {i}: cumulative master bytes must be byte-identical (the \
+                 warm-up actors/abilities ARE present in both — same session)"
+            );
+            assert_eq!(
+                (live_seg.2, live_seg.3),
+                (baseline.2, baseline.3),
+                "live fight {i}: wall window must match (wall came from the real on-disk \
+                 BEGIN_LOG in BOTH paths — never synthesized)"
+            );
+        }
+    }
+
+    #[test]
+    fn mid_session_seed_preserves_actor_ability_indices_for_warmup_entities() {
+        // After warming from the prefix, the indices of entities first registered in the
+        // prefix (the player, the two monsters, the abilities) must equal their from-start
+        // indices — the H1 pin holds across the warm-up→live transition.
+        let session = two_fight_session_inline();
+        let (prefix, _live) = split_after_first_fight(&session);
+
+        // From-start: feed the whole prefix into a plain segmenter, read its frozen maps.
+        let mut baseline = LiveSegmenter::new();
+        for line in &prefix {
+            let _ = baseline.feed(line);
+        }
+        let base_actors = baseline.emitter.frozen_actor_index_map();
+        let base_abils = baseline.emitter.frozen_ability_index_map();
+
+        // Mid-session: same feed, then finish_warmup (which must NOT renumber anything —
+        // it only resets the per-segment POST framing, never the pinned maps).
+        let mut warmed = LiveSegmenter::new();
+        for line in &prefix {
+            let _ = warmed.feed(line);
+        }
+        warmed.finish_warmup();
+        assert_eq!(
+            warmed.emitter.frozen_actor_index_map(),
+            base_actors,
+            "finish_warmup must not renumber actor indices (H1 pin preserved)"
+        );
+        assert_eq!(
+            warmed.emitter.frozen_ability_index_map(),
+            base_abils,
+            "finish_warmup must not renumber ability indices (H1 pin preserved)"
         );
     }
 

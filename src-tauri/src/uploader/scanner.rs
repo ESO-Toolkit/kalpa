@@ -27,6 +27,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 use super::types::{FightSummary, LogSession};
 
@@ -141,6 +142,148 @@ pub(crate) fn tail_session_state(chunk: &[u8], drop_first_line: bool) -> TailSta
         }
     }
     st
+}
+
+/// The disk anchor for a MID-SESSION live join: the byte offset of the most-recent
+/// `BEGIN_LOG` at or before `eof`, plus whether that session is still open (no `END_LOG`
+/// after it). The native-live driver replays `[begin_log_offset, eof)` to warm its
+/// encoder tables + wall clock from disk, so a user who is ALREADY combat-logging can go
+/// live WITHOUT a fresh `/reloadui`. `open_session` distinguishes "logging now" (replay
+/// the prefix) from "last session already ended" (no prefix — tail from EOF as before).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SessionAnchor {
+    /// Absolute byte offset of the most-recent `BEGIN_LOG` line's FIRST byte.
+    pub begin_log_offset: u64,
+    /// True iff NO `END_LOG` follows that `BEGIN_LOG` up to `eof` (logging still active).
+    pub open_session: bool,
+}
+
+/// Window size for the backward scan — reuse the readiness-probe peek (256 KiB is many
+/// thousands of lines, vastly more than the few-hundred-byte gap between a `BEGIN_LOG`
+/// and its session, and far larger than any single line).
+const ANCHOR_WINDOW: u64 = super::tail_io::TAIL_PEEK;
+
+/// Find the most-recent `BEGIN_LOG` at/before `eof` by scanning fixed windows BACKWARD,
+/// so a multi-GB log never reads more than the tail back to the current session header.
+/// Returns `Ok(None)` when the file contains no `BEGIN_LOG` at all (rotated/truncated) —
+/// the caller MUST then route to the official handoff and NEVER synthesize a wall clock.
+///
+/// Correctness details:
+/// * Windows overlap by `ANCHOR_WINDOW/8` (32 KiB ≫ any line) so a `BEGIN_LOG` straddling
+///   a window seam is still seen whole in at least one window. The first (newest) window
+///   that contains a `BEGIN_LOG` wins — older windows are not read, which is exactly the
+///   "never cross an earlier `/reloadui`" rule (we want the CURRENT session's header).
+/// * Within a window we compute each line's ABSOLUTE offset (window start + intra-window
+///   byte position) so `begin_log_offset` is a true file offset usable by `read_range`.
+/// * `open_session` is decided by a forward pass over `[begin_log_offset, eof)`'s tail:
+///   any `END_LOG` after the chosen `BEGIN_LOG` means the session already closed.
+pub(crate) fn find_current_session_begin(
+    path: &Path,
+    eof: u64,
+) -> Result<Option<SessionAnchor>, String> {
+    if eof == 0 {
+        return Ok(None);
+    }
+    let overlap = ANCHOR_WINDOW / 8;
+    let mut buf = Vec::new();
+    // Walk windows from newest (ending at eof) to oldest (starting at 0).
+    let mut win_end = eof;
+    loop {
+        let win_start = win_end.saturating_sub(ANCHOR_WINDOW);
+        let n = super::tail_io::read_range(path, win_start, win_end, &mut buf)?;
+        // Find the absolute offset of the LAST BEGIN_LOG whose line START lies in this
+        // window. We iterate line starts by tracking byte position; a line "starts" right
+        // after a preceding '\n' (or at window byte 0). Skip the leading partial of a
+        // mid-file window (win_start > 0): its true start is in the previous window, so a
+        // BEGIN_LOG there will be caught with its real offset by the overlap.
+        let mut last_begin: Option<u64> = None;
+        let mut line_start: usize = 0;
+        let bytes = &buf[..n];
+        for i in 0..n {
+            if bytes[i] == b'\n' {
+                let line = &bytes[line_start..i];
+                // Only count a line whose start is genuinely within this window (not the
+                // leading partial of a non-zero-based window — that belongs to the prior
+                // window and would have a bogus offset here).
+                let is_partial_lead = win_start > 0 && line_start == 0;
+                if !is_partial_lead && line_is_begin_log(line) {
+                    last_begin = Some(win_start + line_start as u64);
+                }
+                line_start = i + 1;
+            }
+        }
+        // The final line of the window may have no trailing '\n' (it ends at win_end). At
+        // eof that's the file's true last line; mid-file it's a partial we ignore (the
+        // overlap re-reads it whole in the next-newer iteration — but since we go newest
+        // first, "next-newer" already ran; so only consider it when this IS the newest
+        // window, i.e. win_end == eof).
+        if line_start < n && win_end == eof {
+            let line = &bytes[line_start..n];
+            let is_partial_lead = win_start > 0 && line_start == 0;
+            if !is_partial_lead && line_is_begin_log(line) {
+                last_begin = Some(win_start + line_start as u64);
+            }
+        }
+        if let Some(begin_log_offset) = last_begin {
+            let open_session = !any_end_log_after(path, begin_log_offset, eof, &mut buf)?;
+            return Ok(Some(SessionAnchor {
+                begin_log_offset,
+                open_session,
+            }));
+        }
+        if win_start == 0 {
+            return Ok(None); // scanned the whole file, no BEGIN_LOG
+        }
+        // Step back by a full window minus the overlap so a seam-straddling line is seen.
+        win_end = win_start + overlap;
+    }
+}
+
+/// True iff the line (sans trailing CR) is a `BEGIN_LOG` record. Mirrors `classify`'s
+/// token test but works on raw bytes so the backward scanner avoids a full decode.
+fn line_is_begin_log(line: &[u8]) -> bool {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    // ESO line shape: `<relMs>,BEGIN_LOG,...`. The type is the 2nd comma field.
+    let mut fields = line.split(|&b| b == b',');
+    let _rel = fields.next();
+    matches!(fields.next(), Some(t) if t.eq_ignore_ascii_case(b"BEGIN_LOG"))
+}
+
+/// Scan `[from, eof)` forward (in `MAX_READ`-bounded chunks) for any `END_LOG` line,
+/// which would mean the session opened at `from` has already closed. Reuses `buf`.
+fn any_end_log_after(path: &Path, from: u64, eof: u64, buf: &mut Vec<u8>) -> Result<bool, String> {
+    let mut pos = from;
+    let mut carry: Vec<u8> = Vec::new();
+    while pos < eof {
+        let chunk_end = (pos + super::tail_io::MAX_READ).min(eof);
+        let n = super::tail_io::read_range(path, pos, chunk_end, buf)?;
+        // Stitch the carry (a partial line from the previous chunk) onto this chunk's
+        // bytes so a line split across the chunk boundary is classified whole.
+        let mut combined = std::mem::take(&mut carry);
+        combined.extend_from_slice(&buf[..n]);
+        let mut line_start = 0usize;
+        for i in 0..combined.len() {
+            if combined[i] == b'\n' {
+                if line_is_end_log(&combined[line_start..i]) {
+                    return Ok(true);
+                }
+                line_start = i + 1;
+            }
+        }
+        // Whatever follows the last '\n' is a partial — carry it to the next chunk (or, at
+        // eof, it's the final whole line, checked after the loop).
+        carry = combined[line_start..].to_vec();
+        pos = chunk_end;
+    }
+    Ok(line_is_end_log(&carry))
+}
+
+/// True iff the line (sans trailing CR) is an `END_LOG` record.
+fn line_is_end_log(line: &[u8]) -> bool {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let mut fields = line.split(|&b| b == b',');
+    let _rel = fields.next();
+    matches!(fields.next(), Some(t) if t.eq_ignore_ascii_case(b"END_LOG"))
 }
 
 /// Translate common IO errors into the friendly, project-consistent strings the
@@ -627,5 +770,107 @@ mod tests {
             kept.open_session && kept.saw_session_boundary,
             "reading from byte 0 keeps the BEGIN_LOG → open session"
         );
+    }
+
+    // ── find_current_session_begin (mid-session warm-up anchor) ──────────────────
+
+    /// Write bytes to a uniquely-named temp file and return its path (caller removes).
+    fn temp_log(name: &str, content: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("kalpa-anchor-{name}.log"));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    // Two sessions in one file (a /reloadui mid-file): the anchor MUST be the SECOND
+    // (most-recent) BEGIN_LOG, never the earlier one — we never cross a /reloadui.
+    #[test]
+    fn find_current_session_begin_returns_most_recent() {
+        let content = "\
+0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"
+200,BEGIN_COMBAT
+300,END_COMBAT
+400,END_LOG
+500,BEGIN_LOG,1700000099999,15,\"NA\",\"en\",\"eso.live\"
+600,BEGIN_COMBAT
+700,COMBAT_EVENT,DAMAGE,FIRE,1,5,0,1,1,1
+";
+        let path = temp_log("most-recent", content);
+        let eof = std::fs::metadata(&path).unwrap().len();
+        let anchor = find_current_session_begin(&path, eof).unwrap().unwrap();
+        // The second BEGIN_LOG line's absolute offset.
+        let want = content.find("500,BEGIN_LOG").unwrap() as u64;
+        assert_eq!(
+            anchor.begin_log_offset, want,
+            "must pick the MOST-RECENT BEGIN_LOG"
+        );
+        assert!(anchor.open_session, "second session has no END_LOG → open");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A session that ended in END_LOG → closed (the caller will NOT warm up; it tails
+    // from EOF and waits for a fresh header).
+    #[test]
+    fn find_current_session_begin_reports_closed_after_end_log() {
+        let content = "\
+0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"
+200,BEGIN_COMBAT
+300,END_COMBAT
+400,END_LOG
+";
+        let path = temp_log("closed", content);
+        let eof = std::fs::metadata(&path).unwrap().len();
+        let anchor = find_current_session_begin(&path, eof).unwrap().unwrap();
+        assert_eq!(anchor.begin_log_offset, 0);
+        assert!(!anchor.open_session, "END_LOG → session closed");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // No BEGIN_LOG anywhere (e.g. only Interface-style/headerless content) → None, so the
+    // caller falls back and NEVER synthesizes a wall clock.
+    #[test]
+    fn find_current_session_begin_none_when_no_header() {
+        let content = "100,SOMETHING,1\n200,OTHER,2\n";
+        let path = temp_log("noheader", content);
+        let eof = std::fs::metadata(&path).unwrap().len();
+        assert!(find_current_session_begin(&path, eof).unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A BEGIN_LOG that straddles a 256 KiB window seam must still be found (the backward
+    // scan overlaps windows). Pad with filler so the header lands across a window edge.
+    #[test]
+    fn find_current_session_begin_handles_window_seam() {
+        let header = "1234567,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n";
+        // Place the BEGIN_LOG so it spans the first window boundary (ANCHOR_WINDOW),
+        // counting back from EOF: lead + header + trailer, with header centered on the
+        // seam. Use filler lines (valid-ish, ignored by classify).
+        let filler_line = "0,COMBAT_EVENT,DAMAGE,FIRE,1,5,0,1,1,1\n"; // 38 bytes
+        let win = ANCHOR_WINDOW as usize;
+        // Build a trailer so the header's bytes sit across the boundary `eof - win`.
+        let trailer_len = win + 13; // push header start to just before the seam
+        let mut trailer = String::new();
+        while trailer.len() < trailer_len {
+            trailer.push_str(filler_line);
+        }
+        let lead = filler_line.repeat(win / filler_line.len() + 5);
+        let content = format!("{lead}{header}{trailer}");
+        let path = temp_log("seam", &content);
+        let eof = std::fs::metadata(&path).unwrap().len();
+        let anchor = find_current_session_begin(&path, eof).unwrap().unwrap();
+        let want = content.find("1234567,BEGIN_LOG").unwrap() as u64;
+        assert_eq!(
+            anchor.begin_log_offset, want,
+            "a BEGIN_LOG straddling a window seam must still be found at its true offset"
+        );
+        assert!(anchor.open_session);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Empty file → None (nothing to anchor to).
+    #[test]
+    fn find_current_session_begin_empty_file() {
+        let path = temp_log("empty", "");
+        assert!(find_current_session_begin(&path, 0).unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
     }
 }
