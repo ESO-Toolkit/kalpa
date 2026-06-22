@@ -9,7 +9,7 @@ interface AnimatedCheckmarkProps {
 
 export function AnimatedCheckmark({
   size = 20,
-  color = "#34d399",
+  color = "var(--status-success-strong)",
   strokeWidth = 2.5,
   delay = 0,
 }: AnimatedCheckmarkProps) {
@@ -31,7 +31,7 @@ export function AnimatedCheckmark({
     >
       <motion.path
         d="M5 13l4 4L19 7"
-        stroke={color}
+        style={{ stroke: color }}
         strokeWidth={strokeWidth}
         strokeLinecap="round"
         strokeLinejoin="round"

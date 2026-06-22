@@ -6,8 +6,8 @@ const infoPillVariants = cva(
   {
     variants: {
       color: {
-        gold: "border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] text-[#c4a44a]",
-        sky: "border-sky-400/20 bg-sky-400/[0.04] text-sky-400",
+        gold: "border-primary/20 bg-primary/[0.04] text-primary",
+        sky: "border-accent-sky/20 bg-accent-sky/[0.04] text-accent-sky",
         emerald: "border-emerald-400/20 bg-emerald-400/[0.04] text-emerald-400",
         amber: "border-amber-400/20 bg-amber-400/[0.04] text-amber-400",
         red: "border-red-400/20 bg-red-400/[0.04] text-red-400",

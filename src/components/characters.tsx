@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { toast } from "sonner";
-import type { CharacterInfo } from "../types";
+import type { CharacterInfo, CharacterRoster } from "../types";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +14,7 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { CharactersSkeleton } from "@/components/ui/skeletons";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { UNKNOWN_SERVER, defaultCharacterBackupName } from "@/lib/character-backup";
 
 interface CharactersProps {
   addonsPath: string;
@@ -22,6 +23,7 @@ interface CharactersProps {
 
 export function Characters({ addonsPath, onClose }: CharactersProps) {
   const [characters, setCharacters] = useState<CharacterInfo[]>([]);
+  const [skippedFiles, setSkippedFiles] = useState(0);
   const [loading, setLoading] = useState(true);
   const [backupName, setBackupName] = useState("");
   const [backingUp, setBackingUp] = useState<string | null>(null);
@@ -29,10 +31,11 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
   useEffect(() => {
     async function load() {
       try {
-        const chars = await invokeOrThrow<CharacterInfo[]>("list_characters", {
+        const roster = await invokeOrThrow<CharacterRoster>("list_characters", {
           addonsPath,
         });
-        setCharacters(chars);
+        setCharacters(roster.characters);
+        setSkippedFiles(roster.skippedFiles);
       } catch (e) {
         toast.error(`Failed to load characters: ${getTauriErrorMessage(e)}`);
       } finally {
@@ -43,15 +46,23 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
   }, [addonsPath]);
 
   const handleBackup = async (char: CharacterInfo) => {
-    const name = backupName.trim() || `${char.name}-backup`;
+    // A character backup now extracts only this character's per-character
+    // SavedVariables subtree. Passing the server isolates a world-scoped NA/EU
+    // twin so each backs up (and restores) independently; account-wide data and
+    // other characters are left untouched. The default name is server-scoped so
+    // same-name twins don't overwrite each other's backup.
+    const name = backupName.trim() || defaultCharacterBackupName(char.name, char.server);
     setBackingUp(`${char.server}-${char.name}`);
     try {
       const count = await invokeOrThrow<number>("backup_character_settings", {
         addonsPath,
         characterName: char.name,
+        server: char.server,
         backupName: name,
       });
-      toast.success(`Backed up ${count} SavedVariables files for ${char.name}`);
+      toast.success(
+        `Backed up ${char.name}'s settings (${count} addon file${count !== 1 ? "s" : ""})`
+      );
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
     } finally {
@@ -80,9 +91,18 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
         </DialogHeader>
 
         <p className="text-sm text-muted-foreground">
-          Your ESO characters. Back up SavedVariables for a specific character to preserve their
-          addon settings.
+          Your ESO characters. A backup saves just this character&apos;s SavedVariables — restoring
+          it leaves your other characters and account-wide settings untouched. Same-named NA/EU
+          twins are backed up separately.
         </p>
+
+        {!loading && skippedFiles > 0 && (
+          <p className="text-xs text-[#d9a441]">
+            {skippedFiles} SavedVariables file{skippedFiles !== 1 ? "s" : ""} couldn&apos;t be fully
+            read (locked, permission denied, or malformed), so a character may be missing from this
+            list.
+          </p>
+        )}
 
         <div>
           <label htmlFor="backup-name" className="text-xs text-muted-foreground">
@@ -109,40 +129,54 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
             </Fade>
           ) : (
             <div className="space-y-4">
-              {Object.entries(byServer).map(([server, chars], serverIdx) => (
-                <Fade key={server} delay={serverIdx * 80}>
-                  <div>
-                    <div className="flex items-center gap-2 mb-2">
-                      <InfoPill color="sky">{server}</InfoPill>
-                      <span className="text-xs text-muted-foreground">
-                        {chars.length} character{chars.length !== 1 ? "s" : ""}
-                      </span>
+              {Object.entries(byServer)
+                .sort(([a], [b]) => {
+                  // Keep the recovered "Unknown" bucket last; otherwise A–Z.
+                  const au = a === UNKNOWN_SERVER ? 1 : 0;
+                  const bu = b === UNKNOWN_SERVER ? 1 : 0;
+                  return au - bu || a.localeCompare(b);
+                })
+                .map(([server, chars], serverIdx) => (
+                  <Fade key={server} delay={serverIdx * 80}>
+                    <div>
+                      <div className="flex items-center gap-2 mb-2">
+                        <InfoPill color={server === UNKNOWN_SERVER ? "muted" : "sky"}>
+                          {server === UNKNOWN_SERVER ? "Unknown server" : server}
+                        </InfoPill>
+                        <span className="text-xs text-muted-foreground">
+                          {chars.length} character{chars.length !== 1 ? "s" : ""}
+                        </span>
+                      </div>
+                      {server === UNKNOWN_SERVER && (
+                        <p className="text-xs text-muted-foreground mb-2">
+                          Found in addon data; their megaserver couldn&apos;t be determined.
+                        </p>
+                      )}
+                      <div className="space-y-1">
+                        {chars.map((char, charIdx) => (
+                          <Fade
+                            key={`${char.server}-${char.name}`}
+                            delay={serverIdx * 80 + charIdx * 40}
+                          >
+                            <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
+                              <span className="text-sm font-medium">{char.name}</span>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleBackup(char)}
+                                disabled={backingUp === `${char.server}-${char.name}`}
+                              >
+                                {backingUp === `${char.server}-${char.name}`
+                                  ? "Backing up..."
+                                  : "Backup Settings"}
+                              </Button>
+                            </div>
+                          </Fade>
+                        ))}
+                      </div>
                     </div>
-                    <div className="space-y-1">
-                      {chars.map((char, charIdx) => (
-                        <Fade
-                          key={`${char.server}-${char.name}`}
-                          delay={serverIdx * 80 + charIdx * 40}
-                        >
-                          <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200 hover:border-white/[0.1]">
-                            <span className="text-sm font-medium">{char.name}</span>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => handleBackup(char)}
-                              disabled={backingUp === `${char.server}-${char.name}`}
-                            >
-                              {backingUp === `${char.server}-${char.name}`
-                                ? "Backing up..."
-                                : "Backup Settings"}
-                            </Button>
-                          </div>
-                        </Fade>
-                      ))}
-                    </div>
-                  </div>
-                </Fade>
-              ))}
+                  </Fade>
+                ))}
             </div>
           )}
         </div>

@@ -129,14 +129,16 @@ function FileTreeNode({
       onClick={() => onOpenFile(file.relativePath)}
       className={cn(
         "flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-sm transition-colors group",
-        isSelected ? "bg-sky-400/[0.08] border-l-2 border-sky-400/40" : "hover:bg-white/[0.04]"
+        isSelected
+          ? "bg-accent-sky/[0.08] border-l-2 border-accent-sky/40"
+          : "hover:bg-white/[0.04]"
       )}
       style={{ paddingLeft: `${depth * 16 + 6}px` }}
     >
       <FileText className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" />
       <span className="flex-1 truncate">{node.name}</span>
       {file.status === "modified" && (
-        <span className="h-2 w-2 shrink-0 rounded-full bg-[#c4a44a]" title="Modified" />
+        <span className="h-2 w-2 shrink-0 rounded-full bg-primary" title="Modified" />
       )}
       {ext && (
         <InfoPill
@@ -266,7 +268,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
   if (loadState === "loading" && !fileTree) {
     return (
       <div className="flex items-center justify-center py-12 text-muted-foreground/50 text-sm">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a] mr-2" />
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
         Loading files...
       </div>
     );
@@ -325,7 +327,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
 
       {fileTree.modifiedCount > 0 && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground/60">
-          <span className="h-2 w-2 rounded-full bg-[#c4a44a]" />
+          <span className="h-2 w-2 rounded-full bg-primary" />
           {fileTree.modifiedCount} file{fileTree.modifiedCount !== 1 ? "s" : ""} edited
           <span className="text-muted-foreground/30">·</span>
           Protected on update
@@ -336,7 +338,7 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
         <Suspense
           fallback={
             <div className="flex items-center justify-center py-8 text-muted-foreground/50 text-sm">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a] mr-2" />
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
               Loading editor...
             </div>
           }
