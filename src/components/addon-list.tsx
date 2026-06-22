@@ -443,6 +443,9 @@ export function AddonList({
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
+  // TanStack Virtual intentionally returns imperative functions; keep this hook local
+  // and suppress the React Compiler compatibility warning for this documented API.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const rowVirtualizer = useVirtualizer({
     count: addons.length,
     getScrollElement: () => scrollContainerRef.current,

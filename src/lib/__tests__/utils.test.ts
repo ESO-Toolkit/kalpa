@@ -148,6 +148,26 @@ describe("decodeHtml", () => {
     expect(decodeHtml("&#39;")).toBe("'");
     expect(decodeHtml("&#x27;")).toBe("'");
   });
+
+  it("decodes astral numeric entities without corrupting surrogate pairs", () => {
+    expect(decodeHtml("&#128512; &#x1F600;")).toBe("😀 😀");
+  });
+
+  it("decodes uppercase hex numeric entities", () => {
+    expect(decodeHtml("&#X27;")).toBe("'");
+    expect(decodeHtml("&#X1F600;")).toBe("😀");
+  });
+
+  it("leaves invalid numeric entities unchanged", () => {
+    expect(decodeHtml("&#999999999;")).toBe("&#999999999;");
+  });
+
+  it("leaves NUL and surrogate numeric entities unchanged", () => {
+    expect(decodeHtml("&#0;")).toBe("&#0;");
+    expect(decodeHtml("&#xD800;")).toBe("&#xD800;");
+    expect(decodeHtml("&#xDFFF;")).toBe("&#xDFFF;");
+    expect(decodeHtml("&#55296;")).toBe("&#55296;");
+  });
 });
 
 describe("formatBytes", () => {
