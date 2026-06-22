@@ -560,6 +560,55 @@ pub struct WarmupPrefix {
     pub eof: u64,
 }
 
+/// Best-effort `terminate-report` + orphan-breadcrumb settle, shared by EVERY exit path
+/// (normal end and warm-up failure) so the discipline can't drift between them.
+///
+/// Terminate on a FRESH cancel flag — never the stream's stop-`cancel`, which a Stop (or
+/// a warm-up that failed *because* of a Stop) leaves set, making a terminate on it a
+/// no-op that would skip closing the report. A watchdog trips the fresh flag after
+/// [`TERMINATE_DEADLINE`] so a wedged network can't block the driver thread (and thus a
+/// Stop join) for the full request timeout. Clear the `{code, segment_id}` breadcrumb
+/// ONLY on a confirmed close (success or a definitive already-gone); a transient failure
+/// or a watchdog timeout KEEPS it so next-launch recovery closes the report.
+fn terminate_report_and_settle<P: LivePoster>(
+    sender: &P,
+    sink: &dyn OrphanSink,
+    code: &ReportCode,
+) {
+    let term_url = format!(
+        "{}/terminate-report/{}",
+        super::client::desktop_client_base(),
+        code.0
+    );
+    let term_cancel = Arc::new(AtomicBool::new(false));
+    let watchdog_flag = Arc::clone(&term_cancel);
+    let watchdog = std::thread::spawn(move || {
+        let mut waited = std::time::Duration::ZERO;
+        while waited < TERMINATE_DEADLINE {
+            std::thread::sleep(LIVE_CANCEL_POLL);
+            waited += LIVE_CANCEL_POLL;
+            if watchdog_flag.load(Ordering::SeqCst) {
+                return; // terminate already returned; reap promptly
+            }
+        }
+        watchdog_flag.store(true, Ordering::SeqCst);
+    });
+    let term = sender.post(
+        &term_url,
+        super::client::OwnedLiveRequest::Terminate,
+        &term_cancel,
+    );
+    term_cancel.store(true, Ordering::SeqCst);
+    let _ = watchdog.join();
+    match &term {
+        Ok(_) => sink.clear(&code.0),
+        Err(e) if super::client::is_definitively_closed(e) => sink.clear(&code.0),
+        // Transient OR a watchdog-`Cancelled` (terminate timed out): KEEP the breadcrumb
+        // for next-launch recovery rather than assume the report closed.
+        Err(_) => {}
+    }
+}
+
 /// Run the native live upload to completion, holding ONE report open across the
 /// whole session and terminating only on a clean end / idle / stop / failure.
 ///
@@ -615,18 +664,14 @@ pub fn run_native_live(
     // error so the command layer falls back to the official handoff.
     if let Some(w) = warmup {
         if let Err(e) = driver.warm_up_from_prefix(growing_path, w) {
-            // Close the report we just opened (best-effort) before returning the error.
-            let term_url = format!(
-                "{}/terminate-report/{}",
-                super::client::desktop_client_base(),
-                code.0
-            );
-            let _ = driver.sender.post(
-                &term_url,
-                super::client::OwnedLiveRequest::Terminate,
-                &cancel,
-            );
-            sink.clear(&code.0);
+            // Close the report we just opened, using the SAME terminate discipline as the
+            // normal exit: a FRESH cancel (NOT the stream's `cancel` — warm-up may have
+            // failed *because* the user stopped, leaving `cancel` set, which would make a
+            // terminate on that flag a no-op) + watchdog, and clear the orphan breadcrumb
+            // ONLY on a confirmed close. Erasing it unconditionally here would strand an
+            // open remote report with no next-launch recovery when terminate is cancelled
+            // or fails transiently.
+            terminate_report_and_settle(&driver.sender, sink, &code);
             return Err(UploadError::Transport(format!(
                 "mid-session warm-up failed: {e}"
             )));
@@ -634,53 +679,9 @@ pub fn run_native_live(
     }
     let reason = driver.run(growing_path, poll, sink);
 
-    // Best-effort, cancel-aware terminate on EVERY exit path. Clear the breadcrumb only
-    // on a confirmed close (success or a definitive "already gone"); a transient
-    // terminate failure KEEPS it for next-launch recovery (L2).
-    let term_url = format!(
-        "{}/terminate-report/{}",
-        super::client::desktop_client_base(),
-        code.0
-    );
-    // Terminate must not be blocked by the same cancel that ended the stream (or a Stop
-    // would skip closing the report). But it also must not block the driver thread —
-    // and thus a Stop join — for the full 120s request timeout if the network is wedged
-    // at terminate time. So use a fresh flag with a WATCHDOG that trips it after
-    // `TERMINATE_DEADLINE`: `send_cancellable` then returns within ~250ms of the
-    // deadline, the in-flight POST is abandoned (it may still complete server-side),
-    // and the orphan breadcrumb is KEPT (we don't clear on a watchdog-`Cancelled`),
-    // so next-launch recovery closes the report. This bounds Stop latency to the
-    // deadline, not 120s.
-    let term_cancel = Arc::new(AtomicBool::new(false));
-    let watchdog_flag = Arc::clone(&term_cancel);
-    let watchdog = std::thread::spawn(move || {
-        // Sleep in cancel-checkable slices so the watchdog thread itself reaps quickly
-        // once the terminate completes (the flag is set either by us or never).
-        let mut waited = std::time::Duration::ZERO;
-        while waited < TERMINATE_DEADLINE {
-            std::thread::sleep(LIVE_CANCEL_POLL);
-            waited += LIVE_CANCEL_POLL;
-            if watchdog_flag.load(Ordering::SeqCst) {
-                return; // terminate already returned and cleared via a real result
-            }
-        }
-        watchdog_flag.store(true, Ordering::SeqCst);
-    });
-    let term = driver.sender.post(
-        &term_url,
-        super::client::OwnedLiveRequest::Terminate,
-        &term_cancel,
-    );
-    // Stop the watchdog promptly if terminate returned before the deadline.
-    term_cancel.store(true, Ordering::SeqCst);
-    let _ = watchdog.join();
-    match &term {
-        Ok(_) => sink.clear(&code.0),
-        Err(e) if super::client::is_definitively_closed(e) => sink.clear(&code.0),
-        // Transient OR a watchdog-`Cancelled` (terminate timed out): KEEP the
-        // breadcrumb for next-launch recovery rather than assume the report closed.
-        Err(_) => {}
-    }
+    // Best-effort, cancel-aware terminate on EVERY exit path (shared discipline so the
+    // warm-up-failure path above and this normal exit can't drift).
+    terminate_report_and_settle(&driver.sender, sink, &code);
 
     let segments_built = driver.segments_built();
     // A Stop is not an error — report it as a clean end with reason Stopped.
@@ -799,27 +800,17 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
         sink: &dyn OrphanSink,
     ) -> Option<EndReason> {
         for line in lines {
-            // A SECOND BEGIN_LOG is a new logging session. The single-session contract
-            // (the MultiSession routing guard, honored at runtime) forbids mixing two
-            // sessions in one report: flush the closing session's final segment, then
-            // terminate. `feed` returns a boundary on BEGIN_LOG, so the flush happens
-            // via the cut below; we set the terminal AFTER posting the prior segment.
             let is_begin_log = kind_of(&line) == Some("BEGIN_LOG");
             let second_begin_log = is_begin_log && self.seen_begin_log;
-            if is_begin_log && !self.seen_begin_log {
-                // First BEGIN_LOG: the driver is now anchored to a session and will
-                // stream fights. Surface it so the UI flips waiting→streaming the
-                // instant the session header lands (no timeout). Fire on the
-                // false→true EDGE only, before the second-begin-log handling below.
-                self.seen_begin_log = true;
-                if let Some(ch) = self.channel {
-                    (ch.on_session_anchored)();
-                }
-            }
-
-            let boundary = self.seg.feed(&line);
             if second_begin_log {
-                // Flush the just-closed session's last segment, then end as NewSession.
+                // A SECOND BEGIN_LOG = a new logging session (/reloadui). The
+                // single-session contract forbids mixing two sessions in one report:
+                // flush the CLOSING session's final segment FIRST — with its OWN wall
+                // clock — then terminate as NewSession. Crucially, do NOT `feed` the new
+                // header before posting: `feed`ing a BEGIN_LOG runs `on_begin_log`, which
+                // overwrites `current_session_wall`/offset and would timestamp the prior
+                // session's last segment with the NEW session's clock. We terminate right
+                // after, so the new header is never needed in this report.
                 match self.post_current(sink) {
                     PostOutcome::Fatal(d) => return Some(EndReason::Fatal(d)),
                     PostOutcome::Cancelled => return Some(EndReason::Stopped),
@@ -828,6 +819,18 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
                 }
                 return Some(EndReason::NewSession);
             }
+            if is_begin_log {
+                // First BEGIN_LOG: the driver is now anchored to a session and will
+                // stream fights. Surface it so the UI flips waiting→streaming the
+                // instant the session header lands (no timeout). Fire on the
+                // false→true EDGE only (the second-BEGIN_LOG case returned above).
+                self.seen_begin_log = true;
+                if let Some(ch) = self.channel {
+                    (ch.on_session_anchored)();
+                }
+            }
+
+            let boundary = self.seg.feed(&line);
             if boundary && self.seg.shields_settled() {
                 match self.post_current(sink) {
                     PostOutcome::Posted { next_segment_id: 0 } => {
@@ -1273,15 +1276,20 @@ impl LineAssembler {
     /// already consumed by the warm-up's assembler, so this tail must NOT wait for one
     /// (the F4 gate would otherwise discard every tailed line forever — the bug that made
     /// mid-session live require a `/reloadui`). It therefore starts already-anchored
-    /// (`seen_begin_log = true`) and drops the orphaned partial line straddling the
-    /// join boundary (the warm-up held that line's head and never fed it; the tail sees
-    /// only its tail, which must not be emitted as a bogus line). Mirrors the watcher's
-    /// `session_open = start_offset != 0` discipline.
-    fn new_mid_session() -> Self {
+    /// (`seen_begin_log = true`). Mirrors the watcher's `session_open = start_offset != 0`.
+    ///
+    /// `drop_first_fragment` must be true ONLY when the tail's start byte fell INSIDE a
+    /// line (the warm-up held that line's head and never fed it, so the tail sees an
+    /// orphaned tail fragment that must not be emitted). When the start byte is exactly on
+    /// a line boundary (the prior line ended in `\n` at the snapshot EOF) there is NO
+    /// orphan, and dropping would silently discard the FIRST real appended line — possibly
+    /// a `BEGIN_COMBAT`, an actor/ability declaration, an `END_LOG`, or the next
+    /// `BEGIN_LOG`. The caller computes this from the byte just before `start_offset`.
+    fn new_mid_session(drop_first_fragment: bool) -> Self {
         Self {
             partial: Vec::new(),
             seen_begin_log: true,
-            drop_first_fragment: true,
+            drop_first_fragment,
         }
     }
 
@@ -1378,6 +1386,19 @@ impl NotifyTail {
         mid_session: bool,
     ) -> Result<Self, String> {
         use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+        // Mid-session only: did the tail's start byte fall INSIDE a line? If the byte just
+        // before start_offset is a newline (or there is no prior byte), the tail begins on
+        // a clean line boundary and there is no orphaned fragment to drop. We read that one
+        // byte from disk (append-only, so it's stable). On any read error, default to NOT
+        // dropping — losing the F4-style orphan guard is far safer than silently dropping a
+        // real first line.
+        let started_inside_a_line = mid_session && start_offset > 0 && {
+            let mut b = Vec::new();
+            match read_range(path, start_offset - 1, start_offset, &mut b) {
+                Ok(1) => b.first().copied() != Some(b'\n'),
+                _ => false,
+            }
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut watcher = RecommendedWatcher::new(
             move |res| {
@@ -1398,7 +1419,11 @@ impl NotifyTail {
                 consumed: start_offset,
                 read_buf: Vec::new(),
                 assembler: if mid_session {
-                    LineAssembler::new_mid_session()
+                    // Only drop the leading fragment when the tail's start byte fell
+                    // INSIDE a line (the byte just before it is NOT a newline). If the
+                    // snapshot EOF landed exactly on a line boundary, the first appended
+                    // line is whole and must be kept — dropping it would lose a real line.
+                    LineAssembler::new_mid_session(started_inside_a_line)
                 } else {
                     LineAssembler::new()
                 },
@@ -2631,12 +2656,12 @@ mod tests {
 
     #[test]
     fn line_assembler_mid_session_keeps_lines_without_a_header_and_drops_boundary_fragment() {
-        // The mid-session tail (warm-up already consumed the session's BEGIN_LOG) must
-        // (a) keep lines even though no BEGIN_LOG appears in the tailed range, and
-        // (b) drop the orphaned tail of the line straddling the join byte. The first
+        // Mid-session join where the tail-start byte fell INSIDE a line (drop=true): the
+        // tail must (a) keep lines even though no BEGIN_LOG appears in the tailed range,
+        // and (b) drop the orphaned tail of the line straddling the join byte. The first
         // chunk begins mid-line ("…GED,GAINED,…" — the tail of an EFFECT_CHANGED whose
         // head was in the replayed prefix); that fragment must NOT be emitted.
-        let mut a = LineAssembler::new_mid_session();
+        let mut a = LineAssembler::new_mid_session(true);
         let (lines, _) = a
             .push_chunk(b"GED,GAINED,1,5002,29489,1\n700,BEGIN_COMBAT\n750,END_COMBAT\n")
             .unwrap();
@@ -2648,10 +2673,27 @@ mod tests {
     }
 
     #[test]
+    fn line_assembler_mid_session_on_line_boundary_keeps_the_first_line() {
+        // Mid-session join where the snapshot EOF landed EXACTLY on a line boundary
+        // (drop=false): there is NO orphaned fragment, so the first appended line is whole
+        // and MUST be kept. Dropping it (the bug Codex flagged) would silently lose a real
+        // line — e.g. a BEGIN_COMBAT, an actor/ability declaration, an END_LOG, or the
+        // next BEGIN_LOG (breaking fight capture / index stability / the NewSession
+        // terminate). Here the first line IS a BEGIN_COMBAT and must survive.
+        let mut a = LineAssembler::new_mid_session(false);
+        let (lines, _) = a.push_chunk(b"700,BEGIN_COMBAT\n750,END_COMBAT\n").unwrap();
+        assert_eq!(
+            lines,
+            vec!["700,BEGIN_COMBAT".to_string(), "750,END_COMBAT".to_string()],
+            "on a clean boundary the first appended line is kept, not dropped"
+        );
+    }
+
+    #[test]
     fn line_assembler_mid_session_waits_for_the_boundary_newline() {
-        // If the first chunk has no newline yet, the boundary fragment isn't complete —
-        // hold and emit nothing until the newline arrives, then resume normally.
-        let mut a = LineAssembler::new_mid_session();
+        // drop=true with no newline yet → the boundary fragment isn't complete: hold and
+        // emit nothing until the newline arrives, then resume normally.
+        let mut a = LineAssembler::new_mid_session(true);
         let (none, _) = a.push_chunk(b"GED,GAINED,1,5002").unwrap();
         assert!(none.is_empty(), "no newline yet → nothing emitted");
         let (lines, _) = a.push_chunk(b",29489\n800,END_COMBAT\n").unwrap();
