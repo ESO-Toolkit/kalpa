@@ -177,16 +177,6 @@ export function PackCreateView({
     }
   };
 
-  const handleLogout = async () => {
-    try {
-      await invokeOrThrow("auth_logout");
-      onAuthChange(null);
-      toast.success("Signed out");
-    } catch (e) {
-      toast.error(`Sign out failed: ${getTauriErrorMessage(e)}`);
-    }
-  };
-
   const handleSaveDraft = async () => {
     if (!title.trim()) {
       toast.error("Pack needs a title.");
@@ -372,14 +362,6 @@ export function PackCreateView({
               className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
             >
               Cancel edit
-            </button>
-          )}
-          {authUser && (
-            <button
-              onClick={handleLogout}
-              className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-            >
-              Sign out
             </button>
           )}
         </div>

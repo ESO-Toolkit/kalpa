@@ -34,7 +34,14 @@ import { Button } from "@/components/ui/button";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn, decodeHtml } from "@/lib/utils";
-import { PackageIcon, DownloadIcon, ArrowLeftIcon, Loader2Icon, ImportIcon } from "lucide-react";
+import {
+  PackageIcon,
+  DownloadIcon,
+  ArrowLeftIcon,
+  Loader2Icon,
+  ImportIcon,
+  LogOutIcon,
+} from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 // Sub-components
@@ -140,6 +147,7 @@ export function Packs({
 
   // Delete state
   const [deletingPack, setDeletingPack] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   // Install success flash state
   const [installSucceeded, setInstallSucceeded] = useState(false);
@@ -787,6 +795,26 @@ export function Packs({
   // ── Voting ──────────────────────────────────────────────────────────
   const [votingPacks, setVotingPacks] = useState<Set<string>>(new Set());
 
+  const handleLogout = useCallback(async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await invokeOrThrow("auth_logout");
+      onAuthChange(null);
+      setMyPacks([]);
+      setMyPacksPage(1);
+      setMyPacksHasMore(false);
+      setMyPacksLoading(false);
+      setMyPacksLoadingMore(false);
+      setVotingPacks(new Set());
+      toast.success("Signed out");
+    } catch (e) {
+      toast.error(`Sign out failed: ${getTauriErrorMessage(e)}`);
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [loggingOut, onAuthChange]);
+
   const handleVote = async (packId: string) => {
     if (!authUser) {
       toast.error("Sign in to vote on packs.");
@@ -858,6 +886,29 @@ export function Packs({
             <PackageIcon className="size-4 text-primary" />
             {selectedPack ? decodeHtml(selectedPack.title) : "Pack Hub"}
           </DialogTitle>
+
+          {authUser && (
+            <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-white/[0.03] px-2.5 py-1.5 text-xs">
+              <span className="min-w-0 truncate text-muted-foreground/60">
+                Signed in as <span className="font-semibold text-primary">{authUser.userName}</span>
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={handleLogout}
+                disabled={loggingOut}
+                className="shrink-0"
+              >
+                {loggingOut ? (
+                  <Loader2Icon className="size-3 animate-spin" />
+                ) : (
+                  <LogOutIcon className="size-3" />
+                )}
+                Sign out
+              </Button>
+            </div>
+          )}
 
           {/* Tab bar with animated pill indicator */}
           {!selectedPack &&
