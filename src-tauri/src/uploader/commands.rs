@@ -33,11 +33,17 @@ const LIVE_CANCELLED_BEFORE_LAUNCH: &str = "__live_cancelled_before_launch__";
 /// (native in-process driver) once that path's thread exists.
 enum LiveSlot {
     /// Start is in flight. `cancelled` is set if a stop arrives before the
-    /// thread is registered, so the start can abort cleanly. Path-agnostic: BOTH
-    /// the official-handoff and native paths share this phase and the same
-    /// `cancelled` Arc, so the store-before-remove cancellation-race protection
-    /// (see [`stop_slot_in_map`]) covers both.
-    Starting(Arc<AtomicBool>),
+    /// thread is registered, so the start can abort cleanly. The `cancelled` Arc is
+    /// shared by BOTH the official-handoff and native paths (so the store-before-remove
+    /// cancellation-race protection in [`stop_slot_in_map`] covers both).
+    ///
+    /// The `Option<PathBuf>` is the native-live PATH RESERVATION: a native start stamps
+    /// it (under the lock, before spawning the driver or creating the remote report) so
+    /// a concurrent same-path native start is rejected BEFORE it can create a duplicate
+    /// report — closing the create-report-before-promote race. The official path leaves
+    /// it `None` (it has no single-instance-per-file guard). The cancellation semantics
+    /// are unchanged by this field.
+    Starting(Arc<AtomicBool>, Option<PathBuf>),
     /// The official-uploader handoff path: a fight-detection watcher.
     Running(LiveWatchHandle),
     /// The native in-process live driver path. Its `stop()` JOINS the driver
@@ -113,7 +119,7 @@ impl UploaderState {
         if let Ok(sessions) = self.live_sessions.lock() {
             for slot in sessions.values() {
                 match slot {
-                    LiveSlot::Starting(c) => c.store(true, Ordering::SeqCst),
+                    LiveSlot::Starting(c, _) => c.store(true, Ordering::SeqCst),
                     LiveSlot::NativeRunning(h) => h.cancel.store(true, Ordering::SeqCst),
                     // The official watcher's own thread/handle is dropped with the map;
                     // the official uploader is a separate process we don't control.
@@ -1229,7 +1235,10 @@ pub async fn uploader_start_live(
         let prev_running = stop_slot_in_map(&mut sessions, &session_id);
         sessions.insert(
             session_id.clone(),
-            LiveSlot::Starting(Arc::clone(&cancelled)),
+            // Path-agnostic at registration (before native-vs-official routing). The
+            // native branch stamps the path reservation later, under the lock, before it
+            // spawns/creates anything.
+            LiveSlot::Starting(Arc::clone(&cancelled), None),
         );
         prev_running
     };
@@ -1338,7 +1347,7 @@ pub async fn uploader_start_live(
             .map_err(|_| "Live session lock poisoned")?;
         let still_ours = matches!(
             sessions.get(&session_id),
-            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, &cancelled)
+            Some(LiveSlot::Starting(c, _)) if Arc::ptr_eq(c, &cancelled)
         );
         !still_ours || cancelled.load(Ordering::SeqCst)
     };
@@ -1508,7 +1517,7 @@ pub async fn uploader_start_live(
             .map_err(|_| "Live session lock poisoned")?;
         let still_ours = matches!(
             sessions.get(&session_id),
-            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, &cancelled)
+            Some(LiveSlot::Starting(c, _)) if Arc::ptr_eq(c, &cancelled)
         );
         if still_ours && !cancelled.load(Ordering::SeqCst) {
             sessions.insert(session_id.clone(), LiveSlot::Running(handle));
@@ -1537,6 +1546,26 @@ pub async fn uploader_start_live(
     })
 }
 
+/// Does some OTHER session already own a native live upload for `path` — either a
+/// running driver ([`LiveSlot::NativeRunning`]) or a native start that has RESERVED the
+/// path (a `Starting` slot carrying it)? The single-instance-per-file guard, evaluated
+/// from BEFORE the remote report is created (reservation) through the running driver
+/// (slot), so two concurrent same-path starts can't both reach `create-report`.
+fn native_path_taken(
+    sessions: &HashMap<String, LiveSlot>,
+    path: &Path,
+    except_session_id: &str,
+) -> bool {
+    sessions.iter().any(|(sid, slot)| {
+        sid != except_session_id
+            && match slot {
+                LiveSlot::NativeRunning(h) => h.path.as_path() == path,
+                LiveSlot::Starting(_, Some(p)) => p.as_path() == path,
+                _ => false,
+            }
+    })
+}
+
 /// The NATIVE live branch of [`uploader_start_live`]: stream the report in-process via
 /// [`super::native::live::run_native_live`] instead of handing off to the official
 /// uploader. Shares the `Starting`-slot protocol with the official branch (same
@@ -1557,50 +1586,45 @@ async fn start_native_live_branch(
     cancelled: &Arc<AtomicBool>,
     channel: Channel<LiveEvent>,
 ) -> Result<UploadDispatch, String> {
-    // Single-instance FAST REJECT: refuse a second NATIVE live session on the SAME
-    // file. This early check is a cheap fast-fail for the common case; it is NOT the
-    // binding guard — two starts for the same file with different session_ids could
-    // both pass here (TOCTOU). The AUTHORITATIVE same-path check is in the promote
-    // critical section below (the one that also inserts the slot), so a genuine race
-    // can't end with two `NativeRunning` for one file.
-    {
-        let sessions = state
-            .live_sessions
-            .lock()
-            .map_err(|_| "Live session lock poisoned")?;
-        let same_path_native = sessions
-            .values()
-            .any(|slot| matches!(slot, LiveSlot::NativeRunning(h) if h.path == Path::new(safe)));
-        if same_path_native {
-            remove_own_slot(state, session_id, cancelled);
-            return Err("A native live upload is already running for this log.".into());
-        }
-    }
-
-    // Settle prior-run stale records before writing this session's `Live` record
-    // (same reasoning as the official branch). The cancellable `Starting` slot is
-    // already registered, so a stop during this blocking reconcile still sets
-    // `cancelled` and is honored by the abort re-check below.
+    // Settle prior-run stale records before reserving (same reasoning as the official
+    // branch). The cancellable `Starting` slot is already registered, so a stop during
+    // this blocking reconcile still sets `cancelled` and is honored by the reserve below.
     super::history::reconcile_stale_once(app);
 
-    // Abort BEFORE spawning the driver if a stop/supersede arrived during setup
-    // (mirrors the official `aborted_before_handoff`). The driver's own pre-create
-    // cancel read (run_native_live) is the authoritative backstop for a stop landing
-    // after this check.
-    let aborted = {
-        let sessions = state
+    // ATOMIC PATH RESERVATION (the authoritative single-instance guard + the pre-spawn
+    // abort check, in ONE critical section). Under the lock, in order:
+    //   (a) reject if ANOTHER session already owns this path (running OR reserving) —
+    //       this is the binding same-path check, NOT a TOCTOU fast-fail;
+    //   (b) confirm OUR `Starting` slot is still ours and not cancelled (the abort that
+    //       used to be a separate re-check), then
+    //   (c) STAMP the path onto our `Starting` slot.
+    // Because this happens BEFORE we spawn the driver or create the remote report, a
+    // concurrent same-path start now loses HERE (at reservation) instead of both racing
+    // into `create-report` and leaving a duplicate/orphan report. The driver's own
+    // pre-create cancel read stays as the backstop for a stop landing after this point.
+    let reserve = {
+        let mut sessions = state
             .live_sessions
             .lock()
             .map_err(|_| "Live session lock poisoned")?;
-        let still_ours = matches!(
-            sessions.get(session_id),
-            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, cancelled)
-        );
-        !still_ours || cancelled.load(Ordering::SeqCst)
+        if native_path_taken(&sessions, Path::new(safe), session_id) {
+            Err("A native live upload is already running for this log.")
+        } else {
+            match sessions.get_mut(session_id) {
+                Some(LiveSlot::Starting(c, path))
+                    if Arc::ptr_eq(c, cancelled) && !cancelled.load(Ordering::SeqCst) =>
+                {
+                    *path = Some(PathBuf::from(safe));
+                    Ok(())
+                }
+                // Our slot was replaced/removed (superseded/stopped) or cancel is set.
+                _ => Err("Live logging was cancelled before it started."),
+            }
+        }
     };
-    if aborted {
+    if let Err(msg) = reserve {
         remove_own_slot(state, session_id, cancelled);
-        return Err("Live logging was cancelled before it started.".into());
+        return Err(msg.into());
     }
 
     // Write the `Live` history record up front (so a report link can attach later and
@@ -1835,14 +1859,12 @@ async fn start_native_live_branch(
         path: PathBuf::from(safe),
     };
 
-    // Promote Starting → NativeRunning unless a stop arrived mid-start (mirrors the
-    // official promote at the `still_ours && !cancelled` check) OR a CONCURRENT native
-    // start for the SAME file won the race. The same-path single-instance guard is
-    // AUTHORITATIVELY enforced HERE, inside the same critical section as the insert —
-    // the early reject above is only a fast-fail; two starts for the same file with
-    // different session_ids could both pass that earlier check (TOCTOU), so the binding
-    // check must be the one that also inserts (RACE-5). If we lost ownership for any of
-    // these reasons, stop the just-spawned driver (off the executor) and settle by id.
+    // Promote Starting → NativeRunning unless a stop arrived mid-start (the `still_ours
+    // && !cancelled` check) OR another session owns this file. The same-path guard is now
+    // AUTHORITATIVELY held by the pre-spawn RESERVATION above (a concurrent same-path
+    // start lost there, before creating any report); this peer re-check is belt-and-
+    // suspenders against an exotic interleave. If we lost ownership for any of these
+    // reasons, stop the just-spawned driver (off the executor) and settle by id.
     let promote = {
         let mut sessions = state
             .live_sessions
@@ -1850,11 +1872,9 @@ async fn start_native_live_branch(
             .map_err(|_| "Live session lock poisoned")?;
         let still_ours = matches!(
             sessions.get(session_id),
-            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, cancelled)
+            Some(LiveSlot::Starting(c, _)) if Arc::ptr_eq(c, cancelled)
         );
-        let peer_same_path = sessions
-            .values()
-            .any(|slot| matches!(slot, LiveSlot::NativeRunning(h) if h.path == Path::new(safe)));
+        let peer_same_path = native_path_taken(&sessions, Path::new(safe), session_id);
         if still_ours && !cancelled.load(Ordering::SeqCst) && !peer_same_path {
             sessions.insert(
                 session_id.to_string(),
@@ -1905,7 +1925,7 @@ fn stop_slot_in_map(sessions: &mut HashMap<String, LiveSlot>, key: &str) -> Opti
     // and is UNCHANGED across the native-path addition — only the match below gains a
     // `NativeRunning` arm (both `Running` and `NativeRunning` promote from the same
     // `Starting` phase, so this `Starting` store covers an in-flight native start too).
-    if let Some(LiveSlot::Starting(cancelled)) = sessions.get(key) {
+    if let Some(LiveSlot::Starting(cancelled, _)) = sessions.get(key) {
         cancelled.store(true, Ordering::SeqCst);
     }
     match sessions.remove(key) {
@@ -1949,7 +1969,7 @@ fn remove_own_slot(
     if let Ok(mut sessions) = state.live_sessions.lock() {
         let ours = matches!(
             sessions.get(session_id),
-            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, cancelled)
+            Some(LiveSlot::Starting(c, _)) if Arc::ptr_eq(c, cancelled)
         );
         if ours {
             sessions.remove(session_id);
@@ -2173,5 +2193,69 @@ mod native_live_routing_tests {
         let missing = std::env::temp_dir().join("kalpa-route-does-not-exist-xyz.log");
         let _ = std::fs::remove_file(&missing);
         assert!(!native_live_prefix_is_encodable(missing.to_str().unwrap()));
+    }
+
+    // The same-path single-instance guard: native_path_taken sees BOTH a running native
+    // driver AND a not-yet-promoted native start that RESERVED the path (a Starting slot
+    // carrying it), and excludes the caller's own session. This is what closes the
+    // create-report-before-promote race — a concurrent same-path start is rejected at
+    // reservation, before it can create a duplicate/orphan report.
+    #[test]
+    fn native_path_taken_sees_reservations_and_running_excluding_self() {
+        use super::{native_path_taken, LiveSlot, NativeLiveHandle};
+        use std::collections::HashMap;
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+
+        let path = Path::new("C:/logs/Encounter.log");
+        let mk = || Arc::new(AtomicBool::new(false));
+        let mut s: HashMap<String, LiveSlot> = HashMap::new();
+
+        assert!(!native_path_taken(&s, path, "me"), "empty → not taken");
+
+        // A peer RESERVING the same path (Starting carries it) → taken.
+        s.insert(
+            "peer".into(),
+            LiveSlot::Starting(mk(), Some(PathBuf::from("C:/logs/Encounter.log"))),
+        );
+        assert!(
+            native_path_taken(&s, path, "me"),
+            "peer reservation → taken"
+        );
+        // …but excluded when the caller IS that session.
+        assert!(
+            !native_path_taken(&s, path, "peer"),
+            "own reservation is not a conflict"
+        );
+
+        // A pathless Starting (official, or pre-reserve) → not taken.
+        s.clear();
+        s.insert("o".into(), LiveSlot::Starting(mk(), None));
+        assert!(
+            !native_path_taken(&s, path, "me"),
+            "no reservation → not taken"
+        );
+
+        // A DIFFERENT reserved path → not taken.
+        s.insert(
+            "p2".into(),
+            LiveSlot::Starting(mk(), Some(PathBuf::from("C:/logs/Other.log"))),
+        );
+        assert!(
+            !native_path_taken(&s, path, "me"),
+            "different path → not taken"
+        );
+
+        // A running native driver on the same path → taken.
+        s.insert(
+            "run".into(),
+            LiveSlot::NativeRunning(NativeLiveHandle {
+                cancel: mk(),
+                thread: Mutex::new(None),
+                path: PathBuf::from("C:/logs/Encounter.log"),
+            }),
+        );
+        assert!(native_path_taken(&s, path, "me"), "running native → taken");
     }
 }
