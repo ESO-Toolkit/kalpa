@@ -156,6 +156,13 @@ describe("decodeHtml", () => {
   it("leaves invalid numeric entities unchanged", () => {
     expect(decodeHtml("&#999999999;")).toBe("&#999999999;");
   });
+
+  it("leaves NUL and surrogate numeric entities unchanged", () => {
+    expect(decodeHtml("&#0;")).toBe("&#0;");
+    expect(decodeHtml("&#xD800;")).toBe("&#xD800;");
+    expect(decodeHtml("&#xDFFF;")).toBe("&#xDFFF;");
+    expect(decodeHtml("&#55296;")).toBe("&#55296;");
+  });
 });
 
 describe("formatBytes", () => {

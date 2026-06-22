@@ -95,6 +95,11 @@ function decodeNumericEntity(value: string): string | null {
 
   if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return null;
 
+  // Reject HTML-invalid scalar values (NUL and lone surrogates). String.fromCodePoint
+  // accepts these, so without this guard a malformed reference like &#0; or &#xD800;
+  // would decode into a corrupting character instead of being left unchanged.
+  if (codePoint === 0 || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return null;
+
   try {
     return String.fromCodePoint(codePoint);
   } catch {
