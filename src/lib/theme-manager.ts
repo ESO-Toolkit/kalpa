@@ -280,6 +280,13 @@ export async function hydrateThemeFromStore() {
     if (recorded) {
       activeThemeId = targetActive;
       effectiveForced = FORCED_DEFAULT_VERSION;
+      // If the user picked a theme WHILE this batch was in flight, its active-id
+      // write may have raced ours; re-assert the live choice as the last write so
+      // disk matches the UI/mirror and the selection survives the next launch.
+      if (liveSelection && state.activeThemeId !== targetActive) {
+        activeThemeId = state.activeThemeId;
+        void setSetting(STORE_KEY_ACTIVE, activeThemeId);
+      }
     }
     // If it did not persist, honor the stored choice and retry next launch.
   } else if (storedActive !== storedActiveId && !liveSelection) {
