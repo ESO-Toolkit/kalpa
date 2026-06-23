@@ -104,42 +104,19 @@ fn official_uploader_candidates() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Fallback discovery: scan the app roots for any directory whose name looks like
-/// the ESO Logs / Archon uploader and return its matching `<dir>\<dir>.exe`. This
-/// survives a future rename or exe-name drift (e.g. "Archon App 2") that the
-/// explicit [`KNOWN_UPLOADERS`] list wouldn't anticipate, without a code update.
-fn scan_for_uploader() -> Option<PathBuf> {
-    for root in app_roots() {
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let dir_name = entry.file_name();
-            let dir_name = dir_name.to_string_lossy();
-            let lower = dir_name.to_ascii_lowercase();
-            // electron-builder names the exe after the install dir (productName).
-            if lower.starts_with("archon") || lower.starts_with("eso logs") {
-                let exe = entry.path().join(format!("{dir_name}.exe"));
-                if exe.is_file() {
-                    return Some(exe);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Find the official uploader executable, if installed. Tries the explicit known
-/// locations first (fast, no directory enumeration), then a directory scan that
-/// tolerates naming drift.
+/// Find the official uploader executable, if installed.
+///
+/// Matches only the **exact** [`KNOWN_UPLOADERS`] `(dir, exe)` pairs — never a
+/// name-prefix scan of the install roots. A prefix scan (e.g. accept any
+/// `Archon*`/`ESO Logs*` directory) would let a planted `Archon Helper\Archon
+/// Helper.exe` under the user-writable `%LOCALAPPDATA%` be spawned as if it were
+/// the official uploader, widening the trusted-executable set well beyond known
+/// product paths. If the app is ever renamed past these entries, add the new pair
+/// here in a release rather than re-introducing a broad scan.
 pub fn find_official_uploader() -> Option<PathBuf> {
     official_uploader_candidates()
         .into_iter()
         .find(|p| p.is_file())
-        .or_else(scan_for_uploader)
 }
 
 // ── GUI handoff transport (default, always available) ────────────────────────
@@ -493,6 +470,36 @@ mod tests {
                 .iter()
                 .any(|p| p.ends_with("ESO Logs Uploader/ESO Logs Uploader.exe")),
             "legacy uploader must remain a candidate: {paths:?}"
+        );
+    }
+
+    // Discovery must match ONLY the exact known `(dir, exe)` pairs — never a
+    // name-prefix scan. A prefix scan would let a planted `Archon Helper\Archon
+    // Helper.exe` in a user-writable root be spawned as the official uploader. This
+    // pins the candidate surface to exactly the vetted names so re-introducing a
+    // broad scan fails the build.
+    #[test]
+    fn discovery_only_matches_exact_known_names() {
+        let root = Path::new("C:/Root");
+        let exes: Vec<String> = candidates_under(root)
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // Exactly one candidate per known pair, nothing else.
+        assert_eq!(
+            exes.len(),
+            KNOWN_UPLOADERS.len(),
+            "candidate count must equal the known-uploader list (no wildcard expansion): {exes:?}"
+        );
+        for exe in &exes {
+            assert!(
+                KNOWN_UPLOADERS.iter().any(|(_, e)| e == exe),
+                "candidate {exe:?} is not an exact known uploader exe — prefix/wildcard discovery leaked in"
+            );
+        }
+        // A plausible planted-binary name must NOT be produced by the generator.
+        assert!(
+            !exes.iter().any(|e| e == "Archon Helper.exe"),
+            "a name-prefixed planted exe must never be a candidate: {exes:?}"
         );
     }
 }
