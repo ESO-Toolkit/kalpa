@@ -13,6 +13,15 @@ import { SKINS } from "./theme-skins";
 /** The factory-default theme everyone gets until they explicitly pick another. */
 export const DEFAULT_THEME_ID = "nordic-runestone";
 
+/** Bump to forcibly reset EVERY user's active theme to the current
+ * {@link DEFAULT_THEME_ID} once on next launch — overriding any theme they had
+ * previously chosen. After the reset they keep full control of the picker; a
+ * stored version marker stops it from re-applying on later launches.
+ * v1 — move everyone onto Nordic Runestone.
+ * Lives here (store-free) so it is shared by the theme manager AND the pre-paint
+ * boot script's FORCED_VERSION copy (kept in sync by theme-boot.test.ts). */
+export const FORCED_DEFAULT_VERSION = 1;
+
 /** The "bare" theme whose colors equal the authored `:root` values in index.css.
  * It is special-cased on apply (overrides are CLEARED rather than set) and stores
  * nothing in the pre-paint boot mirror. Kept distinct from {@link DEFAULT_THEME_ID}:

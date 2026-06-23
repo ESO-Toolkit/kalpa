@@ -4,6 +4,7 @@ import {
   BUILTIN_THEME_IDS,
   DEFAULT_THEME,
   DEFAULT_THEME_ID,
+  FORCED_DEFAULT_VERSION,
   ROOT_THEME_ID,
 } from "./theme-presets";
 import {
@@ -33,16 +34,10 @@ interface ViewTransitionLike {
 const STORE_KEY_ACTIVE = "appearance.activeThemeId";
 const STORE_KEY_CUSTOM = "appearance.customThemes";
 /** Durable record of the last forced-default migration this user has been moved
- * through (source of truth; the Tauri store). */
+ * through (source of truth; the Tauri store). The version itself
+ * ({@link FORCED_DEFAULT_VERSION}) lives in theme-presets so the store-free boot
+ * script can share it. */
 const STORE_KEY_FORCED_DEFAULT = "appearance.forcedDefaultVersion";
-/** Bump this to forcibly reset EVERY user's active theme to the current
- * {@link DEFAULT_THEME_ID} once on next launch — overriding any theme they had
- * previously chosen. After the reset they keep full control of the picker; the
- * stored version marker stops it from re-applying on later launches.
- * v1 — move everyone onto Nordic Runestone.
- * KEEP IN SYNC with FORCED_VERSION in public/theme-boot.js (guarded by
- * theme-boot.test.ts) so the pre-paint path agrees with hydration. */
-export const FORCED_DEFAULT_VERSION = 1;
 /** Resolved `{ "--var": value }` map of the active theme — read SYNCHRONOUSLY by
  * the boot script in index.html before first paint (see that file). The Tauri
  * store is the durable source of truth. */

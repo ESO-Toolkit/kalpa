@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { DEFAULT_THEME } from "../theme-presets";
-import { FORCED_DEFAULT_VERSION } from "../theme-manager";
+import { DEFAULT_THEME, FORCED_DEFAULT_VERSION } from "../theme-presets";
 import { themeColorsToVars } from "../theme-apply";
 // Vite `?raw` import — the boot script's source as a string (no Node APIs, so the
 // DOM-only app tsconfig still typechecks).
