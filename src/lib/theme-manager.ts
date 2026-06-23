@@ -86,17 +86,20 @@ export function getActiveTheme(): Theme {
 function writeLocalMirror(next: ManagerState) {
   try {
     // Mirror the active theme's resolved CSS vars so the pre-paint boot script
-    // can apply them with zero logic. The ESO Gold base theme stores nothing —
-    // the authored :root values govern.
+    // can apply them with zero logic. Written for EVERY theme — including the
+    // ESO Gold base — so an absent mirror unambiguously means "fresh install,"
+    // letting the boot script paint the factory default instead of the authored
+    // :root (which is ESO Gold, no longer the default). The base theme's vars
+    // equal :root, so applying them pre-paint is visually a no-op.
     const active = [...BUILTIN_THEMES, ...next.customThemes].find(
       (t) => t.id === next.activeThemeId
     );
-    if (!active || active.id === ROOT_THEME_ID) {
+    if (!active) {
       localStorage.removeItem(LS_KEY_VARS);
-    } else {
-      const vars = { ...themeColorsToVars(active.colors), ...themeSkinToVars(active.skin) };
-      localStorage.setItem(LS_KEY_VARS, JSON.stringify(vars));
+      return;
     }
+    const vars = { ...themeColorsToVars(active.colors), ...themeSkinToVars(active.skin) };
+    localStorage.setItem(LS_KEY_VARS, JSON.stringify(vars));
   } catch {
     // localStorage may be unavailable; durability still comes from the Tauri store.
   }
