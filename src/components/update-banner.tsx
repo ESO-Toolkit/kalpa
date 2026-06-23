@@ -1,11 +1,32 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { CheckIcon, XIcon, DownloadIcon, PackageIcon, SearchIcon } from "lucide-react";
+import {
+  ArrowRightIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  DownloadIcon,
+  ListChecksIcon,
+  PackageIcon,
+  SearchIcon,
+  XIcon,
+} from "lucide-react";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { Slide } from "@/components/animate-ui/primitives/effects/slide";
+import { AutoHeight } from "@/components/animate-ui/primitives/effects/auto-height";
+import { cn } from "@/lib/utils";
 
 type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
+
+/** A single available update, enriched with a display title for the chooser. */
+export interface BannerUpdate {
+  folderName: string;
+  title: string;
+  currentVersion: string;
+  remoteVersion: string;
+}
 
 interface UpdateBannerProps {
   availableCount: number;
@@ -17,7 +38,11 @@ interface UpdateBannerProps {
     currentAddon?: string;
   } | null;
   addonStatuses: Map<string, AddonPhase>;
+  /** Available updates, sorted for display — drives the "Choose" checklist. */
+  updates: BannerUpdate[];
   onUpdateAll: () => void;
+  /** Update only the chosen subset; routes through the same streaming batch path. */
+  onUpdateSelected: (folderNames: string[]) => void;
   isOffline?: boolean;
 }
 
@@ -66,15 +91,85 @@ function AddonStatusPill({ name, phase }: { name: string; phase: AddonPhase }) {
   );
 }
 
+/** One selectable row in the chooser: title + current → new version delta. */
+function ChooserRow({
+  update,
+  checked,
+  onToggle,
+}: {
+  update: BannerUpdate;
+  checked: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <label
+      className={cn(
+        "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors duration-150 ease-out hover:bg-white/[0.04]",
+        checked && "bg-primary/[0.04]"
+      )}
+    >
+      <Checkbox
+        checked={checked}
+        onCheckedChange={onToggle}
+        tabIndex={0}
+        aria-label={`${update.title}, update from ${update.currentVersion || "unknown"} to ${
+          update.remoteVersion || "unknown"
+        }`}
+      />
+      <span className="min-w-0 flex-1 truncate text-[13px] text-white/80" title={update.title}>
+        {update.title}
+      </span>
+      <span className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums">
+        <span
+          className="max-w-[88px] truncate text-white/30"
+          title={update.currentVersion || undefined}
+        >
+          {update.currentVersion || "—"}
+        </span>
+        <ArrowRightIcon className="h-3 w-3 text-white/20" aria-hidden="true" />
+        <span
+          className="max-w-[88px] truncate font-medium text-primary/80"
+          title={update.remoteVersion || undefined}
+        >
+          {update.remoteVersion || "—"}
+        </span>
+      </span>
+    </label>
+  );
+}
+
 export function UpdateBanner({
   availableCount,
   updatingAll,
   updateProgress,
   addonStatuses,
+  updates,
   onUpdateAll,
+  onUpdateSelected,
   isOffline,
 }: UpdateBannerProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const chooseButtonRef = useRef<HTMLButtonElement>(null);
+  const reduceMotion = useReducedMotion();
+
+  const [expanded, setExpanded] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // Reset the picker whenever an update run begins from ANY source — a button
+  // click here or a parent-driven auto-update — so the panel can't spring back
+  // open with stale picks when the banner re-renders after the run finishes.
+  // Adjusting state during render by comparing the previous prop is React's
+  // sanctioned alternative to a syncing effect.
+  const [prevUpdatingAll, setPrevUpdatingAll] = useState(updatingAll);
+  if (updatingAll !== prevUpdatingAll) {
+    setPrevUpdatingAll(updatingAll);
+    if (updatingAll) {
+      setExpanded(false);
+      setSelected(new Set());
+    }
+  }
+
+  const canChoose = !updatingAll && updates.length >= 2;
 
   // Auto-scroll pill container to the right as new pills appear
   useEffect(() => {
@@ -83,23 +178,71 @@ export function UpdateBanner({
     }
   }, [addonStatuses]);
 
+  // Selections filtered to addons that are still outdated, so a pick that
+  // finished updating elsewhere never inflates the count or the submit payload.
+  // Derived (not stored) to avoid syncing state inside an effect.
+  const effectiveSelected = useMemo(() => {
+    if (selected.size === 0) return selected;
+    const valid = new Set(updates.map((u) => u.folderName));
+    const next = new Set<string>();
+    for (const folder of selected) if (valid.has(folder)) next.add(folder);
+    return next.size === selected.size ? selected : next;
+  }, [selected, updates]);
+
+  const selectedCount = effectiveSelected.size;
+  const allSelected = updates.length > 0 && selectedCount === updates.length;
+  const someSelected = selectedCount > 0 && !allSelected;
+
+  const toggleOne = (folderName: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderName)) next.delete(folderName);
+      else next.add(folderName);
+      return next;
+    });
+
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(updates.map((u) => u.folderName)));
+
+  const submitSelected = () => {
+    const folders = [...effectiveSelected];
+    if (folders.length === 0) return;
+    onUpdateSelected(folders);
+    setSelected(new Set());
+    setExpanded(false);
+    // Collapsing unmounts the submit button it was triggered from; move focus to
+    // the still-mounted "Choose" trigger so keyboard/SR focus isn't dropped to
+    // <body> (WCAG 2.4.3).
+    chooseButtonRef.current?.focus();
+  };
+
+  // Update All takes over the banner with live progress, so fold the picker away.
+  const handleUpdateAllClick = () => {
+    setExpanded(false);
+    onUpdateAll();
+  };
+
   const total = updateProgress?.total ?? 0;
   const doneCount = (updateProgress?.completed ?? 0) + (updateProgress?.failed ?? 0);
   const allDone = updatingAll && total > 0 && doneCount === total;
 
-  if (availableCount === 0 && !updatingAll) return null;
-
   // Sort statuses: in-progress first, then completed/failed
-  const sortedEntries = [...addonStatuses.entries()].sort((a, b) => {
-    const order: Record<AddonPhase, number> = {
-      downloading: 0,
-      scanning: 1,
-      extracting: 2,
-      failed: 3,
-      completed: 4,
-    };
-    return order[a[1]] - order[b[1]];
-  });
+  const sortedEntries = useMemo(
+    () =>
+      [...addonStatuses.entries()].sort((a, b) => {
+        const order: Record<AddonPhase, number> = {
+          downloading: 0,
+          scanning: 1,
+          extracting: 2,
+          failed: 3,
+          completed: 4,
+        };
+        return order[a[1]] - order[b[1]];
+      }),
+    [addonStatuses]
+  );
+
+  if (availableCount === 0 && !updatingAll) return null;
 
   const progressPct = total > 0 ? ((doneCount / total) * 100).toFixed(0) : "0";
 
@@ -111,7 +254,7 @@ export function UpdateBanner({
     >
       <div className="border-b border-primary/15 bg-gradient-to-r from-primary/[0.06] via-primary/[0.03] to-transparent backdrop-blur-sm">
         {/* Header row */}
-        <div className="flex items-center justify-between px-5 py-2">
+        <div className="flex items-center justify-between gap-3 px-5 py-2">
           {updatingAll && updateProgress ? (
             <div className="flex items-center gap-3 min-w-0">
               {/* Animated counter */}
@@ -173,12 +316,90 @@ export function UpdateBanner({
               update{availableCount > 1 ? "s" : ""} available
             </span>
           )}
-          <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
-            <Button onClick={onUpdateAll} size="sm" disabled={updatingAll || isOffline}>
-              {updatingAll ? "Updating..." : "Update All"}
-            </Button>
-          </SimpleTooltip>
+          <div className="flex shrink-0 items-center gap-2">
+            {canChoose && (
+              <Button
+                ref={chooseButtonRef}
+                onClick={() => setExpanded((v) => !v)}
+                size="sm"
+                variant="ghost"
+                aria-expanded={expanded}
+                aria-controls={expanded ? "update-chooser" : undefined}
+              >
+                <ListChecksIcon className="h-3.5 w-3.5" />
+                Choose
+                <ChevronDownIcon
+                  className={cn(
+                    "h-3.5 w-3.5 transition-transform duration-200 ease-out motion-reduce:transition-none",
+                    expanded && "rotate-180"
+                  )}
+                />
+              </Button>
+            )}
+            <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+              <Button onClick={handleUpdateAllClick} size="sm" disabled={updatingAll || isOffline}>
+                {updatingAll ? "Updating..." : "Update All"}
+              </Button>
+            </SimpleTooltip>
+          </div>
         </div>
+
+        {/* Expandable chooser — pick a subset to update in-context */}
+        {canChoose && (
+          <AutoHeight
+            deps={[expanded, updates.length]}
+            transition={reduceMotion ? { duration: 0 } : undefined}
+          >
+            {expanded ? (
+              <div
+                id="update-chooser"
+                role="region"
+                aria-label="Choose which addons to update"
+                className="border-t border-white/[0.06] px-5 pt-2.5 pb-3"
+              >
+                {/* Toolbar: select-all + scoped update action */}
+                <div className="flex items-center justify-between gap-3 pb-1.5">
+                  <label className="flex cursor-pointer select-none items-center gap-2">
+                    <Checkbox
+                      checked={allSelected}
+                      indeterminate={someSelected}
+                      onCheckedChange={toggleAll}
+                      aria-label="Select all updates"
+                    />
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-white/40">
+                      {selectedCount > 0 ? `${selectedCount} selected` : "Select all"}
+                    </span>
+                  </label>
+                  <SimpleTooltip
+                    content={isOffline ? "Updates require an internet connection" : ""}
+                  >
+                    <Button
+                      onClick={submitSelected}
+                      size="sm"
+                      variant={selectedCount > 0 ? "default" : "secondary"}
+                      disabled={selectedCount === 0 || isOffline}
+                    >
+                      <DownloadIcon className="h-3.5 w-3.5" />
+                      Update{selectedCount > 0 ? ` ${selectedCount}` : ""} selected
+                    </Button>
+                  </SimpleTooltip>
+                </div>
+
+                {/* Scrollable checklist of available updates */}
+                <div className="-mx-1 max-h-[240px] overflow-y-auto px-1">
+                  {updates.map((update) => (
+                    <ChooserRow
+                      key={update.folderName}
+                      update={update}
+                      checked={effectiveSelected.has(update.folderName)}
+                      onToggle={() => toggleOne(update.folderName)}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </AutoHeight>
+        )}
 
         {/* Per-addon streaming pills */}
         {updatingAll && sortedEntries.length > 0 && (
