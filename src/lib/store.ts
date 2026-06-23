@@ -6,7 +6,11 @@ let storePromise: ReturnType<typeof load> | null = null;
 
 function getStore() {
   if (!storePromise) {
-    storePromise = load(STORE_PATH, { autoSave: true, defaults: {} }).catch((err) => {
+    // autoSave is OFF so persistence is fully explicit: every write below calls
+    // save() itself. A debounced autosave could otherwise flush a key in the
+    // middle of a multi-key batch (e.g. the forced-default migration marker
+    // before its active-theme reset), leaving the store durably inconsistent.
+    storePromise = load(STORE_PATH, { autoSave: false, defaults: {} }).catch((err) => {
       storePromise = null;
       throw err;
     });
@@ -31,6 +35,7 @@ export async function setSetting<T>(key: string, value: T): Promise<boolean> {
   try {
     const store = await getStore();
     await store.set(key, value);
+    await store.save();
     return true;
   } catch (err) {
     console.warn(`[store] Failed to write "${key}":`, err);

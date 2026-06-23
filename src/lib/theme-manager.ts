@@ -266,13 +266,11 @@ export async function hydrateThemeFromStore() {
     // theme interactively while we were loading, that live choice wins over the
     // forced default (but the migration is still recorded so it never re-fires).
     const targetActive = liveSelection ? state.activeThemeId : DEFAULT_THEME_ID;
-    // Record the override and its version marker as one unit; only adopt the reset
-    // if it actually persisted — otherwise a partial write could override a choice
-    // without durably marking the migration done, re-firing it on every launch.
-    // Marker first: if a debounced autosave ever flushed mid-batch (before the
-    // single save()), a partial state should be "marked migrated, still old theme"
-    // (benign) — never "reset without marker," which would re-fire and clobber a
-    // later choice.
+    // Record the override and its version marker atomically (setSettings persists
+    // all-or-nothing — the store has autoSave off, so neither key reaches disk
+    // until the single explicit save), and only adopt the reset if it persisted.
+    // This guarantees the marker can never become durable without the active
+    // reset, so the migration neither re-fires nor strands a user on the old theme.
     const recorded = await setSettings({
       [STORE_KEY_FORCED_DEFAULT]: FORCED_DEFAULT_VERSION,
       [STORE_KEY_ACTIVE]: targetActive,

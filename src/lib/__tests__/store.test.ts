@@ -58,8 +58,23 @@ describe("setSetting", () => {
   it("sets value in store and reports success", async () => {
     const { setSetting } = await import("../store");
     mockSet.mockResolvedValue(undefined);
+    mockSave.mockResolvedValue(undefined);
     await expect(setSetting("theme", "dark")).resolves.toBe(true);
     expect(mockSet).toHaveBeenCalledWith("theme", "dark");
+  });
+
+  it("loads the store with autoSave disabled and saves explicitly", async () => {
+    const { setSetting } = await import("../store");
+    mockSet.mockResolvedValue(undefined);
+    mockSave.mockResolvedValue(undefined);
+    await setSetting("theme", "dark");
+
+    const { load } = await import("@tauri-apps/plugin-store");
+    expect(load).toHaveBeenCalledWith(
+      "settings.json",
+      expect.objectContaining({ autoSave: false })
+    );
+    expect(mockSave).toHaveBeenCalled();
   });
 
   it("handles errors without throwing and reports failure", async () => {
