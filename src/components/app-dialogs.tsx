@@ -52,6 +52,7 @@ const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
   "saved-variables": "Saved Variables",
   "migration-wizard": "Migration",
   "safety-center": "Safety Center",
+  "log-upload": "Log Uploader",
 };
 
 interface AppDialogsProps {
