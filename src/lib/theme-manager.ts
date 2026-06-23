@@ -32,6 +32,14 @@ interface ViewTransitionLike {
 
 const STORE_KEY_ACTIVE = "appearance.activeThemeId";
 const STORE_KEY_CUSTOM = "appearance.customThemes";
+/** Tracks the last forced-default migration the user has been moved through. */
+const STORE_KEY_FORCED_DEFAULT = "appearance.forcedDefaultVersion";
+/** Bump this to forcibly reset EVERY user's active theme to the current
+ * {@link DEFAULT_THEME_ID} once on next launch — overriding any theme they had
+ * previously chosen. After the reset they keep full control of the picker; the
+ * stored version marker stops it from re-applying on later launches.
+ * v1 — move everyone onto Nordic Runestone. */
+const FORCED_DEFAULT_VERSION = 1;
 /** Resolved `{ "--var": value }` map of the active theme — the ONLY localStorage
  * key, read SYNCHRONOUSLY by the inline boot script in index.html before first
  * paint (see that file). The Tauri store is the durable source of truth. */
@@ -224,20 +232,32 @@ export function stopPreview() {
  * deferred ES module and would paint a frame late.
  */
 export async function hydrateThemeFromStore() {
-  const [storedActiveId, storedCustom] = await Promise.all([
+  const [storedActiveId, storedCustom, forcedVersion] = await Promise.all([
     getSetting<string>(STORE_KEY_ACTIVE, DEFAULT_THEME_ID),
     getSetting<Theme[]>(STORE_KEY_CUSTOM, []),
+    getSetting<number>(STORE_KEY_FORCED_DEFAULT, 0),
   ]);
   const customThemes = Array.isArray(storedCustom) ? storedCustom : [];
 
-  // Normalize a dangling active id (e.g. a custom theme deleted on another
-  // window) so the gallery's active highlight and the mirror stay consistent.
+  // One-time forced migration: when FORCED_DEFAULT_VERSION advances, reset every
+  // user to the current factory default, overriding whatever they had chosen.
+  // Runs once per version bump — the picker stays fully usable afterward.
+  const force = (forcedVersion ?? 0) < FORCED_DEFAULT_VERSION;
+
+  // Otherwise honor the stored choice, normalizing a dangling active id (e.g. a
+  // custom theme deleted on another window) so the gallery highlight and the
+  // mirror stay consistent.
   const known = new Set([...BUILTIN_THEME_IDS, ...customThemes.map((t) => t.id)]);
-  const activeThemeId = known.has(storedActiveId) ? storedActiveId : DEFAULT_THEME_ID;
+  const activeThemeId = force
+    ? DEFAULT_THEME_ID
+    : known.has(storedActiveId)
+      ? storedActiveId
+      : DEFAULT_THEME_ID;
 
   state = { activeThemeId, customThemes };
   applyTheme(getActiveTheme(), false);
   writeLocalMirror(state);
   if (activeThemeId !== storedActiveId) void setSetting(STORE_KEY_ACTIVE, activeThemeId);
+  if (force) void setSetting(STORE_KEY_FORCED_DEFAULT, FORCED_DEFAULT_VERSION);
   emit();
 }
