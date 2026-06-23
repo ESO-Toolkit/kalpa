@@ -52,12 +52,12 @@ describe("PACK_TYPE_ACCENT", () => {
     }
   });
 
-  it("uses ESO gold for addon-pack", () => {
-    expect(PACK_TYPE_ACCENT["addon-pack"].text).toContain("#c4a44a");
+  it("uses the theme primary accent for addon-pack", () => {
+    expect(PACK_TYPE_ACCENT["addon-pack"].text).toContain("text-primary");
   });
 
-  it("uses sky for build-pack", () => {
-    expect(PACK_TYPE_ACCENT["build-pack"].text).toContain("sky");
+  it("uses the theme sky accent for build-pack", () => {
+    expect(PACK_TYPE_ACCENT["build-pack"].text).toContain("accent-sky");
   });
 
   it("uses violet for roster-pack", () => {

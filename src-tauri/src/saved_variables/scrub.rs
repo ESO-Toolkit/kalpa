@@ -715,6 +715,217 @@ fn classify_under_account(node: &SvTreeNode, acc: &mut DetectAcc) {
     }
 }
 
+/// A character discovered for the Characters roster, with its megaserver when
+/// the layout makes it derivable.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterCharacter {
+    /// The verbatim SavedVariables key (may carry a raw `^Mx` caret suffix).
+    pub name: String,
+    /// "NA Megaserver" / "EU Megaserver" / "PTS" when stored under a world-scoped
+    /// layout; `None` for the account-keyed layout that omits the world.
+    pub world: Option<String>,
+}
+
+/// Extract ESO characters for the **Characters roster** from a SavedVariables
+/// tree.
+///
+/// This is intentionally stricter than [`detect_identities_from_tree`], which
+/// over-collects on purpose (any non-marker key under an account is templated so
+/// scrubbing never leaks an identity). The roster is user-facing and feeds
+/// backups, so a false positive here would surface an addon config section as a
+/// fake character. A key under an account handle is accepted only when it is a
+/// **table** value and *looks like* an ESO character name (uppercase-led;
+/// letters, spaces, hyphens, apostrophes). Real character names always satisfy
+/// this, so none are lost, while config tables an addon stores beside characters
+/// (`settings`, `profiles`, `guilds`) are rejected — even when a `$AccountWide`
+/// marker is present. Numeric character-IDs and `$`-markers are skipped.
+///
+/// The world (when present) only labels the megaserver, never proves a key.
+///
+/// Returns verbatim keys (caret suffix preserved) so callers can both display a
+/// cleaned name and match the raw key on disk.
+///
+/// Retained as the **differential-testing oracle** for the production roster
+/// path, which now streams the raw bytes via
+/// [`crate::saved_variables::roster_stream`]. A parity test asserts the streamer
+/// yields the identical `(name, world)` set on every fixture, so this tree-based
+/// detector is the executable spec the streamer must match. It is compiled only
+/// for tests.
+#[cfg(test)]
+pub fn detect_roster_characters_from_tree(tree: &SvTreeNode) -> Vec<RosterCharacter> {
+    let mut out: Vec<RosterCharacter> = Vec::new();
+    let mut seen: std::collections::BTreeSet<(String, Option<String>)> =
+        std::collections::BTreeSet::new();
+
+    if let Some(top_levels) = tree_children(tree) {
+        for top in top_levels {
+            if let Some(layers) = tree_children(top) {
+                for layer in layers {
+                    roster_under_top(layer, &mut out, &mut seen);
+                }
+            }
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+type RosterSeen = std::collections::BTreeSet<(String, Option<String>)>;
+
+#[cfg(test)]
+fn roster_under_top(node: &SvTreeNode, out: &mut Vec<RosterCharacter>, seen: &mut RosterSeen) {
+    let key = node.key.as_str();
+    if key == "Default" {
+        if let Some(children) = tree_children(node) {
+            for child in children {
+                roster_account_or_world(child, out, seen);
+            }
+        }
+    } else if WELL_KNOWN_WORLDS.contains(&key) || key.contains(' ') {
+        // World-first layout (pChat): world layer directly under the addon var.
+        roster_world_layer(key, node, out, seen);
+    }
+    // An account handle sitting directly under the addon variable (no `Default`)
+    // holds addon section keys at this depth, not character names — skip it.
+}
+
+#[cfg(test)]
+fn roster_account_or_world(
+    node: &SvTreeNode,
+    out: &mut Vec<RosterCharacter>,
+    seen: &mut RosterSeen,
+) {
+    let key = node.key.as_str();
+    if key.starts_with('@') {
+        roster_chars_under_account(node, None, out, seen);
+    } else if WELL_KNOWN_WORLDS.contains(&key) || key.contains(' ') {
+        roster_world_layer(key, node, out, seen);
+    }
+}
+
+#[cfg(test)]
+fn roster_world_layer(
+    world_key: &str,
+    node: &SvTreeNode,
+    out: &mut Vec<RosterCharacter>,
+    seen: &mut RosterSeen,
+) {
+    // Only attribute a real megaserver; a non-canonical custom world stays None.
+    let world = if WELL_KNOWN_WORLDS.contains(&world_key) {
+        Some(world_key)
+    } else {
+        None
+    };
+    if let Some(children) = tree_children(node) {
+        for child in children {
+            if child.key.starts_with('@') {
+                roster_chars_under_account(child, world, out, seen);
+            }
+        }
+    }
+}
+
+/// Common addon config-section keys that pass the character-name shape check but
+/// are not characters. Compared case-insensitively against the whole key.
+const CONFIG_SECTION_KEYS: &[&str] = &[
+    "settings",
+    "setting",
+    "profile",
+    "profiles",
+    "options",
+    "option",
+    "config",
+    "configuration",
+    "data",
+    "global",
+    "globals",
+    "default",
+    "defaults",
+    "general",
+    "account",
+    "accountwide",
+    "preferences",
+    "version",
+    "server",
+    "servers",
+];
+
+/// Does `key` have the shape of an ESO character name? ESO names start with an
+/// uppercase letter and contain only letters, spaces, hyphens, and apostrophes.
+/// A raw `^Mx` caret suffix is allowed (the part before it is checked). Common
+/// capitalized config-section words (`Settings`, `Profile`, …) are rejected even
+/// though they match the shape. This is the discriminator used to recover
+/// characters from accounts without admitting addon config keys.
+///
+/// Exposed to the crate so the streaming roster extractor
+/// (`roster_stream`) applies the EXACT same acceptance rule as the
+/// tree-based detector, keeping the two in parity.
+pub(crate) fn looks_like_character_name(key: &str) -> bool {
+    let base = key.split('^').next().unwrap_or(key);
+    let mut chars = base.chars();
+    match chars.next() {
+        Some(c) if c.is_uppercase() => {}
+        _ => return false,
+    }
+    let len = base.chars().count();
+    if len == 0 || len > 32 {
+        return false;
+    }
+    if !base
+        .chars()
+        .all(|c| c.is_alphabetic() || matches!(c, ' ' | '-' | '\'' | '\u{2019}'))
+    {
+        return false;
+    }
+    // Reject well-known config-section names that happen to look like a name.
+    let lowered = base.to_lowercase();
+    !CONFIG_SECTION_KEYS.contains(&lowered.as_str())
+}
+
+#[cfg(test)]
+fn roster_chars_under_account(
+    account_node: &SvTreeNode,
+    world: Option<&str>,
+    out: &mut Vec<RosterCharacter>,
+    seen: &mut RosterSeen,
+) {
+    let children = match tree_children(account_node) {
+        Some(c) => c,
+        None => return,
+    };
+    for child in children {
+        let key = child.key.as_str();
+        if key.is_empty() || key.starts_with('$') {
+            continue;
+        }
+        if key.bytes().all(|b| b.is_ascii_digit()) {
+            // Numeric characterId — no display name lives at this key.
+            continue;
+        }
+        if !matches!(child.value_type, SvValueType::Table) {
+            // Scalar config (version flags, etc.) is never a character.
+            continue;
+        }
+        // Require the key to look like an ESO character name. Real names always
+        // do (uppercase-led, letters/space/hyphen/apostrophe), so this loses no
+        // characters, while it excludes config-section tables (`settings`,
+        // `profiles`, `guilds`) that addons store alongside characters — even
+        // under an account that also has a `$AccountWide` marker.
+        if !looks_like_character_name(key) {
+            continue;
+        }
+        let entry = RosterCharacter {
+            name: key.to_string(),
+            world: world.map(|w| w.to_string()),
+        };
+        if seen.insert((entry.name.clone(), entry.world.clone())) {
+            out.push(entry);
+        }
+    }
+}
+
 /// Recursive worker. Returns `Some(node)` if the node survives, `None` if it
 /// (and its key in the parent) should be dropped.
 ///
@@ -1456,6 +1667,169 @@ mod tests {
         let detected = detect_identities_from_tree(&tree);
         assert_eq!(detected.accounts, vec!["@Author".to_string()]);
         assert_eq!(detected.characters, vec!["Mainchar".to_string()]);
+    }
+
+    #[test]
+    fn roster_detects_account_keyed_characters() {
+        // Standard layout: $AccountWide sibling proves these are characters.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["enabled"] = true },
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["Alttank"] = { ["x"] = 2 },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Mainchar"));
+        assert!(names.contains(&"Alttank"));
+        assert!(roster.iter().all(|c| c.world.is_none()));
+    }
+
+    #[test]
+    fn roster_maps_world_scoped_server() {
+        // World layer under Default: the megaserver is derivable, and the
+        // $AccountWide marker proves these are characters.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["EU Megaserver"] = {
+                        ["@Author"] = {
+                            ["$AccountWide"] = { ["enabled"] = true },
+                            ["Mainchar"] = { ["x"] = 1 },
+                        },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].name, "Mainchar");
+        assert_eq!(roster[0].world.as_deref(), Some("EU Megaserver"));
+    }
+
+    #[test]
+    fn roster_excludes_world_scoped_config_without_marker() {
+        // World/account-scoped config tables (no $-marker) must NOT become
+        // characters just because they sit under a megaserver layer.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["NA Megaserver"] = {
+                        ["@Author"] = {
+                            ["guilds"] = { ["g1"] = true },
+                            ["profiles"] = { ["p1"] = true },
+                        },
+                    },
+                },
+            }"#,
+        );
+        assert!(detect_roster_characters_from_tree(&tree).is_empty());
+    }
+
+    #[test]
+    fn roster_recovers_markerless_character_names() {
+        // No $-marker, but the keys look like ESO character names — recover them
+        // (an addon storing only per-character data in account-wide mode).
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["Alt Ego"] = { ["x"] = 2 },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Mainchar"));
+        assert!(names.contains(&"Alt Ego"));
+    }
+
+    #[test]
+    fn roster_excludes_config_siblings_in_marked_account() {
+        // $AccountWide marker present, but config tables sit beside the character.
+        // Only the name-shaped key is a character.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["x"] = 1 },
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["settings"] = { ["volume"] = 5 },
+                        ["profiles"] = { ["p1"] = true },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Mainchar"]);
+    }
+
+    #[test]
+    fn roster_excludes_capitalized_config_siblings() {
+        // Capitalized config-section tables match the name shape but are not
+        // characters; only the real character is kept.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["x"] = 1 },
+                        ["Mainchar"] = { ["x"] = 1 },
+                        ["Settings"] = { ["volume"] = 5 },
+                        ["Profile"] = { ["p"] = 1 },
+                        ["Servers"] = { ["na"] = true },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Mainchar"]);
+    }
+
+    #[test]
+    fn roster_excludes_config_section_without_marker() {
+        // No $-marker sibling and not under a world: a config section under
+        // @account must NOT surface as a character.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["settings"] = { ["volume"] = 5 },
+                        ["servers"] = { ["NA"] = true },
+                    },
+                },
+            }"#,
+        );
+        assert!(detect_roster_characters_from_tree(&tree).is_empty());
+    }
+
+    #[test]
+    fn roster_excludes_scalar_and_numeric_keys() {
+        // Scalar config values and numeric characterIds are never roster names,
+        // even when a $-marker proves the account is a character container.
+        let tree = parse(
+            r#"MyAddon_SV = {
+                ["Default"] = {
+                    ["@Author"] = {
+                        ["$AccountWide"] = { ["enabled"] = true },
+                        ["version"] = 3,
+                        ["123456789012345"] = { ["x"] = 1 },
+                        ["Realchar"] = { ["x"] = 1 },
+                    },
+                },
+            }"#,
+        );
+        let roster = detect_roster_characters_from_tree(&tree);
+        let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Realchar"]);
     }
 
     #[test]

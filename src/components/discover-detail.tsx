@@ -122,8 +122,8 @@ export function DiscoverDetail({
   if (!result) {
     return (
       <div className="relative flex flex-1 flex-col items-center justify-center gap-4 text-muted-foreground px-8">
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-[#c4a44a]/[0.04] blur-[60px]" />
-        <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_rgba(196,164,74,0.03)]">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[200px] rounded-full bg-primary/[0.04] blur-[60px]" />
+        <div className="relative rounded-2xl bg-white/[0.03] border border-white/[0.06] p-5 shadow-[0_0_30px_color-mix(in_oklab,var(--primary)_3%,transparent)]">
           <Search
             aria-hidden="true"
             className="size-10 text-muted-foreground/30"
@@ -211,7 +211,7 @@ export function DiscoverDetail({
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
           <div className="flex-1 min-w-0">
-            <h2 className="font-heading text-xl font-semibold bg-gradient-to-r from-[#c4a44a] to-[#d4b45a] bg-clip-text text-transparent">
+            <h2 className="font-heading text-xl font-semibold bg-gradient-to-r from-primary to-primary-hover bg-clip-text text-transparent">
               {detail.title}
             </h2>
             {detail.version && (
@@ -257,7 +257,7 @@ export function DiscoverDetail({
                 >
                   {installingId !== null ? (
                     <span className="flex items-center gap-2">
-                      <span className="inline-block size-3 animate-spin rounded-full border-2 border-[#0b1220]/20 border-t-[#0b1220]" />
+                      <span className="inline-block size-3 animate-spin rounded-full border-2 border-[var(--primary-foreground)]/20 border-t-[var(--primary-foreground)]" />
                       Installing
                     </span>
                   ) : installSuccess || installedEsouiIds.has(result.id) ? (
@@ -313,7 +313,7 @@ export function DiscoverDetail({
         {/* Quick Stats Bar */}
         <div className="grid grid-cols-4 gap-2">
           <StatCard
-            icon={<Download className="size-3.5 text-sky-400" />}
+            icon={<Download className="size-3.5 text-accent-sky" />}
             label="Downloads"
             value={detail.totalDownloads}
             accent="sky"
@@ -325,7 +325,7 @@ export function DiscoverDetail({
             accent="emerald"
           />
           <StatCard
-            icon={<Star className="size-3.5 text-[#c4a44a]" />}
+            icon={<Star className="size-3.5 text-primary" />}
             label="Favorites"
             value={detail.favorites}
             accent="gold"
@@ -353,7 +353,7 @@ export function DiscoverDetail({
               <span>&middot;</span>
               <SimpleTooltip content={detail.md5}>
                 <button
-                  className="group/md5 flex items-center gap-1 hover:text-[#38bdf8] transition-colors duration-150"
+                  className="group/md5 flex items-center gap-1 hover:text-accent-sky transition-colors duration-150"
                   aria-label={`Copy MD5: ${detail.md5}`}
                   onClick={async () => {
                     try {
@@ -372,7 +372,7 @@ export function DiscoverDetail({
                       "transition-all duration-150",
                       md5Copied
                         ? "text-emerald-400"
-                        : "text-muted-foreground/30 group-hover/md5:text-[#38bdf8]"
+                        : "text-muted-foreground/30 group-hover/md5:text-accent-sky"
                     )}
                   >
                     {md5Copied ? <Check className="size-2.5" /> : <Copy className="size-2.5" />}
@@ -429,7 +429,7 @@ export function DiscoverDetail({
                         key={i}
                         className={cn(
                           "size-2 rounded-full transition-all duration-200",
-                          i === safeIdx ? "bg-[#c4a44a] scale-110" : "bg-white/30 hover:bg-white/50"
+                          i === safeIdx ? "bg-primary scale-110" : "bg-white/30 hover:bg-white/50"
                         )}
                         onClick={() => setScreenshotIdx(i)}
                         aria-label={`Screenshot ${i + 1}`}
@@ -455,7 +455,7 @@ export function DiscoverDetail({
                     className={cn(
                       "shrink-0 overflow-hidden rounded-lg border-2 transition-all duration-200",
                       i === safeIdx
-                        ? "border-[#c4a44a] shadow-[0_0_8px_rgba(196,164,74,0.3)]"
+                        ? "border-primary shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_30%,transparent)]"
                         : "border-white/[0.06] hover:border-white/[0.15] opacity-60 hover:opacity-100"
                     )}
                   >
@@ -496,9 +496,9 @@ function StatCard({
   accent: "sky" | "emerald" | "gold" | "violet";
 }) {
   const borderColors = {
-    sky: "border-sky-400/10 hover:border-sky-400/20",
+    sky: "border-accent-sky/10 hover:border-accent-sky/20",
     emerald: "border-emerald-400/10 hover:border-emerald-400/20",
-    gold: "border-[#c4a44a]/10 hover:border-[#c4a44a]/20",
+    gold: "border-primary/10 hover:border-primary/20",
     violet: "border-violet-400/10 hover:border-violet-400/20",
   };
 

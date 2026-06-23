@@ -6,6 +6,72 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Register the 12 BASE theme variables as typed <color> custom properties.
+ * This gives per-token invalid-value robustness: if a malformed custom color is
+ * ever assigned, the browser falls back to the initial-value below instead of
+ * poisoning the cascade. Derived tokens are intentionally NOT registered —
+ * @property forbids an initial-value that references another var(). */
+@property --bg-base {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #060c18;
+}
+@property --background {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #0b1220;
+}
+@property --card {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #0f172a;
+}
+@property --foreground {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #e5e7eb;
+}
+@property --muted-foreground {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #94a3b8;
+}
+@property --primary {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #c4a44a;
+}
+@property --primary-foreground {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #0b1220;
+}
+@property --accent-sky {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #38bdf8;
+}
+@property --border {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #1f2937;
+}
+@property --orb-1 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #c4a44a;
+}
+@property --orb-2 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #38bdf8;
+}
+@property --orb-3 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #6366f1;
+}
+
 @theme inline {
   --font-heading: "Space Grotesk Variable", "Geist Variable", system-ui, sans-serif;
   --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -48,9 +114,11 @@
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
 
-  /* ESO gold accent */
-  --color-gold: #c4a44a;
-  --color-gold-hover: #d4b45a;
+  /* ESO gold accent — now follows the active theme's primary */
+  --color-gold: var(--primary);
+  --color-gold-hover: var(--primary-hover);
+  --color-primary-hover: var(--primary-hover);
+  --color-bg-base: var(--bg-base);
 
   /* Interactive accent (sky-blue from ESO-LOG-AG) */
   --color-accent-sky: var(--accent-sky);
@@ -67,9 +135,31 @@
   --color-addon-library: var(--addon-library);
   --color-addon-disabled: var(--addon-disabled);
 
+  /* Theme-tinted semantic palette — remap the Tailwind status shades the app uses
+   * (emerald/amber/red/violet, + yellow) so component status colors harmonize with
+   * the active theme. Values derive from --primary, so they recompute on switch. */
+  --color-emerald-400: var(--status-success);
+  --color-emerald-500: var(--status-success-strong);
+  --color-amber-300: color-mix(in oklab, #fcd34d 82%, var(--primary));
+  --color-amber-400: var(--status-warning);
+  --color-amber-500: var(--status-warning-strong);
+  --color-yellow-400: var(--status-warning);
+  --color-red-300: color-mix(in oklab, #fca5a5 86%, var(--primary));
+  --color-red-400: var(--status-error);
+  --color-red-500: var(--status-error-strong);
+  --color-violet-400: var(--status-library);
+  --color-violet-500: var(--status-library-strong);
+  /* Light status shades used for text/headings (backups) — tint lightly too. */
+  --color-emerald-100: color-mix(in oklab, #d1fae5 88%, var(--primary));
+  --color-amber-100: color-mix(in oklab, #fef3c7 88%, var(--primary));
+  --color-amber-200: color-mix(in oklab, #fde68a 86%, var(--primary));
+
   /* Glass tokens */
   --color-glass-bg: var(--glass-bg);
+  --color-glass-bg-light: var(--glass-bg-light);
   --color-glass-border: var(--glass-border);
+  --color-glass-border-subtle: var(--glass-border-subtle);
+  --color-surface-overlay: var(--surface-overlay);
 
   /* Card alt */
   --color-card-alt: var(--card-alt);
@@ -78,66 +168,111 @@
   --animate-shimmer: shimmer 1.6s ease-in-out infinite;
 }
 
-/* ESO-inspired dark theme — always dark */
+/* ESO-inspired dark theme — always dark.
+ *
+ * THEMING MODEL: a theme overrides only the 12 BASE variables below at runtime
+ * (see src/lib/theme-apply.ts). Every other token is DERIVED from those 12 via
+ * color-mix() — a Baseline CSS feature in evergreen Chromium / WebView2 — so
+ * `var()` makes them recompute live when the base changes. The defaults here
+ * reproduce the signature "ESO Gold" look exactly; clearing the runtime overrides
+ * (the default theme) falls back to these values with zero visual regression. */
 :root {
-  /* === Core Palette (ESO-LOG-AG aligned) === */
-  --background: #0b1220;
-  --foreground: #e5e7eb;
-  --card: #0f172a;
-  --card-foreground: #e5e7eb;
-  --card-alt: #0d1430;
-  --popover: #0f172a;
-  --popover-foreground: #e5e7eb;
+  /* ============================================================
+     BASE THEME VARIABLES — the 12 colors a theme sets at runtime
+     ============================================================ */
+  --bg-base: #060c18; /* deepest backdrop behind ambient orbs */
+  --background: #0b1220; /* app background */
+  --card: #0f172a; /* surface — panels & cards */
+  --foreground: #e5e7eb; /* primary text */
+  --muted-foreground: #94a3b8; /* secondary / dim text */
+  --primary: #c4a44a; /* brand accent (ESO gold) */
+  --primary-foreground: #0b1220; /* text on primary */
+  --accent-sky: #38bdf8; /* interactive accent */
+  --border: #1f2937; /* base border / divider */
+  --orb-1: #c4a44a; /* ambient background orb 1 */
+  --orb-2: #38bdf8; /* ambient background orb 2 */
+  --orb-3: #6366f1; /* ambient background orb 3 */
 
-  /* === ESO Gold === */
-  --primary: #c4a44a;
-  --primary-foreground: #0b1220;
+  /* ============================================================
+     DERIVED TOKENS (computed from the 12 base vars)
+     ============================================================ */
 
-  /* === Interactive Accent === */
-  --secondary: #0f3460;
-  --secondary-foreground: #e5e7eb;
-  --accent: #0f3460;
-  --accent-foreground: #e5e7eb;
-  --accent-sky: #38bdf8;
-  --accent-cyan: #00e1ff;
+  /* === Surfaces ===
+   * Derivations use OKLCH relative color syntax. Relative color does NOT
+   * auto-clamp, so any COMPUTED channel is wrapped in clamp() (lightness 0–1);
+   * where chroma is AMPLIFIED (--primary-hover) it's capped at ~0.37 to stay in
+   * gamut. Channels passed through unchanged (--card-alt, --accent-cyan keep c/h)
+   * need no clamp. Lightness deltas are ADDITIVE (even elevation steps in a dark
+   * UI). Blends/alpha use color-mix(in oklab, …) — never srgb, which grays out. */
+  --card-foreground: var(--foreground);
+  --card-alt: oklch(from var(--card) clamp(0, calc(l - 0.02), 1) c h);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  /* Elevated translucent surface for modals, dropdowns, tooltips, menus, popovers.
+   * Theme surface at ~95% alpha so backdrop-blur still reads. Any overlay built on
+   * the shared primitives (incl. future modals) inherits the active theme. */
+  --surface-overlay: color-mix(in oklab, var(--card) 95%, transparent);
 
-  /* === Semantic === */
-  --muted: #1a2a4a;
-  --muted-foreground: #94a3b8;
-  --destructive: #ef4444;
-  --success: #22c55e;
-  --warning: #ff9800;
+  /* === Accents === */
+  --primary-hover: oklch(
+    from var(--primary) clamp(0, calc(l + 0.06), 1) clamp(0, calc(c * 1.05), 0.37) h
+  );
+  --primary-glow: color-mix(in oklab, var(--primary) 30%, transparent);
+  --secondary: color-mix(in oklab, var(--accent-sky) 30%, var(--bg-base));
+  --secondary-foreground: var(--foreground);
+  --accent: var(--secondary);
+  --accent-foreground: var(--foreground);
+  --accent-cyan: oklch(from var(--accent-sky) clamp(0, calc(l + 0.08), 1) c h);
 
-  /* === Surfaces === */
-  --border: #1f2937;
-  --input: #1f2937;
-  --ring: #c4a44a;
+  /* === Semantic status colors ===
+   * Each keeps its meaning (green=ok, amber=warn, red=error, violet=library) but
+   * is mixed a modest amount toward the theme --primary so it harmonizes with the
+   * active theme instead of looking pasted-on. The Tailwind emerald/amber/red/
+   * violet utilities are remapped to these in @theme inline, so component status
+   * colors follow the theme too. Errors are tinted least, to stay alarming. */
+  --status-success: color-mix(in oklab, #34d399 78%, var(--primary));
+  --status-success-strong: color-mix(in oklab, #10b981 80%, var(--primary));
+  --status-warning: color-mix(in oklab, #fbbf24 82%, var(--primary));
+  --status-warning-strong: color-mix(in oklab, #f59e0b 82%, var(--primary));
+  --status-error: color-mix(in oklab, #f87171 86%, var(--primary));
+  --status-error-strong: color-mix(in oklab, #ef4444 86%, var(--primary));
+  --status-library: color-mix(in oklab, #a78bfa 78%, var(--primary));
+  --status-library-strong: color-mix(in oklab, #8b5cf6 80%, var(--primary));
 
-  /* === Addon Status Colors === */
-  --addon-healthy: #22c55e;
-  --addon-outdated: #ff9800;
-  --addon-error: #ef4444;
-  --addon-library: #a78bfa;
+  --muted: color-mix(in oklab, var(--card) 82%, var(--accent-sky));
+  --destructive: var(--status-error-strong);
+  --success: var(--status-success-strong);
+  --warning: var(--status-warning-strong);
+
+  /* === Form surfaces === */
+  --input: var(--border);
+  --ring: var(--primary);
+
+  /* === Addon Status Colors (theme-tinted via the tokens above) === */
+  --addon-healthy: var(--status-success-strong);
+  --addon-outdated: var(--status-warning-strong);
+  --addon-error: var(--status-error-strong);
+  --addon-library: var(--status-library);
   --addon-disabled: #6b7280;
 
-  /* === Glass Morphism Tokens === */
-  --glass-bg: rgba(15, 23, 42, 0.84);
-  --glass-bg-light: rgba(15, 23, 42, 0.66);
+  /* === Glass Morphism (tint derived from surface; borders are constant white-alpha) === */
+  --glass-bg: color-mix(in oklab, var(--card) 84%, transparent);
+  --glass-bg-light: color-mix(in oklab, var(--card) 66%, transparent);
   --glass-border: rgba(255, 255, 255, 0.09);
   --glass-border-subtle: rgba(255, 255, 255, 0.04);
   --glass-blur: 16px;
   --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.32), 0 1px 0 rgba(255, 255, 255, 0.05) inset;
   --glass-shadow-light: 0 4px 16px rgba(0, 0, 0, 0.2);
 
-  /* === Scrollbar === */
-  --scrollbar-track: rgba(15, 23, 42, 0.5);
-  --scrollbar-thumb: rgba(56, 189, 248, 0.3);
-  --scrollbar-thumb-hover: rgba(56, 189, 248, 0.5);
-  --scrollbar-thumb-active: rgba(56, 189, 248, 0.7);
+  /* === Scrollbar (accent-tinted) === */
+  --scrollbar-track: color-mix(in oklab, var(--card) 50%, transparent);
+  --scrollbar-thumb: color-mix(in oklab, var(--accent-sky) 30%, transparent);
+  --scrollbar-thumb-hover: color-mix(in oklab, var(--accent-sky) 50%, transparent);
+  --scrollbar-thumb-active: color-mix(in oklab, var(--accent-sky) 70%, transparent);
 
   /* === Charts === */
-  --chart-1: #c4a44a;
-  --chart-2: #3498db;
+  --chart-1: var(--primary);
+  --chart-2: var(--accent-sky);
   --chart-3: #2ecc71;
   --chart-4: #f39c12;
   --chart-5: #e74c3c;
@@ -145,15 +280,30 @@
   /* === Radius === */
   --radius: 0.5rem;
 
+  /* === Skin (art themes only; default = no texture/pattern) === */
+  --app-texture: none;
+  --app-texture-size: auto;
+  --app-pattern: none;
+  --app-pattern-size: auto;
+  --app-pattern-opacity: 0;
+
   /* === Sidebar === */
-  --sidebar: #0f172a;
-  --sidebar-foreground: #e5e7eb;
-  --sidebar-primary: #c4a44a;
-  --sidebar-primary-foreground: #0b1220;
-  --sidebar-accent: #0f3460;
-  --sidebar-accent-foreground: #e5e7eb;
-  --sidebar-border: #1f2937;
-  --sidebar-ring: #c4a44a;
+  --sidebar: var(--card);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: var(--secondary);
+  --sidebar-accent-foreground: var(--foreground);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--primary);
+}
+
+/* Art themes (skins with a texture/pattern): keep content panels solid/opaque so
+ * text stays readable — the motif lives in the BACKDROP (margins, empty states,
+ * behind the chrome), not behind body text. Plain themes are unaffected. */
+:root[data-textured] {
+  --glass-bg: color-mix(in oklab, var(--card) 94%, transparent);
+  --glass-bg-light: color-mix(in oklab, var(--card) 88%, transparent);
 }
 
 @layer base {
@@ -166,6 +316,12 @@
   html {
     @apply font-sans;
   }
+}
+
+/* Theme-aware text selection (default Chromium blue clashes on warm/mono themes) */
+::selection {
+  background: color-mix(in oklab, var(--accent-sky) 40%, var(--bg-base));
+  color: var(--foreground);
 }
 
 /* Custom scrollbar — sky-blue accent (ESO-LOG-AG style) */
@@ -202,16 +358,18 @@
 }
 
 /* === Ambient Background Animations === */
+/* translate-only: scaling a 120px-blurred element re-rasterizes the bitmap each
+ * frame; translate stays on the compositor (paired with will-change:transform). */
 @keyframes orb-drift {
   0%,
   100% {
-    transform: translate(0, 0) scale(1);
+    transform: translate(0, 0);
   }
   33% {
-    transform: translate(30px, -20px) scale(1.05);
+    transform: translate(30px, -20px);
   }
   66% {
-    transform: translate(-20px, 15px) scale(0.95);
+    transform: translate(-20px, 15px);
   }
 }
 
@@ -235,10 +393,11 @@
     transform 0.15s ease,
     background-color 0.15s ease,
     border-color 0.15s ease,
-    background-image 0.15s ease;
+    background-image 0.15s ease,
+    filter 0.15s ease;
 }
 
-/* === Dialog Header Gold Accent Shimmer === */
+/* === Dialog Header Accent Shimmer (follows the active theme's primary) === */
 @keyframes accent-shimmer {
   0% {
     background-position: -200% 0;
@@ -251,13 +410,13 @@
 [data-slot="dialog-header"]::before {
   background: linear-gradient(
     90deg,
-    rgba(196, 164, 74, 0) 0%,
-    rgba(212, 180, 90, 0.6) 20%,
-    rgba(196, 164, 74, 0.9) 40%,
-    rgba(255, 235, 160, 1) 50%,
-    rgba(196, 164, 74, 0.9) 60%,
-    rgba(212, 180, 90, 0.6) 80%,
-    rgba(196, 164, 74, 0) 100%
+    color-mix(in oklab, var(--primary) 0%, transparent) 0%,
+    color-mix(in oklab, var(--primary-hover) 60%, transparent) 20%,
+    color-mix(in oklab, var(--primary) 90%, transparent) 40%,
+    color-mix(in oklab, var(--primary-hover) 65%, #ffffff) 50%,
+    color-mix(in oklab, var(--primary) 90%, transparent) 60%,
+    color-mix(in oklab, var(--primary-hover) 60%, transparent) 80%,
+    color-mix(in oklab, var(--primary) 0%, transparent) 100%
   ) !important;
   background-size: 200% 100%;
   animation: accent-shimmer 4s ease-in-out infinite;
@@ -306,13 +465,13 @@
 }
 
 [data-slot="dialog-content"] ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in oklab, var(--accent-sky) 28%, transparent);
   border-radius: 3px;
   border: none;
 }
 
 [data-slot="dialog-content"] ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: color-mix(in oklab, var(--accent-sky) 48%, transparent);
 }
 
 /* === Select Dropdown Scrollbar === */
@@ -325,7 +484,7 @@
 }
 
 [data-slot="select-content"] ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: color-mix(in oklab, var(--accent-sky) 28%, transparent);
   border-radius: 3px;
   border: none;
 }
@@ -371,6 +530,16 @@
   }
 }
 
+/* === Theme switch cross-fade (View Transitions API) ===
+ * Switching themes is wrapped in document.startViewTransition() (see
+ * theme-manager.ts), which captures before/after snapshots of the root and
+ * cross-fades between the two palettes. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 280ms;
+  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 /* === Reduced Motion === */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -381,6 +550,54 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
+
+/* === Windows High Contrast / forced-colors ===
+ * The chrome relies on translucent white-alpha borders, which forced-colors
+ * flattens away; restore visible system-colored edges + focus, and drop the
+ * decorative art layers so they can't obscure system-painted text. */
+@media (forced-colors: active) {
+  [data-slot="glass-panel"],
+  [data-slot="dialog-content"],
+  [data-slot="popover-content"],
+  [data-slot="select-content"] {
+    border: 1px solid CanvasText;
+  }
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+  :root {
+    --app-texture: none;
+    --app-pattern: none;
+  }
+}
+
+/* === Increased contrast preference: firm up hairline borders === */
+@media (prefers-contrast: more) {
+  :root {
+    --glass-border: rgba(255, 255, 255, 0.18);
+    --glass-border-subtle: rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* === Custom theme editor color picker (react-colorful) — match theme radius === */
+.kalpa-color-picker .react-colorful {
+  width: 100%;
+  height: 150px;
+  border-radius: var(--radius);
+}
+.kalpa-color-picker .react-colorful__saturation {
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.kalpa-color-picker .react-colorful__last-control {
+  border-radius: 0 0 var(--radius) var(--radius);
 }
 
 /* === Screen reader only utility === */

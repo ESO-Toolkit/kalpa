@@ -151,12 +151,12 @@ mod urlencoding {
 /// 1. Bind localhost server on random port
 /// 2. Open browser to website's /app-auth?port={port}
 /// 3. Website does PKCE OAuth with ESO Logs (using its registered redirect URI)
-/// 4. Website sends tokens to http://localhost:{port}/callback?tokens={base64}
+/// 4. Website posts tokens to http://localhost:{port}/callback as JSON
 /// 5. We receive and decode the tokens
 pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
     // Bind to random port
     let listener =
-        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Failed to bind port: {e}"))?;
+        TcpListener::bind("localhost:0").map_err(|e| format!("Failed to bind port: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("Failed to get port: {e}"))?
@@ -197,13 +197,25 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
                 stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 let mut buf = Vec::new();
                 let mut tmp = [0u8; 16384];
-                // Read until we have the full HTTP request headers
+                let mut header_end = None;
+                let mut expected_len = None;
+                // Read until we have the full HTTP request, including the JSON body
+                // used by the current esotk.com app-auth callback.
                 loop {
                     match stream.read(&mut tmp) {
                         Ok(0) => break,
                         Ok(n) => {
                             buf.extend_from_slice(&tmp[..n]);
-                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+
+                            if header_end.is_none() {
+                                header_end = find_header_end(&buf);
+                                if let Some(end) = header_end {
+                                    let request_head = String::from_utf8_lossy(&buf[..end]);
+                                    expected_len = Some(end + content_length(&request_head));
+                                }
+                            }
+
+                            if expected_len.is_some_and(|len| buf.len() >= len) {
                                 break;
                             }
                             if buf.len() > 65536 {
@@ -213,24 +225,23 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
                         Err(_) => break,
                     }
                 }
-                let request = String::from_utf8_lossy(&buf);
+                let header_end = header_end.unwrap_or(buf.len());
+                let request = String::from_utf8_lossy(&buf[..header_end]);
+                let body = if header_end <= buf.len() {
+                    &buf[header_end..]
+                } else {
+                    &[]
+                };
 
-                if let Some(tokens) = extract_tokens_from_request(&request) {
+                if request.starts_with("OPTIONS ") {
+                    write_preflight_response(&mut stream);
+                } else if let Some(tokens) = extract_tokens_from_request(&request, body) {
                     // Send success page
                     let html = r#"<!DOCTYPE html><html><head><style>body{font-family:system-ui;background:#0b1220;color:#e5e7eb;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}div{text-align:center}h1{color:#c4a44a;font-size:1.5rem}p{opacity:0.6}</style></head><body><div><h1>Signed in!</h1><p>You can close this tab and return to Kalpa.</p></div></body></html>"#;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: https://esotk.com\r\nConnection: close\r\n\r\n{}",
-                        html.len(),
-                        html
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                    let _ = stream.flush();
+                    write_response(&mut stream, "200 OK", "text/html", html);
                     return Ok(tokens);
-                } else if request.contains("OPTIONS") {
-                    // Handle CORS preflight — only esotk.com needs access to this callback
-                    let response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: https://esotk.com\r\nAccess-Control-Allow-Methods: GET\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                    let _ = stream.write_all(response.as_bytes());
                 } else {
+                    // Unknown callback request.
                     let response =
                         "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = stream.write_all(response.as_bytes());
@@ -247,12 +258,69 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
     }
 }
 
-fn extract_tokens_from_request(request: &str) -> Option<CallbackTokens> {
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+fn content_length(request_head: &str) -> usize {
+    request_head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0)
+}
+
+fn write_cors_headers(response: &mut String) {
+    response.push_str("Access-Control-Allow-Origin: https://esotk.com\r\n");
+    response.push_str("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
+    response.push_str("Access-Control-Allow-Headers: Content-Type\r\n");
+    response.push_str("Access-Control-Allow-Private-Network: true\r\n");
+    response.push_str("Vary: Origin\r\n");
+}
+
+fn write_preflight_response(stream: &mut impl Write) {
+    let mut response = "HTTP/1.1 204 No Content\r\n".to_string();
+    write_cors_headers(&mut response);
+    response.push_str("Content-Length: 0\r\nConnection: close\r\n\r\n");
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+fn write_response(stream: &mut impl Write, status: &str, content_type: &str, body: &str) {
+    let mut response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n");
+    write_cors_headers(&mut response);
+    response.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    ));
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+fn extract_tokens_from_request(request: &str, body: &[u8]) -> Option<CallbackTokens> {
     let first_line = request.lines().next()?;
-    let path = first_line.split_whitespace().nth(1)?;
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next()?;
+    let path = parts.next()?;
     if !path.starts_with("/callback") {
         return None;
     }
+
+    if method.eq_ignore_ascii_case("POST") {
+        return serde_json::from_slice(body).ok();
+    }
+
+    if !method.eq_ignore_ascii_case("GET") {
+        return None;
+    }
+
     let query = path.split('?').nth(1)?;
     for param in query.split('&') {
         if let Some(value) = param.strip_prefix("tokens=") {
@@ -263,6 +331,49 @@ fn extract_tokens_from_request(request: &str) -> Option<CallbackTokens> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_tokens_from_post_json_callback() {
+        let body = br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#;
+        let request = concat!(
+            "POST /callback HTTP/1.1\r\n",
+            "Host: localhost:12345\r\n",
+            "Content-Type: application/json\r\n",
+            "Content-Length: 69\r\n",
+            "\r\n"
+        );
+
+        let tokens = extract_tokens_from_request(request, body).expect("tokens");
+
+        assert_eq!(tokens.access_token, "access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(tokens.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn extracts_tokens_from_legacy_get_callback() {
+        let encoded = STANDARD
+            .encode(br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#);
+        let request = format!("GET /callback?tokens={encoded} HTTP/1.1\r\n\r\n");
+
+        let tokens = extract_tokens_from_request(&request, &[]).expect("tokens");
+
+        assert_eq!(tokens.access_token, "access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(tokens.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn parses_content_length_case_insensitively() {
+        let request = "POST /callback HTTP/1.1\r\ncontent-length: 42\r\n\r\n";
+
+        assert_eq!(content_length(request), 42);
+    }
 }
 
 // ── User Validation ──────────────────────────────────────────────────────

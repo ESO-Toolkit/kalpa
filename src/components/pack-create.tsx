@@ -178,16 +178,6 @@ export function PackCreateView({
     }
   };
 
-  const handleLogout = async () => {
-    try {
-      await invokeOrThrow("auth_logout");
-      onAuthChange(null);
-      toast.success("Signed out");
-    } catch (e) {
-      toast.error(`Sign out failed: ${getTauriErrorMessage(e)}`);
-    }
-  };
-
   const handleSaveDraft = async () => {
     if (!title.trim()) {
       toast.error("Pack needs a title.");
@@ -361,7 +351,7 @@ export function PackCreateView({
         {authUser ? (
           <span className="text-muted-foreground/60">
             {editingPackId ? "Editing as " : "Creating as "}
-            <span className="text-[#c4a44a] font-semibold">{authUser.userName}</span>
+            <span className="text-primary font-semibold">{authUser.userName}</span>
           </span>
         ) : (
           <span className="text-muted-foreground/60">Creating a pack</span>
@@ -373,14 +363,6 @@ export function PackCreateView({
               className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
             >
               Cancel edit
-            </button>
-          )}
-          {authUser && (
-            <button
-              onClick={handleLogout}
-              className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-            >
-              Sign out
             </button>
           )}
         </div>
@@ -402,7 +384,7 @@ export function PackCreateView({
             className={cn(
               "flex items-center gap-1.5 text-xs font-semibold transition-all duration-200",
               step === s.key
-                ? "text-[#c4a44a]"
+                ? "text-primary"
                 : s.key === "addons" && !canProceed
                   ? "text-muted-foreground/30 cursor-not-allowed"
                   : "text-muted-foreground/50 hover:text-muted-foreground cursor-pointer"
@@ -412,7 +394,7 @@ export function PackCreateView({
               className={cn(
                 "inline-flex items-center justify-center size-5 rounded-full text-[10px] font-bold leading-none transition-all duration-200",
                 step === s.key
-                  ? "bg-[#c4a44a]/20 text-[#c4a44a] border border-[#c4a44a]/40 shadow-[0_0_8px_rgba(196,164,74,0.15)]"
+                  ? "bg-primary/20 text-primary border border-primary/40 shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_15%,transparent)]"
                   : "bg-white/[0.04] text-muted-foreground/40 border border-white/[0.08]"
               )}
             >
@@ -448,7 +430,7 @@ export function PackCreateView({
             <div className="mt-1 flex items-center gap-2">
               <div className="flex-1 h-0.5 rounded bg-white/[0.04] overflow-hidden">
                 <div
-                  className="h-full rounded bg-[#c4a44a] transition-all duration-300"
+                  className="h-full rounded bg-primary transition-all duration-300"
                   style={{ width: `${Math.min((title.length / 100) * 100, 100)}%` }}
                 />
               </div>
@@ -470,12 +452,12 @@ export function PackCreateView({
               onChange={(e) => setDescription(e.target.value)}
               maxLength={500}
               rows={3}
-              className="w-full rounded-[10px] border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_1px_0_rgba(255,255,255,0.02)] transition-all duration-150 hover:bg-white/[0.05] hover:border-white/[0.14] focus-visible:border-sky-400/40 focus-visible:ring-0 focus-visible:shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_0_0_2px_rgba(56,189,248,0.12),0_0_12px_rgba(56,189,248,0.06)] resize-none"
+              className="w-full rounded-[10px] border border-white/[0.1] bg-white/[0.04] px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/30 outline-none shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_1px_0_rgba(255,255,255,0.02)] transition-all duration-150 hover:bg-white/[0.05] hover:border-white/[0.14] focus-visible:border-accent-sky/40 focus-visible:ring-0 focus-visible:shadow-[inset_0_1px_2px_rgba(0,0,0,0.2),0_0_0_2px_color-mix(in_oklab,var(--accent-sky)_12%,transparent),0_0_12px_color-mix(in_oklab,var(--accent-sky)_6%,transparent)] resize-none"
             />
             <div className="mt-1 flex items-center gap-2">
               <div className="flex-1 h-0.5 rounded bg-white/[0.04] overflow-hidden">
                 <div
-                  className="h-full rounded bg-[#c4a44a] transition-all duration-300"
+                  className="h-full rounded bg-primary transition-all duration-300"
                   style={{ width: `${Math.min((description.length / 500) * 100, 100)}%` }}
                 />
               </div>
@@ -507,14 +489,14 @@ export function PackCreateView({
                         : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.1] hover:bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)]",
                       isSelected &&
                         pt === "addon-pack" &&
-                        "ring-1 ring-[#c4a44a]/15 shadow-[0_0_16px_rgba(196,164,74,0.06),inset_0_1px_0_rgba(255,255,255,0.06)]",
+                        "ring-1 ring-primary/15 shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_6%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
                       isSelected &&
                         pt === "build-pack" &&
-                        "ring-1 ring-sky-400/15 shadow-[0_0_16px_rgba(56,189,248,0.06),inset_0_1px_0_rgba(255,255,255,0.06)]",
+                        "ring-1 ring-accent-sky/15 shadow-[0_0_16px_color-mix(in_oklab,var(--accent-sky)_6%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
                       isSelected &&
                         pt === "roster-pack" &&
-                        "ring-1 ring-violet-400/15 shadow-[0_0_16px_rgba(167,139,250,0.06),inset_0_1px_0_rgba(255,255,255,0.06)]",
-                      "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-400/50"
+                        "ring-1 ring-violet-400/15 shadow-[0_0_16px_color-mix(in_oklab,var(--status-library)_6%,transparent),inset_0_1px_0_rgba(255,255,255,0.06)]",
+                      "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                     )}
                   >
                     {isSelected && (
@@ -569,7 +551,7 @@ export function PackCreateView({
                     className={cn(
                       "px-2.5 py-1 rounded-lg text-xs font-semibold transition-all duration-150",
                       isSelected
-                        ? "bg-[#c4a44a]/20 text-[#c4a44a] border border-[#c4a44a]/40 shadow-[0_0_10px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(196,164,74,0.08)]"
+                        ? "bg-primary/20 text-primary border border-primary/40 shadow-[0_0_10px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_8%,transparent)]"
                         : "bg-white/[0.03] text-muted-foreground/60 border border-white/[0.06] shadow-[inset_0_1px_0_rgba(255,255,255,0.02)] hover:border-white/[0.12] hover:text-muted-foreground hover:bg-white/[0.05]",
                       isDisabled && "opacity-30 cursor-not-allowed"
                     )}
@@ -600,7 +582,7 @@ export function PackCreateView({
               Back to details
             </button>
             {addons.length > 0 && (
-              <span className="text-xs text-[#c4a44a] font-semibold">
+              <span className="text-xs text-primary font-semibold">
                 {addons.length} addon{addons.length !== 1 ? "s" : ""} selected
               </span>
             )}
@@ -701,9 +683,9 @@ export function PackCreateView({
                       >
                         <div className="flex items-center gap-2">
                           {alreadyAdded ? (
-                            <CheckIcon className="size-3.5 text-[#c4a44a] shrink-0" />
+                            <CheckIcon className="size-3.5 text-primary shrink-0" />
                           ) : (
-                            <PlusIcon className="size-3.5 text-[#c4a44a] shrink-0" />
+                            <PlusIcon className="size-3.5 text-primary shrink-0" />
                           )}
                           <span className="text-sm font-medium truncate">{result.title}</span>
                           <span className="text-[10px] text-muted-foreground/30 tabular-nums shrink-0">
@@ -752,9 +734,9 @@ export function PackCreateView({
                     >
                       <div className="flex items-center gap-2">
                         {alreadyAdded ? (
-                          <CheckIcon className="size-3.5 text-[#c4a44a] shrink-0" />
+                          <CheckIcon className="size-3.5 text-primary shrink-0" />
                         ) : (
-                          <PlusIcon className="size-3.5 text-[#c4a44a] shrink-0" />
+                          <PlusIcon className="size-3.5 text-primary shrink-0" />
                         )}
                         <span className="text-sm font-medium truncate">
                           {addon.title || addon.folderName}
@@ -779,8 +761,8 @@ export function PackCreateView({
               </SectionHeader>
               {addons.length === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
-                  <div className="rounded-xl bg-[#c4a44a]/[0.08] border border-[#c4a44a]/[0.15] p-3 shadow-[0_0_16px_rgba(196,164,74,0.08),inset_0_1px_0_rgba(196,164,74,0.06)]">
-                    <SparklesIcon className="size-5 text-[#c4a44a]/50" />
+                  <div className="rounded-xl bg-primary/[0.08] border border-primary/[0.15] p-3 shadow-[0_0_16px_color-mix(in_oklab,var(--primary)_8%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--primary)_6%,transparent)]">
+                    <SparklesIcon className="size-5 text-primary/50" />
                   </div>
                   <p className="text-[11px] text-muted-foreground/50 max-w-[160px] leading-relaxed">
                     No addons yet — search or pick from your installed addons above.
@@ -814,7 +796,7 @@ export function PackCreateView({
                           className={cn(
                             "absolute top-0.5 bottom-0.5 rounded-[5px] transition-all duration-200 ease-[cubic-bezier(0.34,1.56,0.64,1)]",
                             addon.required
-                              ? "left-0.5 w-[calc(50%-2px)] bg-[#c4a44a]/20 border border-[#c4a44a]/30 shadow-[0_0_6px_rgba(196,164,74,0.12)]"
+                              ? "left-0.5 w-[calc(50%-2px)] bg-primary/20 border border-primary/30 shadow-[0_0_6px_color-mix(in_oklab,var(--primary)_12%,transparent)]"
                               : "left-[calc(50%)] w-[calc(50%-2px)] bg-white/[0.06] border border-white/[0.08]"
                           )}
                         />
@@ -823,7 +805,7 @@ export function PackCreateView({
                           className={cn(
                             "relative z-10 flex-1 text-[10px] font-semibold py-0.5 rounded-[5px] transition-colors duration-150 text-center",
                             addon.required
-                              ? "text-[#c4a44a]"
+                              ? "text-primary"
                               : "text-muted-foreground/40 hover:text-muted-foreground/60"
                           )}
                         >

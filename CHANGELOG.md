@@ -4,6 +4,47 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+## [0.1.0-beta.9] — 2026-06-21
+
+A feature-and-fixes release headlined by a full **theming system** for the app, paired with a fix that brings back characters most players were missing from the **Characters** list.
+
+The marquee addition lives in **Settings → Appearance**: 49 built-in dark themes — Elder Scrolls art skins, ESO palettes, and editor classics — plus a custom theme builder with live preview and contrast checking. Alongside it, the Characters list now surfaces characters that ESO's default Account-Wide settings mode previously hid, per-character backups are now crash-safe, and Pack Hub sign-in works again after the ESO Toolkit auth site changed its callback.
+
+### Features
+
+- **Theme system with 49 built-in skins.** Settings now has an Appearance section where you can recolor the entire app. There are 49 dark themes to choose from, including eight Elder Scrolls art skins with their own textures and patterns (Elder Scroll, Daedric Obsidian, Dwemer Brass, Ayleid Welkynd, Sithis, Hermaeus Mora, Clockwork City, Nordic Runestone), ESO faction and lore palettes, editor classics like Dracula, Nord, Tokyo Night, Catppuccin and Gruvbox, plus Neon, Nature, Gemstone, Metal and Minimal sets. Switching is instant and applies everywhere, and the original gold default is still there if you want to leave things as they were. ([#175](https://github.com/ESO-Toolkit/kalpa/pull/175))
+- **Custom theme builder.** Beyond the presets, you can build your own theme by picking 12 colors and watching the whole app update live as you go. A built-in readability check flags any color combination that falls below WCAG AA contrast, so your custom theme stays legible, and you can copy a finished theme to the clipboard or paste one in to share it. The color picker is powered by one small new dependency, `react-colorful` (~2.8 KB). ([#175](https://github.com/ESO-Toolkit/kalpa/pull/175))
+- **No theme flash on startup.** Your chosen theme is applied before the window paints, so Kalpa opens directly in the right colors instead of briefly flashing the default theme first. ([#175](https://github.com/ESO-Toolkit/kalpa/pull/175))
+
+### Bug Fixes
+
+- **Missing characters now appear in the Characters list.** When ESO runs in its default Account-Wide Addon Settings mode, every character's data collapses into a single shared block in `AddOnSettings.txt`, so Kalpa could only see characters that had per-character headers and most of your roster never showed up. The Characters list now also recovers character names from your SavedVariables files and merges them in, so characters that were previously invisible are listed (with their real megaserver when it can be determined, otherwise grouped under Unknown). ([#180](https://github.com/ESO-Toolkit/kalpa/pull/180))
+- **Characters hidden inside very large SavedVariables files now show up.** The previous scan loaded each addon data file into memory and skipped any file larger than 64 MiB, which meant a character whose only data lived in a big file would silently go missing. Opening the Characters panel now streams through files of any size, so the size limit is gone and no character is left out. ([#180](https://github.com/ESO-Toolkit/kalpa/pull/180))
+- **Per-character backup and restore is now safe and precise.** Backing up or restoring a single character now surgically touches only that character's data, leaving every other character and your account-wide settings untouched, and same-named characters on NA and EU are kept separate. The process is crash-safe: an interrupted backup rolls back cleanly, restores take a safety snapshot first, and an unreadable backup fails safely instead of risking an overwrite of the whole file. ([#180](https://github.com/ESO-Toolkit/kalpa/pull/180))
+- **Clearer errors when character data can't be read.** If `AddOnSettings.txt` can't be read (for example due to file permissions), the Characters list now surfaces the real error instead of quietly showing an incomplete roster, and files it has to skip during the scan are counted and reported. ([#180](https://github.com/ESO-Toolkit/kalpa/pull/180))
+- **Fixed garbled emoji and special characters in Pack Hub content.** Community pack titles, descriptions, author names, and the addon names shown inside packs could appear as corrupted glyphs when they contained numeric HTML entities for emoji or other upper-Unicode characters, because those characters were being truncated during decoding. Kalpa now decodes these entities correctly so the right characters render, and malformed or invalid entities (including null, lone surrogate values, and uppercase-hex forms like `&#X1F600;`) are handled safely instead of turning into broken text. ([#171](https://github.com/ESO-Toolkit/kalpa/pull/171))
+- **Pack Hub sign-in works again.** The ESO Toolkit sign-in site changed how it hands tokens back to the desktop app — it now sends them as a JSON `POST` to Kalpa's local callback instead of a query string — so browser sign-in could complete while the app never received usable tokens. Kalpa now accepts the new callback (including the cross-origin preflight and private-network permission the browser requires) while still understanding the legacy one, so signing in to the Pack Hub works again. ([#182](https://github.com/ESO-Toolkit/kalpa/pull/182))
+- **Pack Hub account strip and dismissible panel loading.** The Pack Hub now shows the account you're signed in as with a one-click sign-out at the top, and panels that open on demand show a labeled loading dialog you can close instead of briefly flashing a blank screen. ([#182](https://github.com/ESO-Toolkit/kalpa/pull/182))
+
+## [0.1.0-beta.8] — 2026-06-21
+
+A dependency-resolution and addon-install fix release. It makes required/optional dependency status accurate and the in-app **Install/Update** buttons actually work for libraries ESOUI serves via a redirect — most visibly LuiExtended's `LuiData` and `LuiMedia`.
+
+### Bug Fixes
+
+- **Dependency Install/Update no longer fails with `not_found`.** ESOUI redirects a precise-name search straight to the addon's page (e.g. `info4373-LuiData.html`), which carries none of the result-list links Kalpa's search scraped — so the dependency Install/Update buttons returned `not_found` for libraries like `LuiData` and `LuiMedia`. Kalpa now recovers the addon id from the redirected URL. The Discover-tab search was fixed the same way, so an exact-name query no longer comes back empty. ([#174](https://github.com/ESO-Toolkit/kalpa/pull/174))
+- **Dependency status is resolved case-insensitively, matching the game.** ESO loads addon folders case-insensitively, but Kalpa compared names exactly, so a folder cased differently than a `## DependsOn:` entry was falsely flagged "missing". Names are now matched case-insensitively, a folder counts as installed only if it actually has a matching manifest (a partly-extracted folder no longer masks a missing library), and `DependsOn` parsing tolerates spaces around `>=` and stray invisible characters. ([#173](https://github.com/ESO-Toolkit/kalpa/pull/173))
+- **Optional dependencies show present/absent correctly,** including libraries bundled inside another addon, and the Remove button now targets the real on-disk folder rather than the dependency's declared name. ([#173](https://github.com/ESO-Toolkit/kalpa/pull/173))
+- **Dependency install surfaces the real error** — e.g. a Controlled Folder Access / permission block, with the fix steps — instead of a generic `extract_failed`. ([#174](https://github.com/ESO-Toolkit/kalpa/pull/174))
+
+### Features
+
+- **Slide-reveal selection rail in the addon list.** ([#172](https://github.com/ESO-Toolkit/kalpa/pull/172))
+
+### CI
+
+- **Scope the root npm audit to production dependencies** (`--omit=dev`), mirroring the worker audit. It was failing on high-severity advisories in dev-only tooling (`jsdom`→`undici`, `shadcn`→`hono`/`js-yaml`) that never ship in the app. ([#176](https://github.com/ESO-Toolkit/kalpa/pull/176))
+
 ## [0.1.0-beta.7] — 2026-06-14
 
 A correctness and data-integrity hardening release following the recent performance work. An audit of the batched install/update/toggle paths surfaced several cases where the speedups skipped a safety step; these fixes restore the guarantees while keeping the performance gains.

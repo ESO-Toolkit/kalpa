@@ -249,7 +249,7 @@ export function RosterPackInstall({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <PackageIcon className="h-5 w-5 text-[#c4a44a]" />
+            <PackageIcon className="h-5 w-5 text-primary" />
             {loading ? "Loading Pack..." : pack ? decodeHtml(pack.title) : "Roster Pack"}
           </DialogTitle>
         </DialogHeader>
@@ -323,7 +323,7 @@ export function RosterPackInstall({
                       )}
                       {status === "installed" && <CheckIcon className="h-4 w-4 text-emerald-400" />}
                       {status === "installing" && (
-                        <Loader2Icon className="h-4 w-4 animate-spin text-sky-400" />
+                        <Loader2Icon className="h-4 w-4 animate-spin text-accent-sky" />
                       )}
                       {status === "failed" && <XIcon className="h-4 w-4 text-red-400" />}
                     </div>
@@ -336,7 +336,7 @@ export function RosterPackInstall({
                   <div className="mt-1">
                     <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
                       <div
-                        className="h-full rounded-full bg-sky-400 transition-all duration-300"
+                        className="h-full rounded-full bg-accent-sky transition-all duration-300"
                         style={{
                           width: `${(installProgress.completed / installProgress.total) * 100}%`,
                         }}

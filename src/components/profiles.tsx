@@ -148,7 +148,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
         <div className="max-h-[300px] overflow-y-auto space-y-2">
           {!loaded ? (
             <div className="flex justify-center py-6">
-              <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+              <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
             </div>
           ) : profiles.length === 0 ? (
             <Fade>
@@ -162,7 +162,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
                 <div
                   className={cn(
                     "flex items-center justify-between rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-all duration-200",
-                    activeProfile === p.name && "border-[#c4a44a]/30 bg-[#c4a44a]/[0.04]"
+                    activeProfile === p.name && "border-primary/30 bg-primary/[0.04]"
                   )}
                 >
                   <div>

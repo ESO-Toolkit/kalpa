@@ -75,7 +75,7 @@ export function RichDescription({ text, className }: RichDescriptionProps) {
                 {block.items[0]}
               </p>
             ) : (
-              <ul key={idx} className="list-disc space-y-1 pl-5 marker:text-[#c4a44a]">
+              <ul key={idx} className="list-disc space-y-1 pl-5 marker:text-primary">
                 {block.items.map((item, itemIdx) => (
                   <li key={`${idx}-${itemIdx}`} className="text-foreground/85">
                     {item}

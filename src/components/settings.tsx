@@ -31,9 +31,11 @@ import {
   Shield,
   Sparkles,
   Trash2,
+  Palette,
 } from "lucide-react";
+import { AppearanceSettings } from "./appearance-settings";
 
-type SettingsTab = "general" | "tools" | "data";
+type SettingsTab = "general" | "appearance" | "tools" | "data";
 
 interface SettingsProps {
   addonsPath: string;
@@ -53,6 +55,7 @@ interface SettingsProps {
 
 const tabs: { id: SettingsTab; label: string; icon: React.ElementType }[] = [
   { id: "general", label: "General", icon: FolderOpen },
+  { id: "appearance", label: "Appearance", icon: Palette },
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "data", label: "Data", icon: Database },
 ];
@@ -475,6 +478,18 @@ export function Settings({
                       </button>
                     ))}
                   </GlassPanel>
+                </motion.div>
+              )}
+
+              {activeTab === "appearance" && (
+                <motion.div
+                  key={activeTab}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.08 }}
+                >
+                  <AppearanceSettings />
                 </motion.div>
               )}
 
