@@ -875,7 +875,7 @@ pub struct TransportInfo {
 }
 
 /// Report which upload transport is available (drives the UI's upload button
-/// copy: "Upload via ESO Logs Uploader" vs "Open in ESO Logs Uploader").
+/// copy: "Upload to ESO Logs" vs "Open the ESO Logs uploader").
 #[tauri::command]
 pub fn uploader_transport_info() -> TransportInfo {
     let installed = transport::find_official_uploader().is_some();
@@ -1495,7 +1495,7 @@ pub async fn uploader_start_live(
                 eprintln!("[uploader] live timeline watcher failed (upload still running): {e}");
                 return Ok(UploadDispatch {
                     handed_off,
-                    detail: "Live logging started in the ESO Logs Uploader. The in-app \
+                    detail: "Live logging started in the official ESO Logs uploader. The in-app \
                              fight timeline is unavailable for this session."
                         .into(),
                     report,
