@@ -259,12 +259,16 @@ export async function hydrateThemeFromStore() {
   if (forcedVersion < FORCED_DEFAULT_VERSION) {
     // One-time forced migration: move every user onto the current factory default
     // once, overriding whatever they had chosen. Record the override and its
-    // version marker ATOMICALLY and only adopt the reset if it actually persisted
+    // version marker as one unit and only adopt the reset if it actually persisted
     // — otherwise a partial write could override a choice without durably marking
     // the migration done, re-firing the reset on every later launch.
+    // Marker first: if a debounced autosave ever flushed mid-batch (before the
+    // single save()), a partial state should be "marked migrated, still old theme"
+    // (benign) — never "reset without marker," which would re-fire and clobber a
+    // later choice.
     const recorded = await setSettings({
-      [STORE_KEY_ACTIVE]: DEFAULT_THEME_ID,
       [STORE_KEY_FORCED_DEFAULT]: FORCED_DEFAULT_VERSION,
+      [STORE_KEY_ACTIVE]: DEFAULT_THEME_ID,
     });
     if (recorded) {
       activeThemeId = DEFAULT_THEME_ID;
