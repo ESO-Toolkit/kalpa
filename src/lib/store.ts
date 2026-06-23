@@ -42,12 +42,20 @@ export async function setSetting<T>(key: string, value: T): Promise<boolean> {
  * single explicit `save()` flushes the whole store file to disk. autoSave is
  * debounced (100ms), so the explicit save lands before any per-set autosave could
  * fire — making the batch atomic in the normal path, and a mid-batch crash
- * flushes nothing (clean retry next launch). Returns true only if the batch
- * reached disk. Order keys so that, in the rare event a debounced autosave fires
- * mid-batch, a partial flush is still safe. Never throws. */
+ * flushes nothing (clean retry next launch). On failure the in-memory cache is
+ * restored to its exact pre-batch snapshot (set/delete per key), so a later
+ * autosave can't flush a half-written batch — a `false` return means "nothing
+ * changed." (store.reload() is unsuitable: it merges disk state and won't drop
+ * keys this batch newly added.) Never throws. */
 export async function setSettings(entries: Record<string, unknown>): Promise<boolean> {
+  const prior = new Map<string, unknown>();
   try {
     const store = await getStore();
+    // Snapshot every key's prior value BEFORE mutating any, so the snapshot is
+    // complete by the time the first set() runs.
+    for (const key of Object.keys(entries)) {
+      prior.set(key, await store.get(key));
+    }
     for (const [key, value] of Object.entries(entries)) {
       await store.set(key, value);
     }
@@ -55,12 +63,12 @@ export async function setSettings(entries: Record<string, unknown>): Promise<boo
     return true;
   } catch (err) {
     console.warn("[store] Failed to write batch:", err);
-    // Roll back un-persisted in-memory mutations by reloading from disk, so a
-    // debounced autoSave can't later flush a half-written batch after we've
-    // reported failure. This makes a `false` return mean "nothing changed."
     try {
       const store = await getStore();
-      await store.reload();
+      for (const [key, had] of prior) {
+        if (had === undefined) await store.delete(key);
+        else await store.set(key, had);
+      }
     } catch {
       /* best-effort rollback */
     }
