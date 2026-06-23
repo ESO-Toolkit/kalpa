@@ -333,49 +333,6 @@ fn extract_tokens_from_request(request: &str, body: &[u8]) -> Option<CallbackTok
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_tokens_from_post_json_callback() {
-        let body = br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#;
-        let request = concat!(
-            "POST /callback HTTP/1.1\r\n",
-            "Host: localhost:12345\r\n",
-            "Content-Type: application/json\r\n",
-            "Content-Length: 69\r\n",
-            "\r\n"
-        );
-
-        let tokens = extract_tokens_from_request(request, body).expect("tokens");
-
-        assert_eq!(tokens.access_token, "access");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
-        assert_eq!(tokens.expires_in, Some(3600));
-    }
-
-    #[test]
-    fn extracts_tokens_from_legacy_get_callback() {
-        let encoded = STANDARD
-            .encode(br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#);
-        let request = format!("GET /callback?tokens={encoded} HTTP/1.1\r\n\r\n");
-
-        let tokens = extract_tokens_from_request(&request, &[]).expect("tokens");
-
-        assert_eq!(tokens.access_token, "access");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
-        assert_eq!(tokens.expires_in, Some(3600));
-    }
-
-    #[test]
-    fn parses_content_length_case_insensitively() {
-        let request = "POST /callback HTTP/1.1\r\ncontent-length: 42\r\n\r\n";
-
-        assert_eq!(content_length(request), 42);
-    }
-}
-
 // ── User Validation ──────────────────────────────────────────────────────
 
 pub fn validate_token(access_token: &str) -> Result<(String, String), String> {
@@ -504,6 +461,44 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_tokens_from_post_json_callback() {
+        let body = br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#;
+        let request = concat!(
+            "POST /callback HTTP/1.1\r\n",
+            "Host: localhost:12345\r\n",
+            "Content-Type: application/json\r\n",
+            "Content-Length: 69\r\n",
+            "\r\n"
+        );
+
+        let tokens = extract_tokens_from_request(request, body).expect("tokens");
+
+        assert_eq!(tokens.access_token, "access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(tokens.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn extracts_tokens_from_legacy_get_callback() {
+        let encoded = STANDARD
+            .encode(br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#);
+        let request = format!("GET /callback?tokens={encoded} HTTP/1.1\r\n\r\n");
+
+        let tokens = extract_tokens_from_request(&request, &[]).expect("tokens");
+
+        assert_eq!(tokens.access_token, "access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(tokens.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn parses_content_length_case_insensitively() {
+        let request = "POST /callback HTTP/1.1\r\ncontent-length: 42\r\n\r\n";
+
+        assert_eq!(content_length(request), 42);
+    }
 
     #[test]
     fn auth_user_session_persisted_serializes_camelcase_and_omits_when_none() {
