@@ -279,6 +279,10 @@ export function AddonDetail({
 
   const handleConflictResolve = async (decisions: FileDecision[]) => {
     if (!conflictReport || !updateResult) return;
+    // Busy guard: the panel's Apply button stays enabled during the update, so a
+    // double-click would re-submit the same session and fail "Session not found"
+    // once the first apply removes it. Mirrors handleUpdate.
+    if (updating) return;
     setUpdating(true);
     // Re-check here too: ESO may have launched after the initial scan while the
     // conflict panel was open, so the earlier handleUpdate gate can be stale.
@@ -471,7 +475,9 @@ export function AddonDetail({
             sessionId={pendingConflict.sessionId}
             addonsPath={addonsPath}
             onResolve={async (decisions) => {
+              if (updating) return;
               setUpdating(true);
+              setUpdateError(null);
               if (!(await ensureEsoNotBlocking())) {
                 setUpdating(false);
                 return;
