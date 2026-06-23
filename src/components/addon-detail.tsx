@@ -84,6 +84,7 @@ export function AddonDetail({
   const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(
     null
   );
+  const [canStopUpdate, setCanStopUpdate] = useState(false);
   const operationIdRef = useRef<string | null>(null);
   const stopRequestedRef = useRef(false);
 
@@ -94,6 +95,7 @@ export function AddonDetail({
       "update-progress",
       (event) => {
         if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
+          setCanStopUpdate(true);
           setExtractProgress({ done: event.payload.fileIndex, total: event.payload.fileTotal });
         }
       }
@@ -116,12 +118,18 @@ export function AddonDetail({
     const id = crypto.randomUUID();
     operationIdRef.current = id;
     stopRequestedRef.current = false;
+    // The whole operation (scan → download → extract) is cancellable now, so
+    // enable Stop the moment it begins rather than waiting for the first
+    // extraction-progress event. A Stop during scan is signalled to the backend
+    // and also caught by `stopRequestedRef` if the scan finishes first.
+    setCanStopUpdate(true);
     setExtractProgress(null);
     return id;
   };
   const endOperation = () => {
     operationIdRef.current = null;
     stopRequestedRef.current = false;
+    setCanStopUpdate(false);
     setExtractProgress(null);
   };
   const handleStopUpdate = () => {
@@ -268,6 +276,7 @@ export function AddonDetail({
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
       if (isCancellation(e)) {
+        setConflictReport(null);
         toast.info(`Stopped updating ${addon.title}`, {
           description: "It may be partially updated — run the update again to finish.",
         });
@@ -417,7 +426,12 @@ export function AddonDetail({
                   ? `Extracting ${extractProgress.done.toLocaleString()} / ${extractProgress.total.toLocaleString()}`
                   : "Updating…"}
               </span>
-              <Button onClick={handleStopUpdate} size="sm" variant="outline">
+              <Button
+                onClick={handleStopUpdate}
+                disabled={!canStopUpdate}
+                size="sm"
+                variant="outline"
+              >
                 Stop
               </Button>
             </div>
@@ -483,10 +497,15 @@ export function AddonDetail({
                 if (updateResult) onAddonUpdated(updateResult.esouiId);
               } catch (e) {
                 if (isCancellation(e)) {
+                  setPendingConflictDismissed(true);
+                  if (onConflictResolved) {
+                    onConflictResolved(addon.folderName);
+                  } else if (updateResult) {
+                    onAddonUpdated(updateResult.esouiId);
+                  }
                   toast.info(`Stopped updating ${addon.title}`, {
                     description: "It may be partially updated — run the update again to finish.",
                   });
-                  if (updateResult) onAddonUpdated(updateResult.esouiId);
                 } else {
                   setUpdateError(getTauriErrorMessage(e));
                 }
