@@ -1002,8 +1002,9 @@ pub async fn uploader_start_live(
     if transport::find_official_uploader().is_none() {
         remove_own_slot(&state, &session_id, &cancelled);
         return Err(
-            "Live logging needs the ESO Logs Uploader installed. Install \
-                    it, or use \"Upload a Log\" after your session instead."
+            "Live logging needs the official ESO Logs uploader (the Archon App) \
+                    installed. Install it, or use \"Upload a Log\" after your \
+                    session instead."
                 .into(),
         );
     }
@@ -1088,9 +1089,10 @@ pub async fn uploader_start_live(
                     Err(transport::LaunchAborted) => Err(LIVE_CANCELLED_BEFORE_LAUNCH.to_string()),
                 }
             }
-            None => {
-                Err("The ESO Logs Uploader could not be launched for live logging.".to_string())
-            }
+            None => Err(
+                "The official ESO Logs uploader could not be launched for live logging."
+                    .to_string(),
+            ),
         }
     })
     .await
