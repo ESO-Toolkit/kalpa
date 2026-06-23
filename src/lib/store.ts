@@ -55,6 +55,15 @@ export async function setSettings(entries: Record<string, unknown>): Promise<boo
     return true;
   } catch (err) {
     console.warn("[store] Failed to write batch:", err);
+    // Roll back un-persisted in-memory mutations by reloading from disk, so a
+    // debounced autoSave can't later flush a half-written batch after we've
+    // reported failure. This makes a `false` return mean "nothing changed."
+    try {
+      const store = await getStore();
+      await store.reload();
+    } catch {
+      /* best-effort rollback */
+    }
     return false;
   }
 }

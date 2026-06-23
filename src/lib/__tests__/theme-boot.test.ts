@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { DEFAULT_THEME } from "../theme-presets";
 import { FORCED_DEFAULT_VERSION } from "../theme-manager";
-import { themeColorsToVars, themeSkinToVars } from "../theme-apply";
+import { themeColorsToVars } from "../theme-apply";
 // Vite `?raw` import — the boot script's source as a string (no Node APIs, so the
 // DOM-only app tsconfig still typechecks).
 import bootSrc from "../../../public/theme-boot.js?raw";
@@ -27,13 +27,5 @@ describe("theme-boot.js factory-default fallback", () => {
     const raw = bootSrc.match(/var FORCED_VERSION = (\d+);/)?.[1];
     if (!raw) throw new Error("FORCED_VERSION literal not found in theme-boot.js");
     expect(Number(raw)).toBe(FORCED_DEFAULT_VERSION);
-  });
-
-  it("DEFAULT_TEXTURED matches whether the default theme is skinned", () => {
-    const raw = bootSrc.match(/var DEFAULT_TEXTURED = (true|false);/)?.[1];
-    if (!raw) throw new Error("DEFAULT_TEXTURED literal not found in theme-boot.js");
-    const skinVars = themeSkinToVars(DEFAULT_THEME.skin);
-    const expected = "--app-texture" in skinVars || "--app-pattern" in skinVars;
-    expect(raw === "true").toBe(expected);
   });
 });

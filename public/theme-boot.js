@@ -16,8 +16,11 @@
  *
  * Skin note: a theme's texture/pattern IMAGE is applied later by hydration (the
  * SVG data-URIs are too large for this render-blocking script, and the texture
- * layer is React-rendered anyway). We still set `data-textured` here from the
- * applied vars so the `:root[data-textured]` glass tokens are right immediately.
+ * layer is React-rendered anyway). For a returning user the mirror carries the
+ * skin vars, so we set `data-textured` from them to keep the glass tokens right.
+ * For a fresh install / pending migration there is no skin yet, so we paint only
+ * colors and let hydration apply the skin and `data-textured` together — marking
+ * "textured" before the texture exists would briefly mis-tint the glass.
  *
  * Kept dependency-free and in /public so it ships as a same-origin asset that
  * satisfies the strict `script-src 'self'` Content-Security-Policy.
@@ -45,8 +48,6 @@
     "--orb-2": "#5d8aa8",
     "--orb-3": "#4a5a52"
   };
-  // The factory default is a skinned (textured) theme.
-  var DEFAULT_TEXTURED = true;
 
   var root = document.documentElement;
   function apply(vars) {
@@ -76,11 +77,11 @@
   }
 
   // Trust the per-user mirror only once this install has been through the current
-  // forced migration; otherwise paint the factory default.
+  // forced migration; otherwise paint the factory default (colors only — the skin
+  // and its data-textured flag arrive together at hydration).
   if (mirror && applied >= FORCED_VERSION) {
     if (apply(mirror)) root.dataset.textured = "true";
   } else {
     apply(DEFAULT_VARS);
-    if (DEFAULT_TEXTURED) root.dataset.textured = "true";
   }
 })();

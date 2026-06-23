@@ -59,6 +59,9 @@ interface ManagerState {
 }
 
 let state: ManagerState = { activeThemeId: DEFAULT_THEME_ID, customThemes: [] };
+/** Set once the user explicitly picks a theme this session. Guards against a slow
+ * startup hydration/migration clobbering a choice made before it finished. */
+let liveSelection = false;
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -162,6 +165,7 @@ function applyTheme(theme: Theme, animate: boolean) {
 
 /** Switch the active theme (with a cross-fade when supported). */
 export function setActiveTheme(id: string) {
+  liveSelection = true;
   const theme = resolveTheme(id) ?? DEFAULT_THEME;
   state = { ...state, activeThemeId: theme.id };
   applyTheme(theme, true);
@@ -258,31 +262,38 @@ export async function hydrateThemeFromStore() {
 
   if (forcedVersion < FORCED_DEFAULT_VERSION) {
     // One-time forced migration: move every user onto the current factory default
-    // once, overriding whatever they had chosen. Record the override and its
-    // version marker as one unit and only adopt the reset if it actually persisted
-    // — otherwise a partial write could override a choice without durably marking
-    // the migration done, re-firing the reset on every later launch.
+    // once, overriding whatever they had chosen. If the user already picked a
+    // theme interactively while we were loading, that live choice wins over the
+    // forced default (but the migration is still recorded so it never re-fires).
+    const targetActive = liveSelection ? state.activeThemeId : DEFAULT_THEME_ID;
+    // Record the override and its version marker as one unit; only adopt the reset
+    // if it actually persisted — otherwise a partial write could override a choice
+    // without durably marking the migration done, re-firing it on every launch.
     // Marker first: if a debounced autosave ever flushed mid-batch (before the
     // single save()), a partial state should be "marked migrated, still old theme"
     // (benign) — never "reset without marker," which would re-fire and clobber a
     // later choice.
     const recorded = await setSettings({
       [STORE_KEY_FORCED_DEFAULT]: FORCED_DEFAULT_VERSION,
-      [STORE_KEY_ACTIVE]: DEFAULT_THEME_ID,
+      [STORE_KEY_ACTIVE]: targetActive,
     });
     if (recorded) {
-      activeThemeId = DEFAULT_THEME_ID;
+      activeThemeId = targetActive;
       effectiveForced = FORCED_DEFAULT_VERSION;
     }
     // If it did not persist, honor the stored choice and retry next launch.
-  } else if (storedActive !== storedActiveId) {
+  } else if (storedActive !== storedActiveId && !liveSelection) {
     // Already migrated: just heal a dangling active id (e.g. a custom theme
     // deleted on another window).
     void setSetting(STORE_KEY_ACTIVE, activeThemeId);
   }
 
-  state = { activeThemeId, customThemes };
-  applyTheme(getActiveTheme(), false);
+  // A theme chosen interactively during hydration wins — never clobber the live
+  // state with our (possibly stale) startup read.
+  if (!liveSelection) {
+    state = { activeThemeId, customThemes };
+    applyTheme(getActiveTheme(), false);
+  }
   writeLocalMirror(state);
   // Mirror the (now durable) migration version for the pre-paint boot script.
   try {
