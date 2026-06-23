@@ -139,4 +139,23 @@ describe("setSettings", () => {
     // the concurrent write intact rather than restoring "old-theme".
     expect(backing.get("active")).toBe("user-choice");
   });
+
+  it("serializes writes so a concurrent setSetting can't interleave a batch", async () => {
+    backStore();
+    const order: string[] = [];
+    mockSet.mockImplementation(async (k: string) => {
+      order.push(`set:${k}`);
+    });
+    mockSave.mockImplementation(async () => {
+      order.push("save");
+    });
+    const { setSetting, setSettings } = await import("../store");
+
+    // Fire a batch and a single write concurrently.
+    await Promise.all([setSettings({ a: 1, b: 2 }), setSetting("c", 3)]);
+
+    // The batch (set a, set b, save) must fully complete before the single write
+    // (set c, save) begins — no interleaving.
+    expect(order).toEqual(["set:a", "set:b", "save", "set:c", "save"]);
+  });
 });
