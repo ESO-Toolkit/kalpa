@@ -10,6 +10,9 @@ function getStore() {
     // save() itself. A debounced autosave could otherwise flush a key in the
     // middle of a multi-key batch (e.g. the forced-default migration marker
     // before its active-theme reset), leaving the store durably inconsistent.
+    // NOTE: plugin-store caches one instance per path and the FIRST opener's
+    // options win. The Rust side opens settings.json first (token_store.rs) and
+    // also disables autosave, so this option must stay in sync with it.
     storePromise = load(STORE_PATH, { autoSave: false, defaults: {} }).catch((err) => {
       storePromise = null;
       throw err;

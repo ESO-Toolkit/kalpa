@@ -54,7 +54,18 @@ pub fn clear_tokens() {
 pub fn migrate_from_store(app: &tauri::AppHandle) {
     use tauri_plugin_store::StoreExt;
 
-    let store = match app.store("settings.json") {
+    // This is the FIRST opener of settings.json (runs in the setup hook, before
+    // the webview loads). Register the store with autosave OFF so it stays off for
+    // the whole app lifetime: plugin-store caches stores by path and ignores the
+    // options passed by later openers, so the frontend reuses THIS instance. The
+    // theme-migration writes there rely on fully explicit, atomic saves — a
+    // debounced autosave could otherwise flush a partial multi-key batch and
+    // strand a user mid-migration.
+    let store = match app
+        .store_builder("settings.json")
+        .disable_auto_save()
+        .build()
+    {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -86,8 +97,10 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
         return; // leave store intact
     }
 
-    // Credential manager write succeeded — remove plaintext copy
+    // Credential manager write succeeded — remove plaintext copy. autosave is off,
+    // so persist the deletion explicitly.
     let _ = store.delete("auth_tokens");
+    let _ = store.save();
 }
 
 // ── Non-Windows stubs ───────────────────────────────────────────────────
