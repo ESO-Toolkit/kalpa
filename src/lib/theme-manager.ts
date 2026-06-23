@@ -288,9 +288,16 @@ export async function hydrateThemeFromStore() {
     void setSetting(STORE_KEY_ACTIVE, activeThemeId);
   }
 
-  // A theme chosen interactively during hydration wins — never clobber the live
-  // state with our (possibly stale) startup read.
-  if (!liveSelection) {
+  // A theme chosen interactively during hydration wins for the active id — don't
+  // clobber the live choice with our (possibly stale) startup read. Still install
+  // the stored custom themes (merging any created live this session, which win),
+  // so an early interaction can't drop them and have a later save overwrite the
+  // stored list.
+  if (liveSelection) {
+    const merged = new Map(customThemes.map((t) => [t.id, t]));
+    for (const t of state.customThemes) merged.set(t.id, t);
+    state = { activeThemeId: state.activeThemeId, customThemes: [...merged.values()] };
+  } else {
     state = { activeThemeId, customThemes };
     applyTheme(getActiveTheme(), false);
   }
