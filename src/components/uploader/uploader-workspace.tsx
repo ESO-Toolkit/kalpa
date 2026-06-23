@@ -1653,7 +1653,7 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
           size="lg"
           onClick={handleLogin}
           disabled={loggingIn}
-          className="border-accent-sky/30 bg-accent-sky/[0.06] text-sky-200 hover:border-accent-sky/50 hover:bg-accent-sky/[0.12]"
+          className="border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:border-accent-sky/50 hover:bg-accent-sky/[0.12]"
         >
           <LogIn className="size-4" />
           {loggingIn ? "Opening sign-in…" : "Sign in to ESO Logs"}
@@ -1883,7 +1883,7 @@ function ModeTab({
       <div
         className={cn(
           "flex items-center gap-2 text-sm font-semibold",
-          active ? "text-sky-200" : "text-foreground/70"
+          active ? "text-accent-sky" : "text-foreground/70"
         )}
       >
         <Icon
@@ -1892,7 +1892,7 @@ function ModeTab({
         />
         {title}
       </div>
-      <div className={cn("mt-1 text-xs", active ? "text-sky-100/60" : "text-muted-foreground/70")}>
+      <div className={cn("mt-1 text-xs", active ? "text-accent-sky/60" : "text-muted-foreground/70")}>
         {hint}
       </div>
     </button>
@@ -2678,8 +2678,8 @@ function LiveDashboard({
           // /reloadui is needed to start. Reassure while warm-up runs; /reloadui is only a
           // fallback (it also forces ESO's disk-buffer flush outside raids), and the
           // official uploader is the explicit escape hatch.
-          <div className="rounded-lg border border-sky-400/20 border-l-[3px] border-l-sky-400 bg-sky-400/[0.05] p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-sky-200/90">
+          <div className="rounded-lg border border-accent-sky/20 border-l-[3px] border-l-accent-sky bg-accent-sky/[0.05] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-accent-sky/90">
               <Radio className="size-3.5 shrink-0" aria-hidden />
               Joining your in-progress session…
             </div>
@@ -2701,8 +2701,8 @@ function LiveDashboard({
           </div>
         ) : (
           // Not logging yet (or uncertain) → turning on /encounterlog writes the header.
-          <div className="rounded-lg border border-sky-400/20 bg-sky-400/[0.05] p-3">
-            <div className="flex items-center gap-2 text-xs font-medium text-sky-200/90">
+          <div className="rounded-lg border border-accent-sky/20 bg-accent-sky/[0.05] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-accent-sky/90">
               <Radio className="size-3.5 shrink-0" aria-hidden />
               Armed — waiting for a logging session
             </div>
