@@ -85,6 +85,14 @@ export function AddonDetail({
     null
   );
   const [canStopUpdate, setCanStopUpdate] = useState(false);
+  // The operation id lives in this component instance. App.tsx mounts AddonDetail
+  // with key={folderName}, so selecting a different addon mid-update remounts and
+  // drops this ref: the backend update keeps running (it's detached in
+  // spawn_blocking) but its Stop control and progress are lost for the rest of
+  // that update. Accepted known limitation — like the batch-flow and
+  // download-phase Stop gaps — kept small here because the hashing fix shrinks the
+  // motivating multi-minute window to seconds; lifting operation tracking into
+  // App.tsx would be the fix if it becomes a real annoyance.
   const operationIdRef = useRef<string | null>(null);
 
   useEffect(() => {

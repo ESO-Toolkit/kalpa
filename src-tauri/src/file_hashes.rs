@@ -138,6 +138,20 @@ pub fn file_signature(key: &str, path: &Path) -> Result<String, String> {
 /// signature (or the reverse) is therefore treated as a match; the next baseline
 /// write replaces the legacy value with a size signature and normal comparison
 /// resumes. Two values of the SAME kind that differ are a real change.
+///
+/// Accepted limitation: during that single migration window, a stored content
+/// hash can't be compared against a size signature, so a user's hand-edit to a
+/// non-content-hashed binary file (e.g. a swapped `.dds`/`.ttf`) is treated as
+/// unchanged even if it changed the file's size — that one update may overwrite
+/// it without a conflict prompt. We accept this rather than the alternatives,
+/// which each defeat a core goal of the size-signature design: comparing the
+/// disk size against the upstream/ZIP size instead would resurface the
+/// thousands-of-textures conflict storm whenever an upstream update legitimately
+/// changes binary sizes, and re-hashing the binaries to compare exactly would
+/// reintroduce the multi-minute hashing cost this change exists to remove.
+/// Binary assets inside addons are effectively never hand-edited, and after this
+/// one update the baseline self-heals to size signatures so future size-changing
+/// edits are detected normally.
 pub fn signatures_match(stored: &str, current: &str) -> bool {
     if stored == current {
         return true;
@@ -1518,5 +1532,36 @@ mod tests {
             modified.is_empty(),
             "legacy SHA vs new size signature must not be flagged, got: {modified:?}"
         );
+    }
+
+    #[test]
+    fn record_pass_self_heals_legacy_binary_sha_to_size_signature() {
+        // The migration's correctness guarantee is that the lenient mixed-kind
+        // bridge applies only for ONE update: a record pass must rewrite a legacy
+        // 64-hex SHA for a binary file into a `size:` signature, so normal exact
+        // comparison resumes afterward. This pins that self-heal end-to-end.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        create_addon_dir(&addons_dir, "MediaAddon", &[("icons/a.dds", "TEXTURE")]);
+
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        let legacy_sha = sha256_hex("TEXTURE");
+        let legacy = format!(
+            r#"{{"addon_folder":"MediaAddon","esoui_ids":[1],"recorded_at":"2025-01-01T00-00-00Z","installed_version":"1.0","files":{{"icons/a.dds":"{legacy_sha}"}}}}"#,
+        );
+        fs::write(hashes_dir.join("MediaAddon.json"), legacy).unwrap();
+
+        // A record pass (the same one every update performs) rebuilds the manifest
+        // from freshly computed signatures.
+        record_hashes_for_folders(&addons_dir, &["MediaAddon".to_string()], 1, "2.0").unwrap();
+
+        let healed = load_hash_manifest(&addons_dir, "MediaAddon").unwrap();
+        let entry = &healed.files["icons/a.dds"];
+        assert!(
+            is_size_signature(entry),
+            "binary entry must self-heal to a size signature, got: {entry}"
+        );
+        assert_ne!(entry, &legacy_sha, "the legacy SHA must be replaced");
     }
 }
