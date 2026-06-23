@@ -573,9 +573,13 @@
     outline: 2px solid Highlight;
     outline-offset: 2px;
   }
+  /* `!important` is required: the active theme's skin writes these as INLINE
+   * custom properties (boot mirror + applySkin), and inline declarations beat a
+   * normal stylesheet rule. Author-important wins over inline-normal, so this is
+   * the only way the suppression actually takes effect for skinned themes. */
   :root {
-    --app-texture: none;
-    --app-pattern: none;
+    --app-texture: none !important;
+    --app-pattern: none !important;
   }
 }
 
