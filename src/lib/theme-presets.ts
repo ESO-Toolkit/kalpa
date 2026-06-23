@@ -4,12 +4,20 @@ import { SKINS } from "./theme-skins";
 /**
  * Built-in theme catalog.
  *
- * Each preset is a 12-color seed (see {@link ThemeColors}). The default ESO Gold
- * theme reproduces the app's original palette; every other theme was designed and
- * contrast-verified (WCAG) to stay legible against the always-dark component layer.
+ * Each preset is a 12-color seed (see {@link ThemeColors}). The ESO Gold base
+ * theme reproduces the app's original `:root` palette; every other theme was
+ * designed and contrast-verified (WCAG) to stay legible against the always-dark
+ * component layer.
  */
 
-export const DEFAULT_THEME_ID = "eso-gold";
+/** The factory-default theme everyone gets until they explicitly pick another. */
+export const DEFAULT_THEME_ID = "nordic-runestone";
+
+/** The "bare" theme whose colors equal the authored `:root` values in index.css.
+ * It is special-cased on apply (overrides are CLEARED rather than set) and stores
+ * nothing in the pre-paint boot mirror. Kept distinct from {@link DEFAULT_THEME_ID}:
+ * the factory default can be any theme, but only this one matches `:root`. */
+export const ROOT_THEME_ID = "eso-gold";
 
 /** Order categories appear in the gallery. Unknown categories sort last.
  * Elder Scrolls (the deluxe textured art themes) lead; the ESO bucket holds the
@@ -28,9 +36,10 @@ export const CATEGORY_ORDER = [
 
 const seed = (c: ThemeColors) => c;
 
-/** The default theme — matches the original ESO-gold-on-navy palette. */
-export const DEFAULT_THEME: Theme = {
-  id: DEFAULT_THEME_ID,
+/** The ESO Gold base theme — matches the authored `:root` (ESO-gold-on-navy)
+ * palette exactly, so applying it clears overrides rather than setting them. */
+export const ROOT_THEME: Theme = {
+  id: ROOT_THEME_ID,
   name: "ESO Gold",
   description: "The signature Kalpa look — ESO gold over deep navy slate.",
   category: "ESO",
@@ -1039,7 +1048,13 @@ const GENERATED_THEMES: Theme[] = [
   },
 ];
 
-/** All built-in themes, default first. */
-export const BUILTIN_THEMES: Theme[] = [DEFAULT_THEME, ...GENERATED_THEMES];
+/** All built-in themes. The ESO Gold base leads the gallery as the signature
+ * look; the factory default ({@link DEFAULT_THEME}) may be any of them. */
+export const BUILTIN_THEMES: Theme[] = [ROOT_THEME, ...GENERATED_THEMES];
 
 export const BUILTIN_THEME_IDS = new Set(BUILTIN_THEMES.map((t) => t.id));
+
+/** The resolved factory-default theme object (see {@link DEFAULT_THEME_ID}).
+ * Falls back to the ESO Gold base if the id is ever mistyped. */
+export const DEFAULT_THEME: Theme =
+  BUILTIN_THEMES.find((t) => t.id === DEFAULT_THEME_ID) ?? ROOT_THEME;

@@ -4,6 +4,7 @@ import {
   BUILTIN_THEME_IDS,
   DEFAULT_THEME,
   DEFAULT_THEME_ID,
+  ROOT_THEME_ID,
 } from "./theme-presets";
 import {
   applyThemeColors,
@@ -77,12 +78,12 @@ export function getActiveTheme(): Theme {
 function writeLocalMirror(next: ManagerState) {
   try {
     // Mirror the active theme's resolved CSS vars so the pre-paint boot script
-    // can apply them with zero logic. The default theme stores nothing — the
-    // authored :root values govern.
+    // can apply them with zero logic. The ESO Gold base theme stores nothing —
+    // the authored :root values govern.
     const active = [...BUILTIN_THEMES, ...next.customThemes].find(
       (t) => t.id === next.activeThemeId
     );
-    if (!active || active.id === DEFAULT_THEME_ID) {
+    if (!active || active.id === ROOT_THEME_ID) {
       localStorage.removeItem(LS_KEY_VARS);
     } else {
       const vars = { ...themeColorsToVars(active.colors), ...themeSkinToVars(active.skin) };
@@ -99,16 +100,16 @@ function writeLocalMirror(next: ManagerState) {
 
 let activeVT: ViewTransitionLike | null = null;
 
-/** Apply a resolved theme to the document. The default theme clears overrides so
- * the base `:root` values (authored in index.css) win exactly. */
+/** Apply a resolved theme to the document. The ESO Gold base theme clears
+ * overrides so the authored `:root` values (in index.css) win exactly. */
 function applyTheme(theme: Theme, animate: boolean) {
   const run = () => {
-    if (theme.id === DEFAULT_THEME_ID) {
+    if (theme.id === ROOT_THEME_ID) {
       clearThemeColors();
     } else {
       applyThemeColors(theme.colors);
     }
-    applySkin(theme.id === DEFAULT_THEME_ID ? undefined : theme.skin);
+    applySkin(theme.id === ROOT_THEME_ID ? undefined : theme.skin);
     document.documentElement.dataset.themeId = theme.id;
   };
 
