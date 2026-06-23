@@ -39,11 +39,19 @@
 pub const FORMAT_VERSION: u32 = 11;
 
 /// The `clientVersion` string sent with `create-report`, identifying the desktop
-/// client to the service. Observed directly in a real `create-report` request
-/// (the matching `parserVersion` is [`FORMAT_VERSION`]). A protocol fact (a value
-/// the service expects), not reverse-engineered logic. If the service starts
-/// rejecting it as outdated, bump it.
-pub const CLIENT_VERSION: &str = "8.20.113";
+/// client to the service. A protocol fact (a value the service expects), not
+/// reverse-engineered logic.
+///
+/// Bumped `8.20.113` → `9.3.93` (2026-06-23): the standalone ESO Logs Uploader/
+/// Companion apps (which sent `8.20.113`) retire **2026-06-29**, replaced by the
+/// unified **Archon App**. The `/desktop-client/*` endpoints and the create-report
+/// body are UNCHANGED — only the client-version string moved. `9.3.93` is the value
+/// the Archon App sends (its `ff()` client-version constant), confirmed clean-room
+/// from `Uploaders-archon` v9.3.93's `app.asar`. The matching `parserVersion` is
+/// still fetched from the parser at runtime (the log-format version, independent of
+/// the app rename) and remains [`FORMAT_VERSION`] = 11. If the service starts
+/// rejecting it as outdated, bump it to whatever the current Archon App sends.
+pub const CLIENT_VERSION: &str = "9.3.93";
 
 /// Whether [`FORMAT_VERSION`] has been empirically confirmed against the live
 /// service. Gates enabling native upload by default — while `false`, the native
