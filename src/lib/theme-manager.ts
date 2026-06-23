@@ -275,11 +275,19 @@ export async function hydrateThemeFromStore() {
       effectiveForced = FORCED_DEFAULT_VERSION;
       // If the user picked a theme WHILE this batch was in flight, its active-id
       // write may have raced ours; re-assert the live choice durably (awaited,
-      // explicit save) BEFORE the localStorage mirror is written below, so the
-      // mirror never claims authority over a value that isn't on disk.
+      // explicit save) BEFORE the localStorage mirror is written below.
       if (liveSelection && state.activeThemeId !== targetActive) {
-        activeThemeId = state.activeThemeId;
-        await setSettings({ [STORE_KEY_ACTIVE]: activeThemeId });
+        const reassertOk = await setSettings({ [STORE_KEY_ACTIVE]: state.activeThemeId });
+        if (reassertOk) {
+          activeThemeId = state.activeThemeId;
+        } else {
+          // The live choice could not be persisted, so the durable value is still
+          // targetActive. Reconcile the UI + mirror to it rather than advertising
+          // an unsaved theme the next launch would hydrate away.
+          activeThemeId = targetActive;
+          state = { ...state, activeThemeId: targetActive };
+          applyTheme(getActiveTheme(), false);
+        }
       }
     }
     // If it did not persist, honor the stored choice and retry next launch.
