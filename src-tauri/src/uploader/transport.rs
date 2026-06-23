@@ -88,20 +88,27 @@ fn app_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// The exe candidates under one root, for each known `(dir, exe)` pair. Pure
+/// Expand the known `(dir, exe)` pairs across the given roots, **product-major**:
+/// every root for the first (newest) product before any path for the next. Pure
 /// (no I/O), so it is unit-testable without touching the environment.
-fn candidates_under(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+fn candidates_for_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     KNOWN_UPLOADERS
         .iter()
-        .map(move |(dir, exe)| root.join(dir).join(exe))
+        .flat_map(|(dir, exe)| roots.iter().map(move |root| root.join(dir).join(exe)))
+        .collect()
 }
 
 /// Candidate install locations for the official uploader, across all roots.
+///
+/// Ordered **product-major** so an installed Archon App always outranks a stale
+/// legacy uploader regardless of which root each lives in — a per-user
+/// `%LOCALAPPDATA%` Archon App is preferred over an admin `Program Files` legacy
+/// install. (Root-major ordering would let the higher-priority Program Files root
+/// surface a retired legacy uploader ahead of the newer per-user app.) Within a
+/// single product the admin-writable Program Files roots still come first — the
+/// order [`app_roots`] yields.
 fn official_uploader_candidates() -> Vec<PathBuf> {
-    app_roots()
-        .iter()
-        .flat_map(|root| candidates_under(root).collect::<Vec<_>>())
-        .collect()
+    candidates_for_roots(&app_roots())
 }
 
 /// Find the official uploader executable, if installed.
@@ -455,8 +462,8 @@ mod tests {
     // an existing install keeps working through the retirement grace period.
     #[test]
     fn candidates_cover_archon_app_and_legacy() {
-        let root = Path::new("C:/Root");
-        let paths: Vec<String> = candidates_under(root)
+        let paths: Vec<String> = candidates_for_roots(&[PathBuf::from("C:/Root")])
+            .iter()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(
@@ -480,8 +487,8 @@ mod tests {
     // broad scan fails the build.
     #[test]
     fn discovery_only_matches_exact_known_names() {
-        let root = Path::new("C:/Root");
-        let exes: Vec<String> = candidates_under(root)
+        let exes: Vec<String> = candidates_for_roots(&[PathBuf::from("C:/Root")])
+            .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         // Exactly one candidate per known pair, nothing else.
@@ -500,6 +507,34 @@ mod tests {
         assert!(
             !exes.iter().any(|e| e == "Archon Helper.exe"),
             "a name-prefixed planted exe must never be a candidate: {exes:?}"
+        );
+    }
+
+    // An installed Archon App must outrank a stale legacy uploader even when the
+    // legacy one sits in a higher-priority root. Simulate the dual install: the
+    // retired uploader in admin Program Files, the Archon App per-user in
+    // LocalAppData. Product-major ordering must surface Archon App first.
+    #[test]
+    fn archon_app_outranks_legacy_across_roots() {
+        let roots = [
+            PathBuf::from("C:/Program Files"),
+            PathBuf::from("C:/Users/x/AppData/Local/Programs"),
+        ];
+        let paths: Vec<String> = candidates_for_roots(&roots)
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        let archon = paths
+            .iter()
+            .position(|p| p.ends_with("Archon App/Archon App.exe"))
+            .expect("Archon App candidate present");
+        let legacy = paths
+            .iter()
+            .position(|p| p.ends_with("ESO Logs Uploader/ESO Logs Uploader.exe"))
+            .expect("legacy candidate present");
+        assert!(
+            archon < legacy,
+            "Archon App (any root) must rank before the legacy uploader (any root): {paths:?}"
         );
     }
 }
@@ -823,11 +858,17 @@ mod routing_tests {
 
     #[test]
     fn opted_in_with_proven_types_routes_native() {
-        // Gate OPEN (native rendering confirmed 2026-06-19, FORMAT_VERSION_CONFIRMED
-        // = true): an opted-in user whose log is all proven types routes native. A
-        // ZONE_CHANGED-only log is proven, so it routes native (not fallback).
+        // Gate-aware so it holds for BOTH the committed `FORMAT_VERSION_CONFIRMED =
+        // false` (CI builds this) and the owner's local render-test flip to `true`:
+        // an opted-in user whose log is all proven types routes native ONCE the gate
+        // is open, and still falls back while it is closed. A ZONE_CHANGED-only log
+        // is all-proven, so the gate is the only thing deciding native vs fallback.
         let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
-        assert_eq!(assess_native_routing(&path, true), NativeRouting::Native);
+        if super::super::native::format::FORMAT_VERSION_CONFIRMED {
+            assert_eq!(assess_native_routing(&path, true), NativeRouting::Native);
+        } else {
+            assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
+        }
     }
 
     #[test]
