@@ -109,6 +109,20 @@ pub fn list_log_files(logs_dir: &str) -> Result<Vec<LogFileInfo>, String> {
         if !is_log {
             continue;
         }
+        // Skip ESO's two non-combat `.log` files: `Interface.log` (UI/Lua/addon
+        // error log) and `client.log` (engine/connection diagnostics). Both are
+        // `.log` files but contain no `BEGIN_LOG`/combat events, so they can never
+        // become a report — listing them is clutter and a footgun (selecting one
+        // yields an empty/failed upload). Real archived/imported combat logs keep
+        // their own names (e.g. `Archive-…-Encounter.log`) and are unaffected.
+        let is_noncombat = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.eq_ignore_ascii_case("Interface.log") || n.eq_ignore_ascii_case("client.log"))
+            .unwrap_or(false);
+        if is_noncombat {
+            continue;
+        }
 
         let Ok(meta) = fs::metadata(&path) else {
             continue;
