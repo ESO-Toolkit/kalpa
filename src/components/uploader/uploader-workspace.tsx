@@ -204,7 +204,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // `nativeUploadOptIn` (manual) toggle. The readout must stay HONEST, though: native
   // also requires an upload session, and Go Live can fail/decline the sign-in prompt
   // and hand off. So gate the live readout on `hasNativeSession` exactly as manual does
-  // (line above) — showing "ESO Logs Uploader" until a session is captured. This
+  // (line above) — showing "ESO Logs uploader" until a session is captured. This
   // under-promises only in the narrow "user will sign in at Go Live" case (the safe
   // direction) and never claims "Direct from Kalpa" for a session that handed off.
   const [liveUseOfficial, setLiveUseOfficial] = useState(false);
@@ -426,7 +426,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         // ("nothing left running") is the honest default there too.
         toast.info(
           liveHandedOffRef.current
-            ? "Closed live tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report."
+            ? "Closed live tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
             : "Closed live tracking in Kalpa — the direct upload was stopped and its report closed.",
           { duration: 8000 }
         );
@@ -923,7 +923,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       // message for a start that's about to be abandoned.
       if (!liveHasSession) {
         toast.info(
-          "Streaming via the ESO Logs Uploader (sign in to ESO Logs for the faster path)."
+          "Streaming via the official ESO Logs uploader (sign in to ESO Logs for the faster path)."
         );
       }
       setLiveStatus("watching");
@@ -984,7 +984,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       if (dispatch?.report) setLiveReport(dispatch.report);
       toast.success(
         dispatch?.handedOff
-          ? "Live logging started in the ESO Logs Uploader."
+          ? "Live logging started in the official ESO Logs uploader."
           : nativeOptIn
             ? "Live logging started — uploading directly to ESO Logs."
             : "Live logging started."
@@ -1062,7 +1062,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       // so Stop genuinely ended the upload and closed the report.
       toast.info(
         liveHandedOff
-          ? "Stopped tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report."
+          ? "Stopped tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
           : "Stopped the live upload and closed the report on ESO Logs.",
         { duration: 8000 }
       );
@@ -1494,7 +1494,7 @@ function TransportReadout({
       ) : (
         <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-muted-foreground">
           <CloudUpload className="size-3" aria-hidden />
-          {installed ? "Official uploader" : "ESO Logs Uploader"}
+          {installed ? "Official uploader" : "ESO Logs uploader"}
         </span>
       )}
       <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
@@ -1892,7 +1892,9 @@ function ModeTab({
         />
         {title}
       </div>
-      <div className={cn("mt-1 text-xs", active ? "text-accent-sky/60" : "text-muted-foreground/70")}>
+      <div
+        className={cn("mt-1 text-xs", active ? "text-accent-sky/60" : "text-muted-foreground/70")}
+      >
         {hint}
       </div>
     </button>
@@ -2439,7 +2441,7 @@ function ManualActions({
       ? "Upload directly"
       : installed
         ? "Upload to ESO Logs"
-        : "Open in ESO Logs Uploader";
+        : "Open the ESO Logs uploader";
 
   return (
     // The climax — the MOST raised surface, and the only WARM (gold) one, so it
@@ -2465,8 +2467,8 @@ function ManualActions({
         {willUseNative
           ? "Your report appears here when it's done. If a log has an event type Kalpa can't upload directly, it falls back to the official uploader automatically."
           : installed
-            ? "Uploads run through the official ESO Logs Uploader installed on your PC."
-            : "We'll open the ESO Logs Uploader (or its download page) with your prepared log."}
+            ? "Uploads run through the official ESO Logs uploader installed on your PC."
+            : "We'll open the official ESO Logs uploader (or its download page) with your prepared log."}
       </p>
     </div>
   );
@@ -2633,7 +2635,7 @@ function LiveDashboard({
           <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
             <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
               <AlertCircle className="size-3.5 shrink-0" aria-hidden />
-              Kalpa tracks; the ESO Logs Uploader uploads
+              Kalpa tracks; the ESO Logs uploader uploads
             </div>
             <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
               <li className="list-disc">
@@ -2641,7 +2643,7 @@ function LiveDashboard({
                 Kalpa.
               </li>
               <li className="list-disc">
-                The ESO Logs Uploader keeps streaming in its own window.
+                The ESO Logs uploader keeps streaming in its own window.
               </li>
               <li className="list-disc">
                 To end uploading: stop it there and turn off in-game logging.
@@ -2986,7 +2988,7 @@ function StatusBadge({ status }: { status: UploadRecord["status"] }) {
         <InfoPill
           color="amber"
           className="gap-1"
-          title="Finished in the ESO Logs Uploader — paste the report link to track it here."
+          title="Finished in the official ESO Logs uploader — paste the report link to track it here."
         >
           <ExternalLink className="size-2.5" aria-hidden /> Handed off
         </InfoPill>

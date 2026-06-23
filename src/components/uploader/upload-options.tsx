@@ -186,7 +186,7 @@ export function UploadOptionsControl({
         <p className="text-[11px] text-muted-foreground/80">
           {willUseNative
             ? "Direct upload applies this visibility immediately."
-            : "You'll confirm visibility in the ESO Logs Uploader before the report goes live."}
+            : "You'll confirm visibility in the official ESO Logs uploader before the report goes live."}
         </p>
       </div>
     </div>

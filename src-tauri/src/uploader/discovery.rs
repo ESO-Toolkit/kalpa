@@ -118,7 +118,9 @@ pub fn list_log_files(logs_dir: &str) -> Result<Vec<LogFileInfo>, String> {
         let is_noncombat = path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.eq_ignore_ascii_case("Interface.log") || n.eq_ignore_ascii_case("client.log"))
+            .map(|n| {
+                n.eq_ignore_ascii_case("Interface.log") || n.eq_ignore_ascii_case("client.log")
+            })
             .unwrap_or(false);
         if is_noncombat {
             continue;

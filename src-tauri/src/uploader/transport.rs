@@ -46,45 +46,100 @@ pub trait LogUploadTransport: Send + Sync {
 
 // ── Locating the official uploader ───────────────────────────────────────────
 
-/// Candidate install locations for the official ESO Logs / Archon uploader on
-/// Windows.
+/// Known `(install-dir, exe-name)` pairs for the official uploader, newest first.
 ///
-/// Program Files (admin-only writable) is searched **before** the per-user
-/// LocalAppData so an admin install is preferred when both exist. Note the
-/// official Archon/ESO Logs app is an Electron/Squirrel per-user install under
+/// electron-builder names the executable after the app's `productName`, so the
+/// install directory and the exe stem match. Listing real pairs (rather than a
+/// dir × exe cross-product) keeps this honest and avoids nonsense paths like
+/// `Archon\ESO Logs Uploader.exe`.
+const KNOWN_UPLOADERS: [(&str, &str); 3] = [
+    // The unified **Archon App** (replaces the standalone ESO Logs Uploader and
+    // Companion on 2026-06-29). `productName = "Archon App"`, no `executableName`
+    // override, verified clean-room from `Uploaders-archon` v9.3.93's app.asar
+    // (and its macOS `CFBundleExecutable`). The /desktop-client CLI it accepts is
+    // unchanged, so `CliTransport` drives it exactly like the old uploader.
+    ("Archon App", "Archon App.exe"),
+    // The legacy standalone uploader. Kept for the pre-retirement grace period so
+    // an existing install keeps working until the user migrates to the Archon App.
+    ("ESO Logs Uploader", "ESO Logs Uploader.exe"),
+    // Defensive: a shorter "Archon" productName, should a future build use one.
+    ("Archon", "Archon.exe"),
+];
+
+/// App install roots to search, admin-writable Program Files **before** the
+/// per-user LocalAppData so an admin install is preferred when both exist. Each
+/// base contributes both itself and its `Programs` subdir (where Electron's
+/// per-user installs land).
+///
+/// Note the Archon App is an Electron per-user install under
 /// `%LOCALAPPDATA%\Programs`, so on a typical machine the resolved path IS
-/// user-writable — this ordering does not by itself prevent a planted binary
-/// from being the only match. A planting attacker already has user-level code
+/// user-writable — this ordering does not by itself prevent a planted binary from
+/// being the only match. A planting attacker already has user-level code
 /// execution; full hardening (Authenticode/publisher verification before
 /// spawning) is a possible future improvement.
+fn app_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Some(base) = std::env::var_os(var).map(PathBuf::from) {
+            roots.push(base.join("Programs"));
+            roots.push(base);
+        }
+    }
+    roots
+}
+
+/// The exe candidates under one root, for each known `(dir, exe)` pair. Pure
+/// (no I/O), so it is unit-testable without touching the environment.
+fn candidates_under(root: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+    KNOWN_UPLOADERS
+        .iter()
+        .map(move |(dir, exe)| root.join(dir).join(exe))
+}
+
+/// Candidate install locations for the official uploader, across all roots.
 fn official_uploader_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let pf = std::env::var_os("ProgramFiles").map(PathBuf::from);
-    let pf86 = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from);
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    app_roots()
+        .iter()
+        .flat_map(|root| candidates_under(root).collect::<Vec<_>>())
+        .collect()
+}
 
-    // Both the legacy "ESO Logs Uploader" and the rebranded "Archon" app.
-    let exe_names = ["ESO Logs Uploader.exe", "Archon.exe", "ESO Logs.exe"];
-    let app_dirs = ["ESO Logs Uploader", "Archon", "eso-logs-uploader"];
-
-    // Order matters: admin-writable Program Files first, then per-user.
-    for base in [pf, pf86, local].into_iter().flatten() {
-        for app in app_dirs {
-            for exe in exe_names {
-                out.push(base.join(app).join(exe));
-                // Electron Squirrel keeps the exe at the install root too.
-                out.push(base.join("Programs").join(app).join(exe));
+/// Fallback discovery: scan the app roots for any directory whose name looks like
+/// the ESO Logs / Archon uploader and return its matching `<dir>\<dir>.exe`. This
+/// survives a future rename or exe-name drift (e.g. "Archon App 2") that the
+/// explicit [`KNOWN_UPLOADERS`] list wouldn't anticipate, without a code update.
+fn scan_for_uploader() -> Option<PathBuf> {
+    for root in app_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir_name = entry.file_name();
+            let dir_name = dir_name.to_string_lossy();
+            let lower = dir_name.to_ascii_lowercase();
+            // electron-builder names the exe after the install dir (productName).
+            if lower.starts_with("archon") || lower.starts_with("eso logs") {
+                let exe = entry.path().join(format!("{dir_name}.exe"));
+                if exe.is_file() {
+                    return Some(exe);
+                }
             }
         }
     }
-    out
+    None
 }
 
-/// Find the official uploader executable, if installed.
+/// Find the official uploader executable, if installed. Tries the explicit known
+/// locations first (fast, no directory enumeration), then a directory scan that
+/// tolerates naming drift.
 pub fn find_official_uploader() -> Option<PathBuf> {
     official_uploader_candidates()
         .into_iter()
         .find(|p| p.is_file())
+        .or_else(scan_for_uploader)
 }
 
 // ── GUI handoff transport (default, always available) ────────────────────────
@@ -116,17 +171,18 @@ impl LogUploadTransport for GuiHandoffTransport {
             std::process::Command::new(&exe)
                 .arg(log_path)
                 .spawn()
-                .map_err(|e| format!("Failed to launch the ESO Logs Uploader: {e}"))?;
+                .map_err(|e| format!("Failed to launch the official ESO Logs uploader: {e}"))?;
             Ok(UploadOutcome::HandedOff {
-                detail: "Opened the ESO Logs Uploader with your prepared log.".into(),
+                detail: "Opened the official ESO Logs uploader with your prepared log.".into(),
             })
         } else {
             // Not installed — open the official download page; the file is ready
             // on disk for the user to drag in.
             open_url(UPLOADER_DOWNLOAD_URL)?;
             Ok(UploadOutcome::HandedOff {
-                detail: "The ESO Logs Uploader isn't installed. Opened the \
-                         download page; your prepared log is ready on disk."
+                detail: "The official ESO Logs uploader (the Archon App) isn't \
+                         installed. Opened the download page; your prepared log is \
+                         ready on disk."
                     .into(),
             })
         }
@@ -251,9 +307,10 @@ impl CliTransport {
     fn handed_off_outcome(opts: &UploadOptions) -> UploadOutcome {
         UploadOutcome::HandedOff {
             detail: if opts.real_time {
-                "Live logging started in the ESO Logs Uploader.".into()
+                "Live logging started in the official ESO Logs uploader.".into()
             } else {
-                "Uploading in the ESO Logs Uploader — watch its window for progress.".into()
+                "Uploading in the official ESO Logs uploader — watch its window for progress."
+                    .into()
             },
         }
     }
@@ -289,7 +346,9 @@ impl CliTransport {
         // uploader window shows the user real progress.
         match cmd.spawn() {
             Ok(_) => Ok(Ok(Self::handed_off_outcome(opts))),
-            Err(e) => Ok(Err(format!("Failed to start the ESO Logs Uploader: {e}"))),
+            Err(e) => Ok(Err(format!(
+                "Failed to start the official ESO Logs uploader: {e}"
+            ))),
         }
     }
 }
@@ -410,6 +469,31 @@ mod tests {
             "manual must not request real-time uploading: {s}"
         );
         drop(dir);
+    }
+
+    // The Archon App (post-2026-06-29 unified uploader) MUST be discoverable:
+    // `productName = "Archon App"` → `…\Archon App\Archon App.exe`. That pairing
+    // is exactly what the old dir × exe cross-product missed (it had "Archon" /
+    // "Archon.exe" but not "Archon App"). The legacy uploader stays a candidate so
+    // an existing install keeps working through the retirement grace period.
+    #[test]
+    fn candidates_cover_archon_app_and_legacy() {
+        let root = Path::new("C:/Root");
+        let paths: Vec<String> = candidates_under(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with("Archon App/Archon App.exe")),
+            "Archon App exe must be a candidate: {paths:?}"
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.ends_with("ESO Logs Uploader/ESO Logs Uploader.exe")),
+            "legacy uploader must remain a candidate: {paths:?}"
+        );
     }
 }
 
