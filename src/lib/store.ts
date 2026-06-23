@@ -37,3 +37,20 @@ export async function setSetting<T>(key: string, value: T): Promise<boolean> {
     return false;
   }
 }
+
+/** Persist several settings atomically: all keys are set, then flushed to disk in
+ * a single explicit save. Returns true only if the whole batch reached disk, so
+ * callers can treat the group as one all-or-nothing operation. Never throws. */
+export async function setSettings(entries: Record<string, unknown>): Promise<boolean> {
+  try {
+    const store = await getStore();
+    for (const [key, value] of Object.entries(entries)) {
+      await store.set(key, value);
+    }
+    await store.save();
+    return true;
+  } catch (err) {
+    console.warn("[store] Failed to write batch:", err);
+    return false;
+  }
+}

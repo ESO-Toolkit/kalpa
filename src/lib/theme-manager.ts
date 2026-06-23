@@ -1,4 +1,4 @@
-import { getSetting, setSetting } from "./store";
+import { getSetting, setSetting, setSettings } from "./store";
 import {
   BUILTIN_THEMES,
   BUILTIN_THEME_IDS,
@@ -32,18 +32,26 @@ interface ViewTransitionLike {
 
 const STORE_KEY_ACTIVE = "appearance.activeThemeId";
 const STORE_KEY_CUSTOM = "appearance.customThemes";
-/** Tracks the last forced-default migration the user has been moved through. */
+/** Durable record of the last forced-default migration this user has been moved
+ * through (source of truth; the Tauri store). */
 const STORE_KEY_FORCED_DEFAULT = "appearance.forcedDefaultVersion";
 /** Bump this to forcibly reset EVERY user's active theme to the current
  * {@link DEFAULT_THEME_ID} once on next launch — overriding any theme they had
  * previously chosen. After the reset they keep full control of the picker; the
  * stored version marker stops it from re-applying on later launches.
- * v1 — move everyone onto Nordic Runestone. */
-const FORCED_DEFAULT_VERSION = 1;
-/** Resolved `{ "--var": value }` map of the active theme — the ONLY localStorage
- * key, read SYNCHRONOUSLY by the inline boot script in index.html before first
- * paint (see that file). The Tauri store is the durable source of truth. */
+ * v1 — move everyone onto Nordic Runestone.
+ * KEEP IN SYNC with FORCED_VERSION in public/theme-boot.js (guarded by
+ * theme-boot.test.ts) so the pre-paint path agrees with hydration. */
+export const FORCED_DEFAULT_VERSION = 1;
+/** Resolved `{ "--var": value }` map of the active theme — read SYNCHRONOUSLY by
+ * the boot script in index.html before first paint (see that file). The Tauri
+ * store is the durable source of truth. */
 export const LS_KEY_VARS = "kalpa.appearance.activeVars";
+/** Synchronous mirror of {@link STORE_KEY_FORCED_DEFAULT} for the pre-paint boot
+ * script: lets it tell a not-yet-migrated install (paint the factory default)
+ * from a migrated one (trust the per-user mirror), avoiding a stale-theme flash
+ * on the migration launch. */
+export const LS_KEY_FORCED = "kalpa.appearance.forcedDefaultVersion";
 
 interface ManagerState {
   activeThemeId: string;
@@ -235,32 +243,48 @@ export function stopPreview() {
  * deferred ES module and would paint a frame late.
  */
 export async function hydrateThemeFromStore() {
-  const [storedActiveId, storedCustom, forcedVersion] = await Promise.all([
+  const [storedActiveId, storedCustom, storedForced] = await Promise.all([
     getSetting<string>(STORE_KEY_ACTIVE, DEFAULT_THEME_ID),
     getSetting<Theme[]>(STORE_KEY_CUSTOM, []),
     getSetting<number>(STORE_KEY_FORCED_DEFAULT, 0),
   ]);
   const customThemes = Array.isArray(storedCustom) ? storedCustom : [];
-
-  // One-time forced migration: when FORCED_DEFAULT_VERSION advances, reset every
-  // user to the current factory default, overriding whatever they had chosen.
-  // Runs once per version bump — the picker stays fully usable afterward.
-  const force = (forcedVersion ?? 0) < FORCED_DEFAULT_VERSION;
-
-  // Otherwise honor the stored choice, normalizing a dangling active id (e.g. a
-  // custom theme deleted on another window) so the gallery highlight and the
-  // mirror stay consistent.
   const known = new Set([...BUILTIN_THEME_IDS, ...customThemes.map((t) => t.id)]);
-  const activeThemeId = force
-    ? DEFAULT_THEME_ID
-    : known.has(storedActiveId)
-      ? storedActiveId
-      : DEFAULT_THEME_ID;
+  const storedActive = known.has(storedActiveId) ? storedActiveId : DEFAULT_THEME_ID;
+  const forcedVersion = storedForced ?? 0;
+
+  let activeThemeId = storedActive;
+  let effectiveForced = forcedVersion;
+
+  if (forcedVersion < FORCED_DEFAULT_VERSION) {
+    // One-time forced migration: move every user onto the current factory default
+    // once, overriding whatever they had chosen. Record the override and its
+    // version marker ATOMICALLY and only adopt the reset if it actually persisted
+    // — otherwise a partial write could override a choice without durably marking
+    // the migration done, re-firing the reset on every later launch.
+    const recorded = await setSettings({
+      [STORE_KEY_ACTIVE]: DEFAULT_THEME_ID,
+      [STORE_KEY_FORCED_DEFAULT]: FORCED_DEFAULT_VERSION,
+    });
+    if (recorded) {
+      activeThemeId = DEFAULT_THEME_ID;
+      effectiveForced = FORCED_DEFAULT_VERSION;
+    }
+    // If it did not persist, honor the stored choice and retry next launch.
+  } else if (storedActive !== storedActiveId) {
+    // Already migrated: just heal a dangling active id (e.g. a custom theme
+    // deleted on another window).
+    void setSetting(STORE_KEY_ACTIVE, activeThemeId);
+  }
 
   state = { activeThemeId, customThemes };
   applyTheme(getActiveTheme(), false);
   writeLocalMirror(state);
-  if (activeThemeId !== storedActiveId) void setSetting(STORE_KEY_ACTIVE, activeThemeId);
-  if (force) void setSetting(STORE_KEY_FORCED_DEFAULT, FORCED_DEFAULT_VERSION);
+  // Mirror the (now durable) migration version for the pre-paint boot script.
+  try {
+    localStorage.setItem(LS_KEY_FORCED, String(effectiveForced));
+  } catch {
+    // localStorage may be unavailable; the Tauri store remains the source of truth.
+  }
   emit();
 }
