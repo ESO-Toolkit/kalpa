@@ -1450,9 +1450,6 @@ impl Drop for CancelGuard {
     }
 }
 
-/// Build a throttled extraction-progress callback that emits `update-progress`
-/// events: on the first file, every 64 files, and at completion, so a
-/// thousands-of-files addon doesn't flood the event bus.
 /// How many files must pass since the last emitted progress event before the
 /// next one is sent, so a thousands-of-files addon doesn't flood the event bus.
 const PROGRESS_EMIT_STRIDE: usize = 64;
@@ -1470,6 +1467,9 @@ fn should_emit_progress(prev: usize, done: usize, total: usize) -> bool {
     prev == usize::MAX || done >= total || done.saturating_sub(prev) >= PROGRESS_EMIT_STRIDE
 }
 
+/// Build a throttled extraction-progress callback that emits `update-progress`
+/// events: on the first file, every `PROGRESS_EMIT_STRIDE` files, and at
+/// completion, so a thousands-of-files addon doesn't flood the event bus.
 fn make_progress_emitter(
     app: tauri::AppHandle,
     operation_id: String,

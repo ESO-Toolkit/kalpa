@@ -300,6 +300,11 @@ export function AddonDetail({
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
       if (isCancellation(e)) {
+        // The backend deletes the pending session on cancel, so this panel's
+        // sessionId is now dead — clear it (like the other cancel paths) so a
+        // retry goes through the main Update button and a fresh scan rather than
+        // re-applying a stale session and hitting "Session not found".
+        setConflictReport(null);
         toast.info(`Stopped updating ${addon.title}`, {
           description: "It may be partially updated — run the update again to finish.",
         });

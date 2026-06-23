@@ -1552,8 +1552,17 @@ mod tests {
         );
         fs::write(hashes_dir.join("MediaAddon.json"), legacy).unwrap();
 
+        // Pre-record: the legacy SHA baseline is in effect. The mixed-kind bridge
+        // must not false-flag the unchanged .dds (this is the lenient window).
+        assert!(
+            detect_modifications(&addons_dir, "MediaAddon")
+                .unwrap()
+                .is_empty(),
+            "legacy SHA vs fresh size signature must not be flagged while the bridge is active"
+        );
+
         // A record pass (the same one every update performs) rebuilds the manifest
-        // from freshly computed signatures.
+        // from freshly computed signatures, replacing the legacy SHA.
         record_hashes_for_folders(&addons_dir, &["MediaAddon".to_string()], 1, "2.0").unwrap();
 
         let healed = load_hash_manifest(&addons_dir, "MediaAddon").unwrap();
@@ -1563,5 +1572,14 @@ mod tests {
             "binary entry must self-heal to a size signature, got: {entry}"
         );
         assert_ne!(entry, &legacy_sha, "the legacy SHA must be replaced");
+
+        // Post-record: the baseline is now a size signature, so exact same-kind
+        // comparison resumes. A genuine size change is flagged...
+        fs::write(addons_dir.join("MediaAddon/icons/a.dds"), "TEXTUREXX").unwrap();
+        assert_eq!(
+            detect_modifications(&addons_dir, "MediaAddon").unwrap(),
+            vec!["icons/a.dds"],
+            "after self-heal, a real size change must be detected via exact comparison"
+        );
     }
 }
