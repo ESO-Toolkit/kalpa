@@ -66,6 +66,11 @@ export async function setSettings(entries: Record<string, unknown>): Promise<boo
     try {
       const store = await getStore();
       for (const [key, had] of prior) {
+        // Compare-and-restore: only roll back a key that STILL holds this batch's
+        // attempted value. If a concurrent write changed it since, that newer
+        // value wins — the rollback must not clobber an unrelated write.
+        const current = await store.get(key);
+        if (current !== entries[key]) continue;
         if (had === undefined) await store.delete(key);
         else await store.set(key, had);
       }

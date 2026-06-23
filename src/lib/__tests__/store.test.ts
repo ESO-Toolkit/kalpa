@@ -70,32 +70,58 @@ describe("setSetting", () => {
 });
 
 describe("setSettings", () => {
+  /** Back the mocked store with a real Map so set/get/delete stay consistent —
+   * compare-and-restore reads back what the batch wrote. Optionally seed prior
+   * values. */
+  function backStore(seed: Record<string, unknown> = {}) {
+    const backing = new Map<string, unknown>(Object.entries(seed));
+    mockGet.mockImplementation(async (key: string) => backing.get(key));
+    mockSet.mockImplementation(async (key: string, value: unknown) => {
+      backing.set(key, value);
+    });
+    mockDelete.mockImplementation(async (key: string) => backing.delete(key));
+    return backing;
+  }
+
   it("sets every key then saves once, reporting success", async () => {
-    const { setSettings } = await import("../store");
-    mockGet.mockResolvedValue(undefined);
-    mockSet.mockResolvedValue(undefined);
+    const backing = backStore();
     mockSave.mockResolvedValue(undefined);
+    const { setSettings } = await import("../store");
 
     await expect(setSettings({ a: 1, b: "two" })).resolves.toBe(true);
 
-    expect(mockSet).toHaveBeenCalledWith("a", 1);
-    expect(mockSet).toHaveBeenCalledWith("b", "two");
+    expect(backing.get("a")).toBe(1);
+    expect(backing.get("b")).toBe("two");
     expect(mockSave).toHaveBeenCalledTimes(1);
   });
 
   it("rolls the cache back to its pre-batch snapshot when save fails", async () => {
-    const { setSettings } = await import("../store");
-    // Prior values: "active" existed, "marker" did not.
-    mockGet.mockImplementation(async (key: string) => (key === "active" ? "old-theme" : undefined));
-    mockSet.mockResolvedValue(undefined);
-    mockDelete.mockResolvedValue(undefined);
+    // "active" existed before; "marker" did not.
+    const backing = backStore({ active: "old-theme" });
     mockSave.mockRejectedValue(new Error("disk full"));
+    const { setSettings } = await import("../store");
 
     await expect(setSettings({ marker: 1, active: "new-theme" })).resolves.toBe(false);
 
-    // Rollback restores the prior value for an existing key and deletes one that
-    // was absent, so a later autosave can't flush the half-written batch.
-    expect(mockSet).toHaveBeenCalledWith("active", "old-theme");
-    expect(mockDelete).toHaveBeenCalledWith("marker");
+    // Restored exactly: the existing key reverts, the newly-added key is dropped,
+    // so a later autosave can't flush the half-written batch.
+    expect(backing.get("active")).toBe("old-theme");
+    expect(backing.has("marker")).toBe(false);
+  });
+
+  it("does not clobber a concurrent write when rolling back", async () => {
+    const backing = backStore({ active: "old-theme" });
+    // A concurrent writer lands a new value right as the batch tries to save.
+    mockSave.mockImplementation(async () => {
+      backing.set("active", "user-choice");
+      throw new Error("disk full");
+    });
+    const { setSettings } = await import("../store");
+
+    await expect(setSettings({ active: "batch-default" })).resolves.toBe(false);
+
+    // The key no longer holds the batch's attempted value, so the rollback leaves
+    // the concurrent write intact rather than restoring "old-theme".
+    expect(backing.get("active")).toBe("user-choice");
   });
 });
