@@ -311,6 +311,11 @@ pub fn run() {
             // (one-time). This is also the first opener of the settings store.
             token_store::migrate_from_store(app.handle());
 
+            // If that open swallowed a load error (plugin-store ignores them) and
+            // left an empty cache while settings exist on disk, reload so a later
+            // flush can't overwrite the user's settings with an empty store.
+            settings_store::ensure_loaded(app.handle());
+
             // Load auth tokens from secure credential manager
             if let Some(tokens) = token_store::load_tokens() {
                 if let Ok(mut guard) = app.state::<auth::AuthState>().tokens.lock() {

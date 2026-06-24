@@ -169,13 +169,28 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// A settings file parses as a JSON object — the same shape the plugin
-/// deserialises into (`HashMap<String, Value>`). A truncated or half-written file
-/// fails this check, which is what recovery keys off.
-fn is_valid(path: &Path) -> bool {
+/// State of the primary settings file, distinguishing genuine corruption from a
+/// merely-unreadable file. Conflating the two would let recovery quarantine a
+/// good file that is only transiently locked (e.g. by an AV scan).
+enum PrimaryState {
+    /// Readable and parses as a settings object — the shape the plugin loads.
+    Valid,
+    /// Readable but does not parse: genuinely corrupt data.
+    Corrupt,
+    /// Could not be read at all: missing, or a transient I/O / lock error.
+    Unreadable,
+}
+
+fn classify(path: &Path) -> PrimaryState {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).is_ok(),
-        Err(_) => false,
+        Ok(bytes) => {
+            if serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).is_ok() {
+                PrimaryState::Valid
+            } else {
+                PrimaryState::Corrupt
+            }
+        }
+        Err(_) => PrimaryState::Unreadable,
     }
 }
 
@@ -196,15 +211,22 @@ fn quarantine(main: &Path) {
 ///     never completed — discard them. They are never promoted: resurrecting a
 ///     write the caller was never told succeeded would be wrong, and a leftover
 ///     can even be a write whose fsync failed.
-///   * a primary that exists but doesn't parse is external corruption or a pre-fix
-///     partial write — quarantine it so the plugin starts clean rather than
-///     silently loading partial JSON.
+///   * a primary that is readable but doesn't parse is external corruption or a
+///     pre-fix partial write — quarantine it so the plugin starts clean rather
+///     than silently loading partial JSON.
+///   * a primary that exists but is *unreadable* is left untouched: it may be a
+///     good file behind a transient lock, and moving it aside would destroy it.
+///     [`ensure_loaded`] then guards against the plugin opening it as empty.
 fn recover_path(main: &Path) {
     for s in staging_files(main) {
         let _ = fs::remove_file(&s);
     }
-    if main.exists() && !is_valid(main) {
-        quarantine(main);
+    match classify(main) {
+        PrimaryState::Corrupt => quarantine(main),
+        PrimaryState::Unreadable if main.exists() => eprintln!(
+            "[settings_store] recovery: {main:?} is present but unreadable; leaving it in place"
+        ),
+        PrimaryState::Valid | PrimaryState::Unreadable => {}
     }
 }
 
@@ -219,6 +241,37 @@ fn settings_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
 pub fn recover<R: Runtime>(app: &AppHandle<R>) {
     if let Some(path) = settings_path(app) {
         recover_path(&path);
+    }
+}
+
+/// Guard against tauri-plugin-store silently swallowing a load error: its
+/// `StoreBuilder::build_inner` ignores `load()` failures, so a settings file that
+/// was transiently unreadable when the store opened yields an *empty* in-memory
+/// cache. If the file actually holds settings, retry the load — otherwise a later
+/// flush would write that empty cache over the user's real settings. Call once,
+/// right after the store is first opened. No-op for a genuinely empty/fresh store.
+pub fn ensure_loaded<R: Runtime>(app: &AppHandle<R>) {
+    let Some(store) = app.get_store(STORE_FILE) else {
+        return;
+    };
+    if !store.is_empty() {
+        return; // cache already has data — load succeeded
+    }
+    let Some(path) = settings_path(app) else {
+        return;
+    };
+    let disk_has_settings = fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<BTreeMap<String, JsonValue>>(&b).ok())
+        .is_some_and(|m| !m.is_empty());
+    if disk_has_settings {
+        // The file holds settings but the cache opened empty — the load was
+        // swallowed. Retry it so the cache reflects disk before anything flushes.
+        if let Err(e) = store.reload() {
+            eprintln!(
+                "[settings_store] settings present on disk but reload failed; not overwriting: {e}"
+            );
+        }
     }
 }
 
@@ -426,11 +479,33 @@ mod tests {
     }
 
     #[test]
-    fn empty_file_is_treated_as_invalid() {
+    fn empty_file_is_classified_corrupt() {
         let dir = temp_dir("empty");
         let main = dir.join("settings.json");
         fs::write(&main, b"").unwrap();
 
-        assert!(!is_valid(&main));
+        // Readable but unparseable → corrupt (gets quarantined), distinct from a
+        // file that cannot be read at all.
+        assert!(matches!(classify(&main), PrimaryState::Corrupt));
+    }
+
+    #[test]
+    fn recovery_leaves_an_unreadable_primary_in_place() {
+        let dir = temp_dir("unreadable");
+        let main = dir.join("settings.json");
+        // A directory at the primary path makes fs::read fail on every platform,
+        // standing in for a file behind a transient lock.
+        fs::create_dir(&main).unwrap();
+        fs::write(staged(&main, "x"), b"{\"uncommitted\":1}").unwrap();
+
+        recover_path(&main);
+
+        // The unreadable primary is NOT quarantined — it may be a good file behind
+        // a transient lock, and moving it aside would destroy it. Only uncommitted
+        // staging is cleared.
+        assert!(matches!(classify(&main), PrimaryState::Unreadable));
+        assert!(main.exists(), "unreadable primary left in place");
+        assert!(!suffixed(&main, ".corrupt").exists(), "not quarantined");
+        assert!(staging_files(&main).is_empty());
     }
 }
