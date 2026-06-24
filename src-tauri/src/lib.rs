@@ -10,6 +10,7 @@ mod manifest_cache;
 mod metadata;
 mod safe_migration;
 mod saved_variables;
+mod settings_store;
 mod token_store;
 pub mod uploader;
 
@@ -312,8 +313,19 @@ pub fn run() {
                 *guard = Some(tray);
             }
 
-            // Migrate auth tokens from plaintext store to credential manager (one-time)
+            // Repair settings.json left partial/corrupt by an interrupted write,
+            // BEFORE anything opens (and merge-loads) the store below: clear
+            // uncommitted staging leftovers and quarantine a corrupt primary.
+            settings_store::recover(app.handle());
+
+            // Migrate auth tokens from plaintext store to credential manager
+            // (one-time). This is also the first opener of the settings store.
             token_store::migrate_from_store(app.handle());
+
+            // If that open swallowed a load error (plugin-store ignores them) and
+            // left an empty cache while settings exist on disk, reload so a later
+            // flush can't overwrite the user's settings with an empty store.
+            settings_store::ensure_loaded(app.handle());
 
             // Load auth tokens from secure credential manager
             if let Some(tokens) = token_store::load_tokens() {
@@ -464,18 +476,28 @@ pub fn run() {
             uploader::commands::uploader_attach_report,
             #[cfg(debug_assertions)]
             uploader::commands::uploader_run_native_live_spike,
+            commands::flush_settings,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // On real process exit, signal every native live session to stop so its
-            // terminate-report + abandoned POSTs settle promptly (the OS reaps the
-            // driver threads; we don't join here, to avoid blocking exit on a wedged
-            // network). A hard exit's correctness is covered by the L2 orphan
+            // On a real app exit, detach settings.json from the plugin registry so
+            // tauri-plugin-store's own RunEvent::Exit handler can't truncate-write
+            // it. ExitRequested fires before Exit (and before the plugin's exit
+            // save), so detaching here neutralises that non-atomic write. Settings
+            // are already persisted atomically on every write, so nothing is
+            // flushed here. (Window close hides to tray and never reaches this.)
+            if let tauri::RunEvent::ExitRequested { .. } = &event {
+                settings_store::detach_on_exit(app);
+            }
+            // On any real process exit, signal every native live session to stop so
+            // its terminate-report + abandoned POSTs settle promptly (the OS reaps
+            // the driver threads; we don't join here, to avoid blocking exit on a
+            // wedged network). A hard exit's correctness is covered by the L2 orphan
             // breadcrumb + next-launch recovery — this just closes reports faster.
-            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = &event {
                 if let Some(state) = app.try_state::<uploader::commands::UploaderState>() {
                     state.signal_all_live_stop();
                 }

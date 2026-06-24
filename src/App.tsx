@@ -447,6 +447,8 @@ function App() {
           const path = instances[0]!.addonsPath;
           setAddonsPath(path);
           await invokeOrThrow("set_addons_path", { addonsPath: path });
+          // Best-effort persist: this is auto-detection, so if the write fails it
+          // self-heals — the same instance is re-detected and re-selected next launch.
           void setSetting("addonsPath", path);
           // Scan and update check are independent — run concurrently.
           await Promise.all([scanAddons(path), checkForUpdates(path, autoUpdate, false)]);
@@ -534,7 +536,14 @@ function App() {
 
       try {
         await invokeOrThrow("set_addons_path", { addonsPath: path });
-        await setSetting("addonsPath", path);
+        // Critical setting: don't commit the UI to a path that didn't persist.
+        if (!(await setSetting("addonsPath", path))) {
+          setError(
+            "Could not save the AddOns folder location — free up disk space or check antivirus, then try again."
+          );
+          setErrorShowSettings(true);
+          return;
+        }
         setAddonsPath(path);
         setSetupInstances(null);
         setErrorShowSettings(false);
@@ -771,7 +780,16 @@ function App() {
 
       try {
         await invokeOrThrow("set_addons_path", { addonsPath: nextPath });
-        await setSetting("addonsPath", nextPath);
+        // The AddOns path is the one setting the app can't function without, so
+        // treat a persistence failure as hard: don't switch the UI to a path that
+        // won't survive a restart. (Cosmetic prefs below tolerate silent failure.)
+        if (!(await setSetting("addonsPath", nextPath))) {
+          setError(
+            "Could not save the AddOns folder location — free up disk space or check antivirus, then try again."
+          );
+          setErrorShowSettings(true);
+          return;
+        }
         setAddonsPath(nextPath);
         setSelectedAddon(null);
         setSelectedFolders(new Set());
