@@ -1,6 +1,12 @@
 import type { Pack, AuthUser } from "../types";
 import type { PackTypeFilter, SortOption } from "./pack-constants";
-import { TYPE_LABELS, TAG_COLORS, PACK_TYPE_ACCENT, PACK_TYPE_PILL_COLOR } from "./pack-constants";
+import {
+  TYPE_LABELS,
+  TAG_COLORS,
+  PACK_TYPE_ACCENT,
+  PACK_TYPE_PILL_COLOR,
+  packIdentity,
+} from "./pack-constants";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
@@ -141,6 +147,7 @@ export function PackListView({
               PACK_TYPE_ACCENT[pack.packType as keyof typeof PACK_TYPE_ACCENT] ??
               PACK_TYPE_ACCENT["addon-pack"];
             const pillColor = PACK_TYPE_PILL_COLOR[pack.packType] ?? "muted";
+            const identity = packIdentity(pack);
             return (
               <div
                 key={pack.id}
@@ -153,30 +160,57 @@ export function PackListView({
                     onSelectPack(pack.id);
                   }
                 }}
+                style={identity.glowVars}
                 className={cn(
                   "group w-full text-left rounded-xl border border-white/[0.06] p-3",
-                  "border-l-[3px] transition-all duration-200 cursor-pointer",
-                  "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
+                  "border-l-[3px] cursor-pointer",
+                  "transition-[transform,border-color,background-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
+                  "shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]",
                   accent.border,
                   accent.bg,
                   accent.hoverBg,
-                  accent.hoverGlow,
-                  "hover:border-white/[0.12] hover:-translate-y-[1px]",
+                  // Per-pack hover glow (color from --pk-glow) + top inner highlight.
+                  "hover:shadow-[0_8px_28px_var(--pk-glow),inset_0_1px_0_rgba(255,255,255,0.07)]",
+                  "hover:border-white/[0.14] motion-safe:hover:-translate-y-[1px]",
+                  "motion-reduce:transition-none",
                   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                 )}
               >
-                {/* Top row: title + vote button */}
-                <div className="flex items-start justify-between gap-3">
+                {/* Top row: monogram identity tile + title block + vote button */}
+                <div className="flex items-start gap-3">
+                  {/* Per-pack monogram identity tile — the primary distinction signal.
+                      Decorative: the title text already names the pack, so aria-hidden. */}
+                  <div
+                    aria-hidden="true"
+                    style={identity.tileStyle}
+                    className={cn(
+                      "relative grid place-items-center size-10 shrink-0 rounded-lg",
+                      "font-heading text-[13px] font-bold leading-none tracking-tight",
+                      "transition-transform duration-150 ease-[cubic-bezier(0.4,0,0.2,1)]",
+                      "motion-safe:group-hover:scale-[1.04] motion-reduce:transform-none"
+                    )}
+                  >
+                    {identity.monogram}
+                  </div>
+
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="font-heading text-sm font-semibold truncate group-hover:text-primary transition-colors duration-200">
+                      <span className="font-heading text-sm font-semibold truncate transition-colors duration-200 group-hover:text-primary">
                         {decodeHtml(pack.title)}
                       </span>
                       <InfoPill color={pillColor}>
                         {TYPE_LABELS[pack.packType] ?? pack.packType}
                       </InfoPill>
                     </div>
+
+                    {/* Description sits under the title so it aligns to the baseline */}
+                    {pack.description && (
+                      <p className="mt-1 text-xs text-muted-foreground/70 line-clamp-2 leading-relaxed">
+                        {decodeHtml(pack.description)}
+                      </p>
+                    )}
                   </div>
+
                   {/* Vote button — right-aligned */}
                   <SimpleTooltip
                     content={
@@ -220,15 +254,8 @@ export function PackListView({
                   </SimpleTooltip>
                 </div>
 
-                {/* Description */}
-                {pack.description && (
-                  <p className="mt-1.5 text-xs text-muted-foreground/70 line-clamp-2 leading-relaxed">
-                    {decodeHtml(pack.description)}
-                  </p>
-                )}
-
-                {/* Bottom row: tags + meta */}
-                <div className="mt-2.5 flex items-center gap-1.5 flex-wrap">
+                {/* Bottom meta row: tags + counts + author (aligned past the tile) */}
+                <div className="mt-2.5 flex items-center gap-1.5 flex-wrap pl-[52px]">
                   {pack.tags.map((tag) => (
                     <InfoPill key={tag} color={TAG_COLORS[tag] ?? "muted"}>
                       {tag}
@@ -253,6 +280,7 @@ export function PackListView({
                   {!pack.isAnonymous && pack.authorName && (
                     <span className="text-[11px] text-muted-foreground/40 ml-auto inline-flex items-center gap-1.5">
                       <span
+                        aria-hidden="true"
                         className={cn(
                           "inline-flex items-center justify-center size-4 rounded-full text-[8px] font-bold uppercase leading-none",
                           "bg-gradient-to-b from-white/[0.14] to-white/[0.06] text-muted-foreground/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
