@@ -10,6 +10,7 @@ mod manifest_cache;
 mod metadata;
 mod safe_migration;
 mod saved_variables;
+mod settings_store;
 mod token_store;
 
 use serde::Serialize;
@@ -301,6 +302,10 @@ pub fn run() {
                 *guard = Some(tray);
             }
 
+            // Repair settings.json left partial/corrupt by an interrupted write,
+            // BEFORE anything opens (and merge-loads) the store below.
+            settings_store::recover(app.handle());
+
             // Migrate auth tokens from plaintext store to credential manager (one-time)
             token_store::migrate_from_store(app.handle());
 
@@ -418,11 +423,23 @@ pub fn run() {
             commands::cancel_update,
             commands::list_edit_backups,
             commands::restore_edit_backup,
+            commands::flush_settings,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // On a real app exit, flush settings.json atomically and drop the
+            // store from the plugin registry so tauri-plugin-store's own
+            // RunEvent::Exit handler can't truncate-write it afterwards.
+            // ExitRequested fires before Exit, so this runs first regardless of
+            // plugin handler order. (Window close hides to tray and never gets
+            // here.)
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                settings_store::flush_and_detach(app_handle);
+            }
+        });
 }
 
 #[cfg(test)]

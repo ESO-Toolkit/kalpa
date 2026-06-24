@@ -1,4 +1,5 @@
 import { load } from "@tauri-apps/plugin-store";
+import { invoke } from "@tauri-apps/api/core";
 
 const STORE_PATH = "settings.json";
 
@@ -23,10 +24,12 @@ function enqueueWrite<T>(op: () => Promise<T>): Promise<T> {
 
 function getStore() {
   if (!storePromise) {
-    // autoSave is OFF so persistence is fully explicit: every write below calls
-    // save() itself. A debounced autosave could otherwise flush a key in the
-    // middle of a multi-key batch (e.g. the forced-default migration marker
-    // before its active-theme reset), leaving the store durably inconsistent.
+    // autoSave is OFF so persistence is fully explicit: every write below flushes
+    // via the `flush_settings` command (atomic write-temp + fsync + rename in
+    // settings_store.rs) instead of the plugin's non-atomic save(). A debounced
+    // autosave could otherwise flush a key in the middle of a multi-key batch
+    // (e.g. the forced-default migration marker before its active-theme reset),
+    // leaving the store durably inconsistent.
     // NOTE: plugin-store caches one instance per path and the FIRST opener's
     // options win. The Rust side opens settings.json first (token_store.rs) and
     // also disables autosave, so this option must stay in sync with it.
@@ -56,7 +59,7 @@ export async function setSetting<T>(key: string, value: T): Promise<boolean> {
     try {
       const store = await getStore();
       await store.set(key, value);
-      await store.save();
+      await invoke("flush_settings");
       return true;
     } catch (err) {
       console.warn(`[store] Failed to write "${key}":`, err);
@@ -66,12 +69,13 @@ export async function setSetting<T>(key: string, value: T): Promise<boolean> {
 }
 
 /** Persist several settings as one unit: serialized against all other writes (so
- * no other save() interleaves the batch), every key is set in memory, then a
- * single explicit `save()` flushes the whole store file to disk all-or-nothing.
- * On failure the in-memory cache is restored to its exact pre-batch snapshot
- * (set/delete per key), so a later save can't flush a half-written batch — a
- * `false` return means "nothing changed." (store.reload() is unsuitable: it
- * merges disk state and won't drop keys this batch newly added.) Never throws. */
+ * no other flush interleaves the batch), every key is set in memory, then a
+ * single `flush_settings` invoke writes the whole store file to disk
+ * all-or-nothing (atomic temp+rename). On failure the in-memory cache is
+ * restored to its exact pre-batch snapshot (set/delete per key), so a later
+ * flush can't write a half-written batch — a `false` return means "nothing
+ * changed." (store.reload() is unsuitable: it merges disk state and won't drop
+ * keys this batch newly added.) Never throws. */
 export async function setSettings(entries: Record<string, unknown>): Promise<boolean> {
   return enqueueWrite(async () => {
     const prior = new Map<string, unknown>();
@@ -85,7 +89,7 @@ export async function setSettings(entries: Record<string, unknown>): Promise<boo
       for (const [key, value] of Object.entries(entries)) {
         await store.set(key, value);
       }
-      await store.save();
+      await invoke("flush_settings");
       return true;
     } catch (err) {
       console.warn("[store] Failed to write batch:", err);

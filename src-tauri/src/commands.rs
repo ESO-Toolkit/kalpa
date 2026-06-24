@@ -8059,6 +8059,14 @@ pub fn update_tray_tooltip(
     Ok(())
 }
 
+/// Atomically persist the settings store to disk. The frontend calls this
+/// instead of the plugin-store `save()` so writes are crash-safe (write-temp +
+/// fsync + atomic rename); see `settings_store`.
+#[tauri::command]
+pub async fn flush_settings(app: tauri::AppHandle) -> Result<(), String> {
+    crate::settings_store::flush(&app)
+}
+
 // ── Controlled Folder Access / write-access detection ──────────────────
 
 #[derive(Debug, Clone, Serialize)]
