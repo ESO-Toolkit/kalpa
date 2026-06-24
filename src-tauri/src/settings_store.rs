@@ -336,7 +336,14 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         }
         let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
         atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
-        let _ = store.reload(); // disk now equals `merged`; sync the live cache
+        // The write committed `merged` to disk. Sync the live cache to that same
+        // in-memory map directly — NOT via store.reload(), which re-reads disk and
+        // could fail under the very lock this path handles, leaving the cache empty
+        // while the taint is cleared. Applying the in-memory map can't fail, so the
+        // cache is guaranteed to equal disk before we clear the taint.
+        for (key, value) in &merged {
+            store.set(key.clone(), value.clone());
+        }
         SETTINGS_TAINTED.store(false, Ordering::SeqCst);
         return Ok(());
     }
