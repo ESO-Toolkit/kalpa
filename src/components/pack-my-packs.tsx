@@ -268,15 +268,17 @@ export function MyPacksView({
                       }}
                       style={identity.glowVars}
                       className={cn(
-                        "group w-full text-left rounded-xl border border-white/[0.06] p-3",
+                        "group w-full text-left rounded-xl border border-white/[0.08] p-3",
                         "border-l-[3px] cursor-pointer",
                         "transition-[transform,border-color,background-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
-                        "shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]",
+                        // Elevated translucent panel so the card stands clear of the
+                        // dialog background instead of blending into a faint tint.
+                        "bg-[color-mix(in_oklab,var(--card)_62%,transparent)]",
+                        "shadow-[0_2px_8px_rgba(0,0,0,0.30),inset_0_1px_0_rgba(255,255,255,0.06)]",
                         accent.border,
-                        accent.bg,
-                        accent.hoverBg,
-                        "hover:shadow-[0_8px_28px_var(--pk-glow),inset_0_1px_0_rgba(255,255,255,0.07)]",
-                        "hover:border-white/[0.14] motion-safe:hover:-translate-y-[1px]",
+                        "hover:bg-[color-mix(in_oklab,var(--card)_76%,transparent)]",
+                        "hover:shadow-[0_10px_30px_var(--pk-glow),0_2px_8px_rgba(0,0,0,0.30),inset_0_1px_0_rgba(255,255,255,0.08)]",
+                        "hover:border-white/[0.16] motion-safe:hover:-translate-y-[1px]",
                         "motion-reduce:transition-none",
                         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                       )}
@@ -495,15 +497,17 @@ export function MyPacksView({
                   }}
                   style={identity.glowVars}
                   className={cn(
-                    "group w-full text-left rounded-xl border border-white/[0.06] p-3",
+                    "group w-full text-left rounded-xl border border-white/[0.08] p-3",
                     "border-l-[3px] cursor-pointer",
                     "transition-[transform,border-color,background-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
-                    "shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]",
+                    // Elevated translucent panel so the card stands clear of the
+                    // dialog background instead of blending into a faint tint.
+                    "bg-[color-mix(in_oklab,var(--card)_62%,transparent)]",
+                    "shadow-[0_2px_8px_rgba(0,0,0,0.30),inset_0_1px_0_rgba(255,255,255,0.06)]",
                     accent.border,
-                    accent.bg,
-                    accent.hoverBg,
-                    "hover:shadow-[0_8px_28px_var(--pk-glow),inset_0_1px_0_rgba(255,255,255,0.07)]",
-                    "hover:border-white/[0.14] motion-safe:hover:-translate-y-[1px]",
+                    "hover:bg-[color-mix(in_oklab,var(--card)_76%,transparent)]",
+                    "hover:shadow-[0_10px_30px_var(--pk-glow),0_2px_8px_rgba(0,0,0,0.30),inset_0_1px_0_rgba(255,255,255,0.08)]",
+                    "hover:border-white/[0.16] motion-safe:hover:-translate-y-[1px]",
                     "motion-reduce:transition-none",
                     "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                   )}
