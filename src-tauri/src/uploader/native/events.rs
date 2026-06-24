@@ -396,6 +396,18 @@ impl EventEmitter {
             // them as unknown/no-op) — they only need to be *covered* so a trial log
             // routes native instead of falling back.
             "BEGIN_TRIAL" | "TRIAL_INIT" => None,
+            // Infinite Archive (ENDLESS_DUNGEON_*): no segment event. Golden-confirmed
+            // (2026-06-24, Archon report M6t4mDzFWyqraPdN): the official uploader emits
+            // nothing for any of the six markers — they are pure state markers. IA
+            // fights themselves encode via the standard combat arms above. Listed
+            // explicitly (rather than via the `_` catch-all) so they count as *known*
+            // no-ops, matching their presence in coverage::PROVEN_LINE_TYPES.
+            "ENDLESS_DUNGEON_BEGIN"
+            | "ENDLESS_DUNGEON_END"
+            | "ENDLESS_DUNGEON_STAGE_END"
+            | "ENDLESS_DUNGEON_BUFF_ADDED"
+            | "ENDLESS_DUNGEON_BUFF_REMOVED"
+            | "ENDLESS_DUNGEON_INIT" => None,
             _ => None,
         };
         // Anchor the timestamp base on the first line that ACTUALLY emits (a

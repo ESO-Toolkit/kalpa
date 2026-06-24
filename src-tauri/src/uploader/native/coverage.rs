@@ -71,6 +71,16 @@ pub const PROVEN_LINE_TYPES: &[&str] = &[
     "BEGIN_TRIAL",
     "END_TRIAL",
     "TRIAL_INIT",
+    // Infinite Archive markers (6) — present in IA logs. The official uploader emits
+    // NO segment event for ANY of these (golden-confirmed 2026-06-24, Archon report
+    // M6t4mDzFWyqraPdN): all six are pure no-op state markers, and IA fights encode
+    // with the standard combat codes above. Included so IA logs route native.
+    "ENDLESS_DUNGEON_BEGIN",
+    "ENDLESS_DUNGEON_END",
+    "ENDLESS_DUNGEON_STAGE_END",
+    "ENDLESS_DUNGEON_BUFF_ADDED",
+    "ENDLESS_DUNGEON_BUFF_REMOVED",
+    "ENDLESS_DUNGEON_INIT",
 ];
 
 /// Line types whose [`super::events`] encoder is **built and structurally tested**
@@ -123,19 +133,28 @@ pub const STRUCTURALLY_READY_LINE_TYPES: &[&str] = &[
     "BEGIN_TRIAL",
     "END_TRIAL",
     "TRIAL_INIT",
+    // Infinite Archive markers: all six emit no segment event (golden-confirmed).
+    "ENDLESS_DUNGEON_BEGIN",
+    "ENDLESS_DUNGEON_END",
+    "ENDLESS_DUNGEON_STAGE_END",
+    "ENDLESS_DUNGEON_BUFF_ADDED",
+    "ENDLESS_DUNGEON_BUFF_REMOVED",
+    "ENDLESS_DUNGEON_INIT",
 ];
 
 /// The **complete, closed** set of ESO `Encounter.log` event types — the finite
 /// target the encoder must cover for native upload to handle ~all real raid
 /// logs. Established by an event-type census across real logs spanning 70K → 8.4M
-/// lines (a 120× size range, a year of game patches): the vocabulary is a closed
-/// set of exactly these 20 types and does **not** grow with log size. There is no
-/// long tail — two types (`EFFECT_CHANGED` + `COMBAT_EVENT`) are 92–95% of every
-/// file, so the cost is concentrated.
+/// lines (a 120× size range, a year of game patches): a closed set of 20 base
+/// combat/trial types that does **not** grow with log size, plus the 6 Infinite
+/// Archive `ENDLESS_DUNGEON_*` markers (a distinct game mode) = **26 total**. There
+/// is no long tail — two types (`EFFECT_CHANGED` + `COMBAT_EVENT`) are 92–95% of
+/// every file, so the cost is concentrated.
 ///
-/// 17 of these appear in 100% of logs (the mandatory floor); the 3 `*_TRIAL*`
-/// markers appear in every actual trial/raid. Proving all 20 reaches effectively
-/// 100% native coverage for real raid logs. A *future* game patch could add a new
+/// 17 appear in 100% of logs (the mandatory floor); the 3 `*_TRIAL*` markers appear
+/// in every actual trial/raid; the 6 `ENDLESS_DUNGEON_*` markers appear in every
+/// Infinite Archive run (and emit no segment event — golden-confirmed). Proving all
+/// 26 reaches effectively 100% native coverage. A *future* game patch could add a new
 /// type — that is the one scenario [`assess`] still falls back on, and it does so
 /// automatically (any type not in [`PROVEN_LINE_TYPES`] → fallback), so a novel
 /// type degrades gracefully to the official uploader instead of corrupting.
@@ -162,6 +181,13 @@ pub const TARGET_LINE_TYPES: &[&str] = &[
     "BEGIN_TRIAL",
     "END_TRIAL",
     "TRIAL_INIT",
+    // Infinite Archive markers (6) — present in every IA log.
+    "ENDLESS_DUNGEON_BEGIN",
+    "ENDLESS_DUNGEON_END",
+    "ENDLESS_DUNGEON_STAGE_END",
+    "ENDLESS_DUNGEON_BUFF_ADDED",
+    "ENDLESS_DUNGEON_BUFF_REMOVED",
+    "ENDLESS_DUNGEON_INIT",
 ];
 
 /// Whether the native path may handle a given log.
@@ -219,7 +245,7 @@ where
 }
 
 /// How many of the [`TARGET_LINE_TYPES`] are currently proven. Progress toward
-/// full native coverage: when this equals `TARGET_LINE_TYPES.len()` (20), native
+/// full native coverage: when this equals `TARGET_LINE_TYPES.len()` (26), native
 /// upload handles ~all real raid logs.
 pub fn coverage_progress() -> (usize, usize) {
     let target: BTreeSet<&str> = TARGET_LINE_TYPES.iter().copied().collect();
@@ -268,21 +294,22 @@ mod tests {
         }
     }
 
-    // The target vocabulary is the closed 20-type set from the census. Pin the
-    // count so an accidental edit is caught; changing it is a deliberate act
+    // The target vocabulary is the closed 26-type set: the 20 base combat/trial
+    // types from the census + the 6 Infinite Archive ENDLESS_DUNGEON_* markers. Pin
+    // the count so an accidental edit is caught; changing it is a deliberate act
     // (e.g. a future patch genuinely adds a type).
     #[test]
-    fn target_vocabulary_is_the_closed_set_of_20() {
+    fn target_vocabulary_is_the_closed_set_of_26() {
         assert_eq!(
             TARGET_LINE_TYPES.len(),
-            20,
-            "the census established a closed set of 20 event types"
+            26,
+            "20 base census types + 6 Infinite Archive markers = 26"
         );
         // No duplicates.
         let unique: BTreeSet<&str> = TARGET_LINE_TYPES.iter().copied().collect();
         assert_eq!(
             unique.len(),
-            20,
+            26,
             "TARGET_LINE_TYPES must have no duplicates"
         );
     }
@@ -290,7 +317,7 @@ mod tests {
     #[test]
     fn coverage_progress_reports_proven_over_total() {
         let (proven, total) = coverage_progress();
-        assert_eq!(total, 20);
+        assert_eq!(total, 26);
         assert_eq!(proven, PROVEN_LINE_TYPES.len());
     }
 
@@ -319,7 +346,7 @@ mod tests {
     #[test]
     fn structural_readiness_reports_ready_ge_confirmed() {
         let (ready, confirmed, total) = structural_readiness();
-        assert_eq!(total, 20);
+        assert_eq!(total, 26);
         assert_eq!(confirmed, PROVEN_LINE_TYPES.len());
         assert!(
             ready >= confirmed,
@@ -392,5 +419,28 @@ mod tests {
     #[test]
     fn blank_lines_are_ignored() {
         assert!(matches!(assess(["", "   "]), Coverage::Native));
+    }
+
+    // An Infinite Archive log carries the six ENDLESS_DUNGEON_* markers (grammar
+    // from the real golden, Archon report M6t4mDzFWyqraPdN) alongside standard
+    // combat types. All are proven — the markers as golden-confirmed no-ops — so an
+    // IA log routes native instead of falling back to the official uploader.
+    #[test]
+    fn an_infinite_archive_log_routes_native() {
+        let ia = [
+            "0,BEGIN_LOG,123,15,\"NA Megaserver\",\"en\",\"eso.live.12.0\"",
+            "119777,ENDLESS_DUNGEON_BEGIN,1,1781928320125,T",
+            "152543,ENDLESS_DUNGEON_INIT,1,1782074394312,F",
+            "163488,ENDLESS_DUNGEON_STAGE_END,1,1781928320125",
+            "183759,ENDLESS_DUNGEON_BUFF_ADDED,1,200204",
+            "269960,ENDLESS_DUNGEON_BUFF_REMOVED,1,200204",
+            "189697,ENDLESS_DUNGEON_END,1,1780500,26000,F",
+            "300000,COMBAT_EVENT,DAMAGE,1,2,3",
+            "400000,END_LOG",
+        ];
+        assert!(
+            matches!(assess(ia), Coverage::Native),
+            "an Infinite Archive log must route native (markers are proven no-ops)"
+        );
     }
 }
