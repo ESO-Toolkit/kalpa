@@ -19,6 +19,37 @@ pub struct LogPathDetection {
     pub message: String,
 }
 
+/// Best-effort guess (from peeking the log's tail + a short growth sample) at whether
+/// a fresh logging session is coming, for the native-live "what to tell the user
+/// before Go Live" hint. NEVER gates going live — it only picks which waiting-state
+/// guidance to show; the driver's first `BEGIN_LOG` is the ground truth that flips to
+/// streaming.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LiveReadinessVerdict {
+    /// Logging is already running (open session in the tail + the file is growing), so
+    /// no fresh `BEGIN_LOG` is coming — native needs a `/reloadui` to start streaming.
+    ActiveNoHeader,
+    /// Not logging yet (no open session / not growing) — turning on `/encounterlog`
+    /// will write the `BEGIN_LOG` native waits for.
+    LoggingOff,
+    /// No log file present to peek.
+    NoLog,
+    /// Couldn't tell from the peek — show soft guidance, no hard "/reloadui" claim.
+    Uncertain,
+}
+
+/// The native-live readiness probe result (see `LiveReadinessVerdict`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveReadiness {
+    pub verdict: LiveReadinessVerdict,
+    /// Whether a fight appears to be in progress right now (advisory; strengthens copy).
+    pub fight_in_progress: bool,
+    /// Whether the file grew during the probe window (the growth disambiguator).
+    pub grew: bool,
+}
+
 /// Metadata about a single log file in the logs directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -186,6 +217,10 @@ pub enum UploadStatus {
     Queued,
     Uploading,
     Live,
+    /// A native live session whose ESO Logs session expired mid-stream: posting is
+    /// paused (the report stays open) until the user re-signs-in. Distinct from `Live`
+    /// so the panel can prompt a re-login rather than show a healthy badge.
+    Paused,
     Completed,
     Failed,
     Cancelled,

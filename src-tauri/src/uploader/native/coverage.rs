@@ -215,6 +215,21 @@ fn line_type(line: &str) -> Option<&str> {
     line.split(',').nth(1).map(str::trim)
 }
 
+/// Per-line coverage check for the LIVE path. Returns `Some(type)` if this line carries a
+/// type token that is NOT in [`PROVEN_LINE_TYPES`] (so the caller must fail CLOSED), or
+/// `None` if it is proven (or has no type token). The live driver can't pre-scan a
+/// growing file like [`assess`] does for a finished log, so it calls this on every fed
+/// line (warm-up replay AND live tail) and terminates on the first unproven type —
+/// upholding the same guarantee: unproven input must NOT yield a silently-incomplete
+/// native report (`EventEmitter::feed` ignores unknown kinds, so a dropped line would
+/// otherwise pass validation).
+pub fn unproven_line_type(line: &str) -> Option<&str> {
+    match line_type(line) {
+        Some(t) if !PROVEN_LINE_TYPES.contains(&t) => Some(t),
+        _ => None,
+    }
+}
+
 /// Assess whether a raw log (as an iterator of lines) is fully within proven
 /// coverage. Returns [`Coverage::Native`] only if every line type present is in
 /// [`PROVEN_LINE_TYPES`]; otherwise [`Coverage::Fallback`] with the unproven set.
@@ -385,6 +400,19 @@ mod tests {
             }
             Coverage::Native => panic!("an unproven line type must force fallback"),
         }
+    }
+
+    #[test]
+    fn unproven_line_type_gates_a_single_live_line() {
+        // The LIVE path's per-line gate: a proven type (or a typeless line) returns None
+        // (keep streaming); an unproven type returns Some(type) so the driver fails closed.
+        assert_eq!(unproven_line_type("100,COMBAT_EVENT,DAMAGE,FIRE,1"), None);
+        assert_eq!(unproven_line_type("0,BEGIN_LOG,123,15"), None);
+        assert_eq!(unproven_line_type(""), None); // typeless → not unproven
+        assert_eq!(
+            unproven_line_type("4,SOME_FUTURE_EVENT,1,2,3"),
+            Some("SOME_FUTURE_EVENT")
+        );
     }
 
     #[test]

@@ -70,6 +70,9 @@ export type UploadStatus =
   | "queued"
   | "uploading"
   | "live"
+  // A native live session whose ESO Logs session expired mid-stream: posting is
+  // paused (the report stays open) until the user re-signs-in.
+  | "paused"
   | "completed"
   | "failed"
   | "cancelled"
@@ -119,7 +122,28 @@ export type LiveEvent =
   | { type: "sessionReset" }
   | { type: "fightSkipped"; reason: string }
   | { type: "warning"; message: string }
+  // Native live only: the first BEGIN_LOG arrived, so the driver is anchored and now
+  // streaming — the UI flips from "waiting for a session" to "streaming".
+  | { type: "sessionAnchored" }
+  // Native live only: the ESO Logs session expired mid-stream (re-login prompt) /
+  // a fresh session resumed posting.
+  | { type: "reauthRequired"; message: string }
+  | { type: "reauthResolved" }
   | { type: "stopped"; reason: string };
+
+/// Result of the pre-Go-Live readiness probe (uploader_probe_live_readiness): a
+/// best-effort guess at whether a fresh logging session is coming, used only to pick
+/// which guidance the "waiting" state opens with — never to gate going live.
+export interface LiveReadiness {
+  /// `activeNoHeader` = logging is already running (no fresh BEGIN_LOG coming → needs
+  /// /reloadui); `loggingOff` = not logging yet (turn on /encounterlog); `noLog` = no
+  /// log file found; `uncertain` = couldn't tell (soft guidance).
+  verdict: "activeNoHeader" | "loggingOff" | "noLog" | "uncertain";
+  /// Whether a fight appears to be in progress right now (advisory; strengthens copy).
+  fightInProgress: boolean;
+  /// Whether the file grew during the probe window (the growth disambiguator).
+  grew: boolean;
+}
 
 /** The display-level status of the whole uploader, for the glanceable pill. */
 export type UploaderStatus =

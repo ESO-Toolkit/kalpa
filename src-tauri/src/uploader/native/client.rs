@@ -33,6 +33,20 @@ use crate::uploader::types::UploadOptions;
 /// Base for the report lifecycle endpoints. A fact about the service.
 const DESKTOP_CLIENT_BASE: &str = "https://www.esologs.com/desktop-client";
 
+/// How often the cancel-aware live send polls the cancel flag while a blocking POST
+/// is in flight on a worker thread. Bounds Stop latency to ~this interval instead of
+/// the 120s request timeout. Short enough to feel instant, long enough to add no
+/// measurable busy-wait cost over a multi-hour session. `pub(crate)` so the live
+/// driver reuses the same slice for its cancel-aware backoff/pause loops.
+pub(crate) const LIVE_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Grace window to let an in-flight `create-report` LAND after a Stop, so we capture its
+/// report code and TERMINATE it instead of leaking an untracked remote report. Create
+/// normally completes in well under a second; this only matters when a Stop races the
+/// create POST. Past this window (a wedged network during create) we give up — a rare,
+/// bounded leak — rather than block Stop indefinitely.
+pub(crate) const CREATE_REPORT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A report code returned by `create-report` and used to address subsequent
 /// segment/master-table/terminate calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +309,12 @@ impl<'a> NativeUpload<'a> {
         extract_report_code(&body)
     }
 
+    // NOTE: the live lifecycle (create / master / add-segment / terminate) is driven
+    // through the cancel-aware [`LiveSender`] (below), NOT through these borrow-based
+    // `send` methods — a live POST must be abandonable on Stop within ~250ms, which
+    // the blocking `send` cannot do. The one-shot `upload_finished` path still uses
+    // the methods below.
+
     /// POST the fights segment for `segment_id`; returns the server-assigned
     /// `nextSegmentId` (0 = no further segments).
     fn add_segment(
@@ -450,35 +470,388 @@ impl<'a> NativeUpload<'a> {
         }
     }
 
-    /// Build the `create-report` JSON body. Ten fields, matching the confirmed
-    /// live request: a fresh report is created with `startTime == endTime` at
-    /// creation time (the server backfills the real range from the segments).
-    ///
-    /// Serialized via `serde_json` (not hand-formatted) so free-text fields
-    /// (`guildId`, `description`) are correctly quoted/escaped for any input.
+    /// Build the `create-report` JSON body. Delegates to [`create_report_body_for`]
+    /// so the borrow-based one-shot path and the owned live path build an identical
+    /// body.
     fn create_report_body(&self) -> Vec<u8> {
-        let opts = self.opts;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        // `description` is sent as "" (not null) when absent — matches the
-        // confirmed request shape; `guildId` is null for Personal Logs.
-        let body = serde_json::json!({
-            "clientVersion": super::format::CLIENT_VERSION,
-            "parserVersion": super::format::FORMAT_VERSION,
-            "startTime": now_ms,
-            "endTime": now_ms,
-            "guildId": opts.guild_id,
-            "fileName": "log.txt",
-            "serverOrRegion": opts.region,
-            "visibility": opts.visibility.as_report_visibility_id(),
-            "reportTagId": serde_json::Value::Null,
-            "description": opts.description.as_deref().unwrap_or(""),
+        create_report_body_for(self.opts)
+    }
+}
+
+/// Build the `create-report` JSON body for `opts`. Ten fields, matching the confirmed
+/// live request: a fresh report is created with `startTime == endTime` at creation
+/// time (the server backfills the real range from the segments). Serialized via
+/// `serde_json` so free-text fields (`guildId`, `description`) are correctly
+/// quoted/escaped. Shared by [`NativeUpload::create_report_body`] (one-shot) and the
+/// live driver (which builds an [`OwnedLiveRequest::CreateReport`]).
+pub(crate) fn create_report_body_for(opts: &UploadOptions) -> Vec<u8> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let body = serde_json::json!({
+        "clientVersion": super::format::CLIENT_VERSION,
+        "parserVersion": super::format::FORMAT_VERSION,
+        "startTime": now_ms,
+        "endTime": now_ms,
+        "guildId": opts.guild_id,
+        "fileName": "log.txt",
+        "serverOrRegion": opts.region,
+        "visibility": opts.visibility.as_report_visibility_id(),
+        "reportTagId": serde_json::Value::Null,
+        "description": opts.description.as_deref().unwrap_or(""),
+    });
+    serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec())
+}
+
+/// The `/desktop-client` base URL (a protocol fact). Exposed so the live driver can
+/// build its endpoint URLs without duplicating the constant.
+pub(crate) fn desktop_client_base() -> &'static str {
+    DESKTOP_CLIENT_BASE
+}
+
+/// Parse a `create-report` response body into a [`ReportCode`] (see
+/// [`extract_report_code`]). Exposed for the live driver, which sends create-report
+/// through the cancel-aware [`LiveSender`] rather than [`NativeUpload::create_report`].
+pub(crate) fn parse_report_code(body: &[u8]) -> Result<ReportCode, UploadError> {
+    extract_report_code(body)
+}
+
+/// Parse an `add-report-segment` response body into a `nextSegmentId` (see
+/// [`extract_next_segment_id`]). Exposed for the live driver.
+pub(crate) fn parse_next_segment_id(body: &[u8]) -> Result<u64, UploadError> {
+    extract_next_segment_id(body)
+}
+
+/// Whether a terminate/upload error means the report is already closed/gone (so an
+/// orphan breadcrumb can be dropped and a terminate is unnecessary). A 404/410 is
+/// definitive (report doesn't exist / already terminated / server auto-expired).
+/// Everything else — timeout, 5xx, connection error, a `Session(Expired)` that
+/// survived the one re-auth — is TRANSIENT, so the orphan is KEPT for a later retry.
+pub(crate) fn is_definitively_closed(e: &UploadError) -> bool {
+    matches!(
+        e,
+        UploadError::Server { status: 404, .. } | UploadError::Server { status: 410, .. }
+    )
+}
+
+// ── Cancel-aware LIVE sender (L4) ────────────────────────────────────────────
+//
+// The shared `send`/`send_once` above use `reqwest::blocking` with a 120s timeout
+// and check cancellation only BETWEEN segments, so a Stop during a mid-POST
+// `req.send()` would hang up to ~120s. For a multi-hour live session that is
+// unacceptable (and it would block the Tokio executor thread that joins the driver
+// on Stop — the concurrency review's RACE-1). [`LiveSender`] is an OWNED,
+// `'static`-safe analog used ONLY by the live driver: it runs each POST on a
+// detached worker thread and lets the caller poll the cancel flag every
+// [`LIVE_CANCEL_POLL`], returning [`UploadError::Cancelled`] within ~250ms and
+// ABANDONING the in-flight POST (it completes server-side; we just stop waiting —
+// and since cancel always leads to terminate, no further segment is sent, so the
+// abandoned POST is harmless). This is ADDITIVE: it does not touch the proven
+// one-shot `send`/`send_once`, which the manual `upload_finished` path still uses.
+//
+// Clean-room: the request envelopes are the same protocol facts; the construction
+// here is implemented from scratch (it cannot borrow `NativeUpload`'s `&dyn
+// SessionProvider`, which is not `'static`, so the sender owns an
+// `Arc<dyn SessionProvider>` and clones the bytes to cross the thread boundary).
+
+/// An owned, cloneable request body for the live path (the bytes are owned so the
+/// request can be built on a worker thread). Mirrors the live arms of
+/// [`RequestKind`] but carries `Vec<u8>` instead of a borrow.
+///
+/// Gated with the rest of the live path until the de-gate step; the live module is
+/// unreachable in release until then, so this can't ship by accident.
+#[derive(Clone)]
+pub(crate) enum OwnedLiveRequest {
+    /// `create-report` — JSON body.
+    CreateReport { body: Vec<u8> },
+    /// `set-report-master-table/{code}` in live mode (`isRealTime=true`).
+    MasterTable { segment_id: u64, bytes: Vec<u8> },
+    /// `add-report-segment/{code}` in live mode.
+    AddSegment {
+        segment_id: u64,
+        bytes: Vec<u8>,
+        start_time: u64,
+        end_time: u64,
+        in_progress_event_count: u64,
+    },
+    /// `terminate-report/{code}` — no body.
+    Terminate,
+}
+
+/// The POST + session-probe seam the live driver depends on. [`LiveSender`] is the
+/// production impl (real cancel-aware HTTP); a scripted fake implements it in tests so
+/// the driver's retry / pause-resume / idle state machine is deterministically
+/// testable without a server.
+pub(crate) trait LivePoster {
+    /// Send one live request, cancel-aware (returns `Cancelled` fast on stop).
+    fn post(
+        &self,
+        url: &str,
+        req: OwnedLiveRequest,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Vec<u8>, UploadError>;
+    /// Whether a usable session is currently available (polled while paused on a lost
+    /// session to detect a re-login).
+    fn has_session(&self) -> bool;
+}
+
+/// An owned, `'static`-safe sender for the live path. Holds the cookie session
+/// provider as an `Arc` (so it can move into a detached worker) and applies the same
+/// single 401/419 re-auth-then-retry the shared `send` does. Built from the managed
+/// [`super::session::StoredSessionProvider`] for the production live driver.
+#[derive(Clone)]
+pub(crate) struct LiveSender {
+    session: Arc<dyn SessionProvider>,
+}
+
+impl LiveSender {
+    pub(crate) fn new(session: Arc<dyn SessionProvider>) -> Self {
+        Self { session }
+    }
+
+    /// Whether a usable session is currently available (without prompting). The live
+    /// driver polls this while paused on a lost session to detect a re-login. A `true`
+    /// result does not guarantee the server still accepts it — only a request can —
+    /// but it rules out the not-signed-in case the pause is waiting on.
+    pub(crate) fn has_live_session(&self) -> bool {
+        self.session.session().is_ok()
+    }
+}
+
+impl LivePoster for LiveSender {
+    fn post(
+        &self,
+        url: &str,
+        req: OwnedLiveRequest,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Vec<u8>, UploadError> {
+        self.send_cancellable(url, req, cancel)
+    }
+    fn has_session(&self) -> bool {
+        self.has_live_session()
+    }
+}
+
+impl LiveSender {
+    /// Send `req` to `url`, cancel-aware: the blocking POST runs on a detached
+    /// worker; this returns [`UploadError::Cancelled`] within ~[`LIVE_CANCEL_POLL`]
+    /// if `cancel` is set, abandoning the in-flight POST. The 120s reqwest timeout
+    /// stays as the absolute backstop on the abandoned worker, not the Stop latency.
+    pub(crate) fn send_cancellable(
+        &self,
+        url: &str,
+        req: OwnedLiveRequest,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Vec<u8>, UploadError> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(UploadError::Cancelled);
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        let session = Arc::clone(&self.session);
+        let url = url.to_string();
+        // Detached worker: it owns everything it needs and outlives an abandoned
+        // wait. NOT `thread::scope` — scope's implicit join at scope end would
+        // re-block on cancel, defeating the whole purpose.
+        std::thread::spawn(move || {
+            let result = live_send_with_reauth(&session, &url, &req);
+            // The receiver may already be gone (we abandoned the POST on cancel);
+            // a failed send just drops the result, which is fine.
+            let _ = tx.send(result);
         });
-        // `to_vec` on an owned Value cannot fail; fall back to an empty object if
-        // it somehow does rather than panicking.
-        serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec())
+        wait_for_send_or_cancel(rx, cancel)
+    }
+
+    /// Like [`Self::send_cancellable`] but for `create-report`, which must NEVER be
+    /// abandoned mid-flight: the server can create the report after we give up, leaving
+    /// an untracked orphan (no code to record/terminate, uncatchable by next-launch
+    /// recovery). On cancel this waits up to [`CREATE_REPORT_GRACE`] for the worker to
+    /// return the code so the caller can record + terminate it; only if the grace expires
+    /// with no result does it surface `Cancelled`. Fast-Stop is preserved for the normal
+    /// (non-create) cancel path — this divergence is create-only.
+    pub(crate) fn send_create_cancellable(
+        &self,
+        url: &str,
+        req: OwnedLiveRequest,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<Vec<u8>, UploadError> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(UploadError::Cancelled);
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        let session = Arc::clone(&self.session);
+        let url = url.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(live_send_with_reauth(&session, &url, &req));
+        });
+        wait_for_create_or_cancel(rx, cancel, CREATE_REPORT_GRACE)
+    }
+}
+
+/// Wait on a worker's result channel, polling `cancel` every [`LIVE_CANCEL_POLL`].
+/// Returns the worker's result on completion, [`UploadError::Cancelled`] if cancel
+/// trips first, or a transport error if the worker dropped the channel. Extracted
+/// from [`LiveSender::send_cancellable`] so the cancel-latency contract is unit-
+/// testable without a real HTTP worker (a fake sender that never completes).
+fn wait_for_send_or_cancel(
+    rx: std::sync::mpsc::Receiver<Result<Vec<u8>, UploadError>>,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Vec<u8>, UploadError> {
+    loop {
+        match rx.recv_timeout(LIVE_CANCEL_POLL) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(UploadError::Cancelled);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(UploadError::Transport(
+                    "live upload worker terminated unexpectedly".into(),
+                ));
+            }
+        }
+    }
+}
+
+/// Like [`wait_for_send_or_cancel`] but for CREATE-REPORT: on cancel it does NOT abandon
+/// the in-flight POST. It first waits cancel-aware (fast Stop); once cancel trips it waits
+/// up to `grace` for the worker to deliver the report code, RETURNING it (`Ok`) so the
+/// caller can record + terminate the just-created report instead of leaking it. Only if
+/// the grace expires (or the worker dies) with no code does it surface `Cancelled`.
+/// Extracted so the no-leak-on-cancel contract is unit-testable without a real worker.
+fn wait_for_create_or_cancel(
+    rx: std::sync::mpsc::Receiver<Result<Vec<u8>, UploadError>>,
+    cancel: &Arc<AtomicBool>,
+    grace: std::time::Duration,
+) -> Result<Vec<u8>, UploadError> {
+    // Phase 1: fast cancel-aware wait (same as the normal path).
+    loop {
+        match rx.recv_timeout(LIVE_CANCEL_POLL) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(UploadError::Transport(
+                    "live upload worker terminated unexpectedly".into(),
+                ));
+            }
+        }
+    }
+    // Phase 2 (cancelled mid-create): wait `grace` for the report to land so we can
+    // capture its code and clean it up. No code in time ⇒ accept the rare bounded leak.
+    match rx.recv_timeout(grace) {
+        Ok(result) => result,
+        Err(_) => Err(UploadError::Cancelled),
+    }
+}
+
+/// One live request with the shared single 401/419 re-auth-then-retry, run on a
+/// worker thread (so it takes owned data). Mirrors [`NativeUpload::send`]'s retry
+/// loop but for the owned live request; the actual wire attempt is
+/// [`live_send_once`]. Kept separate from the borrow-based `send` so the one-shot
+/// path is untouched.
+fn live_send_with_reauth(
+    session: &Arc<dyn SessionProvider>,
+    url: &str,
+    req: &OwnedLiveRequest,
+) -> Result<Vec<u8>, UploadError> {
+    let mut sess = session.session()?;
+    for attempt in 0..2 {
+        match live_send_once(&sess, url, req) {
+            Ok(SendResult::Ok(body)) => return Ok(body),
+            Ok(SendResult::AuthRejected) if attempt == 0 => {
+                session.invalidate();
+                sess = match session.session() {
+                    Ok(s) => s,
+                    Err(_) => return Err(UploadError::Session(SessionError::Expired)),
+                };
+                continue;
+            }
+            Ok(SendResult::AuthRejected) => {
+                return Err(UploadError::Session(SessionError::Expired));
+            }
+            Ok(SendResult::ServerError { status, detail }) => {
+                return Err(UploadError::Server { status, detail });
+            }
+            Err(transport) => return Err(UploadError::Transport(transport)),
+        }
+    }
+    unreachable!("live send retry loop must return within two iterations")
+}
+
+/// Perform exactly one HTTP attempt for an owned live request. Builds the same
+/// multipart/JSON envelopes the borrow-based [`NativeUpload::send_once`] does, from
+/// owned data. No retry logic here.
+fn live_send_once(
+    session: &Session,
+    url: &str,
+    req: &OwnedLiveRequest,
+) -> Result<SendResult, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let base = client
+        .post(url)
+        .header(reqwest::header::COOKIE, session.cookie_header())
+        .header(reqwest::header::ACCEPT, "application/json");
+
+    let base = match req {
+        OwnedLiveRequest::CreateReport { body } => base
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone()),
+        OwnedLiveRequest::Terminate => base, // no body
+        OwnedLiveRequest::MasterTable { segment_id, bytes } => {
+            let form = reqwest::blocking::multipart::Form::new()
+                .text("segmentId", segment_id.to_string())
+                .text("isRealTime", "true")
+                .part("logfile", segment_logfile_part(bytes)?);
+            base.multipart(form)
+        }
+        OwnedLiveRequest::AddSegment {
+            segment_id,
+            bytes,
+            start_time,
+            end_time,
+            in_progress_event_count,
+        } => {
+            let form = reqwest::blocking::multipart::Form::new()
+                .text(
+                    "parameters",
+                    segment_parameters_json_live(
+                        *segment_id,
+                        *start_time,
+                        *end_time,
+                        *in_progress_event_count,
+                    ),
+                )
+                .part("logfile", segment_logfile_part(bytes)?);
+            base.multipart(form)
+        }
+    };
+
+    let resp = base.send().map_err(|e| format!("request failed: {e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status.as_u16() == 419 {
+        return Ok(SendResult::AuthRejected);
+    }
+    let code = status.as_u16();
+    let body = resp.bytes().map_err(|e| format!("read body failed: {e}"))?;
+    if status.is_success() {
+        Ok(SendResult::Ok(body.to_vec()))
+    } else {
+        let detail = String::from_utf8_lossy(&body)
+            .chars()
+            .take(200)
+            .collect::<String>();
+        Ok(SendResult::ServerError {
+            status: code,
+            detail,
+        })
     }
 }
 
@@ -520,6 +893,25 @@ fn segment_parameters_json(segment_id: u64, start_time: u64, end_time: u64) -> S
     format!(
         "{{\"startTime\":{start_time},\"endTime\":{end_time},\"mythic\":0,\"isLiveLog\":false,\
          \"isRealTime\":false,\"inProgressEventCount\":0,\"segmentId\":{segment_id}}}"
+    )
+}
+
+/// The `parameters` JSON for a LIVE `add-report-segment` (debug-only). Same shape as
+/// the one-shot variant but with `isLiveLog`/`isRealTime` true and a caller-supplied
+/// `inProgressEventCount` (the count of events in an unfinished fight at the segment
+/// tail; 0 when the segment ends on a fight boundary). The exact server semantics of
+/// these flags on an OPEN report are UNVERIFIED — settling them is the live spike's
+/// one open question (see `docs/native-live-streaming-spike-FINDINGS.md`).
+fn segment_parameters_json_live(
+    segment_id: u64,
+    start_time: u64,
+    end_time: u64,
+    in_progress_event_count: u64,
+) -> String {
+    format!(
+        "{{\"startTime\":{start_time},\"endTime\":{end_time},\"mythic\":0,\"isLiveLog\":true,\
+         \"isRealTime\":true,\"inProgressEventCount\":{in_progress_event_count},\
+         \"segmentId\":{segment_id}}}"
     )
 }
 
@@ -775,5 +1167,119 @@ mod tests {
                 String::from_utf8_lossy(bad)
             );
         }
+    }
+
+    // ── Cancel-aware live send (L4) ──────────────────────────────────────────
+
+    /// A Stop set while a live POST is in flight must return `Cancelled` within a
+    /// couple of poll intervals (~250ms each), NOT wait for the 120s request
+    /// timeout. We exercise the exact wait loop with a worker that never completes.
+    #[test]
+    fn live_wait_returns_cancelled_fast_when_no_result_arrives() {
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, UploadError>>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        // Trip cancel from another thread shortly after we start waiting.
+        let c = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            c.store(true, Ordering::SeqCst);
+        });
+        let start = std::time::Instant::now();
+        let r = wait_for_send_or_cancel(rx, &cancel);
+        let elapsed = start.elapsed();
+        assert!(matches!(r, Err(UploadError::Cancelled)), "{r:?}");
+        // Bounded by the cancel set (~120ms) + one poll interval (~250ms), with
+        // generous slack for CI scheduling — the point is it's NOT the 120s timeout.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancel must return promptly, took {elapsed:?}"
+        );
+        // `_tx` is held to keep the channel open (so it's a Timeout-then-cancel
+        // path, not a Disconnected path).
+        drop(_tx);
+    }
+
+    /// A completed worker result is returned as-is (cancel never trips).
+    #[test]
+    fn live_wait_returns_worker_result_when_it_completes() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        tx.send(Ok(b"ok-body".to_vec())).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let r = wait_for_send_or_cancel(rx, &cancel).unwrap();
+        assert_eq!(r, b"ok-body");
+    }
+
+    /// A worker that drops its sender without producing a result (a panic) surfaces
+    /// as a transport error, never a hang.
+    #[test]
+    fn live_wait_maps_dropped_worker_to_transport_error() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        drop(tx); // worker "panicked" before sending
+        let cancel = Arc::new(AtomicBool::new(false));
+        let r = wait_for_send_or_cancel(rx, &cancel);
+        assert!(matches!(r, Err(UploadError::Transport(_))), "{r:?}");
+    }
+
+    /// CREATE wait: a result that completes normally is returned (cancel never trips).
+    #[test]
+    fn create_wait_returns_result_when_it_completes() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        tx.send(Ok(b"code".to_vec())).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let r = wait_for_create_or_cancel(rx, &cancel, std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(r, b"code");
+    }
+
+    /// CREATE wait, THE FIX: a Stop racing create must NOT abandon the report. With cancel
+    /// already set, a code landing within the grace window is captured (returned `Ok`), so
+    /// the caller can terminate it — not surfaced as `Cancelled` (which would orphan it).
+    #[test]
+    fn create_wait_captures_a_late_landing_report_on_cancel() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
+        let cancel = Arc::new(AtomicBool::new(true)); // stopped during create
+        std::thread::spawn(move || {
+            // Land AFTER a phase-1 poll timeout, so phase-2 grace is what captures it.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = tx.send(Ok(b"report-code".to_vec()));
+        });
+        let r = wait_for_create_or_cancel(rx, &cancel, std::time::Duration::from_secs(5));
+        assert_eq!(
+            r.unwrap(),
+            b"report-code",
+            "a report landing within grace must be captured, not abandoned"
+        );
+    }
+
+    /// CREATE wait: if no code lands within the grace (wedged create), give up as
+    /// `Cancelled` — bounded by the grace, never the 120s request timeout.
+    #[test]
+    fn create_wait_gives_up_after_grace_with_no_report() {
+        let (_tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, UploadError>>();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let start = std::time::Instant::now();
+        let r = wait_for_create_or_cancel(rx, &cancel, std::time::Duration::from_millis(300));
+        assert!(matches!(r, Err(UploadError::Cancelled)), "{r:?}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "bounded by the grace, took {:?}",
+            start.elapsed()
+        );
+        drop(_tx);
+    }
+
+    /// An already-cancelled send short-circuits before spawning any worker.
+    #[test]
+    fn live_send_cancellable_short_circuits_when_already_cancelled() {
+        let sess: Arc<dyn SessionProvider> = Arc::new(FakeSession {
+            invalidated: std::sync::Mutex::new(false),
+        });
+        let sender = LiveSender::new(sess);
+        let cancel = Arc::new(AtomicBool::new(true)); // already stopped
+        let r = sender.send_cancellable(
+            "https://example.invalid/x",
+            OwnedLiveRequest::Terminate,
+            &cancel,
+        );
+        assert!(matches!(r, Err(UploadError::Cancelled)), "{r:?}");
     }
 }

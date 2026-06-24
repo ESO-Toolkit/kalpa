@@ -16,28 +16,22 @@
 //! `ReadDirectoryChangesW` modify events for a single appended file can coalesce
 //! or be missed under heavy raid write volume.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use tauri::ipc::Channel;
 
 use super::scanner;
-
-/// 64 MiB cap on a single incremental read, bounding memory per pass.
-const MAX_READ: u64 = 64 * 1024 * 1024;
-/// Poll fallback cadence — short enough to feel live, light on IO.
-const POLL_INTERVAL: Duration = Duration::from_millis(400);
-/// Give up after this many consecutive stat/read failures (~the active log was
-/// deleted/renamed/replaced-by-a-dir, or a permanent AV/CFA/share lock). At a
-/// ~400ms cadence this is ~12s of unbroken failure before we tear the session
-/// down rather than spinning forever while the UI shows a stuck "LIVE".
-const MAX_CONSECUTIVE_FAILURES: u32 = 30;
+// The read primitive + loop tuning constants are shared with the native
+// live-streaming tail; both live in `tail_io` so the two tail loops can't drift
+// on the read bound, poll cadence, or failure-streak teardown threshold.
+use super::tail_io::{read_range, MAX_CONSECUTIVE_FAILURES, MAX_READ, POLL_INTERVAL};
 
 /// Events streamed to the frontend over the live-session [`Channel`].
 ///
@@ -70,6 +64,17 @@ pub enum LiveEvent {
     /// A non-fatal warning (e.g. transient read retry). The UI may log but
     /// should not toast these, as they can recur frequently.
     Warning { message: String },
+    /// (Native live only) the first `BEGIN_LOG` of a logging session arrived, so the
+    /// driver is now anchored and will stream fights as they finish. Until this fires,
+    /// the native path is *armed but waiting* (the encoder needs a session header it
+    /// can't synthesize). The UI flips from the amber "waiting for a session" state to
+    /// the emerald "streaming" state on this event — instant, no timeout.
+    SessionAnchored,
+    /// (Native live only) the ESO Logs session expired mid-stream — posting is paused
+    /// until the user re-signs-in. The UI shows a re-login prompt; the report stays open.
+    ReauthRequired { message: String },
+    /// (Native live only) a fresh session was captured — posting resumed.
+    ReauthResolved,
     /// Watching stopped (user-initiated or fatal error).
     Stopped { reason: String },
 }
@@ -102,37 +107,6 @@ impl Drop for LiveWatchHandle {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-/// Read `[start, end)` from a file into the caller-owned `buf`, bounded by
-/// [`MAX_READ`], and return the number of bytes read. `buf` is resized to
-/// exactly that length, so the valid bytes are `&buf[..len]`.
-///
-/// The caller hands in a buffer that lives for the whole tail loop so this
-/// never allocates per pass — it grows to the session's high-water mark once
-/// and is reused. Offsets are still tracked from true byte lengths (the raw
-/// bytes), never from a lossily-decoded string.
-fn read_range(path: &Path, start: u64, end: u64, buf: &mut Vec<u8>) -> Result<usize, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    if end <= start {
-        buf.clear();
-        return Ok(0);
-    }
-    let len = end - start;
-    if len > MAX_READ {
-        return Err(format!("incremental read too large: {len} bytes"));
-    }
-    let len = len as usize;
-    let mut f = std::fs::File::open(path).map_err(|e| format!("open: {e}"))?;
-    f.seek(SeekFrom::Start(start))
-        .map_err(|e| format!("seek: {e}"))?;
-    // `resize` reuses existing capacity; it only zero-fills bytes beyond the
-    // current high-water mark, and those are immediately overwritten by the
-    // read below.
-    buf.resize(len, 0);
-    f.read_exact(&mut buf[..len])
-        .map_err(|e| format!("read: {e}"))?;
-    Ok(len)
 }
 
 /// Start tailing `file_path` for fight detection. `start_offset` is where to

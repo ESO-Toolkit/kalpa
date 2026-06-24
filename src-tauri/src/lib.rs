@@ -446,6 +446,7 @@ pub fn run() {
             uploader::commands::uploader_detect_path,
             uploader::commands::uploader_list_logs,
             uploader::commands::uploader_preflight,
+            uploader::commands::uploader_probe_live_readiness,
             uploader::commands::uploader_split_to_disk,
             uploader::commands::uploader_split_to_disk_named,
             uploader::commands::uploader_import_log,
@@ -462,10 +463,24 @@ pub fn run() {
             uploader::commands::uploader_delete_history,
             uploader::commands::uploader_attach_report,
             #[cfg(debug_assertions)]
+            uploader::commands::uploader_run_native_live_spike,
+            #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // On real process exit, signal every native live session to stop so its
+            // terminate-report + abandoned POSTs settle promptly (the OS reaps the
+            // driver threads; we don't join here, to avoid blocking exit on a wedged
+            // network). A hard exit's correctness is covered by the L2 orphan
+            // breadcrumb + next-launch recovery — this just closes reports faster.
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<uploader::commands::UploaderState>() {
+                    state.signal_all_live_stop();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

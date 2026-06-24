@@ -56,6 +56,7 @@ import {
   type FightSummary,
   type LiveEvent,
   type LiveFight,
+  type LiveReadiness,
   type LogFileInfo,
   type LogPathDetection,
   type LogPreflight,
@@ -189,12 +190,33 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // gate still has final say per log (an unproven event type falls back).
   const [nativeOptIn, setNativeOptIn] = useState(false);
   const [hasNativeSession, setHasNativeSession] = useState(false);
-  // Direct upload is the *intended* path only for MANUAL uploads with both opt-in
-  // and a session. Live mode ALWAYS hands off to the official uploader
-  // (uploader_start_live never goes native), so the transport readout, the
-  // "Upload directly" label, and the direct-only report-name field must not claim
-  // native there.
-  const willUseNative = mode === "manual" && nativeOptIn && hasNativeSession;
+  // Direct (native) upload is the *intended* path — in BOTH modes — when the user has
+  // opted in AND captured an upload session. Live now routes native under the same
+  // gate (the backend's per-segment coverage + format flag still have final say), so
+  // the header transport readout must reflect native in live too; previously it was
+  // forced to manual-only, which wrongly claimed "Official uploader" for a live
+  // session that would actually go native. The manual-only consumers (ManualActions,
+  // LogSummaryCard) only render in manual mode, so broadening this is safe for them.
+  const willUseNative = nativeOptIn && hasNativeSession;
+
+  // Live mode defaults to native for everyone (the official handoff is an explicit
+  // opt-out via `liveUseOfficialUploader`, default false), independent of the legacy
+  // `nativeUploadOptIn` (manual) toggle. The readout must stay HONEST, though: native
+  // also requires an upload session, and Go Live can fail/decline the sign-in prompt
+  // and hand off. So gate the live readout on `hasNativeSession` exactly as manual does
+  // (line above) — showing "ESO Logs uploader" until a session is captured. This
+  // under-promises only in the narrow "user will sign in at Go Live" case (the safe
+  // direction) and never claims "Direct from Kalpa" for a session that handed off.
+  const [liveUseOfficial, setLiveUseOfficial] = useState(false);
+  const liveWillUseNative = !liveUseOfficial && hasNativeSession;
+
+  // The transport hint for the CURRENT mode. Several shared panels (the header
+  // readout, LogSummaryCard's route chip, UploadOptionsControl's report-name field)
+  // render in BOTH modes, so they must reflect the mode-correct flag — live uses a
+  // different opt-out (`liveUseOfficialUploader`) than manual (`nativeUploadOptIn`).
+  // Passing the manual `willUseNative` into them while in live mode made the route
+  // chip / report-name field contradict the (mode-aware) header.
+  const activeWillUseNative = mode === "live" ? liveWillUseNative : willUseNative;
 
   // Live-mode state
   const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
@@ -206,8 +228,27 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // Mirror of the count so the empty-deps unmount cleanup can report the true
   // fight total to the backend without re-subscribing on every fight.
   const liveFightCountRef = useRef(0);
+  // Fight indices already counted this session. Used to dedup re-delivered fight
+  // events in the EVENT HANDLER (not inside a setState updater): incrementing the
+  // count inside the setLiveFights updater double-fires under React StrictMode (which
+  // invokes updaters twice), which over-counted every fight (e.g. "2 fights" for 1).
+  const seenFightIndicesRef = useRef<Set<number>>(new Set());
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
+  // Which path this live session actually took: true = handed off to the official
+  // uploader (a separate app keeps streaming); false = native in-process (Kalpa IS
+  // the uploader, Stop ends it). Drives the live dashboard's callout/copy so it's
+  // accurate per session, since the same session can route either way depending on
+  // opt-in + sign-in. Set from the start dispatch's `handedOff`.
+  const [liveHandedOff, setLiveHandedOff] = useState(false);
+  // (Native path) whether a logging session has anchored yet — i.e. the driver saw
+  // its first BEGIN_LOG and is now streaming. Until then the native path is "armed but
+  // waiting" (the encoder needs a session header). Flips on the SessionAnchored event,
+  // instantly (no timeout). Drives the waiting↔streaming UI.
+  const [sessionAnchored, setSessionAnchored] = useState(false);
+  // The pre-Go-Live readiness probe result (native only) — seeds which "waiting"
+  // guidance to show first; SessionAnchored then takes over as ground truth.
+  const [liveReadiness, setLiveReadiness] = useState<LiveReadiness | null>(null);
   // Wall-clock start of the current live session, for the elapsed timer. Stored
   // as state (drives the timer's mount) and set alongside the session id in
   // handleStartLive. Kept separate from the `live-${ts}` id string so the timer
@@ -223,6 +264,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // empty-deps unmount cleanup, which can't read `liveSessionId` state (stale
   // closure). Lets the close path show the same handoff reminder as Stop.
   const liveWasRunningRef = useRef(false);
+  // Mirror of `liveHandedOff` for the empty-deps unmount cleanup (which can't read
+  // the state value — stale closure), so the close toast is path-aware too: native
+  // close ends the upload + closes the report, handoff leaves the official uploader
+  // streaming.
+  const liveHandedOffRef = useRef(false);
   // Gate for the live channel handler: late events queued during the ~poll
   // shutdown window must not fire setState/toast after stop or unmount.
   const liveActiveRef = useRef(false);
@@ -315,12 +361,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // transport hint stay in sync with Settings and the credential store.
   const refreshNativeState = useCallback(async () => {
     try {
-      const [optIn, session] = await Promise.all([
+      const [optIn, session, liveOfficial] = await Promise.all([
         getSetting<boolean>("nativeUploadOptIn", false),
         invokeOrThrow<boolean>("uploader_has_session"),
+        getSetting<boolean>("liveUseOfficialUploader", false),
       ]);
       setNativeOptIn(optIn);
       setHasNativeSession(session);
+      setLiveUseOfficial(liveOfficial);
     } catch {
       /* best-effort — the upload path still reads the setting fresh per upload */
     }
@@ -329,13 +377,15 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [optIn, session] = await Promise.all([
+      const [optIn, session, liveOfficial] = await Promise.all([
         getSetting<boolean>("nativeUploadOptIn", false),
         invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+        getSetting<boolean>("liveUseOfficialUploader", false),
       ]);
       if (cancelled) return;
       setNativeOptIn(optIn);
       setHasNativeSession(session);
+      setLiveUseOfficial(liveOfficial);
     })();
     return () => {
       cancelled = true;
@@ -367,12 +417,17 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       liveWasRunningRef.current = false;
       if (id) {
         // Warn whenever a live session was active at close — including an
-        // in-flight start (`id` set but not yet promoted): the official uploader
-        // may already have been launched, and we can't tell from here.
-        // Over-warning ("it may still be uploading") is the safe, honest default
-        // vs. silently leaving an upload running.
+        // in-flight start (`id` set but not yet promoted). Path-aware via the ref
+        // mirror (the state isn't readable in this empty-deps closure): a native
+        // session's close stops the upload + closes the report; a handoff session
+        // leaves the official uploader streaming. For an in-flight start that hasn't
+        // resolved handedOff yet, the ref defaults to false (native) — but such a
+        // start hasn't launched the official uploader either, so the native wording
+        // ("nothing left running") is the honest default there too.
         toast.info(
-          "Closed live tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report.",
+          liveHandedOffRef.current
+            ? "Closed live tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
+            : "Closed live tracking in Kalpa — the direct upload was stopped and its report closed.",
           { duration: 8000 }
         );
         void invokeOrThrow("uploader_stop_live", {
@@ -534,6 +589,45 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     [logsDir, loadLogs, handleSelectLog]
   );
 
+  // Live mode has exactly one sensible target — the live Encounter.log ESO is writing
+  // right now — so there's no real choice to make. Auto-pick it (so "Go Live" works
+  // without hunting for a file); the user can still override by clicking a different
+  // log first. Returns the selected path, or null if no encounter log is present.
+  //
+  // CRUCIAL: live streaming is ONLY valid for an ESO *encounter* log. The folder also
+  // holds `Interface.log` — the game's UI/error log, which it writes constantly (even
+  // in menus), so it is almost always the most-recently-modified file and would win a
+  // naive "newest / isActive" pick. But it has no BEGIN_LOG and the native encoder
+  // can't anchor a session on it, so it must NEVER be a live target. We therefore
+  // restrict to encounter logs and prefer, in order: the active `Encounter.log` (the
+  // hot file) → any active encounter log (a just-rotated session that's still hot) →
+  // the literal `Encounter.log` even if cold → the newest encounter log. Archives
+  // (`Archive-…-Encounter-….log`) are historical and belong in manual upload, but they
+  // ARE encounter logs, so they remain a last-resort candidate rather than Interface.log.
+  // Called from the Live-tab click and as a Go-Live fallback (NOT from an effect — the
+  // React Compiler discourages firing setState from effects; this is a user action).
+  const autoSelectActiveLog = useCallback((): string | null => {
+    // `fileName` is the bare name (no path). ESO encounter logs contain "encounter"
+    // and end in .log; the live file is named exactly `Encounter.log`. Anything else —
+    // notably `Interface.log` — is not streamable, so it's excluded outright.
+    const isEncounterLog = (name: string) => /encounter.*\.log$/i.test(name);
+    const isLiveEncounter = (name: string) => /^encounter\.log$/i.test(name);
+    const encounterLogs = logs.filter((l) => isEncounterLog(l.fileName));
+    if (encounterLogs.length === 0) return null;
+
+    const target =
+      encounterLogs.find((l) => l.isActive && isLiveEncounter(l.fileName)) ??
+      encounterLogs.find((l) => l.isActive) ??
+      encounterLogs.find((l) => isLiveEncounter(l.fileName)) ??
+      [...encounterLogs].sort((a, b) => b.modifiedAtMs - a.modifiedAtMs)[0];
+
+    if (target) {
+      void handleSelectLog(target.path);
+      return target.path;
+    }
+    return null;
+  }, [logs, handleSelectLog]);
+
   // Native file drag-drop over the window. Tauri delivers real OS paths (unlike
   // HTML5 drag-drop in a webview), which the backend then copy-confines. We only
   // act on a single dropped .log; the drag-over state drives the picker visual.
@@ -612,16 +706,41 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setWorkbenchOpen(true);
   };
 
-  const handleStartLive = async () => {
-    if (!selectedLog) {
-      toast.error("Pick the active Encounter.log first.");
+  const handleStartLive = async (forceHandoffArg: boolean = false) => {
+    // Harden against an event accidentally being passed (e.g. onClick={handleStartLive}
+    // instead of a wrapper): coerce to a real boolean so a leaked PointerEvent can never
+    // read as a truthy `forceHandoff` and silently route to the official uploader.
+    const forceHandoff = forceHandoffArg === true;
+    // Resolve a target if none is selected (e.g. logs finished loading after the Live
+    // tab was clicked): auto-pick the active Encounter.log. `handleSelectLog` is async
+    // and won't have updated `selectedLog` state by this tick, so use the path it
+    // returns directly for this start.
+    let target = selectedLog;
+    if (!target) target = autoSelectActiveLog();
+    if (!target) {
+      // autoSelectActiveLog returns null when there's no *encounter* log to stream.
+      // Distinguish "the folder has logs but none are an Encounter.log" (e.g. only
+      // Interface.log so far — combat logging was never turned on) from "no logs at
+      // all"; both want the same /encounterlog nudge, not a "pick a file" message
+      // (there's nothing valid to pick).
+      const hasEncounterLog = logs.some((l) => /encounter.*\.log$/i.test(l.fileName));
+      toast.error(
+        hasEncounterLog
+          ? "Pick the Encounter.log to stream first."
+          : "No Encounter.log found yet — enable combat logging in ESO (/encounterlog), then try again."
+      );
       return;
     }
     // Guard re-entry SYNCHRONOUSLY via a ref: `starting`/`liveSessionId` state
     // doesn't update until the next render, so two clicks in one frame would
     // both pass a state-only check and start two backend watchers (orphaning
     // one). The ref flips immediately.
-    if (startingRef.current || liveSessionId) return;
+    // Re-entry guard keyed on the REF, not the render-captured `liveSessionId` state:
+    // `handleForceHandoffLive` calls this right after `await handleStopLive()`, which
+    // clears `liveSessionIdRef.current` synchronously but won't have re-rendered
+    // `liveSessionId` to null yet in this call stack — so a state check here would
+    // wrongly no-op the restart and leave nothing running.
+    if (startingRef.current || liveSessionIdRef.current) return;
     startingRef.current = true;
     setStarting(true);
     const startedAt = Date.now();
@@ -633,7 +752,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setLiveFights([]);
     setLiveFightCount(0);
     liveFightCountRef.current = 0;
+    seenFightIndicesRef.current = new Set();
     setLiveReport(null);
+    setSessionAnchored(false); // native: not anchored until the first BEGIN_LOG
+    // Reset the handoff path indicator (state + its unmount-toast ref mirror) so this
+    // new session doesn't inherit the previous session's path for its copy/toast until
+    // the start dispatch resolves the real value.
+    setLiveHandedOff(false);
+    liveHandedOffRef.current = false;
     setLiveStartMs(startedAt);
     setLiveStatus("watching");
     liveActiveRef.current = true;
@@ -655,16 +781,25 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         case "started":
           setLiveStatus("watching");
           break;
+        case "sessionAnchored":
+          // Native: the first BEGIN_LOG landed — flip waiting→streaming instantly.
+          setSessionAnchored(true);
+          break;
         case "fightDetected": {
+          // A fight implies the session anchored, even if the anchored event was
+          // missed/coalesced — keep the UI honest.
+          setSessionAnchored(true);
           const detected = ev;
+          // Dedup + count in the EVENT-HANDLER body (runs once per event), NOT inside a
+          // setState updater. React StrictMode double-invokes updaters in dev, so the old
+          // nested `setLiveFightCount` inside the `setLiveFights` updater fired twice and
+          // double-counted every fight ("2 fights" for 1). The ref Set dedups re-delivered
+          // events; both setStates below use PURE updaters (StrictMode-safe).
+          if (seenFightIndicesRef.current.has(detected.index)) break;
+          seenFightIndicesRef.current.add(detected.index);
+          liveFightCountRef.current += 1;
+          setLiveFightCount((c) => c + 1);
           setLiveFights((prev) => {
-            if (prev.some((f) => f.index === detected.index)) return prev;
-            // Bump the truthful total only when this is a genuinely new fight
-            // (not a re-delivered duplicate within the window).
-            setLiveFightCount((c) => {
-              liveFightCountRef.current = c + 1;
-              return c + 1;
-            });
             const next = [
               ...prev,
               {
@@ -685,6 +820,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           setLiveFights([]);
           setLiveFightCount(0);
           liveFightCountRef.current = 0;
+          seenFightIndicesRef.current = new Set();
           break;
         case "fightSkipped":
           // A genuinely oversized fight; surface once. The full log still uploads.
@@ -693,6 +829,18 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         case "warning":
           // Transient (e.g. a read retry) — log but don't toast, as these recur.
           console.warn("[uploader] live watcher:", ev.message);
+          break;
+        case "reauthRequired":
+          // Native live only: the ESO Logs session expired mid-stream. Posting is
+          // paused (the report stays open) until the user re-signs-in. Prompt them;
+          // the driver resumes automatically once a fresh session is stored.
+          setLiveStatus("attention");
+          toast.warning(ev.message, { duration: 12000 });
+          break;
+        case "reauthResolved":
+          // A fresh session was captured; the driver resumed posting.
+          setLiveStatus("watching");
+          toast.success("Signed back in — resuming the live upload.");
           break;
         case "stopped": {
           // A `stopped` event that passes the session guard above means THIS
@@ -724,12 +872,100 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       }
     };
 
+    // Native direct-streaming is the DEFAULT live path: it's faster and keeps the
+    // report in-app. The only ways off it are (a) `forceHandoff` — the explicit "go
+    // live via the official uploader instead" escape hatch — or (b) the persisted
+    // `liveUseOfficialUploader` opt-OUT (default false → native). We use a dedicated
+    // key (not the legacy `nativeUploadOptIn`, whose default-false meant "native off")
+    // so existing users' stored values aren't silently inverted: an unset key resolves
+    // to false = native, which is the new default for everyone.
+    const preferOfficial =
+      forceHandoff || (await getSetting<boolean>("liveUseOfficialUploader", false));
+
+    // Native needs the in-app ESO Logs upload session (the wcl_session cookie), which
+    // is SEPARATE from the profile login that gates this dialog (authUser/isLoggedIn).
+    // A user can be "signed in" to the dialog yet have no upload session — the old
+    // behaviour then silently handed off to the official uploader, which is exactly the
+    // surprise we're fixing. So when native is wanted but there's no session, prompt the
+    // capture inline and proceed native once it lands; only fall back to handoff if the
+    // user cancels/the capture fails.
+    let liveHasSession = await invokeOrThrow<boolean>("uploader_has_session").catch(() => false);
+    if (!preferOfficial && !liveHasSession) {
+      // Bail if the start was superseded while we were checking (mirror of the
+      // pre-start abort check below) before opening a sign-in window.
+      if (liveSessionIdRef.current !== sessionId) {
+        startingRef.current = false;
+        setStarting(false);
+        return;
+      }
+      setLiveStatus("attention");
+      const signedIn = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs")
+        .then((r) => {
+          warnIfSessionNotPersisted(r);
+          return true;
+        })
+        .catch(() => false);
+      // Re-read the session: the capture either populated the cookie or it didn't.
+      liveHasSession = signedIn
+        ? await invokeOrThrow<boolean>("uploader_has_session").catch(() => false)
+        : false;
+      // Keep the lifted state in sync so the header readout/Direct Upload section
+      // reflect the freshly captured (or still-missing) session.
+      void refreshNativeState();
+      // A stop / mode-switch could have landed during the sign-in window.
+      if (liveSessionIdRef.current !== sessionId) {
+        startingRef.current = false;
+        setStarting(false);
+        return;
+      }
+      // Toast AFTER the abort re-check (and only for the still-current session) so a
+      // Stop-during-sign-in doesn't emit a "streaming via the official uploader"
+      // message for a start that's about to be abandoned.
+      if (!liveHasSession) {
+        toast.info(
+          "Streaming via the official ESO Logs uploader (sign in to ESO Logs for the faster path)."
+        );
+      }
+      setLiveStatus("watching");
+    }
+
+    // Final native decision: wanted AND we have a session (either pre-existing or just
+    // captured). Without a session even after prompting, fall back to the handoff.
+    const nativeOptIn = !preferOfficial && liveHasSession;
+
+    // Native only: peek whether a fresh logging session is coming, so the waiting
+    // state opens with the right guidance (/encounterlog on vs /reloadui). Best-effort
+    // — on error we just show generic guidance; SessionAnchored is the ground truth.
+    if (nativeOptIn) {
+      const readiness = await invokeOrThrow<LiveReadiness>("uploader_probe_live_readiness", {
+        filePath: target,
+      }).catch(() => null);
+      setLiveReadiness(readiness);
+    } else {
+      setLiveReadiness(null);
+    }
+
+    // PRE-START ABORT CHECK. The settings/has_session reads and the readiness probe
+    // above are awaited BEFORE `uploader_start_live` registers a backend `Starting`
+    // slot — so a stop / switch-to-Manual / dialog-close landing during them runs
+    // `uploader_stop_live` against a slot that doesn't exist yet (a no-op), and without
+    // this guard the start would then resume and launch an ORPHAN backend session the
+    // UI already asked to stop. If we lost ownership (the ref was cleared/replaced),
+    // bail before touching the backend. Once `uploader_start_live` runs, the backend's
+    // own Starting-slot cancellation-race protocol takes over.
+    if (liveSessionIdRef.current !== sessionId) {
+      startingRef.current = false;
+      setStarting(false);
+      return;
+    }
+
     try {
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_start_live", {
         sessionId,
-        filePath: selectedLog,
+        filePath: target,
         options,
         channel,
+        nativeOptIn,
       });
       // The start can resolve Ok AFTER a stop / switch-to-Manual / superseding
       // start ran during the await (handleStopLive already fired
@@ -740,13 +976,18 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       // an unclearable phantom session. The backend stop already cancelled/will
       // settle it, so just drop the stale result silently.
       if (liveSessionIdRef.current !== sessionId) return;
-      liveWasRunningRef.current = true; // handed off; the uploader is now streaming
+      liveWasRunningRef.current = true; // running (handed off OR native); don't re-warn on close
       setLiveSessionId(sessionId);
+      const handed = dispatch?.handedOff ?? true; // default to the safe handoff wording
+      setLiveHandedOff(handed);
+      liveHandedOffRef.current = handed; // mirror for the unmount-cleanup toast
       if (dispatch?.report) setLiveReport(dispatch.report);
       toast.success(
         dispatch?.handedOff
           ? "Live logging started in the official ESO Logs uploader."
-          : "Live logging started."
+          : nativeOptIn
+            ? "Live logging started — uploading directly to ESO Logs."
+            : "Live logging started."
       );
     } catch (e) {
       // Only act on the failure if THIS start is still current. If a stop /
@@ -775,10 +1016,18 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     // Running watcher with no visible Stop control.
     const id = liveSessionIdRef.current;
     if (!id) return;
+    // Clear the ownership refs SYNCHRONOUSLY, before any await. A caller that stops
+    // then immediately starts (handleForceHandoffLive) or switches to Manual
+    // (`void handleStopLive()` then setMode) must see "no session" instantly — the
+    // backend stop is awaited below, but a synchronous follow-on (handleStartLive's
+    // re-entry guard, the pre-start abort re-check, the Live-tab auto-select) reads
+    // these refs and would otherwise act on the just-stopped session. The post-await
+    // cleanup below re-checks `=== id` so it won't clobber a newer session.
+    liveSessionIdRef.current = null;
+    liveActiveRef.current = false;
     // Was this session actually running (handed off to the uploader), vs still
     // starting? Only a running session left the official uploader streaming, so
-    // only then do we remind the user it keeps going. Clear the ref so a later
-    // dialog-close can't re-warn for an already-stopped session.
+    // only then do we remind the user it keeps going.
     const wasRunning = liveWasRunningRef.current;
     liveWasRunningRef.current = false;
 
@@ -797,24 +1046,24 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     } catch {
       /* best-effort */
     }
-    // Only clear the live refs/state if WE are still the current session. The
-    // await above can take a while (it joins the watcher thread + settles history
-    // I/O); during it the watcher's own `stopped` event can clear state, re-enable
-    // Start, and the user can begin a NEW session. Clobbering the refs/state
-    // unconditionally here would orphan that new session (its start result gets
-    // dropped by the session guard, its channel events ignored) with no visible
-    // Stop. If a newer session replaced ours, leave it alone.
-    if (liveSessionIdRef.current === id) {
-      liveActiveRef.current = false; // stop processing any trailing events
-      liveSessionIdRef.current = null;
+    // Clear the live UI STATE unless a NEWER session took over during the await. We
+    // already nulled the refs synchronously up top; the await can take a while (it
+    // joins the driver/watcher + settles history), during which the user could start a
+    // NEW session (which sets liveSessionIdRef to a new id). Only skip the state reset
+    // in that case — otherwise clear it. `null` means no newer session claimed it, so
+    // it's ours to reset.
+    if (liveSessionIdRef.current === null) {
       setLiveSessionId(null);
       setLiveStatus(liveFightCount > 0 ? "upToDate" : "idle");
     }
     if (wasRunning) {
-      // Be honest: Kalpa stopped its own tracking, but it can't stop the separate
-      // official uploader — it may still be streaming until the user stops it.
+      // Path-aware: on the HANDOFF path Kalpa can't stop the separate official
+      // uploader (it may still be streaming); on the NATIVE path Kalpa IS the uploader,
+      // so Stop genuinely ended the upload and closed the report.
       toast.info(
-        "Stopped tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report.",
+        liveHandedOff
+          ? "Stopped tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
+          : "Stopped the live upload and closed the report on ESO Logs.",
         { duration: 8000 }
       );
     }
@@ -829,6 +1078,16 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       );
     }
     await refreshHistory();
+  };
+
+  // The "go live anyway via the official uploader" escape hatch from the native
+  // waiting state (logging already running, no fresh BEGIN_LOG coming). Stop the
+  // armed-but-waiting native session and immediately restart it forcing the handoff
+  // path — which CAN pick up an in-progress session. Explicit, user-chosen, disclosed
+  // (the running callout then shows the handoff copy) — never a silent downgrade.
+  const handleForceHandoffLive = async () => {
+    await handleStopLive();
+    await handleStartLive(true);
   };
 
   const copyLink = useCallback(async (url: string) => {
@@ -911,7 +1170,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
             Turn your <code className="text-foreground/80">Encounter.log</code> into a shareable
             report on esologs.com — parses, rankings, and full fight breakdowns.
           </DialogDescription>
-          {isLoggedIn && <TransportReadout willUseNative={willUseNative} transport={transport} />}
+          {isLoggedIn && (
+            <TransportReadout willUseNative={activeWillUseNative} transport={transport} />
+          )}
         </DialogHeader>
 
         {!isLoggedIn ? (
@@ -949,7 +1210,18 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 />
                 <ModeTab
                   active={mode === "live"}
-                  onClick={() => setMode("live")}
+                  onClick={() => {
+                    setMode("live");
+                    // Entering Live re-targets the ACTIVE Encounter.log, overriding any
+                    // selection carried over from Manual (e.g. an archive you were
+                    // about to upload) — live has exactly one correct target, and a
+                    // stale manual pick would silently make Go Live stream the wrong
+                    // (or a dead) file. The user can still click a different log AFTER
+                    // switching to Live to override. Guard on the REFS (not the
+                    // `liveSessionId` state, which lags) so this can't clobber the
+                    // selection of an in-flight start.
+                    if (!liveSessionIdRef.current && !startingRef.current) autoSelectActiveLog();
+                  }}
                   Icon={Radio}
                   title="Live Log"
                   hint="Stream fights during an ongoing raid."
@@ -982,7 +1254,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
                   preflight={preflight}
                   fights={fights}
-                  willUseNative={willUseNative}
+                  willUseNative={activeWillUseNative}
                 />
               )}
 
@@ -1016,7 +1288,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                     options={options}
                     onChange={setOptions}
                     disabled={uploading || liveSessionId !== null}
-                    willUseNative={willUseNative}
+                    willUseNative={activeWillUseNative}
                     fights={fights}
                     whenMs={logs.find((l) => l.path === selectedLog)?.modifiedAtMs ?? null}
                   />
@@ -1031,12 +1303,13 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               )}
 
               {/* Direct upload (recommended) — opt-in + in-app sign-in. Placed just
-                before the action so the user sets up the faster path right where
-                it pays off. Gated on the same `nativeUploadOptIn` setting the
-                upload reads fresh per dispatch. MANUAL mode only: live logging
-                always hands off to the official uploader, so a direct-upload
-                promo/ready panel there would be a false claim. */}
-              {mode === "manual" && liveSessionId === null && (
+                before the action so the user sets up the faster path right where it
+                pays off. Shown in BOTH modes (when no live session is running): live
+                now also goes native when opted-in + signed-in, so this is where a
+                user discovers WHY a live session would otherwise hand off (not opted
+                in / not signed in) and fixes it before Go Live — the gap that made a
+                "why did the official uploader open?" surprise. */}
+              {liveSessionId === null && (
                 <DirectUploadSection
                   optIn={nativeOptIn}
                   hasSession={hasNativeSession}
@@ -1067,14 +1340,36 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   <LiveDashboard
                     running={liveSessionId !== null}
                     starting={starting}
-                    canStart={!!selectedLog}
+                    // Always enabled (the listError empty-state aside, handled by the
+                    // panel): handleStartLive resolves the active Encounter.log itself
+                    // and surfaces an honest toast when the folder is empty — so gating
+                    // on a selection or logs.length>0 made both the auto-select fallback
+                    // AND the empty-folder toast unreachable from the button.
+                    canStart={true}
                     startMs={liveStartMs}
                     liveFights={liveFights}
                     liveFightCount={liveFightCount}
                     liveReport={liveReport}
-                    onStart={handleStartLive}
+                    // Fights already in the selected log before going live. Live
+                    // streams only NEW fights (tail starts at EOF), so this drives the
+                    // "earlier fights won't be uploaded" expectation note.
+                    priorFightCount={preflight?.totalFights ?? 0}
+                    // Which path the running session took — drives the callout/copy
+                    // (handoff = a separate uploader app; native = Kalpa uploads).
+                    handedOff={liveHandedOff}
+                    // Native waiting↔streaming: anchored once the first BEGIN_LOG lands.
+                    sessionAnchored={sessionAnchored}
+                    // Best-effort pre-start guess of what's coming (which waiting copy).
+                    readiness={liveReadiness}
+                    // Wrap so the click PointerEvent is NOT passed as the first arg
+                    // (`forceHandoff`): a bare `onStart={handleStartLive}` made every
+                    // Go Live receive the event as a truthy forceHandoff → preferOfficial
+                    // → silent handoff to the official uploader. This is THE "it still
+                    // opened the other uploader" bug.
+                    onStart={() => void handleStartLive()}
                     onStop={handleStopLive}
                     onCopyLink={copyLink}
+                    onForceHandoff={handleForceHandoffLive}
                   />
                 )}
               </div>
@@ -1358,7 +1653,7 @@ function LoggedOut({ onAuthChange }: { onAuthChange: (user: AuthUser | null) => 
           size="lg"
           onClick={handleLogin}
           disabled={loggingIn}
-          className="border-accent-sky/30 bg-accent-sky/[0.06] text-sky-200 hover:border-accent-sky/50 hover:bg-accent-sky/[0.12]"
+          className="border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:border-accent-sky/50 hover:bg-accent-sky/[0.12]"
         >
           <LogIn className="size-4" />
           {loggingIn ? "Opening sign-in…" : "Sign in to ESO Logs"}
@@ -1572,9 +1867,15 @@ function ModeTab({
         "group relative overflow-hidden rounded-xl p-3 text-left transition-all duration-200",
         "focus-visible:ring-2 focus-visible:ring-accent-sky/40 focus-visible:outline-none",
         active
-          ? // RAISED out of the track: a lit sky surface with an outer shadow +
-            // top highlight so the active mode physically reads as selected.
-            "bg-gradient-to-b from-accent-sky/[0.16] to-accent-sky/[0.06] shadow-[0_4px_14px_-4px_color-mix(in_oklab,var(--accent-sky)_40%,transparent),inset_0_1px_0_rgba(255,255,255,0.12)]"
+          ? // RAISED out of the well. The lift is built from layered NEUTRAL
+            // shadows (matching the design system's dark-ambient idiom), not a
+            // single saturated blue drop — a tight contact shadow + a soft
+            // ambient shadow give real depth, a hairline ring defines the raised
+            // edge against the dark track, the sky tint is a faint accent glow
+            // (not the lift), and an inset top highlight catches the light. The
+            // sky accents are tokenized (accent-sky) so the active tab follows
+            // the theme.
+            "bg-gradient-to-b from-accent-sky/[0.14] to-accent-sky/[0.05] ring-1 ring-inset ring-accent-sky/25 shadow-[0_1px_2px_rgba(0,0,0,0.5),0_8px_20px_-8px_rgba(0,0,0,0.55),0_0_22px_-12px_color-mix(in_oklab,var(--accent-sky)_55%,transparent),inset_0_1px_0_rgba(255,255,255,0.14)]"
           : // FLAT in the well: no fill, no border — just sits in the recess.
             "text-muted-foreground hover:bg-white/[0.04]"
       )}
@@ -1582,7 +1883,7 @@ function ModeTab({
       <div
         className={cn(
           "flex items-center gap-2 text-sm font-semibold",
-          active ? "text-sky-200" : "text-foreground/70"
+          active ? "text-accent-sky" : "text-foreground/70"
         )}
       >
         <Icon
@@ -1591,7 +1892,9 @@ function ModeTab({
         />
         {title}
       </div>
-      <div className={cn("mt-1 text-xs", active ? "text-sky-100/60" : "text-muted-foreground/70")}>
+      <div
+        className={cn("mt-1 text-xs", active ? "text-accent-sky/60" : "text-muted-foreground/70")}
+      >
         {hint}
       </div>
     </button>
@@ -2138,7 +2441,7 @@ function ManualActions({
       ? "Upload directly"
       : installed
         ? "Upload to ESO Logs"
-        : "Open in ESO Logs uploader";
+        : "Open the ESO Logs uploader";
 
   return (
     // The climax — the MOST raised surface, and the only WARM (gold) one, so it
@@ -2171,6 +2474,35 @@ function ManualActions({
   );
 }
 
+/** A monospace command chip with a one-click copy — for the in-game slash commands
+ *  the live waiting state asks the user to type (`/reloadui`, `/encounterlog on`). */
+function CopyChip({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard may be blocked; the visible text is still copyable manually */
+        }
+      }}
+      className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-black/30 px-2 py-1 font-mono text-xs text-foreground/85 transition-colors hover:border-white/15 hover:bg-black/40"
+      aria-label={`Copy ${text}`}
+    >
+      {copied ? (
+        <Check className="size-3 text-emerald-400" />
+      ) : (
+        <Copy className="size-3 opacity-70" />
+      )}
+      {text}
+    </button>
+  );
+}
+
 function LiveDashboard({
   running,
   starting,
@@ -2179,9 +2511,14 @@ function LiveDashboard({
   liveFights,
   liveFightCount,
   liveReport,
+  priorFightCount,
+  handedOff,
+  sessionAnchored,
+  readiness,
   onStart,
   onStop,
   onCopyLink,
+  onForceHandoff,
 }: {
   running: boolean;
   starting: boolean;
@@ -2190,11 +2527,27 @@ function LiveDashboard({
   liveFights: LiveFight[];
   liveFightCount: number;
   liveReport: ReportRef | null;
+  priorFightCount: number;
+  handedOff: boolean;
+  sessionAnchored: boolean;
+  readiness: LiveReadiness | null;
   onStart: () => void;
   onStop: () => void;
   onCopyLink: (url: string) => void | Promise<void>;
+  onForceHandoff: () => void;
 }) {
   const detecting = running && liveFightCount > 0;
+  // The native path has a WAITING phase: armed, but the encoder needs a BEGIN_LOG to
+  // anchor a session, so nothing streams until one arrives. `sessionAnchored` (the
+  // SessionAnchored event = first BEGIN_LOG) is the ground truth that flips
+  // waiting→streaming — instant, no timeout. The handoff path has no waiting phase (the
+  // official uploader picks up mid-session), so it's never "waiting" here.
+  const isNative = running && !handedOff;
+  const waiting = isNative && !sessionAnchored;
+  // While waiting, the readiness probe says whether logging is already running (needs
+  // /reloadui) or not yet (turn on /encounterlog). A confident "already running" verdict
+  // also offers the official-uploader escape hatch.
+  const alreadyLogging = readiness?.verdict === "activeNoHeader";
   return (
     <GlassPanel variant="primary" className="space-y-3 p-4">
       <div className="flex items-center justify-between gap-3">
@@ -2202,23 +2555,36 @@ function LiveDashboard({
           <SectionHeader>Live Session</SectionHeader>
           {running && (
             <>
-              {/* Session-level LIVE: a steady dot with a soft pulsing ring, so it
-                  doesn't compete with the per-fight "Streaming" pulses. Emerald,
-                  not red — live-and-healthy; red is reserved for real errors. */}
-              <InfoPill color="emerald" className="gap-1.5">
-                <span className="relative flex size-2">
-                  <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
-                  <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
-                </span>
-                LIVE
-              </InfoPill>
+              {/* The glanceable honesty cue: AMBER "ARMED" while a native session waits
+                  for its first BEGIN_LOG (nothing's streaming yet), EMERALD "LIVE" once
+                  anchored (or for the handoff path, which is live immediately). Not red
+                  — red is reserved for real errors. */}
+              {waiting ? (
+                <InfoPill color="amber" className="gap-1.5">
+                  <span className="relative flex size-2">
+                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-400/70" />
+                    <span className="relative inline-flex size-2 rounded-full bg-amber-400" />
+                  </span>
+                  ARMED
+                </InfoPill>
+              ) : (
+                <InfoPill color="emerald" className="gap-1.5">
+                  <span className="relative flex size-2">
+                    <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
+                    <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+                  </span>
+                  LIVE
+                </InfoPill>
+              )}
               {startMs !== null && <SessionTimer startMs={startMs} />}
             </>
           )}
         </div>
         {running ? (
           <Button variant="outline" size="sm" onClick={onStop}>
-            Stop tracking
+            {/* Handoff: Kalpa only "tracks", so "Stop tracking" is honest. Native:
+                Stop genuinely ends the upload, so don't call it mere "tracking". */}
+            {handedOff ? "Stop tracking" : "Stop upload"}
           </Button>
         ) : (
           <Button size="sm" onClick={onStart} disabled={!canStart || starting}>
@@ -2259,27 +2625,105 @@ function LiveDashboard({
       )}
 
       {/* Scannable "what Stop does" callout — the single most important thing to
-          understand in live mode, lifted out of a gray paragraph into a bulleted
-          amber-accented card so a raider gets it at a glance. */}
-      {running && (
-        <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
-          <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
-            <AlertCircle className="size-3.5 shrink-0" aria-hidden />
-            Kalpa tracks; the ESO Logs uploader uploads
+          understand in live mode. PATH-AWARE: on the handoff path a separate uploader
+          app does the actual upload (Stop here only ends Kalpa's timeline); on the
+          native path Kalpa IS the uploader (Stop ends the upload + closes the report).
+          Showing the handoff text for a native session (or vice-versa) is actively
+          misleading, so it branches on the path the running session actually took. */}
+      {running &&
+        (handedOff ? (
+          <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
+              <AlertCircle className="size-3.5 shrink-0" aria-hidden />
+              Kalpa tracks; the ESO Logs uploader uploads
+            </div>
+            <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
+              <li className="list-disc">
+                <span className="text-amber-400/90">Stop tracking</span> ends this timeline in
+                Kalpa.
+              </li>
+              <li className="list-disc">
+                The ESO Logs uploader keeps streaming in its own window.
+              </li>
+              <li className="list-disc">
+                To end uploading: stop it there and turn off in-game logging.
+              </li>
+            </ul>
           </div>
-          <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
-            <li className="list-disc">
-              <span className="text-amber-400/90">Stop tracking</span> ends this timeline in Kalpa.
-            </li>
-            <li className="list-disc">The ESO Logs uploader keeps streaming in its own window.</li>
-            <li className="list-disc">
-              To end uploading: stop it there and turn off in-game logging.
-            </li>
-          </ul>
-        </div>
-      )}
+        ) : (
+          <div className="rounded-lg border border-emerald-500/15 border-l-[3px] border-l-emerald-500 bg-emerald-500/[0.04] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-emerald-300/90">
+              <Radio className="size-3.5 shrink-0" aria-hidden />
+              Kalpa is uploading directly to ESO Logs
+            </div>
+            <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
+              <li className="list-disc">
+                Fights stream straight from Kalpa — no separate uploader window.
+              </li>
+              <li className="list-disc">
+                <span className="text-emerald-400/90">Stop</span> ends the upload and closes the
+                report on esologs.com.
+              </li>
+              <li className="list-disc">Keep Kalpa open until you stop or finish the raid.</li>
+            </ul>
+          </div>
+        ))}
 
-      {running && (
+      {/* NATIVE WAITING (armed, not yet anchored): the encoder needs a BEGIN_LOG, so
+          guide the user to produce one — immediately, no timeout. Which guidance shows
+          first comes from the readiness probe; SessionAnchored then flips this to the
+          streaming state below the instant a session header lands. */}
+      {waiting &&
+        (alreadyLogging ? (
+          // Logging is ALREADY running → Kalpa joins the in-progress session (mid-session
+          // warm-up replays the current session from disk to seed the encoder), so NO
+          // /reloadui is needed to start. Reassure while warm-up runs; /reloadui is only a
+          // fallback (it also forces ESO's disk-buffer flush outside raids), and the
+          // official uploader is the explicit escape hatch.
+          <div className="rounded-lg border border-accent-sky/20 border-l-[3px] border-l-accent-sky bg-accent-sky/[0.05] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-accent-sky/90">
+              <Radio className="size-3.5 shrink-0" aria-hidden />
+              Joining your in-progress session…
+            </div>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Kalpa is reading the session you’re already logging and will stream fights from here —
+              no reload needed. For a long session this can take a few seconds.
+              {readiness?.fightInProgress ? " (A fight is being logged right now.)" : ""}
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] text-muted-foreground/80">Not starting?</span>
+              <CopyChip text="/reloadui" />
+              <Button variant="ghost" size="sm" onClick={onForceHandoff}>
+                Use the official uploader instead
+              </Button>
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground/80">
+              Only fights from now on are in this report — use “Upload a Log” for earlier ones.
+            </p>
+          </div>
+        ) : (
+          // Not logging yet (or uncertain) → turning on /encounterlog writes the header.
+          <div className="rounded-lg border border-accent-sky/20 bg-accent-sky/[0.05] p-3">
+            <div className="flex items-center gap-2 text-xs font-medium text-accent-sky/90">
+              <Radio className="size-3.5 shrink-0" aria-hidden />
+              Armed — waiting for a logging session
+            </div>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Kalpa uploads the moment ESO starts a logging session — no fights have been sent yet
+              (an empty report is reserved on ESO Logs and fills in as you fight). Turn on combat
+              logging: type <code className="text-foreground/80">/encounterlog on</code> in ESO (if
+              it’s already on, <code className="text-foreground/80">/reloadui</code> starts a fresh
+              session). Fights stream here as they finish.
+            </p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <CopyChip text="/encounterlog on" />
+              <CopyChip text="/reloadui" />
+            </div>
+          </div>
+        ))}
+
+      {/* STREAMING (handoff path always; native once anchored). */}
+      {running && !waiting && (
         <div
           className={cn(
             "flex items-center gap-2 text-sm",
@@ -2291,11 +2735,31 @@ function LiveDashboard({
           {detecting && <InfoPill color="emerald">Detecting fights</InfoPill>}
           <span>
             {liveFightCount === 0
-              ? "Watching for combat… start a fight in-game and it'll appear here."
+              ? isNative
+                ? "Logging session started — streaming fights to ESO Logs as they finish."
+                : "Watching for combat… start a fight in-game and it'll appear here."
               : `${liveFightCount} fight${liveFightCount === 1 ? "" : "s"} this session.` +
                 (liveFightCount > liveFights.length
                   ? ` Showing the latest ${liveFights.length} — your full history is saved on esologs.com.`
                   : "")}
+          </span>
+        </div>
+      )}
+
+      {/* Pre-start expectation: live streams only NEW fights (the tail starts at the
+          current end of the log), so earlier fights already in this Encounter.log are
+          not part of this live report. Set the expectation; no destructive action —
+          the report is already clean, and ESO holds the file open so Kalpa can't
+          rotate it anyway. */}
+      {!running && priorFightCount > 0 && (
+        <div className="flex items-start gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-muted-foreground">
+          <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-foreground/50" aria-hidden />
+          <span>
+            Live streams only fights from when you start. The {priorFightCount} earlier fight
+            {priorFightCount === 1 ? "" : "s"} already in this log{" "}
+            {priorFightCount === 1 ? "isn't" : "aren't"} part of this live report — upload{" "}
+            {priorFightCount === 1 ? "it" : "them"} separately with{" "}
+            <span className="text-foreground/70">Upload a Log</span> if you want.
           </span>
         </div>
       )}

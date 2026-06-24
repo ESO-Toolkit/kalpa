@@ -714,6 +714,13 @@ function NativeUploadDisclosure({
             yet encode exactly, it falls back to the official uploader for that log automatically —
             so a report is never uploaded incorrectly.
           </p>
+          <p className="text-xs">
+            With this on, <span className="font-medium text-white/90">live logging</span> also
+            uploads directly: Kalpa keeps one report open and streams each fight as it finishes,
+            then closes the report when you stop — without launching the official uploader. If you
+            sign out of ESO Logs mid-session it pauses and prompts you to sign back in. Without this
+            on, live logging hands off to the official uploader as before.
+          </p>
         </div>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => onOpenChange(false)}>

@@ -29,18 +29,135 @@ const LIVE_CANCELLED_BEFORE_LAUNCH: &str = "__live_cancelled_before_launch__";
 
 /// A live session slot. A session is registered as `Starting` *before* the
 /// (blocking) uploader handoff so a concurrent stop/unmount during that window
-/// is observed; it transitions to `Running` once the watcher thread exists.
+/// is observed; it transitions to `Running` (official handoff) or `NativeRunning`
+/// (native in-process driver) once that path's thread exists.
 enum LiveSlot {
     /// Start is in flight. `cancelled` is set if a stop arrives before the
-    /// watcher is registered, so the start can abort cleanly.
-    Starting(Arc<AtomicBool>),
+    /// thread is registered, so the start can abort cleanly. The `cancelled` Arc is
+    /// shared by BOTH the official-handoff and native paths (so the store-before-remove
+    /// cancellation-race protection in [`stop_slot_in_map`] covers both).
+    ///
+    /// The `Option<PathBuf>` is the native-live PATH RESERVATION: a native start stamps
+    /// it (under the lock, before spawning the driver or creating the remote report) so
+    /// a concurrent same-path native start is rejected BEFORE it can create a duplicate
+    /// report — closing the create-report-before-promote race. The official path leaves
+    /// it `None` (it has no single-instance-per-file guard). The cancellation semantics
+    /// are unchanged by this field.
+    Starting(Arc<AtomicBool>, Option<PathBuf>),
+    /// The official-uploader handoff path: a fight-detection watcher.
     Running(LiveWatchHandle),
+    /// The native in-process live driver path. Its `stop()` JOINS the driver
+    /// thread, which can be mid-POST — so it MUST be joined via `spawn_blocking`
+    /// (never inline in the async command, which would block a Tokio worker). The
+    /// driver self-terminates the report on exit; `NativeLiveHandle::shutdown` does
+    /// NOT terminate (the driver owns that).
+    NativeRunning(NativeLiveHandle),
 }
 
-/// Managed state: active live-watch sessions keyed by session id.
+/// Handle to a running native live driver: signals its cancel flag and joins its
+/// thread on `stop`/`Drop`, mirroring [`watcher::LiveWatchHandle`]. The driver owns
+/// `terminate-report` on every exit path, so `shutdown` only store-then-joins — it
+/// must NEVER itself call the network or hold the `live_sessions` lock.
+pub struct NativeLiveHandle {
+    cancel: Arc<AtomicBool>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The Encounter.log this driver streams — for the same-path single-instance
+    /// guard (one native live session per file).
+    path: PathBuf,
+}
+
+impl NativeLiveHandle {
+    fn shutdown(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.thread.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+    /// Signal the driver to stop and wait for its thread to exit. Because the driver's
+    /// sends are cancel-aware (~250ms), this join returns promptly even mid-POST — but
+    /// it still JOINS a thread, so callers run it OFF the async executor.
+    pub fn stop(&self) {
+        self.shutdown();
+    }
+}
+
+impl Drop for NativeLiveHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// What [`stop_slot_in_map`] removed and the caller must `.stop()` AFTER releasing the
+/// `live_sessions` lock (both variants' `.stop()` JOIN a thread, which must never run
+/// under the lock — the existing rule). `#[must_use]` so a caller can't drop it on the
+/// floor and leak a running session.
+#[must_use = "the returned handle must be stopped after the live_sessions lock is released"]
+enum StoppedHandle {
+    /// An official-handoff watcher — joined inline (its stop is a fast local join).
+    Watch(LiveWatchHandle),
+    /// A native driver — its join must go through `spawn_blocking` (it can be
+    /// mid-POST and runs from an async command; an inline join blocks a Tokio worker).
+    Native(NativeLiveHandle),
+}
+
+/// Managed state: active live sessions keyed by session id.
 #[derive(Default)]
 pub struct UploaderState {
     live_sessions: Mutex<HashMap<String, LiveSlot>>,
+}
+
+impl UploaderState {
+    /// Signal every live session to stop, best-effort, WITHOUT joining. Called from the
+    /// app's exit handler: a native driver's terminate-on-exit + abandoned POSTs then
+    /// settle faster, and the OS reaps the threads. We deliberately do NOT join here
+    /// (the join could block process exit on a wedged network up to the terminate
+    /// watchdog); correctness on a hard exit is covered by the L2 orphan breadcrumb +
+    /// next-launch recovery. Setting the flag is enough to start a prompt close.
+    pub fn signal_all_live_stop(&self) {
+        if let Ok(sessions) = self.live_sessions.lock() {
+            for slot in sessions.values() {
+                match slot {
+                    LiveSlot::Starting(c, _) => c.store(true, Ordering::SeqCst),
+                    LiveSlot::NativeRunning(h) => h.cancel.store(true, Ordering::SeqCst),
+                    // The official watcher's own thread/handle is dropped with the map;
+                    // the official uploader is a separate process we don't control.
+                    LiveSlot::Running(_) => {}
+                }
+            }
+        }
+    }
+}
+
+/// The command-side [`super::native::live::OrphanSink`] adapter: persists the native
+/// live driver's `{reportCode, segmentId}` crash-recovery breadcrumb via
+/// [`super::native::orphans`]. Holds the `AppHandle` (for the app-data file) + the
+/// session's `sourcePath`/`createdAtMs` so the driver stays free of Tauri types.
+struct CommandOrphanSink {
+    app: tauri::AppHandle,
+    source_path: String,
+    created_at_ms: u64,
+}
+
+impl super::native::live::OrphanSink for CommandOrphanSink {
+    fn record_open(&self, code: &str, segment_id: u64) {
+        let _ = super::native::orphans::record_open(
+            &self.app,
+            super::native::orphans::LiveOrphan {
+                code: code.to_string(),
+                last_segment_id: segment_id,
+                source_path: self.source_path.clone(),
+                created_at_ms: self.created_at_ms,
+            },
+        );
+    }
+    fn note_segment(&self, code: &str, segment_id: u64) {
+        let _ = super::native::orphans::note_segment(&self.app, code, segment_id);
+    }
+    fn clear(&self, code: &str) {
+        let _ = super::native::orphans::clear(&self.app, code);
+    }
 }
 
 // ── Path confinement ─────────────────────────────────────────────────────────
@@ -353,6 +470,82 @@ pub async fn uploader_preflight(
             total_fights,
             fights,
             recommend_split,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Peek the active log's TAIL + sample its growth to guess, BEFORE Go Live, whether a
+/// fresh logging session is coming — so native live opens its waiting state with the
+/// right guidance (turn on `/encounterlog` vs `/reloadui` to start a fresh session).
+/// Read-only and best-effort: it never decides whether to go live (the driver's first
+/// `BEGIN_LOG` is the ground truth), so an `Err` or `Uncertain` just degrades to soft
+/// guidance. Cheap: reads the last [`tail_io::TAIL_PEEK`] bytes + two size samples
+/// ~1.1s apart for the growth disambiguator.
+#[tauri::command]
+pub async fn uploader_probe_live_readiness(
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<LiveReadiness, String> {
+    let safe = confine_log_path(&allowed, &file_path)?;
+    let safe = safe.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&safe);
+        let size0 = match std::fs::metadata(path) {
+            Ok(m) => m.len(),
+            // No file (or unreadable) → nothing to stream from yet.
+            Err(_) => {
+                return Ok::<_, String>(LiveReadiness {
+                    verdict: LiveReadinessVerdict::NoLog,
+                    fight_in_progress: false,
+                    grew: false,
+                })
+            }
+        };
+
+        // Peek the tail to find the latest session/combat boundary. Drop the first
+        // (partial) line only when the peek starts mid-file; a small whole file read
+        // from byte 0 keeps its real first line (which may BE the BEGIN_LOG).
+        let mut buf = Vec::new();
+        let start = size0.saturating_sub(super::tail_io::TAIL_PEEK);
+        let tail = match super::tail_io::read_range(path, start, size0, &mut buf) {
+            Ok(n) => scanner::tail_session_state(&buf[..n], start > 0),
+            Err(_) => Default::default(), // unreadable tail → uncertain below
+        };
+
+        // Growth disambiguator: did the file get more bytes during a short window?
+        // A growing file with an open session = logging is actively running now.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let size1 = std::fs::metadata(path).map(|m| m.len()).unwrap_or(size0);
+        let grew = size1 > size0;
+
+        // Verdict — only claim the hard "/reloadui" case (ActiveNoHeader) when we have
+        // a SESSION-boundary-authoritative open session that is also growing. The key
+        // false-positive guard the reviewer flagged: a peek with combat boundaries but
+        // NO session boundary (a long fight whose BEGIN_LOG scrolled past the peek
+        // window) must NOT be read as "logging off" — if it grew, it's actively
+        // logging, so it's at least Uncertain (soft "if logging's already on, reload").
+        let verdict = if tail.saw_session_boundary && tail.open_session && grew {
+            LiveReadinessVerdict::ActiveNoHeader
+        } else if grew {
+            // Growing but we can't authoritatively see an open session header in the
+            // peek (combat-only or no boundary) → don't claim either; soft guidance.
+            LiveReadinessVerdict::Uncertain
+        } else if tail.saw_session_boundary && !tail.open_session {
+            // A session that ended (END_LOG) and the file is quiescent → logging off.
+            LiveReadinessVerdict::LoggingOff
+        } else if !tail.saw_session_boundary && !tail.saw_combat_boundary {
+            // No boundary at all + not growing → most likely logging is simply off.
+            LiveReadinessVerdict::LoggingOff
+        } else {
+            LiveReadinessVerdict::Uncertain
+        };
+
+        Ok::<_, String>(LiveReadiness {
+            verdict,
+            fight_in_progress: tail.fight_in_progress,
+            grew,
         })
     })
     .await
@@ -713,9 +906,13 @@ pub async fn uploader_login_esologs(
 ) -> Result<super::native::login::UploadLoginResult, String> {
     // State derefs through the Arc to the provider; `run_login` takes
     // `&StoredSessionProvider`.
-    super::native::login::run_login(app, &session)
+    let result = super::native::login::run_login(app.clone(), &session)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    // A just-signed-in user may have orphaned native live reports from a prior crash —
+    // sweep them now (off-thread, once-per-process; no-op if none / signed-out).
+    super::native::orphans::recover_orphans_once(app, std::sync::Arc::clone(&session));
+    result
 }
 
 /// Whether a native upload session cookie is currently available (signed in for
@@ -723,8 +920,12 @@ pub async fn uploader_login_esologs(
 /// present without prompting a fresh login.
 #[tauri::command]
 pub fn uploader_has_session(
+    app: tauri::AppHandle,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
 ) -> bool {
+    // Panel-open / sign-in check is also the lazy trigger for native-live orphan
+    // recovery (off-thread, once-per-process, only spends its Once once signed in).
+    super::native::orphans::recover_orphans_once(app, std::sync::Arc::clone(&session));
     session.has_session()
 }
 
@@ -930,6 +1131,64 @@ pub async fn uploader_upload_log(
 /// or actor context). The watcher runs purely for the UI's per-fight timeline,
 /// streaming [`LiveEvent`]s over `channel`.
 ///
+/// Pre-routing gate for a MID-SESSION native live start: can native faithfully encode
+/// the session already on disk? Returns false ⇒ DON'T route native — fall through to the
+/// official handoff (which can pick up an in-progress log), matching the finished-log
+/// guarantee that unproven input routes to the official uploader rather than producing a
+/// silently-incomplete native report. Deciding this BEFORE `start_native_live_branch`
+/// runs means no native report is ever created for a session we can't encode (vs the old
+/// behaviour: create then hard-fail). Conservatively returns false on any IO/scan
+/// uncertainty. Returns true when there's no open-session prefix (a cold start native
+/// handles by waiting for a fresh `BEGIN_LOG`), so it never blocks the common case.
+fn native_live_prefix_is_encodable(path: &str) -> bool {
+    let p = Path::new(path);
+    let eof = match std::fs::metadata(p) {
+        Ok(m) => m.len(),
+        Err(_) => return false,
+    };
+    let anchor = match super::scanner::find_current_session_begin(p, eof) {
+        Ok(Some(a)) if a.open_session => a,
+        Ok(_) => return true, // no open session → nothing to gate (cold start)
+        Err(_) => return false, // can't read the log to decide → hand off
+    };
+    let boundary = match super::tail_io::last_line_boundary(p, eof) {
+        Some(b) if anchor.begin_log_offset < b => b,
+        _ => return true, // no complete on-disk content yet → let native wait for it
+    };
+    // Scan the line-aligned prefix [begin, boundary) for any unproven line type.
+    let mut pos = anchor.begin_log_offset;
+    let mut buf = Vec::new();
+    let mut carry: Vec<u8> = Vec::new();
+    while pos < boundary {
+        let end = (pos + super::tail_io::MAX_READ).min(boundary);
+        let n = match super::tail_io::read_range(p, pos, end, &mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let mut combined = std::mem::take(&mut carry);
+        combined.extend_from_slice(&buf[..n]);
+        let mut ls = 0;
+        for i in 0..combined.len() {
+            if combined[i] == b'\n' {
+                let line = String::from_utf8_lossy(&combined[ls..i]);
+                if super::native::coverage::unproven_line_type(&line).is_some() {
+                    return false;
+                }
+                ls = i + 1;
+            }
+        }
+        carry = combined[ls..].to_vec();
+        pos = end;
+    }
+    if !carry.is_empty() {
+        let line = String::from_utf8_lossy(&carry);
+        if super::native::coverage::unproven_line_type(&line).is_some() {
+            return false;
+        }
+    }
+    true
+}
+
 /// `include_entire_file` controls only what the UI timeline backfills; the
 /// official uploader is launched with `--include-entire-file` accordingly.
 // Each parameter is a distinct injected dependency (app, state, allowed,
@@ -940,10 +1199,16 @@ pub async fn uploader_start_live(
     app: tauri::AppHandle,
     state: State<'_, UploaderState>,
     allowed: State<'_, AllowedAddonsPath>,
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
     session_id: String,
     file_path: String,
     options: UploadOptions,
     channel: Channel<LiveEvent>,
+    // Whether the user opted into native (direct) live upload. When true AND the
+    // format is confirmed AND a session exists, this session streams natively
+    // in-process; otherwise it hands off to the official uploader (the default).
+    // Absent → false (official handoff), preserving the prior behaviour exactly.
+    native_opt_in: Option<bool>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
 
@@ -969,12 +1234,16 @@ pub async fn uploader_start_live(
         let prev_running = stop_slot_in_map(&mut sessions, &session_id);
         sessions.insert(
             session_id.clone(),
-            LiveSlot::Starting(Arc::clone(&cancelled)),
+            // Path-agnostic at registration (before native-vs-official routing). The
+            // native branch stamps the path reservation later, under the lock, before it
+            // spawns/creates anything.
+            LiveSlot::Starting(Arc::clone(&cancelled), None),
         );
         prev_running
     };
     if let Some(handle) = prev_running {
-        handle.stop();
+        // Off the async executor: a native handle's join can be mid-POST (RACE-1).
+        stop_handle_off_executor(handle).await;
     }
 
     // Fallible setup now runs WITH the cancellable slot in place. On any error we
@@ -993,6 +1262,47 @@ pub async fn uploader_start_live(
         .and_then(|n| n.to_str())
         .unwrap_or("Encounter.log")
         .to_string();
+
+    // ROUTING (the gated opt-in): native in-process live vs official handoff. Decided
+    // AFTER the path-agnostic `Starting` slot is registered (above) so a stop during
+    // routing is still observed, and BEFORE the official-uploader-installed check
+    // (which is official-branch-only — the native path needs no external uploader).
+    // The DEFAULT is the official handoff; native runs only when opted-in + format
+    // confirmed + signed-in. Single-instance: refuse a second native live session on
+    // the SAME file (one ESO client writes one Encounter.log).
+    let native_opt_in = native_opt_in.unwrap_or(false);
+    let route_native = matches!(
+        transport::assess_native_live_routing(native_opt_in, session.has_session()),
+        transport::NativeRouting::Native
+    );
+    // …AND the already-on-disk session prefix is something native can faithfully encode.
+    // If it carries an unproven line type (or we can't read it to decide), route to the
+    // official handoff instead of create-then-fail a native report — the same
+    // fall-back-on-unproven guarantee the finished-log path gives. The prefix read can be
+    // large (a long in-progress session), so run it off the async executor; only when
+    // native would otherwise be chosen.
+    let route_native = if route_native {
+        let safe_for_scan = safe.clone();
+        tokio::task::spawn_blocking(move || native_live_prefix_is_encodable(&safe_for_scan))
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if route_native {
+        return start_native_live_branch(
+            &app,
+            &state,
+            &session,
+            &session_id,
+            &safe,
+            &file_name,
+            &options,
+            &cancelled,
+            channel,
+        )
+        .await;
+    }
 
     // Live mode genuinely requires the official uploader: only it can stream a
     // running log in real time (a lone fight slice has no BEGIN_LOG header). The
@@ -1037,7 +1347,7 @@ pub async fn uploader_start_live(
             .map_err(|_| "Live session lock poisoned")?;
         let still_ours = matches!(
             sessions.get(&session_id),
-            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, &cancelled)
+            Some(LiveSlot::Starting(c, _)) if Arc::ptr_eq(c, &cancelled)
         );
         !still_ours || cancelled.load(Ordering::SeqCst)
     };
@@ -1208,7 +1518,7 @@ pub async fn uploader_start_live(
             .map_err(|_| "Live session lock poisoned")?;
         let still_ours = matches!(
             sessions.get(&session_id),
-            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, &cancelled)
+            Some(LiveSlot::Starting(c, _)) if Arc::ptr_eq(c, &cancelled)
         );
         if still_ours && !cancelled.load(Ordering::SeqCst) {
             sessions.insert(session_id.clone(), LiveSlot::Running(handle));
@@ -1237,6 +1547,365 @@ pub async fn uploader_start_live(
     })
 }
 
+/// Does some OTHER session already own a native live upload for `path` — either a
+/// running driver ([`LiveSlot::NativeRunning`]) or a native start that has RESERVED the
+/// path (a `Starting` slot carrying it)? The single-instance-per-file guard, evaluated
+/// from BEFORE the remote report is created (reservation) through the running driver
+/// (slot), so two concurrent same-path starts can't both reach `create-report`.
+fn native_path_taken(
+    sessions: &HashMap<String, LiveSlot>,
+    path: &Path,
+    except_session_id: &str,
+) -> bool {
+    sessions.iter().any(|(sid, slot)| {
+        sid != except_session_id
+            && match slot {
+                LiveSlot::NativeRunning(h) => h.path.as_path() == path,
+                LiveSlot::Starting(_, Some(p)) => p.as_path() == path,
+                _ => false,
+            }
+    })
+}
+
+/// The NATIVE live branch of [`uploader_start_live`]: stream the report in-process via
+/// [`super::native::live::run_native_live`] instead of handing off to the official
+/// uploader. Shares the `Starting`-slot protocol with the official branch (same
+/// `cancelled` Arc, same store-before-remove cancellation-race, same `still_ours &&
+/// !cancelled` promote) — the only divergences are: it spawns the native driver thread
+/// (promoting to [`LiveSlot::NativeRunning`]), it needs no external uploader, and it
+/// SELF-SETTLES its history record by exact id on the driver thread (so
+/// `uploader_stop_live` must skip `settle_live` for a native handle — RACE-6).
+#[allow(clippy::too_many_arguments)]
+async fn start_native_live_branch(
+    app: &tauri::AppHandle,
+    state: &State<'_, UploaderState>,
+    session: &std::sync::Arc<super::native::session::StoredSessionProvider>,
+    session_id: &str,
+    safe: &str,
+    file_name: &str,
+    options: &UploadOptions,
+    cancelled: &Arc<AtomicBool>,
+    channel: Channel<LiveEvent>,
+) -> Result<UploadDispatch, String> {
+    // Settle prior-run stale records before reserving (same reasoning as the official
+    // branch). The cancellable `Starting` slot is already registered, so a stop during
+    // this blocking reconcile still sets `cancelled` and is honored by the reserve below.
+    super::history::reconcile_stale_once(app);
+
+    // ATOMIC PATH RESERVATION (the authoritative single-instance guard + the pre-spawn
+    // abort check, in ONE critical section). Under the lock, in order:
+    //   (a) reject if ANOTHER session already owns this path (running OR reserving) —
+    //       this is the binding same-path check, NOT a TOCTOU fast-fail;
+    //   (b) confirm OUR `Starting` slot is still ours and not cancelled (the abort that
+    //       used to be a separate re-check), then
+    //   (c) STAMP the path onto our `Starting` slot.
+    // Because this happens BEFORE we spawn the driver or create the remote report, a
+    // concurrent same-path start now loses HERE (at reservation) instead of both racing
+    // into `create-report` and leaving a duplicate/orphan report. The driver's own
+    // pre-create cancel read stays as the backstop for a stop landing after this point.
+    let reserve = {
+        let mut sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        if native_path_taken(&sessions, Path::new(safe), session_id) {
+            Err("A native live upload is already running for this log.")
+        } else {
+            match sessions.get_mut(session_id) {
+                Some(LiveSlot::Starting(c, path))
+                    if Arc::ptr_eq(c, cancelled) && !cancelled.load(Ordering::SeqCst) =>
+                {
+                    *path = Some(PathBuf::from(safe));
+                    Ok(())
+                }
+                // Our slot was replaced/removed (superseded/stopped) or cancel is set.
+                _ => Err("Live logging was cancelled before it started."),
+            }
+        }
+    };
+    if let Err(msg) = reserve {
+        remove_own_slot(state, session_id, cancelled);
+        return Err(msg.into());
+    }
+
+    // Write the `Live` history record up front (so a report link can attach later and
+    // the panel shows the session immediately). The native driver SELF-SETTLES this
+    // record by exact id when it exits (below), so `uploader_stop_live` skips
+    // `settle_live` for native.
+    let record_id = super::history::next_record_id(now_ms(), session_id);
+    let record = UploadRecord {
+        id: record_id.clone(),
+        source_path: safe.to_string(),
+        file_name: file_name.to_string(),
+        created_at_ms: now_ms(),
+        status: UploadStatus::Live,
+        mode: UploadMode::Live,
+        visibility: options.visibility,
+        fight_count: 0,
+        report: None,
+        error: None,
+    };
+    let _ = super::history::upsert(app, record);
+
+    // Spawn the driver thread. It owns: the cancel flag (the SAME Arc as the Starting
+    // slot, so a stop is observed), an OrphanSink adapter (persists the {code,segment}
+    // breadcrumb — L2 crash recovery), and a LiveEventSink (reauth prompts to the UI).
+    // On exit it self-settles the history record by exact id. The thread NEVER touches
+    // `live_sessions` (no lock-ordering cycle).
+    let driver_cancel = Arc::clone(cancelled);
+    let provider: std::sync::Arc<dyn super::native::session::SessionProvider> =
+        std::sync::Arc::clone(session) as std::sync::Arc<_>;
+    let app_for_thread = app.clone();
+    let app_for_sink = app.clone();
+    let safe_owned = safe.to_string();
+    let opts_owned = options.clone();
+    let record_id_for_thread = record_id.clone();
+    let channel_for_thread = channel;
+
+    let handle = std::thread::spawn(move || {
+        use super::native::live::{run_native_live, LiveEventSink};
+        // OrphanSink → orphans.rs (L2). record_open on create, note_segment per accepted
+        // segment, clear on confirmed terminate.
+        let sink = CommandOrphanSink {
+            app: app_for_sink,
+            source_path: safe_owned.clone(),
+            created_at_ms: now_ms(),
+        };
+        // Surface lifecycle/auth events over the same LiveEvent channel the UI consumes.
+        let ch_anchored = channel_for_thread.clone();
+        let ch_fight = channel_for_thread.clone();
+        let ch_reauth = channel_for_thread.clone();
+        let ch_resolved = channel_for_thread.clone();
+        let events = LiveEventSink {
+            on_session_anchored: Box::new(move || {
+                let _ = ch_anchored.send(LiveEvent::SessionAnchored);
+            }),
+            on_fight_posted: Box::new(move |index, duration_ms| {
+                // Native fights drive the same per-fight UI timeline as the official
+                // watcher. Duration comes from the segment's report-absolute wall window
+                // (end-start). Zone/boss naming still isn't cheaply available at the
+                // driver's cut without re-parsing, so they're omitted (the row shows
+                // unnamed but with a real duration) — a naming pass is a follow-up.
+                let _ = ch_fight.send(LiveEvent::FightDetected {
+                    index,
+                    zone_name: None,
+                    boss_name: None,
+                    duration_ms,
+                });
+            }),
+            on_reauth_required: Box::new(move || {
+                let _ = ch_reauth.send(LiveEvent::ReauthRequired {
+                    message: "Sign in to ESO Logs again to keep uploading this session.".into(),
+                });
+            }),
+            on_reauth_resolved: Box::new(move || {
+                let _ = ch_resolved.send(LiveEvent::ReauthResolved);
+            }),
+        };
+        let log_path = Path::new(&safe_owned);
+        let eof = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+
+        // Determine the current session anchor. DISTINGUISH a scanner error (we couldn't
+        // read the log to learn whether a session is already open) from Ok(None) (no open
+        // session — a legitimate cold tail-from-EOF). On error, DECLINE native rather than
+        // start a header-gated tail from EOF: in an already-open session that would
+        // silently stream nothing (the exact mid-session bug). No report exists yet, so
+        // this is a clean, visible decline.
+        let anchor = match super::scanner::find_current_session_begin(log_path, eof) {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = channel_for_thread.send(LiveEvent::Stopped {
+                    reason: format!(
+                        "Couldn't read the log to start live logging ({e}). Try again, \
+                         or type /reloadui in ESO to begin a fresh session."
+                    ),
+                });
+                let _ = super::history::settle_started(&app_for_thread, &record_id_for_thread);
+                return;
+            }
+        };
+
+        // LINE-SAFE SEAM: start the tail at the last COMPLETE line boundary ≤ EOF (and
+        // replay the warm-up prefix up to that same boundary). If EOF fell inside a line
+        // (a non-atomic append in progress at attach time), this avoids splitting that
+        // line across the warm-up/tail seam — the tail reads it whole from its true start,
+        // so no real line (BEGIN_COMBAT / UNIT_ADDED / END_COMBAT / END_LOG / next
+        // BEGIN_LOG) is lost. Both the prefix end and the tail start use this boundary, so
+        // they meet exactly with no gap or overlap.
+        // `None` means no newline within the 1 MiB scan window — a single unterminated
+        // line longer than any well-formed ESO line. We must NOT fall back to raw EOF: EOF
+        // isn't a line boundary there, so the tail would emit the line's later suffix as a
+        // corrupted synthetic line (and leave a gap) — the exact seam bug the line-safe
+        // boundary exists to prevent. Decline native instead (no report created yet).
+        let tail_start = match super::tail_io::last_line_boundary(log_path, eof) {
+            Some(b) => b,
+            None => {
+                let _ = channel_for_thread.send(LiveEvent::Stopped {
+                    reason: "Couldn't find a safe place to start live logging (the log's \
+                             last line looks incomplete). Try again, or type /reloadui in \
+                             ESO to begin a fresh session."
+                        .into(),
+                });
+                let _ = super::history::settle_started(&app_for_thread, &record_id_for_thread);
+                return;
+            }
+        };
+        let _ = channel_for_thread.send(LiveEvent::Started {
+            file: safe_owned.clone(),
+            start_offset: tail_start,
+        });
+
+        // MID-SESSION: if the user is ALREADY combat-logging (an OPEN session header lies
+        // before the line-safe tail start), replay that prefix to warm the encoder so they
+        // stream WITHOUT a fresh /reloadui. No header / closed session / just-started ⇒
+        // None ⇒ tail from the boundary exactly as a cold start.
+        let warmup = match anchor {
+            Some(a) if a.open_session && a.begin_log_offset < tail_start => {
+                Some(super::native::live::WarmupPrefix {
+                    begin_log_offset: a.begin_log_offset,
+                    eof: tail_start,
+                })
+            }
+            _ => None,
+        };
+
+        // When we warmed up from a prefix, the tail starts INSIDE an already-open session
+        // (its BEGIN_LOG was in the replayed prefix), so the tail's line assembler must
+        // start anchored — otherwise it discards every tailed line waiting for a header
+        // that never comes, and live silently streams nothing until a /reloadui.
+        let mid_session = warmup.is_some();
+        let result = run_native_live(
+            &safe_owned,
+            provider,
+            &opts_owned,
+            driver_cancel,
+            // The production tail reads the real Encounter.log, starting at the same
+            // line-safe boundary the warm-up prefix stopped at (no gap/overlap).
+            &match super::native::live::NotifyTail::new(log_path, tail_start, mid_session) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = channel_for_thread.send(LiveEvent::Stopped {
+                        reason: format!("Could not start the live tail: {e}"),
+                    });
+                    let _ = super::history::settle_started(&app_for_thread, &record_id_for_thread);
+                    return;
+                }
+            },
+            warmup,
+            &sink,
+            Some(&events),
+        );
+
+        // Self-settle the record by EXACT id (never the suffix-matching settle_live —
+        // that's the official path's, and double-settling would race). Report a clean
+        // stop / end as settled; a failure carries the reason.
+        match result {
+            Ok((code, ended)) => {
+                use super::native::live::EndReason;
+                let url = super::watcher::report_url(&code.0);
+                // Map the terminal reason to success vs failure. A clean end, a
+                // server-side end, a user Stop, an idle stop, or a /reloadui (NewSession)
+                // all leave a real (possibly partial) report that streamed correctly →
+                // Completed. A Fatal or a reauth timeout means the report is incomplete
+                // (a bad segment / lost session mid-stream) → Failed, but we still keep
+                // its link so the user can inspect what made it up.
+                let (succeeded, error) = match &ended.reason {
+                    EndReason::Fatal(d) => (false, Some(format!("Live upload failed: {d}"))),
+                    EndReason::ReauthTimeout => (
+                        false,
+                        Some(
+                            "ESO Logs sign-in expired mid-upload and wasn't restored; the \
+                             report is incomplete."
+                                .to_string(),
+                        ),
+                    ),
+                    EndReason::Ended
+                    | EndReason::Idle
+                    | EndReason::ServerEnded
+                    | EndReason::NewSession
+                    | EndReason::Stopped => (true, None),
+                };
+                let _ = channel_for_thread.send(LiveEvent::Stopped {
+                    reason: format!("Live upload finished ({:?}).", ended.reason),
+                });
+                let _ = super::history::settle_native_live(
+                    &app_for_thread,
+                    &record_id_for_thread,
+                    ended.segments_built,
+                    Some((url, code.0)),
+                    succeeded,
+                    error,
+                );
+            }
+            Err(e) => {
+                let reason = format!("Live upload stopped: {e}");
+                let _ = channel_for_thread.send(LiveEvent::Stopped {
+                    reason: reason.clone(),
+                });
+                let _ = super::history::settle_native_live(
+                    &app_for_thread,
+                    &record_id_for_thread,
+                    0,
+                    None,
+                    false,
+                    Some(reason),
+                );
+            }
+        }
+    });
+
+    let native_handle = NativeLiveHandle {
+        cancel: Arc::clone(cancelled),
+        thread: Mutex::new(Some(handle)),
+        path: PathBuf::from(safe),
+    };
+
+    // Promote Starting → NativeRunning unless a stop arrived mid-start (the `still_ours
+    // && !cancelled` check) OR another session owns this file. The same-path guard is now
+    // AUTHORITATIVELY held by the pre-spawn RESERVATION above (a concurrent same-path
+    // start lost there, before creating any report); this peer re-check is belt-and-
+    // suspenders against an exotic interleave. If we lost ownership for any of these
+    // reasons, stop the just-spawned driver (off the executor) and settle by id.
+    let promote = {
+        let mut sessions = state
+            .live_sessions
+            .lock()
+            .map_err(|_| "Live session lock poisoned")?;
+        let still_ours = matches!(
+            sessions.get(session_id),
+            Some(LiveSlot::Starting(c, _)) if Arc::ptr_eq(c, cancelled)
+        );
+        let peer_same_path = native_path_taken(&sessions, Path::new(safe), session_id);
+        if still_ours && !cancelled.load(Ordering::SeqCst) && !peer_same_path {
+            sessions.insert(
+                session_id.to_string(),
+                LiveSlot::NativeRunning(native_handle),
+            );
+            (None, false)
+        } else {
+            (Some(native_handle), peer_same_path)
+        }
+    };
+    if let (Some(handle), lost_to_peer) = promote {
+        // Lost ownership (stop/supersede) OR a peer native start claimed this file
+        // first. Stop the driver off the async executor (it can be mid-POST), then
+        // settle our just-written record by id.
+        let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
+        let _ = super::history::settle_started(app, &record_id);
+        return Err(if lost_to_peer {
+            "A native live upload is already running for this log.".into()
+        } else {
+            "Live logging was cancelled before it started.".to_string()
+        });
+    }
+
+    Ok(UploadDispatch {
+        handed_off: false,
+        detail: "Live logging started — uploading directly to ESO Logs.".into(),
+        report: None,
+    })
+}
+
 /// Stop whatever slot is under `key`, **while the session lock is held**, and
 /// return any `Running` watcher handle for the caller to join *after* releasing
 /// the lock (a `handle.stop()` joins a thread and must not run under the lock).
@@ -1250,18 +1919,44 @@ pub async fn uploader_start_live(
 /// concurrent stop, the documented unrecallable case); it can never see "slot
 /// gone, flag still false" and launch after an observable stop. Storing after
 /// the removal (the previous bug) left exactly that window.
-#[must_use = "the returned Running handle must be stopped after the lock is released"]
-fn stop_slot_in_map(
-    sessions: &mut HashMap<String, LiveSlot>,
-    key: &str,
-) -> Option<LiveWatchHandle> {
+#[must_use = "the returned handle must be stopped after the lock is released"]
+fn stop_slot_in_map(sessions: &mut HashMap<String, LiveSlot>, key: &str) -> Option<StoppedHandle> {
     // Set a Starting slot's flag in place FIRST (while still mapped), then remove.
-    if let Some(LiveSlot::Starting(cancelled)) = sessions.get(key) {
+    // This store-before-remove order is the load-bearing cancellation-race invariant
+    // and is UNCHANGED across the native-path addition — only the match below gains a
+    // `NativeRunning` arm (both `Running` and `NativeRunning` promote from the same
+    // `Starting` phase, so this `Starting` store covers an in-flight native start too).
+    if let Some(LiveSlot::Starting(cancelled, _)) = sessions.get(key) {
         cancelled.store(true, Ordering::SeqCst);
     }
     match sessions.remove(key) {
-        Some(LiveSlot::Running(handle)) => Some(handle),
+        Some(LiveSlot::Running(handle)) => Some(StoppedHandle::Watch(handle)),
+        Some(LiveSlot::NativeRunning(handle)) => Some(StoppedHandle::Native(handle)),
         _ => None,
+    }
+}
+
+/// Stop a [`StoppedHandle`] AFTER the `live_sessions` lock is released. A `Watch`
+/// joins inline (its stop is a fast local thread join). A `Native` join can be
+/// mid-POST and this may run from an async command, so it goes through
+/// `spawn_blocking` to avoid blocking a Tokio worker (concurrency review RACE-1). The
+/// driver's cancel-aware sends keep the join itself prompt (~250ms).
+async fn stop_handle_off_executor(handle: StoppedHandle) {
+    match handle {
+        StoppedHandle::Watch(h) => h.stop(),
+        StoppedHandle::Native(h) => {
+            let _ = tokio::task::spawn_blocking(move || h.stop()).await;
+        }
+    }
+}
+
+/// Synchronous variant for sync contexts (e.g. `uploader_stop_live` is a sync command):
+/// a `Native` join is still off the async executor here because the whole command is
+/// sync (not on a Tokio worker). A `Watch` joins inline as before.
+fn stop_handle_blocking(handle: StoppedHandle) {
+    match handle {
+        StoppedHandle::Watch(h) => h.stop(),
+        StoppedHandle::Native(h) => h.stop(),
     }
 }
 
@@ -1275,7 +1970,7 @@ fn remove_own_slot(
     if let Ok(mut sessions) = state.live_sessions.lock() {
         let ours = matches!(
             sessions.get(session_id),
-            Some(LiveSlot::Starting(c)) if Arc::ptr_eq(c, cancelled)
+            Some(LiveSlot::Starting(c, _)) if Arc::ptr_eq(c, cancelled)
         );
         if ours {
             sessions.remove(session_id);
@@ -1307,13 +2002,23 @@ pub fn uploader_stop_live(
             .map_err(|_| "Live session lock poisoned")?;
         stop_slot_in_map(&mut sessions, &session_id)
     };
+    // Whether this stop hit a NATIVE driver: it self-settles its own history record
+    // (by exact id, on the driver thread, after the join), so the suffix-matching
+    // `settle_live` must NOT also touch it here — that would double-settle / race the
+    // driver's terminal write (concurrency review RACE-6 / FIX-6). For an official
+    // Watch, settle as today.
+    let was_native = matches!(running, Some(StoppedHandle::Native(_)));
     if let Some(handle) = running {
-        handle.stop();
+        // This command is sync (not on a Tokio worker), so a native join here is
+        // already off the async executor; `stop_handle_blocking` joins both variants.
+        stop_handle_blocking(handle);
     }
-    // Settle the matching history record (Live → Completed, with the observed
-    // fight count) so the panel reflects reality immediately rather than waiting
-    // for the next-launch reconcile. Best-effort: a missing record is fine.
-    let _ = super::history::settle_live(&app, &session_id, fight_count.unwrap_or(0));
+    if !was_native {
+        // Settle the matching official-handoff record (Live → HandedOff, with the
+        // observed fight count) so the panel reflects reality immediately rather than
+        // waiting for the next-launch reconcile. Best-effort: a missing record is fine.
+        let _ = super::history::settle_live(&app, &session_id, fight_count.unwrap_or(0));
+    }
     Ok(())
 }
 
@@ -1365,4 +2070,193 @@ pub fn uploader_attach_report(
     });
     let updated = record.clone();
     super::history::upsert(&app, updated)
+}
+
+// ── Debug-only native LIVE-streaming spike round-trip (spike/native-live) ──────
+//
+// Drives `native::live::run_native_live_spike` against a GROWING synthetic `.log`
+// to answer the one question the spike can't settle offline: does esologs.com keep
+// ONE report OPEN and render it as segments stream in? It is `#[cfg(debug_assertions)]`
+// so it never ships, and is invoked manually (e.g. from the devtools console:
+// `window.__TAURI__.core.invoke('uploader_run_native_live_spike', { growingPath: 'C:\\\\eso-live-spike\\\\Encounter.log' })`).
+//
+// SAFETY: it creates a REAL report on the signed-in account (Unlisted), so use a test
+// account or accept a throwaway Unlisted report. Point it at a file OUTSIDE a
+// CFA-protected folder (NOT Documents/Desktop) so the debug binary can read it. The
+// tester appends fights to that file while this command runs; it terminates the report
+// on END_LOG, ~10s idle, or completion.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn uploader_run_native_live_spike(
+    session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
+    growing_path: String,
+) -> Result<String, String> {
+    use super::native::live::{run_native_live_spike, FileTail};
+
+    if !session.has_session() {
+        return Err("Not signed in to ESO Logs — run the in-app login first \
+                    (uploader_login_esologs)."
+            .into());
+    }
+    if !Path::new(&growing_path).is_file() {
+        return Err(format!(
+            "Synthetic log not found: {growing_path} (create it first, then append fights)."
+        ));
+    }
+
+    // Unlisted so the throwaway test report isn't public; Personal Logs (no guild).
+    let opts = UploadOptions {
+        region: 1,
+        guild_id: None,
+        visibility: Visibility::Unlisted,
+        description: Some("Kalpa native live-streaming spike (test)".into()),
+        real_time: true,
+        include_entire_file: false,
+    };
+    // Pass the session as an Arc<dyn SessionProvider> so the live driver's cancel-aware
+    // LiveSender (which runs POSTs on detached worker threads) can own it.
+    let provider: std::sync::Arc<dyn super::native::session::SessionProvider> =
+        std::sync::Arc::clone(&session) as std::sync::Arc<_>;
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    // Idle deadline: terminate after this many seconds with no new bytes. Generous so
+    // a manual tester has time to append fights between steps; the END_LOG line ends
+    // the session promptly regardless, so a large deadline only affects the "tester
+    // walked away" case.
+    let tail = FileTail::new(120);
+
+    let (code, segments) = tokio::task::spawn_blocking(move || {
+        run_native_live_spike(&growing_path, provider, &opts, cancel, &tail)
+    })
+    .await
+    .map_err(|e| format!("Live spike task failed: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    let url = watcher::report_url(&code.0);
+    eprintln!("[uploader] native live spike report: {url} ({segments} segment(s))");
+    // Surface the segment count so the round-trip can tell "0 segments = timing race"
+    // from "N segments but didn't render = the real result".
+    Ok(format!("{url}  [segments={segments}]"))
+}
+
+#[cfg(test)]
+mod native_live_routing_tests {
+    use super::native_live_prefix_is_encodable;
+
+    fn temp(name: &str, content: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("kalpa-route-{name}.log"));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    // An OPEN session whose prefix is all proven types → native is encodable (route native).
+    #[test]
+    fn proven_open_prefix_routes_native() {
+        let p = temp(
+            "proven",
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"H\",\"@h\",1,50,160,0,PLAYER_ALLY,T\n\
+             100,BEGIN_COMBAT\n200,END_COMBAT\n",
+        );
+        assert!(native_live_prefix_is_encodable(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // An OPEN session whose prefix contains an UNPROVEN type → NOT encodable (→ handoff),
+    // matching the finished-log fall-back guarantee instead of create-then-fail.
+    #[test]
+    fn unproven_open_prefix_declines_native() {
+        let p = temp(
+            "unproven",
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             50,SOME_FUTURE_EVENT,1,2,3\n\
+             100,BEGIN_COMBAT\n200,END_COMBAT\n",
+        );
+        assert!(!native_live_prefix_is_encodable(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // A CLOSED session (ends in END_LOG) → no open prefix to gate → native ok (cold start
+    // waits for a fresh BEGIN_LOG).
+    #[test]
+    fn closed_session_is_encodable() {
+        let p = temp(
+            "closed",
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             100,BEGIN_COMBAT\n200,END_COMBAT\n300,END_LOG\n",
+        );
+        assert!(native_live_prefix_is_encodable(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // A missing/unreadable file → conservatively NOT encodable (→ handoff).
+    #[test]
+    fn unreadable_file_declines_native() {
+        let missing = std::env::temp_dir().join("kalpa-route-does-not-exist-xyz.log");
+        let _ = std::fs::remove_file(&missing);
+        assert!(!native_live_prefix_is_encodable(missing.to_str().unwrap()));
+    }
+
+    // The same-path single-instance guard: native_path_taken sees BOTH a running native
+    // driver AND a not-yet-promoted native start that RESERVED the path (a Starting slot
+    // carrying it), and excludes the caller's own session. This is what closes the
+    // create-report-before-promote race — a concurrent same-path start is rejected at
+    // reservation, before it can create a duplicate/orphan report.
+    #[test]
+    fn native_path_taken_sees_reservations_and_running_excluding_self() {
+        use super::{native_path_taken, LiveSlot, NativeLiveHandle};
+        use std::collections::HashMap;
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+
+        let path = Path::new("C:/logs/Encounter.log");
+        let mk = || Arc::new(AtomicBool::new(false));
+        let mut s: HashMap<String, LiveSlot> = HashMap::new();
+
+        assert!(!native_path_taken(&s, path, "me"), "empty → not taken");
+
+        // A peer RESERVING the same path (Starting carries it) → taken.
+        s.insert(
+            "peer".into(),
+            LiveSlot::Starting(mk(), Some(PathBuf::from("C:/logs/Encounter.log"))),
+        );
+        assert!(
+            native_path_taken(&s, path, "me"),
+            "peer reservation → taken"
+        );
+        // …but excluded when the caller IS that session.
+        assert!(
+            !native_path_taken(&s, path, "peer"),
+            "own reservation is not a conflict"
+        );
+
+        // A pathless Starting (official, or pre-reserve) → not taken.
+        s.clear();
+        s.insert("o".into(), LiveSlot::Starting(mk(), None));
+        assert!(
+            !native_path_taken(&s, path, "me"),
+            "no reservation → not taken"
+        );
+
+        // A DIFFERENT reserved path → not taken.
+        s.insert(
+            "p2".into(),
+            LiveSlot::Starting(mk(), Some(PathBuf::from("C:/logs/Other.log"))),
+        );
+        assert!(
+            !native_path_taken(&s, path, "me"),
+            "different path → not taken"
+        );
+
+        // A running native driver on the same path → taken.
+        s.insert(
+            "run".into(),
+            LiveSlot::NativeRunning(NativeLiveHandle {
+                cancel: mk(),
+                thread: Mutex::new(None),
+                path: PathBuf::from("C:/logs/Encounter.log"),
+            }),
+        );
+        assert!(native_path_taken(&s, path, "me"), "running native → taken");
+    }
 }
