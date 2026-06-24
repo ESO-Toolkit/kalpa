@@ -3,6 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 
 const STORE_PATH = "settings.json";
 
+/** The `flush_settings` command returns this error when it reloaded settings from
+ * disk after the store had opened over a transiently-unreadable file. The plugin
+ * cache has been replaced, so a batch's rollback snapshot is stale — skip the
+ * rollback. Keep in sync with `STORE_RELOADED_SIGNAL` in
+ * src-tauri/src/settings_store.rs. */
+const STORE_RELOADED_SIGNAL = "settings-store-reloaded";
+
 let storePromise: ReturnType<typeof load> | null = null;
 
 /** Serializes all writes (set + save) so they never interleave. Because autoSave
@@ -109,6 +116,13 @@ export async function setSettings(entries: Record<string, unknown>): Promise<boo
       await invoke("flush_settings");
       return true;
     } catch (err) {
+      if (String(err).includes(STORE_RELOADED_SIGNAL)) {
+        // The store was reloaded from disk (it had opened over a transiently
+        // unreadable file). The plugin cache was replaced, so this batch's rollback
+        // snapshot is stale — skip rollback. The write didn't persist; report
+        // failure and let the caller retry against the freshly loaded state.
+        return false;
+      }
       console.warn("[store] Failed to write batch:", err);
       try {
         const store = await getStore();

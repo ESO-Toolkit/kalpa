@@ -47,6 +47,13 @@ use tauri_plugin_store::StoreExt;
 /// The settings store path, relative to the plugin's AppData base directory.
 const STORE_FILE: &str = "settings.json";
 
+/// Error returned by [`flush`] when it loaded the real settings from disk after
+/// the store had opened over a transiently-unreadable file. The frontend
+/// recognises this token and skips its rollback (the cache was replaced, so its
+/// snapshot is stale) and retries the write against the now-correct state. Keep in
+/// sync with `STORE_RELOADED_SIGNAL` in `src/lib/store.ts`.
+const STORE_RELOADED_SIGNAL: &str = "settings-store-reloaded";
+
 /// Number of times to attempt the final rename. On Windows an AV scanner or the
 /// search indexer can briefly hold the destination open, failing the rename
 /// transiently; a few short retries absorb that without giving up on the save.
@@ -319,33 +326,22 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let path = settings_path(app).ok_or_else(|| "could not resolve settings path".to_string())?;
 
     if SETTINGS_TAINTED.load(Ordering::SeqCst) {
-        // The store opened empty over a file that may hold real settings, so the
-        // caller's write was applied to an untrusted (empty) cache. Merge WITHOUT
-        // touching the live cache or the taint flag, so that if the write fails the
-        // frontend's rollback snapshot (taken from the empty cache) stays valid:
-        // build `disk ∪ pending` in a LOCAL map (pending wins conflicts) and write
-        // that. Only AFTER the bytes are durably written do we bring the live cache
-        // up to date and clear the taint — then return success, so no rollback runs.
-        let Some(mut merged) = read_settings_map(&path) else {
-            // Still can't read the file; refuse rather than overwrite it. The
-            // frontend rolls its write back; a later attempt retries the reload.
+        // The store opened empty over a file that may hold real settings. The cache
+        // is untrusted: not only this write, but any value the frontend READ while
+        // the cache was empty (and may now be writing back as a default/fallback)
+        // could be wrong. So do NOT commit the pending writes. Instead load the real
+        // settings from disk, discard the untrusted cache, and clear the taint;
+        // signal the frontend to skip its (now-stale) rollback and retry against the
+        // real state. Until the file can be read, refuse without touching anything.
+        let Some(disk) = read_settings_map(&path) else {
             return Err("settings could not be loaded yet; not overwriting them".to_string());
         };
-        for (key, value) in store.entries() {
-            merged.insert(key, value);
-        }
-        let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
-        atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
-        // The write committed `merged` to disk. Sync the live cache to that same
-        // in-memory map directly — NOT via store.reload(), which re-reads disk and
-        // could fail under the very lock this path handles, leaving the cache empty
-        // while the taint is cleared. Applying the in-memory map can't fail, so the
-        // cache is guaranteed to equal disk before we clear the taint.
-        for (key, value) in &merged {
-            store.set(key.clone(), value.clone());
+        store.clear();
+        for (key, value) in disk {
+            store.set(key, value);
         }
         SETTINGS_TAINTED.store(false, Ordering::SeqCst);
-        return Ok(());
+        return Err(STORE_RELOADED_SIGNAL.to_string());
     }
 
     // Snapshot the cache into a sorted map: deterministic key order keeps the

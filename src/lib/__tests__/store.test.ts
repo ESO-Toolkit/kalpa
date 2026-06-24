@@ -153,6 +153,20 @@ describe("setSettings", () => {
     expect(backing.has("obj")).toBe(false); // newly-added key dropped
   });
 
+  it("skips rollback when the store was reloaded from disk", async () => {
+    const backing = backStore({ existing: "disk" });
+    // The flush command reloaded the store from disk (it had opened over a
+    // transiently unreadable file) and signalled so via this error.
+    mockInvoke.mockRejectedValue("settings-store-reloaded");
+    const { setSettings } = await import("../store");
+
+    await expect(setSettings({ existing: "attempted", fresh: 1 })).resolves.toBe(false);
+
+    // Rollback was skipped (its snapshot would be stale): the newly-added key was
+    // NOT deleted, unlike a normal flush failure.
+    expect(backing.has("fresh")).toBe(true);
+  });
+
   it("does not clobber a concurrent write when rolling back", async () => {
     const backing = backStore({ active: "old-theme" });
     // A concurrent writer lands a new value right as the batch tries to flush.
