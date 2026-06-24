@@ -216,15 +216,17 @@ fn recover_path(main: &Path) -> Option<BTreeMap<String, JsonValue>> {
         }
 
         // Could not write the primary (e.g. it is locked). Two safeguards:
-        //  1. File backstop: park a `.tmp` source under `.bak` (atomic, non-
-        //     truncating rename, a name the runtime never reuses) so a crash before
-        //     the cache is flushed still leaves a recoverable file. `.tmp` is
-        //     consumed only if the move succeeds; otherwise it is kept.
-        //  2. Authoritative: return the parsed map so the caller seeds the live
-        //     cache — the next flush persists it, so the data survives even if the
-        //     file backstop is later clobbered.
+        //  1. File backstop: copy a `.tmp` source into an INDEPENDENT `.bak`
+        //     (write+fsync, never a rename of the source). `.bak` is a name the
+        //     runtime write path never reuses, so it survives the seed flush below
+        //     reusing `.tmp` as its staging file. We never delete the source `.tmp`,
+        //     so even if the `.bak` copy can't be written (e.g. disk full) a valid
+        //     on-disk copy still exists until a real write succeeds. (When the
+        //     source already IS `.bak`, it is itself the backstop — leave it.)
+        //  2. Authoritative: return the parsed map so the caller seeds it into the
+        //     live cache, where it is persisted by the next successful flush.
         if from_tmp {
-            let _ = rename_with_retries(&tmp, &bak);
+            let _ = write_synced(&bak, &bytes);
         }
         quarantine(main);
         eprintln!(
@@ -460,13 +462,39 @@ mod tests {
             Some(&serde_json::json!(1)),
             "recovered settings are returned for cache seeding"
         );
-        // File backstop: the staged copy is also parked under `.bak` (a name the
-        // runtime write path never reuses), and `.tmp` is consumed by that move.
+        // Independent on-disk backstop under `.bak` (survives a later seed flush
+        // that reuses `.tmp`), AND the source `.tmp` is preserved — both hold a
+        // valid copy.
         assert_eq!(
             read_if_valid(&suffixed(&main, ".bak")).unwrap(),
             b"{\"saved\":1}"
         );
-        assert!(!tmp_path(&main).exists(), "stale staging dropped");
+        assert!(
+            read_if_valid(&tmp_path(&main)).is_some(),
+            "source .tmp is preserved as a fallback copy"
+        );
+    }
+
+    #[test]
+    fn recovery_keeps_tmp_when_bak_backstop_cannot_be_written() {
+        let dir = temp_dir("bak-write-fail");
+        let main = dir.join("settings.json");
+        // Primary unwritable (a directory) so promotion fails, and `.bak` is a
+        // directory too so the backstop copy can't be written — the worst case.
+        fs::create_dir(&main).unwrap();
+        fs::create_dir(suffixed(&main, ".bak")).unwrap();
+        fs::write(tmp_path(&main), b"{\"saved\":9}").unwrap();
+
+        let recovered = recover_path(&main);
+
+        // The recovered data is still returned for seeding...
+        assert_eq!(recovered.unwrap().get("saved"), Some(&serde_json::json!(9)));
+        // ...and because the `.bak` backstop could not be written, the source
+        // `.tmp` is preserved (never deleted) as the surviving on-disk copy.
+        assert!(
+            read_if_valid(&tmp_path(&main)).is_some(),
+            ".tmp must survive when the .bak backstop cannot be written"
+        );
     }
 
     #[test]
