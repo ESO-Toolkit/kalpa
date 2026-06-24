@@ -202,13 +202,21 @@ fn recover_path(main: &Path) {
             eprintln!("[settings_store] recovery: restored {main:?} from staged write");
             return;
         }
-        // Could not durably replace `main`. Park the recovered bytes under `.bak`
-        // (untouchable by runtime `.tmp` writes) before clearing `.tmp`, so the
-        // data survives for a future launch to retry.
-        let _ = write_synced(&bak, &bytes);
-        let _ = fs::remove_file(&tmp);
+        // Could not durably replace `main`. Move the staged copy aside to `.bak`
+        // via an atomic, non-truncating rename (a name the runtime write path
+        // never reuses), so a later `.tmp` write can't clobber it and a future
+        // launch can retry. Crucially this consumes `.tmp` only if the move
+        // succeeds; if even the move fails, `.tmp` is left as the surviving copy
+        // rather than risking the loss of the only recovered bytes.
+        match rename_with_retries(&tmp, &bak) {
+            Ok(()) => eprintln!(
+                "[settings_store] recovery: staged promotion failed; preserved copy at {bak:?}"
+            ),
+            Err(e) => eprintln!(
+                "[settings_store] recovery: staged promotion failed and could not park copy ({e}); keeping {tmp:?}"
+            ),
+        }
         quarantine(main);
-        eprintln!("[settings_store] recovery: staged promotion failed; preserved copy at {bak:?}");
         return;
     }
 
@@ -246,11 +254,16 @@ pub fn recover<R: Runtime>(app: &AppHandle<R>) {
 }
 
 /// Atomically persist the plugin store's current in-memory cache to disk,
-/// replacing the plugin's non-atomic `Store::save`. A no-op (returns `Ok`) if
-/// the store has not been opened yet — there is nothing to persist.
+/// replacing the plugin's non-atomic `Store::save`. Errors (rather than silently
+/// succeeding) if the store isn't open — which only happens after shutdown
+/// detach — so a caller can tell its write was not persisted.
 pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let Some(store) = app.get_store(STORE_FILE) else {
-        return Ok(());
+        // The store is only absent after `detach_on_exit` removes it during
+        // shutdown. Report a real error rather than a false success, so a write
+        // that lost its race with shutdown surfaces as failed instead of being
+        // silently reported as persisted.
+        return Err("settings store is not open".to_string());
     };
     let path = settings_path(app).ok_or_else(|| "could not resolve settings path".to_string())?;
 
