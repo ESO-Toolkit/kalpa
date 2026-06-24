@@ -139,9 +139,14 @@ describe("packIdentity", () => {
     }
   });
 
-  it("exposes the --pk-glow custom property for the card hover glow", () => {
-    const { glowVars } = packIdentity({ id: "x", title: "Trial Necessities" });
-    expect((glowVars as unknown as Record<string, string>)["--pk-glow"]).toMatch(/^color-mix\(/);
+  it("builds an opaque card surface with accent wash + --pk-glow", () => {
+    const { cardStyle } = packIdentity({ id: "x", title: "Trial Necessities" });
+    const style = cardStyle as unknown as Record<string, string>;
+    expect(style["--pk-glow"]).toMatch(/^color-mix\(/);
+    // opaque base panel (linear-gradient over var(--card)) + accent wash (radial)
+    expect(cardStyle.backgroundImage).toContain("linear-gradient");
+    expect(cardStyle.backgroundImage).toContain("radial-gradient");
+    expect(cardStyle.backgroundImage).toContain("var(--card)");
   });
 
   it("derives a monogram from the title", () => {

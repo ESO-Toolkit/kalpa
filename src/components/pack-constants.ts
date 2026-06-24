@@ -155,8 +155,10 @@ export interface PackIdentity {
   accentVar: string;
   /** Inline style for the monogram tile (per-pack gradient + glyph + ring). */
   tileStyle: CSSProperties;
-  /** Inline style exposing --pk-glow for the card's per-pack hover glow. */
-  glowVars: CSSProperties;
+  /** Inline style for the whole card surface: an opaque, top-lit elevated panel
+   *  + a soft accent wash from the monogram corner, plus the --pk-glow custom
+   *  property the card's hover shadow consumes. */
+  cardStyle: CSSProperties;
 }
 
 /** Deterministic identity for a pack. Pure function of id + title. Accepts a
@@ -186,10 +188,15 @@ export function packIdentity(pack: { id: string; title: string; packType?: strin
       `inset 0 0 0 1px color-mix(in oklab, var(${accentVar}) 26%, transparent)`,
   };
 
-  // Per-pack hover glow color, consumed by the card via a bounded arbitrary class.
-  const glowVars = {
-    "--pk-glow": `color-mix(in oklab, var(${accentVar}) 16%, transparent)`,
+  // Card surface: an OPAQUE, top-lit elevated panel (so the card never picks up
+  // the page background) with a soft accent wash from the monogram corner. The
+  // --pk-glow custom property feeds the card's per-pack hover shadow.
+  const cardStyle = {
+    "--pk-glow": `color-mix(in oklab, var(${accentVar}) 26%, transparent)`,
+    backgroundImage:
+      `radial-gradient(135% 120% at 0% 0%, color-mix(in oklab, var(${accentVar}) 13%, transparent), transparent 56%), ` +
+      `linear-gradient(180deg, color-mix(in oklab, var(--card) 88%, white), var(--card))`,
   } as CSSProperties;
 
-  return { monogram: packMonogram(pack.title), accentVar, tileStyle, glowVars };
+  return { monogram: packMonogram(pack.title), accentVar, tileStyle, cardStyle };
 }

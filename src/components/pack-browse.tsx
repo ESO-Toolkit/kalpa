@@ -160,20 +160,17 @@ export function PackListView({
                     onSelectPack(pack.id);
                   }
                 }}
-                style={identity.glowVars}
+                style={identity.cardStyle}
                 className={cn(
-                  "group w-full text-left rounded-xl border border-white/[0.08] p-3",
+                  "group w-full text-left rounded-xl border border-white/[0.1] p-3",
                   "border-l-[3px] cursor-pointer",
-                  "transition-[transform,border-color,background-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
-                  // Elevated translucent panel so the card reads as a distinct raised
-                  // surface above the dialog background, not a faint tint that blends in.
-                  "bg-[color-mix(in_oklab,var(--card)_62%,transparent)]",
-                  "shadow-[0_2px_8px_rgba(0,0,0,0.30),inset_0_1px_0_rgba(255,255,255,0.06)]",
+                  "transition-[transform,border-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
+                  // Real elevation so the opaque card sits clearly above the background.
+                  "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.07)]",
                   accent.border,
-                  "hover:bg-[color-mix(in_oklab,var(--card)_76%,transparent)]",
-                  // Per-pack hover glow (color from --pk-glow) layered over the resting lift.
-                  "hover:shadow-[0_10px_30px_var(--pk-glow),0_2px_8px_rgba(0,0,0,0.30),inset_0_1px_0_rgba(255,255,255,0.08)]",
-                  "hover:border-white/[0.16] motion-safe:hover:-translate-y-[1px]",
+                  // Per-pack colored glow + deeper shadow lift on hover.
+                  "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.1)]",
+                  "hover:border-white/[0.18] motion-safe:hover:-translate-y-[2px]",
                   "motion-reduce:transition-none",
                   "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                 )}
