@@ -430,14 +430,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // On a real app exit, flush settings.json atomically and drop the
-            // store from the plugin registry so tauri-plugin-store's own
-            // RunEvent::Exit handler can't truncate-write it afterwards.
-            // ExitRequested fires before Exit, so this runs first regardless of
-            // plugin handler order. (Window close hides to tray and never gets
-            // here.)
+            // On a real app exit, detach settings.json from the plugin registry so
+            // tauri-plugin-store's own RunEvent::Exit handler can't truncate-write
+            // it. ExitRequested fires before Exit (and before the plugin's exit
+            // save), so detaching here neutralises that non-atomic write. Settings
+            // are already persisted atomically on every write, so nothing is
+            // flushed here. (Window close hides to tray and never reaches this.)
             if let tauri::RunEvent::ExitRequested { .. } = event {
-                settings_store::flush_and_detach(app_handle);
+                settings_store::detach_on_exit(app_handle);
             }
         });
 }

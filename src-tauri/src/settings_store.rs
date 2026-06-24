@@ -45,16 +45,22 @@ const STORE_FILE: &str = "settings.json";
 const RENAME_ATTEMPTS: usize = 5;
 const RENAME_BACKOFF: Duration = Duration::from_millis(40);
 
-/// Serialises the file-write half of [`atomic_write`] within this process, so a
-/// late frontend flush and the shutdown flush can never both be mid-write
-/// against the shared temp path.
+/// Serialises [`atomic_write`] within this process, so two writers (e.g. a
+/// frontend flush racing the token migration) can never both be mid-write
+/// against the shared staging path.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-/// `settings.json` → `settings.json.tmp`. Appends a suffix rather than replacing
-/// the extension so the temp name can never collide with the real file's stem.
-fn tmp_path(main: &Path) -> PathBuf {
-    suffixed(main, ".tmp")
-}
+/// Runtime staging suffix. A crash between staging and rename leaves a complete
+/// `settings.json.tmp`; recovery treats it as a candidate (see [`recover_path`]).
+const STAGING_SUFFIX: &str = ".tmp";
+/// Where recovery parks a complete copy it could not promote, under a name the
+/// runtime write path never reuses — so a later write cannot destroy it.
+const PRESERVED_SUFFIX: &str = ".bak";
+/// Distinct staging name for promotion, so promoting never touches the candidate
+/// it is reading from.
+const PROMOTE_SUFFIX: &str = ".recovering";
+/// Where an unrecoverable corrupt primary is set aside for inspection.
+const QUARANTINE_SUFFIX: &str = ".corrupt";
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     let mut s: OsString = path.as_os_str().to_owned();
@@ -62,31 +68,30 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Crash-atomic file write: stage the full contents into `<path>.tmp`, fsync it,
-/// then rename it over `path`. fsync-before-rename guarantees the temp file's
-/// bytes are durable before it becomes the canonical file; the rename is atomic
-/// on a single NTFS volume, so a crash at any point leaves either the old
-/// complete file or the new complete file. `path` is never truncated in place.
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// `settings.json` → `settings.json.tmp` (the runtime staging path).
+fn tmp_path(main: &Path) -> PathBuf {
+    suffixed(main, STAGING_SUFFIX)
+}
+
+/// Write `bytes` to `path` (truncating) and fsync them to disk before returning,
+/// so the file's contents are durable once this succeeds.
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = tmp_path(path);
+    let mut f = fs::File::create(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
 
-    // Hold the lock across the whole stage-and-rename so two concurrent writers
-    // can't clobber each other's shared temp file.
-    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    // Stage + fsync the complete contents before the rename makes them canonical.
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-
+/// Rename `from` → `to`, retrying briefly. On Windows an AV scanner or the search
+/// indexer can hold the destination open and fail the rename transiently; a few
+/// short retries absorb that without giving up.
+fn rename_with_retries(from: &Path, to: &Path) -> io::Result<()> {
     let mut last_err = None;
     for attempt in 0..RENAME_ATTEMPTS {
-        match fs::rename(&tmp, path) {
+        match fs::rename(from, to) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_err = Some(e);
@@ -96,11 +101,37 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
             }
         }
     }
-
-    // The rename never landed. Drop the temp so it isn't leaked, and surface the
-    // error: `path` itself was never touched, so the previous good file survives.
-    let _ = fs::remove_file(&tmp);
     Err(last_err.unwrap_or_else(|| io::Error::other("rename failed")))
+}
+
+/// Crash-atomic file write: stage the full contents into `<path>.tmp`, fsync it,
+/// then rename it over `path`. fsync-before-rename makes the staged bytes durable
+/// before the rename publishes them, and the rename is atomic on a single NTFS
+/// volume — so a crash at any point leaves either the old complete file or the
+/// new complete file, never a partial one. `path` is never truncated in place.
+///
+/// Durability nuance: we do not force write-through on the rename's metadata, so
+/// a power cut within the OS's metadata-flush window may leave the *previous*
+/// complete file (the just-confirmed save can roll back). That preserves the
+/// no-corruption guarantee but not last-write durability; a stronger guarantee
+/// would need a platform-specific write-through replace (e.g. `MoveFileExW` with
+/// `MOVEFILE_WRITE_THROUGH`).
+fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = tmp_path(path);
+
+    // Hold the lock across the whole stage-and-rename so two concurrent writers
+    // can't clobber each other's shared staging file.
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    write_synced(&tmp, bytes)?;
+    if let Err(e) = rename_with_retries(&tmp, path) {
+        // The rename never landed. Drop the staging file so it isn't leaked, and
+        // surface the error: `path` was never touched, so the previous good file
+        // survives.
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Read a settings file and return its bytes only if it parses as a JSON object
@@ -112,57 +143,92 @@ fn read_if_valid(path: &Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Durably replace `main` with `bytes` via a promotion-only staging file (never
+/// the runtime `.tmp`, so a concurrent/later write can't interfere), retrying the
+/// rename and re-validating the result. Returns `true` only when `main` now holds
+/// the recovered content. On any failure `main` is left untouched.
+fn promote(main: &Path, bytes: &[u8]) -> bool {
+    let staging = suffixed(main, PROMOTE_SUFFIX);
+    let ok = write_synced(&staging, bytes).is_ok()
+        && rename_with_retries(&staging, main).is_ok()
+        && read_if_valid(main).is_some();
+    if !ok {
+        let _ = fs::remove_file(&staging);
+    }
+    ok
+}
+
+/// Move a corrupt primary aside so plugin-store starts clean instead of silently
+/// merging nothing, and a human can inspect what was lost.
+fn quarantine(main: &Path) {
+    if !main.exists() {
+        return;
+    }
+    let dest = suffixed(main, QUARANTINE_SUFFIX);
+    let _ = fs::remove_file(&dest); // overwrite any prior quarantine
+    match fs::rename(main, &dest) {
+        Ok(()) => eprintln!("[settings_store] recovery: quarantined corrupt {main:?} -> {dest:?}"),
+        Err(e) => eprintln!("[settings_store] recovery: failed to quarantine {main:?}: {e}"),
+    }
+}
+
 /// Repair on-disk settings state left by an interrupted write, BEFORE the plugin
-/// opens (and merge-loads) the file. Handles the only states [`atomic_write`]
-/// can leave on a crash, plus a pre-existing corrupt primary:
-///   * primary present & valid → drop any stale `.tmp`; done.
-///   * primary missing/corrupt + `.tmp` valid → promote the `.tmp` (a save whose
-///     rename didn't land; the staged file is a complete, fsynced snapshot).
-///   * primary corrupt + no valid `.tmp` → quarantine the corrupt file to
-///     `.corrupt` so the plugin starts clean instead of silently merging nothing
-///     (and a human can inspect what was lost).
+/// opens (and merge-loads) the file:
+///   * primary valid → it is the authority; drop stale `.tmp`/`.bak` and return.
+///   * primary missing/corrupt → restore from the newest complete copy we have —
+///     a crash-staged write (`.tmp`), else a preserved copy (`.bak`) parked by an
+///     earlier failed promotion — promoting it via a separate staging file so the
+///     source is never destroyed before `main` is durably replaced.
+///   * promotion fails → preserve the recovered bytes under `.bak` (a name the
+///     runtime write path never reuses) and quarantine the corrupt primary, so a
+///     future launch can retry without the recoverable copy being clobbered.
+///   * nothing recoverable → quarantine a corrupt primary and start fresh.
 fn recover_path(main: &Path) {
     let tmp = tmp_path(main);
+    let bak = suffixed(main, PRESERVED_SUFFIX);
 
+    // The primary, when valid, is always the authority — drop any leftovers.
     if read_if_valid(main).is_some() {
-        if tmp.exists() {
-            let _ = fs::remove_file(&tmp);
-        }
-        return;
-    }
-
-    // Primary is missing or corrupt. Promote a complete staged write if we have
-    // one. Route the restore through `atomic_write` rather than a bare rename so
-    // that (a) a transient lock is retried, and (b) the staging file is consumed
-    // on success — otherwise a later write would reuse the same `.tmp` name and
-    // truncate this recoverable copy. The validated bytes are held in memory, so
-    // the data is safe even as the staging file is rewritten.
-    if let Some(bytes) = read_if_valid(&tmp) {
-        match atomic_write(main, &bytes) {
-            Ok(()) => eprintln!("[settings_store] recovery: restored {main:?} from staged write"),
-            Err(e) => eprintln!(
-                "[settings_store] recovery: failed to restore {main:?} from staged write: {e}"
-            ),
-        }
-        return;
-    }
-
-    // No usable staged copy. Quarantine a corrupt primary so it doesn't get
-    // silently swallowed by the plugin's load, then start fresh.
-    if main.exists() {
-        let quarantine = suffixed(main, ".corrupt");
-        let _ = fs::remove_file(&quarantine); // overwrite any prior quarantine
-        match fs::rename(main, &quarantine) {
-            Ok(()) => eprintln!(
-                "[settings_store] recovery: quarantined corrupt {main:?} -> {quarantine:?}; starting fresh"
-            ),
-            Err(e) => eprintln!("[settings_store] recovery: failed to quarantine {main:?}: {e}"),
-        }
-    }
-    // Drop a present-but-invalid temp so it can't be mistaken for a good one later.
-    if tmp.exists() {
         let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(&bak);
+        return;
     }
+
+    // Primary missing/corrupt — try the freshest complete copy first.
+    if let Some(bytes) = read_if_valid(&tmp) {
+        if promote(main, &bytes) {
+            let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(&bak);
+            eprintln!("[settings_store] recovery: restored {main:?} from staged write");
+            return;
+        }
+        // Could not durably replace `main`. Park the recovered bytes under `.bak`
+        // (untouchable by runtime `.tmp` writes) before clearing `.tmp`, so the
+        // data survives for a future launch to retry.
+        let _ = write_synced(&bak, &bytes);
+        let _ = fs::remove_file(&tmp);
+        quarantine(main);
+        eprintln!("[settings_store] recovery: staged promotion failed; preserved copy at {bak:?}");
+        return;
+    }
+
+    if let Some(bytes) = read_if_valid(&bak) {
+        if promote(main, &bytes) {
+            let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(&bak);
+            eprintln!("[settings_store] recovery: restored {main:?} from preserved copy");
+            return;
+        }
+        // Keep `.bak` intact for the next launch; just clean up and quarantine.
+        let _ = fs::remove_file(&tmp);
+        quarantine(main);
+        eprintln!("[settings_store] recovery: preserved-copy promotion failed; keeping {bak:?}");
+        return;
+    }
+
+    // Nothing recoverable. Quarantine a corrupt primary and drop a stale `.tmp`.
+    quarantine(main);
+    let _ = fs::remove_file(&tmp);
 }
 
 /// Resolve the absolute settings.json path via the plugin's own resolver, so it
@@ -198,14 +264,23 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     atomic_write(&path, &bytes).map_err(|e| e.to_string())
 }
 
-/// Final atomic flush at shutdown, then drop the store from the plugin's
-/// registry so tauri-plugin-store's own `RunEvent::Exit` handler can't perform a
-/// non-atomic truncate-write of `settings.json` after us. Call from the app's
-/// `RunEvent::ExitRequested` handler (which fires before `Exit`).
-pub fn flush_and_detach<R: Runtime>(app: &AppHandle<R>) {
-    if let Err(e) = flush(app) {
-        eprintln!("[settings_store] shutdown flush failed: {e}");
-    }
+/// Drop the store from the plugin's registry at shutdown so tauri-plugin-store's
+/// own `RunEvent::Exit` handler can't perform a non-atomic truncate-write of
+/// `settings.json` after us (its exit save runs before our run-callback for the
+/// same event, so we must detach during the earlier `ExitRequested`).
+///
+/// We deliberately do NOT flush here: every `setSetting`/`setSettings` already
+/// persists atomically the moment it completes, so the on-disk file is current
+/// as of the last *finished* write. Flushing the live cache at exit could instead
+/// snapshot a multi-key batch mid-flight (set but not yet flushed) and persist it
+/// half-applied — the very inconsistency the batched flush exists to prevent.
+///
+/// Detaching during `ExitRequested` is safe because Kalpa never prevents exit:
+/// window close hides to tray, and this callback runs after every plugin's
+/// `ExitRequested` handler, so by the time it runs exit is committed. If a future
+/// change starts calling `ExitRequestApi::prevent`, this detach must move with it
+/// (a closed store would strand the live frontend).
+pub fn detach_on_exit<R: Runtime>(app: &AppHandle<R>) {
     if let Some(store) = app.get_store(STORE_FILE) {
         store.close_resource();
     }
@@ -291,6 +366,56 @@ mod tests {
 
         assert_eq!(fs::read(&main).unwrap(), b"{\"recovered\":true}");
         assert!(!tmp_path(&main).exists());
+    }
+
+    #[test]
+    fn recovery_restores_from_preserved_bak_when_no_temp() {
+        let dir = temp_dir("restore-bak");
+        let main = dir.join("settings.json");
+        fs::write(&main, b"{\"corrupt").unwrap();
+        // No `.tmp`, but a `.bak` parked by an earlier failed promotion.
+        fs::write(suffixed(&main, ".bak"), b"{\"preserved\":1}").unwrap();
+
+        recover_path(&main);
+
+        assert_eq!(fs::read(&main).unwrap(), b"{\"preserved\":1}");
+        assert!(!suffixed(&main, ".bak").exists(), "preserved copy consumed");
+    }
+
+    #[test]
+    fn recovery_prefers_temp_over_preserved_bak() {
+        let dir = temp_dir("prefer-temp");
+        let main = dir.join("settings.json");
+        fs::write(&main, b"{\"corrupt").unwrap();
+        fs::write(tmp_path(&main), b"{\"newest\":1}").unwrap();
+        fs::write(suffixed(&main, ".bak"), b"{\"older\":1}").unwrap();
+
+        recover_path(&main);
+
+        // The crash-staged write is newer than a parked copy and wins.
+        assert_eq!(fs::read(&main).unwrap(), b"{\"newest\":1}");
+        assert!(!tmp_path(&main).exists());
+        assert!(!suffixed(&main, ".bak").exists());
+    }
+
+    #[test]
+    fn recovery_preserves_recovered_bytes_when_promotion_fails() {
+        let dir = temp_dir("promote-fail");
+        let main = dir.join("settings.json");
+        // Make `main` a directory so renaming a file over it fails deterministically
+        // on every platform, forcing the promotion failure path.
+        fs::create_dir(&main).unwrap();
+        fs::write(tmp_path(&main), b"{\"saved\":1}").unwrap();
+
+        recover_path(&main);
+
+        // The recovered bytes are parked under `.bak` (a name runtime writes never
+        // reuse) so a future launch can retry — they are never lost.
+        assert_eq!(
+            read_if_valid(&suffixed(&main, ".bak")).unwrap(),
+            b"{\"saved\":1}"
+        );
+        assert!(!tmp_path(&main).exists(), "stale staging dropped");
     }
 
     #[test]
