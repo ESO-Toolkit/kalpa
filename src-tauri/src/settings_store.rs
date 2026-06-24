@@ -36,7 +36,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -66,6 +66,13 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Per-process counter making each staging file name unique.
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Set when the store opened with an empty cache while the primary on disk may
+/// still hold real settings (it couldn't be loaded — e.g. a transient lock, since
+/// plugin-store swallows load errors). While tainted, [`flush`] refuses to write
+/// so the empty cache can't overwrite the real file; it clears once a reload of
+/// the primary succeeds.
+static SETTINGS_TAINTED: AtomicBool = AtomicBool::new(false);
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     let mut s: OsString = path.as_os_str().to_owned();
@@ -244,12 +251,27 @@ pub fn recover<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Whether an empty in-memory cache must NOT be trusted to overwrite the primary
+/// — i.e. the file on disk may still hold real settings the load missed. True when
+/// the primary parses as a non-empty object, or exists but can't be read at all
+/// (it might be good data behind a transient lock). A missing, empty, or corrupt
+/// primary has nothing worth protecting.
+fn primary_may_hold_settings(path: &Path) -> bool {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes)
+            .map(|m| !m.is_empty())
+            .unwrap_or(false),
+        Err(_) => path.exists(),
+    }
+}
+
 /// Guard against tauri-plugin-store silently swallowing a load error: its
 /// `StoreBuilder::build_inner` ignores `load()` failures, so a settings file that
 /// was transiently unreadable when the store opened yields an *empty* in-memory
-/// cache. If the file actually holds settings, retry the load — otherwise a later
-/// flush would write that empty cache over the user's real settings. Call once,
-/// right after the store is first opened. No-op for a genuinely empty/fresh store.
+/// cache. If the file may hold real settings, retry the load; if that still can't
+/// load it, taint the store so [`flush`] refuses to overwrite the file until it
+/// loads. Call once, right after the store is first opened. No-op for a genuinely
+/// empty/fresh store.
 pub fn ensure_loaded<R: Runtime>(app: &AppHandle<R>) {
     let Some(store) = app.get_store(STORE_FILE) else {
         return;
@@ -260,19 +282,19 @@ pub fn ensure_loaded<R: Runtime>(app: &AppHandle<R>) {
     let Some(path) = settings_path(app) else {
         return;
     };
-    let disk_has_settings = fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<BTreeMap<String, JsonValue>>(&b).ok())
-        .is_some_and(|m| !m.is_empty());
-    if disk_has_settings {
-        // The file holds settings but the cache opened empty — the load was
-        // swallowed. Retry it so the cache reflects disk before anything flushes.
-        if let Err(e) = store.reload() {
-            eprintln!(
-                "[settings_store] settings present on disk but reload failed; not overwriting: {e}"
-            );
-        }
+    if !primary_may_hold_settings(&path) {
+        return; // missing/empty/corrupt primary — the empty cache is fine to write
     }
+    // Retry the swallowed load so the cache reflects disk before anything flushes.
+    if store.reload().is_ok() && !store.is_empty() {
+        return;
+    }
+    // Still couldn't load the file's settings into the cache. Refuse to overwrite
+    // it until it loads, so a later flush can't replace real settings with empty.
+    SETTINGS_TAINTED.store(true, Ordering::SeqCst);
+    eprintln!(
+        "[settings_store] settings file present but could not be loaded; refusing to overwrite it until it loads"
+    );
 }
 
 /// Atomically persist the plugin store's current in-memory cache to disk,
@@ -287,6 +309,18 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         // silently reported as persisted.
         return Err("settings store is not open".to_string());
     };
+
+    if SETTINGS_TAINTED.load(Ordering::SeqCst) {
+        // The store opened empty over a file that may hold real settings. Don't
+        // overwrite it. Retry the load: if it succeeds the store is trustworthy
+        // again for the NEXT write, but fail this one — it ran against the
+        // untrusted empty cache.
+        if store.reload().is_ok() {
+            SETTINGS_TAINTED.store(false, Ordering::SeqCst);
+        }
+        return Err("settings could not be loaded yet; not overwriting them".to_string());
+    }
+
     let path = settings_path(app).ok_or_else(|| "could not resolve settings path".to_string())?;
 
     // Snapshot the cache into a sorted map: deterministic key order keeps the
@@ -507,5 +541,46 @@ mod tests {
         assert!(main.exists(), "unreadable primary left in place");
         assert!(!suffixed(&main, ".corrupt").exists(), "not quarantined");
         assert!(staging_files(&main).is_empty());
+    }
+
+    #[test]
+    fn primary_may_hold_settings_protects_only_recoverable_files() {
+        let dir = temp_dir("may-hold");
+
+        let missing = dir.join("missing.json");
+        assert!(
+            !primary_may_hold_settings(&missing),
+            "missing → nothing to protect"
+        );
+
+        let empty_obj = dir.join("empty.json");
+        fs::write(&empty_obj, b"{}").unwrap();
+        assert!(
+            !primary_may_hold_settings(&empty_obj),
+            "empty {{}} → nothing to protect"
+        );
+
+        let with_data = dir.join("data.json");
+        fs::write(&with_data, b"{\"a\":1}").unwrap();
+        assert!(
+            primary_may_hold_settings(&with_data),
+            "real settings → protect"
+        );
+
+        let corrupt = dir.join("corrupt.json");
+        fs::write(&corrupt, b"{\"half").unwrap();
+        assert!(
+            !primary_may_hold_settings(&corrupt),
+            "corrupt → quarantined separately, nothing loadable to protect"
+        );
+
+        // A directory reads as an I/O error but exists — stands in for a file
+        // behind a transient lock, which may hold real settings.
+        let unreadable = dir.join("locked.json");
+        fs::create_dir(&unreadable).unwrap();
+        assert!(
+            primary_may_hold_settings(&unreadable),
+            "present but unreadable → may hold settings, must protect"
+        );
     }
 }
