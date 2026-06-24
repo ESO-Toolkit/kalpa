@@ -265,6 +265,12 @@ fn primary_may_hold_settings(path: &Path) -> bool {
     }
 }
 
+/// Read and parse the primary into a settings map, or `None` if it can't be read
+/// or doesn't parse as a JSON object.
+fn read_settings_map(path: &Path) -> Option<BTreeMap<String, JsonValue>> {
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
 /// Guard against tauri-plugin-store silently swallowing a load error: its
 /// `StoreBuilder::build_inner` ignores `load()` failures, so a settings file that
 /// was transiently unreadable when the store opened yields an *empty* in-memory
@@ -310,26 +316,30 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         return Err("settings store is not open".to_string());
     };
 
+    let path = settings_path(app).ok_or_else(|| "could not resolve settings path".to_string())?;
+
     if SETTINGS_TAINTED.load(Ordering::SeqCst) {
         // The store opened empty over a file that may hold real settings, so the
-        // caller's write was applied to an untrusted (empty) cache. Merge before
-        // writing so nothing is lost: capture the pending writes, reload the real
-        // settings from disk, then re-apply the writes ON TOP (they win conflicts).
-        // The result is disk ∪ pending, which we then persist normally — so we
-        // return success and the frontend does not run its (now-stale) rollback.
-        let pending = store.entries();
-        if store.reload().is_err() {
+        // caller's write was applied to an untrusted (empty) cache. Merge WITHOUT
+        // touching the live cache or the taint flag, so that if the write fails the
+        // frontend's rollback snapshot (taken from the empty cache) stays valid:
+        // build `disk ∪ pending` in a LOCAL map (pending wins conflicts) and write
+        // that. Only AFTER the bytes are durably written do we bring the live cache
+        // up to date and clear the taint — then return success, so no rollback runs.
+        let Some(mut merged) = read_settings_map(&path) else {
             // Still can't read the file; refuse rather than overwrite it. The
             // frontend rolls its write back; a later attempt retries the reload.
             return Err("settings could not be loaded yet; not overwriting them".to_string());
+        };
+        for (key, value) in store.entries() {
+            merged.insert(key, value);
         }
-        for (key, value) in pending {
-            store.set(key, value);
-        }
+        let bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
+        atomic_write(&path, &bytes).map_err(|e| e.to_string())?;
+        let _ = store.reload(); // disk now equals `merged`; sync the live cache
         SETTINGS_TAINTED.store(false, Ordering::SeqCst);
+        return Ok(());
     }
-
-    let path = settings_path(app).ok_or_else(|| "could not resolve settings path".to_string())?;
 
     // Snapshot the cache into a sorted map: deterministic key order keeps the
     // on-disk file stable across saves (smaller diffs) and is still exactly what
