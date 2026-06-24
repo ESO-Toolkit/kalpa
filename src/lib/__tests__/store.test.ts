@@ -101,7 +101,12 @@ describe("setSettings", () => {
    * values. */
   function backStore(seed: Record<string, unknown> = {}) {
     const backing = new Map<string, unknown>(Object.entries(seed));
-    mockGet.mockImplementation(async (key: string) => backing.get(key));
+    mockGet.mockImplementation(async (key: string) => {
+      const v = backing.get(key);
+      // Simulate IPC: reads come back as fresh deserialized values (new object
+      // refs), so callers can't rely on reference equality.
+      return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+    });
     mockSet.mockImplementation(async (key: string, value: unknown) => {
       backing.set(key, value);
     });
@@ -133,6 +138,19 @@ describe("setSettings", () => {
     // so a later flush can't write the half-applied batch.
     expect(backing.get("active")).toBe("old-theme");
     expect(backing.has("marker")).toBe(false);
+  });
+
+  it("rolls back object and array values structurally when the flush fails", async () => {
+    // "list" existed before; "obj" is new. Reads return fresh refs (see backStore),
+    // so a reference-equality guard would skip both — deep equality restores them.
+    const backing = backStore({ list: [1, 2] });
+    mockInvoke.mockRejectedValue(new Error("disk full"));
+    const { setSettings } = await import("../store");
+
+    await expect(setSettings({ obj: { a: 1 }, list: [3, 4] })).resolves.toBe(false);
+
+    expect(backing.get("list")).toEqual([1, 2]); // existing key reverted
+    expect(backing.has("obj")).toBe(false); // newly-added key dropped
   });
 
   it("does not clobber a concurrent write when rolling back", async () => {

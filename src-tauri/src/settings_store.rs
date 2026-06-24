@@ -14,15 +14,16 @@
 //! calling the plugin's `save()`:
 //!   * the Rust migration and the JS `setSetting`/`setSettings` paths persist
 //!     via [`flush`] (exposed as the `flush_settings` command), and
-//!   * on `RunEvent::ExitRequested` the app calls [`flush_and_detach`], which
-//!     does a final atomic flush and then drops the store from the plugin
-//!     registry so the plugin's exit handler can't truncate-write it after us.
+//!   * on `RunEvent::ExitRequested` the app calls [`detach_on_exit`], which drops
+//!     the store from the plugin registry so the plugin's exit handler can't
+//!     truncate-write it after us (it does not flush — every write already did).
 //!
 //! [`flush`] serialises the cache and writes it with the standard
 //! write-temp + fsync + atomic-rename pattern, so the on-disk file is only ever
 //! the previous complete file or the next complete file — never a partial one.
 //! [`recover`] runs before the store is first opened and repairs on-disk state
-//! left by a crash (a stray `.tmp`, or a corrupt primary file).
+//! left by a crash; settings it cannot write back to the primary are returned for
+//! [`seed_recovered`] to put into the live cache so they are never lost.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -173,17 +174,22 @@ fn quarantine(main: &Path) {
 }
 
 /// Repair on-disk settings state left by an interrupted write, BEFORE the plugin
-/// opens (and merge-loads) the file:
-///   * primary valid → it is the authority; drop stale `.tmp`/`.bak` and return.
-///   * primary missing/corrupt → restore from the newest complete copy we have —
-///     a crash-staged write (`.tmp`), else a preserved copy (`.bak`) parked by an
-///     earlier failed promotion — promoting it via a separate staging file so the
-///     source is never destroyed before `main` is durably replaced.
-///   * promotion fails → preserve the recovered bytes under `.bak` (a name the
-///     runtime write path never reuses) and quarantine the corrupt primary, so a
-///     future launch can retry without the recoverable copy being clobbered.
-///   * nothing recoverable → quarantine a corrupt primary and start fresh.
-fn recover_path(main: &Path) {
+/// opens (and merge-loads) the file. Returns the recovered settings map ONLY when
+/// it held a valid copy that it could not write back to the primary — so the
+/// caller can seed it into the live store ([`seed_recovered`]). That cache seed is
+/// the authoritative guard against loss: even if the on-disk copies are later
+/// clobbered, the data is live and the next flush persists it.
+///
+///   * primary valid → it is the authority; drop stale `.tmp`/`.bak`; return None.
+///   * primary missing/corrupt → restore from the freshest complete copy (`.tmp`,
+///     else a `.bak` parked by an earlier failed promotion), promoting it via a
+///     separate staging file so the source is never destroyed before `main` is
+///     durably replaced. On success return None.
+///   * promotion fails → best-effort park the copy under `.bak` (a name the
+///     runtime write path never reuses) and quarantine the corrupt primary, then
+///     return the recovered map so the caller seeds the live cache.
+///   * nothing recoverable → quarantine a corrupt primary; return None.
+fn recover_path(main: &Path) -> Option<BTreeMap<String, JsonValue>> {
     let tmp = tmp_path(main);
     let bak = suffixed(main, PRESERVED_SUFFIX);
 
@@ -191,52 +197,46 @@ fn recover_path(main: &Path) {
     if read_if_valid(main).is_some() {
         let _ = fs::remove_file(&tmp);
         let _ = fs::remove_file(&bak);
-        return;
+        return None;
     }
 
-    // Primary missing/corrupt — try the freshest complete copy first.
-    if let Some(bytes) = read_if_valid(&tmp) {
+    // Primary missing/corrupt — try the freshest complete copy first (`.tmp`, a
+    // crash-staged write), then a `.bak` parked by an earlier failed promotion.
+    for from_tmp in [true, false] {
+        let source = if from_tmp { &tmp } else { &bak };
+        let Some(bytes) = read_if_valid(source) else {
+            continue;
+        };
+
         if promote(main, &bytes) {
             let _ = fs::remove_file(&tmp);
             let _ = fs::remove_file(&bak);
-            eprintln!("[settings_store] recovery: restored {main:?} from staged write");
-            return;
+            eprintln!("[settings_store] recovery: restored {main:?} from {source:?}");
+            return None;
         }
-        // Could not durably replace `main`. Move the staged copy aside to `.bak`
-        // via an atomic, non-truncating rename (a name the runtime write path
-        // never reuses), so a later `.tmp` write can't clobber it and a future
-        // launch can retry. Crucially this consumes `.tmp` only if the move
-        // succeeds; if even the move fails, `.tmp` is left as the surviving copy
-        // rather than risking the loss of the only recovered bytes.
-        match rename_with_retries(&tmp, &bak) {
-            Ok(()) => eprintln!(
-                "[settings_store] recovery: staged promotion failed; preserved copy at {bak:?}"
-            ),
-            Err(e) => eprintln!(
-                "[settings_store] recovery: staged promotion failed and could not park copy ({e}); keeping {tmp:?}"
-            ),
-        }
-        quarantine(main);
-        return;
-    }
 
-    if let Some(bytes) = read_if_valid(&bak) {
-        if promote(main, &bytes) {
-            let _ = fs::remove_file(&tmp);
-            let _ = fs::remove_file(&bak);
-            eprintln!("[settings_store] recovery: restored {main:?} from preserved copy");
-            return;
+        // Could not write the primary (e.g. it is locked). Two safeguards:
+        //  1. File backstop: park a `.tmp` source under `.bak` (atomic, non-
+        //     truncating rename, a name the runtime never reuses) so a crash before
+        //     the cache is flushed still leaves a recoverable file. `.tmp` is
+        //     consumed only if the move succeeds; otherwise it is kept.
+        //  2. Authoritative: return the parsed map so the caller seeds the live
+        //     cache — the next flush persists it, so the data survives even if the
+        //     file backstop is later clobbered.
+        if from_tmp {
+            let _ = rename_with_retries(&tmp, &bak);
         }
-        // Keep `.bak` intact for the next launch; just clean up and quarantine.
-        let _ = fs::remove_file(&tmp);
         quarantine(main);
-        eprintln!("[settings_store] recovery: preserved-copy promotion failed; keeping {bak:?}");
-        return;
+        eprintln!(
+            "[settings_store] recovery: could not rewrite {main:?}; seeding cache from recovered copy"
+        );
+        return serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).ok();
     }
 
     // Nothing recoverable. Quarantine a corrupt primary and drop a stale `.tmp`.
     quarantine(main);
     let _ = fs::remove_file(&tmp);
+    None
 }
 
 /// Resolve the absolute settings.json path via the plugin's own resolver, so it
@@ -247,9 +247,34 @@ fn settings_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
 
 /// Repair on-disk settings state left by a crash. Call once, before the plugin
 /// store is first opened, so the repaired file is what the plugin's load() reads.
-pub fn recover<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(path) = settings_path(app) {
-        recover_path(&path);
+/// Returns settings that could not be written back to the primary; pass them to
+/// [`seed_recovered`] after the store opens so they become the live state.
+#[must_use]
+pub fn recover<R: Runtime>(app: &AppHandle<R>) -> Option<BTreeMap<String, JsonValue>> {
+    recover_path(&settings_path(app)?)
+}
+
+/// Seed settings that [`recover`] could not write back to disk into the live
+/// store, then persist them. Call right after the store is first opened. Making
+/// the recovered settings the live state means they are not lost even if the
+/// on-disk backstop is later overwritten — the flush writes them through as soon
+/// as the primary is writable again.
+pub fn seed_recovered<R: Runtime>(
+    app: &AppHandle<R>,
+    recovered: Option<BTreeMap<String, JsonValue>>,
+) {
+    let Some(map) = recovered else {
+        return;
+    };
+    let Some(store) = app.get_store(STORE_FILE) else {
+        eprintln!("[settings_store] recovery: store not open; cannot seed recovered settings");
+        return;
+    };
+    for (key, value) in map {
+        store.set(key, value);
+    }
+    if let Err(e) = flush(app) {
+        eprintln!("[settings_store] recovery: seeded cache but could not persist yet: {e}");
     }
 }
 
@@ -349,7 +374,10 @@ mod tests {
         // A leftover temp from some earlier crash.
         fs::write(tmp_path(&main), b"{\"stale\":1}").unwrap();
 
-        recover_path(&main);
+        assert!(
+            recover_path(&main).is_none(),
+            "valid primary needs no seeding"
+        );
 
         assert_eq!(fs::read(&main).unwrap(), b"{\"keep\":1}");
         assert!(!tmp_path(&main).exists(), "stale temp should be removed");
@@ -363,7 +391,10 @@ mod tests {
         fs::write(&main, b"{\"half").unwrap();
         fs::write(tmp_path(&main), b"{\"recovered\":42}").unwrap();
 
-        recover_path(&main);
+        assert!(
+            recover_path(&main).is_none(),
+            "successful promotion needs no seeding"
+        );
 
         assert_eq!(fs::read(&main).unwrap(), b"{\"recovered\":42}");
         assert!(!tmp_path(&main).exists());
@@ -420,10 +451,17 @@ mod tests {
         fs::create_dir(&main).unwrap();
         fs::write(tmp_path(&main), b"{\"saved\":1}").unwrap();
 
-        recover_path(&main);
+        let recovered = recover_path(&main);
 
-        // The recovered bytes are parked under `.bak` (a name runtime writes never
-        // reuse) so a future launch can retry — they are never lost.
+        // Authoritative safeguard: the recovered settings are returned to seed the
+        // live cache, so they are not lost even if the file backstop is clobbered.
+        assert_eq!(
+            recovered.unwrap().get("saved"),
+            Some(&serde_json::json!(1)),
+            "recovered settings are returned for cache seeding"
+        );
+        // File backstop: the staged copy is also parked under `.bak` (a name the
+        // runtime write path never reuses), and `.tmp` is consumed by that move.
         assert_eq!(
             read_if_valid(&suffixed(&main, ".bak")).unwrap(),
             b"{\"saved\":1}"
