@@ -1,5 +1,14 @@
 import { lazy, Suspense } from "react";
 import type { AddonManifest, AuthUser, GameInstance } from "@/types";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Loader2Icon } from "lucide-react";
 
 const Packs = lazy(() => import("./packs").then((m) => ({ default: m.Packs })));
 const Profiles = lazy(() => import("./profiles").then((m) => ({ default: m.Profiles })));
@@ -33,6 +42,19 @@ type ActiveDialog =
   | "log-upload"
   | null;
 
+const DIALOG_LABELS: Record<Exclude<ActiveDialog, null>, string> = {
+  settings: "Settings",
+  profiles: "Profiles",
+  packs: "Pack Hub",
+  backups: "Backups",
+  "api-compat": "API Compatibility",
+  characters: "Characters",
+  "saved-variables": "Saved Variables",
+  "migration-wizard": "Migration",
+  "safety-center": "Safety Center",
+  "log-upload": "Log Uploader",
+};
+
 interface AppDialogsProps {
   activeDialog: ActiveDialog;
   addons: AddonManifest[];
@@ -47,6 +69,30 @@ interface AppDialogsProps {
   onPathChange: (path: string) => void;
   onRefresh: () => void;
   onShowDialog: (dialog: Exclude<ActiveDialog, null>) => void;
+}
+
+function DialogLoadingFallback({ title, onClose }: { title: string; onClose: () => void }) {
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Loader2Icon className="size-4 animate-spin text-primary" />
+            {title}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex items-center gap-3 py-6 text-sm text-muted-foreground">
+          <Loader2Icon className="size-4 animate-spin text-primary" />
+          <span>Loading...</span>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 export function AppDialogs({
@@ -65,9 +111,12 @@ export function AppDialogs({
   onShowDialog,
 }: AppDialogsProps) {
   if (!activeDialog) return null;
+  const fallback = (
+    <DialogLoadingFallback title={DIALOG_LABELS[activeDialog]} onClose={onCloseDialog} />
+  );
 
   return (
-    <Suspense fallback={null}>
+    <Suspense fallback={fallback}>
       {activeDialog === "packs" && (
         <Packs
           addonsPath={addonsPath}

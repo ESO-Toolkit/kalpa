@@ -92,19 +92,19 @@ export function AppHeader({
         if ((e.target as HTMLElement).closest('button, a, input, [role="button"]')) return;
         void getCurrentWindow().toggleMaximize();
       }}
-      className="relative z-20 flex items-center border-b border-white/[0.06] bg-[rgba(10,18,36,0.85)] px-4 py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2]"
+      className="relative z-20 flex items-center border-b border-white/[0.06] bg-[color-mix(in_oklab,var(--bg-base)_85%,transparent)] px-4 py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2]"
     >
-      <div className="absolute right-0 bottom-0 left-0 h-px bg-gradient-to-r from-transparent via-[#c4a44a]/30 to-transparent" />
+      <div className="absolute right-0 bottom-0 left-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
       <div className="flex items-center gap-2.5">
         <Logo size={20} className="text-[#4dc2e6]" />
         <div className="flex items-center gap-2">
-          <h1 className="bg-gradient-to-r from-[#c4a44a] via-[#d4b45a] to-[#c4a44a] bg-clip-text font-heading text-[13px] font-bold uppercase tracking-[0.15em] text-transparent">
+          <h1 className="bg-gradient-to-r from-primary via-primary-hover to-primary bg-clip-text font-heading text-[13px] font-bold uppercase tracking-[0.15em] text-transparent">
             Kalpa
           </h1>
           <div className="h-3 w-px bg-white/[0.12]" />
           <button
             onClick={() => void openUrl("https://esotk.com")}
-            className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white/40 backdrop-blur-sm transition-colors duration-300 hover:border-[#38bdf8]/20 hover:text-white/60 cursor-pointer"
+            className="inline-flex items-center rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white/40 backdrop-blur-sm transition-colors duration-300 hover:border-accent-sky/20 hover:text-white/60 cursor-pointer"
           >
             esotk.com
           </button>
@@ -148,7 +148,7 @@ export function AppHeader({
                 Tag
               </Button>
               {tagMenuOpen && (
-                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-white/[0.06] bg-[rgba(10,18,36,0.95)] backdrop-blur-xl p-1 shadow-lg">
+                <div className="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-xl border border-white/[0.06] bg-surface-overlay backdrop-blur-xl p-1 shadow-lg">
                   {PRESET_TAGS.map((tag) => (
                     <button
                       key={tag}
@@ -160,7 +160,7 @@ export function AppHeader({
                       className={cn(
                         "w-full text-left rounded px-2.5 py-1.5 text-xs font-medium transition-colors hover:bg-white/[0.06]",
                         tag === "favorite"
-                          ? "text-[#c4a44a]"
+                          ? "text-primary"
                           : tag === "broken"
                             ? "text-red-400"
                             : tag === "testing"
@@ -190,7 +190,7 @@ export function AppHeader({
                         value={customTagInput}
                         onChange={(e) => setCustomTagInput(e.target.value)}
                         placeholder="Custom tag..."
-                        className="flex-1 min-w-0 rounded-[10px] bg-white/[0.04] border border-white/[0.06] hover:border-white/[0.15] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-[#38bdf8]/40"
+                        className="flex-1 min-w-0 rounded-[10px] bg-white/[0.04] border border-white/[0.06] hover:border-white/[0.15] px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/50 outline-none focus:border-accent-sky/40"
                         autoFocus
                       />
                       <button
@@ -229,7 +229,7 @@ export function AppHeader({
               {checkingUpdates && (
                 <span className="ml-1 inline-flex items-center gap-1">
                   ·
-                  <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+                  <span className="inline-block size-3 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
                 </span>
               )}
             </span>

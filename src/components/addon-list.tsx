@@ -97,6 +97,85 @@ const AddonListItem = memo(function AddonListItem({
   onToggleSelect,
   onRightClick,
 }: AddonListItemProps) {
+  const content = (
+    <>
+      <div className="truncate text-sm font-medium">
+        {addon.tags.includes("favorite") && <span className="text-primary mr-1">{"★"}</span>}
+        {addon.isLibrary && (
+          <span className="text-violet-400 mr-1 text-[10px] font-medium uppercase tracking-wide">
+            LIB
+          </span>
+        )}
+        {addon.title}
+      </div>
+      <div className="mt-0.5 flex items-center gap-1.5">
+        <span className="text-xs text-muted-foreground/50">
+          {addon.version || `v${addon.addonVersion ?? "?"}`}
+        </span>
+        {addon.author && (
+          <span className="text-xs text-muted-foreground/40">&middot; {addon.author}</span>
+        )}
+        <div className="flex-1" />
+        {hasUpdate && (
+          <Badge
+            variant="outline"
+            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+          >
+            Update
+          </Badge>
+        )}
+        {addon.disabled && (
+          <Badge
+            variant="outline"
+            className="border-zinc-400/20 bg-zinc-400/[0.04] text-zinc-400 text-[10px]"
+          >
+            Disabled
+          </Badge>
+        )}
+        {addon.missingDependencies.length > 0 && (
+          <Badge
+            variant="outline"
+            className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
+          >
+            {addon.missingDependencies.length} missing
+          </Badge>
+        )}
+        {addon.outdatedDependencies.length > 0 && (
+          <Badge
+            variant="outline"
+            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+          >
+            {addon.outdatedDependencies.length} outdated
+          </Badge>
+        )}
+        {addon.modifiedFileCount > 0 && (
+          <Badge
+            variant="outline"
+            className="border-primary/20 bg-primary/[0.04] text-primary/70 text-[10px]"
+          >
+            {addon.modifiedFileCount} edited
+          </Badge>
+        )}
+        {addon.tags.includes("broken") && (
+          <Badge
+            variant="outline"
+            className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
+          >
+            Broken
+          </Badge>
+        )}
+        {addon.tags.includes("testing") && (
+          <Badge
+            variant="outline"
+            className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
+          >
+            Testing
+          </Badge>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div
       id={`addon-${addon.folderName}`}
@@ -104,22 +183,22 @@ const AddonListItem = memo(function AddonListItem({
       aria-selected={batchMode ? isSelected : isCurrent}
       aria-label={`${addon.title}${addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}${addon.outdatedDependencies.length > 0 ? `, ${addon.outdatedDependencies.length} outdated dependencies` : ""}`}
       className={cn(
-        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_rgba(196,164,74,0.02)] group",
+        "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_color-mix(in_oklab,var(--primary)_2%,transparent)] group",
         addon.disabled
           ? "border-l-zinc-500 opacity-50"
           : addon.missingDependencies.length > 0
-            ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_rgba(239,68,68,0.1)]"
+            ? "border-l-red-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-error-strong)_10%,transparent)]"
             : addon.outdatedDependencies.length > 0
-              ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
+              ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent)]"
               : addon.isLibrary
-                ? "border-l-violet-400 shadow-[inset_4px_0_12px_-4px_rgba(167,139,250,0.08)]"
+                ? "border-l-violet-400 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-library)_8%,transparent)]"
                 : hasUpdate
-                  ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_rgba(245,158,11,0.1)]"
+                  ? "border-l-amber-500 shadow-[inset_4px_0_12px_-4px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent)]"
                   : "border-l-transparent",
         isCurrent &&
           !batchMode &&
-          "bg-[#c4a44a]/[0.06] border-l-[#c4a44a]! shadow-[inset_4px_0_16px_-4px_rgba(196,164,74,0.15),inset_0_0_0_1px_rgba(196,164,74,0.08)]",
-        isSelected && "bg-[#c4a44a]/[0.04] border-l-[#c4a44a]!"
+          "bg-primary/[0.06] border-l-primary! shadow-[inset_4px_0_16px_-4px_color-mix(in_oklab,var(--primary)_15%,transparent),inset_0_0_0_1px_color-mix(in_oklab,var(--primary)_8%,transparent)]",
+        isSelected && "bg-primary/[0.04] border-l-primary!"
       )}
       onClick={(e) => {
         if (e.ctrlKey || e.metaKey) {
@@ -139,93 +218,35 @@ const AddonListItem = memo(function AddonListItem({
         onRightClick(addon, { x: e.clientX, y: e.clientY });
       }}
     >
-      <div className="flex items-start gap-2">
+      {/* Selection rail: a width-animated column that stays collapsed until the row
+          is hovered/focused or selection (batch) mode is active, then expands and
+          glides the title right to reveal the checkbox. Only the column WIDTH
+          animates \u2014 row height is unchanged, so the virtualizer is unaffected. */}
+      <div className="flex items-start">
         <div
           className={cn(
-            "shrink-0 mt-0.5 transition-opacity duration-150",
-            isSelected || batchMode ? "opacity-100" : "opacity-0 group-hover:opacity-70"
+            "shrink-0 mt-0.5 flex items-center overflow-hidden transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none",
+            isSelected || batchMode
+              ? "w-6 opacity-100"
+              : "w-0 opacity-0 group-hover:w-6 group-hover:opacity-100 group-focus-within:w-6 group-focus-within:opacity-100"
           )}
         >
-          <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={isSelected}
+            aria-label={`Select ${addon.title}`}
+            tabIndex={batchMode ? 0 : -1}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleSelect(addon.folderName);
+            }}
+            className="flex items-center justify-center rounded-[5px] outline-none focus-visible:ring-2 focus-visible:ring-accent-sky/40"
+          >
+            <Checkbox checked={isSelected} tabIndex={-1} className="pointer-events-none" />
+          </button>
         </div>
-        <div className="flex-1 min-w-0">
-          <div className="truncate text-sm font-medium">
-            {addon.tags.includes("favorite") && (
-              <span className="text-[#c4a44a] mr-1">{"\u2605"}</span>
-            )}
-            {addon.isLibrary && (
-              <span className="text-violet-400 mr-1 text-[10px] font-medium uppercase tracking-wide">
-                LIB
-              </span>
-            )}
-            {addon.title}
-          </div>
-          <div className="mt-0.5 flex items-center gap-1.5">
-            <span className="text-xs text-muted-foreground/50">
-              {addon.version || `v${addon.addonVersion ?? "?"}`}
-            </span>
-            {addon.author && (
-              <span className="text-xs text-muted-foreground/40">&middot; {addon.author}</span>
-            )}
-            <div className="flex-1" />
-            {hasUpdate && (
-              <Badge
-                variant="outline"
-                className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
-              >
-                Update
-              </Badge>
-            )}
-            {addon.disabled && (
-              <Badge
-                variant="outline"
-                className="border-zinc-400/20 bg-zinc-400/[0.04] text-zinc-400 text-[10px]"
-              >
-                Disabled
-              </Badge>
-            )}
-            {addon.missingDependencies.length > 0 && (
-              <Badge
-                variant="outline"
-                className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
-              >
-                {addon.missingDependencies.length} missing
-              </Badge>
-            )}
-            {addon.outdatedDependencies.length > 0 && (
-              <Badge
-                variant="outline"
-                className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
-              >
-                {addon.outdatedDependencies.length} outdated
-              </Badge>
-            )}
-            {addon.modifiedFileCount > 0 && (
-              <Badge
-                variant="outline"
-                className="border-[#c4a44a]/20 bg-[#c4a44a]/[0.04] text-[#c4a44a]/70 text-[10px]"
-              >
-                {addon.modifiedFileCount} edited
-              </Badge>
-            )}
-            {addon.tags.includes("broken") && (
-              <Badge
-                variant="outline"
-                className="border-red-400/20 bg-red-400/[0.04] text-red-400 text-[10px]"
-              >
-                Broken
-              </Badge>
-            )}
-            {addon.tags.includes("testing") && (
-              <Badge
-                variant="outline"
-                className="border-amber-400/20 bg-amber-400/[0.04] text-amber-400 text-[10px]"
-              >
-                Testing
-              </Badge>
-            )}
-          </div>
-        </div>
+        <div className="flex-1 min-w-0">{content}</div>
       </div>
     </div>
   );
@@ -422,6 +443,9 @@ export function AddonList({
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
+  // TanStack Virtual intentionally returns imperative functions; keep this hook local
+  // and suppress the React Compiler compatibility warning for this documented API.
+  // eslint-disable-next-line react-hooks/incompatible-library
   const rowVirtualizer = useVirtualizer({
     count: addons.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -468,12 +492,12 @@ export function AddonList({
   );
 
   return (
-    <div className="flex min-h-0 w-[380px] min-w-[300px] flex-col border-r border-white/[0.06] bg-[rgba(10,18,36,0.6)] backdrop-blur-xl backdrop-saturate-[1.2] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+    <div className="flex min-h-0 w-[380px] min-w-[300px] flex-col border-r border-white/[0.06] bg-[color-mix(in_oklab,var(--bg-base)_60%,transparent)] backdrop-blur-xl backdrop-saturate-[1.2] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       {/* Mode switcher */}
       <div className="px-3 pt-3 pb-2">
         <Tabs value={viewMode} onValueChange={(v) => onViewModeChange(v as ViewMode)}>
-          <TabsList className="w-full bg-white/[0.04] border border-white/[0.06] [&_[data-slot=tabs-trigger]]:data-active:text-[#c4a44a]">
-            <TabsIndicator className="bg-[#c4a44a]/[0.1] border-[#c4a44a]/20" />
+          <TabsList className="w-full bg-white/[0.04] border border-white/[0.06] [&_[data-slot=tabs-trigger]]:data-active:text-primary">
+            <TabsIndicator className="bg-primary/[0.1] border-primary/20" />
             <TabsTrigger value="installed" className="flex-1">
               My Addons
             </TabsTrigger>
@@ -524,7 +548,7 @@ export function AddonList({
                     className={cn(
                       "relative shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150",
                       isActive
-                        ? "text-[#c4a44a]"
+                        ? "text-primary"
                         : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
                     )}
                     onClick={() => {
@@ -535,7 +559,7 @@ export function AddonList({
                     {isActive && (
                       <motion.span
                         layoutId="filter-tab-indicator"
-                        className="absolute inset-0 rounded-lg bg-[#c4a44a]/15 border border-[#c4a44a]/25 shadow-[0_0_8px_rgba(196,164,74,0.1),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                        className="absolute inset-0 rounded-lg bg-primary/15 border border-primary/25 shadow-[0_0_8px_color-mix(in_oklab,var(--primary)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.05)]"
                         transition={{ type: "spring", stiffness: 400, damping: 30 }}
                       />
                     )}
@@ -561,7 +585,7 @@ export function AddonList({
                       className={cn(
                         "relative shrink-0 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors duration-150",
                         isActive
-                          ? "text-sky-400"
+                          ? "text-accent-sky"
                           : "text-muted-foreground/70 hover:text-foreground hover:bg-white/[0.05] border border-transparent"
                       )}
                       onClick={() => {
@@ -572,7 +596,7 @@ export function AddonList({
                       {isActive && (
                         <motion.span
                           layoutId="filter-tab-indicator"
-                          className="absolute inset-0 rounded-lg bg-sky-500/15 border border-sky-500/25 shadow-[0_0_8px_rgba(56,189,248,0.1),inset_0_1px_0_rgba(255,255,255,0.05)]"
+                          className="absolute inset-0 rounded-lg bg-accent-sky/15 border border-accent-sky/25 shadow-[0_0_8px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_0_rgba(255,255,255,0.05)]"
                           transition={{ type: "spring", stiffness: 400, damping: 30 }}
                         />
                       )}
@@ -590,7 +614,7 @@ export function AddonList({
               <span className="text-[11px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground/50">
                 {addons.length} {addons.length === 1 ? "addon" : "addons"}
                 {batchMode && (
-                  <span className="text-[#c4a44a] font-medium normal-case tracking-normal">
+                  <span className="text-primary font-medium normal-case tracking-normal">
                     {" "}
                     &middot; {selectedFolders.size} selected
                   </span>
@@ -624,7 +648,7 @@ export function AddonList({
             >
               {loading && addons.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-muted-foreground">
-                  <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a]" />
+                  <div className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
                 </div>
               ) : addons.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center px-5">
@@ -644,7 +668,7 @@ export function AddonList({
                         </p>
                       </div>
                       <button
-                        className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/[0.08] hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-sky-400/30 focus-visible:outline-none"
+                        className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-white/[0.08] hover:text-foreground transition-colors focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
                         onClick={() => {
                           onSearchChange("");
                           onFilterChange("all");
@@ -658,7 +682,7 @@ export function AddonList({
                   ) : (
                     <Fade className="w-full">
                       <GlassPanel variant="subtle" className="relative p-5 overflow-hidden">
-                        <div className="absolute -top-10 -right-10 h-[120px] w-[120px] rounded-full bg-[#c4a44a]/[0.03] blur-[40px]" />
+                        <div className="absolute -top-10 -right-10 h-[120px] w-[120px] rounded-full bg-primary/[0.03] blur-[40px]" />
                         <div className="flex flex-col items-center gap-4 relative">
                           <Logo size={36} className="opacity-60" />
                           <div className="text-center">
@@ -677,7 +701,7 @@ export function AddonList({
                               }}
                               className="flex w-full items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.06] hover:border-white/[0.1] group"
                             >
-                              <div className="flex size-7 items-center justify-center rounded-md bg-[#c4a44a]/10 text-[#c4a44a]">
+                              <div className="flex size-7 items-center justify-center rounded-md bg-primary/10 text-primary">
                                 <Globe className="size-3.5" />
                               </div>
                               <div className="flex-1 min-w-0">
@@ -696,7 +720,7 @@ export function AddonList({
                               }}
                               className="flex w-full items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-left transition-colors hover:bg-white/[0.06] hover:border-white/[0.1] group"
                             >
-                              <div className="flex size-7 items-center justify-center rounded-md bg-sky-500/10 text-sky-400">
+                              <div className="flex size-7 items-center justify-center rounded-md bg-accent-sky/10 text-accent-sky">
                                 <Search className="size-3.5" />
                               </div>
                               <div className="flex-1 min-w-0">

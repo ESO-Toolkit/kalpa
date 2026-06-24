@@ -32,7 +32,7 @@ function PopoverContent({
       <PopoverPositioner side={side} sideOffset={sideOffset} align={align}>
         <PopoverPopup
           className={cn(
-            "z-50 w-64 origin-(--transform-origin) rounded-xl border border-white/[0.08] bg-[rgba(15,23,42,0.92)] p-3 shadow-lg backdrop-blur-xl",
+            "z-50 w-64 origin-(--transform-origin) rounded-xl border border-white/[0.08] bg-surface-overlay p-3 shadow-lg backdrop-blur-xl",
             className
           )}
           transition={{ type: "spring", stiffness: 500, damping: 30 }}

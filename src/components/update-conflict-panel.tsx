@@ -107,7 +107,7 @@ export function UpdateConflictPanel({
                     <span
                       className={cn(
                         "text-[10px] font-semibold uppercase tracking-wider",
-                        decision === "keep_mine" ? "text-[#c4a44a]" : "text-sky-400"
+                        decision === "keep_mine" ? "text-primary" : "text-accent-sky"
                       )}
                     >
                       {decision === "keep_mine" ? "keeping yours" : "taking update"}
@@ -143,7 +143,7 @@ export function UpdateConflictPanel({
                 <div className="mt-1">
                   {loadingDiff ? (
                     <div className="flex items-center justify-center py-4 text-muted-foreground/50 text-sm">
-                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a] mr-2" />
+                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
                       Loading differences...
                     </div>
                   ) : diffData?.isBinary ? (

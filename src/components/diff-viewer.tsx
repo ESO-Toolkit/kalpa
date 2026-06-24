@@ -33,8 +33,8 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
   return (
     <GlassPanel variant="subtle" className="overflow-hidden">
       <div className="flex border-b border-white/[0.06] text-xs">
-        <div className="flex-1 px-3 py-1.5 text-[#c4a44a]/80 font-medium">Your version</div>
-        <div className="flex-1 px-3 py-1.5 text-sky-400/80 font-medium border-l border-white/[0.06]">
+        <div className="flex-1 px-3 py-1.5 text-primary/80 font-medium">Your version</div>
+        <div className="flex-1 px-3 py-1.5 text-accent-sky/80 font-medium border-l border-white/[0.06]">
           The update
         </div>
       </div>
@@ -53,9 +53,9 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
               if (prefix === "-") {
                 return (
                   <div key={`${hi}-${li}`} className="flex">
-                    <div className="flex-1 bg-[#c4a44a]/[0.06] border-l-2 border-[#c4a44a]/30 px-3 whitespace-pre-wrap break-all">
-                      <span className="text-[#c4a44a]/40 select-none mr-2">−</span>
-                      <span className="text-[#c4a44a]/80">{content}</span>
+                    <div className="flex-1 bg-primary/[0.06] border-l-2 border-primary/30 px-3 whitespace-pre-wrap break-all">
+                      <span className="text-primary/40 select-none mr-2">−</span>
+                      <span className="text-primary/80">{content}</span>
                     </div>
                     <div className="flex-1 border-l border-white/[0.06]" />
                   </div>
@@ -66,9 +66,9 @@ export function DiffViewer({ userContent, upstreamContent, fileName }: DiffViewe
                 return (
                   <div key={`${hi}-${li}`} className="flex">
                     <div className="flex-1" />
-                    <div className="flex-1 bg-sky-400/[0.06] border-l-2 border-sky-400/30 px-3 whitespace-pre-wrap break-all">
-                      <span className="text-sky-400/40 select-none mr-2">+</span>
-                      <span className="text-sky-400/80">{content}</span>
+                    <div className="flex-1 bg-accent-sky/[0.06] border-l-2 border-accent-sky/30 px-3 whitespace-pre-wrap break-all">
+                      <span className="text-accent-sky/40 select-none mr-2">+</span>
+                      <span className="text-accent-sky/80">{content}</span>
                     </div>
                   </div>
                 );

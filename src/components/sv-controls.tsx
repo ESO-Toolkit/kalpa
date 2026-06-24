@@ -25,7 +25,7 @@ export function ToggleControl({
       onClick={() => !field.readOnly && onChange(!checked)}
       className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
         field.readOnly ? "opacity-50 cursor-not-allowed" : "cursor-pointer"
-      } ${checked ? "bg-[#c4a44a]" : "bg-white/[0.12]"}`}
+      } ${checked ? "bg-primary" : "bg-white/[0.12]"}`}
       aria-label={field.label}
     >
       <motion.span
@@ -80,7 +80,7 @@ export function NumberControl({
       </button>
       <input
         type="number"
-        className="w-20 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30"
+        className="w-20 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-accent-sky/50 focus:ring-1 focus:ring-accent-sky/30"
         value={localValue}
         onChange={(e) => setLocalValue(e.target.value)}
         onBlur={commit}
@@ -117,7 +117,7 @@ export function SliderControl({
     <div className="flex items-center gap-2">
       <input
         type="range"
-        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/[0.1] accent-[#c4a44a]"
+        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-white/[0.1] accent-primary"
         min={min}
         max={max}
         step={step}
@@ -200,7 +200,7 @@ export function TextControl({
   if (field.props.multiline) {
     return (
       <textarea
-        className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30 resize-y"
+        className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 text-xs text-foreground outline-none focus:border-accent-sky/50 focus:ring-1 focus:ring-accent-sky/30 resize-y"
         rows={3}
         value={localValue}
         onChange={(e) => setLocalValue(e.target.value)}
@@ -213,7 +213,7 @@ export function TextControl({
   return (
     <input
       type="text"
-      className="w-full max-w-xs rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30"
+      className="w-full max-w-xs rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none focus:border-accent-sky/50 focus:ring-1 focus:ring-accent-sky/30"
       value={localValue}
       onChange={(e) => setLocalValue(e.target.value)}
       onBlur={commit}
@@ -275,7 +275,7 @@ export function RawControl({
 
   return (
     <textarea
-      className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-[#38bdf8]/50 focus:ring-1 focus:ring-[#38bdf8]/30 resize-y"
+      className="w-full rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-accent-sky/50 focus:ring-1 focus:ring-accent-sky/30 resize-y"
       rows={2}
       value={localValue}
       onChange={(e) => setLocalValue(e.target.value)}

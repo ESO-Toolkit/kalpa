@@ -225,3 +225,55 @@ Then add to `src/index.css`:
 ```
 
 No other new dependencies are needed — the existing stack (shadcn base-nova, CVA, Tailwind v4, tw-animate-css, lucide-react) covers everything.
+
+---
+
+## Runtime Theming System (built-in + custom themes)
+
+Kalpa ships many switchable themes plus a custom theme builder. The system is **seed-based** and **CSS-derived**, validated against June-2026 best practices.
+
+### The seed model
+
+A theme is just **12 colors** (a `ThemeColors` "seed" — see `src/lib/theme-types.ts`):
+
+`bgBase, background, surface, foreground, mutedForeground, primary, primaryForeground, accent, border, orb1, orb2, orb3`
+
+Those 12 map onto **12 base CSS variables** on `:root` (see `src/lib/theme-apply.ts`):
+
+| Seed | CSS var |
+|------|---------|
+| bgBase | `--bg-base` |
+| background | `--background` |
+| surface | `--card` |
+| foreground | `--foreground` |
+| mutedForeground | `--muted-foreground` |
+| primary | `--primary` |
+| primaryForeground | `--primary-foreground` |
+| accent | `--accent-sky` |
+| border | `--border` |
+| orb1/2/3 | `--orb-1` / `--orb-2` / `--orb-3` |
+
+### Derivation — CSS only, in OKLCH
+
+The other ~40 tokens (`--card-alt`, `--muted`, `--secondary`/`--accent`, `--primary-hover`, `--primary-glow`, `--accent-cyan`, glass tints, scrollbar, sidebar…) are **derived from the 12 base vars in `index.css`** using `oklch(from … clamp(…) …)` relative color syntax and `color-mix(in oklab, …)`. Because `var()` is live, overriding a base var recomputes everything.
+
+Rules when editing derivations:
+- Always `clamp()` relative-color channels (they do **not** auto-clamp); cap chroma at ~`0.37`.
+- Lightness deltas are **additive** (`calc(l + 0.06)`), never multiplicative — even elevation steps in a dark UI.
+- `color-mix` **must** specify `in oklab` (`in srgb` grays out).
+- The 12 seeds are registered via `@property … syntax:"<color>"` for invalid-value robustness.
+
+### Switching & persistence
+
+- `setActiveTheme(id)` writes the 12 base vars on `:root` inside `document.startViewTransition()` for a cross-fade (reduced-motion + `skipTransition()` guarded). The **default theme clears** the overrides so the authored `:root` values win exactly — zero regression.
+- Persistence: durable copy in the Tauri store **and** a synchronous `localStorage` mirror (`kalpa.appearance.activeVars`).
+- **Flash-free startup:** `public/theme-boot.js` (a render-blocking classic script in `index.html`, CSP `'self'`-safe) applies the saved vars before first paint; `src-tauri/tauri.conf.json` sets an opaque dark `backgroundColor` + `theme: Dark` for the native layer.
+
+### Using theme colors in components
+
+- Use the Tailwind tokens so colors follow the theme: `text-primary`, `bg-primary/[0.04]`, `border-primary/30`, `ring-primary`, `text-accent-sky`, `bg-accent-sky/10`, `from-primary-hover to-primary`. Opacity modifiers work (Tailwind v4 compiles them to `color-mix`).
+- **Keep literal** the theme-independent overlays (`border-white/[0.06]`, `bg-white/[0.02]`) and **semantic status colors** (emerald/amber/red/violet = success/warning/error/library) — these must stay constant across themes.
+
+### Custom theme builder
+
+`src/components/appearance-settings.tsx` (Settings → Appearance) renders the gallery; `theme-editor.tsx` is the builder: 12 pickers (react-colorful popover + hex field + EyeDropper), **live full-app preview**, and **live WCAG-2 AA contrast feedback** (`theme-contrast.ts`). Themes export/import as JSON via the clipboard. `src/lib/__tests__/theme-contrast.test.ts` enforces that every built-in theme stays contrast-compliant.

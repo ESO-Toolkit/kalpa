@@ -106,7 +106,7 @@ export function AddonFileEditor({
   if (loadState === "loading") {
     return (
       <div className="flex items-center justify-center py-8 text-muted-foreground/50 text-sm">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-[#c4a44a] mr-2" />
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary mr-2" />
         Loading file...
       </div>
     );

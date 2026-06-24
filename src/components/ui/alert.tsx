@@ -11,7 +11,7 @@ const alertVariants = cva(
         default:
           "bg-white/[0.03] border-white/[0.06] text-card-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]",
         destructive:
-          "bg-red-500/[0.06] border-red-500/20 text-destructive shadow-[inset_0_1px_0_rgba(239,68,68,0.06)] *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current",
+          "bg-red-500/[0.06] border-red-500/20 text-destructive shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-error-strong)_6%,transparent)] *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current",
       },
     },
     defaultVariants: {
