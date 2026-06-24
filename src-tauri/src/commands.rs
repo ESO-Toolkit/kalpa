@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -1390,16 +1391,149 @@ fn check_for_updates_metadata(
     Ok(pending)
 }
 
+// ── Update cancellation + progress ──────────────────────────────────────
+
+/// Per-file progress for a single addon update, emitted on the `update-progress`
+/// event. The frontend correlates events by `operation_id` and renders the phase
+/// plus "Extracting N of M".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProgressEvent {
+    pub operation_id: String,
+    pub folder_name: String,
+    /// Currently always "extracting" — the slow, file-count-bound phase.
+    pub phase: String,
+    pub file_index: usize,
+    pub file_total: usize,
+}
+
+/// RAII registration of a cancellation flag in [`crate::UpdateCancels`]. Inserted
+/// on construction, removed on drop (every exit path: success, error, or panic),
+/// so a stale flag can never cancel a later, unrelated operation. An empty
+/// `operation_id` (caller opted out of cancellation) registers nothing.
+struct CancelGuard {
+    registry: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    operation_id: String,
+    flag: Arc<AtomicBool>,
+}
+
+impl CancelGuard {
+    fn register(
+        registry: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+        operation_id: String,
+    ) -> Self {
+        let flag = Arc::new(AtomicBool::new(false));
+        if !operation_id.is_empty() {
+            if let Ok(mut map) = registry.lock() {
+                map.insert(operation_id.clone(), flag.clone());
+            }
+        }
+        Self {
+            registry,
+            operation_id,
+            flag,
+        }
+    }
+
+    fn flag(&self) -> &AtomicBool {
+        &self.flag
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if !self.operation_id.is_empty() {
+            if let Ok(mut map) = self.registry.lock() {
+                map.remove(&self.operation_id);
+            }
+        }
+    }
+}
+
+/// How many files must pass since the last emitted progress event before the
+/// next one is sent, so a thousands-of-files addon doesn't flood the event bus.
+const PROGRESS_EMIT_STRIDE: usize = 64;
+
+/// Throttle decision for the extraction-progress emitter, factored out as a pure
+/// function so the first/every-stride/last contract is directly testable.
+///
+/// `prev` is the `done` value at the last emitted event, or `usize::MAX` if none
+/// has been emitted yet. Emits when: this is the first event, OR we've reached
+/// completion (`done >= total`), OR at least `PROGRESS_EMIT_STRIDE` files have
+/// passed since the last emit. The first-event branch is independent of the
+/// stride, so the frontend reliably learns the operation id (enabling Stop) on
+/// the very first file even for a small archive.
+fn should_emit_progress(prev: usize, done: usize, total: usize) -> bool {
+    prev == usize::MAX || done >= total || done.saturating_sub(prev) >= PROGRESS_EMIT_STRIDE
+}
+
+/// Build a throttled extraction-progress callback that emits `update-progress`
+/// events: on the first file, every `PROGRESS_EMIT_STRIDE` files, and at
+/// completion, so a thousands-of-files addon doesn't flood the event bus.
+fn make_progress_emitter(
+    app: tauri::AppHandle,
+    operation_id: String,
+    folder_name: String,
+) -> impl Fn(usize, usize) {
+    let last = AtomicUsize::new(usize::MAX);
+    move |done: usize, total: usize| {
+        let prev = last.load(Ordering::Relaxed);
+        if !should_emit_progress(prev, done, total) {
+            return;
+        }
+        last.store(done, Ordering::Relaxed);
+        let _ = app.emit(
+            "update-progress",
+            UpdateProgressEvent {
+                operation_id: operation_id.clone(),
+                folder_name: folder_name.clone(),
+                phase: "extracting".to_string(),
+                file_index: done,
+                file_total: total,
+            },
+        );
+    }
+}
+
+/// Signal an in-flight update (identified by `operation_id`) to stop. Returns
+/// `true` if a matching in-flight operation was found and flagged, `false` if it
+/// had already finished or never existed. The extraction loop polls the flag
+/// between files and aborts cleanly, rolling back any partially-written folder.
 #[tauri::command]
+pub async fn cancel_update(
+    cancels: tauri::State<'_, crate::UpdateCancels>,
+    operation_id: String,
+) -> Result<bool, String> {
+    let map = cancels
+        .0
+        .lock()
+        .map_err(|_| "Internal cancel registry lock error".to_string())?;
+    match map.get(&operation_id) {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_addon(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
+    cancels: tauri::State<'_, crate::UpdateCancels>,
+    app: tauri::AppHandle,
     addons_path: String,
     esoui_id: u32,
     api_version: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<InstallResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
+    let registry = cancels.0.clone();
+    let operation_id = operation_id.unwrap_or_default();
+    let cancel = CancelGuard::register(registry, operation_id.clone());
     tokio::task::spawn_blocking(move || {
         // Network I/O outside the lock: fetch info + download ZIP
         let info = esoui::fetch_addon_info(esoui_id)?;
@@ -1409,12 +1543,23 @@ pub async fn update_addon(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+
+        // Build a progress emitter for the file-bound extraction. The
+        // cancellation flag was registered before this blocking task started, so
+        // a Stop request made while downloading or waiting on the metadata lock
+        // is still observed before extraction writes files.
+        let progress = make_progress_emitter(app, operation_id, info.title.clone());
+        let hooks = installer::ExtractHooks {
+            cancel: Some(cancel.flag()),
+            progress: Some(&progress),
+        };
         update_addon_blocking(
             &addons_dir,
             esoui_id,
             api_version.as_deref(),
             info,
             tmp_file,
+            hooks,
         )
     })
     .await
@@ -1427,9 +1572,10 @@ fn update_addon_blocking(
     api_version: Option<&str>,
     info: EsouiAddonInfo,
     tmp_file: NamedTempFile,
+    hooks: installer::ExtractHooks,
 ) -> Result<InstallResult, String> {
     // Extract the downloaded ZIP
-    let installed_folders = installer::extract_addon_zip(tmp_file.path(), addons_dir)?;
+    let installed_folders = installer::extract_addon_zip_with(tmp_file.path(), addons_dir, hooks)?;
 
     // Store the API version (from filelist.json) when available, since
     // check_for_updates compares against the API version. Using the
@@ -1788,12 +1934,15 @@ fn build_conflict_report(
         let disk_hash = disk_hashes.get(rel_path);
 
         let user_modified = match (stored_hash, disk_hash) {
-            (Some(stored), Some(disk)) => stored != disk,
+            (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
             (Some(_), None) => true, // file deleted
             (None, _) => false,      // no stored hash = no baseline = treat as unmodified
         };
 
         let upstream_changed = match stored_hash {
+            // ZIP-vs-baseline comparisons must be exact. The mixed
+            // legacy-SHA/size-signature bridge is only safe for live disk
+            // checks; using it here would hide upstream binary size changes.
             Some(stored) => stored != zip_hash,
             None => true, // new file in upstream or no baseline
         };
@@ -1852,10 +2001,11 @@ pub async fn scan_update_conflicts(
 
         let session_id = generate_session_id(&folder_name);
 
-        // The ZIP hash map isn't reused here: extraction happens later in a
-        // separate `update_addon_with_decisions` invocation, after the user
-        // resolves conflicts, by which point this map is long gone.
-        let (report, _zip_hashes) = build_conflict_report(
+        // Keep the ZIP hash map: the apply step (update_addon_with_decisions)
+        // reuses it as the new baseline instead of re-decompressing and
+        // re-hashing the whole archive a second time — the big saving on
+        // many-file addons.
+        let (report, zip_hashes) = build_conflict_report(
             &addons_dir,
             &folder_name,
             &kept_path,
@@ -1871,6 +2021,7 @@ pub async fn scan_update_conflicts(
                     folder_name: folder_name.clone(),
                     esoui_id,
                     update_version: info.version,
+                    zip_hashes,
                 },
             );
         }
@@ -2027,9 +2178,10 @@ pub async fn scan_batch_conflicts(
                             errors.insert(folder_name.clone(), e);
                             failed.push(folder_name);
                         }
-                        // ZIP map unused: extraction is deferred to the
-                        // interactive `update_addon_with_decisions` call.
-                        Ok((report, _zip_hashes)) => {
+                        // Keep the ZIP map on the pending update so the deferred
+                        // interactive `update_addon_with_decisions` reuses it as
+                        // the baseline instead of re-hashing the archive.
+                        Ok((report, zip_hashes)) => {
                             if let Ok(mut map) = pending_clone.lock() {
                                 map.insert(
                                     session_id.clone(),
@@ -2038,6 +2190,7 @@ pub async fn scan_batch_conflicts(
                                         folder_name: folder_name.clone(),
                                         esoui_id: dl.esoui_id,
                                         update_version: version.to_string(),
+                                        zip_hashes,
                                     },
                                 );
                             }
@@ -2342,6 +2495,7 @@ fn extract_streamed_downloads(
                         folder_name: folder_name.clone(),
                         esoui_id: dl.esoui_id,
                         update_version: dl.api_version.clone(),
+                        zip_hashes: zip_hashes.clone(),
                     },
                 );
             }
@@ -2591,13 +2745,17 @@ pub struct FileDecision {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_addon_with_decisions(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     pending: tauri::State<'_, crate::PendingUpdates>,
+    cancels: tauri::State<'_, crate::UpdateCancels>,
+    app: tauri::AppHandle,
     addons_path: String,
     session_id: String,
     decisions: Vec<FileDecision>,
+    operation_id: Option<String>,
 ) -> Result<InstallResult, String> {
     for d in &decisions {
         validate_relative_path(&d.relative_path)?;
@@ -2605,6 +2763,9 @@ pub async fn update_addon_with_decisions(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let pending_clone = pending.0.clone();
     let lock = meta_lock.0.clone();
+    let registry = cancels.0.clone();
+    let operation_id = operation_id.unwrap_or_default();
+    let cancel = CancelGuard::register(registry, operation_id.clone());
 
     tokio::task::spawn_blocking(move || {
         let _guard = lock
@@ -2631,7 +2792,17 @@ pub async fn update_addon_with_decisions(
         // `pu` was obtained and the session either never existed or wasn't ours to
         // remove. Validation failures before `spawn_blocking` likewise leave the
         // session intact on purpose, so the user can retry or cancel it.
-        let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions);
+        //
+        // Build a progress emitter for the file-bound extraction. The
+        // cancellation flag was registered before this blocking task started, so
+        // a Stop request made while waiting on the metadata lock is still
+        // observed before extraction writes files.
+        let progress = make_progress_emitter(app, operation_id, pu.folder_name.clone());
+        let hooks = installer::ExtractHooks {
+            cancel: Some(cancel.flag()),
+            progress: Some(&progress),
+        };
+        let outcome = update_with_decisions_inner(&addons_dir, &pu, &decisions, hooks);
 
         // Delete the kept temp ZIP first, then drop the pending entry. If the
         // delete genuinely fails (e.g. another process briefly holds the file),
@@ -2660,6 +2831,7 @@ fn update_with_decisions_inner(
     addons_dir: &Path,
     pu: &crate::PendingUpdate,
     decisions: &[FileDecision],
+    hooks: installer::ExtractHooks,
 ) -> Result<InstallResult, String> {
     let kept_files: Vec<String> = decisions
         .iter()
@@ -2696,11 +2868,18 @@ fn update_with_decisions_inner(
         )?;
     }
 
-    // Hash the ZIP once. This map becomes the new baseline after extraction
-    // (reused by record_hashes_with_zip_baseline), and also supplies the
-    // upstream hashes for kept "keep_mine" files so the user's edit stays
-    // detectable on the next update cycle.
-    let zip_hashes = file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?;
+    // The ZIP's hash/signature map. Reuse the one computed during conflict
+    // detection (stored on the pending update) so we don't re-decompress and
+    // re-hash the whole archive again here — the dominant cost on many-file
+    // addons. Fall back to hashing it if a pending entry predates that field.
+    // This map becomes the new baseline after extraction (reused by
+    // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
+    // "keep_mine" files so the user's edit stays detectable on the next update.
+    let zip_hashes = if pu.zip_hashes.is_empty() {
+        file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?
+    } else {
+        pu.zip_hashes.clone()
+    };
     let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
         None
     } else {
@@ -2711,11 +2890,11 @@ fn update_with_decisions_inner(
         (!overrides.is_empty()).then_some(overrides)
     };
 
-    // Extract with selective skipping
+    // Extract with selective skipping (cancellable, progress-reporting)
     let installed_folders = if skip_files.is_empty() {
-        installer::extract_addon_zip(&pu.zip_path, addons_dir)?
+        installer::extract_addon_zip_with(&pu.zip_path, addons_dir, hooks)?
     } else {
-        installer::extract_addon_zip_selective(&pu.zip_path, addons_dir, &skip_files)?
+        installer::extract_addon_zip_selective_with(&pu.zip_path, addons_dir, &skip_files, hooks)?
     };
 
     // Record the baseline from the ZIP hash map (plus a disk pass over only
@@ -3008,8 +3187,12 @@ pub async fn write_addon_file(
         // modified_files cache current.
         if let Some(mut manifest) = file_hashes::load_hash_manifest(&addons_dir, &folder_name) {
             let key = relative_path.replace('\\', "/");
-            let hash = file_hashes::hash_file(&file_path)?;
-            let is_modified = manifest.files.get(&key).map(|h| h != &hash).unwrap_or(true);
+            let sig = file_hashes::file_signature(&key, &file_path)?;
+            let is_modified = manifest
+                .files
+                .get(&key)
+                .map(|stored| !file_hashes::signatures_match(stored, &sig))
+                .unwrap_or(true);
             if is_modified && !manifest.modified_files.contains(&key) {
                 manifest.modified_files.push(key);
                 manifest.modified_files.sort();
@@ -8037,6 +8220,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_emit_progress_first_stride_and_completion() {
+        // First event (no prior emit) always fires, so the frontend learns the
+        // operation id and can enable Stop even on a tiny archive.
+        assert!(should_emit_progress(usize::MAX, 0, 5000));
+        assert!(should_emit_progress(usize::MAX, 0, 0));
+
+        // Within a stride of the last emit (prev=0): nothing until 64 files pass.
+        assert!(!should_emit_progress(0, 1, 5000));
+        assert!(!should_emit_progress(0, 63, 5000));
+        assert!(should_emit_progress(0, 64, 5000));
+        assert!(should_emit_progress(0, 200, 5000));
+
+        // Completion (done >= total) always fires, even if fewer than a stride
+        // of files have passed since the last emit — so the final "N of N" lands.
+        assert!(should_emit_progress(5000, 5000, 5000));
+        assert!(should_emit_progress(4990, 5000, 5000)); // only 10 since last emit
+    }
+
+    #[test]
     fn download_thread_count_scales_and_clamps() {
         // A single-addon batch must still get at least one thread. (The
         // streaming consumer runs on its own thread, so num_threads(1) is safe,
@@ -8267,6 +8469,48 @@ mod tests {
         let addon_dir = dir.join(folder);
         std::fs::create_dir_all(&addon_dir).unwrap();
         std::fs::write(addon_dir.join(format!("{folder}.txt")), manifest_body).unwrap();
+    }
+
+    #[test]
+    fn conflict_report_does_not_treat_legacy_binary_hash_as_unchanged_upstream() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        let addon_dir = addons_dir.join("MediaAddon");
+        fs::create_dir_all(&addon_dir).unwrap();
+
+        let mut files = HashMap::new();
+        files.insert("icons/a.dds".to_string(), "0".repeat(64));
+        file_hashes::save_hash_manifest(
+            &addons_dir,
+            &file_hashes::HashManifest {
+                addon_folder: "MediaAddon".to_string(),
+                esoui_ids: vec![123],
+                recorded_at: "2026-01-01T00-00-00Z".to_string(),
+                installed_version: "1.0".to_string(),
+                files,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let zip_path = tmp.path().join("update.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("MediaAddon/icons/a.dds", options)
+            .unwrap();
+        archive.write_all(b"new-texture-bytes").unwrap();
+        archive.finish().unwrap();
+
+        let (report, _) =
+            build_conflict_report(&addons_dir, "MediaAddon", &zip_path, "2.0", "session").unwrap();
+
+        assert_eq!(report.auto_kept_files, Vec::<String>::new());
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].relative_path, "icons/a.dds");
     }
 
     #[test]

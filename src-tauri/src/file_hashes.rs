@@ -1,10 +1,11 @@
 use crate::metadata;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn is_zero(v: &u32) -> bool {
@@ -58,6 +59,106 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+/// Prefix marking a cheap size-only signature, as opposed to a 64-hex SHA-256
+/// digest. The colon guarantees it can never collide with a hash hex string.
+const SIZE_SIG_PREFIX: &str = "size:";
+
+fn size_signature(len: u64) -> String {
+    format!("{SIZE_SIG_PREFIX}{len}")
+}
+
+fn is_size_signature(value: &str) -> bool {
+    value.starts_with(SIZE_SIG_PREFIX)
+}
+
+/// File extensions whose CONTENTS we hash (SHA-256) so a user's hand-edit is
+/// detected on the next update. Every other file gets a cheap size signature
+/// instead.
+///
+/// Hashing thousands of static binary assets — e.g. the 5,600+ `.dds` textures a
+/// media library like LibCustomIcons ships — just to detect edits that never
+/// happen is the dominant cost of updating large addons (a single-threaded pass
+/// over ~5,600 files measured in minutes). Conflict detection for the files a
+/// user can actually edit (Lua/XML/settings/manifests) is unchanged; for binary
+/// assets we still flag a size change, only not a same-size in-place edit.
+fn hashes_file_contents(key: &str) -> bool {
+    let ext = key
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some(
+            "lua"
+                | "xml"
+                | "txt"
+                | "addon"
+                | "md"
+                | "json"
+                | "toc"
+                | "def"
+                | "lang"
+                | "csv"
+                | "cfg"
+                | "ini"
+                | "html"
+                | "htm"
+        )
+    )
+}
+
+/// Compute the baseline signature for a single on-disk file: a SHA-256 of its
+/// contents for user-editable types, or a size signature for binary assets.
+/// `key` is the forward-slash relative path used only to classify by extension.
+///
+/// Public so the single-file editor save path records the same signature kind
+/// this module would, instead of always hashing contents.
+pub fn file_signature(key: &str, path: &Path) -> Result<String, String> {
+    if hashes_file_contents(key) {
+        hash_file(path)
+    } else {
+        let len = fs::metadata(path)
+            .map_err(|e| format!("Failed to read file metadata for signature: {e}"))?
+            .len();
+        Ok(size_signature(len))
+    }
+}
+
+/// Whether a freshly-computed signature represents the SAME file state as a
+/// stored baseline value. Use this instead of `==` everywhere a live signature
+/// is compared against a manifest entry.
+///
+/// Besides exact equality, this handles the migration from the old
+/// hash-everything manifests: a binary file recorded as a 64-hex SHA-256 in an
+/// older manifest will not equal its new `size:` signature, but that mismatch is
+/// a format difference, not a user edit. A stored content hash vs a fresh size
+/// signature (or the reverse) is therefore treated as a match; the next baseline
+/// write replaces the legacy value with a size signature and normal comparison
+/// resumes. Two values of the SAME kind that differ are a real change.
+///
+/// Accepted limitation: during that single migration window, a stored content
+/// hash can't be compared against a size signature, so a user's hand-edit to a
+/// non-content-hashed binary file (e.g. a swapped `.dds`/`.ttf`) is treated as
+/// unchanged even if it changed the file's size — that one update may overwrite
+/// it without a conflict prompt. We accept this rather than the alternatives,
+/// which each defeat a core goal of the size-signature design: comparing the
+/// disk size against the upstream/ZIP size instead would resurface the
+/// thousands-of-textures conflict storm whenever an upstream update legitimately
+/// changes binary sizes, and re-hashing the binaries to compare exactly would
+/// reintroduce the multi-minute hashing cost this change exists to remove.
+/// Binary assets inside addons are effectively never hand-edited, and after this
+/// one update the baseline self-heals to size signatures so future size-changing
+/// edits are detected normally.
+pub fn signatures_match(stored: &str, current: &str) -> bool {
+    if stored == current {
+        return true;
+    }
+    // Mixed kinds (one size signature, one content hash) only arise from a
+    // pre-migration manifest entry for a binary file — assume unchanged.
+    is_size_signature(stored) != is_size_signature(current)
 }
 
 const MAX_HASH_BYTES: u64 = 500 * 1024 * 1024;
@@ -144,15 +245,26 @@ where
     walk(addon_path, addon_path, 0, &mut on_file)
 }
 
-/// Walk an addon folder and compute SHA-256 hashes for every file.
-/// Keys are forward-slash-normalized relative paths within the addon folder.
+/// Walk an addon folder and compute a baseline signature for every file (a
+/// SHA-256 for editable types, a size signature for binary assets — see
+/// [`file_signature`]). Keys are forward-slash-normalized relative paths.
+///
+/// The walk is sequential (directory I/O), but the per-file signatures are
+/// computed in parallel with rayon: on a large media addon the previous
+/// single-threaded pass over thousands of files was the dominant update cost.
 pub fn compute_addon_hashes(addon_path: &Path) -> Result<HashMap<String, String>, String> {
-    let mut hashes = HashMap::new();
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
     walk_addon_files(addon_path, |key, path| {
-        hashes.insert(key, hash_file(path)?);
+        entries.push((key, path.to_path_buf()));
         Ok(())
     })?;
-    Ok(hashes)
+    entries
+        .into_par_iter()
+        .map(|(key, path)| {
+            let sig = file_signature(&key, &path)?;
+            Ok((key, sig))
+        })
+        .collect()
 }
 
 /// Build a hash baseline for a just-extracted addon folder by reusing a ZIP-derived
@@ -178,16 +290,21 @@ pub fn compute_baseline_with_zip(
     addon_path: &Path,
     zip_hashes: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
-    let mut hashes = HashMap::new();
+    let mut entries: Vec<(String, PathBuf)> = Vec::new();
     walk_addon_files(addon_path, |key, path| {
-        let hash = match zip_hashes.get(&key) {
-            Some(h) => h.clone(),
-            None => hash_file(path)?,
-        };
-        hashes.insert(key, hash);
+        entries.push((key, path.to_path_buf()));
         Ok(())
     })?;
-    Ok(hashes)
+    entries
+        .into_par_iter()
+        .map(|(key, path)| {
+            let value = match zip_hashes.get(&key) {
+                Some(h) => h.clone(),
+                None => file_signature(&key, &path)?,
+            };
+            Ok((key, value))
+        })
+        .collect()
 }
 
 /// Hash files inside a ZIP that belong to a specific addon folder, without extracting.
@@ -234,9 +351,17 @@ pub fn hash_zip_entries(
             _ => continue,
         };
 
-        let hash = stream_sha256(&mut entry)
-            .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?;
-        hashes.insert(relative, hash);
+        // Binary assets get a size signature without decompressing the entry —
+        // `entry.size()` is the uncompressed size, identical to the file's size
+        // on disk after extraction, so it matches the disk-side signature in
+        // [`file_signature`]. Editable files are still content-hashed.
+        let value = if hashes_file_contents(&relative) {
+            stream_sha256(&mut entry)
+                .map_err(|e| format!("Failed to read ZIP entry {name}: {e}"))?
+        } else {
+            size_signature(entry.size())
+        };
+        hashes.insert(relative, value);
     }
 
     Ok(hashes)
@@ -280,7 +405,7 @@ pub fn detect_modifications(addons_dir: &Path, folder_name: &str) -> Result<Vec<
     let mut modified = Vec::new();
     for (path, stored_hash) in &manifest.files {
         match current_hashes.get(path) {
-            Some(disk_hash) if disk_hash != stored_hash => {
+            Some(disk_hash) if !signatures_match(stored_hash, disk_hash) => {
                 modified.push(path.clone());
             }
             None => {
@@ -1299,6 +1424,162 @@ mod tests {
         assert!(
             !hashes.contains_key("link.lua"),
             "symlink entry must be skipped, like extraction does"
+        );
+    }
+
+    // ── Binary-asset size signatures + legacy-manifest migration ─────────
+
+    #[test]
+    fn binary_files_get_size_signature_not_sha256() {
+        // A .dds texture must record a cheap `size:N` signature, while a .lua
+        // file in the same folder still gets a 64-hex SHA-256.
+        let tmp = tempfile::tempdir().unwrap();
+        let addon = create_addon_dir(
+            tmp.path(),
+            "MediaAddon",
+            &[("icons/a.dds", "BINARYBYTES"), ("core.lua", "local x = 1")],
+        );
+        let hashes = compute_addon_hashes(&addon).unwrap();
+
+        assert_eq!(hashes["icons/a.dds"], size_signature(11)); // "BINARYBYTES".len()
+        assert!(is_size_signature(&hashes["icons/a.dds"]));
+        assert_eq!(hashes["core.lua"].len(), 64); // SHA-256 hex
+        assert!(!is_size_signature(&hashes["core.lua"]));
+    }
+
+    #[test]
+    fn binary_signature_matches_between_disk_and_zip() {
+        // The disk-side and ZIP-side signatures for a binary file must be equal
+        // (both size-based) so a clean update produces no spurious conflict.
+        let tmp = tempfile::tempdir().unwrap();
+        let content = "texture-payload-bytes";
+        let addon = create_addon_dir(tmp.path(), "MediaAddon", &[("icons/a.dds", content)]);
+        let zip = create_test_zip(
+            tmp.path(),
+            "u.zip",
+            "MediaAddon",
+            &[("icons/a.dds", content)],
+        );
+
+        let disk = compute_addon_hashes(&addon).unwrap();
+        let zip_hashes = hash_zip_entries(&zip, "MediaAddon").unwrap();
+        assert_eq!(disk["icons/a.dds"], zip_hashes["icons/a.dds"]);
+        assert!(is_size_signature(&zip_hashes["icons/a.dds"]));
+        // The ZIP-baseline merge agrees too.
+        let baseline = compute_baseline_with_zip(&addon, &zip_hashes).unwrap();
+        assert_eq!(baseline, disk);
+    }
+
+    #[test]
+    fn signatures_match_bridges_legacy_hash_and_size_sig() {
+        let sha = sha256_hex("anything");
+        let sig = size_signature(123);
+        // Legacy SHA-256 vs new size signature (either order) = treated as a match.
+        assert!(signatures_match(&sha, &sig));
+        assert!(signatures_match(&sig, &sha));
+        // Same kind, equal = match.
+        assert!(signatures_match(&sig, &size_signature(123)));
+        assert!(signatures_match(&sha, &sha));
+        // Same kind, different = real change.
+        assert!(!signatures_match(&sig, &size_signature(456)));
+        assert!(!signatures_match(&sha, &sha256_hex("other")));
+    }
+
+    #[test]
+    fn detect_modifications_flags_binary_size_change_but_not_legacy_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        create_addon_dir(&addons_dir, "MediaAddon", &[("icons/a.dds", "AAAA")]);
+
+        // Baseline records a size signature for the .dds.
+        record_hashes_for_folders(&addons_dir, &["MediaAddon".to_string()], 1, "1.0").unwrap();
+        let baseline = load_hash_manifest(&addons_dir, "MediaAddon").unwrap();
+        assert!(is_size_signature(&baseline.files["icons/a.dds"]));
+
+        // Same size, different bytes → NOT flagged (acceptable tradeoff).
+        fs::write(addons_dir.join("MediaAddon/icons/a.dds"), "BBBB").unwrap();
+        assert!(detect_modifications(&addons_dir, "MediaAddon")
+            .unwrap()
+            .is_empty());
+
+        // Different size → flagged.
+        fs::write(addons_dir.join("MediaAddon/icons/a.dds"), "BBBBB").unwrap();
+        assert_eq!(
+            detect_modifications(&addons_dir, "MediaAddon").unwrap(),
+            vec!["icons/a.dds"]
+        );
+    }
+
+    #[test]
+    fn detect_modifications_ignores_legacy_sha_for_unchanged_binary() {
+        // A manifest written by the OLD code stores a SHA-256 for a .dds. The
+        // file is unchanged on disk, but the new code computes a size signature.
+        // The mismatch must NOT be flagged as a user modification.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        create_addon_dir(&addons_dir, "MediaAddon", &[("icons/a.dds", "TEXTURE")]);
+
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        let legacy = format!(
+            r#"{{"addon_folder":"MediaAddon","esoui_ids":[1],"recorded_at":"2025-01-01T00-00-00Z","installed_version":"1.0","files":{{"icons/a.dds":"{}"}}}}"#,
+            sha256_hex("TEXTURE")
+        );
+        fs::write(hashes_dir.join("MediaAddon.json"), legacy).unwrap();
+
+        let modified = detect_modifications(&addons_dir, "MediaAddon").unwrap();
+        assert!(
+            modified.is_empty(),
+            "legacy SHA vs new size signature must not be flagged, got: {modified:?}"
+        );
+    }
+
+    #[test]
+    fn record_pass_self_heals_legacy_binary_sha_to_size_signature() {
+        // The migration's correctness guarantee is that the lenient mixed-kind
+        // bridge applies only for ONE update: a record pass must rewrite a legacy
+        // 64-hex SHA for a binary file into a `size:` signature, so normal exact
+        // comparison resumes afterward. This pins that self-heal end-to-end.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        create_addon_dir(&addons_dir, "MediaAddon", &[("icons/a.dds", "TEXTURE")]);
+
+        let hashes_dir = addons_dir.join(".kalpa-hashes");
+        fs::create_dir_all(&hashes_dir).unwrap();
+        let legacy_sha = sha256_hex("TEXTURE");
+        let legacy = format!(
+            r#"{{"addon_folder":"MediaAddon","esoui_ids":[1],"recorded_at":"2025-01-01T00-00-00Z","installed_version":"1.0","files":{{"icons/a.dds":"{legacy_sha}"}}}}"#,
+        );
+        fs::write(hashes_dir.join("MediaAddon.json"), legacy).unwrap();
+
+        // Pre-record: the legacy SHA baseline is in effect. The mixed-kind bridge
+        // must not false-flag the unchanged .dds (this is the lenient window).
+        assert!(
+            detect_modifications(&addons_dir, "MediaAddon")
+                .unwrap()
+                .is_empty(),
+            "legacy SHA vs fresh size signature must not be flagged while the bridge is active"
+        );
+
+        // A record pass (the same one every update performs) rebuilds the manifest
+        // from freshly computed signatures, replacing the legacy SHA.
+        record_hashes_for_folders(&addons_dir, &["MediaAddon".to_string()], 1, "2.0").unwrap();
+
+        let healed = load_hash_manifest(&addons_dir, "MediaAddon").unwrap();
+        let entry = &healed.files["icons/a.dds"];
+        assert!(
+            is_size_signature(entry),
+            "binary entry must self-heal to a size signature, got: {entry}"
+        );
+        assert_ne!(entry, &legacy_sha, "the legacy SHA must be replaced");
+
+        // Post-record: the baseline is now a size signature, so exact same-kind
+        // comparison resumes. A genuine size change is flagged...
+        fs::write(addons_dir.join("MediaAddon/icons/a.dds"), "TEXTUREXX").unwrap();
+        assert_eq!(
+            detect_modifications(&addons_dir, "MediaAddon").unwrap(),
+            vec!["icons/a.dds"],
+            "after self-heal, a real size change must be detected via exact comparison"
         );
     }
 }

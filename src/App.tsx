@@ -13,7 +13,7 @@ import { EsoRunningProvider } from "@/lib/eso-running-context";
 import { SetupWizard } from "./components/setup-wizard";
 import { StatusBanners } from "./components/status-banners";
 import { RosterPackInstall } from "./components/roster-pack-install";
-import { UpdateBanner } from "./components/update-banner";
+import { UpdateBanner, type BannerUpdate } from "./components/update-banner";
 import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { getSetting, setSetting } from "@/lib/store";
 import {
@@ -814,6 +814,21 @@ function App() {
     return ids;
   }, [addons]);
 
+  // Enrich the available updates with display titles and sort them, so the
+  // banner's "Choose" checklist reads like the addon list rather than raw
+  // folder names.
+  const bannerUpdates = useMemo<BannerUpdate[]>(() => {
+    const titleByFolder = new Map(addons.map((a) => [a.folderName, a.title] as const));
+    return updatesAvailable
+      .map((u) => ({
+        folderName: u.folderName,
+        title: titleByFolder.get(u.folderName) ?? u.folderName,
+        currentVersion: u.currentVersion,
+        remoteVersion: u.remoteVersion,
+      }))
+      .sort((a, b) => a.title.localeCompare(b.title));
+  }, [updatesAvailable, addons]);
+
   const runBatchUpdates = useCallback(
     async (updates: UpdateCheckResult[]) => {
       const path = addonsPathRef.current;
@@ -1047,6 +1062,19 @@ function App() {
   const handleUpdateAll = useCallback(() => {
     void runBatchUpdates(updatesAvailable);
   }, [runBatchUpdates, updatesAvailable]);
+
+  // Update only the addons chosen in the banner's "Choose" checklist. Reuses the
+  // streaming batch path so a partial run gets the same pills, progress bar, and
+  // conflict handling as Update All.
+  const handleUpdateSelected = useCallback(
+    (folderNames: string[]) => {
+      const names = new Set(folderNames);
+      const toUpdate = updatesAvailable.filter((update) => names.has(update.folderName));
+      if (toUpdate.length === 0) return;
+      void runBatchUpdates(toUpdate);
+    },
+    [runBatchUpdates, updatesAvailable]
+  );
 
   const handleToggleSelect = useCallback((folderName: string) => {
     setSelectedFolders((prev) => {
@@ -1338,7 +1366,9 @@ function App() {
           updatingAll={updatingAll}
           updateProgress={updateProgress}
           addonStatuses={addonStatuses}
+          updates={bannerUpdates}
           onUpdateAll={handleUpdateAll}
+          onUpdateSelected={handleUpdateSelected}
           isOffline={isOffline}
         />
 

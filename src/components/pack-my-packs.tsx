@@ -7,6 +7,7 @@ import {
   TAG_COLORS,
   PACK_TYPE_ACCENT,
   PACK_TYPE_PILL_COLOR,
+  packIdentity,
 } from "./pack-constants";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -253,6 +254,7 @@ export function MyPacksView({
                   PACK_TYPE_ACCENT["addon-pack"];
                 const pillColor = PACK_TYPE_PILL_COLOR[pack.packType] ?? "muted";
                 const isConfirmingDelete = confirmDeleteId === pack.id;
+                const identity = packIdentity(pack);
                 return (
                   <div key={pack.id} className="relative">
                     <div
@@ -265,20 +267,34 @@ export function MyPacksView({
                           onSelectPack(pack.id);
                         }
                       }}
+                      style={identity.cardStyle}
                       className={cn(
-                        "group w-full text-left rounded-xl border border-white/[0.06] p-3",
-                        "border-l-[3px] transition-all duration-200 cursor-pointer",
-                        "shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]",
+                        "group w-full text-left rounded-xl border border-white/[0.1] p-3",
+                        "border-l-[3px] cursor-pointer",
+                        "transition-[transform,border-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
+                        // Real elevation so the opaque card sits clearly above the background.
+                        "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.07)]",
                         accent.border,
-                        accent.bg,
-                        accent.hoverBg,
-                        accent.hoverGlow,
-                        "hover:border-white/[0.12] hover:-translate-y-[1px]",
+                        "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.1)]",
+                        "hover:border-white/[0.18] motion-safe:hover:-translate-y-[2px]",
+                        "motion-reduce:transition-none",
                         "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                       )}
                     >
-                      {/* Top row: title + quick actions */}
+                      {/* Top row: monogram identity tile + title + quick actions */}
                       <div className="flex items-start justify-between gap-3">
+                        <div
+                          aria-hidden="true"
+                          style={identity.tileStyle}
+                          className={cn(
+                            "relative grid place-items-center size-10 shrink-0 rounded-lg",
+                            "font-heading text-[13px] font-bold leading-none tracking-tight",
+                            "transition-transform duration-150 ease-[cubic-bezier(0.4,0,0.2,1)]",
+                            "motion-safe:group-hover:scale-[1.04] motion-reduce:transform-none"
+                          )}
+                        >
+                          {identity.monogram}
+                        </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className="font-heading text-sm font-semibold truncate group-hover:text-primary transition-colors duration-200">
@@ -348,15 +364,15 @@ export function MyPacksView({
                         </div>
                       </div>
 
-                      {/* Description */}
+                      {/* Description (aligned past the tile) */}
                       {pack.description && (
-                        <p className="mt-1.5 text-xs text-muted-foreground/70 line-clamp-2 leading-relaxed">
+                        <p className="mt-1.5 pl-[52px] text-xs text-muted-foreground/70 line-clamp-2 leading-relaxed">
                           {decodeHtml(pack.description)}
                         </p>
                       )}
 
-                      {/* Bottom row: tags + meta */}
-                      <div className="mt-2.5 flex items-center gap-1.5 flex-wrap">
+                      {/* Bottom row: tags + meta (aligned past the tile) */}
+                      <div className="mt-2.5 flex items-center gap-1.5 flex-wrap pl-[52px]">
                         {pack.tags.map((tag) => (
                           <InfoPill key={tag} color={TAG_COLORS[tag] ?? "muted"}>
                             {tag}
@@ -460,6 +476,11 @@ export function MyPacksView({
                 PACK_TYPE_ACCENT[ref.packType as keyof typeof PACK_TYPE_ACCENT] ??
                 PACK_TYPE_ACCENT["addon-pack"];
               const pillColor = PACK_TYPE_PILL_COLOR[ref.packType] ?? "muted";
+              const identity = packIdentity({
+                id: ref.packId,
+                title: ref.title,
+                packType: ref.packType,
+              });
               return (
                 <div
                   key={ref.packId}
@@ -472,17 +493,33 @@ export function MyPacksView({
                       onSelectPack(ref.packId);
                     }
                   }}
+                  style={identity.cardStyle}
                   className={cn(
-                    "group w-full text-left rounded-xl border border-white/[0.06] p-3",
-                    "border-l-[3px] transition-all duration-200 cursor-pointer",
+                    "group w-full text-left rounded-xl border border-white/[0.1] p-3",
+                    "border-l-[3px] cursor-pointer",
+                    "transition-[transform,border-color,box-shadow] duration-200 ease-[cubic-bezier(0.4,0,0.2,1)]",
+                    // Real elevation so the opaque card sits clearly above the background.
+                    "shadow-[0_4px_16px_-4px_rgba(0,0,0,0.5),0_2px_4px_-1px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.07)]",
                     accent.border,
-                    accent.bg,
-                    accent.hoverBg,
-                    "hover:border-white/[0.12] hover:-translate-y-[1px] hover:shadow-[0_4px_16px_rgba(0,0,0,0.2)]",
+                    "hover:shadow-[0_16px_40px_-6px_var(--pk-glow),0_8px_20px_-4px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.1)]",
+                    "hover:border-white/[0.18] motion-safe:hover:-translate-y-[2px]",
+                    "motion-reduce:transition-none",
                     "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent-sky/50"
                   )}
                 >
                   <div className="flex items-start justify-between gap-3">
+                    <div
+                      aria-hidden="true"
+                      style={identity.tileStyle}
+                      className={cn(
+                        "relative grid place-items-center size-10 shrink-0 rounded-lg",
+                        "font-heading text-[13px] font-bold leading-none tracking-tight",
+                        "transition-transform duration-150 ease-[cubic-bezier(0.4,0,0.2,1)]",
+                        "motion-safe:group-hover:scale-[1.04] motion-reduce:transform-none"
+                      )}
+                    >
+                      {identity.monogram}
+                    </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="font-heading text-sm font-semibold truncate group-hover:text-primary transition-colors duration-200">
@@ -505,7 +542,7 @@ export function MyPacksView({
                       </button>
                     </SimpleTooltip>
                   </div>
-                  <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                  <div className="mt-2 flex items-center gap-1.5 flex-wrap pl-[52px]">
                     <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/50">
                       <PackageIcon className="size-3" />
                       {ref.addonCount} addon{ref.addonCount !== 1 ? "s" : ""}
