@@ -1470,9 +1470,26 @@ fn check_update_cancelled(cancel: Option<&AtomicBool>) -> Result<(), String> {
     }
 }
 
+/// How many files must pass since the last emitted progress event before the
+/// next one is sent, so a thousands-of-files addon doesn't flood the event bus.
+const PROGRESS_EMIT_STRIDE: usize = 64;
+
+/// Throttle decision for the extraction-progress emitter, factored out as a pure
+/// function so the first/every-stride/last contract is directly testable.
+///
+/// `prev` is the `done` value at the last emitted event, or `usize::MAX` if none
+/// has been emitted yet. Emits when: this is the first event, OR we've reached
+/// completion (`done >= total`), OR at least `PROGRESS_EMIT_STRIDE` files have
+/// passed since the last emit. The first-event branch is independent of the
+/// stride, so the frontend reliably learns the operation id (enabling Stop) on
+/// the very first file even for a small archive.
+fn should_emit_progress(prev: usize, done: usize, total: usize) -> bool {
+    prev == usize::MAX || done >= total || done.saturating_sub(prev) >= PROGRESS_EMIT_STRIDE
+}
+
 /// Build a throttled extraction-progress callback that emits `update-progress`
-/// events: on the first file, every 64 files, and at completion, so a
-/// thousands-of-files addon doesn't flood the event bus.
+/// events: on the first file, every `PROGRESS_EMIT_STRIDE` files, and at
+/// completion, so a thousands-of-files addon doesn't flood the event bus.
 fn make_progress_emitter(
     app: tauri::AppHandle,
     operation_id: String,
@@ -1481,8 +1498,7 @@ fn make_progress_emitter(
     let last = AtomicUsize::new(usize::MAX);
     move |done: usize, total: usize| {
         let prev = last.load(Ordering::Relaxed);
-        let should_emit = prev == usize::MAX || done >= total || done.saturating_sub(prev) >= 64;
-        if !should_emit {
+        if !should_emit_progress(prev, done, total) {
             return;
         }
         last.store(done, Ordering::Relaxed);
@@ -1508,9 +1524,7 @@ fn make_batch_progress_emitter(
     let last = AtomicUsize::new(usize::MAX);
     move |done: usize, file_total: usize| {
         let prev = last.load(Ordering::Relaxed);
-        let should_emit =
-            prev == usize::MAX || done >= file_total || done.saturating_sub(prev) >= 64;
-        if !should_emit {
+        if !should_emit_progress(prev, done, file_total) {
             return;
         }
         last.store(done, Ordering::Relaxed);
@@ -8291,6 +8305,25 @@ pub fn open_ransomware_protection_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_emit_progress_first_stride_and_completion() {
+        // First event (no prior emit) always fires, so the frontend learns the
+        // operation id and can enable Stop even on a tiny archive.
+        assert!(should_emit_progress(usize::MAX, 0, 5000));
+        assert!(should_emit_progress(usize::MAX, 0, 0));
+
+        // Within a stride of the last emit (prev=0): nothing until 64 files pass.
+        assert!(!should_emit_progress(0, 1, 5000));
+        assert!(!should_emit_progress(0, 63, 5000));
+        assert!(should_emit_progress(0, 64, 5000));
+        assert!(should_emit_progress(0, 200, 5000));
+
+        // Completion (done >= total) always fires, even if fewer than a stride
+        // of files have passed since the last emit — so the final "N of N" lands.
+        assert!(should_emit_progress(5000, 5000, 5000));
+        assert!(should_emit_progress(4990, 5000, 5000)); // only 10 since last emit
+    }
 
     #[test]
     fn download_thread_count_scales_and_clamps() {

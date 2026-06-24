@@ -632,4 +632,44 @@ mod tests {
             "a skipped (keep-mine) file must not be overwritten"
         );
     }
+
+    #[test]
+    fn extracted_binary_signature_matches_zip_signature_end_to_end() {
+        // The size-signature optimization relies on a ZIP entry's uncompressed
+        // size (used as the ZIP-side signature) equalling the byte length written
+        // to disk by extraction. Assert that invariant through a real extract,
+        // not just two size strings: a clean media update must not flag every
+        // texture as size-changed on the next scan.
+        use crate::file_hashes::{compute_addon_hashes, hash_zip_entries};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("AddOns");
+        fs::create_dir_all(&addons_dir).unwrap();
+
+        let zip_path = tmp.path().join("media.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("MediaAddon/icons/a.dds", options)
+            .unwrap();
+        archive
+            .write_all(b"\x00\x01\x02texture-bytes\xff\xfe")
+            .unwrap();
+        archive.finish().unwrap();
+
+        extract_addon_zip_with(&zip_path, &addons_dir, ExtractHooks::NONE).unwrap();
+
+        let disk = compute_addon_hashes(&addons_dir.join("MediaAddon")).unwrap();
+        let zip_hashes = hash_zip_entries(&zip_path, "MediaAddon").unwrap();
+        assert!(
+            zip_hashes["icons/a.dds"].starts_with("size:"),
+            "a .dds entry must use a size signature, got: {}",
+            zip_hashes["icons/a.dds"]
+        );
+        assert_eq!(
+            disk["icons/a.dds"], zip_hashes["icons/a.dds"],
+            "extracted .dds size signature must equal the ZIP-side signature"
+        );
+    }
 }

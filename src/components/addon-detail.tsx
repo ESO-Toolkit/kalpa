@@ -85,6 +85,14 @@ export function AddonDetail({
     null
   );
   const [canStopUpdate, setCanStopUpdate] = useState(false);
+  // The operation id lives in this component instance. App.tsx mounts AddonDetail
+  // with key={folderName}, so selecting a different addon mid-update remounts and
+  // drops this ref: the backend update keeps running (it's detached in
+  // spawn_blocking) but its Stop control and progress are lost for the rest of
+  // that update. Accepted known limitation — like the batch-flow and
+  // download-phase Stop gaps — kept small here because the hashing fix shrinks the
+  // motivating multi-minute window to seconds; lifting operation tracking into
+  // App.tsx would be the fix if it becomes a real annoyance.
   const operationIdRef = useRef<string | null>(null);
   const stopRequestedRef = useRef(false);
 
@@ -293,6 +301,10 @@ export function AddonDetail({
 
   const handleConflictResolve = async (decisions: FileDecision[]) => {
     if (!conflictReport || !updateResult) return;
+    // Busy guard: the panel's Apply button stays enabled during the update, so a
+    // double-click would re-submit the same session and fail "Session not found"
+    // once the first apply removes it. Mirrors handleUpdate.
+    if (updating) return;
     setUpdating(true);
     // Re-check here too: ESO may have launched after the initial scan while the
     // conflict panel was open, so the earlier handleUpdate gate can be stale.
@@ -314,6 +326,11 @@ export function AddonDetail({
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
       if (isCancellation(e)) {
+        // The backend deletes the pending session on cancel, so this panel's
+        // sessionId is now dead — clear it (like the other cancel paths) so a
+        // retry goes through the main Update button and a fresh scan rather than
+        // re-applying a stale session and hitting "Session not found".
+        setConflictReport(null);
         toast.info(`Stopped updating ${addon.title}`, {
           description: "It may be partially updated — run the update again to finish.",
         });
@@ -480,7 +497,9 @@ export function AddonDetail({
             sessionId={pendingConflict.sessionId}
             addonsPath={addonsPath}
             onResolve={async (decisions) => {
+              if (updating) return;
               setUpdating(true);
+              setUpdateError(null);
               if (!(await ensureEsoNotBlocking())) {
                 setUpdating(false);
                 return;
