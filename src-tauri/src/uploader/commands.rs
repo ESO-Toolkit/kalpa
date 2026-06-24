@@ -773,8 +773,8 @@ pub async fn uploader_upload_log(
     // Settings toggle, gated behind a ToS disclosure). `Option` so an
     // older/omitting caller deserializes to `None` (treated as `false`) and never
     // enables native by accident. Native still only runs when the coverage gate
-    // ALSO allows it (`FORMAT_VERSION_CONFIRMED` + proven event types), so today
-    // this changes the observable routing reason but not the actual transport.
+    // ALSO allows it (`FORMAT_VERSION_CONFIRMED` is now true + every event type
+    // proven), so an opted-in user with an all-proven log uploads directly.
     native_opt_in: Option<bool>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
@@ -841,16 +841,15 @@ pub async fn uploader_upload_log(
     // in, the format is confirmed, AND every event type in this log is within
     // proven byte-exact coverage; otherwise we route to the official uploader.
     // This guarantees the native path never produces a less-accurate report than
-    // the official app. Today `FORMAT_VERSION_CONFIRMED` is false, so this always
-    // resolves to the official path — wiring it now keeps behavior unchanged
-    // while making the safe-routing decision real and observable.
+    // the official app.
     //
     // Driven by the Settings opt-in toggle (passed from the frontend). Absent →
     // false. With the format-version gate OPEN (native rendering confirmed
-    // 2026-06-19), an opted-in user whose log is all proven types routes native; an
-    // un-opted-in user, or a log with any unproven event type, falls back to the
-    // official uploader. The native path itself also self-checks the built segment
-    // and falls back if it is ever malformed (see `run_native_upload`).
+    // 2026-06-19, fidelity reconfirmed vs the official upload 2026-06-24), an
+    // opted-in user whose log is all proven types routes native; an un-opted-in
+    // user, or a log with any unproven event type, falls back to the official
+    // uploader. The native path itself also self-checks the built segment and
+    // falls back if it is ever malformed (see `run_native_upload`).
     let native_opt_in = native_opt_in.unwrap_or(false);
     let routing = transport::assess_native_routing(&dispatch_path, native_opt_in);
     let use_native = matches!(routing, transport::NativeRouting::Native);

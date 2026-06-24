@@ -850,13 +850,12 @@ mod routing_tests {
         );
     }
 
-    // The native-routing gate is all-or-nothing: a single unproven type forces
-    // Gate-closed safety: an opted-in upload must NOT route native while
-    // FORMAT_VERSION_CONFIRMED is false, regardless of line types. (When the gate
-    // reopens, the coverage half — unproven types force fallback with the type
-    // surfaced — is exercised via the coverage.rs unit tests.)
+    // Coverage safety (gate is OPEN): an opted-in upload with ANY unproven line
+    // type must still fall back, never route native — so a novel/future event can
+    // never reach the encoder and corrupt a report. (The all-proven → native half,
+    // including Infinite Archive logs, is exercised by the coverage.rs unit tests.)
     #[test]
-    fn opted_in_does_not_route_native_while_gate_closed() {
+    fn opted_in_with_unproven_type_falls_back() {
         let (_d, path) = temp_log("0,BEGIN_LOG,1,15\n100,SOME_FUTURE_EVENT,1,2\n");
         assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
     }

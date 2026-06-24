@@ -58,19 +58,20 @@ pub const CLIENT_VERSION: &str = "9.3.93";
 /// transport must not be the default (it may still be exercised behind an
 /// explicit dev/opt-in path for the round-trip that confirms the version).
 ///
-/// The version itself is confirmed (11). This stays `false` until the segment
-/// **serialization** is also confirmed by a byte-exact round-trip — sending an
-/// independently-produced segment that the server accepts — since a correct
-/// version with a wrong segment body would still fail.
-// GATE CLOSED (2026-06-18): a live upload was server-ACCEPTED (report
-// jAHXkRdzpGwxVQ1t) but the report does NOT render — esologs shows an infinite
-// loading screen and it never appears in the user's report list. So server
-// acceptance of the POST is NOT sufficient: the segment is structurally accepted
-// but semantically wrong (the parser can't build a report from it). Native upload
-// stays OFF until a produced segment is confirmed to RENDER correctly, not merely
-// be accepted. The auth/login/encoder/transport are all built; the remaining work
-// is making the encoded segment actually parseable. See PROVEN_LINE_TYPES.
-pub const FORMAT_VERSION_CONFIRMED: bool = false;
+/// The version is confirmed (11). This flag additionally requires the produced
+/// segment to **render** correctly server-side, not merely be accepted.
+// GATE CLOSED (2026-06-18) → CONFIRMED OPEN (2026-06-19/24): an earlier upload was
+// server-ACCEPTED but did NOT render — traced to a zero-width segment-window
+// transport bug (the `add-report-segment` request sent startTime/endTime 0), since
+// fixed (see `super::client`), NOT an encoder fault. After the fix a real dungeon
+// log rendered a complete report (2026-06-19, owner-verified). Then a real Kyne's
+// Aegis trial uploaded natively was confirmed to RENDER and match the official
+// Archon upload within 0.06% on raid totals + identical top-player numbers
+// (2026-06-24, "Probe B", reports ryJ4QzTDB72bxZaX vs AjNzRvD7bg8CQt9c). The
+// hard-won lesson — server acceptance ≠ rendering — is now satisfied: rendering is
+// proven, so the gate is OPEN. Per-log coverage still gates which logs qualify
+// (see PROVEN_LINE_TYPES); any unproven line type still falls back.
+pub const FORMAT_VERSION_CONFIRMED: bool = true;
 
 /// Errors specific to producing or versioning the upload format.
 #[derive(Debug, Clone, PartialEq, Eq)]
