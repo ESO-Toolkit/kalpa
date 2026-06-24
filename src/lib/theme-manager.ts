@@ -1,9 +1,11 @@
-import { getSetting, setSetting } from "./store";
+import { getSetting, setSetting, setSettings } from "./store";
 import {
   BUILTIN_THEMES,
   BUILTIN_THEME_IDS,
   DEFAULT_THEME,
   DEFAULT_THEME_ID,
+  FORCED_DEFAULT_VERSION,
+  ROOT_THEME_ID,
 } from "./theme-presets";
 import {
   applyThemeColors,
@@ -31,10 +33,20 @@ interface ViewTransitionLike {
 
 const STORE_KEY_ACTIVE = "appearance.activeThemeId";
 const STORE_KEY_CUSTOM = "appearance.customThemes";
-/** Resolved `{ "--var": value }` map of the active theme — the ONLY localStorage
- * key, read SYNCHRONOUSLY by the inline boot script in index.html before first
- * paint (see that file). The Tauri store is the durable source of truth. */
+/** Durable record of the last forced-default migration this user has been moved
+ * through (source of truth; the Tauri store). The version itself
+ * ({@link FORCED_DEFAULT_VERSION}) lives in theme-presets so the store-free boot
+ * script can share it. */
+const STORE_KEY_FORCED_DEFAULT = "appearance.forcedDefaultVersion";
+/** Resolved `{ "--var": value }` map of the active theme — read SYNCHRONOUSLY by
+ * the boot script in index.html before first paint (see that file). The Tauri
+ * store is the durable source of truth. */
 export const LS_KEY_VARS = "kalpa.appearance.activeVars";
+/** Synchronous mirror of {@link STORE_KEY_FORCED_DEFAULT} for the pre-paint boot
+ * script: lets it tell a not-yet-migrated install (paint the factory default)
+ * from a migrated one (trust the per-user mirror), avoiding a stale-theme flash
+ * on the migration launch. */
+export const LS_KEY_FORCED = "kalpa.appearance.forcedDefaultVersion";
 
 interface ManagerState {
   activeThemeId: string;
@@ -42,6 +54,9 @@ interface ManagerState {
 }
 
 let state: ManagerState = { activeThemeId: DEFAULT_THEME_ID, customThemes: [] };
+/** Set once the user explicitly picks a theme this session. Guards against a slow
+ * startup hydration/migration clobbering a choice made before it finished. */
+let liveSelection = false;
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -77,17 +92,20 @@ export function getActiveTheme(): Theme {
 function writeLocalMirror(next: ManagerState) {
   try {
     // Mirror the active theme's resolved CSS vars so the pre-paint boot script
-    // can apply them with zero logic. The default theme stores nothing — the
-    // authored :root values govern.
+    // can apply them with zero logic. Written for EVERY theme — including the
+    // ESO Gold base — so an absent mirror unambiguously means "fresh install,"
+    // letting the boot script paint the factory default instead of the authored
+    // :root (which is ESO Gold, no longer the default). The base theme's vars
+    // equal :root, so applying them pre-paint is visually a no-op.
     const active = [...BUILTIN_THEMES, ...next.customThemes].find(
       (t) => t.id === next.activeThemeId
     );
-    if (!active || active.id === DEFAULT_THEME_ID) {
+    if (!active) {
       localStorage.removeItem(LS_KEY_VARS);
-    } else {
-      const vars = { ...themeColorsToVars(active.colors), ...themeSkinToVars(active.skin) };
-      localStorage.setItem(LS_KEY_VARS, JSON.stringify(vars));
+      return;
     }
+    const vars = { ...themeColorsToVars(active.colors), ...themeSkinToVars(active.skin) };
+    localStorage.setItem(LS_KEY_VARS, JSON.stringify(vars));
   } catch {
     // localStorage may be unavailable; durability still comes from the Tauri store.
   }
@@ -99,16 +117,16 @@ function writeLocalMirror(next: ManagerState) {
 
 let activeVT: ViewTransitionLike | null = null;
 
-/** Apply a resolved theme to the document. The default theme clears overrides so
- * the base `:root` values (authored in index.css) win exactly. */
+/** Apply a resolved theme to the document. The ESO Gold base theme clears
+ * overrides so the authored `:root` values (in index.css) win exactly. */
 function applyTheme(theme: Theme, animate: boolean) {
   const run = () => {
-    if (theme.id === DEFAULT_THEME_ID) {
+    if (theme.id === ROOT_THEME_ID) {
       clearThemeColors();
     } else {
       applyThemeColors(theme.colors);
     }
-    applySkin(theme.id === DEFAULT_THEME_ID ? undefined : theme.skin);
+    applySkin(theme.id === ROOT_THEME_ID ? undefined : theme.skin);
     document.documentElement.dataset.themeId = theme.id;
   };
 
@@ -142,6 +160,7 @@ function applyTheme(theme: Theme, animate: boolean) {
 
 /** Switch the active theme (with a cross-fade when supported). */
 export function setActiveTheme(id: string) {
+  liveSelection = true;
   const theme = resolveTheme(id) ?? DEFAULT_THEME;
   state = { ...state, activeThemeId: theme.id };
   applyTheme(theme, true);
@@ -223,20 +242,80 @@ export function stopPreview() {
  * deferred ES module and would paint a frame late.
  */
 export async function hydrateThemeFromStore() {
-  const [storedActiveId, storedCustom] = await Promise.all([
+  const [storedActiveId, storedCustom, storedForced] = await Promise.all([
     getSetting<string>(STORE_KEY_ACTIVE, DEFAULT_THEME_ID),
     getSetting<Theme[]>(STORE_KEY_CUSTOM, []),
+    getSetting<number>(STORE_KEY_FORCED_DEFAULT, 0),
   ]);
   const customThemes = Array.isArray(storedCustom) ? storedCustom : [];
-
-  // Normalize a dangling active id (e.g. a custom theme deleted on another
-  // window) so the gallery's active highlight and the mirror stay consistent.
   const known = new Set([...BUILTIN_THEME_IDS, ...customThemes.map((t) => t.id)]);
-  const activeThemeId = known.has(storedActiveId) ? storedActiveId : DEFAULT_THEME_ID;
+  const storedActive = known.has(storedActiveId) ? storedActiveId : DEFAULT_THEME_ID;
+  const forcedVersion = storedForced ?? 0;
 
-  state = { activeThemeId, customThemes };
-  applyTheme(getActiveTheme(), false);
+  let activeThemeId = storedActive;
+  let effectiveForced = forcedVersion;
+
+  if (forcedVersion < FORCED_DEFAULT_VERSION) {
+    // One-time forced migration: move every user onto the current factory default
+    // once, overriding whatever they had chosen. If the user already picked a
+    // theme interactively while we were loading, that live choice wins over the
+    // forced default (but the migration is still recorded so it never re-fires).
+    const targetActive = liveSelection ? state.activeThemeId : DEFAULT_THEME_ID;
+    // Record the override and its version marker atomically (setSettings persists
+    // all-or-nothing — the store has autoSave off, so neither key reaches disk
+    // until the single explicit save), and only adopt the reset if it persisted.
+    // This guarantees the marker can never become durable without the active
+    // reset, so the migration neither re-fires nor strands a user on the old theme.
+    const recorded = await setSettings({
+      [STORE_KEY_FORCED_DEFAULT]: FORCED_DEFAULT_VERSION,
+      [STORE_KEY_ACTIVE]: targetActive,
+    });
+    if (recorded) {
+      activeThemeId = targetActive;
+      effectiveForced = FORCED_DEFAULT_VERSION;
+      // If the user picked a theme WHILE this batch was in flight, its active-id
+      // write may have raced ours; re-assert the live choice durably (awaited,
+      // explicit save) BEFORE the localStorage mirror is written below.
+      if (liveSelection && state.activeThemeId !== targetActive) {
+        const reassertOk = await setSettings({ [STORE_KEY_ACTIVE]: state.activeThemeId });
+        if (reassertOk) {
+          activeThemeId = state.activeThemeId;
+        } else {
+          // The live choice could not be persisted, so the durable value is still
+          // targetActive. Reconcile the UI + mirror to it rather than advertising
+          // an unsaved theme the next launch would hydrate away.
+          activeThemeId = targetActive;
+          state = { ...state, activeThemeId: targetActive };
+          applyTheme(getActiveTheme(), false);
+        }
+      }
+    }
+    // If it did not persist, honor the stored choice and retry next launch.
+  } else if (storedActive !== storedActiveId && !liveSelection) {
+    // Already migrated: just heal a dangling active id (e.g. a custom theme
+    // deleted on another window).
+    void setSetting(STORE_KEY_ACTIVE, activeThemeId);
+  }
+
+  // A theme chosen interactively during hydration wins for the active id — don't
+  // clobber the live choice with our (possibly stale) startup read. Still install
+  // the stored custom themes (merging any created live this session, which win),
+  // so an early interaction can't drop them and have a later save overwrite the
+  // stored list.
+  if (liveSelection) {
+    const merged = new Map(customThemes.map((t) => [t.id, t]));
+    for (const t of state.customThemes) merged.set(t.id, t);
+    state = { activeThemeId: state.activeThemeId, customThemes: [...merged.values()] };
+  } else {
+    state = { activeThemeId, customThemes };
+    applyTheme(getActiveTheme(), false);
+  }
   writeLocalMirror(state);
-  if (activeThemeId !== storedActiveId) void setSetting(STORE_KEY_ACTIVE, activeThemeId);
+  // Mirror the (now durable) migration version for the pre-paint boot script.
+  try {
+    localStorage.setItem(LS_KEY_FORCED, String(effectiveForced));
+  } catch {
+    // localStorage may be unavailable; the Tauri store remains the source of truth.
+  }
   emit();
 }
