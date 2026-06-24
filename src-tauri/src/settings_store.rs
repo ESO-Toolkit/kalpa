@@ -60,6 +60,12 @@ const STORE_RELOADED_SIGNAL: &str = "settings-store-reloaded";
 const RENAME_ATTEMPTS: usize = 5;
 const RENAME_BACKOFF: Duration = Duration::from_millis(40);
 
+/// Attempts to (re)load the settings file at startup before giving up and
+/// tainting. A transient lock on this tiny file clears well within this window,
+/// so the frontend never sees the empty cache in the realistic case.
+const LOAD_ATTEMPTS: usize = 10;
+const LOAD_BACKOFF: Duration = Duration::from_millis(50);
+
 /// Infix for per-write staging files: `settings.json.tmp-<pid>-<n>`. Staging
 /// names are unique so a crashed write's leftover is never the name a later write
 /// reuses (no clobber), and recovery can recognise and clear them all.
@@ -272,12 +278,6 @@ fn primary_may_hold_settings(path: &Path) -> bool {
     }
 }
 
-/// Read and parse the primary into a settings map, or `None` if it can't be read
-/// or doesn't parse as a JSON object.
-fn read_settings_map(path: &Path) -> Option<BTreeMap<String, JsonValue>> {
-    serde_json::from_slice(&fs::read(path).ok()?).ok()
-}
-
 /// Guard against tauri-plugin-store silently swallowing a load error: its
 /// `StoreBuilder::build_inner` ignores `load()` failures, so a settings file that
 /// was transiently unreadable when the store opened yields an *empty* in-memory
@@ -298,12 +298,20 @@ pub fn ensure_loaded<R: Runtime>(app: &AppHandle<R>) {
     if !primary_may_hold_settings(&path) {
         return; // missing/empty/corrupt primary — the empty cache is fine to write
     }
-    // Retry the swallowed load so the cache reflects disk before anything flushes.
-    if store.reload().is_ok() && !store.is_empty() {
-        return;
+    // Retry the swallowed load with brief backoff. This runs in setup, before the
+    // webview loads, so as long as the transient lock clears within the window the
+    // frontend never reads the empty cache. `reload_ignore_defaults` swaps the
+    // whole map under one lock, so a concurrent reader can't see a partial cache.
+    for attempt in 0..LOAD_ATTEMPTS {
+        if store.reload_ignore_defaults().is_ok() && !store.is_empty() {
+            return;
+        }
+        if attempt + 1 < LOAD_ATTEMPTS {
+            std::thread::sleep(LOAD_BACKOFF);
+        }
     }
-    // Still couldn't load the file's settings into the cache. Refuse to overwrite
-    // it until it loads, so a later flush can't replace real settings with empty.
+    // Still couldn't load the file's settings into the cache (a sustained lock).
+    // Taint the store so [`flush`] refuses to overwrite the file until it loads.
     SETTINGS_TAINTED.store(true, Ordering::SeqCst);
     eprintln!(
         "[settings_store] settings file present but could not be loaded; refusing to overwrite it until it loads"
@@ -330,15 +338,12 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         // is untrusted: not only this write, but any value the frontend READ while
         // the cache was empty (and may now be writing back as a default/fallback)
         // could be wrong. So do NOT commit the pending writes. Instead load the real
-        // settings from disk, discard the untrusted cache, and clear the taint;
-        // signal the frontend to skip its (now-stale) rollback and retry against the
-        // real state. Until the file can be read, refuse without touching anything.
-        let Some(disk) = read_settings_map(&path) else {
+        // settings from disk (an atomic full-map swap, so concurrent readers never
+        // see a partial cache), clear the taint, and signal the frontend to skip its
+        // now-stale rollback and retry against the real state. Until the file can be
+        // read, refuse without touching anything.
+        if store.reload_ignore_defaults().is_err() {
             return Err("settings could not be loaded yet; not overwriting them".to_string());
-        };
-        store.clear();
-        for (key, value) in disk {
-            store.set(key, value);
         }
         SETTINGS_TAINTED.store(false, Ordering::SeqCst);
         return Err(STORE_RELOADED_SIGNAL.to_string());
