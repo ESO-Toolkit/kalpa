@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import type {
   AddonManifest,
@@ -78,6 +79,65 @@ export function AddonDetail({
   const customTagRef = useRef<HTMLInputElement>(null);
   const [conflictReport, setConflictReport] = useState<ConflictReport | null>(null);
   const [pendingConflictDismissed, setPendingConflictDismissed] = useState(false);
+  // Per-file extraction progress for THIS addon's in-flight update, correlated
+  // by operation id. Drives the "Extracting N of M" label and the Stop button.
+  const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(
+    null
+  );
+  const [canStopUpdate, setCanStopUpdate] = useState(false);
+  // The operation id lives in this component instance. App.tsx mounts AddonDetail
+  // with key={folderName}, so selecting a different addon mid-update remounts and
+  // drops this ref: the backend update keeps running (it's detached in
+  // spawn_blocking) but its Stop control and progress are lost for the rest of
+  // that update. Accepted known limitation — like the batch-flow and
+  // download-phase Stop gaps — kept small here because the hashing fix shrinks the
+  // motivating multi-minute window to seconds; lifting operation tracking into
+  // App.tsx would be the fix if it becomes a real annoyance.
+  const operationIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ operationId: string; fileIndex: number; fileTotal: number }>(
+      "update-progress",
+      (event) => {
+        if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
+          setCanStopUpdate(true);
+          setExtractProgress({ done: event.payload.fileIndex, total: event.payload.fileTotal });
+        }
+      }
+    )
+      .then((un) => {
+        if (disposed) un();
+        else unlisten = un;
+      })
+      .catch((e) => console.error("[tauri:update-progress]", e));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // Start a cancellable update: mint an operation id (correlates progress events
+  // and lets Stop signal the backend) and reset progress. `endOperation` clears
+  // both on completion. `handleStopUpdate` asks the backend to abort.
+  const beginOperation = (): string => {
+    const id = crypto.randomUUID();
+    operationIdRef.current = id;
+    setCanStopUpdate(false);
+    setExtractProgress(null);
+    return id;
+  };
+  const endOperation = () => {
+    operationIdRef.current = null;
+    setCanStopUpdate(false);
+    setExtractProgress(null);
+  };
+  const handleStopUpdate = () => {
+    const id = operationIdRef.current;
+    if (id) void invokeOrThrow("cancel_update", { operationId: id }).catch(() => {});
+  };
+  const isCancellation = (e: unknown) => getTauriErrorMessage(e).includes("Update cancelled");
 
   // Map of lowercased top-level folder name → its real on-disk spelling. ESO
   // resolves addon names case-insensitively, so membership tests must too (a
@@ -173,6 +233,7 @@ export function AddonDetail({
             addonsPath,
             sessionId: report.sessionId,
             decisions: autoDecisions,
+            operationId: beginOperation(),
           });
           setUpdateSuccess(true);
           toast.success(`Updated ${addon.title}`);
@@ -194,19 +255,34 @@ export function AddonDetail({
         addonsPath,
         sessionId: report.sessionId,
         decisions: autoKeptDecisions,
+        operationId: beginOperation(),
       });
       setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
-      setUpdateError(getTauriErrorMessage(e));
+      if (isCancellation(e)) {
+        setConflictReport(null);
+        toast.info(`Stopped updating ${addon.title}`, {
+          description: "It may be partially updated — run the update again to finish.",
+        });
+        // Re-scan so the row reflects the on-disk truth (the update didn't finish).
+        onAddonUpdated(updateResult.esouiId);
+      } else {
+        setUpdateError(getTauriErrorMessage(e));
+      }
     } finally {
+      endOperation();
       setUpdating(false);
     }
   };
 
   const handleConflictResolve = async (decisions: FileDecision[]) => {
     if (!conflictReport || !updateResult) return;
+    // Busy guard: the panel's Apply button stays enabled during the update, so a
+    // double-click would re-submit the same session and fail "Session not found"
+    // once the first apply removes it. Mirrors handleUpdate.
+    if (updating) return;
     setUpdating(true);
     // Re-check here too: ESO may have launched after the initial scan while the
     // conflict panel was open, so the earlier handleUpdate gate can be stale.
@@ -220,14 +296,28 @@ export function AddonDetail({
         addonsPath,
         sessionId: conflictReport.sessionId,
         decisions,
+        operationId: beginOperation(),
       });
       setConflictReport(null);
       setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);
       onAddonUpdated(updateResult.esouiId);
     } catch (e) {
-      setUpdateError(getTauriErrorMessage(e));
+      if (isCancellation(e)) {
+        // The backend deletes the pending session on cancel, so this panel's
+        // sessionId is now dead — clear it (like the other cancel paths) so a
+        // retry goes through the main Update button and a fresh scan rather than
+        // re-applying a stale session and hitting "Session not found".
+        setConflictReport(null);
+        toast.info(`Stopped updating ${addon.title}`, {
+          description: "It may be partially updated — run the update again to finish.",
+        });
+        onAddonUpdated(updateResult.esouiId);
+      } else {
+        setUpdateError(getTauriErrorMessage(e));
+      }
     } finally {
+      endOperation();
       setUpdating(false);
     }
   };
@@ -324,11 +414,29 @@ export function AddonDetail({
           <span className="text-sm text-amber-400">
             Update available: {updateResult.currentVersion} &rarr; {updateResult.remoteVersion}
           </span>
-          <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
-            <Button onClick={handleUpdate} disabled={updating || isOffline} size="sm">
-              {updating ? "Updating..." : "Update"}
-            </Button>
-          </SimpleTooltip>
+          {updating ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs tabular-nums text-white/50">
+                {extractProgress && extractProgress.total > 0
+                  ? `Extracting ${extractProgress.done.toLocaleString()} / ${extractProgress.total.toLocaleString()}`
+                  : "Updating…"}
+              </span>
+              <Button
+                onClick={handleStopUpdate}
+                disabled={!canStopUpdate}
+                size="sm"
+                variant="outline"
+              >
+                Stop
+              </Button>
+            </div>
+          ) : (
+            <SimpleTooltip content={isOffline ? "Updates require an internet connection" : ""}>
+              <Button onClick={handleUpdate} disabled={isOffline} size="sm">
+                Update
+              </Button>
+            </SimpleTooltip>
+          )}
         </GlassPanel>
       ) : null}
 
@@ -367,7 +475,9 @@ export function AddonDetail({
             sessionId={pendingConflict.sessionId}
             addonsPath={addonsPath}
             onResolve={async (decisions) => {
+              if (updating) return;
               setUpdating(true);
+              setUpdateError(null);
               if (!(await ensureEsoNotBlocking())) {
                 setUpdating(false);
                 return;
@@ -377,13 +487,27 @@ export function AddonDetail({
                   addonsPath,
                   sessionId: pendingConflict.sessionId,
                   decisions,
+                  operationId: beginOperation(),
                 });
                 toast.success(`Updated ${addon.title}`);
                 onConflictResolved?.(addon.folderName);
                 if (updateResult) onAddonUpdated(updateResult.esouiId);
               } catch (e) {
-                setUpdateError(getTauriErrorMessage(e));
+                if (isCancellation(e)) {
+                  setPendingConflictDismissed(true);
+                  if (onConflictResolved) {
+                    onConflictResolved(addon.folderName);
+                  } else if (updateResult) {
+                    onAddonUpdated(updateResult.esouiId);
+                  }
+                  toast.info(`Stopped updating ${addon.title}`, {
+                    description: "It may be partially updated — run the update again to finish.",
+                  });
+                } else {
+                  setUpdateError(getTauriErrorMessage(e));
+                }
               } finally {
+                endOperation();
                 setUpdating(false);
               }
             }}
