@@ -18,15 +18,18 @@
 //!     the store from the plugin registry so the plugin's exit handler can't
 //!     truncate-write it after us (it does not flush — every write already did).
 //!
-//! [`flush`] serialises the cache and writes it with the standard
-//! write-temp + fsync + atomic-rename pattern, so the on-disk file is only ever
-//! the previous complete file or the next complete file — never a partial one.
-//! Each write stages to a *unique* temp name, so a crashed write's leftover is
-//! never the name a later write reuses — a recovery candidate can never be
-//! clobbered. [`recover`] runs before the store is first opened and repairs
-//! on-disk state left by a crash; settings it cannot write back to the primary
-//! are returned for [`seed_recovered`] to put into the live cache so they are not
-//! lost.
+//! [`flush`] writes with the standard write-temp + fsync + atomic-rename pattern:
+//! it stages the bytes into a unique temp file, fsyncs them, then renames that
+//! over the primary. The rename is atomic on a single NTFS volume, so the on-disk
+//! `settings.json` is only ever the previous complete file or the next complete
+//! file — never a partial one.
+//!
+//! The primary is therefore the *sole* committed truth: a successful write lives
+//! in `settings.json`, and a staging leftover only exists when a write's rename
+//! never completed — i.e. an uncommitted write. [`recover`] runs before the store
+//! opens and simply discards those uncommitted leftovers and quarantines a
+//! primary that fails to parse (external corruption or a pre-fix partial write),
+//! so the plugin starts from clean, complete state.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -35,7 +38,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde_json::Value as JsonValue;
 use tauri::{AppHandle, Runtime};
@@ -52,9 +55,9 @@ const RENAME_BACKOFF: Duration = Duration::from_millis(40);
 
 /// Infix for per-write staging files: `settings.json.tmp-<pid>-<n>`. Staging
 /// names are unique so a crashed write's leftover is never the name a later write
-/// reuses — recovery candidates therefore cannot be clobbered.
+/// reuses (no clobber), and recovery can recognise and clear them all.
 const STAGING_INFIX: &str = ".tmp-";
-/// Where an unrecoverable corrupt primary is set aside for inspection.
+/// Where a corrupt primary is set aside for inspection.
 const QUARANTINE_SUFFIX: &str = ".corrupt";
 
 /// Serialises [`atomic_write`] within this process so two writers (e.g. a
@@ -70,9 +73,7 @@ fn suffixed(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// A unique staging path for one write, e.g. `settings.json.tmp-12345-7`. Unique
-/// per write so a crashed write's leftover never collides with — and so can never
-/// be clobbered by — a later write.
+/// A unique staging path for one write, e.g. `settings.json.tmp-12345-7`.
 fn unique_staging(main: &Path) -> PathBuf {
     let n = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
     suffixed(main, &format!("{STAGING_INFIX}{}-{n}", std::process::id()))
@@ -101,14 +102,6 @@ fn staging_files(main: &Path) -> Vec<PathBuf> {
         }
     }
     out
-}
-
-/// File modification time, or the epoch if it can't be read — used only to pick
-/// the freshest recovery candidate, so a missing timestamp just sorts oldest.
-fn mtime(path: &Path) -> SystemTime {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// Write `bytes` to `path` (truncating) and fsync them to disk before returning,
@@ -147,8 +140,12 @@ fn rename_with_retries(from: &Path, to: &Path) -> io::Result<()> {
 /// bytes durable before the rename publishes them, and the rename is atomic on a
 /// single NTFS volume — so a crash at any point leaves either the old complete
 /// file or the new complete file, never a partial one. `path` is never truncated
-/// in place, and the unique staging name means this write can never clobber a
-/// recovery candidate left by a previous crash.
+/// in place.
+///
+/// On ANY error (write, fsync, or rename) the staging file is removed before
+/// returning, so a failed write never leaves a readable file behind that a later
+/// recovery could mistake for a committed save. `path` itself is only touched by
+/// the final rename, so a failure leaves the previous good file intact.
 ///
 /// Durability nuance: we do not force write-through on the rename's metadata, so
 /// a power cut within the OS's metadata-flush window may leave the *previous*
@@ -161,32 +158,30 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    write_synced(&staging, bytes)?;
+    if let Err(e) = write_synced(&staging, bytes) {
+        let _ = fs::remove_file(&staging);
+        return Err(e);
+    }
     if let Err(e) = rename_with_retries(&staging, path) {
-        // The rename never landed. Drop our staging file so it isn't leaked, and
-        // surface the error: `path` was never touched, so the previous good file
-        // survives.
         let _ = fs::remove_file(&staging);
         return Err(e);
     }
     Ok(())
 }
 
-/// Read a settings file and return its bytes only if it parses as a JSON object
-/// — the same shape the plugin deserialises into (`HashMap<String, Value>`). A
-/// truncated or half-written file returns `None`, which is what recovery keys off.
-fn read_if_valid(path: &Path) -> Option<Vec<u8>> {
-    let bytes = fs::read(path).ok()?;
-    serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).ok()?;
-    Some(bytes)
+/// A settings file parses as a JSON object — the same shape the plugin
+/// deserialises into (`HashMap<String, Value>`). A truncated or half-written file
+/// fails this check, which is what recovery keys off.
+fn is_valid(path: &Path) -> bool {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Move a corrupt primary aside so plugin-store starts clean instead of silently
 /// merging nothing, and a human can inspect what was lost.
 fn quarantine(main: &Path) {
-    if !main.exists() {
-        return;
-    }
     let dest = suffixed(main, QUARANTINE_SUFFIX);
     let _ = fs::remove_file(&dest); // overwrite any prior quarantine
     match fs::rename(main, &dest) {
@@ -195,74 +190,22 @@ fn quarantine(main: &Path) {
     }
 }
 
-/// Repair on-disk settings state left by an interrupted write, BEFORE the plugin
-/// opens (and merge-loads) the file. Returns the recovered settings map ONLY when
-/// it held a valid copy that it could not write back to the primary — so the
-/// caller can seed it into the live store ([`seed_recovered`]).
-///
-///   * primary valid → it is the committed authority; drop uncommitted staging
-///     leftovers; return None.
-///   * primary missing/corrupt → promote the freshest complete staging leftover
-///     (a crash-staged write). On success, clean up the rest; return None.
-///   * promotion fails (primary locked) → leave the staging leftovers untouched
-///     (their unique names keep them safe for the next launch to retry),
-///     quarantine the corrupt primary, and return the recovered map so the caller
-///     seeds the live cache.
-///   * nothing recoverable → quarantine a corrupt primary; return None.
-fn recover_path(main: &Path) -> Option<BTreeMap<String, JsonValue>> {
-    let staging = staging_files(main);
-
-    // The primary, when valid, is the committed authority. atomic_write only ever
-    // publishes a complete file, so a staging leftover here is an uncommitted save
-    // (its rename never completed) — discard them all.
-    if read_if_valid(main).is_some() {
-        for s in &staging {
-            let _ = fs::remove_file(s);
-        }
-        return None;
+/// Repair on-disk settings state BEFORE the plugin opens (and merge-loads) the
+/// file. atomic_write only ever publishes a complete primary, so:
+///   * staging leftovers (`<main>.tmp-*`) are uncommitted writes whose rename
+///     never completed — discard them. They are never promoted: resurrecting a
+///     write the caller was never told succeeded would be wrong, and a leftover
+///     can even be a write whose fsync failed.
+///   * a primary that exists but doesn't parse is external corruption or a pre-fix
+///     partial write — quarantine it so the plugin starts clean rather than
+///     silently loading partial JSON.
+fn recover_path(main: &Path) {
+    for s in staging_files(main) {
+        let _ = fs::remove_file(&s);
     }
-
-    // Primary missing or corrupt — only possible from external corruption or a
-    // pre-fix partial write, since atomic_write never leaves an invalid primary.
-    // Promote the freshest complete staged copy if there is one. Staging files
-    // have unique names, so none has been clobbered by a later write.
-    let Some(src) = staging
-        .iter()
-        .filter(|s| read_if_valid(s).is_some())
-        .max_by_key(|s| mtime(s))
-    else {
-        // Nothing usable. Quarantine a corrupt primary and drop junk staging files.
+    if main.exists() && !is_valid(main) {
         quarantine(main);
-        for s in &staging {
-            let _ = fs::remove_file(s);
-        }
-        return None;
-    };
-
-    // Hold the recovered bytes so we can seed the cache if the on-disk promotion
-    // can't complete.
-    let bytes = read_if_valid(src)?;
-
-    if rename_with_retries(src, main).is_ok() && read_if_valid(main).is_some() {
-        for s in &staging {
-            if s != src {
-                let _ = fs::remove_file(s);
-            }
-        }
-        eprintln!("[settings_store] recovery: restored {main:?} from {src:?}");
-        return None;
     }
-
-    // Could not write the primary (e.g. it is locked). Leave the staging files
-    // in place — their unique names keep them safe from later writes, so a future
-    // launch retries — and quarantine the corrupt primary. Return the recovered
-    // settings so the caller seeds them into the live cache, making this session
-    // show them and persist them on the next successful write.
-    quarantine(main);
-    eprintln!(
-        "[settings_store] recovery: could not rewrite {main:?}; seeding cache, will retry next launch"
-    );
-    serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).ok()
 }
 
 /// Resolve the absolute settings.json path via the plugin's own resolver, so it
@@ -273,34 +216,9 @@ fn settings_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
 
 /// Repair on-disk settings state left by a crash. Call once, before the plugin
 /// store is first opened, so the repaired file is what the plugin's load() reads.
-/// Returns settings that could not be written back to the primary; pass them to
-/// [`seed_recovered`] after the store opens so they become the live state.
-#[must_use]
-pub fn recover<R: Runtime>(app: &AppHandle<R>) -> Option<BTreeMap<String, JsonValue>> {
-    recover_path(&settings_path(app)?)
-}
-
-/// Seed settings that [`recover`] could not write back to disk into the live
-/// store, then persist them. Call right after the store is first opened. Making
-/// the recovered settings the live state means they are not lost — an early write
-/// persists them rather than an empty store, and the flush writes them through as
-/// soon as the primary is writable again.
-pub fn seed_recovered<R: Runtime>(
-    app: &AppHandle<R>,
-    recovered: Option<BTreeMap<String, JsonValue>>,
-) {
-    let Some(map) = recovered else {
-        return;
-    };
-    let Some(store) = app.get_store(STORE_FILE) else {
-        eprintln!("[settings_store] recovery: store not open; cannot seed recovered settings");
-        return;
-    };
-    for (key, value) in map {
-        store.set(key, value);
-    }
-    if let Err(e) = flush(app) {
-        eprintln!("[settings_store] recovery: seeded cache but could not persist yet: {e}");
+pub fn recover<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(path) = settings_path(app) {
+        recover_path(&path);
     }
 }
 
@@ -399,18 +317,36 @@ mod tests {
     }
 
     #[test]
+    fn atomic_write_removes_staging_and_keeps_primary_on_failure() {
+        let dir = temp_dir("write-fail");
+        // Make the target a directory so the final rename fails deterministically
+        // on every platform, exercising the failure cleanup path.
+        let main = dir.join("settings.json");
+        fs::create_dir(&main).unwrap();
+
+        assert!(
+            atomic_write(&main, b"{\"a\":1}").is_err(),
+            "writing over a directory must fail"
+        );
+        assert!(
+            staging_files(&main).is_empty(),
+            "staging is removed when the write fails"
+        );
+    }
+
+    #[test]
     fn atomic_write_does_not_clobber_an_existing_staging_leftover() {
         let dir = temp_dir("no-clobber");
         let main = dir.join("settings.json");
-        // A recovery candidate from an earlier crash.
+        // A leftover from an earlier crash.
         let leftover = staged(&main, "old");
-        fs::write(&leftover, b"{\"recoverable\":1}").unwrap();
+        fs::write(&leftover, b"{\"leftover\":1}").unwrap();
 
         // A normal write uses a unique staging name, so the leftover is untouched.
         atomic_write(&main, b"{\"new\":1}").unwrap();
 
         assert_eq!(fs::read(&main).unwrap(), b"{\"new\":1}");
-        assert_eq!(read_if_valid(&leftover).unwrap(), b"{\"recoverable\":1}");
+        assert_eq!(fs::read(&leftover).unwrap(), b"{\"leftover\":1}");
     }
 
     #[test]
@@ -418,86 +354,39 @@ mod tests {
         let dir = temp_dir("valid-primary");
         let main = dir.join("settings.json");
         fs::write(&main, b"{\"keep\":1}").unwrap();
-        // A leftover staging file from some earlier crash.
         fs::write(staged(&main, "x"), b"{\"stale\":1}").unwrap();
 
-        assert!(
-            recover_path(&main).is_none(),
-            "valid primary needs no seeding"
-        );
+        recover_path(&main);
 
         assert_eq!(fs::read(&main).unwrap(), b"{\"keep\":1}");
         assert!(staging_files(&main).is_empty(), "stale staging removed");
     }
 
     #[test]
-    fn recovery_promotes_staged_write_when_primary_is_corrupt() {
-        let dir = temp_dir("promote-corrupt");
-        let main = dir.join("settings.json");
-        // A corrupt/partial primary alongside a complete staged write.
-        fs::write(&main, b"{\"half").unwrap();
-        fs::write(staged(&main, "x"), b"{\"recovered\":42}").unwrap();
-
-        assert!(
-            recover_path(&main).is_none(),
-            "successful promotion needs no seeding"
-        );
-
-        assert_eq!(fs::read(&main).unwrap(), b"{\"recovered\":42}");
-        assert!(staging_files(&main).is_empty());
-    }
-
-    #[test]
-    fn recovery_promotes_staged_write_when_primary_is_missing() {
-        let dir = temp_dir("promote-missing");
-        let main = dir.join("settings.json");
-        fs::write(staged(&main, "x"), b"{\"recovered\":true}").unwrap();
-
-        recover_path(&main);
-
-        assert_eq!(fs::read(&main).unwrap(), b"{\"recovered\":true}");
-        assert!(staging_files(&main).is_empty());
-    }
-
-    #[test]
-    fn recovery_promotes_a_valid_staging_over_an_invalid_one() {
-        let dir = temp_dir("valid-over-invalid");
+    fn recovery_does_not_promote_staging_over_a_corrupt_primary() {
+        // A staging leftover is an uncommitted write — even with valid JSON it must
+        // NOT be promoted (it may be a write whose fsync failed and which already
+        // reported failure to the caller).
+        let dir = temp_dir("no-promote");
         let main = dir.join("settings.json");
         fs::write(&main, b"{\"corrupt").unwrap();
-        fs::write(staged(&main, "a"), b"{\"half").unwrap(); // invalid
-        fs::write(staged(&main, "b"), b"{\"good\":1}").unwrap(); // valid
+        fs::write(staged(&main, "x"), b"{\"uncommitted\":1}").unwrap();
 
         recover_path(&main);
 
-        assert_eq!(fs::read(&main).unwrap(), b"{\"good\":1}");
-        assert!(staging_files(&main).is_empty(), "all staging cleaned up");
-    }
-
-    #[test]
-    fn recovery_seeds_cache_and_keeps_staging_when_promotion_fails() {
-        let dir = temp_dir("promote-fail");
-        let main = dir.join("settings.json");
-        // Make `main` a directory so renaming a file over it fails deterministically
-        // on every platform, forcing the promotion-failure path.
-        fs::create_dir(&main).unwrap();
-        let leftover = staged(&main, "x");
-        fs::write(&leftover, b"{\"saved\":1}").unwrap();
-
-        let recovered = recover_path(&main);
-
-        // Authoritative: the recovered settings are returned to seed the live cache.
+        assert!(!main.exists(), "corrupt primary is quarantined");
         assert_eq!(
-            recovered.unwrap().get("saved"),
-            Some(&serde_json::json!(1)),
-            "recovered settings are returned for cache seeding"
+            fs::read(suffixed(&main, ".corrupt")).unwrap(),
+            b"{\"corrupt"
         );
-        // The staging leftover is kept (unique name → safe from later writes), so a
-        // future launch can still recover it from disk.
-        assert_eq!(read_if_valid(&leftover).unwrap(), b"{\"saved\":1}");
+        assert!(
+            staging_files(&main).is_empty(),
+            "uncommitted staging is discarded, never promoted"
+        );
     }
 
     #[test]
-    fn recovery_quarantines_corrupt_primary_with_no_staged_write() {
+    fn recovery_quarantines_corrupt_primary_with_no_staging() {
         let dir = temp_dir("quarantine");
         let main = dir.join("settings.json");
         fs::write(&main, b"{\"truncated").unwrap();
@@ -512,19 +401,16 @@ mod tests {
     }
 
     #[test]
-    fn recovery_drops_invalid_staging_when_primary_missing() {
-        let dir = temp_dir("invalid-staging");
+    fn recovery_drops_staging_when_primary_missing() {
+        let dir = temp_dir("missing-primary");
         let main = dir.join("settings.json");
-        // Neither file is usable: a half-written staging file, no primary.
-        fs::write(staged(&main, "x"), b"{\"half").unwrap();
+        fs::write(staged(&main, "x"), b"{\"uncommitted\":1}").unwrap();
 
         recover_path(&main);
 
+        // No committed primary to recover; the uncommitted staging is just cleared.
         assert!(!main.exists());
-        assert!(
-            staging_files(&main).is_empty(),
-            "invalid staging should be removed"
-        );
+        assert!(staging_files(&main).is_empty());
     }
 
     #[test]
@@ -532,10 +418,11 @@ mod tests {
         let dir = temp_dir("fresh");
         let main = dir.join("settings.json");
 
-        assert!(recover_path(&main).is_none()); // must not panic or create anything
+        recover_path(&main); // must not panic or create anything
 
         assert!(!main.exists());
         assert!(staging_files(&main).is_empty());
+        assert!(!suffixed(&main, ".corrupt").exists());
     }
 
     #[test]
@@ -544,6 +431,6 @@ mod tests {
         let main = dir.join("settings.json");
         fs::write(&main, b"").unwrap();
 
-        assert!(read_if_valid(&main).is_none());
+        assert!(!is_valid(&main));
     }
 }

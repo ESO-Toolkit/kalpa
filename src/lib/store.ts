@@ -76,19 +76,13 @@ export async function getSetting<T>(key: string, fallback: T): Promise<T> {
  * (so callers can surface "couldn't save" instead of falsely reporting success).
  * `true` means the write was published crash-atomically (it survives a process
  * kill or app crash and never leaves a partial file); it does not guarantee the
- * change survives an OS-level power cut in the brief window after the write. */
+ * change survives an OS-level power cut in the brief window after the write.
+ *
+ * Implemented as a one-key batch so a failed write rolls the in-memory cache back
+ * to its prior value — otherwise the failed value would linger in the cache and a
+ * later unrelated flush could persist it despite this call returning false. */
 export async function setSetting<T>(key: string, value: T): Promise<boolean> {
-  return enqueueWrite(async () => {
-    try {
-      const store = await getStore();
-      await store.set(key, value);
-      await invoke("flush_settings");
-      return true;
-    } catch (err) {
-      console.warn(`[store] Failed to write "${key}":`, err);
-      return false;
-    }
-  });
+  return setSettings({ [key]: value });
 }
 
 /** Persist several settings as one unit: serialized against all other writes (so

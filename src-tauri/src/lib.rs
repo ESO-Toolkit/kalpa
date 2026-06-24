@@ -303,18 +303,13 @@ pub fn run() {
             }
 
             // Repair settings.json left partial/corrupt by an interrupted write,
-            // BEFORE anything opens (and merge-loads) the store below. Any settings
-            // recovery could not write back to disk are returned to be seeded into
-            // the store once it is open.
-            let recovered_settings = settings_store::recover(app.handle());
+            // BEFORE anything opens (and merge-loads) the store below: clear
+            // uncommitted staging leftovers and quarantine a corrupt primary.
+            settings_store::recover(app.handle());
 
             // Migrate auth tokens from plaintext store to credential manager
             // (one-time). This is also the first opener of the settings store.
             token_store::migrate_from_store(app.handle());
-
-            // Seed any recovered-but-unwritten settings into the now-open store so
-            // they are the live state and get persisted by the next flush.
-            settings_store::seed_recovered(app.handle(), recovered_settings);
 
             // Load auth tokens from secure credential manager
             if let Some(tokens) = token_store::load_tokens() {
