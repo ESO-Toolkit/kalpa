@@ -2,30 +2,35 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockGet = vi.fn();
 const mockSet = vi.fn();
-const mockSave = vi.fn();
 const mockDelete = vi.fn();
+/** Persistence now goes through the `flush_settings` Tauri command (atomic
+ * write in settings_store.rs), not the plugin's non-atomic store.save(). */
+const mockInvoke = vi.fn();
 
 vi.mock("@tauri-apps/plugin-store", () => ({
   load: vi.fn().mockResolvedValue({
     get: mockGet,
     set: mockSet,
-    save: mockSave,
     delete: mockDelete,
   }),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => mockInvoke(...args),
 }));
 
 beforeEach(async () => {
   vi.resetModules();
   mockGet.mockReset();
   mockSet.mockReset();
-  mockSave.mockReset();
   mockDelete.mockReset();
+  mockInvoke.mockReset();
+  mockInvoke.mockResolvedValue(undefined);
 
   const { load } = await import("@tauri-apps/plugin-store");
   vi.mocked(load).mockResolvedValue({
     get: mockGet,
     set: mockSet,
-    save: mockSave,
     delete: mockDelete,
   } as never);
 });
@@ -58,15 +63,13 @@ describe("setSetting", () => {
   it("sets value in store and reports success", async () => {
     const { setSetting } = await import("../store");
     mockSet.mockResolvedValue(undefined);
-    mockSave.mockResolvedValue(undefined);
     await expect(setSetting("theme", "dark")).resolves.toBe(true);
     expect(mockSet).toHaveBeenCalledWith("theme", "dark");
   });
 
-  it("loads the store with autoSave disabled and saves explicitly", async () => {
+  it("loads the store with autoSave disabled and flushes atomically", async () => {
     const { setSetting } = await import("../store");
     mockSet.mockResolvedValue(undefined);
-    mockSave.mockResolvedValue(undefined);
     await setSetting("theme", "dark");
 
     const { load } = await import("@tauri-apps/plugin-store");
@@ -74,12 +77,20 @@ describe("setSetting", () => {
       "settings.json",
       expect.objectContaining({ autoSave: false })
     );
-    expect(mockSave).toHaveBeenCalled();
+    // Persistence is the atomic command, never the plugin's save().
+    expect(mockInvoke).toHaveBeenCalledWith("flush_settings");
   });
 
-  it("handles errors without throwing and reports failure", async () => {
+  it("handles set errors without throwing and reports failure", async () => {
     const { setSetting } = await import("../store");
     mockSet.mockRejectedValue(new Error("write error"));
+    await expect(setSetting("key", "val")).resolves.toBe(false);
+  });
+
+  it("reports failure when the atomic flush fails", async () => {
+    const { setSetting } = await import("../store");
+    mockSet.mockResolvedValue(undefined);
+    mockInvoke.mockRejectedValue(new Error("disk full"));
     await expect(setSetting("key", "val")).resolves.toBe(false);
   });
 });
@@ -90,7 +101,12 @@ describe("setSettings", () => {
    * values. */
   function backStore(seed: Record<string, unknown> = {}) {
     const backing = new Map<string, unknown>(Object.entries(seed));
-    mockGet.mockImplementation(async (key: string) => backing.get(key));
+    mockGet.mockImplementation(async (key: string) => {
+      const v = backing.get(key);
+      // Simulate IPC: reads come back as fresh deserialized values (new object
+      // refs), so callers can't rely on reference equality.
+      return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+    });
     mockSet.mockImplementation(async (key: string, value: unknown) => {
       backing.set(key, value);
     });
@@ -98,36 +114,63 @@ describe("setSettings", () => {
     return backing;
   }
 
-  it("sets every key then saves once, reporting success", async () => {
+  it("sets every key then flushes once, reporting success", async () => {
     const backing = backStore();
-    mockSave.mockResolvedValue(undefined);
     const { setSettings } = await import("../store");
 
     await expect(setSettings({ a: 1, b: "two" })).resolves.toBe(true);
 
     expect(backing.get("a")).toBe(1);
     expect(backing.get("b")).toBe("two");
-    expect(mockSave).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("flush_settings");
   });
 
-  it("rolls the cache back to its pre-batch snapshot when save fails", async () => {
+  it("rolls the cache back to its pre-batch snapshot when the flush fails", async () => {
     // "active" existed before; "marker" did not.
     const backing = backStore({ active: "old-theme" });
-    mockSave.mockRejectedValue(new Error("disk full"));
+    mockInvoke.mockRejectedValue(new Error("disk full"));
     const { setSettings } = await import("../store");
 
     await expect(setSettings({ marker: 1, active: "new-theme" })).resolves.toBe(false);
 
     // Restored exactly: the existing key reverts, the newly-added key is dropped,
-    // so a later autosave can't flush the half-written batch.
+    // so a later flush can't write the half-applied batch.
     expect(backing.get("active")).toBe("old-theme");
     expect(backing.has("marker")).toBe(false);
   });
 
+  it("rolls back object and array values structurally when the flush fails", async () => {
+    // "list" existed before; "obj" is new. Reads return fresh refs (see backStore),
+    // so a reference-equality guard would skip both — deep equality restores them.
+    const backing = backStore({ list: [1, 2] });
+    mockInvoke.mockRejectedValue(new Error("disk full"));
+    const { setSettings } = await import("../store");
+
+    await expect(setSettings({ obj: { a: 1 }, list: [3, 4] })).resolves.toBe(false);
+
+    expect(backing.get("list")).toEqual([1, 2]); // existing key reverted
+    expect(backing.has("obj")).toBe(false); // newly-added key dropped
+  });
+
+  it("skips rollback when the store was reloaded from disk", async () => {
+    const backing = backStore({ existing: "disk" });
+    // The flush command reloaded the store from disk (it had opened over a
+    // transiently unreadable file) and signalled so via this error.
+    mockInvoke.mockRejectedValue("settings-store-reloaded");
+    const { setSettings } = await import("../store");
+
+    await expect(setSettings({ existing: "attempted", fresh: 1 })).resolves.toBe(false);
+
+    // Rollback was skipped (its snapshot would be stale): the newly-added key was
+    // NOT deleted, unlike a normal flush failure.
+    expect(backing.has("fresh")).toBe(true);
+  });
+
   it("does not clobber a concurrent write when rolling back", async () => {
     const backing = backStore({ active: "old-theme" });
-    // A concurrent writer lands a new value right as the batch tries to save.
-    mockSave.mockImplementation(async () => {
+    // A concurrent writer lands a new value right as the batch tries to flush.
+    mockInvoke.mockImplementation(async () => {
       backing.set("active", "user-choice");
       throw new Error("disk full");
     });
@@ -146,16 +189,16 @@ describe("setSettings", () => {
     mockSet.mockImplementation(async (k: string) => {
       order.push(`set:${k}`);
     });
-    mockSave.mockImplementation(async () => {
-      order.push("save");
+    mockInvoke.mockImplementation(async () => {
+      order.push("flush");
     });
     const { setSetting, setSettings } = await import("../store");
 
     // Fire a batch and a single write concurrently.
     await Promise.all([setSettings({ a: 1, b: 2 }), setSetting("c", 3)]);
 
-    // The batch (set a, set b, save) must fully complete before the single write
-    // (set c, save) begins — no interleaving.
-    expect(order).toEqual(["set:a", "set:b", "save", "set:c", "save"]);
+    // The batch (set a, set b, flush) must fully complete before the single write
+    // (set c, flush) begins — no interleaving.
+    expect(order).toEqual(["set:a", "set:b", "flush", "set:c", "flush"]);
   });
 });

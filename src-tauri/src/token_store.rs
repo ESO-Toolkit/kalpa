@@ -98,9 +98,10 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
     }
 
     // Credential manager write succeeded — remove plaintext copy. autosave is off,
-    // so persist the deletion explicitly.
+    // so persist the deletion explicitly — and atomically (crash-safe), via the
+    // same path the rest of the app uses, instead of the plugin's truncate-write.
     let _ = store.delete("auth_tokens");
-    let _ = store.save();
+    let _ = crate::settings_store::flush(app);
 }
 
 // ── Non-Windows stubs ───────────────────────────────────────────────────

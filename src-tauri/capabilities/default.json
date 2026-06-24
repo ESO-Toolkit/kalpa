@@ -13,6 +13,7 @@
     "store:allow-load",
     "store:allow-get",
     "store:allow-set",
+    "store:allow-delete",
     "updater:allow-check",
     "updater:allow-download-and-install",
     "process:allow-restart",
