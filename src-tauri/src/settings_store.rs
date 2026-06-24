@@ -311,14 +311,22 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     };
 
     if SETTINGS_TAINTED.load(Ordering::SeqCst) {
-        // The store opened empty over a file that may hold real settings. Don't
-        // overwrite it. Retry the load: if it succeeds the store is trustworthy
-        // again for the NEXT write, but fail this one — it ran against the
-        // untrusted empty cache.
-        if store.reload().is_ok() {
-            SETTINGS_TAINTED.store(false, Ordering::SeqCst);
+        // The store opened empty over a file that may hold real settings, so the
+        // caller's write was applied to an untrusted (empty) cache. Merge before
+        // writing so nothing is lost: capture the pending writes, reload the real
+        // settings from disk, then re-apply the writes ON TOP (they win conflicts).
+        // The result is disk ∪ pending, which we then persist normally — so we
+        // return success and the frontend does not run its (now-stale) rollback.
+        let pending = store.entries();
+        if store.reload().is_err() {
+            // Still can't read the file; refuse rather than overwrite it. The
+            // frontend rolls its write back; a later attempt retries the reload.
+            return Err("settings could not be loaded yet; not overwriting them".to_string());
         }
-        return Err("settings could not be loaded yet; not overwriting them".to_string());
+        for (key, value) in pending {
+            store.set(key, value);
+        }
+        SETTINGS_TAINTED.store(false, Ordering::SeqCst);
     }
 
     let path = settings_path(app).ok_or_else(|| "could not resolve settings path".to_string())?;
