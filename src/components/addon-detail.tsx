@@ -94,6 +94,7 @@ export function AddonDetail({
   // motivating multi-minute window to seconds; lifting operation tracking into
   // App.tsx would be the fix if it becomes a real annoyance.
   const operationIdRef = useRef<string | null>(null);
+  const stopRequestedRef = useRef(false);
 
   useEffect(() => {
     let disposed = false;
@@ -124,17 +125,24 @@ export function AddonDetail({
   const beginOperation = (): string => {
     const id = crypto.randomUUID();
     operationIdRef.current = id;
-    setCanStopUpdate(false);
+    stopRequestedRef.current = false;
+    // The whole operation (scan → download → extract) is cancellable now, so
+    // enable Stop the moment it begins rather than waiting for the first
+    // extraction-progress event. A Stop during scan is signalled to the backend
+    // and also caught by `stopRequestedRef` if the scan finishes first.
+    setCanStopUpdate(true);
     setExtractProgress(null);
     return id;
   };
   const endOperation = () => {
     operationIdRef.current = null;
+    stopRequestedRef.current = false;
     setCanStopUpdate(false);
     setExtractProgress(null);
   };
   const handleStopUpdate = () => {
     const id = operationIdRef.current;
+    stopRequestedRef.current = true;
     if (id) void invokeOrThrow("cancel_update", { operationId: id }).catch(() => {});
   };
   const isCancellation = (e: unknown) => getTauriErrorMessage(e).includes("Update cancelled");
@@ -205,18 +213,32 @@ export function AddonDetail({
     }
     setUpdateError(null);
     setConflictReport(null);
+    const operationId = beginOperation();
     try {
       const report = await invokeOrThrow<ConflictReport>("scan_update_conflicts", {
         addonsPath,
         folderName: addon.folderName,
         esouiId: addon.esouiId,
+        operationId,
       });
+      if (stopRequestedRef.current) {
+        await invokeOrThrow("cancel_pending_update", { sessionId: report.sessionId }).catch(
+          () => {}
+        );
+        throw new Error("Update cancelled.");
+      }
 
       if (report.conflicts.length > 0) {
         const policy = await getSetting<"ask" | "keep_mine" | "take_update">(
           "conflictPolicy",
           "ask"
         );
+        if (stopRequestedRef.current) {
+          await invokeOrThrow("cancel_pending_update", { sessionId: report.sessionId }).catch(
+            () => {}
+          );
+          throw new Error("Update cancelled.");
+        }
 
         if (policy !== "ask") {
           const autoDecisions: FileDecision[] = [
@@ -233,7 +255,7 @@ export function AddonDetail({
             addonsPath,
             sessionId: report.sessionId,
             decisions: autoDecisions,
-            operationId: beginOperation(),
+            operationId,
           });
           setUpdateSuccess(true);
           toast.success(`Updated ${addon.title}`);
@@ -255,7 +277,7 @@ export function AddonDetail({
         addonsPath,
         sessionId: report.sessionId,
         decisions: autoKeptDecisions,
-        operationId: beginOperation(),
+        operationId,
       });
       setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);

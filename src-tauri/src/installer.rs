@@ -81,6 +81,7 @@ fn is_cancelled(hooks: &ExtractHooks) -> bool {
         .unwrap_or(false)
 }
 
+#[allow(dead_code)] // Convenience wrapper retained for callers that do not need hooks.
 pub fn extract_addon_zip_selective(
     zip_path: &Path,
     addons_dir: &Path,

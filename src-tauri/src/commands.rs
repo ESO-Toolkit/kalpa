@@ -1438,15 +1438,35 @@ impl CancelGuard {
     fn flag(&self) -> &AtomicBool {
         &self.flag
     }
+
+    fn flag_arc(&self) -> Arc<AtomicBool> {
+        self.flag.clone()
+    }
 }
 
 impl Drop for CancelGuard {
     fn drop(&mut self) {
         if !self.operation_id.is_empty() {
             if let Ok(mut map) = self.registry.lock() {
-                map.remove(&self.operation_id);
+                let should_remove = map
+                    .get(&self.operation_id)
+                    .is_some_and(|flag| Arc::ptr_eq(flag, &self.flag));
+                if should_remove {
+                    map.remove(&self.operation_id);
+                }
             }
         }
+    }
+}
+
+fn check_update_cancelled(cancel: Option<&AtomicBool>) -> Result<(), String> {
+    if cancel
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+    {
+        Err(installer::CANCELLED.to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -1495,6 +1515,26 @@ fn make_progress_emitter(
     }
 }
 
+fn make_batch_progress_emitter(
+    app: tauri::AppHandle,
+    folder_name: String,
+    index: usize,
+    total: usize,
+) -> impl Fn(usize, usize) {
+    let last = AtomicUsize::new(usize::MAX);
+    move |done: usize, file_total: usize| {
+        let prev = last.load(Ordering::Relaxed);
+        if !should_emit_progress(prev, done, file_total) {
+            return;
+        }
+        last.store(done, Ordering::Relaxed);
+        let _ = app.emit(
+            "batch-update-progress",
+            batch_file_progress(folder_name.clone(), index, total, done, file_total),
+        );
+    }
+}
+
 /// Signal an in-flight update (identified by `operation_id`) to stop. Returns
 /// `true` if a matching in-flight operation was found and flagged, `false` if it
 /// had already finished or never existed. The extraction loop polls the flag
@@ -1537,12 +1577,22 @@ pub async fn update_addon(
     tokio::task::spawn_blocking(move || {
         // Network I/O outside the lock: fetch info + download ZIP
         let info = esoui::fetch_addon_info(esoui_id)?;
-        let tmp_file = esoui::download_addon(&info.download_url, None)?;
+        if cancel.flag().load(Ordering::Relaxed) {
+            return Err(installer::CANCELLED.to_string());
+        }
+        let tmp_file =
+            esoui::download_addon_with_cancel(&info.download_url, None, Some(cancel.flag()))?;
+        if cancel.flag().load(Ordering::Relaxed) {
+            return Err(installer::CANCELLED.to_string());
+        }
 
         // Acquire lock only for extract + metadata update
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        if cancel.flag().load(Ordering::Relaxed) {
+            return Err(installer::CANCELLED.to_string());
+        }
 
         // Build a progress emitter for the file-bound extraction. The
         // cancellation flag was registered before this blocking task started, so
@@ -1630,6 +1680,7 @@ pub struct BatchUpdateEntry {
     pub esoui_id: u32,
     pub folder_name: String,
     pub api_version: String,
+    pub operation_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1644,10 +1695,47 @@ pub struct BatchUpdateResult {
 #[serde(rename_all = "camelCase")]
 pub struct BatchUpdateProgress {
     pub folder_name: String,
-    /// "downloading" | "extracting" | "completed" | "failed"
+    /// "downloading" | "scanning" | "extracting" | "completed" | "failed" | "stopped"
     pub phase: String,
     pub index: usize,
     pub total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_total: Option<usize>,
+}
+
+fn batch_progress(
+    folder_name: impl Into<String>,
+    phase: impl Into<String>,
+    index: usize,
+    total: usize,
+) -> BatchUpdateProgress {
+    BatchUpdateProgress {
+        folder_name: folder_name.into(),
+        phase: phase.into(),
+        index,
+        total,
+        file_index: None,
+        file_total: None,
+    }
+}
+
+fn batch_file_progress(
+    folder_name: impl Into<String>,
+    index: usize,
+    total: usize,
+    file_index: usize,
+    file_total: usize,
+) -> BatchUpdateProgress {
+    BatchUpdateProgress {
+        folder_name: folder_name.into(),
+        phase: "extracting".to_string(),
+        index,
+        total,
+        file_index: Some(file_index),
+        file_total: Some(file_total),
+    }
 }
 
 #[tauri::command]
@@ -1696,12 +1784,7 @@ fn batch_download_addons(
     for (i, entry) in updates.iter().enumerate() {
         let _ = app.emit(
             "batch-update-progress",
-            BatchUpdateProgress {
-                folder_name: entry.folder_name.clone(),
-                phase: "downloading".to_string(),
-                index: i,
-                total,
-            },
+            batch_progress(entry.folder_name.clone(), "downloading", i, total),
         );
     }
 
@@ -1716,34 +1799,25 @@ fn batch_download_addons(
             .par_iter()
             .enumerate()
             .map(|(i, entry)| {
-                let result = fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| {
-                    // Emit "extracting" as soon as download finishes
-                    let _ = app_clone.emit(
-                        "batch-update-progress",
-                        BatchUpdateProgress {
-                            folder_name: entry.folder_name.clone(),
-                            phase: "extracting".to_string(),
+                let result =
+                    fetch_and_download_with_retry(entry.esoui_id, None).map(|(tmp, info)| {
+                        // Emit "extracting" as soon as download finishes
+                        let _ = app_clone.emit(
+                            "batch-update-progress",
+                            batch_progress(entry.folder_name.clone(), "extracting", i, total),
+                        );
+                        BatchDownloaded {
+                            tmp,
+                            info,
+                            esoui_id: entry.esoui_id,
+                            api_version: entry.api_version.clone(),
                             index: i,
-                            total,
-                        },
-                    );
-                    BatchDownloaded {
-                        tmp,
-                        info,
-                        esoui_id: entry.esoui_id,
-                        api_version: entry.api_version.clone(),
-                        index: i,
-                    }
-                });
+                        }
+                    });
                 if result.is_err() {
                     let _ = app_clone.emit(
                         "batch-update-progress",
-                        BatchUpdateProgress {
-                            folder_name: entry.folder_name.clone(),
-                            phase: "failed".to_string(),
-                            index: i,
-                            total,
-                        },
+                        batch_progress(entry.folder_name.clone(), "failed", i, total),
                     );
                 }
                 (entry.folder_name.clone(), result)
@@ -1778,12 +1852,7 @@ fn batch_extract_and_record(
                 Err(e) => {
                     let _ = app.emit(
                         "batch-update-progress",
-                        BatchUpdateProgress {
-                            folder_name: folder_name.clone(),
-                            phase: "failed".to_string(),
-                            index: dl.index,
-                            total,
-                        },
+                        batch_progress(folder_name.clone(), "failed", dl.index, total),
                     );
                     errors.insert(folder_name.clone(), e);
                     failed.push(folder_name);
@@ -1803,12 +1872,7 @@ fn batch_extract_and_record(
                         // update silently clobber user edits. Surface it as failed.
                         let _ = app.emit(
                             "batch-update-progress",
-                            BatchUpdateProgress {
-                                folder_name: folder_name.clone(),
-                                phase: "failed".to_string(),
-                                index: dl.index,
-                                total,
-                            },
+                            batch_progress(folder_name.clone(), "failed", dl.index, total),
                         );
                         errors.insert(folder_name.clone(), e);
                         failed.push(folder_name);
@@ -1840,12 +1904,7 @@ fn batch_extract_and_record(
                     );
                     let _ = app.emit(
                         "batch-update-progress",
-                        BatchUpdateProgress {
-                            folder_name: folder_name.clone(),
-                            phase: "completed".to_string(),
-                            index: dl.index,
-                            total,
-                        },
+                        batch_progress(folder_name.clone(), "completed", dl.index, total),
                     );
                     completed.push(folder_name);
                 }
@@ -1909,7 +1968,9 @@ fn build_conflict_report(
     zip_path: &Path,
     update_version: &str,
     session_id: &str,
+    cancel: Option<&AtomicBool>,
 ) -> Result<(ConflictReport, HashMap<String, String>), String> {
+    check_update_cancelled(cancel)?;
     let stored = file_hashes::load_hash_manifest(addons_dir, folder_name);
     let addon_path = addons_dir.join(folder_name);
 
@@ -1920,8 +1981,10 @@ fn build_conflict_report(
     } else {
         HashMap::new()
     };
+    check_update_cancelled(cancel)?;
 
     let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
+    check_update_cancelled(cancel)?;
 
     let stored_files = stored.as_ref().map(|m| &m.files);
 
@@ -1929,7 +1992,10 @@ fn build_conflict_report(
     let mut auto_kept_files = Vec::new();
     let mut conflicts = Vec::new();
 
-    for (rel_path, zip_hash) in &zip_hashes {
+    for (idx, (rel_path, zip_hash)) in zip_hashes.iter().enumerate() {
+        if idx % 64 == 0 {
+            check_update_cancelled(cancel)?;
+        }
         let stored_hash = stored_files.and_then(|f| f.get(rel_path));
         let disk_hash = disk_hashes.get(rel_path);
 
@@ -1966,6 +2032,7 @@ fn build_conflict_report(
     safe_files.sort();
     auto_kept_files.sort();
     conflicts.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    check_update_cancelled(cancel)?;
 
     let report = ConflictReport {
         session_id: session_id.to_string(),
@@ -1983,21 +2050,29 @@ fn build_conflict_report(
 pub async fn scan_update_conflicts(
     state: tauri::State<'_, AllowedAddonsPath>,
     pending: tauri::State<'_, crate::PendingUpdates>,
+    cancels: tauri::State<'_, crate::UpdateCancels>,
     addons_path: String,
     folder_name: String,
     esoui_id: u32,
+    operation_id: Option<String>,
 ) -> Result<ConflictReport, String> {
     validate_name(&folder_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let pending_clone = pending.0.clone();
+    let registry = cancels.0.clone();
+    let operation_id = operation_id.unwrap_or_default();
 
     tokio::task::spawn_blocking(move || {
+        let cancel = CancelGuard::register(registry, operation_id);
         let info = esoui::fetch_addon_info(esoui_id)?;
-        let tmp_file = esoui::download_addon(&info.download_url, None)?;
-
-        let (_, kept_path) = tmp_file
-            .keep()
-            .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
+        if cancel.flag().load(Ordering::Relaxed) {
+            return Err(installer::CANCELLED.to_string());
+        }
+        let tmp_file =
+            esoui::download_addon_with_cancel(&info.download_url, None, Some(cancel.flag()))?;
+        if cancel.flag().load(Ordering::Relaxed) {
+            return Err(installer::CANCELLED.to_string());
+        }
 
         let session_id = generate_session_id(&folder_name);
 
@@ -2008,10 +2083,19 @@ pub async fn scan_update_conflicts(
         let (report, zip_hashes) = build_conflict_report(
             &addons_dir,
             &folder_name,
-            &kept_path,
+            tmp_file.path(),
             &info.version,
             &session_id,
+            Some(cancel.flag()),
         )?;
+
+        if cancel.flag().load(Ordering::Relaxed) {
+            return Err(installer::CANCELLED.to_string());
+        }
+
+        let (_, kept_path) = tmp_file
+            .keep()
+            .map_err(|e| format!("Failed to persist temp ZIP: {e}"))?;
 
         if let Ok(mut map) = pending_clone.lock() {
             map.insert(
@@ -2085,12 +2169,7 @@ pub async fn scan_batch_conflicts(
         for (i, entry) in updates.iter().enumerate() {
             let _ = app.emit(
                 "batch-update-progress",
-                BatchUpdateProgress {
-                    folder_name: entry.folder_name.clone(),
-                    phase: "downloading".to_string(),
-                    index: i,
-                    total,
-                },
+                batch_progress(entry.folder_name.clone(), "downloading", i, total),
             );
         }
 
@@ -2113,16 +2192,11 @@ pub async fn scan_batch_conflicts(
                     .par_iter()
                     .enumerate()
                     .map(|(i, entry)| {
-                        let result = fetch_and_download_with_retry(entry.esoui_id).and_then(
+                        let result = fetch_and_download_with_retry(entry.esoui_id, None).and_then(
                             |(tmp, _info)| {
                                 let _ = app_clone.emit(
                                     "batch-update-progress",
-                                    BatchUpdateProgress {
-                                        folder_name: entry.folder_name.clone(),
-                                        phase: "scanning".to_string(),
-                                        index: i,
-                                        total,
-                                    },
+                                    batch_progress(entry.folder_name.clone(), "scanning", i, total),
                                 );
                                 let (_, kept_path) = tmp
                                     .keep()
@@ -2137,12 +2211,7 @@ pub async fn scan_batch_conflicts(
                         if result.is_err() {
                             let _ = app_clone.emit(
                                 "batch-update-progress",
-                                BatchUpdateProgress {
-                                    folder_name: entry.folder_name.clone(),
-                                    phase: "failed".to_string(),
-                                    index: i,
-                                    total,
-                                },
+                                batch_progress(entry.folder_name.clone(), "failed", i, total),
                             );
                         }
                         (entry.folder_name.clone(), i, result)
@@ -2172,6 +2241,7 @@ pub async fn scan_batch_conflicts(
                         &dl.kept_path,
                         version,
                         &session_id,
+                        None,
                     ) {
                         Err(e) => {
                             let _ = std::fs::remove_file(&dl.kept_path);
@@ -2255,6 +2325,7 @@ struct StreamedDownload {
     info: EsouiAddonInfo,
     esoui_id: u32,
     api_version: String,
+    cancel: Arc<AtomicBool>,
 }
 
 /// Update all addons in a single IPC call with a streaming pipeline:
@@ -2270,10 +2341,12 @@ struct StreamedDownload {
 ///   zips are kept in `PendingUpdates` and returned for the interactive modal,
 ///   exactly like `scan_batch_conflicts` + `update_addon_with_decisions`.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_batch_with_decisions(
     state: tauri::State<'_, AllowedAddonsPath>,
     meta_lock: tauri::State<'_, MetadataLock>,
     pending: tauri::State<'_, crate::PendingUpdates>,
+    cancels: tauri::State<'_, crate::UpdateCancels>,
     app: tauri::AppHandle,
     addons_path: String,
     updates: Vec<BatchUpdateEntry>,
@@ -2282,22 +2355,29 @@ pub async fn update_batch_with_decisions(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let lock = meta_lock.0.clone();
     let pending = pending.0.clone();
+    let registry = cancels.0.clone();
 
     tokio::task::spawn_blocking(move || {
         let t_start = std::time::Instant::now();
         let total = updates.len();
+        let cancel_guards: Vec<CancelGuard> = updates
+            .iter()
+            .map(|entry| {
+                CancelGuard::register(
+                    registry.clone(),
+                    entry.operation_id.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let cancel_flags: Vec<Arc<AtomicBool>> =
+            cancel_guards.iter().map(CancelGuard::flag_arc).collect();
 
         // Emit "downloading" for every addon up front so the UI shows progress
         // immediately, before the first byte lands.
         for (i, entry) in updates.iter().enumerate() {
             let _ = app.emit(
                 "batch-update-progress",
-                BatchUpdateProgress {
-                    folder_name: entry.folder_name.clone(),
-                    phase: "downloading".to_string(),
-                    index: i,
-                    total,
-                },
+                batch_progress(entry.folder_name.clone(), "downloading", i, total),
             );
         }
 
@@ -2336,28 +2416,24 @@ pub async fn update_batch_with_decisions(
                     .par_iter()
                     .enumerate()
                     .for_each_with(tx, |tx, (i, entry)| {
+                        let cancel = cancel_flags[i].clone();
                         let result =
-                            fetch_and_download_with_retry(entry.esoui_id).map(|(zip, info)| {
-                                StreamedDownload {
+                            fetch_and_download_with_retry(entry.esoui_id, Some(cancel.as_ref()))
+                                .map(|(zip, info)| StreamedDownload {
                                     zip,
                                     info,
                                     esoui_id: entry.esoui_id,
                                     api_version: entry.api_version.clone(),
-                                }
-                            });
-                        let phase = if result.is_ok() {
-                            "extracting"
-                        } else {
-                            "failed"
+                                    cancel,
+                                });
+                        let phase = match &result {
+                            Ok(_) => "extracting",
+                            Err(e) if e == installer::CANCELLED => "stopped",
+                            Err(_) => "failed",
                         };
                         let _ = app_dl.emit(
                             "batch-update-progress",
-                            BatchUpdateProgress {
-                                folder_name: entry.folder_name.clone(),
-                                phase: phase.to_string(),
-                                index: i,
-                                total,
-                            },
+                            batch_progress(entry.folder_name.clone(), phase, i, total),
                         );
                         let _ = tx.send((i, entry.folder_name.clone(), result));
                     });
@@ -2431,12 +2507,7 @@ fn extract_streamed_downloads(
     let emit_phase = |folder: &str, phase: &str, index: usize| {
         let _ = app.emit(
             "batch-update-progress",
-            BatchUpdateProgress {
-                folder_name: folder.to_string(),
-                phase: phase.to_string(),
-                index,
-                total,
-            },
+            batch_progress(folder, phase, index, total),
         );
     };
 
@@ -2444,7 +2515,7 @@ fn extract_streamed_downloads(
         let dl = match result {
             Ok(dl) => dl,
             Err(e) => {
-                // "failed" already emitted by the download worker.
+                // "failed"/"stopped" already emitted by the download worker.
                 errors.insert(folder_name.clone(), e);
                 failed.push(folder_name);
                 continue;
@@ -2460,15 +2531,28 @@ fn extract_streamed_downloads(
             dl.zip.path(),
             &dl.api_version,
             &session_id,
+            Some(dl.cancel.as_ref()),
         ) {
             Ok(r) => r,
             Err(e) => {
-                emit_phase(&folder_name, "failed", index);
+                let phase = if e == installer::CANCELLED {
+                    "stopped"
+                } else {
+                    "failed"
+                };
+                emit_phase(&folder_name, phase, index);
                 errors.insert(folder_name.clone(), e);
                 failed.push(folder_name);
                 continue;
             }
         };
+
+        if dl.cancel.load(Ordering::Relaxed) {
+            emit_phase(&folder_name, "stopped", index);
+            errors.insert(folder_name.clone(), installer::CANCELLED.to_string());
+            failed.push(folder_name);
+            continue;
+        }
 
         let has_conflicts = !report.conflicts.is_empty();
 
@@ -2523,16 +2607,31 @@ fn extract_streamed_downloads(
             .map(|p| format!("{folder_name}/{p}"))
             .collect();
 
+        let progress = make_batch_progress_emitter(app.clone(), folder_name.clone(), index, total);
+        let hooks = installer::ExtractHooks {
+            cancel: Some(dl.cancel.as_ref()),
+            progress: Some(&progress),
+        };
         let extract_result = if skip_files.is_empty() {
-            installer::extract_addon_zip(dl.zip.path(), addons_dir)
+            installer::extract_addon_zip_with(dl.zip.path(), addons_dir, hooks)
         } else {
-            installer::extract_addon_zip_selective(dl.zip.path(), addons_dir, &skip_files)
+            installer::extract_addon_zip_selective_with(
+                dl.zip.path(),
+                addons_dir,
+                &skip_files,
+                hooks,
+            )
         };
 
         let installed_folders = match extract_result {
             Ok(folders) => folders,
             Err(e) => {
-                emit_phase(&folder_name, "failed", index);
+                let phase = if e == installer::CANCELLED {
+                    "stopped"
+                } else {
+                    "failed"
+                };
+                emit_phase(&folder_name, phase, index);
                 errors.insert(folder_name.clone(), e);
                 failed.push(folder_name);
                 continue;
@@ -2771,6 +2870,9 @@ pub async fn update_addon_with_decisions(
         let _guard = lock
             .lock()
             .map_err(|_| "Internal metadata lock error".to_string())?;
+        if cancel.flag().load(Ordering::Relaxed) {
+            return Err(installer::CANCELLED.to_string());
+        }
         let pu = {
             let map = pending_clone
                 .lock()
@@ -3724,11 +3826,20 @@ static RETRY_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::n
 /// Fetch addon info and download its ZIP, retrying up to 3 times on HTTP 429.
 /// Backoff: base delay doubles each attempt (1 s, 2 s) with up to 500 ms of
 /// jitter so parallel workers don't retry in lockstep.
-fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiAddonInfo), String> {
+fn fetch_and_download_with_retry(
+    esoui_id: u32,
+    cancel: Option<&AtomicBool>,
+) -> Result<(NamedTempFile, EsouiAddonInfo), String> {
     let seq = RETRY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let mut last_err = String::new();
     for attempt in 0u32..3 {
+        if cancel
+            .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            return Err(installer::CANCELLED.to_string());
+        }
         if attempt > 0 {
             let base_ms = 1000u64 * (1 << (attempt - 1));
             // Spread jitter using an atomic counter + clock nanos so threads
@@ -3739,6 +3850,12 @@ fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiA
                 .unwrap_or(0);
             let jitter_ms = ((nanos.wrapping_add(seq.wrapping_mul(7919))) % 500) as u64;
             std::thread::sleep(std::time::Duration::from_millis(base_ms + jitter_ms));
+            if cancel
+                .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(false)
+            {
+                return Err(installer::CANCELLED.to_string());
+            }
         }
         let info = match esoui::fetch_addon_info(esoui_id) {
             Ok(i) => i,
@@ -3750,7 +3867,13 @@ fn fetch_and_download_with_retry(esoui_id: u32) -> Result<(NamedTempFile, EsouiA
                 return Err(e);
             }
         };
-        match esoui::download_addon(&info.download_url, None) {
+        if cancel
+            .map(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            return Err(installer::CANCELLED.to_string());
+        }
+        match esoui::download_addon_with_cancel(&info.download_url, None, cancel) {
             Ok(tmp) => return Ok((tmp, info)),
             Err(e) => {
                 last_err = e.clone();
@@ -3783,13 +3906,14 @@ fn import_download_addons(to_install: &[&ExportEntry]) -> Result<ImportDownloadR
         to_install
             .par_iter()
             .map(|entry| {
-                let result = fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| {
-                    ImportDownloaded {
-                        tmp,
-                        info,
-                        esoui_id: entry.esoui_id,
-                    }
-                });
+                let result =
+                    fetch_and_download_with_retry(entry.esoui_id, None).map(|(tmp, info)| {
+                        ImportDownloaded {
+                            tmp,
+                            info,
+                            esoui_id: entry.esoui_id,
+                        }
+                    });
                 (entry.folder_name.clone(), result)
             })
             .collect()
@@ -3971,7 +4095,7 @@ pub async fn batch_install_pack_addons(
                         },
                     );
                     let result =
-                        fetch_and_download_with_retry(entry.esoui_id).map(|(tmp, info)| {
+                        fetch_and_download_with_retry(entry.esoui_id, None).map(|(tmp, info)| {
                             PackDownloaded {
                                 tmp,
                                 info,
@@ -8214,6 +8338,21 @@ mod tests {
         assert_eq!(download_thread_count(0), 1);
     }
 
+    #[test]
+    fn batch_progress_omits_file_counts_when_absent() {
+        let value = serde_json::to_value(batch_progress("Foo", "downloading", 0, 3)).unwrap();
+        assert!(value.get("fileIndex").is_none());
+        assert!(value.get("fileTotal").is_none());
+    }
+
+    #[test]
+    fn batch_file_progress_serializes_camel_case_file_counts() {
+        let value = serde_json::to_value(batch_file_progress("Foo", 0, 3, 64, 128)).unwrap();
+        assert_eq!(value["phase"], "extracting");
+        assert_eq!(value["fileIndex"], 64);
+        assert_eq!(value["fileTotal"], 128);
+    }
+
     /// Build a roster slice of `(raw_key, world)` from terse pairs.
     fn sv(chars: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
         chars
@@ -8469,7 +8608,8 @@ mod tests {
         archive.finish().unwrap();
 
         let (report, _) =
-            build_conflict_report(&addons_dir, "MediaAddon", &zip_path, "2.0", "session").unwrap();
+            build_conflict_report(&addons_dir, "MediaAddon", &zip_path, "2.0", "session", None)
+                .unwrap();
 
         assert_eq!(report.auto_kept_files, Vec::<String>::new());
         assert_eq!(report.conflicts.len(), 1);

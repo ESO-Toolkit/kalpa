@@ -1,11 +1,24 @@
 import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { CheckIcon, XIcon, DownloadIcon, PackageIcon, SearchIcon } from "lucide-react";
+import {
+  CheckIcon,
+  CircleStopIcon,
+  DownloadIcon,
+  PackageIcon,
+  SearchIcon,
+  SquareIcon,
+  XIcon,
+} from "lucide-react";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { Slide } from "@/components/animate-ui/primitives/effects/slide";
 
-type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
+type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed" | "stopped";
+
+interface AddonFileProgress {
+  fileIndex: number;
+  fileTotal: number;
+}
 
 interface UpdateBannerProps {
   availableCount: number;
@@ -17,7 +30,9 @@ interface UpdateBannerProps {
     currentAddon?: string;
   } | null;
   addonStatuses: Map<string, AddonPhase>;
+  addonFileProgress: Map<string, AddonFileProgress>;
   onUpdateAll: () => void;
+  onStopAddon?: (name: string) => void;
   isOffline?: boolean;
 }
 
@@ -35,6 +50,12 @@ function PhaseIcon({ phase }: { phase: AddonPhase }) {
           <CheckIcon className="h-2.5 w-2.5 text-emerald-400" strokeWidth={3} />
         </div>
       );
+    case "stopped":
+      return (
+        <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-amber-500/20">
+          <CircleStopIcon className="h-2.5 w-2.5 text-amber-400" strokeWidth={3} />
+        </div>
+      );
     case "failed":
       return (
         <div className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-red-500/20">
@@ -44,17 +65,30 @@ function PhaseIcon({ phase }: { phase: AddonPhase }) {
   }
 }
 
-function AddonStatusPill({ name, phase }: { name: string; phase: AddonPhase }) {
+function AddonStatusPill({
+  name,
+  phase,
+  progress,
+  onStop,
+}: {
+  name: string;
+  phase: AddonPhase;
+  progress?: AddonFileProgress;
+  onStop?: (name: string) => void;
+}) {
   const bgColor =
     phase === "completed"
       ? "bg-emerald-500/[0.06] border-emerald-500/15"
-      : phase === "failed"
-        ? "bg-red-500/[0.06] border-red-500/15"
-        : phase === "extracting"
-          ? "bg-primary/[0.06] border-primary/15"
-          : phase === "scanning"
-            ? "bg-violet-400/[0.06] border-violet-400/15"
-            : "bg-accent-sky/[0.06] border-accent-sky/15";
+      : phase === "stopped"
+        ? "bg-amber-500/[0.06] border-amber-500/15"
+        : phase === "failed"
+          ? "bg-red-500/[0.06] border-red-500/15"
+          : phase === "extracting"
+            ? "bg-primary/[0.06] border-primary/15"
+            : phase === "scanning"
+              ? "bg-violet-400/[0.06] border-violet-400/15"
+              : "bg-accent-sky/[0.06] border-accent-sky/15";
+  const canStop = phase === "downloading" || phase === "scanning" || phase === "extracting";
 
   return (
     <div
@@ -62,6 +96,28 @@ function AddonStatusPill({ name, phase }: { name: string; phase: AddonPhase }) {
     >
       <PhaseIcon phase={phase} />
       <span className="max-w-[120px] truncate text-[11px] font-medium text-white/70">{name}</span>
+      {phase === "extracting" && progress && progress.fileTotal > 0 && (
+        <span className="shrink-0 text-[10px] tabular-nums text-white/45">
+          Extracting {progress.fileIndex.toLocaleString()} of {progress.fileTotal.toLocaleString()}
+        </span>
+      )}
+      {canStop && onStop && (
+        <SimpleTooltip content={`Stop updating ${name}`}>
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            className="-mr-1 h-5 w-5 text-white/45 hover:bg-red-500/[0.12] hover:text-red-300"
+            onClick={(event) => {
+              event.stopPropagation();
+              onStop(name);
+            }}
+          >
+            <SquareIcon className="h-2.5 w-2.5" />
+            <span className="sr-only">Stop updating {name}</span>
+          </Button>
+        </SimpleTooltip>
+      )}
     </div>
   );
 }
@@ -71,7 +127,9 @@ export function UpdateBanner({
   updatingAll,
   updateProgress,
   addonStatuses,
+  addonFileProgress,
   onUpdateAll,
+  onStopAddon,
   isOffline,
 }: UpdateBannerProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -86,6 +144,15 @@ export function UpdateBanner({
   const total = updateProgress?.total ?? 0;
   const doneCount = (updateProgress?.completed ?? 0) + (updateProgress?.failed ?? 0);
   const allDone = updatingAll && total > 0 && doneCount === total;
+  const stoppedCount = [...addonStatuses.values()].filter((phase) => phase === "stopped").length;
+  const failedCount = [...addonStatuses.values()].filter((phase) => phase === "failed").length;
+  const issueSummary = [
+    failedCount > 0 && `${failedCount} failed`,
+    stoppedCount > 0 && `${stoppedCount} stopped`,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const issueSummaryClass = failedCount > 0 ? "text-red-400/70" : "text-amber-400/80";
 
   if (availableCount === 0 && !updatingAll) return null;
 
@@ -95,6 +162,7 @@ export function UpdateBanner({
       downloading: 0,
       scanning: 1,
       extracting: 2,
+      stopped: 3,
       failed: 3,
       completed: 4,
     };
@@ -155,9 +223,13 @@ export function UpdateBanner({
               {/* Phase summary */}
               <span className="text-xs text-white/40">
                 {allDone ? (
-                  <span className="text-emerald-400 animate-[fade-in_0.3s_ease-out]">All done</span>
-                ) : updateProgress.failed > 0 ? (
-                  <span className="text-red-400/70">{updateProgress.failed} failed</span>
+                  <span
+                    className={`${issueSummary ? issueSummaryClass : "text-emerald-400"} animate-[fade-in_0.3s_ease-out]`}
+                  >
+                    {issueSummary || "All done"}
+                  </span>
+                ) : issueSummary ? (
+                  <span className={issueSummaryClass}>{issueSummary}</span>
                 ) : (
                   "Updating addons..."
                 )}
@@ -187,7 +259,13 @@ export function UpdateBanner({
             className="flex gap-1.5 overflow-x-auto px-5 pb-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
           >
             {sortedEntries.map(([name, phase]) => (
-              <AddonStatusPill key={name} name={name} phase={phase} />
+              <AddonStatusPill
+                key={name}
+                name={name}
+                phase={phase}
+                progress={addonFileProgress.get(name)}
+                onStop={onStopAddon}
+              />
             ))}
           </div>
         )}

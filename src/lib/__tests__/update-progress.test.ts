@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
+type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed" | "stopped";
 
 // Replicate the progress calculation and sorting logic from update-banner.tsx
 
@@ -24,6 +24,7 @@ function sortStatuses(statuses: Map<string, AddonPhase>): [string, AddonPhase][]
       downloading: 0,
       scanning: 1,
       extracting: 2,
+      stopped: 3,
       failed: 3,
       completed: 4,
     };
@@ -117,5 +118,24 @@ describe("sortStatuses", () => {
     const sorted = sortStatuses(statuses);
     expect(sorted[0]![0]).toBe("error");
     expect(sorted[1]![0]).toBe("success");
+  });
+
+  it("sorts stopped into the terminal tier (after in-progress, before completed)", () => {
+    const statuses = new Map<string, AddonPhase>([
+      ["done", "completed"],
+      ["halted", "stopped"],
+      ["busy", "extracting"],
+    ]);
+    const sorted = sortStatuses(statuses);
+    expect(sorted.map(([, phase]) => phase)).toEqual(["extracting", "stopped", "completed"]);
+  });
+
+  it("keeps stopped and failed in the same tier, preserving input order", () => {
+    const statuses = new Map<string, AddonPhase>([
+      ["a", "stopped"],
+      ["b", "failed"],
+    ]);
+    const sorted = sortStatuses(statuses);
+    expect(sorted.map(([name]) => name)).toEqual(["a", "b"]);
   });
 });
