@@ -372,7 +372,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         // Over-warning ("it may still be uploading") is the safe, honest default
         // vs. silently leaving an upload running.
         toast.info(
-          "Closed live tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report.",
+          "Closed live tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report.",
           { duration: 8000 }
         );
         void invokeOrThrow("uploader_stop_live", {
@@ -745,7 +745,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       if (dispatch?.report) setLiveReport(dispatch.report);
       toast.success(
         dispatch?.handedOff
-          ? "Live logging started in the ESO Logs Uploader."
+          ? "Live logging started in the official ESO Logs uploader."
           : "Live logging started."
       );
     } catch (e) {
@@ -814,7 +814,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       // Be honest: Kalpa stopped its own tracking, but it can't stop the separate
       // official uploader — it may still be streaming until the user stops it.
       toast.info(
-        "Stopped tracking in Kalpa. The ESO Logs Uploader keeps streaming in its own window — stop it there to end the live report.",
+        "Stopped tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report.",
         { duration: 8000 }
       );
     }
@@ -1199,7 +1199,7 @@ function TransportReadout({
       ) : (
         <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-muted-foreground">
           <CloudUpload className="size-3" aria-hidden />
-          {installed ? "Official uploader" : "ESO Logs Uploader"}
+          {installed ? "Official uploader" : "ESO Logs uploader"}
         </span>
       )}
       <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
@@ -2138,7 +2138,7 @@ function ManualActions({
       ? "Upload directly"
       : installed
         ? "Upload to ESO Logs"
-        : "Open in ESO Logs Uploader";
+        : "Open in ESO Logs uploader";
 
   return (
     // The climax — the MOST raised surface, and the only WARM (gold) one, so it
@@ -2164,8 +2164,8 @@ function ManualActions({
         {willUseNative
           ? "Your report appears here when it's done. If a log has an event type Kalpa can't upload directly, it falls back to the official uploader automatically."
           : installed
-            ? "Uploads run through the official ESO Logs Uploader installed on your PC."
-            : "We'll open the ESO Logs Uploader (or its download page) with your prepared log."}
+            ? "Uploads run through the official ESO Logs uploader installed on your PC."
+            : "We'll open the official ESO Logs uploader (or its download page) with your prepared log."}
       </p>
     </div>
   );
@@ -2265,13 +2265,13 @@ function LiveDashboard({
         <div className="rounded-lg border border-amber-500/15 border-l-[3px] border-l-amber-500 bg-amber-500/[0.04] p-3">
           <div className="flex items-center gap-2 text-xs font-medium text-amber-300/90">
             <AlertCircle className="size-3.5 shrink-0" aria-hidden />
-            Kalpa tracks; the ESO Logs Uploader uploads
+            Kalpa tracks; the ESO Logs uploader uploads
           </div>
           <ul className="mt-1.5 space-y-1 pl-5 text-xs text-muted-foreground">
             <li className="list-disc">
               <span className="text-amber-400/90">Stop tracking</span> ends this timeline in Kalpa.
             </li>
-            <li className="list-disc">The ESO Logs Uploader keeps streaming in its own window.</li>
+            <li className="list-disc">The ESO Logs uploader keeps streaming in its own window.</li>
             <li className="list-disc">
               To end uploading: stop it there and turn off in-game logging.
             </li>
@@ -2524,7 +2524,7 @@ function StatusBadge({ status }: { status: UploadRecord["status"] }) {
         <InfoPill
           color="amber"
           className="gap-1"
-          title="Finished in the ESO Logs Uploader — paste the report link to track it here."
+          title="Finished in the official ESO Logs uploader — paste the report link to track it here."
         >
           <ExternalLink className="size-2.5" aria-hidden /> Handed off
         </InfoPill>
