@@ -103,14 +103,13 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Err(last_err.unwrap_or_else(|| io::Error::other("rename failed")))
 }
 
-/// A settings file is "good" only if it parses as a JSON object — the same shape
-/// the plugin deserialises into (`HashMap<String, Value>`). A truncated or
-/// half-written file fails this check, which is exactly what recovery keys off.
-fn file_is_valid(path: &Path) -> bool {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).is_ok(),
-        Err(_) => false,
-    }
+/// Read a settings file and return its bytes only if it parses as a JSON object
+/// — the same shape the plugin deserialises into (`HashMap<String, Value>`). A
+/// truncated or half-written file returns `None`, which is what recovery keys off.
+fn read_if_valid(path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice::<BTreeMap<String, JsonValue>>(&bytes).ok()?;
+    Some(bytes)
 }
 
 /// Repair on-disk settings state left by an interrupted write, BEFORE the plugin
@@ -125,18 +124,25 @@ fn file_is_valid(path: &Path) -> bool {
 fn recover_path(main: &Path) {
     let tmp = tmp_path(main);
 
-    if main.exists() && file_is_valid(main) {
+    if read_if_valid(main).is_some() {
         if tmp.exists() {
             let _ = fs::remove_file(&tmp);
         }
         return;
     }
 
-    // Primary is missing or corrupt. Promote a complete staged write if we have one.
-    if tmp.exists() && file_is_valid(&tmp) {
-        match fs::rename(&tmp, main) {
+    // Primary is missing or corrupt. Promote a complete staged write if we have
+    // one. Route the restore through `atomic_write` rather than a bare rename so
+    // that (a) a transient lock is retried, and (b) the staging file is consumed
+    // on success — otherwise a later write would reuse the same `.tmp` name and
+    // truncate this recoverable copy. The validated bytes are held in memory, so
+    // the data is safe even as the staging file is rewritten.
+    if let Some(bytes) = read_if_valid(&tmp) {
+        match atomic_write(main, &bytes) {
             Ok(()) => eprintln!("[settings_store] recovery: restored {main:?} from staged write"),
-            Err(e) => eprintln!("[settings_store] recovery: failed to promote {tmp:?}: {e}"),
+            Err(e) => eprintln!(
+                "[settings_store] recovery: failed to restore {main:?} from staged write: {e}"
+            ),
         }
         return;
     }
@@ -332,6 +338,25 @@ mod tests {
         let main = dir.join("settings.json");
         fs::write(&main, b"").unwrap();
 
-        assert!(!file_is_valid(&main));
+        assert!(read_if_valid(&main).is_none());
+    }
+
+    #[test]
+    fn recovery_consumes_staging_file_so_a_later_write_cant_clobber_it() {
+        // Reviewer scenario: corrupt primary + valid staged write. After recovery
+        // the staged file must be gone, so the next atomic_write (which stages to
+        // the same `.tmp` name) can't truncate the recoverable copy.
+        let dir = temp_dir("consume-staging");
+        let main = dir.join("settings.json");
+        fs::write(&main, b"{\"corrupt").unwrap();
+        fs::write(tmp_path(&main), b"{\"saved\":1}").unwrap();
+
+        recover_path(&main);
+        assert_eq!(read_if_valid(&main).unwrap(), b"{\"saved\":1}");
+        assert!(!tmp_path(&main).exists(), "staging file must be consumed");
+
+        // A subsequent write proceeds normally and does not resurrect stale data.
+        atomic_write(&main, b"{\"saved\":2}").unwrap();
+        assert_eq!(read_if_valid(&main).unwrap(), b"{\"saved\":2}");
     }
 }
