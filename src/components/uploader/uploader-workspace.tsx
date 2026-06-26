@@ -204,10 +204,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const [deleting, setDeleting] = useState(false);
 
   // Direct (native) upload state, lifted here so both the promoted Direct Upload
-  // section and the upload action can reflect which transport will run. `optIn`
-  // mirrors the Settings `nativeUploadOptIn` toggle (writable inline here too);
-  // `hasSession` is whether the in-app esologs upload cookie is present. Direct
-  // upload is the *intended* path only when both are true — the backend coverage
+  // section and the upload action can reflect which transport will run. Native is
+  // now the DEFAULT for manual too: `nativeOptIn` = NOT the `manualUseOfficialUploader`
+  // opt-out (default false → native), mirroring live's `liveUseOfficialUploader`.
+  // `hasSession` is whether the in-app esologs upload cookie is present. Direct upload
+  // is the *intended* path only when nativeOptIn AND hasSession — the backend coverage
   // gate still has final say per log (an unproven event type falls back).
   const [nativeOptIn, setNativeOptIn] = useState(false);
   const [hasNativeSession, setHasNativeSession] = useState(false);
@@ -221,8 +222,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const willUseNative = nativeOptIn && hasNativeSession;
 
   // Live mode defaults to native for everyone (the official handoff is an explicit
-  // opt-out via `liveUseOfficialUploader`, default false), independent of the legacy
-  // `nativeUploadOptIn` (manual) toggle. The readout must stay HONEST, though: native
+  // opt-out via `liveUseOfficialUploader`, default false); manual now mirrors this with
+  // its own `manualUseOfficialUploader` opt-out. The readout must stay HONEST, though: native
   // also requires an upload session, and Go Live can fail/decline the sign-in prompt
   // and hand off. So gate the live readout on `hasNativeSession` exactly as manual does
   // (line above) — showing "ESO Logs uploader" until a session is captured. This
@@ -234,7 +235,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // The transport hint for the CURRENT mode. Several shared panels (the header
   // readout, LogSummaryCard's route chip, UploadOptionsControl's report-name field)
   // render in BOTH modes, so they must reflect the mode-correct flag — live uses a
-  // different opt-out (`liveUseOfficialUploader`) than manual (`nativeUploadOptIn`).
+  // different opt-out (`liveUseOfficialUploader`) than manual (`manualUseOfficialUploader`).
   // Passing the manual `willUseNative` into them while in live mode made the route
   // chip / report-name field contradict the (mode-aware) header.
   const activeWillUseNative = mode === "live" ? liveWillUseNative : willUseNative;
@@ -382,12 +383,15 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // transport hint stay in sync with Settings and the credential store.
   const refreshNativeState = useCallback(async () => {
     try {
-      const [optIn, session, liveOfficial] = await Promise.all([
-        getSetting<boolean>("nativeUploadOptIn", false),
+      const [manualOfficial, session, liveOfficial] = await Promise.all([
+        // Manual now mirrors live: native is the DEFAULT, opt-OUT via
+        // `manualUseOfficialUploader` (default false → native). `nativeOptIn` here
+        // is the "intends native" flag the readout/section read, so it's the negation.
+        getSetting<boolean>("manualUseOfficialUploader", false),
         invokeOrThrow<boolean>("uploader_has_session"),
         getSetting<boolean>("liveUseOfficialUploader", false),
       ]);
-      setNativeOptIn(optIn);
+      setNativeOptIn(!manualOfficial);
       setHasNativeSession(session);
       setLiveUseOfficial(liveOfficial);
     } catch {
@@ -398,13 +402,13 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [optIn, session, liveOfficial] = await Promise.all([
-        getSetting<boolean>("nativeUploadOptIn", false),
+      const [manualOfficial, session, liveOfficial] = await Promise.all([
+        getSetting<boolean>("manualUseOfficialUploader", false),
         invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
         getSetting<boolean>("liveUseOfficialUploader", false),
       ]);
       if (cancelled) return;
-      setNativeOptIn(optIn);
+      setNativeOptIn(!manualOfficial);
       setHasNativeSession(session);
       setLiveUseOfficial(liveOfficial);
     })();
@@ -687,16 +691,17 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     if (!selectedLog) return;
     setUploading(true);
     try {
-      // Read opt-in AND session presence fresh per upload. Native upload needs
-      // BOTH the opt-in and a captured esologs session — without the session the
-      // backend would route native and hard-fail "Not signed in" instead of
-      // using the official uploader. Gating the dispatched flag on the session
-      // keeps the routing consistent with the UI's willUseNative hint.
-      const [optIn, hasSession] = await Promise.all([
-        getSetting<boolean>("nativeUploadOptIn", false),
+      // Read the opt-OUT AND session presence fresh per upload. Manual now mirrors
+      // live: native is the DEFAULT (opt-out via `manualUseOfficialUploader`,
+      // default false → native), but it still needs a captured esologs session —
+      // without it the backend would route native and hard-fail "Not signed in", so
+      // gate the dispatched flag on the session to keep routing consistent with the
+      // UI's willUseNative hint (an opted-in user with no session still hands off).
+      const [manualOfficial, hasSession] = await Promise.all([
+        getSetting<boolean>("manualUseOfficialUploader", false),
         invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
       ]);
-      const nativeOptIn = optIn && hasSession;
+      const nativeOptIn = !manualOfficial && hasSession;
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
         filePath: selectedLog,
         options,
@@ -1720,7 +1725,9 @@ function DirectUploadSection({
   const [disclosureOpen, setDisclosureOpen] = useState(false);
 
   const handleEnable = async () => {
-    await setSetting("nativeUploadOptIn", true);
+    // Clear the opt-OUT (default is native now); this state only shows when the
+    // user previously turned direct upload OFF, so "Enable" turns it back on.
+    await setSetting("manualUseOfficialUploader", false);
     setDisclosureOpen(false);
     toast.success("Direct upload enabled.");
     await onChanged();

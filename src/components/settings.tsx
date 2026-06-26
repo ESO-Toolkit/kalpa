@@ -89,14 +89,16 @@ export function Settings({
   const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
-  const [nativeUpload, setNativeUpload] = useState(false);
-  const [nativeUploadDisclosureOpen, setNativeUploadDisclosureOpen] = useState(false);
+  // Opt-OUT of direct upload (native is the default for manual + live). Mirrors the
+  // `manualUseOfficialUploader` key the uploader workspace reads; the toggle writes
+  // both manual + live opt-out keys.
+  const [useOfficialUploader, setUseOfficialUploader] = useState(false);
   const [autoOpenAnalysis, setAutoOpenAnalysis] = useState(false);
 
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
     void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) => setWarnEsoRunning(!s));
-    void getSetting<boolean>("nativeUploadOptIn", false).then(setNativeUpload);
+    void getSetting<boolean>("manualUseOfficialUploader", false).then(setUseOfficialUploader);
     void getSetting<boolean>("autoOpenAnalysis", false).then(setAutoOpenAnalysis);
     void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
       setConflictPolicy
@@ -413,34 +415,32 @@ export function Settings({
                     </label>
                   </GlassPanel>
 
-                  {/* Direct (native) log upload — experimental, opt-in, ToS-gated.
-                    Enabling shows a disclosure first; disabling is immediate. */}
+                  {/* Direct (native) upload is now the DEFAULT for both manual and
+                    live (faster, report in-app). This is the opt-OUT: turning it on
+                    forces the official ESO Logs uploader for both. One control writes
+                    both the manual and live opt-out keys so they stay in sync. */}
                   <GlassPanel variant="subtle" className="p-3">
                     <label className="flex items-center gap-3 cursor-pointer">
                       <Checkbox
-                        checked={nativeUpload}
+                        checked={useOfficialUploader}
                         onCheckedChange={(checked) => {
                           const value = checked === true;
-                          if (value) {
-                            // Require the disclosure before enabling.
-                            setNativeUploadDisclosureOpen(true);
-                          } else {
-                            setNativeUpload(false);
-                            void setSetting("nativeUploadOptIn", false);
-                          }
+                          setUseOfficialUploader(value);
+                          // Mirror live's opt-out model for manual too; set both so a
+                          // single toggle governs the whole uploader's transport.
+                          void setSetting("manualUseOfficialUploader", value);
+                          void setSetting("liveUseOfficialUploader", value);
                         }}
                       />
                       <div>
                         <p className="text-sm font-medium text-white/90">
-                          Upload logs directly{" "}
-                          <span className="ml-1 rounded bg-[#c4a44a]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#c4a44a]">
-                            Experimental
-                          </span>
+                          Use the official ESO Logs uploader
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          Send logs to ESO Logs straight from Kalpa — faster, and the report appears
-                          in-app. Unofficial method; falls back to the official uploader
-                          automatically. See details when you enable it.
+                          Off by default — Kalpa uploads directly (faster, and the report appears
+                          in-app). Direct upload is an unofficial method that falls back to the
+                          official uploader automatically when a log can't be encoded with full
+                          accuracy. Turn this on to always use the official uploader instead.
                         </p>
                       </div>
                     </label>
@@ -684,79 +684,7 @@ export function Settings({
           </div>
         </DialogContent>
       </Dialog>
-
-      <NativeUploadDisclosure
-        open={nativeUploadDisclosureOpen}
-        onOpenChange={setNativeUploadDisclosureOpen}
-        onAccept={() => {
-          setNativeUpload(true);
-          void setSetting("nativeUploadOptIn", true);
-          setNativeUploadDisclosureOpen(false);
-          toast.success("Direct upload enabled.");
-        }}
-      />
     </>
-  );
-}
-
-/// One-time, honest disclosure shown before enabling direct (native) upload.
-/// Direct upload talks to ESO Logs' private desktop-client endpoints — a
-/// reverse-engineered method the site operator has okayed but which is not an
-/// officially supported integration. We default it OFF and require an explicit
-/// accept so the user makes an informed choice; the official uploader remains the
-/// default and the always-available fallback.
-function NativeUploadDisclosure({
-  open,
-  onOpenChange,
-  onAccept,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onAccept: () => void;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Enable direct upload?</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-3 text-sm text-muted-foreground">
-          <p>
-            Direct upload sends your logs to ESO Logs straight from Kalpa, instead of opening the
-            official ESO Logs uploader. It's faster and keeps everything in one window.
-          </p>
-          <p>
-            It works by talking to ESO Logs' uploader endpoints directly — an{" "}
-            <span className="font-medium text-white/90">unofficial method</span>. The ESO Logs
-            operator has said this is fine, but it isn't an officially supported integration, so it
-            could stop working if ESO Logs changes how their uploader works.
-          </p>
-          <p>
-            Kalpa only uses direct upload for logs it can encode with full accuracy; anything else
-            automatically falls back to the official uploader, so a report is never uploaded
-            incorrectly. You can turn this off any time.
-          </p>
-          <p className="text-xs">
-            Direct upload works today for common combat logs. If a log has an event type Kalpa can't
-            yet encode exactly, it falls back to the official uploader for that log automatically —
-            so a report is never uploaded incorrectly.
-          </p>
-          <p className="text-xs">
-            With this on, <span className="font-medium text-white/90">live logging</span> also
-            uploads directly: Kalpa keeps one report open and streams each fight as it finishes,
-            then closes the report when you stop — without launching the official uploader. If you
-            sign out of ESO Logs mid-session it pauses and prompts you to sign back in. Without this
-            on, live logging hands off to the official uploader as before.
-          </p>
-        </div>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button onClick={onAccept}>Enable direct upload</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
 
