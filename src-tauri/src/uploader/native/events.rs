@@ -4070,4 +4070,38 @@ mod combat_fixture {
             eprintln!("[abdiff] {name} OFFL-ONLY: {}", off_only.join(","));
         }
     }
+
+    /// Structural validity check for diverse on-disk logs (no official segment
+    /// needed): runs the full production `build_native_payload` and confirms it
+    /// returns a payload — i.e. the segment passes `validate_segment_text` (every
+    /// `A` resolves, counts are right). A pass means a Kalpa-native upload of that
+    /// log will RENDER, not "accept but load forever". Drops a per-code census so
+    /// the distribution can be eyeballed. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "diagnostic; needs a diverse log staged in .decode-samples"]
+    fn validate_diverse_logs_encode() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let ds = format!("{base}/../.decode-samples");
+        for name in ["bleed.log"] {
+            let Ok(raw) = std::fs::read_to_string(format!("{ds}/{name}")) else {
+                eprintln!("[validate] {name}: absent, skipping");
+                continue;
+            };
+            let lines: Vec<&str> = raw.lines().collect();
+            match super::build_native_payload(&lines) {
+                Ok(Some(_)) => eprintln!("[validate] {name}: build_native_payload OK (renders)"),
+                Ok(None) => eprintln!("[validate] {name}: not a valid session (no BEGIN_LOG)"),
+                Err(e) => panic!("[validate] {name}: structural failure: {e}"),
+            }
+            if let Some(seg) = build_fights_segment(&lines) {
+                let mut codes: std::collections::BTreeMap<&str, usize> = Default::default();
+                for l in seg.lines().skip(2) {
+                    if let Some(c) = l.split('|').nth(1) {
+                        *codes.entry(c).or_insert(0) += 1;
+                    }
+                }
+                eprintln!("[validate] {name} per-code: {codes:?}");
+            }
+        }
+    }
 }
