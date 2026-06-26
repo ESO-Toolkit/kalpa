@@ -4082,7 +4082,13 @@ mod combat_fixture {
     fn validate_diverse_logs_encode() {
         let base = env!("CARGO_MANIFEST_DIR");
         let ds = format!("{base}/../.decode-samples");
-        for name in ["bleed.log"] {
+        for name in [
+            "bleed.log",
+            "kynes_pug.log",
+            "blackrose.log",
+            "lucent_pug.log",
+            "ossein_ia.log",
+        ] {
             let Ok(raw) = std::fs::read_to_string(format!("{ds}/{name}")) else {
                 eprintln!("[validate] {name}: absent, skipping");
                 continue;
