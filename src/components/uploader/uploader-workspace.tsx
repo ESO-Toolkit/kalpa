@@ -212,25 +212,27 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // gate still has final say per log (an unproven event type falls back).
   const [nativeOptIn, setNativeOptIn] = useState(false);
   const [hasNativeSession, setHasNativeSession] = useState(false);
-  // Direct (native) upload is the *intended* path — in BOTH modes — when the user has
-  // opted in AND captured an upload session. Live now routes native under the same
-  // gate (the backend's per-segment coverage + format flag still have final say), so
-  // the header transport readout must reflect native in live too; previously it was
-  // forced to manual-only, which wrongly claimed "Official uploader" for a live
-  // session that would actually go native. The manual-only consumers (ManualActions,
-  // LogSummaryCard) only render in manual mode, so broadening this is safe for them.
-  const willUseNative = nativeOptIn && hasNativeSession;
-
   // Live mode defaults to native for everyone (the official handoff is an explicit
   // opt-out via `liveUseOfficialUploader`, default false); manual now mirrors this with
-  // its own `manualUseOfficialUploader` opt-out. The readout must stay HONEST, though: native
-  // also requires an upload session, and Go Live can fail/decline the sign-in prompt
-  // and hand off. So gate the live readout on `hasNativeSession` exactly as manual does
-  // (line above) — showing "ESO Logs uploader" until a session is captured. This
-  // under-promises only in the narrow "user will sign in at Go Live" case (the safe
-  // direction) and never claims "Direct from Kalpa" for a session that handed off.
+  // its own `manualUseOfficialUploader` opt-out. The readout must stay HONEST, though:
+  // native also requires an upload session, and Go Live can fail/decline the sign-in
+  // prompt and hand off. So gate the live readout on `hasNativeSession` — showing "ESO
+  // Logs uploader" until a session is captured. This under-promises only in the narrow
+  // "user will sign in at Go Live" case (the safe direction) and never claims "Direct
+  // from Kalpa" for a session that handed off.
   const [liveUseOfficial, setLiveUseOfficial] = useState(false);
   const liveWillUseNative = !liveUseOfficial && hasNativeSession;
+
+  // Direct (native) upload is the *intended* MANUAL path when the user hasn't opted out
+  // AND has a session. The opt-out is UNIFIED (the Settings toggle writes both keys and
+  // the promo reflects both), so a MIGRATED user with only the live opt-out
+  // (`manualUseOfficialUploader` unset + `liveUseOfficialUploader=true`) must read as
+  // "official" for manual too — hence `!liveUseOfficial`. `nativeOptIn` alone is the raw
+  // `!manualUseOfficialUploader`. The per-upload routing (handleManualUpload) reads BOTH
+  // keys fresh the same way, so this readout and the actual route never disagree. Live
+  // now routes native under the same gate, so the header readout reflects native in live
+  // too (the manual-only consumers ManualActions/LogSummaryCard render in manual mode).
+  const willUseNative = nativeOptIn && !liveUseOfficial && hasNativeSession;
 
   // The transport hint for the CURRENT mode. Several shared panels (the header
   // readout, LogSummaryCard's route chip, UploadOptionsControl's report-name field)
@@ -691,17 +693,21 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     if (!selectedLog) return;
     setUploading(true);
     try {
-      // Read the opt-OUT AND session presence fresh per upload. Manual now mirrors
-      // live: native is the DEFAULT (opt-out via `manualUseOfficialUploader`,
-      // default false → native), but it still needs a captured esologs session —
-      // without it the backend would route native and hard-fail "Not signed in", so
-      // gate the dispatched flag on the session to keep routing consistent with the
-      // UI's willUseNative hint (an opted-in user with no session still hands off).
-      const [manualOfficial, hasSession] = await Promise.all([
+      // Read the opt-OUT keys AND session presence fresh per upload. Manual now mirrors
+      // live: native is the DEFAULT (opt-out via `manualUseOfficialUploader`, default
+      // false → native), but it still needs a captured esologs session — without it the
+      // backend would route native and hard-fail "Not signed in", so gate on the session
+      // (an opted-in user with no session still hands off). The opt-out is UNIFIED, so
+      // honour EITHER key: a migrated user with only the live opt-out
+      // (`liveUseOfficialUploader=true`, manual key unset) sees the official uploader in
+      // the UI and must actually route there — matching the willUseNative readout and
+      // the Settings toggle, never silently routing native against the visible opt-out.
+      const [manualOfficial, liveOfficial, hasSession] = await Promise.all([
         getSetting<boolean>("manualUseOfficialUploader", false),
+        getSetting<boolean>("liveUseOfficialUploader", false),
         invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
       ]);
-      const nativeOptIn = !manualOfficial && hasSession;
+      const nativeOptIn = !manualOfficial && !liveOfficial && hasSession;
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
         filePath: selectedLog,
         options,
