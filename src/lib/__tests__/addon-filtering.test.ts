@@ -252,7 +252,7 @@ describe("filterAddons — sorting", () => {
     expect(result.map((a) => a.folderName)).toEqual(["Known", "Unknown1", "Unknown2"]);
   });
 
-  it("sorts by recently installed (newest install first)", () => {
+  it("sorts by recently downloaded (newest download first)", () => {
     const addons = [
       makeAddon({ folderName: "First", title: "First", installedAt: "2024-01-01T00:00:00Z" }),
       makeAddon({ folderName: "Third", title: "Third", installedAt: "2024-06-15T00:00:00Z" }),
@@ -262,7 +262,7 @@ describe("filterAddons — sorting", () => {
     expect(result.map((a) => a.folderName)).toEqual(["Third", "Second", "First"]);
   });
 
-  it("sorts untracked addons (no installedAt) last, tie-broken by name", () => {
+  it("sorts never-downloaded addons (no installedAt) last, tie-broken by name", () => {
     const addons = [
       makeAddon({ folderName: "Untracked2", title: "Zebra", installedAt: "" }),
       makeAddon({ folderName: "Tracked", title: "Tracked", installedAt: "2024-05-01T00:00:00Z" }),

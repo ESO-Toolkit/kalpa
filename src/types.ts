@@ -20,8 +20,9 @@ export interface AddonManifest {
   esouiId: number | null;
   tags: string[];
   esouiLastUpdate: number;
-  /** When this addon was installed/last updated locally, as an ISO 8601 UTC
-   * string. Empty for addons Kalpa is not tracking. */
+  /** Last time Kalpa downloaded/installed this addon locally (refreshed on each
+   * real install/update; not touched by metadata reconciliation), as an ISO
+   * 8601 UTC string. Empty for addons Kalpa never downloaded. */
   installedAt: string;
   disabled: boolean;
   modifiedFileCount: number;

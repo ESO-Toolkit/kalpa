@@ -570,7 +570,7 @@ export function AddonDetail({
               {addon.installedAt && !Number.isNaN(Date.parse(addon.installedAt)) && (
                 <>
                   <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
-                    Installed
+                    Downloaded
                   </dt>
                   <dd>{relativeDate(Date.parse(addon.installedAt))}</dd>
                 </>

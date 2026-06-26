@@ -81,9 +81,10 @@ export function filterAddons(
           return byName();
         }
         case "installed": {
-          // Most recently installed/updated locally first. The timestamp is an
-          // ISO 8601 UTC string, so lexicographic comparison is chronological.
-          // Untracked addons (empty string) sort last, ties break by name.
+          // Most recently downloaded locally first (refreshed on each real
+          // install/update). The timestamp is an ISO 8601 UTC string, so
+          // lexicographic comparison is chronological. Addons Kalpa never
+          // downloaded (empty string) sort last, ties break by name.
           const li = left.installedAt || "";
           const ri = right.installedAt || "";
           if (li !== ri) {

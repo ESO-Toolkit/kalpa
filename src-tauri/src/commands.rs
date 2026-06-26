@@ -3427,19 +3427,26 @@ fn auto_link_addons_blocking(
                 None => true,
             };
             if needs_update {
-                let version = already_tracked
-                    .map(|m| m.installed_version.clone())
-                    .unwrap_or_else(|| read_local_version(addons_dir, &folder_name));
-                let download_url = already_tracked
-                    .map(|m| m.download_url.clone())
-                    .unwrap_or_else(|| api_entry.file_info_uri.clone());
-                metadata::record_install_ext(
-                    &mut store,
-                    &folder_name,
+                // Reconcile ESOUI metadata in place. This is NOT a download, so
+                // `installed_at` (the local "last downloaded" time) and tags must
+                // be preserved — only API-derived fields change. A brand-new,
+                // auto-linked entry was present on disk but never downloaded by
+                // Kalpa, so its `installed_at` is left empty (unknown).
+                let entry = store.addons.entry(folder_name.clone()).or_insert_with(|| {
+                    metadata::AddonMetadata {
+                        esoui_id: 0,
+                        installed_version: read_local_version(addons_dir, &folder_name),
+                        download_url: api_entry.file_info_uri.clone(),
+                        installed_at: String::new(),
+                        tags: Vec::new(),
+                        esoui_last_update: 0,
+                    }
+                });
+                metadata::reconcile_addon(
+                    entry,
                     api_entry.esoui_id,
-                    &version,
-                    &download_url,
                     api_entry.last_update,
+                    &api_entry.file_info_uri,
                 );
                 linked.push(folder_name);
             }

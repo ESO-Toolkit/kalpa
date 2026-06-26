@@ -106,7 +106,7 @@ const AddonListItem = memo(function AddonListItem({
     dateLabel = `Updated ${formatRelativeMs(addon.esouiLastUpdate)}`;
   } else if (sortMode === "installed" && addon.installedAt) {
     const rel = formatRelativeDate(addon.installedAt);
-    if (rel) dateLabel = `Installed ${rel}`;
+    if (rel) dateLabel = `Downloaded ${rel}`;
   }
 
   const content = (
@@ -648,7 +648,7 @@ export function AddonList({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="updated">Recently Updated</SelectItem>
-                  <SelectItem value="installed">Recently Installed</SelectItem>
+                  <SelectItem value="installed">Recently Downloaded</SelectItem>
                   <SelectItem value="name">Name</SelectItem>
                   <SelectItem value="author">Author</SelectItem>
                 </SelectContent>

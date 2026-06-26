@@ -43,9 +43,10 @@ pub struct AddonManifest {
     pub esoui_id: Option<u32>,
     pub tags: Vec<String>,
     pub esoui_last_update: u64,
-    /// When this addon was installed/last updated locally, as an ISO 8601 UTC
-    /// string (copied from the metadata store). Empty for addons Kalpa is not
-    /// tracking (e.g. manually dropped in, or installed before metadata existed).
+    /// Last time Kalpa downloaded/installed this addon locally, as an ISO 8601
+    /// UTC string (copied from the metadata store; refreshed on each real
+    /// install/update, not on metadata reconciliation). Empty for addons Kalpa
+    /// never downloaded (e.g. manually dropped in).
     #[serde(default)]
     pub installed_at: String,
     pub disabled: bool,
