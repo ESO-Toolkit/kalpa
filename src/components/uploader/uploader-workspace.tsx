@@ -221,7 +221,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // "user will sign in at Go Live" case (the safe direction) and never claims "Direct
   // from Kalpa" for a session that handed off.
   const [liveUseOfficial, setLiveUseOfficial] = useState(false);
-  const liveWillUseNative = !liveUseOfficial && hasNativeSession;
+  // Unified opt-out: native for live iff NEITHER key is opted out (== the manual rule),
+  // so the live readout matches live routing in any split persisted state.
+  const liveWillUseNative = nativeOptIn && !liveUseOfficial && hasNativeSession;
 
   // Direct (native) upload is the *intended* MANUAL path when the user hasn't opted out
   // AND has a session. The opt-out is UNIFIED (the Settings toggle writes both keys and
@@ -917,13 +919,17 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
 
     // Native direct-streaming is the DEFAULT live path: it's faster and keeps the
     // report in-app. The only ways off it are (a) `forceHandoff` — the explicit "go
-    // live via the official uploader instead" escape hatch — or (b) the persisted
-    // `liveUseOfficialUploader` opt-OUT (default false → native). We use a dedicated
-    // key (not the legacy `nativeUploadOptIn`, whose default-false meant "native off")
-    // so existing users' stored values aren't silently inverted: an unset key resolves
-    // to false = native, which is the new default for everyone.
-    const preferOfficial =
-      forceHandoff || (await getSetting<boolean>("liveUseOfficialUploader", false));
+    // live via the official uploader instead" escape hatch — or (b) the UNIFIED opt-out.
+    // The opt-out spans BOTH keys (the Settings toggle + the direct-upload promo treat
+    // them as one), so honour EITHER: a user who turned on "use the official uploader"
+    // must hand off in live too, even in a split persisted state. Read both keys (an
+    // unset key resolves to false = native, the default for everyone) so live routing
+    // matches the manual routing + readouts and can't silently diverge.
+    const [manualOfficial, liveOfficial] = await Promise.all([
+      getSetting<boolean>("manualUseOfficialUploader", false),
+      getSetting<boolean>("liveUseOfficialUploader", false),
+    ]);
+    const preferOfficial = forceHandoff || manualOfficial || liveOfficial;
 
     // Native needs the in-app ESO Logs upload session (the wcl_session cookie), which
     // is SEPARATE from the profile login that gates this dialog (authUser/isLoggedIn).
