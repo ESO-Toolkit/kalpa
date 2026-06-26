@@ -1059,6 +1059,20 @@ pub async fn uploader_upload_log(
         // noise).
         eprintln!("[uploader] native routing → official: {}", reason.explain());
     }
+    // When the user opted INTO direct upload but THIS log fell back to the official
+    // app for an actionable, per-log reason (too large / multiple sessions / an event
+    // type Kalpa can't yet encode), surface that reason so a "direct" upload quietly
+    // using the official uploader isn't a mystery. `NotOptedIn` (the user chose the
+    // official path) and `FormatUnconfirmed` (a global flag, not a per-log trait) are
+    // not surprises worth overriding the generic handoff copy.
+    let fallback_note = match &routing {
+        transport::NativeRouting::Fallback(
+            reason @ (transport::NativeFallbackReason::UnprovenEvents(_)
+            | transport::NativeFallbackReason::TooLarge
+            | transport::NativeFallbackReason::MultiSession),
+        ) if native_opt_in => Some(reason.explain()),
+        _ => None,
+    };
 
     let outcome = if use_native {
         // Native path: build the payload + drive the report lifecycle in-process,
@@ -1093,7 +1107,9 @@ pub async fn uploader_upload_log(
             let _ = super::history::upsert(&app, record);
             Ok(UploadDispatch {
                 handed_off: true,
-                detail,
+                // Prefer the actionable "why direct upload fell back" note when there
+                // is one; otherwise the transport's own handoff detail.
+                detail: fallback_note.unwrap_or(detail),
                 report: None,
             })
         }

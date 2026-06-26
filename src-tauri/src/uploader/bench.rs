@@ -18,6 +18,18 @@
 //! line reports `n/a` (the tracking allocator isn't installed — see `bench_alloc`).
 //! When the sample log is absent the benchmark SKIPS (prints a notice and returns)
 //! so it never fails CI or another machine.
+//!
+//! RECORDED BASELINE (2026-06-25, `--release`, single-threaded, sunspire_raw.log
+//! 927.8 MiB / 0.97 GB; run with `--test-threads=1` so the shared peak-heap counter
+//! isn't cross-contaminated by the two tests running in parallel):
+//!
+//! * SPLIT  : 2.72 s, 357 MB/s, **peak heap 8.0 MiB** (= the 8 MiB copy buffer →
+//!   truly O(1) memory). Beats the sheumais reference on both axes (~6 s / ~40 MB).
+//! * ENCODE : 200 MiB chunk in 8.74 s, 24 MB/s, peak heap 462.7 MiB (~2.3× input —
+//!   the buffered `contents` + `Vec<&str>` + rendered segment held at once). This is
+//!   the one axis Kalpa does NOT beat sheumais's streaming ~40 MB-at-1 GB; production
+//!   never hits it (the 256 MiB cap forces a split first), and a streaming encoder is
+//!   the future optimization to close it.
 
 use std::io::Read;
 use std::path::PathBuf;
