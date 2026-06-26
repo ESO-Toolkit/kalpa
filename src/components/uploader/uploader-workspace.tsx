@@ -132,6 +132,11 @@ async function openReportUrl(url: string): Promise<void> {
  *  keys are written as one unit (the unified Settings toggle), so either set ⇒
  *  opted out. Used by both manual and live routing so they can never disagree. */
 async function usesOfficialUploader(): Promise<boolean> {
+  // A TAINTED settings store (opened empty over an unreadable settings file) returns
+  // default values WITHOUT error, so getSettingChecked's `ok` can't catch it. Consult
+  // the backend taint flag and fail closed; a failed taint check also fails closed.
+  const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
+  if (tainted) return true;
   const [manual, live] = await Promise.all([
     getSettingChecked<boolean>("manualUseOfficialUploader", false),
     getSettingChecked<boolean>("liveUseOfficialUploader", false),
@@ -410,7 +415,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         invokeOrThrow<boolean>("uploader_has_session"),
         getSettingChecked<boolean>("liveUseOfficialUploader", false),
       ]);
-      const readFailed = !manual.ok || !live.ok;
+      // Treat a tainted (untrusted-empty) store as a read failure too.
+      const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
+      const readFailed = !manual.ok || !live.ok || tainted;
       setNativeOptIn(!manual.value && !readFailed);
       setHasNativeSession(session);
       setLiveUseOfficial(live.value || readFailed);
@@ -428,8 +435,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         getSettingChecked<boolean>("liveUseOfficialUploader", false),
       ]);
       if (cancelled) return;
-      // Fail closed on a store read error (see refreshNativeState).
-      const readFailed = !manual.ok || !live.ok;
+      // Fail closed on a store read error OR a tainted store (see refreshNativeState).
+      const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
+      if (cancelled) return;
+      const readFailed = !manual.ok || !live.ok || tainted;
       setNativeOptIn(!manual.value && !readFailed);
       setHasNativeSession(session);
       setLiveUseOfficial(live.value || readFailed);

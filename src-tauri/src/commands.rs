@@ -8104,6 +8104,15 @@ pub async fn flush_settings(app: tauri::AppHandle) -> Result<(), String> {
     crate::settings_store::flush(&app)
 }
 
+/// Whether the settings store opened TAINTED (empty over an unreadable settings
+/// file), so cached reads are untrusted defaults. Security-sensitive frontend reads
+/// (the native-upload opt-out) consult this to fail CLOSED instead of trusting a
+/// default that may mask a real persisted opt-out.
+#[tauri::command]
+pub fn settings_tainted() -> bool {
+    crate::settings_store::is_tainted()
+}
+
 // ── Controlled Folder Access / write-access detection ──────────────────
 
 #[derive(Debug, Clone, Serialize)]

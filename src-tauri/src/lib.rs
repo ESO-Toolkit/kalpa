@@ -489,6 +489,7 @@ pub fn run() {
             #[cfg(debug_assertions)]
             uploader::commands::uploader_run_native_live_spike,
             commands::flush_settings,
+            commands::settings_tainted,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])
