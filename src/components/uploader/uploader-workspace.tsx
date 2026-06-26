@@ -1348,7 +1348,13 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 "why did the official uploader open?" surprise. */}
               {liveSessionId === null && (
                 <DirectUploadSection
-                  optIn={nativeOptIn}
+                  // This section represents the UNIFIED direct-upload state (it's shown
+                  // in both modes), so "opted in" requires native for BOTH manual and
+                  // live — i.e. neither opt-out key set. A migrated user with only the
+                  // live opt-out (manualUseOfficialUploader=false, liveUseOfficialUploader
+                  // =true) must NOT see "ready" while Go Live hands off; they see Enable,
+                  // which clears BOTH keys. Manual-only routing still uses `nativeOptIn`.
+                  optIn={nativeOptIn && !liveUseOfficial}
                   hasSession={hasNativeSession}
                   onChanged={refreshNativeState}
                 />
