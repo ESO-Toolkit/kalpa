@@ -29,6 +29,18 @@ function enqueueWrite<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** Resolves once every settings write enqueued SO FAR has settled (committed or
+ * failed). A security-sensitive READ (the native-upload opt-out) calls this before
+ * reading so a fire-and-forget toggle write (`void setSettings(...)`) can't be read
+ * stale: the read is ordered AFTER any pending write rather than racing the IPC/disk
+ * flush. Never rejects. */
+export function settingsWritesSettled(): Promise<void> {
+  return writeChain.then(
+    () => undefined,
+    () => undefined
+  );
+}
+
 /** Structural equality for JSON-serializable values. Store reads come back as
  * freshly deserialized values over IPC, so reference equality (===) would treat
  * every object/array entry as changed — making the rollback guard below skip them.

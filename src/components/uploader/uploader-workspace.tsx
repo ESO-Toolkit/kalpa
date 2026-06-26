@@ -48,7 +48,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
-import { getSetting, getSettingChecked, setSettings } from "@/lib/store";
+import { getSetting, getSettingChecked, setSettings, settingsWritesSettled } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
 import {
@@ -132,6 +132,10 @@ async function openReportUrl(url: string): Promise<void> {
  *  keys are written as one unit (the unified Settings toggle), so either set ⇒
  *  opted out. Used by both manual and live routing so they can never disagree. */
 async function usesOfficialUploader(): Promise<boolean> {
+  // Order this read AFTER any pending settings write: the Settings toggle writes the
+  // opt-out fire-and-forget, so reading the store immediately could see stale values
+  // and route native against a just-set opt-out.
+  await settingsWritesSettled();
   // A TAINTED settings store (opened empty over an unreadable settings file) returns
   // default values WITHOUT error, so getSettingChecked's `ok` can't catch it. Consult
   // the backend taint flag and fail closed; a failed taint check also fails closed.
