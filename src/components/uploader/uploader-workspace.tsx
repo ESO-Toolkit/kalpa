@@ -128,7 +128,13 @@ async function openReportUrl(url: string): Promise<void> {
 async function maybeAutoOpenAnalysis(code: string, opts?: { live?: boolean }): Promise<void> {
   try {
     const auto = await getSetting<boolean>("autoOpenAnalysis", false);
-    if (auto) await openReportUrl(esotkReportUrl(code, opts));
+    if (!auto) return;
+    // Open directly (not via openReportUrl) so a failure stays SILENT: the user
+    // didn't click anything, so an opener-scope rejection or read error must not
+    // pop a "couldn't open" toast. The always-present "View analysis" button covers
+    // the manual path.
+    const m = await import("@tauri-apps/plugin-opener");
+    await m.openUrl(esotkReportUrl(code, opts));
   } catch {
     /* best-effort — the manual button still works */
   }
