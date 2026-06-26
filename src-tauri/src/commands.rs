@@ -161,6 +161,10 @@ pub struct UpdateCheckResult {
     pub remote_version: String,
     pub download_url: String,
     pub has_update: bool,
+    /// Remote ESOUI last-updated timestamp (epoch ms) observed during this
+    /// check. The frontend merges it into live addon state so the "Recently
+    /// Updated" sort is accurate immediately, without waiting for a re-scan.
+    pub remote_last_update: u64,
 }
 
 /// Determine the "primary" folder from a list of installed folders.
@@ -1296,6 +1300,7 @@ pub async fn check_for_updates(
                 remote_version: p.remote_version,
                 download_url: p.fallback_url,
                 has_update: p.has_update,
+                remote_last_update: p.remote_last_update,
             })
             .collect();
 
@@ -1312,6 +1317,7 @@ struct UpdatePending {
     remote_version: String,
     fallback_url: String,
     has_update: bool,
+    remote_last_update: u64,
 }
 
 /// Phase 1 of check_for_updates: compare local metadata against the ESOUI API
@@ -1380,6 +1386,7 @@ fn check_for_updates_metadata(
             remote_version: api_entry.version.clone(),
             fallback_url: meta.download_url.clone(),
             has_update,
+            remote_last_update: api_entry.last_update,
         });
     }
 

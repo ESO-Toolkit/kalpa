@@ -50,6 +50,10 @@ export interface UpdateCheckResult {
   remoteVersion: string;
   downloadUrl: string;
   hasUpdate: boolean;
+  /** Remote ESOUI last-updated timestamp (epoch ms) seen during this check.
+   * Merged into live addon state so the "Recently Updated" sort is accurate
+   * without waiting for a re-scan. */
+  remoteLastUpdate: number;
 }
 
 export interface BatchUpdateResult {
