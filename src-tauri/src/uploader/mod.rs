@@ -16,6 +16,10 @@
 //! * [`history`]   — persistent upload history.
 //! * [`commands`]  — Tauri command handlers and managed state.
 
+/// Performance benchmark for the split + native-encode pipeline (ignored by
+/// default; needs a local multi-GB log). See `bench.rs`.
+#[cfg(test)]
+mod bench;
 pub mod commands;
 pub mod discovery;
 pub mod history;

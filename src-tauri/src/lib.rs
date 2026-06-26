@@ -1,4 +1,8 @@
 mod auth;
+/// Heap high-water-mark allocator for the uploader perf benchmark. The
+/// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
+/// so normal builds are unaffected.
+pub mod bench_alloc;
 mod commands;
 mod edit_backups;
 mod esoui;
@@ -13,6 +17,14 @@ mod saved_variables;
 mod settings_store;
 mod token_store;
 pub mod uploader;
+
+// Benchmark-only heap tracker (see `bench_alloc`). Installed solely under the
+// `bench-alloc` feature so the app/release/normal-test builds keep the system
+// allocator. Used by the `cargo test --features bench-alloc … --ignored` perf
+// benchmark to report peak heap.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: bench_alloc::TrackingAlloc = bench_alloc::TrackingAlloc;
 
 use serde::Serialize;
 use std::collections::HashMap;

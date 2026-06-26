@@ -10,6 +10,13 @@ repository = "https://github.com/ESO-Toolkit/kalpa"
 name = "kalpa_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+# Installs a heap-tracking global allocator (see src/bench_alloc.rs) so the
+# uploader perf benchmark can report a peak-heap high-water mark. OFF by default;
+# enable only for `cargo test --features bench-alloc … --ignored`. No effect on
+# the app/release builds.
+bench-alloc = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
