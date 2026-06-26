@@ -1411,7 +1411,11 @@ fn split_csv_quoted(s: &str) -> impl Iterator<Item = &str> {
 /// for an actionResult that does not emit a damage/dot line.
 pub fn code1_result_flag(action_result: &str) -> Option<u8> {
     match action_result {
-        "DAMAGE" | "DOT_TICK" => Some(1),
+        // FALL_DAMAGE is environmental damage TAKEN (source absent → mask 32, no S
+        // block). The official segment renders it exactly like a normal hit: flag 1,
+        // final = hitValue (verified: `…|32|16|C…|T…|1|13549`). We previously dropped
+        // it (no flag), losing real DamageTaken — present on cityofash/combat/sunspire.
+        "DAMAGE" | "DOT_TICK" | "FALL_DAMAGE" => Some(1),
         "CRITICAL_DAMAGE" | "DOT_TICK_CRITICAL" => Some(2),
         "BLOCKED_DAMAGE" => Some(4),
         "DODGED" => Some(7),
