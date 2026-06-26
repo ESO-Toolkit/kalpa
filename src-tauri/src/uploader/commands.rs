@@ -1672,11 +1672,21 @@ async fn start_native_live_branch(
             created_at_ms: now_ms(),
         };
         // Surface lifecycle/auth events over the same LiveEvent channel the UI consumes.
+        let ch_report = channel_for_thread.clone();
         let ch_anchored = channel_for_thread.clone();
         let ch_fight = channel_for_thread.clone();
         let ch_reauth = channel_for_thread.clone();
         let ch_resolved = channel_for_thread.clone();
         let events = LiveEventSink {
+            on_report_open: Box::new(move |code: &str| {
+                // The report exists on ESO Logs the instant create-report returns;
+                // hand the UI its code + canonical link so it can deep-link to the
+                // live analysis view while the raid is still streaming.
+                let _ = ch_report.send(LiveEvent::ReportOpened {
+                    code: code.to_string(),
+                    url: super::watcher::report_url(code),
+                });
+            }),
             on_session_anchored: Box::new(move || {
                 let _ = ch_anchored.send(LiveEvent::SessionAnchored);
             }),

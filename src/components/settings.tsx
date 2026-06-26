@@ -91,11 +91,13 @@ export function Settings({
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [nativeUpload, setNativeUpload] = useState(false);
   const [nativeUploadDisclosureOpen, setNativeUploadDisclosureOpen] = useState(false);
+  const [autoOpenAnalysis, setAutoOpenAnalysis] = useState(false);
 
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
     void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) => setWarnEsoRunning(!s));
     void getSetting<boolean>("nativeUploadOptIn", false).then(setNativeUpload);
+    void getSetting<boolean>("autoOpenAnalysis", false).then(setAutoOpenAnalysis);
     void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
       setConflictPolicy
     );
@@ -439,6 +441,31 @@ export function Settings({
                           Send logs to ESO Logs straight from Kalpa — faster, and the report appears
                           in-app. Unofficial method; falls back to the official uploader
                           automatically. See details when you enable it.
+                        </p>
+                      </div>
+                    </label>
+                  </GlassPanel>
+
+                  {/* Auto-open the ESO Log Aggregator analysis after an upload. Off by
+                    default so an upload never steals focus to the browser unasked. */}
+                  <GlassPanel variant="subtle" className="p-3">
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <Checkbox
+                        checked={autoOpenAnalysis}
+                        onCheckedChange={(checked) => {
+                          const value = checked === true;
+                          setAutoOpenAnalysis(value);
+                          void setSetting("autoOpenAnalysis", value);
+                        }}
+                      />
+                      <div>
+                        <p className="text-sm font-medium text-white/90">
+                          Open analysis after upload
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          When an upload finishes, automatically open its report in the ESO Log
+                          Aggregator (fight detection, rotations, scribing, replay). You can always
+                          open it from a report's “View analysis” button instead.
                         </p>
                       </div>
                     </label>

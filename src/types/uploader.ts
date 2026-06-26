@@ -122,6 +122,10 @@ export type LiveEvent =
   | { type: "sessionReset" }
   | { type: "fightSkipped"; reason: string }
   | { type: "warning"; message: string }
+  // Native live only: the report was created and now has a code — emitted the
+  // instant create-report returns, so the UI can surface the report link / a live
+  // analysis deep-link while the raid is still streaming (not just after settle).
+  | { type: "reportOpened"; code: string; url: string }
   // Native live only: the first BEGIN_LOG arrived, so the driver is anchored and now
   // streaming — the UI flips from "waiting for a session" to "streaming".
   | { type: "sessionAnchored" }

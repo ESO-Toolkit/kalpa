@@ -670,6 +670,15 @@ pub fn run_native_live(
         return Err(UploadError::Cancelled);
     }
 
+    // Surface the report code to the UI now that the report exists and we're committed
+    // to streaming it (past the create-race cancel check above, so a Stop-during-create
+    // never shows a "report ready" for a report we immediately terminate). The handoff
+    // path can't reach here, so this is the only way the live code reaches the UI in
+    // real time rather than after settle.
+    if let Some(ch) = channel {
+        (ch.on_report_open)(&code.0);
+    }
+
     let mut driver = LiveDriver::new(sender, code.clone(), cancel.clone(), channel);
     // MID-SESSION: warm the encoder from the on-disk session prefix BEFORE tailing, so a
     // user already combat-logging streams without a fresh /reloadui. A warm-up failure
@@ -713,6 +722,11 @@ pub fn run_native_live(
 /// and is testable with a recording fake. The production command adapts a
 /// `Channel<LiveEvent>` into this.
 pub struct LiveEventSink {
+    /// Called once, the instant `create-report` returns a code (before any segment
+    /// posts), with the report code. Lets the UI surface the report link / an ESO Log
+    /// Aggregator live deep-link while the session is still streaming. The command
+    /// adapter builds the full URL from the code.
+    pub on_report_open: Box<dyn Fn(&str) + Send + Sync>,
     /// Called once when the first `BEGIN_LOG` arrives — the driver is now anchored and
     /// will stream fights. The UI flips from "waiting for a session" to "streaming".
     pub on_session_anchored: Box<dyn Fn() + Send + Sync>,

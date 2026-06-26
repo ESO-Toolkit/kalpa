@@ -64,6 +64,13 @@ pub enum LiveEvent {
     /// A non-fatal warning (e.g. transient read retry). The UI may log but
     /// should not toast these, as they can recur frequently.
     Warning { message: String },
+    /// (Native live only) the report was created on ESO Logs and now has a code —
+    /// emitted the instant `create-report` returns, before the first segment posts.
+    /// Lets the UI surface the report link (and an ESO Log Aggregator "watch live"
+    /// deep-link) while the raid is still in progress, instead of only after the
+    /// session settles. The official-handoff path can't observe a code, so it never
+    /// fires there. `url` is the canonical esologs.com report link.
+    ReportOpened { code: String, url: String },
     /// (Native live only) the first `BEGIN_LOG` of a logging session arrived, so the
     /// driver is now anchored and will stream fights as they finish. Until this fires,
     /// the native path is *armed but waiting* (the encoder needs a session header it

@@ -61,6 +61,21 @@ export function compactBytes(bytes: number): string {
   return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/** Deep-link to the ESO Log Aggregator (esotk.com) analysis for a report `code`.
+ *  esotk reads the ESO Logs report by code via the public GraphQL API and renders
+ *  the owner's richer analysis (fight detection + HM, rotation/cast lists, scribing,
+ *  insights, 3D replay) — strictly better than the raw esologs.com report view, and
+ *  the reason Kalpa hands off viewing rather than rebuilding it.
+ *
+ *  `live: true` targets esotk's LiveLog view, which 30s-repolls the newest in-progress
+ *  fight — the right link to open while a raid is still streaming. The code is always
+ *  server-issued alphanumeric, but encode it defensively so a malformed value can't
+ *  break out of the fragment path. */
+export function esotkReportUrl(code: string, opts?: { live?: boolean }): string {
+  const base = `https://esotk.com/#/report/${encodeURIComponent(code)}`;
+  return opts?.live ? `${base}/live` : base;
+}
+
 /** Format a millisecond duration as `m:ss` or `s.s s`. */
 export function formatDuration(ms: number): string {
   if (ms <= 0) return "0s";

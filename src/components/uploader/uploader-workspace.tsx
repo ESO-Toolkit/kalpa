@@ -73,6 +73,7 @@ import {
   StatusPill,
   WhatGetsUploaded,
   compactBytes,
+  esotkReportUrl,
   formatElapsed,
   relativeFromMs,
 } from "./uploader-shared";
@@ -116,6 +117,20 @@ async function openReportUrl(url: string): Promise<void> {
     await m.openUrl(url);
   } catch {
     toast.error("Couldn't open the report — copy the link and open it manually.");
+  }
+}
+
+/** Open the ESO Log Aggregator analysis for `code` IFF the user enabled auto-open
+ *  (the `autoOpenAnalysis` setting, default off). Best-effort: a disabled setting,
+ *  a read failure, or an opener-scope rejection is silent — the always-present
+ *  "View analysis" button covers the manual case. `live` opens esotk's LiveLog view
+ *  (for an in-progress native session). */
+async function maybeAutoOpenAnalysis(code: string, opts?: { live?: boolean }): Promise<void> {
+  try {
+    const auto = await getSetting<boolean>("autoOpenAnalysis", false);
+    if (auto) await openReportUrl(esotkReportUrl(code, opts));
+  } catch {
+    /* best-effort — the manual button still works */
   }
 }
 
@@ -687,6 +702,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       });
       if (dispatch.report) {
         toast.success("Upload complete — report ready.");
+        // Native upload produced a report code; offer to jump straight to the richer
+        // ESO Log Aggregator analysis if the user opted into auto-open.
+        void maybeAutoOpenAnalysis(dispatch.report.code);
       } else {
         toast.success(dispatch.detail, { duration: 7000 });
       }
@@ -780,6 +798,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       switch (ev.type) {
         case "started":
           setLiveStatus("watching");
+          break;
+        case "reportOpened":
+          // Native live only: the report now has a code (create-report returned),
+          // before any fight has posted. Surface it immediately so the user can open
+          // the live analysis in the ESO Log Aggregator while the raid is streaming —
+          // previously the live code only appeared after the session settled.
+          setLiveReport({ code: ev.code, url: ev.url });
+          void maybeAutoOpenAnalysis(ev.code, { live: true });
           break;
         case "sessionAnchored":
           // Native: the first BEGIN_LOG landed — flip waiting→streaming instantly.
@@ -2612,13 +2638,22 @@ function LiveDashboard({
             >
               <Copy className="size-3.5" />
             </Button>
+            <Button variant="ghost" size="sm" onClick={() => void openReportUrl(liveReport.url)}>
+              <ExternalLink className="size-3.5" />
+              ESO Logs
+            </Button>
+            {/* The richer analysis lives in the ESO Log Aggregator (esotk) — make it
+                the primary action. While a native session is still streaming, deep-link
+                to esotk's LiveLog view (30s repoll follows the newest fight). */}
             <Button
               size="sm"
               className="bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
-              onClick={() => void openReportUrl(liveReport.url)}
+              onClick={() =>
+                void openReportUrl(esotkReportUrl(liveReport.code, { live: isNative }))
+              }
             >
-              <ExternalLink className="size-3.5" />
-              View report
+              <Zap className="size-3.5" />
+              {isNative ? "Watch live" : "View analysis"}
             </Button>
           </div>
         </div>
@@ -2879,13 +2914,27 @@ function HistoryPanel({
                     >
                       <Copy className="size-3.5" />
                     </Button>
+                    <SimpleTooltip content="Open the raw report on ESO Logs" side="top">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => void openReportUrl(r.report!.url)}
+                        aria-label="Open report on ESO Logs"
+                      >
+                        <ExternalLink className="size-3.5" />
+                      </Button>
+                    </SimpleTooltip>
+                    {/* The richer analysis (fight detection, rotation, scribing, replay)
+                        lives in the ESO Log Aggregator — the primary "view" action. */}
                     <Button
                       variant="ghost"
-                      size="icon-sm"
-                      onClick={() => void openReportUrl(r.report!.url)}
-                      aria-label="Open report"
+                      size="sm"
+                      className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
+                      onClick={() => void openReportUrl(esotkReportUrl(r.report!.code))}
+                      aria-label="Open analysis in ESO Log Aggregator"
                     >
-                      <ExternalLink className="size-3.5" />
+                      <Zap className="size-3.5" />
+                      Analysis
                     </Button>
                   </>
                 ) : (
