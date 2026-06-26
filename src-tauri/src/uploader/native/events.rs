@@ -167,6 +167,19 @@ pub struct EventEmitter {
     /// `cast_id_target_unit_id`). The fall-back when a cast id is unknown is
     /// [`Self::last_interrupt`].
     cast_id_units: HashMap<String, (String, String)>,
+    /// Cast track ids whose `BEGIN_CAST` had `duration == 0` (an instant cast that
+    /// already emitted its code-16 at BEGIN_CAST). An `END_CAST INTERRUPTED` of such
+    /// a cast is a *phantom* interrupt — the cast also COMPLETED at the same ts — and
+    /// the official segment omits it. Tracked so [`Self::emit_interrupt`] can drop it.
+    /// Rebound on every `BEGIN_CAST` (cleared when a timed cast reuses the id) so it
+    /// reflects the id's CURRENT cast, not a stale historical one.
+    instant_cast_ids: std::collections::HashSet<String>,
+    /// Cast track ids of `BEGIN_CAST`s for Break Free (ability 16565). A crowd-control
+    /// `EFFECT_CHANGED FADED` that a unit broke free of carries one of these ids in a
+    /// trailing 27th field; code 28 (InterruptionRemoved) gates on membership here so
+    /// it fires only for a real Break Free and never for an unrelated source-driven
+    /// removal (dispel/purge) that also carries a trailing source-cast id.
+    break_free_cast_ids: std::collections::HashSet<String>,
     /// The unit id of the most recent `INTERRUPT`-status COMBAT_EVENT target — the
     /// reference's `last_interrupt`, used as the interrupted-cast caster when the
     /// `END_CAST INTERRUPTED`'s cast id isn't in [`Self::cast_id_units`].
@@ -895,15 +908,46 @@ impl EventEmitter {
 
         // GAINED/FADED (5/7/10/12) are the thin 5-field line; UPDATED (6/8/11)
         // appends the new stack count. Cast-ref then the optional shield follow.
-        match code {
-            "6" | "8" => Some(format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}")),
-            "11" => Some(format!(
-                "{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}{cast_ref}"
-            )),
-            _ => Some(format!(
-                "{ts}|{code}|{sub}|{src_mask}|{tgt_mask}{cast_ref}{shield_tail}"
-            )),
+        let normal = match code {
+            "6" | "8" => format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}"),
+            "11" => format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}{cast_ref}"),
+            _ => format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}{cast_ref}{shield_tail}"),
+        };
+
+        // code 28 (InterruptionRemoved): a crowd-control effect that a unit BROKE
+        // FREE of (Break Free, ability 16565) is force-faded. The official log marks
+        // exactly such a FADED with a trailing 27th field — the Break Free cast's
+        // track id — and the official segment emits a self-tuple code-28 line for the
+        // broke-free unit (the FADED's target) IMMEDIATELY AFTER the normal fade line.
+        // We gate on the trailing field being a KNOWN Break Free cast id (not merely
+        // present): a dispel/purge source-removal also carries a trailing source-cast
+        // id, so presence alone over-fires on PvP/trial logs not in the captures.
+        // Requiring a real Break Free cast also guarantees its instant BEGIN_CAST
+        // already allocated the (unit,unit,16565) self-tuple, so the `alloc_for` below
+        // is idempotent and mints nothing new (no tuple/master perturbation).
+        // Duplicates are preserved (two identical raw FADEDs → two identical code-28).
+        if change_type == "FADED"
+            && ability != "16565"
+            && f.get(26)
+                .map(|s| s.trim())
+                .is_some_and(|s| self.break_free_cast_ids.contains(s))
+        {
+            let a28 = self.alloc_for(&tgt_unit, "16565", &tgt_unit);
+            let sub28 = self
+                .actors
+                .code1_subordinal(&a28.to_string(), &tgt_unit, &tgt_unit);
+            // Own-side masks derived from the broke-free unit (16 friendly / 64
+            // hostile) rather than hardcoded — players give 16|16 as in the captures,
+            // but a hostile breaker would correctly be 64|64.
+            let mask = self.own_side(&tgt_unit);
+            // Trailing field = the 1-based master ability index of the removed CC
+            // (the FADED ability); the final `0` is an invariant flag on every line.
+            let removed_idx = self.ability_index(&ability);
+            return Some(format!(
+                "{normal}\n{ts}|28|{sub28}|{mask}|{mask}|{removed_idx}|0"
+            ));
         }
+        Some(normal)
     }
 
     /// Reconcile a unit's shield pool against history. Returns `true` (the value
@@ -959,6 +1003,27 @@ impl EventEmitter {
                 cast_track_id.to_string(),
                 (src_unit.clone(), tgt_unit.clone()),
             );
+            // An instant cast (duration 0) that is later "interrupted" is a phantom
+            // interrupt the official drops (it COMPLETES at the same ts). Remember it.
+            // ESO recycles cast track ids, so a TIMED cast reusing this id must CLEAR
+            // the flag — otherwise a genuinely-interrupted timed cast on a recycled id
+            // would be wrongly dropped (the flag must reflect the CURRENT binding, not
+            // any past one). Channeled casts return early above and never reach here,
+            // so an id reused by a channel keeps its prior (instant) flag — matching
+            // the capture where such an interrupt is a phantom the official omits.
+            if code == "16" {
+                self.instant_cast_ids.insert(cast_track_id.to_string());
+            } else {
+                self.instant_cast_ids.remove(cast_track_id);
+            }
+            // Break Free (16565) cast track ids: the trailing 27th field of a
+            // force-faded crowd-control EFFECT_CHANGED is exactly one of these, which
+            // is how code 28 (InterruptionRemoved) recognises a real CC-break (vs an
+            // unrelated source-driven removal such as a dispel/purge that also carries
+            // a trailing source-cast id).
+            if ability == "16565" {
+                self.break_free_cast_ids.insert(cast_track_id.to_string());
+            }
             let cast_ability_index = self.ability_index(&ability);
             if cast_ability_index != 0 {
                 self.cast_track_to_a
@@ -1035,14 +1100,16 @@ impl EventEmitter {
     ///   caster (resolved via [`Self::cast_id_units`], falling back to
     ///   [`Self::last_interrupt`]).
     /// * the subordinal `A` is the tuple `(interruptingUnit, interruptedCaster,
-    ///   interruptingAbility)` — which must already exist (the reference only emits
-    ///   when its `effects_hashmap` has that key). If it doesn't, the interrupt is
-    ///   dropped (matches the official, which omits ~3 of the raw interrupts).
+    ///   interruptingAbility)` — minted if missing when the caster came from the
+    ///   reliable cast-id lookup (the official mints these self-interrupt tuples too),
+    ///   but only reused (never minted) on the `last_interrupt` fallback.
     /// * the trailing field is the interrupted ability's 1-based master index.
     ///
-    /// Dropped (returns `None`, no line) when the interrupting unit is 0, the
+    /// Dropped (returns `None`, no line) when: the interrupting unit is 0; the
     /// interrupting and interrupted abilities are identical (a cast can't interrupt
-    /// itself), the caster is unknown, or the interrupting tuple was never allocated.
+    /// itself); the interrupted cast was INSTANT (a phantom interrupt the official
+    /// omits); the caster is unknown; or — on the fallback path only — the interrupting
+    /// tuple was never allocated.
     fn emit_interrupt(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
         let interrupted_cast_id = f.get(3)?.trim();
         let interrupted_ability = f.get(4)?.trim();
@@ -1054,21 +1121,37 @@ impl EventEmitter {
         if interrupting_ability == interrupted_ability {
             return None; // an ability cannot interrupt itself
         }
+        // An interrupt of an INSTANT cast (BEGIN_CAST duration 0) is a phantom: the
+        // cast also COMPLETES at the same ts, and the official segment omits it.
+        if self.instant_cast_ids.contains(interrupted_cast_id) {
+            return None;
+        }
         // The interrupted cast's caster is the line's target: look it up by the
-        // interrupted cast id, falling back to the last INTERRUPT-status target.
-        let caster = self
-            .cast_id_units
-            .get(interrupted_cast_id)
-            .map(|(src, _)| src.clone())
-            .or_else(|| self.last_interrupt.clone())?;
-        // The tuple must already exist for (interruptingUnit, caster,
-        // interruptingAbility) — the reference reuses the existing effect tuple.
+        // interrupted cast id (the RELIABLE source), falling back to the last
+        // INTERRUPT-status target. Track which source resolved it: only the reliable
+        // cast-id lookup may MINT a tuple below — a stale `last_interrupt` fallback
+        // must not invent a phantom tuple+line against the wrong caster.
+        let (caster, reliable) = match self.cast_id_units.get(interrupted_cast_id) {
+            Some((src, _)) => (src.clone(), true),
+            None => (self.last_interrupt.clone()?, false),
+        };
+        // The tuple for (interruptingUnit, caster, interruptingAbility): reuse the
+        // existing effect/combat tuple if present. When the caster came from the
+        // reliable cast-id lookup, ALLOCATE it if missing — a self-interrupting
+        // monster whose interrupting ability appears only on an ABILITY_INFO + this
+        // END_CAST INTERRUPTED forms no tuple earlier, yet the official still mints one
+        // and emits the line. On the `last_interrupt` fallback we only reuse an
+        // existing tuple (drop if absent), so a stale caster can't mint a phantom.
         let src_actor = self.actor_index(interrupting_unit);
         let tgt_actor = self.actor_index(&caster);
         let ability_idx = self.ability_index(interrupting_ability);
-        let &a = self
-            .tuple_to_index
-            .get(&(src_actor, tgt_actor, ability_idx))?;
+        let a = if reliable {
+            self.alloc_tuple(src_actor, tgt_actor, ability_idx)
+        } else {
+            *self
+                .tuple_to_index
+                .get(&(src_actor, tgt_actor, ability_idx))?
+        };
         // Own-side masks (the reference's allegiance_from_reaction per unit): the
         // interrupter and caster are usually cross-faction (16|64) but can be same
         // side (16|16 / 64|64), which the earlier/later ordering can't produce.
@@ -3170,14 +3253,18 @@ mod combat_fixture {
     /// * 5 (+260) / 16 (−492): Maarselok-capture artifacts (EXACT on Ossein) — leave.
     /// * 1 (−139): zero-hit damage the official keeps — emit-vs-drop predicate lives
     ///   in the parser crate's is_damage_event, underdetermined on both captures.
-    /// * 9/14/28 (~50 events): rare codes the reference does not model (no construct
-    ///   site); stateful shield-pool / CC-fade correlations underdetermined on both.
+    /// * 9/14 (rare codes): 9 (ShieldEvent) self-shield pools are largely synthetic
+    ///   (Wicked-Bonds rotating pool not in the raw stream) and underdetermined from
+    ///   two captures; 14 (Hemorrhaging bleed report) has a parser-computed value
+    ///   absent from the raw — both left unimplemented pending a 3rd capture. (code 28
+    ///   InterruptionRemoved is now EXACT: 23/23 combat, 4/4 ossein — a Break-Free
+    ///   force-fade carries a trailing cast-track field that uniquely marks it.)
     /// * 19 (death): count is right but positioning is the parser's intra-timestamp
     ///   tiebreak (not in the stream); reworking it would regress the exact count.
-    /// * 27 (interrupted): 17 of 19 emitted byte-correct (EXACT on Ossein); the 2
-    ///   dropped need a tuple for an interrupting ability seen only on an END_CAST
-    ///   INTERRUPTED — tied to the missing-tuple tail.
     /// Tighten these bounds (toward 0) as more rules are proven.
+    /// (code 27 interrupted is now EXACT 19/19 on combat and 3/3 on Ossein: phantom
+    /// interrupts of instant casts are dropped, and a self-interrupt's END_CAST-only
+    /// tuple is allocated lazily.)
     #[test]
     fn per_code_counts_stay_within_known_bounds() {
         let base = env!("CARGO_MANIFEST_DIR");
@@ -3207,7 +3294,7 @@ mod combat_fixture {
 
         // Codes reproduced EXACTLY (count delta must be 0).
         for c in [
-            "2", "6", "8", "10", "11", "12", "15", "19", "22", "26", "44", "52", "53",
+            "2", "6", "8", "10", "11", "12", "15", "19", "22", "26", "27", "28", "44", "52", "53",
         ] {
             assert_eq!(
                 get(&oc, c),
@@ -3240,8 +3327,6 @@ mod combat_fixture {
                           // Not-yet-modeled rare codes: bound at their full official count (we emit 0).
         bound("9", 30);
         bound("14", 10);
-        bound("27", 4); // 17/19 emitted byte-correct; 2 need an END_CAST-only tuple
-        bound("28", 30);
         bound("38", 650);
         bound("41", 2);
         bound("51", 2);
@@ -3294,8 +3379,8 @@ mod combat_fixture {
         let fc = counts(&official);
         let get = |m: &std::collections::BTreeMap<String, i64>, c: &str| *m.get(c).unwrap_or(&0);
         for c in [
-            "2", "5", "6", "7", "8", "10", "11", "12", "15", "16", "26", "27", "38", "41", "44",
-            "51", "52", "53",
+            "2", "5", "6", "7", "8", "10", "11", "12", "15", "16", "26", "27", "28", "38", "41",
+            "44", "51", "52", "53",
         ] {
             assert_eq!(
                 get(&oc, c),
