@@ -98,7 +98,14 @@ export function Settings({
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
     void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) => setWarnEsoRunning(!s));
-    void getSetting<boolean>("manualUseOfficialUploader", false).then(setUseOfficialUploader);
+    // The toggle WRITES both opt-out keys, so its checked state must REFLECT both: a
+    // pre-existing user who opted out of LIVE direct upload (liveUseOfficialUploader)
+    // before this unified control existed must see it as on, or the toggle would claim
+    // "direct upload" while live still hands off (a read/write split-brain).
+    void Promise.all([
+      getSetting<boolean>("manualUseOfficialUploader", false),
+      getSetting<boolean>("liveUseOfficialUploader", false),
+    ]).then(([manual, live]) => setUseOfficialUploader(manual || live));
     void getSetting<boolean>("autoOpenAnalysis", false).then(setAutoOpenAnalysis);
     void getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask").then(
       setConflictPolicy
