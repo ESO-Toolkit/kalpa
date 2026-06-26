@@ -456,13 +456,34 @@ impl IncrementalMasterState {
                 }
             }
 
-            // Capture the actor record inputs once (dedup by identity across sessions).
-            self.captured_actors
-                .entry(identity.clone())
-                .or_insert_with(|| CapturedActor {
-                    actor: actor.clone(),
-                    owner_is_player,
-                });
+            // Capture the actor record inputs (dedup by identity across sessions).
+            // Mirror `build_master_table_inner`: prefer a RESOLVED player record over an
+            // "Offline"/empty placeholder so an offline-first re-add upgrades IN PLACE,
+            // keeping the live master byte-identical to the re-walk oracle (the live twin
+            // of the one-shot charId-dedup fix — without this, native live would freeze
+            // the "Offline" row for an offline-first player).
+            if let Some(captured) = self.captured_actors.get_mut(&identity) {
+                let new_is_resolved = matches!(
+                    &actor,
+                    ActorInfo::Player { name, account, .. }
+                        if !name.is_empty() && name.as_str() != "Offline" && !account.is_empty()
+                );
+                let stored_is_placeholder = matches!(
+                    &captured.actor,
+                    ActorInfo::Player { name, .. } if name.is_empty() || name.as_str() == "Offline"
+                );
+                if new_is_resolved && stored_is_placeholder {
+                    captured.actor = actor.clone();
+                }
+            } else {
+                self.captured_actors.insert(
+                    identity.clone(),
+                    CapturedActor {
+                        actor: actor.clone(),
+                        owner_is_player,
+                    },
+                );
+            }
 
             // Now record this unit's bindings for LATER lines.
             self.unit_is_player.insert(unit_id.clone(), is_player);
@@ -668,6 +689,47 @@ mod tests {
         assert!(
             idx_b == Some(2) && idx_a == Some(3),
             "under the advancing pin the FIRST registrant (Wisp B) takes the lower index: B={idx_b:?} A={idx_a:?}"
+        );
+    }
+
+    // OFFLINE-FIRST in the LIVE path: a player added first as "Offline","" (out of
+    // render range) then resolved on a later UNIT_ADDED must UPGRADE in the incremental
+    // master too — byte-identical to the one-shot re-walk. Codex adversarial-review
+    // finding: my one-shot charId-dedup + name-upgrade fix wasn't mirrored in
+    // IncrementalMasterState, so native live would freeze the "Offline" row while a
+    // finished-log upload resolved it.
+    #[test]
+    fn incremental_master_upgrades_offline_first_player_like_rewalk() {
+        use crate::uploader::native::encode::build_master_table_with_tuples_forced;
+        let lines = [
+            "0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"10.0\"",
+            "5,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",111,50,1000,0,PLAYER_ALLY,T",
+            // Character 222 appears OFFLINE first, then resolves to "Sidekick".
+            "6,UNIT_ADDED,2,PLAYER,F,2,0,F,0,0,\"Offline\",\"\",222,0,0,0,PLAYER_ALLY,T",
+            "100,UNIT_ADDED,3,PLAYER,F,2,0,F,4,9,\"Sidekick\",\"@side\",222,50,1100,0,PLAYER_ALLY,T",
+        ];
+        let mut idx = IncrementalIndexState::default();
+        let mut mst = IncrementalMasterState::default();
+        for l in lines {
+            idx.update(l);
+            mst.update(l);
+        }
+        let tuples: Vec<(u32, u32, u32)> = Vec::new();
+        let live = mst
+            .render_master(&tuples, idx.actor_map(), idx.ability_map())
+            .expect("live master builds");
+        let refs: Vec<&str> = lines.to_vec();
+        let oracle = build_master_table_with_tuples_forced(
+            &refs,
+            &tuples,
+            idx.actor_map(),
+            idx.ability_map(),
+        )
+        .expect("one-shot master builds");
+        assert_eq!(live, oracle, "live master must match the one-shot re-walk");
+        assert!(
+            live.contains("Sidekick^@side^222^") && !live.contains("Offline"),
+            "offline-first player must resolve to its real name in the live master; got:\n{live}"
         );
     }
 

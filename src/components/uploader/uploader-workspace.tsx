@@ -1725,9 +1725,15 @@ function DirectUploadSection({
   const [disclosureOpen, setDisclosureOpen] = useState(false);
 
   const handleEnable = async () => {
-    // Clear the opt-OUT (default is native now); this state only shows when the
-    // user previously turned direct upload OFF, so "Enable" turns it back on.
-    await setSetting("manualUseOfficialUploader", false);
+    // Clear BOTH opt-OUT keys (default is native now); this state only shows when the
+    // user previously turned direct upload OFF. The Settings toggle writes both manual
+    // AND live keys as one unified "use the official uploader" control, so the inline
+    // Enable must clear both too — otherwise enabling here re-enables manual direct
+    // upload while LIVE silently keeps handing off to the official uploader.
+    await Promise.all([
+      setSetting("manualUseOfficialUploader", false),
+      setSetting("liveUseOfficialUploader", false),
+    ]);
     setDisclosureOpen(false);
     toast.success("Direct upload enabled.");
     await onChanged();

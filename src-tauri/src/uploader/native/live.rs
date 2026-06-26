@@ -670,15 +670,6 @@ pub fn run_native_live(
         return Err(UploadError::Cancelled);
     }
 
-    // Surface the report code to the UI now that the report exists and we're committed
-    // to streaming it (past the create-race cancel check above, so a Stop-during-create
-    // never shows a "report ready" for a report we immediately terminate). The handoff
-    // path can't reach here, so this is the only way the live code reaches the UI in
-    // real time rather than after settle.
-    if let Some(ch) = channel {
-        (ch.on_report_open)(&code.0);
-    }
-
     let mut driver = LiveDriver::new(sender, code.clone(), cancel.clone(), channel);
     // MID-SESSION: warm the encoder from the on-disk session prefix BEFORE tailing, so a
     // user already combat-logging streams without a fresh /reloadui. A warm-up failure
@@ -700,6 +691,18 @@ pub fn run_native_live(
             )));
         }
     }
+
+    // Surface the report code to the UI now that the report exists AND the session is
+    // fully committed to streaming — past the create-race cancel check AND a successful
+    // warm-up. Emitting earlier (before warm-up) could flash a "report ready" / auto-open
+    // esotk for a report that a warm-up failure then immediately terminates (a
+    // truncation/rotation race). Cold starts (no warm-up) emit right here too, with no
+    // perceptible delay. The handoff path can't reach here, so this is the only way the
+    // live code reaches the UI in real time rather than only after settle.
+    if let Some(ch) = channel {
+        (ch.on_report_open)(&code.0);
+    }
+
     let reason = driver.run(growing_path, poll, sink);
 
     // Best-effort, cancel-aware terminate on EVERY exit path (shared discipline so the
