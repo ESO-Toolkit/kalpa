@@ -877,9 +877,18 @@ impl EventEmitter {
 
         // A buff/debuff applied by a tracked cast carries a trailing `A{castA}`
         // (the reference's `source_cast_index`) linking it to that cast's tuple.
-        // Only GAINED (5/10) and UPDATED-debuff (11) carry it — a FADED has no
-        // causing cast. The shield trailing is gated on the cast-ref being present.
-        let cast_a = if matches!(code, "5" | "10" | "11") {
+        // GAINED (5/10), UPDATED-debuff (11) AND UPDATED-buff-stack-INCREASE (6) carry
+        // it when the change's `castTrackId` resolves to a tracked cast — a FADED has
+        // no causing cast. Verified against the official segments: code-6 attribution
+        // reproduces EXACTLY on the byte-validated captures (Maarselok 286/286, Ossein
+        // 43/43, same timestamps), because a stack *gain* is driven by a cast.
+        // A stack DECREASE (8) is NOT cast-caused — the official segment never
+        // attributes it (0 of 93/110/2/1 across all four captures), even though some
+        // decrease events do carry a resolvable `castTrackId` (the original applying
+        // cast). So 8 is deliberately EXCLUDED here: including it over-attributed by
+        // 7/28/2 on Maarselok/City-of-Ash/Kyne's. The shield trailing is gated on the
+        // cast-ref being present.
+        let cast_a = if matches!(code, "5" | "10" | "11" | "6") {
             self.cast_track_to_a.get(&cast_track_id).copied()
         } else {
             None
@@ -907,10 +916,17 @@ impl EventEmitter {
             };
 
         // GAINED/FADED (5/7/10/12) are the thin 5-field line; UPDATED (6/8/11)
-        // appends the new stack count. Cast-ref then the optional shield follow.
+        // appends the new stack count, then the cast-ref (present only when the
+        // change's cast resolved — always empty for 8, see above), then the optional
+        // shield. A stack-INCREASE (6) thus carries the cast-ref exactly as
+        // UPDATED-debuff (11) does — linked to the cast that drove it (e.g. an
+        // Arcanist Crux gain from Escalating Runeblades), which is what the server
+        // maps to extraAbilityGameID. `8` keeps the shared arm because its empty
+        // cast-ref makes the form collapse to the same `|{stack}` it had before.
         let normal = match code {
-            "6" | "8" => format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}"),
-            "11" => format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}{cast_ref}"),
+            "6" | "8" | "11" => {
+                format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|{stack}{cast_ref}")
+            }
             _ => format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}{cast_ref}{shield_tail}"),
         };
 
@@ -3617,6 +3633,207 @@ mod combat_fixture {
                     eprintln!("[ossein]     {s}");
                 }
             }
+        }
+    }
+
+    /// DIAGNOSTIC (manual, `--ignored`): report code-6/8 (applybuffstack) cast-ref
+    /// ATTRIBUTION — how many UPDATED-buff lines carry a trailing `|A{cast}` linking
+    /// the stack-increment to its driving cast — for OURS vs the OFFICIAL segment,
+    /// across every staged capture. The server maps that cast-ref to
+    /// `extraAbilityGameID`, so it is what lets esotk reconstruct "what generated
+    /// this stack" (e.g. an Arcanist Crux gain). Prints, per capture: total +
+    /// attributed code-6/8 for ours and official, and the timestamp-set overlap of
+    /// the attributed code-6 events (the events both sides agree are cast-driven).
+    /// No-op without the gitignored golden captures.
+    #[test]
+    #[ignore = "diagnostic; needs .decode-samples golden captures, run with --ignored --nocapture"]
+    fn applybuffstack_cast_ref_attribution_report() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let ds = format!("{base}/../.decode-samples");
+
+        // (display name, raw log file, official-segment files to concatenate)
+        let captures: &[(&str, &str, &[&str])] = &[
+            (
+                "Maarselok",
+                "combat_raw_encounter.log",
+                &["combat_fights_segment.txt"],
+            ),
+            (
+                "Ossein",
+                "ossein_raw.log",
+                &[
+                    "ossein_fights_segment_1.txt",
+                    "ossein_fights_segment_2.txt",
+                    "ossein_fights_segment_3.txt",
+                    "ossein_fights_segment.txt",
+                ],
+            ),
+            (
+                "CityOfAsh",
+                "cityofash.log",
+                &["cityofash_official_segment.txt"],
+            ),
+            ("Kynes", "chunk2_kynes.log", &["kynes_official_segment.txt"]),
+        ];
+
+        // A line is "attributed" iff its final `|`-segment is `A<digits>`.
+        fn is_attr(l: &str) -> bool {
+            l.rsplit('|').next().is_some_and(|t| {
+                t.strip_prefix('A')
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            })
+        }
+        // (total6, set-of-attributed-code6-timestamps, total8, attributed8) for a body.
+        fn tally(body: &str) -> (u64, std::collections::BTreeSet<i64>, u64, u64) {
+            let (mut t6, mut t8, mut a8) = (0u64, 0u64, 0u64);
+            let mut a6: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+            for l in body.lines() {
+                let mut it = l.split('|');
+                let ts: i64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1);
+                match it.next() {
+                    Some("6") => {
+                        t6 += 1;
+                        if is_attr(l) {
+                            a6.insert(ts);
+                        }
+                    }
+                    Some("8") => {
+                        t8 += 1;
+                        if is_attr(l) {
+                            a8 += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (t6, a6, t8, a8)
+        }
+
+        for (name, raw_file, off_files) in captures {
+            let Ok(raw) = std::fs::read_to_string(format!("{ds}/{raw_file}")) else {
+                eprintln!("[attr] {name}: raw absent, skipping");
+                continue;
+            };
+            let mut official = String::new();
+            for of in *off_files {
+                if let Ok(s) = std::fs::read_to_string(format!("{ds}/{of}")) {
+                    official.push_str(&s.lines().skip(2).collect::<Vec<_>>().join("\n"));
+                    official.push('\n');
+                }
+            }
+            if official.is_empty() {
+                eprintln!("[attr] {name}: official segment absent, skipping");
+                continue;
+            }
+            let lines: Vec<&str> = raw.lines().collect();
+            let ours = build_fights_segment(&lines).expect("our segment builds");
+            let our_body: String = ours.lines().skip(2).collect::<Vec<_>>().join("\n");
+
+            let (ot6, oa6, ot8, oa8) = tally(&our_body);
+            let (ft6, fa6, ft8, fa8) = tally(&official);
+            let inter = oa6.intersection(&fa6).count();
+            let ours_only = oa6.difference(&fa6).count();
+            let off_only = fa6.difference(&oa6).count();
+            eprintln!("[attr] {name}:");
+            eprintln!(
+                "[attr]   code6 attributed  ours {}/{ot6}   official {}/{ft6}",
+                oa6.len(),
+                fa6.len()
+            );
+            eprintln!("[attr]   code8 attributed  ours {oa8}/{ot8}   official {fa8}/{ft8}");
+            eprintln!(
+                "[attr]   code6 attributed-ts overlap: match {inter}  ours-only {ours_only}  official-only {off_only}"
+            );
+        }
+    }
+
+    /// Regression guard for the applybuffstack (code-6) cast-ref attribution fix.
+    /// Locks two invariants on the byte-validated captures so a future change can't
+    /// silently regress the `extraAbilityGameID` linkage esotk relies on:
+    ///   * code-8 (stack DECREASE) is NEVER attributed — the official segment emits 0
+    ///     cast-refs on code-8 across every capture (a decrease is not cast-caused),
+    ///     even though some decrease events carry a resolvable `castTrackId`.
+    ///   * code-6 (stack INCREASE) is attributed on EXACTLY the timestamps the
+    ///     official segment attributes (Maarselok 286, Ossein 43) — no more, no less.
+    /// No-op without the gitignored golden captures (like the other oracles).
+    #[test]
+    fn applybuffstack_attribution_matches_official_on_validated_captures() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let ds = format!("{base}/../.decode-samples");
+
+        // A line is "attributed" iff its final `|`-segment is `A<digits>`.
+        fn is_attr(l: &str) -> bool {
+            l.rsplit('|').next().is_some_and(|t| {
+                t.strip_prefix('A')
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            })
+        }
+        // (attributed code-6 timestamps, attributed code-8 count) for a segment body.
+        fn attribution(body: &str) -> (std::collections::BTreeSet<i64>, u64) {
+            let mut a6 = std::collections::BTreeSet::new();
+            let mut a8 = 0u64;
+            for l in body.lines() {
+                let mut it = l.split('|');
+                let ts: i64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(-1);
+                match it.next() {
+                    Some("6") if is_attr(l) => {
+                        a6.insert(ts);
+                    }
+                    Some("8") if is_attr(l) => {
+                        a8 += 1;
+                    }
+                    _ => {}
+                }
+            }
+            (a6, a8)
+        }
+
+        let cases: &[(&str, &[&str])] = &[
+            ("combat_raw_encounter.log", &["combat_fights_segment.txt"]),
+            (
+                "ossein_raw.log",
+                &[
+                    "ossein_fights_segment_1.txt",
+                    "ossein_fights_segment_2.txt",
+                    "ossein_fights_segment_3.txt",
+                    "ossein_fights_segment.txt",
+                ],
+            ),
+        ];
+
+        for (raw_file, off_files) in cases {
+            let Ok(raw) = std::fs::read_to_string(format!("{ds}/{raw_file}")) else {
+                continue; // golden capture not present — nothing to check.
+            };
+            let mut official = String::new();
+            for of in *off_files {
+                if let Ok(s) = std::fs::read_to_string(format!("{ds}/{of}")) {
+                    official.push_str(&s.lines().skip(2).collect::<Vec<_>>().join("\n"));
+                    official.push('\n');
+                }
+            }
+            if official.is_empty() {
+                continue; // segment files not staged.
+            }
+            let lines: Vec<&str> = raw.lines().collect();
+            let ours = build_fights_segment(&lines).expect("our segment builds");
+            let our_body: String = ours.lines().skip(2).collect::<Vec<_>>().join("\n");
+
+            let (our6, our8) = attribution(&our_body);
+            let (off6, _off8) = attribution(&official);
+            assert_eq!(
+                our8, 0,
+                "{raw_file}: code-8 (stack decrease) must never carry a cast-ref \
+                 (official attributes 0); got {our8}"
+            );
+            assert_eq!(
+                our6,
+                off6,
+                "{raw_file}: code-6 attributed timestamps must match the official \
+                 segment exactly (ours {} vs official {})",
+                our6.len(),
+                off6.len()
+            );
         }
     }
 }
