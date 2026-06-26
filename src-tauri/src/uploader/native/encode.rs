@@ -650,6 +650,16 @@ impl ActorInfo {
             } => {
                 if name.is_empty() {
                     format!("anon:{reg_offset}")
+                } else if !player_id.is_empty() && player_id != "0" {
+                    // Dedup a named player by their STABLE character id alone. The same
+                    // character can re-appear out of render range as `"Offline",""`
+                    // (empty account); keying on account+id would split that into a
+                    // duplicate "Offline" actor — which Archon never does (it merges by
+                    // character id and keeps the resolved record). No committed golden
+                    // capture has offline re-adds, so this is byte-identical there; only
+                    // large/PUG logs with out-of-range players merge (verified vs the
+                    // sunspire Archon capture).
+                    format!("p:{player_id}")
                 } else {
                     format!("p:{account}:{player_id}")
                 }
@@ -970,6 +980,32 @@ fn build_master_table_inner(
                             actor,
                             owner_is_player,
                         });
+                    } else {
+                        // Same character already recorded. Prefer a RESOLVED player
+                        // record (real name + account) over a placeholder `"Offline",""`
+                        // one: a player out of render range at the first UNIT_ADDED logs
+                        // as "Offline" but appears named on a later re-add. Archon keeps
+                        // the resolved name; upgrade the stored record IN PLACE (same
+                        // index, so segment A-refs stay in lockstep) so a native report
+                        // shows the real name too. Only ever fires for offline re-adds;
+                        // a no-op on every committed golden (none have offline players).
+                        let is_resolved = matches!(
+                            &actor,
+                            ActorInfo::Player { name, account, .. }
+                                if !name.is_empty() && name.as_str() != "Offline" && !account.is_empty()
+                        );
+                        if is_resolved {
+                            if let Some(p) = pending.iter_mut().find(|p| p.identity == identity) {
+                                let stored_is_placeholder = matches!(
+                                    &p.actor,
+                                    ActorInfo::Player { name, .. }
+                                        if name.is_empty() || name.as_str() == "Offline"
+                                );
+                                if stored_is_placeholder {
+                                    p.actor = actor;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1877,6 +1913,47 @@ mod tests {
         assert_eq!(ability_flags(true, true), 3); // T,T → 3 (Dodge Fatigue)
         assert_eq!(ability_flags(false, false), 0); // F,F → 0
         assert_eq!(ability_flags(true, false), 2); // T,F → 2
+    }
+
+    // A player out of render range re-adds as `"Offline",""` (empty account) — the
+    // SAME character id as their named record. Archon merges these by character id and
+    // keeps the resolved name; without the charId dedup + name-upgrade we'd emit a
+    // duplicate "Offline" actor (the master over-production that displays "Offline" for
+    // ~12% of players on large/PUG logs in esotk). Covers BOTH the common named-first
+    // case and the offline-first upgrade.
+    #[test]
+    fn offline_player_readd_merges_into_resolved_record() {
+        let begin = "0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"10.0\"";
+        let hero =
+            "5,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",111,50,1000,0,PLAYER_ALLY,T";
+        // The same character (id 222) once resolved, once Offline (race/class/cp all 0).
+        let side =
+            "6,UNIT_ADDED,2,PLAYER,F,2,0,F,4,9,\"Sidekick\",\"@side\",222,50,1100,0,PLAYER_ALLY,T";
+        let side_off =
+            "9000,UNIT_ADDED,3,PLAYER,F,2,0,F,0,0,\"Offline\",\"\",222,0,0,0,PLAYER_ALLY,T";
+
+        // Named-first (the common case): resolved record seen, then an Offline re-add.
+        let m = build_master_table(&[begin, hero, side, side_off]).expect("master builds");
+        assert!(
+            m.contains("Sidekick^@side^222^"),
+            "resolved record must survive the Offline re-add; got:\n{m}"
+        );
+        assert!(
+            !m.contains("Offline"),
+            "no duplicate Offline actor; got:\n{m}"
+        );
+
+        // Offline-first (player still loading at the first UNIT_ADDED): the placeholder
+        // is upgraded in place to the resolved record once it appears.
+        let m2 = build_master_table(&[begin, hero, side_off, side]).expect("master builds");
+        assert!(
+            m2.contains("Sidekick^@side^222^"),
+            "Offline placeholder must upgrade to the resolved name; got:\n{m2}"
+        );
+        assert!(
+            !m2.contains("Offline"),
+            "no leftover Offline record; got:\n{m2}"
+        );
     }
 
     // Byte-exact against EVERY ability record in the real golden master table.

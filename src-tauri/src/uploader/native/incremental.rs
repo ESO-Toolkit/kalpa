@@ -662,7 +662,9 @@ mod tests {
         let a = inc.actor_map();
         let idx_b = a.get("m:7002:Wisp B").copied();
         let idx_a = a.get("m:7001:Wisp A").copied();
-        assert_eq!(a.get("p:@hero:820189967932710348").copied(), Some(1));
+        // A named player now dedups by stable character id alone (not account+id), so
+        // the same character logged later as "Offline","" merges instead of splitting.
+        assert_eq!(a.get("p:820189967932710348").copied(), Some(1));
         assert!(
             idx_b == Some(2) && idx_a == Some(3),
             "under the advancing pin the FIRST registrant (Wisp B) takes the lower index: B={idx_b:?} A={idx_a:?}"
