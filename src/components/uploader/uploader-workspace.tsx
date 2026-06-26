@@ -48,7 +48,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
-import { getSetting, setSetting } from "@/lib/store";
+import { getSetting, setSettings } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
 import {
@@ -1732,14 +1732,18 @@ function DirectUploadSection({
 
   const handleEnable = async () => {
     // Clear BOTH opt-OUT keys (default is native now); this state only shows when the
-    // user previously turned direct upload OFF. The Settings toggle writes both manual
-    // AND live keys as one unified "use the official uploader" control, so the inline
-    // Enable must clear both too — otherwise enabling here re-enables manual direct
-    // upload while LIVE silently keeps handing off to the official uploader.
-    await Promise.all([
-      setSetting("manualUseOfficialUploader", false),
-      setSetting("liveUseOfficialUploader", false),
-    ]);
+    // user previously turned direct upload OFF. Write them ATOMICALLY (one flush,
+    // all-or-nothing) via the unified store batch — the Settings toggle uses the same
+    // write — so a partial/failed write can't re-enable manual direct upload while LIVE
+    // silently keeps handing off (the split-brain). Surface a failed write.
+    const ok = await setSettings({
+      manualUseOfficialUploader: false,
+      liveUseOfficialUploader: false,
+    });
+    if (!ok) {
+      toast.error("Couldn't enable direct upload — try again.");
+      return;
+    }
     setDisclosureOpen(false);
     toast.success("Direct upload enabled.");
     await onChanged();

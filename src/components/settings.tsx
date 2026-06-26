@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
-import { getSetting, setSetting } from "@/lib/store";
+import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import type { AuthUser, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -433,10 +433,20 @@ export function Settings({
                         onCheckedChange={(checked) => {
                           const value = checked === true;
                           setUseOfficialUploader(value);
-                          // Mirror live's opt-out model for manual too; set both so a
-                          // single toggle governs the whole uploader's transport.
-                          void setSetting("manualUseOfficialUploader", value);
-                          void setSetting("liveUseOfficialUploader", value);
+                          // Mirror live's opt-out model for manual too. Write both keys
+                          // ATOMICALLY (one flush, all-or-nothing) so a failed/crashed
+                          // write can't leave one mode opted out and the other native —
+                          // the exact split-brain this unified toggle exists to prevent.
+                          // On failure, revert the optimistic UI and surface it.
+                          void setSettings({
+                            manualUseOfficialUploader: value,
+                            liveUseOfficialUploader: value,
+                          }).then((ok) => {
+                            if (!ok) {
+                              setUseOfficialUploader(!value);
+                              toast.error("Couldn't save that setting — try again.");
+                            }
+                          });
                         }}
                       />
                       <div>
