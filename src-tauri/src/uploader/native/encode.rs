@@ -1517,7 +1517,9 @@ pub fn combat_crit_flag(action_result: &str) -> Option<u8> {
 /// these families so the caller gates it.
 pub fn combat_noncode1_crit_flag(action_result: &str) -> Option<u8> {
     match action_result {
-        "HEAL" | "DOT_TICK" | "HOT_TICK" | "POWER_ENERGIZE" | "POWER_DRAIN" => Some(1),
+        "HEAL" | "HEAL_ABSORBED" | "DOT_TICK" | "HOT_TICK" | "POWER_ENERGIZE" | "POWER_DRAIN" => {
+            Some(1)
+        }
         "CRITICAL_HEAL" | "DOT_TICK_CRITICAL" | "HOT_TICK_CRITICAL" => Some(2),
         _ => None,
     }

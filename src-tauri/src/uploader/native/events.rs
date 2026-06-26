@@ -1238,18 +1238,28 @@ impl EventEmitter {
             );
         }
 
-        // A fully-ineffective IN-COMBAT heal (hit 0 AND overflow 0 — healed nothing,
-        // no overheal) is dropped: the official segment omits it. Verified EXACT on
-        // the Maarselok capture (88 such raw heals, all in-combat, official drops
-        // exactly 88 → code-3 2354/2354) and within ~2 on the Ossein trial capture.
-        // The in-combat gate matters — out-of-combat zero heals are kept (the Ossein
-        // capture keeps several). This mirrors the zero-zero drop the damage path
-        // already applies.
-        if self.in_combat
-            && matches!(action_result, "HEAL" | "CRITICAL_HEAL")
-            && hit_value == "0"
+        // A fully-ineffective heal (hit 0 AND overflow 0 — healed nothing, no
+        // overheal) is dropped: the official segment omits it UNCONDITIONALLY.
+        // Verified across all five captures — NO official segment keeps a single
+        // zero-effective code-3 line (`|crit|0`): combat/cityofash/kynes/ossein/
+        // sunspire all have zero such lines. The earlier in-combat gate was wrong
+        // (it conflated pure-OVERHEAL heals — hit 0 but overflow>0, which ARE kept
+        // and render with a nonzero final — against true zero-zero heals, which are
+        // always dropped). Removing the gate drives code-3 to EXACT on cityofash
+        // (Exhilarating Drain 137260 +1→0), kynes (Radiating Regeneration 46266
+        // +40→0), and ossein's zero-zero side (46266 +5→0); combat is unchanged
+        // (its 88 zero-zero heals are all in-combat). This mirrors the zero-zero
+        // drop the damage path already applies.
+        if matches!(
+            action_result,
+            "HEAL" | "CRITICAL_HEAL" | "HEAL_ABSORBED" | "HOT_TICK" | "HOT_TICK_CRITICAL"
+        ) && hit_value == "0"
             && overflow == "0"
         {
+            // Same zero-zero rule for the heal-over-time (code-4) family: NO official
+            // segment keeps a zero-effective code-4 line either. Driving the drop here
+            // makes code-4 EXACT on ossein (+4→0) and sunspire (+460→0); the smaller
+            // captures have no zero-zero HOT ticks, so they are unchanged.
             return None;
         }
 
@@ -1304,7 +1314,12 @@ impl EventEmitter {
             "19"
         } else if matches!(action_result, "DOT_TICK" | "DOT_TICK_CRITICAL") {
             "2"
-        } else if matches!(action_result, "HEAL" | "CRITICAL_HEAL") {
+        } else if matches!(action_result, "HEAL" | "CRITICAL_HEAL" | "HEAL_ABSORBED") {
+            // HEAL_ABSORBED (a heal nullified by a heal-absorb mechanic, e.g. IA
+            // "Cursed Terrain" 236388) renders as an ordinary code-3 heal carrying
+            // the absorbed amount — the official segment emits it verbatim (7/7 on
+            // Ossein, present on Sunspire). We previously dropped it (fell through to
+            // the unmodeled-result arm), losing those heal rows.
             "3"
         } else if matches!(action_result, "HOT_TICK" | "HOT_TICK_CRITICAL") {
             // Heal-over-time tick → code 4, same heal-style tail as code 3.
@@ -3945,6 +3960,114 @@ mod combat_fixture {
                     "[extra] {name} MASTER OFFL: lastActorId={fa} actors={far} abilities={fab} tuples={ft} pets={fp}"
                 );
             }
+        }
+    }
+
+    /// STEP 0 diagnostic for the ability-id canonicalization hypothesis. For each
+    /// capture, builds the native master, writes it next to the golden as
+    /// `<name>_native_master.txt`, and prints the ability-id SET difference vs the
+    /// official master (ours-only = candidate over-production; official-only =
+    /// abilities Archon kept that we labelled with a sibling id). Run with
+    /// `--ignored --nocapture`. Pure diagnostic; never asserts.
+    #[test]
+    #[ignore = "diagnostic; needs the golden corpus"]
+    fn dump_master_ability_diff() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let ds = format!("{base}/../.decode-samples");
+        let td = format!("{base}/src/uploader/native/testdata");
+
+        // (name, raw path, official master path)
+        let captures: &[(&str, String, String)] = &[
+            (
+                "combat",
+                format!("{ds}/combat_raw_encounter.log"),
+                format!("{td}/combat_master_table.txt"),
+            ),
+            (
+                "cityofash",
+                format!("{ds}/cityofash.log"),
+                format!("{ds}/cityofash_official_master.txt"),
+            ),
+            (
+                "kynes",
+                format!("{ds}/chunk2_kynes.log"),
+                format!("{ds}/kynes_official_master.txt"),
+            ),
+            (
+                "ossein",
+                format!("{ds}/ossein_raw.log"),
+                format!("{ds}/ossein_master_2.txt"),
+            ),
+            (
+                "sunspire",
+                format!("{ds}/sunspire_raw.log"),
+                format!("{ds}/sunspire_official_master.txt"),
+            ),
+        ];
+
+        // Extract the ability-id list (in index order) from a master-table string.
+        // Section layout: header, lastActorId, actors…, lastAbilityId, abilities…,
+        // lastTupleId, … . Ability record = `Name|dmgType|abilityId|icon|caused|flags`.
+        fn ability_ids(master: &str) -> Vec<String> {
+            let v: Vec<&str> = master.lines().collect();
+            let mut i = 1; // skip header
+            i += 1; // skip lastActorId
+            while i < v.len() && v[i].parse::<u64>().is_err() {
+                i += 1; // walk actors
+            }
+            i += 1; // skip lastAbilityId
+            let mut ids = Vec::new();
+            while i < v.len() && v[i].parse::<u64>().is_err() && !v[i].is_empty() {
+                let id = v[i].split('|').nth(2).unwrap_or("").to_string();
+                ids.push(id);
+                i += 1;
+            }
+            ids
+        }
+
+        for (name, raw_path, off_path) in captures {
+            let Ok(raw) = std::fs::read_to_string(raw_path) else {
+                eprintln!("[abdiff] {name}: raw absent, skipping");
+                continue;
+            };
+            let lines: Vec<&str> = raw.lines().collect();
+            // Build the master + segment as a CONSISTENT pair from ONE emitter (the
+            // production `build_native_payload` ordering): the segment's `A` values
+            // index THIS emitter's tuple table, and the master is built from the same
+            // tuples — so a decoder can resolve `A -> tuple -> ability` correctly.
+            // (Standalone `build_master_table` uses a different tuple ordering and
+            // mis-resolves the segment — the documented decode gotcha.)
+            let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+            let mut emitter = EventEmitter::with_master_indices(id2a, ab2i);
+            let seg = render_segment(&lines, &mut emitter);
+            let ours =
+                super::super::encode::build_master_table_with_tuples(&lines, emitter.tuples())
+                    .expect("master builds");
+            let out_path = format!("{ds}/{name}_native_master.txt");
+            let _ = std::fs::write(&out_path, &ours);
+            if let Some(seg) = seg {
+                let _ = std::fs::write(format!("{ds}/{name}_native_segment.txt"), &seg);
+            }
+
+            let Ok(off) = std::fs::read_to_string(off_path) else {
+                eprintln!("[abdiff] {name}: official master absent; wrote native only");
+                continue;
+            };
+            let our_ids = ability_ids(&ours);
+            let off_ids = ability_ids(&off);
+            let our_set: std::collections::BTreeSet<&String> = our_ids.iter().collect();
+            let off_set: std::collections::BTreeSet<&String> = off_ids.iter().collect();
+            let ours_only: Vec<&str> = our_set.difference(&off_set).map(|s| s.as_str()).collect();
+            let off_only: Vec<&str> = off_set.difference(&our_set).map(|s| s.as_str()).collect();
+            eprintln!(
+                "[abdiff] {name}: ours={} official={} | ours-only={} official-only={}",
+                our_ids.len(),
+                off_ids.len(),
+                ours_only.len(),
+                off_only.len()
+            );
+            eprintln!("[abdiff] {name} OURS-ONLY: {}", ours_only.join(","));
+            eprintln!("[abdiff] {name} OFFL-ONLY: {}", off_only.join(","));
         }
     }
 }
