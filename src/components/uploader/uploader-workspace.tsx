@@ -48,7 +48,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
-import { getSetting, setSettings } from "@/lib/store";
+import { getSetting, getSettingChecked, setSettings } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
 import {
@@ -125,6 +125,20 @@ async function openReportUrl(url: string): Promise<void> {
  *  a read failure, or an opener-scope rejection is silent — the always-present
  *  "View analysis" button covers the manual case. `live` opens esotk's LiveLog view
  *  (for an in-progress native session). */
+/** The effective "use the official ESO Logs uploader" opt-out, read FAIL-CLOSED.
+ *  Returns true (use official) if EITHER opt-out key is set OR a store read fails —
+ *  the native path speaks ESO Logs' private endpoints, so a degraded store that
+ *  can't confirm the opt-out must NOT silently route there against the user. The two
+ *  keys are written as one unit (the unified Settings toggle), so either set ⇒
+ *  opted out. Used by both manual and live routing so they can never disagree. */
+async function usesOfficialUploader(): Promise<boolean> {
+  const [manual, live] = await Promise.all([
+    getSettingChecked<boolean>("manualUseOfficialUploader", false),
+    getSettingChecked<boolean>("liveUseOfficialUploader", false),
+  ]);
+  return !manual.ok || !live.ok || manual.value || live.value;
+}
+
 async function maybeAutoOpenAnalysis(code: string, opts?: { live?: boolean }): Promise<void> {
   try {
     const auto = await getSetting<boolean>("autoOpenAnalysis", false);
@@ -387,17 +401,19 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // transport hint stay in sync with Settings and the credential store.
   const refreshNativeState = useCallback(async () => {
     try {
-      const [manualOfficial, session, liveOfficial] = await Promise.all([
+      const [manual, session, live] = await Promise.all([
         // Manual now mirrors live: native is the DEFAULT, opt-OUT via
-        // `manualUseOfficialUploader` (default false → native). `nativeOptIn` here
-        // is the "intends native" flag the readout/section read, so it's the negation.
-        getSetting<boolean>("manualUseOfficialUploader", false),
+        // `manualUseOfficialUploader` (default false → native). Read FAIL-CLOSED so a
+        // store error presents as opted-out, never claiming "direct" in the readout
+        // against an opt-out it couldn't confirm (matches routing's usesOfficialUploader).
+        getSettingChecked<boolean>("manualUseOfficialUploader", false),
         invokeOrThrow<boolean>("uploader_has_session"),
-        getSetting<boolean>("liveUseOfficialUploader", false),
+        getSettingChecked<boolean>("liveUseOfficialUploader", false),
       ]);
-      setNativeOptIn(!manualOfficial);
+      const readFailed = !manual.ok || !live.ok;
+      setNativeOptIn(!manual.value && !readFailed);
       setHasNativeSession(session);
-      setLiveUseOfficial(liveOfficial);
+      setLiveUseOfficial(live.value || readFailed);
     } catch {
       /* best-effort — the upload path still reads the setting fresh per upload */
     }
@@ -406,15 +422,17 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [manualOfficial, session, liveOfficial] = await Promise.all([
-        getSetting<boolean>("manualUseOfficialUploader", false),
+      const [manual, session, live] = await Promise.all([
+        getSettingChecked<boolean>("manualUseOfficialUploader", false),
         invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
-        getSetting<boolean>("liveUseOfficialUploader", false),
+        getSettingChecked<boolean>("liveUseOfficialUploader", false),
       ]);
       if (cancelled) return;
-      setNativeOptIn(!manualOfficial);
+      // Fail closed on a store read error (see refreshNativeState).
+      const readFailed = !manual.ok || !live.ok;
+      setNativeOptIn(!manual.value && !readFailed);
       setHasNativeSession(session);
-      setLiveUseOfficial(liveOfficial);
+      setLiveUseOfficial(live.value || readFailed);
     })();
     return () => {
       cancelled = true;
@@ -695,21 +713,18 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     if (!selectedLog) return;
     setUploading(true);
     try {
-      // Read the opt-OUT keys AND session presence fresh per upload. Manual now mirrors
-      // live: native is the DEFAULT (opt-out via `manualUseOfficialUploader`, default
-      // false → native), but it still needs a captured esologs session — without it the
-      // backend would route native and hard-fail "Not signed in", so gate on the session
-      // (an opted-in user with no session still hands off). The opt-out is UNIFIED, so
-      // honour EITHER key: a migrated user with only the live opt-out
-      // (`liveUseOfficialUploader=true`, manual key unset) sees the official uploader in
-      // the UI and must actually route there — matching the willUseNative readout and
-      // the Settings toggle, never silently routing native against the visible opt-out.
-      const [manualOfficial, liveOfficial, hasSession] = await Promise.all([
-        getSetting<boolean>("manualUseOfficialUploader", false),
-        getSetting<boolean>("liveUseOfficialUploader", false),
+      // Resolve the effective (unified, fail-closed) opt-out AND session presence fresh
+      // per upload. Native is the DEFAULT, but it still needs a captured esologs session
+      // — without it the backend would route native and hard-fail "Not signed in", so
+      // gate on the session (an opted-in user with no session still hands off).
+      // `usesOfficialUploader` honours EITHER opt-out key and fails closed on a store
+      // read error, so a migrated/degraded state never silently routes native against
+      // the opt-out the UI shows.
+      const [useOfficial, hasSession] = await Promise.all([
+        usesOfficialUploader(),
         invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
       ]);
-      const nativeOptIn = !manualOfficial && !liveOfficial && hasSession;
+      const nativeOptIn = !useOfficial && hasSession;
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
         filePath: selectedLog,
         options,
@@ -920,16 +935,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     // Native direct-streaming is the DEFAULT live path: it's faster and keeps the
     // report in-app. The only ways off it are (a) `forceHandoff` — the explicit "go
     // live via the official uploader instead" escape hatch — or (b) the UNIFIED opt-out.
-    // The opt-out spans BOTH keys (the Settings toggle + the direct-upload promo treat
-    // them as one), so honour EITHER: a user who turned on "use the official uploader"
-    // must hand off in live too, even in a split persisted state. Read both keys (an
-    // unset key resolves to false = native, the default for everyone) so live routing
-    // matches the manual routing + readouts and can't silently diverge.
-    const [manualOfficial, liveOfficial] = await Promise.all([
-      getSetting<boolean>("manualUseOfficialUploader", false),
-      getSetting<boolean>("liveUseOfficialUploader", false),
-    ]);
-    const preferOfficial = forceHandoff || manualOfficial || liveOfficial;
+    // `usesOfficialUploader` honours EITHER opt-out key and fails closed on a store read
+    // error, identical to the manual routing — so live can't diverge from manual or from
+    // the readouts in any split/degraded state.
+    const preferOfficial = forceHandoff || (await usesOfficialUploader());
 
     // Native needs the in-app ESO Logs upload session (the wcl_session cookie), which
     // is SEPARATE from the profile login that gates this dialog (authUser/isLoggedIn).

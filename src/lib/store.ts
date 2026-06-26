@@ -79,6 +79,26 @@ export async function getSetting<T>(key: string, fallback: T): Promise<T> {
   }
 }
 
+/** Like {@link getSetting} but distinguishes a genuinely-absent key (`ok: true`,
+ * value = fallback) from a store READ FAILURE (`ok: false`). `getSetting` returns
+ * its fallback in both cases, which is wrong for a security/trust-boundary read
+ * (e.g. the native-upload opt-out): a degraded store would look like "not opted
+ * out" and silently route the unofficial path. Such callers can fail CLOSED by
+ * treating `ok: false` as opted-out. Never throws. */
+export async function getSettingChecked<T>(
+  key: string,
+  fallback: T
+): Promise<{ value: T; ok: boolean }> {
+  try {
+    const store = await getStore();
+    const val = await store.get<T>(key);
+    return { value: val ?? fallback, ok: true };
+  } catch (err) {
+    console.warn(`[store] Failed to read "${key}":`, err);
+    return { value: fallback, ok: false };
+  }
+}
+
 /** Persist a setting. Never throws; returns true on success, false on failure
  * (so callers can surface "couldn't save" instead of falsely reporting success).
  * `true` means the write was published crash-atomically (it survives a process
