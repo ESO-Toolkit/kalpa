@@ -43,6 +43,11 @@ pub struct AddonManifest {
     pub esoui_id: Option<u32>,
     pub tags: Vec<String>,
     pub esoui_last_update: u64,
+    /// When this addon was installed/last updated locally, as an ISO 8601 UTC
+    /// string (copied from the metadata store). Empty for addons Kalpa is not
+    /// tracking (e.g. manually dropped in, or installed before metadata existed).
+    #[serde(default)]
+    pub installed_at: String,
     pub disabled: bool,
     #[serde(default)]
     pub modified_file_count: u32,
@@ -204,6 +209,7 @@ pub fn parse_manifest(folder_name: &str, manifest_path: &Path) -> Option<AddonMa
         esoui_id: None,
         tags: Vec::new(),
         esoui_last_update: 0,
+        installed_at: String::new(),
         disabled: false,
         modified_file_count: 0,
     })

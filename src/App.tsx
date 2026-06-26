@@ -17,7 +17,7 @@ import { UpdateBanner, type BannerUpdate } from "./components/update-banner";
 import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
-import { filterAddons, isFilterMode } from "@/lib/addon-helpers";
+import { filterAddons, isFilterMode, isSortMode } from "@/lib/addon-helpers";
 import type {
   AddonManifest,
   AuthUser,
@@ -385,15 +385,19 @@ function App() {
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
     const [savedSort, savedFilter, savedPath, autoUpdate] = await Promise.all([
-      getSetting<SortMode>("sortMode", "name"),
+      getSetting<string>("sortMode", "name"),
       getSetting<string>("filterMode", "all"),
       getSetting<string>("addonsPath", ""),
       getSetting<boolean>("autoUpdate", false),
     ]);
 
+    const normalizedSort = isSortMode(savedSort) ? savedSort : "name";
     const normalizedFilter = isFilterMode(savedFilter) ? savedFilter : "all";
-    setSortMode(savedSort);
+    setSortMode(normalizedSort);
     setFilterMode(normalizedFilter);
+    if (normalizedSort !== savedSort) {
+      void setSetting("sortMode", normalizedSort);
+    }
     if (normalizedFilter !== savedFilter) {
       void setSetting("filterMode", normalizedFilter);
     }

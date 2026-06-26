@@ -5,10 +5,9 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function formatRelativeDate(iso: string): string {
+/** Human-readable "time ago" for an epoch-millisecond timestamp. */
+export function formatRelativeMs(then: number): string {
   const now = Date.now();
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
   const seconds = Math.floor((now - then) / 1000);
   if (seconds < 0) return "Today";
   if (seconds < 60) return "just now";
@@ -22,6 +21,14 @@ export function formatRelativeDate(iso: string): string {
   if (months < 12) return `${months} month${months !== 1 ? "s" : ""} ago`;
   const years = Math.floor(months / 12);
   return `${years} year${years !== 1 ? "s" : ""} ago`;
+}
+
+/** Human-readable "time ago" for an ISO 8601 date string. Empty string for
+ * unparseable input. */
+export function formatRelativeDate(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  return formatRelativeMs(then);
 }
 
 export function formatRelativeExpiry(iso: string): string {

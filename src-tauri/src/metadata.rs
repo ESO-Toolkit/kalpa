@@ -223,18 +223,28 @@ pub fn record_install_ext(
     } else {
         esoui_last_update
     };
+    // `installed_at` is a STABLE first-install timestamp: keep the existing value
+    // when re-recording an addon we already track. This function is also reached
+    // on update and on metadata reconciliation (auto_link), neither of which
+    // should reset "when did I install this" — only a brand-new entry gets a
+    // fresh stamp. (Falls through to a fresh stamp for legacy entries that
+    // somehow have an empty string.)
+    let installed_at = match existing.map(|m| m.installed_at.clone()) {
+        Some(prior) if !prior.is_empty() => prior,
+        _ => format_timestamp(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        ),
+    };
     store.addons.insert(
         folder_name.to_string(),
         AddonMetadata {
             esoui_id,
             installed_version: version.to_string(),
             download_url: download_url.to_string(),
-            installed_at: format_timestamp(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            ),
+            installed_at,
             tags: existing_tags,
             esoui_last_update: last_update,
         },
@@ -327,6 +337,23 @@ mod tests {
         let backup: MetadataStore =
             serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
         assert!(backup.addons.is_empty());
+    }
+
+    #[test]
+    fn installed_at_is_preserved_across_rerecord() {
+        let mut store = MetadataStore::default();
+        record_install(&mut store, "Addon", 1, "1.0", "url");
+
+        // Pin a known first-install time, then simulate an update / auto-link
+        // reconciliation (both flow through record_install_ext). The stable
+        // install timestamp must survive; the other fields should still refresh.
+        store.addons.get_mut("Addon").unwrap().installed_at = "2020-01-01T00:00:00Z".to_string();
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url2", 12345);
+
+        let meta = &store.addons["Addon"];
+        assert_eq!(meta.installed_at, "2020-01-01T00:00:00Z");
+        assert_eq!(meta.installed_version, "2.0");
+        assert_eq!(meta.esoui_last_update, 12345);
     }
 
     #[test]

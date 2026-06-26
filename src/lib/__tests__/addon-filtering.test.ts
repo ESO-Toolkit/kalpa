@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { AddonManifest, FilterMode, SortMode } from "../../types";
-import { filterAddons, isFilterMode, computeFilterCounts } from "../addon-helpers";
+import { filterAddons, isFilterMode, isSortMode, computeFilterCounts } from "../addon-helpers";
 
 // ── Test data factory ──
 
@@ -22,6 +22,7 @@ function makeAddon(overrides: Partial<AddonManifest> = {}): AddonManifest {
     esouiId: 1234,
     tags: [],
     esouiLastUpdate: 0,
+    installedAt: "",
     disabled: false,
     modifiedFileCount: 0,
     ...overrides,
@@ -72,6 +73,22 @@ describe("isFilterMode", () => {
     expect(isFilterMode("")).toBe(false);
     expect(isFilterMode("ALL")).toBe(false);
     expect(isFilterMode("outdated-deps")).toBe(false);
+  });
+});
+
+describe("isSortMode", () => {
+  it("accepts valid sort modes", () => {
+    expect(isSortMode("name")).toBe(true);
+    expect(isSortMode("author")).toBe(true);
+    expect(isSortMode("updated")).toBe(true);
+    expect(isSortMode("installed")).toBe(true);
+  });
+
+  it("rejects invalid sort modes", () => {
+    expect(isSortMode("invalid")).toBe(false);
+    expect(isSortMode("")).toBe(false);
+    expect(isSortMode("Name")).toBe(false);
+    expect(isSortMode("date")).toBe(false);
   });
 });
 
@@ -212,6 +229,47 @@ describe("filterAddons — sorting", () => {
     ];
     const result = filterAddons(dupes, baseOpts);
     expect(result.map((a) => a.folderName)).toEqual(["A", "B"]);
+  });
+
+  it("sorts by recently updated (newest ESOUI update first)", () => {
+    const addons = [
+      makeAddon({ folderName: "Old", title: "Old", esouiLastUpdate: 1_000 }),
+      makeAddon({ folderName: "New", title: "New", esouiLastUpdate: 9_000 }),
+      makeAddon({ folderName: "Mid", title: "Mid", esouiLastUpdate: 5_000 }),
+    ];
+    const result = filterAddons(addons, { ...baseOpts, sortMode: "updated" });
+    expect(result.map((a) => a.folderName)).toEqual(["New", "Mid", "Old"]);
+  });
+
+  it("sorts addons with no update time (0) last, tie-broken by name", () => {
+    const addons = [
+      makeAddon({ folderName: "Unknown2", title: "Zebra", esouiLastUpdate: 0 }),
+      makeAddon({ folderName: "Known", title: "Known", esouiLastUpdate: 5_000 }),
+      makeAddon({ folderName: "Unknown1", title: "Apple", esouiLastUpdate: 0 }),
+    ];
+    const result = filterAddons(addons, { ...baseOpts, sortMode: "updated" });
+    // Known (has a date) first; the two unknowns follow ordered by title.
+    expect(result.map((a) => a.folderName)).toEqual(["Known", "Unknown1", "Unknown2"]);
+  });
+
+  it("sorts by recently installed (newest install first)", () => {
+    const addons = [
+      makeAddon({ folderName: "First", title: "First", installedAt: "2024-01-01T00:00:00Z" }),
+      makeAddon({ folderName: "Third", title: "Third", installedAt: "2024-06-15T00:00:00Z" }),
+      makeAddon({ folderName: "Second", title: "Second", installedAt: "2024-03-10T00:00:00Z" }),
+    ];
+    const result = filterAddons(addons, { ...baseOpts, sortMode: "installed" });
+    expect(result.map((a) => a.folderName)).toEqual(["Third", "Second", "First"]);
+  });
+
+  it("sorts untracked addons (no installedAt) last, tie-broken by name", () => {
+    const addons = [
+      makeAddon({ folderName: "Untracked2", title: "Zebra", installedAt: "" }),
+      makeAddon({ folderName: "Tracked", title: "Tracked", installedAt: "2024-05-01T00:00:00Z" }),
+      makeAddon({ folderName: "Untracked1", title: "Apple", installedAt: "" }),
+    ];
+    const result = filterAddons(addons, { ...baseOpts, sortMode: "installed" });
+    expect(result.map((a) => a.folderName)).toEqual(["Tracked", "Untracked1", "Untracked2"]);
   });
 });
 

@@ -942,6 +942,7 @@ fn scan_installed_addons_blocking(
             addon.esoui_id = Some(meta.esoui_id);
             addon.tags = meta.tags.clone();
             addon.esoui_last_update = meta.esoui_last_update;
+            addon.installed_at = meta.installed_at.clone();
         }
 
         if let Some(hash_manifest) = file_hashes::load_hash_manifest(addons_dir, &addon.folder_name)

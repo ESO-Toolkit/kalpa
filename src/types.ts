@@ -20,6 +20,9 @@ export interface AddonManifest {
   esouiId: number | null;
   tags: string[];
   esouiLastUpdate: number;
+  /** When this addon was installed/last updated locally, as an ISO 8601 UTC
+   * string. Empty for addons Kalpa is not tracking. */
+  installedAt: string;
   disabled: boolean;
   modifiedFileCount: number;
 }
@@ -301,7 +304,7 @@ export interface EffectiveField {
 }
 
 // App-level UI state types
-export type SortMode = "name" | "author";
+export type SortMode = "name" | "author" | "updated" | "installed";
 export type FilterMode =
   | "all"
   | "addons"

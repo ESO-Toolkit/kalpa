@@ -14,6 +14,12 @@ export function isFilterMode(value: string): value is FilterMode {
   return (VALID_FILTER_MODES as readonly string[]).includes(value);
 }
 
+export const VALID_SORT_MODES: readonly SortMode[] = ["name", "author", "updated", "installed"];
+
+export function isSortMode(value: string): value is SortMode {
+  return (VALID_SORT_MODES as readonly string[]).includes(value);
+}
+
 export function filterAddons(
   addons: AddonManifest[],
   opts: {
@@ -55,12 +61,41 @@ export function filterAddons(
       }
     })
     .sort((left, right) => {
+      const byName = () => left.title.toLowerCase().localeCompare(right.title.toLowerCase());
       switch (opts.sortMode) {
-        case "author":
-          return left.author.toLowerCase().localeCompare(right.author.toLowerCase());
+        case "author": {
+          const byAuthor = left.author.toLowerCase().localeCompare(right.author.toLowerCase());
+          return byAuthor !== 0 ? byAuthor : byName();
+        }
+        case "updated": {
+          // Most recently updated upstream (ESOUI) first. Addons with no known
+          // update time (0 — not on ESOUI or never update-checked) sort last,
+          // then ties break by name so the order stays stable and legible.
+          const lu = left.esouiLastUpdate || 0;
+          const ru = right.esouiLastUpdate || 0;
+          if (lu !== ru) {
+            if (lu === 0) return 1;
+            if (ru === 0) return -1;
+            return ru - lu;
+          }
+          return byName();
+        }
+        case "installed": {
+          // Most recently installed/updated locally first. The timestamp is an
+          // ISO 8601 UTC string, so lexicographic comparison is chronological.
+          // Untracked addons (empty string) sort last, ties break by name.
+          const li = left.installedAt || "";
+          const ri = right.installedAt || "";
+          if (li !== ri) {
+            if (!li) return 1;
+            if (!ri) return -1;
+            return ri.localeCompare(li);
+          }
+          return byName();
+        }
         case "name":
         default:
-          return left.title.toLowerCase().localeCompare(right.title.toLowerCase());
+          return byName();
       }
     });
 }
