@@ -3836,4 +3836,115 @@ mod combat_fixture {
             );
         }
     }
+
+    /// DIAGNOSTIC (manual, `--ignored`): extend the per-code + master-section delta
+    /// report to the EXTRA reused captures (City-of-Ash dungeon, Kyne's 12-player
+    /// trial) so the gap matrix covers more class/mechanic diversity than just the
+    /// Maarselok + Ossein goldens. Confirms which residual codes are systematic vs
+    /// capture-specific, and whether the master snapshot-tail over-production
+    /// (actors/abilities/tuples) repeats on an independent trial. No-op without the
+    /// gitignored captures.
+    #[test]
+    #[ignore = "diagnostic; needs .decode-samples cityofash/kynes captures, run with --ignored --nocapture"]
+    fn diff_against_official_extra_captures() {
+        let base = env!("CARGO_MANIFEST_DIR");
+        let ds = format!("{base}/../.decode-samples");
+
+        // (name, raw, official segment file(s), official master file)
+        let captures: &[(&str, &str, &[&str], &str)] = &[
+            (
+                "CityOfAsh",
+                "cityofash.log",
+                &["cityofash_official_segment.txt"],
+                "cityofash_official_master.txt",
+            ),
+            (
+                "Kynes",
+                "chunk2_kynes.log",
+                &["kynes_official_segment.txt"],
+                "kynes_official_master.txt",
+            ),
+        ];
+
+        fn code_counts(body: &str) -> std::collections::BTreeMap<String, i64> {
+            let mut m = std::collections::BTreeMap::new();
+            for l in body.lines() {
+                if let Some(c) = l.split('|').nth(1) {
+                    *m.entry(c.to_string()).or_insert(0) += 1;
+                }
+            }
+            m
+        }
+        // (lastActorId, actors, abilities, tuples, pets) from a master-table string.
+        fn sections(v: &[&str]) -> (String, usize, usize, usize, usize) {
+            let mut i = 1;
+            let last_actor = v.get(i).unwrap_or(&"?").to_string();
+            i += 1;
+            let mut count = |v: &[&str], i: &mut usize| -> usize {
+                let mut n = 0;
+                while *i < v.len() && !v[*i].is_empty() && v[*i].parse::<u64>().is_err() {
+                    n += 1;
+                    *i += 1;
+                }
+                *i += 1; // skip the next lastAssignedId line
+                n
+            };
+            let a = count(v, &mut i);
+            let b = count(v, &mut i);
+            let t = count(v, &mut i);
+            let mut p = 0;
+            while i < v.len() && !v[i].is_empty() {
+                p += 1;
+                i += 1;
+            }
+            (last_actor, a, b, t, p)
+        }
+
+        for (name, raw_file, seg_files, master_file) in captures {
+            let Ok(raw) = std::fs::read_to_string(format!("{ds}/{raw_file}")) else {
+                eprintln!("[extra] {name}: raw absent, skipping");
+                continue;
+            };
+            let lines: Vec<&str> = raw.lines().collect();
+
+            // --- Segment per-code deltas ---
+            let mut official = String::new();
+            for sf in *seg_files {
+                if let Ok(s) = std::fs::read_to_string(format!("{ds}/{sf}")) {
+                    official.push_str(&s.lines().skip(2).collect::<Vec<_>>().join("\n"));
+                    official.push('\n');
+                }
+            }
+            if !official.is_empty() {
+                let ours = build_fights_segment(&lines).expect("our segment builds");
+                let our_body: String = ours.lines().skip(2).collect::<Vec<_>>().join("\n");
+                let oc = code_counts(&our_body);
+                let fc = code_counts(&official);
+                let mut codes: std::collections::BTreeSet<String> = oc.keys().cloned().collect();
+                codes.extend(fc.keys().cloned());
+                eprintln!("[extra] {name} per-code (code: ours / official):");
+                for c in &codes {
+                    let o = *oc.get(c).unwrap_or(&0);
+                    let f = *fc.get(c).unwrap_or(&0);
+                    let mark = if o == f { "" } else { "  <-- DIFF" };
+                    eprintln!("[extra]   {c:>4}: {o:>7} / {f:>7}{mark}");
+                }
+            }
+
+            // --- Master section counts ---
+            if let Ok(off_master) = std::fs::read_to_string(format!("{ds}/{master_file}")) {
+                let ours = super::super::encode::build_master_table(&lines).expect("master builds");
+                let o: Vec<&str> = ours.lines().collect();
+                let f: Vec<&str> = off_master.lines().collect();
+                let (oa, oar, oab, ot, op) = sections(&o);
+                let (fa, far, fab, ft, fp) = sections(&f);
+                eprintln!(
+                    "[extra] {name} MASTER OURS: lastActorId={oa} actors={oar} abilities={oab} tuples={ot} pets={op}"
+                );
+                eprintln!(
+                    "[extra] {name} MASTER OFFL: lastActorId={fa} actors={far} abilities={fab} tuples={ft} pets={fp}"
+                );
+            }
+        }
+    }
 }
