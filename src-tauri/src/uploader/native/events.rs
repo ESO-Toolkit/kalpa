@@ -3253,12 +3253,17 @@ mod combat_fixture {
     /// * 5 (+260) / 16 (−492): Maarselok-capture artifacts (EXACT on Ossein) — leave.
     /// * 1 (−139): zero-hit damage the official keeps — emit-vs-drop predicate lives
     ///   in the parser crate's is_damage_event, underdetermined on both captures.
-    /// * 9/14 (rare codes): 9 (ShieldEvent) self-shield pools are largely synthetic
-    ///   (Wicked-Bonds rotating pool not in the raw stream) and underdetermined from
-    ///   two captures; 14 (Hemorrhaging bleed report) has a parser-computed value
-    ///   absent from the raw — both left unimplemented pending a 3rd capture. (code 28
-    ///   InterruptionRemoved is now EXACT: 23/23 combat, 4/4 ossein — a Break-Free
-    ///   force-fade carries a trailing cast-track field that uniquely marks it.)
+    /// * 9 (ShieldEvent): ABANDONED — proven IRREDUCIBLE from the client log (5 matched
+    ///   captures incl a Sunspire vet trial, 2026-06-26). Emission is gated by ESO Logs'
+    ///   server-side ability-classification DB + pool resampler: abilities with
+    ///   byte-identical client metadata get opposite treatment, the same ability emits in
+    ///   one capture but is suppressed in another (so no static allowlist works), and most
+    ///   values are server-synthesized (absent from the raw). It is also NOT needed —
+    ///   shields render accurately via code-38. Left permanently unemitted; do not pursue.
+    /// * 14 (Hemorrhaging bleed report): parser-computed value absent from the raw —
+    ///   left unimplemented. (code 28 InterruptionRemoved is now EXACT: 23/23 combat,
+    ///   4/4 ossein — a Break-Free force-fade carries a trailing cast-track field that
+    ///   uniquely marks it.)
     /// * 19 (death): count is right but positioning is the parser's intra-timestamp
     ///   tiebreak (not in the stream); reworking it would regress the exact count.
     /// Tighten these bounds (toward 0) as more rules are proven.
