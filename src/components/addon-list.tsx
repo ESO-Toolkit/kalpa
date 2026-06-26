@@ -647,10 +647,10 @@ export function AddonList({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="name">Name</SelectItem>
-                  <SelectItem value="author">Author</SelectItem>
                   <SelectItem value="updated">Recently Updated</SelectItem>
                   <SelectItem value="installed">Recently Installed</SelectItem>
+                  <SelectItem value="name">Name</SelectItem>
+                  <SelectItem value="author">Author</SelectItem>
                 </SelectContent>
               </Select>
             </div>
