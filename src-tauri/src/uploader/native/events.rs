@@ -107,6 +107,12 @@ struct PendingShield {
     prefix: String,
     /// The shielded (damage target) raw unit id — the back-patch run's owner.
     target_unit: String,
+    /// The DAMAGE_SHIELDED's own castTrackId. A zero-absorb (`hit == 0`) shield is
+    /// kept ONLY if a real damage event on this SAME cast later arrives (else it is a
+    /// no-op the official drops); a normal (`hit > 0`) shield flushes on target alone.
+    cast_track_id: String,
+    /// `true` for a zero-absorb shield — gates the flush on a same-cast damage.
+    requires_cast: bool,
 }
 
 /// The running parser state for one log's event assembly.
@@ -161,11 +167,13 @@ pub struct EventEmitter {
     /// the parser applies); every other combat event allocates its tuple regardless
     /// of whether its line is emitted.
     in_combat: bool,
-    /// `castTrackId → (sourceUnit, targetUnit)` recorded at every `BEGIN_CAST`. An
-    /// `END_CAST INTERRUPTED` looks up the interrupted cast's caster (source) here to
-    /// build the code-27 interrupt line (the reference's `cast_id_source_unit_id` /
-    /// `cast_id_target_unit_id`). The fall-back when a cast id is unknown is
-    /// [`Self::last_interrupt`].
+    /// `castTrackId → (sourceUnit, targetUnit)` recorded at every non-channeled
+    /// `BEGIN_CAST`. An `END_CAST INTERRUPTED` looks up the interrupted cast's caster
+    /// (source) here to build the code-27 interrupt line (the reference's
+    /// `cast_id_source_unit_id` / `cast_id_target_unit_id`); an interrupt whose cast id
+    /// is absent here is a phantom the official drops. It is ALSO the membership set
+    /// code 28 (InterruptionRemoved) gates on — a CC `FADED`'s trailing remove-cast id
+    /// must be a real (tracked) cast.
     cast_id_units: HashMap<String, (String, String)>,
     /// Cast track ids whose `BEGIN_CAST` had `duration == 0` (an instant cast that
     /// already emitted its code-16 at BEGIN_CAST). An `END_CAST INTERRUPTED` of such
@@ -174,12 +182,6 @@ pub struct EventEmitter {
     /// Rebound on every `BEGIN_CAST` (cleared when a timed cast reuses the id) so it
     /// reflects the id's CURRENT cast, not a stale historical one.
     instant_cast_ids: std::collections::HashSet<String>,
-    /// Cast track ids of `BEGIN_CAST`s for Break Free (ability 16565). A crowd-control
-    /// `EFFECT_CHANGED FADED` that a unit broke free of carries one of these ids in a
-    /// trailing 27th field; code 28 (InterruptionRemoved) gates on membership here so
-    /// it fires only for a real Break Free and never for an unrelated source-driven
-    /// removal (dispel/purge) that also carries a trailing source-cast id.
-    break_free_cast_ids: std::collections::HashSet<String>,
     /// `castTrackId → the reflect buff's abilityId` for casts the game marked
     /// `REFLECTED` (an incoming hit a reflect skill bounced back — Sigil of Defense
     /// 112895, Defensive Stance 126608…). The buff's abilityId rides in the
@@ -189,10 +191,6 @@ pub struct EventEmitter {
     /// render-compare (the reflected damage shows under "Sigil of Defense", not
     /// "Quick Shot"). Derived byte-exact on blackrose (3) + sunspire (5).
     reflect_casts: HashMap<String, String>,
-    /// The unit id of the most recent `INTERRUPT`-status COMBAT_EVENT target — the
-    /// reference's `last_interrupt`, used as the interrupted-cast caster when the
-    /// `END_CAST INTERRUPTED`'s cast id isn't in [`Self::cast_id_units`].
-    last_interrupt: Option<String>,
     /// Buffered code-38 (DamageShielded) lines awaiting their damaging-ability index
     /// (`f10`). A DAMAGE_SHIELDED carries the SHIELD ability (146311), not the
     /// damaging one; the damaging ability arrives on the paired real DAMAGE/DOT event
@@ -404,7 +402,7 @@ impl EventEmitter {
         // Any code-38 lines still pending at end of stream (no following real
         // damage to back-patch them) are flushed with f10 = 0 (the reference's
         // un-patched placeholder).
-        let tail = self.flush_pending_shields(None, None);
+        let tail = self.flush_pending_shields(None, None, None);
         for l in tail.iter() {
             out.push_str(l);
             out.push('\n');
@@ -554,7 +552,7 @@ impl EventEmitter {
     /// is not silently dropped. (Mid-stream the cut policy never cuts with pending
     /// shields, so this only fires on the terminal segment.)
     pub fn drain_trailing_shields_into_segment(&mut self) {
-        let tail = self.flush_pending_shields(None, None);
+        let tail = self.flush_pending_shields(None, None, None);
         for l in tail {
             // These lines carry no fresh ts of their own; keep the segment's existing
             // window (they belong to the final fight already accounted for).
@@ -817,7 +815,18 @@ impl EventEmitter {
                 // a key already present means "already active". Verified on the
                 // capture: this removes 697 spurious code-5 GAINEDs.
                 let already_active = self.last_stack.contains_key(&stack_key);
-                self.last_stack.insert(stack_key.clone(), stack.clone());
+                // Seed the stack-direction baseline to ONE application, NOT the raw
+                // stackCount field (which is informational on a GAINED). The first
+                // post-GAINED UPDATED then routes by change vs 1: a 1→N gain → code 6,
+                // a same-value re-application → dropped. Seeding the raw stackCount
+                // instead mis-routed the first stack change (a buff that GAINED at
+                // stackCount N then UPDATED to N read as "same stack" and dropped, and a
+                // genuine increase read as a decrease → spurious code 8). Verified
+                // byte-exact: makes codes 6/8/11 exact on Dreadsail and corrects
+                // cityofash/kynes toward the official segment; inert on combat/ossein.
+                // `already_active` (presence) and the orphan check are value-agnostic,
+                // and GAINED 5/10 + FADED 7/12 are presence-based, so only 6/8/11 shift.
+                self.last_stack.insert(stack_key.clone(), "1".to_string());
                 if already_active {
                     return None;
                 }
@@ -945,24 +954,38 @@ impl EventEmitter {
             _ => format!("{ts}|{code}|{sub}|{src_mask}|{tgt_mask}{cast_ref}{shield_tail}"),
         };
 
-        // code 28 (InterruptionRemoved): a crowd-control effect that a unit BROKE
-        // FREE of (Break Free, ability 16565) is force-faded. The official log marks
-        // exactly such a FADED with a trailing 27th field — the Break Free cast's
-        // track id — and the official segment emits a self-tuple code-28 line for the
-        // broke-free unit (the FADED's target) IMMEDIATELY AFTER the normal fade line.
-        // We gate on the trailing field being a KNOWN Break Free cast id (not merely
-        // present): a dispel/purge source-removal also carries a trailing source-cast
-        // id, so presence alone over-fires on PvP/trial logs not in the captures.
-        // Requiring a real Break Free cast also guarantees its instant BEGIN_CAST
-        // already allocated the (unit,unit,16565) self-tuple, so the `alloc_for` below
-        // is idempotent and mints nothing new (no tuple/master perturbation).
+        // code 28 (InterruptionRemoved): a crowd-control effect actively REMOVED by a
+        // cast (a unit breaking free with Break Free, OR a cleanse/CC-break cast on
+        // another unit) is force-faded carrying the removing cast's track id in a
+        // trailing field — the `playerInitiatedRemoveCastTrackId`. The official segment
+        // emits a self-tuple code-28 line for the freed unit (the FADED's target)
+        // IMMEDIATELY AFTER the normal fade line. The trailing field's POSITION depends
+        // on the line shape: a full FADED (target state block) carries it at f[26]; a
+        // `*`-collapsed self-target FADED carries it at f[17] (an 18-field line). We
+        // gate on the id being a REAL, tracked cast (`cast_id_units` — a non-channeled
+        // BEGIN_CAST we saw): a natural expiry has no removing cast, and a `0`/empty or
+        // never-opened id is not a CC-break. This generalises the old Break-Free-only
+        // rule (16565) to all cleanse/break casts — byte-exact on sunspire (587/587),
+        // combat (23), cityofash (38), kynes (0), ossein (4), blackrose (28/28); see
+        // the bounded Dreadsail residual in the memory (a stale consumable cast id
+        // re-stamped onto 2 naturally-expiring effects, in-stream-indistinguishable).
         // Duplicates are preserved (two identical raw FADEDs → two identical code-28).
+        let remove_cast = if f.len() == 27 {
+            f.get(26)
+        } else if f.len() == 18 {
+            f.get(17)
+        } else {
+            None
+        };
         if change_type == "FADED"
             && ability != "16565"
-            && f.get(26)
+            && remove_cast
                 .map(|s| s.trim())
-                .is_some_and(|s| self.break_free_cast_ids.contains(s))
+                .is_some_and(|s| !s.is_empty() && s != "0" && self.cast_id_units.contains_key(s))
         {
+            // The self-tuple is always (freedUnit, 16565, freedUnit): the official
+            // attributes every InterruptionRemoved to the universal Break-Free action
+            // (ability 16565), regardless of which cast actually removed the CC.
             let a28 = self.alloc_for(&tgt_unit, "16565", &tgt_unit);
             let sub28 = self
                 .actors
@@ -1047,14 +1070,6 @@ impl EventEmitter {
             } else {
                 self.instant_cast_ids.remove(cast_track_id);
             }
-            // Break Free (16565) cast track ids: the trailing 27th field of a
-            // force-faded crowd-control EFFECT_CHANGED is exactly one of these, which
-            // is how code 28 (InterruptionRemoved) recognises a real CC-break (vs an
-            // unrelated source-driven removal such as a dispel/purge that also carries
-            // a trailing source-cast id).
-            if ability == "16565" {
-                self.break_free_cast_ids.insert(cast_track_id.to_string());
-            }
             let cast_ability_index = self.ability_index(&ability);
             if cast_ability_index != 0 {
                 self.cast_track_to_a
@@ -1128,19 +1143,17 @@ impl EventEmitter {
     ///
     /// The line is `{ts}|27|{sub}|{srcMask}|{tgtMask}|{interruptedAbilityIndex}`:
     /// * source = the **interrupting** unit, target = the **interrupted** cast's
-    ///   caster (resolved via [`Self::cast_id_units`], falling back to
-    ///   [`Self::last_interrupt`]).
+    ///   caster (resolved via [`Self::cast_id_units`]).
     /// * the subordinal `A` is the tuple `(interruptingUnit, interruptedCaster,
-    ///   interruptingAbility)` — minted if missing when the caster came from the
-    ///   reliable cast-id lookup (the official mints these self-interrupt tuples too),
-    ///   but only reused (never minted) on the `last_interrupt` fallback.
+    ///   interruptingAbility)` — minted if missing (the official mints these
+    ///   self-interrupt tuples too).
     /// * the trailing field is the interrupted ability's 1-based master index.
     ///
     /// Dropped (returns `None`, no line) when: the interrupting unit is 0; the
     /// interrupting and interrupted abilities are identical (a cast can't interrupt
     /// itself); the interrupted cast was INSTANT (a phantom interrupt the official
-    /// omits); the caster is unknown; or — on the fallback path only — the interrupting
-    /// tuple was never allocated.
+    /// omits); or the interrupted cast id was never opened by a tracked BEGIN_CAST (a
+    /// phantom interrupt of a non-cast, e.g. a Bash against no active cast).
     fn emit_interrupt(&mut self, raw_ts: i64, f: &[&str]) -> Option<String> {
         let interrupted_cast_id = f.get(3)?.trim();
         let interrupted_ability = f.get(4)?.trim();
@@ -1158,31 +1171,26 @@ impl EventEmitter {
             return None;
         }
         // The interrupted cast's caster is the line's target: look it up by the
-        // interrupted cast id (the RELIABLE source), falling back to the last
-        // INTERRUPT-status target. Track which source resolved it: only the reliable
-        // cast-id lookup may MINT a tuple below — a stale `last_interrupt` fallback
-        // must not invent a phantom tuple+line against the wrong caster.
-        let (caster, reliable) = match self.cast_id_units.get(interrupted_cast_id) {
-            Some((src, _)) => (src.clone(), true),
-            None => (self.last_interrupt.clone()?, false),
+        // interrupted cast id. An interrupt whose cast id was NEVER opened by a tracked
+        // BEGIN_CAST is a PHANTOM the official segment drops — a status hit (e.g. Bash
+        // 21973) the game logs an END_CAST INTERRUPTED for, against no real cast. We
+        // previously fell back to `last_interrupt`, which minted spurious code-27 lines
+        // (Dreadsail +81 Bash). Requiring a tracked cast closes that over-fire exactly,
+        // byte-identical on all captures (combat/cityofash/kynes/ossein/sunspire/
+        // blackrose unchanged), so the caster always comes from the reliable source.
+        let caster = match self.cast_id_units.get(interrupted_cast_id) {
+            Some((src, _)) => src.clone(),
+            None => return None,
         };
         // The tuple for (interruptingUnit, caster, interruptingAbility): reuse the
-        // existing effect/combat tuple if present. When the caster came from the
-        // reliable cast-id lookup, ALLOCATE it if missing — a self-interrupting
+        // existing effect/combat tuple if present, else ALLOCATE it — a self-interrupting
         // monster whose interrupting ability appears only on an ABILITY_INFO + this
         // END_CAST INTERRUPTED forms no tuple earlier, yet the official still mints one
-        // and emits the line. On the `last_interrupt` fallback we only reuse an
-        // existing tuple (drop if absent), so a stale caster can't mint a phantom.
+        // and emits the line.
         let src_actor = self.actor_index(interrupting_unit);
         let tgt_actor = self.actor_index(&caster);
         let ability_idx = self.ability_index(interrupting_ability);
-        let a = if reliable {
-            self.alloc_tuple(src_actor, tgt_actor, ability_idx)
-        } else {
-            *self
-                .tuple_to_index
-                .get(&(src_actor, tgt_actor, ability_idx))?
-        };
+        let a = self.alloc_tuple(src_actor, tgt_actor, ability_idx);
         // Own-side masks (the reference's allegiance_from_reaction per unit): the
         // interrupter and caster are usually cross-faction (16|64) but can be same
         // side (16|16 / 64|64), which the earlier/later ordering can't produce.
@@ -1316,21 +1324,21 @@ impl EventEmitter {
         // ability is unknown until the paired real DAMAGE/DOT event arrives, so the
         // line is buffered and flushed (back-patched with f10) then.
         if action_result == "DAMAGE_SHIELDED" {
-            // On a REFLECTED cast (the boss-reflect case, e.g. Dreadsail Spell Wall),
-            // the absorbed shield is NOT its own code-38 line: the official segment
-            // folds it into the paired reflected hit's overflow (the same code-1
-            // temporary_damage_buffer mechanic) and emits no DamageShielded line.
-            // Verified on dreadsail (every reflect-cast DAMAGE_SHIELDED → 0 code-38,
-            // its value rides in the next code-54 line's overflow).
-            if self.reflect_casts.contains_key(cast_track_id) {
-                if let Ok(v) = hit_value.parse::<u64>() {
-                    if v > 0 {
-                        *self.temp_damage.entry(tgt_unit.clone()).or_insert(0) += v;
-                    }
-                }
-                return None; // folded into the paired reflected damage
-            }
-            self.buffer_damage_shielded(raw_ts, hit_value, &ability, &src_unit, &tgt_unit);
+            // A reflect-cast shield is handled the SAME as any other: buffer_damage_shielded
+            // both emits a standalone code-38 (flushed by the paired hit) AND accumulates
+            // temp_damage, which the reflected hit (code-54) then folds into its overflow.
+            // The official segment emits BOTH for a reflect-cast shield (verified on
+            // dreadsail: 15/18 carry a code-38 line plus the folded code-54 overflow, 3/18
+            // a code-38 only when the reflected hit lands as code-1), so it must NOT be
+            // special-cased away here.
+            self.buffer_damage_shielded(
+                raw_ts,
+                hit_value,
+                &ability,
+                &src_unit,
+                &tgt_unit,
+                cast_track_id,
+            );
             return None; // emitted later via the flush
         }
 
@@ -1341,7 +1349,7 @@ impl EventEmitter {
             action_result,
             "DAMAGE" | "CRITICAL_DAMAGE" | "DOT_TICK" | "DOT_TICK_CRITICAL" | "BLOCKED_DAMAGE"
         ) {
-            self.flush_pending_shields(Some(&tgt_unit), Some(&ability))
+            self.flush_pending_shields(Some(&tgt_unit), Some(&ability), Some(cast_track_id))
         } else {
             Vec::new()
         };
@@ -1383,16 +1391,13 @@ impl EventEmitter {
             }
         }
 
-        // An INTERRUPT-status combat event records its target as the last interrupted
-        // unit (the reference's `last_interrupt`), the fall-back caster for a later
-        // END_CAST INTERRUPTED whose cast id we never saw. It emits no line, but it
-        // DOES register its `(src, ability, tgt)` tuple — the reference allocates a
-        // buff event for every combat event at the top of the handler, and the later
-        // END_CAST INTERRUPTED reuses this exact tuple as its code-27 subordinal `A`.
-        // Without it the interrupting ability (e.g. Bash 21973) owns no tuple and
-        // both the tuple and its interrupt line are lost.
+        // An INTERRUPT-status combat event emits no line, but it DOES register its
+        // `(src, ability, tgt)` tuple — the reference allocates a buff event for every
+        // combat event at the top of the handler, and a later END_CAST INTERRUPTED on a
+        // tracked cast reuses this exact tuple as its code-27 subordinal `A`. Without it
+        // the interrupting ability (e.g. Bash 21973) owns no tuple and its interrupt
+        // line is lost.
         if action_result == "INTERRUPT" {
-            self.last_interrupt = Some(tgt_unit.clone());
             self.alloc_for(&src_unit, &ability, &tgt_unit);
         }
 
@@ -1724,7 +1729,9 @@ impl EventEmitter {
     /// * `{f8}` = the damage source's own-side mask.
     /// * `{hit}` = the absorbed hit value (raw, not accumulated).
     ///
-    /// A zero hit absorbs nothing → no line.
+    /// A zero-absorb (`hit == 0`) shield is buffered as `requires_cast` — the official
+    /// keeps it ONLY when a real damage event on the same cast later lands (a fully-
+    /// pre-absorbed hit), and drops the unpaired ones; the flush enforces that.
     fn buffer_damage_shielded(
         &mut self,
         raw_ts: i64,
@@ -1732,14 +1739,19 @@ impl EventEmitter {
         shield_ability: &str,
         src_unit: &str,
         tgt_unit: &str,
+        cast_track_id: &str,
     ) {
-        if hit_value == "0" || hit_value.is_empty() {
+        if hit_value.is_empty() {
             return;
         }
+        let requires_cast = hit_value == "0";
         // Accumulate the absorbed amount for this target so the paired real damage
         // event folds it into its overflow (the reference's temporary_damage_buffer).
+        // A zero-absorb shield adds nothing to fold.
         if let Ok(v) = hit_value.parse::<u64>() {
-            *self.temp_damage.entry(tgt_unit.to_string()).or_insert(0) += v;
+            if v > 0 {
+                *self.temp_damage.entry(tgt_unit.to_string()).or_insert(0) += v;
+            }
         }
         // The DAMAGE_SHIELDED combat event allocates its OWN tuple first — keyed on
         // (damageSource, shieldAbility, damageTarget), e.g. `9|3|210` — exactly like
@@ -1766,15 +1778,24 @@ impl EventEmitter {
         self.pending_shields.push(PendingShield {
             prefix,
             target_unit: tgt_unit.to_string(),
+            cast_track_id: cast_track_id.to_string(),
+            requires_cast,
         });
     }
 
     /// Flush buffered code-38 lines, appending the damaging-ability index (`f10`) to
-    /// each. Called by the paired real damage event (with `tgt`/`ability` set) — only
-    /// the pending lines whose target matches are flushed — and at end of stream
-    /// (both `None`) to drain any leftover lines with `f10 = 0`. Returns the finished
-    /// lines in buffered (timestamp) order.
-    fn flush_pending_shields(&mut self, tgt: Option<&str>, ability: Option<&str>) -> Vec<String> {
+    /// each. Called by the paired real damage event (with `tgt`/`ability`/`cast` set) —
+    /// the pending lines whose target matches are flushed — and at end of stream (all
+    /// `None`) to drain leftover normal lines with `f10 = 0`. A zero-absorb
+    /// (`requires_cast`) shield flushes ONLY when the flushing damage shares its cast
+    /// (so an unpaired zero-absorb shield is never emitted — it stays buffered and is
+    /// dropped at stream end). Returns the finished lines in buffered order.
+    fn flush_pending_shields(
+        &mut self,
+        tgt: Option<&str>,
+        ability: Option<&str>,
+        cast: Option<&str>,
+    ) -> Vec<String> {
         if self.pending_shields.is_empty() {
             return Vec::new();
         }
@@ -1786,7 +1807,8 @@ impl EventEmitter {
         // `take` so we can re-borrow self while iterating.
         for p in std::mem::take(&mut self.pending_shields) {
             let matches_target = tgt.map(|t| t == p.target_unit).unwrap_or(true);
-            if matches_target {
+            let cast_ok = !p.requires_cast || cast == Some(p.cast_track_id.as_str());
+            if matches_target && cast_ok {
                 out.push(format!("{}|{f10}", p.prefix));
             } else {
                 kept.push(p);
@@ -2714,10 +2736,16 @@ mod tests {
             .filter(|l| l.split('|').nth(1) == Some("54"))
             .collect();
         assert_eq!(c54.len(), 4, "exactly four code-54 lines, got:\n{seg}");
-        // No DamageShielded (code-38) line: the reflect-cast shield is folded.
-        assert!(
-            !body.iter().any(|l| l.split('|').nth(1) == Some("38")),
-            "a reflect-cast DAMAGE_SHIELDED must fold, not emit code-38:\n{seg}"
+        // A reflect-cast DAMAGE_SHIELDED emits a standalone code-38 (the shield record)
+        // AND folds its absorbed value into the paired reflected hit's code-54 overflow
+        // — the official segment emits both. So exactly one code-38 here (from s3), and
+        // the shield-fold code-54 still carries the absorbed 1138 in its overflow.
+        assert_eq!(
+            body.iter()
+                .filter(|l| l.split('|').nth(1) == Some("38"))
+                .count(),
+            1,
+            "the reflect-cast shield must emit one code-38 line:\n{seg}"
         );
         // Every code-54 here is the boss→player direction: masks 64|16, bare tuple A.
         for l in &c54 {
@@ -2748,6 +2776,166 @@ mod tests {
         assert!(
             tails.contains(&format!("{dmg_idx}|7")),
             "dodged form missing in {tails:?}"
+        );
+    }
+
+    // Shared raw preamble for the small synthetic guards below.
+    const G_LOG: &str = "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"";
+    const G_ZONE: &str = "0,ZONE_CHANGED,1129,\"Hall\",NONE";
+    const G_PLAYER: &str =
+        "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Sorc\",\"@sorc\",111,50,2136,0,PLAYER_ALLY,T";
+    const G_BOSS: &str =
+        "0,UNIT_ADDED,40,MONSTER,F,0,90001,T,0,0,\"Boss\",\"\",0,50,160,0,HOSTILE,F";
+    const G_P: &str = "39728/39728,16363/16363,21310/21310,500/500,1000/1000,0,0.5,0.5,1.0";
+    const G_B: &str = "1426108/5864622,0/0,0/0,0/0,0/0,0,0.36,0.77,4.8";
+
+    fn render(lines: &[&str]) -> Vec<String> {
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(lines);
+        let mut e = EventEmitter::with_master_indices(id2a, ab2i);
+        let seg = render_segment(lines, &mut e).expect("segment builds");
+        seg.lines().skip(2).map(|s| s.to_string()).collect()
+    }
+    fn code_count(body: &[String], code: &str) -> usize {
+        body.iter()
+            .filter(|l| l.split('|').nth(1) == Some(code))
+            .count()
+    }
+
+    /// Guard (code 6/8): a GAINED seeds the stack-direction baseline at ONE application,
+    /// not the raw stackCount. So a buff that GAINED at stack 2 and then UPDATED still at
+    /// 2 is a stack INCREASE vs the 1-application baseline → code 6 (applybuffstack), the
+    /// same-value UPDATED the official keeps — NOT dropped as "same stack" and NOT a
+    /// spurious code 8 decrease.
+    #[test]
+    fn buff_stack_baseline_is_one_application_not_raw_stackcount() {
+        let ab = "0,EFFECT_INFO,61665,BUFF";
+        let g = format!("100,EFFECT_CHANGED,GAINED,2,7000,61665,1,{G_P},*");
+        let u = format!("200,EFFECT_CHANGED,UPDATED,2,7000,61665,1,{G_P},*");
+        let lines = vec![G_LOG, G_ZONE, G_PLAYER, ab, &g, &u];
+        let body = render(&lines);
+        assert_eq!(
+            code_count(&body, "5"),
+            1,
+            "the GAINED is one code-5:\n{body:?}"
+        );
+        assert_eq!(
+            code_count(&body, "6"),
+            1,
+            "the same-value UPDATED after GAINED is a code-6 increase vs baseline 1:\n{body:?}"
+        );
+        assert_eq!(
+            code_count(&body, "8"),
+            0,
+            "it must NOT be a spurious code-8 decrease:\n{body:?}"
+        );
+    }
+
+    /// Guard (code 27): an END_CAST INTERRUPTED whose interrupted cast was never opened
+    /// by a tracked BEGIN_CAST is a phantom the official drops (e.g. a Bash against no
+    /// active cast). Only a real tracked cast yields a code-27 line.
+    #[test]
+    fn interrupt_of_untracked_cast_is_dropped() {
+        let ab_bash = "0,ABILITY_INFO,21973,\"Bash\",\"/esoui/art/icons/x.dds\",F,T";
+        let ab_cast = "0,ABILITY_INFO,16958,\"Grand Healing\",\"/esoui/art/icons/y.dds\",F,T";
+        // A genuine timed cast the boss opens (ctid 9000) then a player Bash interrupts it.
+        let begin = format!("100,BEGIN_CAST,1500,F,9000,16958,40,{G_B},*");
+        let interrupted = "200,END_CAST,INTERRUPTED,9000,16958,21973,1";
+        // A phantom: an INTERRUPTED for ctid 9999 that no BEGIN_CAST ever opened.
+        let phantom = "300,END_CAST,INTERRUPTED,9999,16958,21973,1";
+        let lines = vec![
+            G_LOG,
+            G_ZONE,
+            G_PLAYER,
+            G_BOSS,
+            ab_bash,
+            ab_cast,
+            &begin,
+            interrupted,
+            phantom,
+        ];
+        let body = render(&lines);
+        assert_eq!(
+            code_count(&body, "27"),
+            1,
+            "only the tracked-cast interrupt emits code-27; the untracked phantom is dropped:\n{body:?}"
+        );
+    }
+
+    /// Guard (code 28): a crowd-control debuff FADED carrying a trailing remove-cast id
+    /// that resolves to a real (tracked) cast emits an InterruptionRemoved (code 28),
+    /// generalising past the old Break-Free-only rule to any cleanse/CC-break cast. A
+    /// natural fade (no removing cast) emits no code-28.
+    #[test]
+    fn interruption_removed_fires_for_any_tracked_remove_cast() {
+        let cc = "0,EFFECT_INFO,38254,DEBUFF";
+        let ab_purge = "0,ABILITY_INFO,28279,\"Purge\",\"/esoui/art/icons/x.dds\",F,T";
+        // Player casts Purge (instant, ctid 6000) → tracked in cast_id_units.
+        let purge = format!("50,BEGIN_CAST,0,F,6000,28279,1,{G_P},*");
+        // Boss applies the CC to the player, then it FADES — removed by the Purge cast.
+        let gained = format!("60,EFFECT_CHANGED,GAINED,1,7000,38254,40,{G_B},1,{G_P}");
+        let faded_removed = format!("70,EFFECT_CHANGED,FADED,1,7000,38254,40,{G_B},1,{G_P},6000");
+        // A second CC that fades naturally (no trailing remove-cast) → no code-28.
+        let g2 = format!("80,EFFECT_CHANGED,GAINED,1,7001,38254,40,{G_B},1,{G_P}");
+        let f2_natural = format!("90,EFFECT_CHANGED,FADED,1,7001,38254,40,{G_B},1,{G_P},0");
+        let lines = vec![
+            G_LOG,
+            G_ZONE,
+            G_PLAYER,
+            G_BOSS,
+            cc,
+            ab_purge,
+            &purge,
+            &gained,
+            &faded_removed,
+            &g2,
+            &f2_natural,
+        ];
+        let body = render(&lines);
+        assert_eq!(
+            code_count(&body, "28"),
+            1,
+            "exactly the cleanse-removed CC emits code-28; the natural fade does not:\n{body:?}"
+        );
+    }
+
+    /// Guard (code 38): a zero-absorb DAMAGE_SHIELDED (hit==0) is kept ONLY when a real
+    /// damage event on the SAME cast lands (a fully pre-absorbed hit); an unpaired
+    /// zero-absorb shield is dropped. A normal hit>0 shield always emits.
+    #[test]
+    fn zero_absorb_shield_kept_only_with_a_paired_same_cast_hit() {
+        let ab = "0,ABILITY_INFO,119222,\"Frostbolt\",\"/esoui/art/icons/x.dds\",F,T";
+        // (1) zero-absorb shield on cast 5000 + a same-cast DAMAGE → kept.
+        let s_paired =
+            format!("100,COMBAT_EVENT,DAMAGE_SHIELDED,GENERIC,0,0,0,5000,146311,40,{G_B},1,{G_P}");
+        let d_paired =
+            format!("100,COMBAT_EVENT,DAMAGE,PHYSICAL,1,500,0,5000,119222,40,{G_B},1,{G_P}");
+        // (2) zero-absorb shield on cast 5001 with NO paired damage → dropped.
+        let s_unpaired =
+            format!("200,COMBAT_EVENT,DAMAGE_SHIELDED,GENERIC,0,0,0,5001,146311,40,{G_B},1,{G_P}");
+        // (3) normal hit>0 shield on cast 5002 + a same-cast DAMAGE → kept.
+        let s_norm = format!(
+            "300,COMBAT_EVENT,DAMAGE_SHIELDED,GENERIC,0,1000,0,5002,146311,40,{G_B},1,{G_P}"
+        );
+        let d_norm =
+            format!("300,COMBAT_EVENT,DAMAGE,PHYSICAL,1,200,0,5002,119222,40,{G_B},1,{G_P}");
+        let lines = vec![
+            G_LOG,
+            G_ZONE,
+            G_PLAYER,
+            G_BOSS,
+            ab,
+            &s_paired,
+            &d_paired,
+            &s_unpaired,
+            &s_norm,
+            &d_norm,
+        ];
+        let body = render(&lines);
+        assert_eq!(
+            code_count(&body, "38"),
+            2,
+            "the paired zero-absorb shield + the normal shield emit code-38; the unpaired \
+             zero-absorb is dropped:\n{body:?}"
         );
     }
 
@@ -3191,7 +3379,7 @@ mod tests {
         }
         // Drain any pending code-38 shields at end of stream (the one-shot build()
         // does this too).
-        for l in e.flush_pending_shields(None, None) {
+        for l in e.flush_pending_shields(None, None, None) {
             all_emitted.push(l);
         }
         all_emitted
@@ -3235,7 +3423,7 @@ mod tests {
                 cut_emitter.open_segment();
             }
         }
-        let _ = cut_emitter.flush_pending_shields(None, None);
+        let _ = cut_emitter.flush_pending_shields(None, None, None);
         assert_eq!(
             cut_emitter.tuples(),
             one_shot.tuples(),
