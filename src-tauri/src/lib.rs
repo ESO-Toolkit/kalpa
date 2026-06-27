@@ -473,6 +473,7 @@ pub fn run() {
             uploader::commands::uploader_probe_live_readiness,
             uploader::commands::uploader_split_to_disk,
             uploader::commands::uploader_split_to_disk_named,
+            uploader::commands::uploader_split_fights_to_disk,
             uploader::commands::uploader_import_log,
             uploader::commands::uploader_delete_log,
             uploader::commands::uploader_restore_log,
