@@ -17,7 +17,7 @@ import { UpdateBanner, type BannerUpdate } from "./components/update-banner";
 import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { getSetting, setSetting } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
-import { filterAddons, isFilterMode } from "@/lib/addon-helpers";
+import { filterAddons, isFilterMode, isSortMode } from "@/lib/addon-helpers";
 import type {
   AddonManifest,
   AuthUser,
@@ -308,6 +308,31 @@ function App() {
         if (seq !== checkSeqRef.current) return;
 
         setUpdateResults(results);
+
+        // The check just wrote fresh esoui_last_update values to metadata, but the
+        // live addon state still holds whatever was on disk at scan time (0 for a
+        // just-installed addon). Merge the freshly observed timestamps in so the
+        // "Recently Updated" sort is correct immediately, without a second scan.
+        const freshUpdateTimes = new Map(
+          results
+            .filter((r) => r.remoteLastUpdate > 0)
+            .map((r) => [r.folderName, r.remoteLastUpdate] as const)
+        );
+        if (freshUpdateTimes.size > 0) {
+          setAddons((prev) => {
+            let changed = false;
+            const next = prev.map((addon) => {
+              const ts = freshUpdateTimes.get(addon.folderName);
+              if (ts !== undefined && ts !== addon.esouiLastUpdate) {
+                changed = true;
+                return { ...addon, esouiLastUpdate: ts };
+              }
+              return addon;
+            });
+            return changed ? next : prev;
+          });
+        }
+
         const updates = results.filter((result) => result.hasUpdate);
 
         void invokeResult("update_tray_tooltip", { updateCount: updates.length });
@@ -385,15 +410,19 @@ function App() {
     // These settings reads are independent — fetch them in one batch instead
     // of four sequential awaits.
     const [savedSort, savedFilter, savedPath, autoUpdate] = await Promise.all([
-      getSetting<SortMode>("sortMode", "name"),
+      getSetting<string>("sortMode", "name"),
       getSetting<string>("filterMode", "all"),
       getSetting<string>("addonsPath", ""),
       getSetting<boolean>("autoUpdate", false),
     ]);
 
+    const normalizedSort = isSortMode(savedSort) ? savedSort : "name";
     const normalizedFilter = isFilterMode(savedFilter) ? savedFilter : "all";
-    setSortMode(savedSort);
+    setSortMode(normalizedSort);
     setFilterMode(normalizedFilter);
+    if (normalizedSort !== savedSort) {
+      void setSetting("sortMode", normalizedSort);
+    }
     if (normalizedFilter !== savedFilter) {
       void setSetting("filterMode", normalizedFilter);
     }

@@ -39,7 +39,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsIndicator, TabsTrigger } from "@/components/ui/tabs";
 import { DiscoverPanel } from "@/components/discover-panel";
-import { cn } from "@/lib/utils";
+import { cn, formatRelativeMs, formatRelativeDate } from "@/lib/utils";
 import { motion, AnimatePresence } from "motion/react";
 
 interface AddonListProps {
@@ -82,6 +82,7 @@ interface AddonListItemProps {
   isSelected: boolean;
   batchMode: boolean;
   hasUpdate: boolean;
+  sortMode: SortMode;
   onSelect: (addon: AddonManifest) => void;
   onToggleSelect: (folderName: string) => void;
   onRightClick: (addon: AddonManifest, pos: { x: number; y: number }) => void;
@@ -93,10 +94,21 @@ const AddonListItem = memo(function AddonListItem({
   isSelected,
   batchMode,
   hasUpdate,
+  sortMode,
   onSelect,
   onToggleSelect,
   onRightClick,
 }: AddonListItemProps) {
+  // When sorting by a date, swap the author byline for the relevant timestamp so
+  // the active sort is legible in each row. Falls back to the author otherwise.
+  let dateLabel: string | null = null;
+  if (sortMode === "updated" && addon.esouiLastUpdate > 0) {
+    dateLabel = `Updated ${formatRelativeMs(addon.esouiLastUpdate)}`;
+  } else if (sortMode === "installed" && addon.installedAt) {
+    const rel = formatRelativeDate(addon.installedAt);
+    if (rel) dateLabel = `Downloaded ${rel}`;
+  }
+
   const content = (
     <>
       <div className="truncate text-sm font-medium">
@@ -109,11 +121,17 @@ const AddonListItem = memo(function AddonListItem({
         {addon.title}
       </div>
       <div className="mt-0.5 flex items-center gap-1.5">
-        <span className="text-xs text-muted-foreground/50">
+        <span className="shrink-0 text-xs text-muted-foreground/50">
           {addon.version || `v${addon.addonVersion ?? "?"}`}
         </span>
-        {addon.author && (
-          <span className="text-xs text-muted-foreground/40">&middot; {addon.author}</span>
+        {dateLabel ? (
+          <span className="truncate text-xs text-muted-foreground/40">&middot; {dateLabel}</span>
+        ) : (
+          addon.author && (
+            <span className="truncate text-xs text-muted-foreground/40">
+              &middot; {addon.author}
+            </span>
+          )
         )}
         <div className="flex-1" />
         {hasUpdate && (
@@ -181,7 +199,7 @@ const AddonListItem = memo(function AddonListItem({
       id={`addon-${addon.folderName}`}
       role="option"
       aria-selected={batchMode ? isSelected : isCurrent}
-      aria-label={`${addon.title}${addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}${addon.outdatedDependencies.length > 0 ? `, ${addon.outdatedDependencies.length} outdated dependencies` : ""}`}
+      aria-label={`${addon.title}${dateLabel ? `, ${dateLabel}` : addon.author ? `, by ${addon.author}` : ""}${addon.isLibrary ? ", Library" : ""}${hasUpdate ? ", Update available" : ""}${addon.disabled ? ", Disabled" : ""}${addon.missingDependencies.length > 0 ? `, ${addon.missingDependencies.length} missing dependencies` : ""}${addon.outdatedDependencies.length > 0 ? `, ${addon.outdatedDependencies.length} outdated dependencies` : ""}`}
       className={cn(
         "cursor-pointer border-l-3 border-l-transparent px-4 py-2.5 transition-all duration-200 ease-[cubic-bezier(0.4,0,0.2,1)] hover:bg-white/[0.04] hover:shadow-[inset_0_0_20px_color-mix(in_oklab,var(--primary)_2%,transparent)] group",
         addon.disabled
@@ -629,6 +647,8 @@ export function AddonList({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="updated">Recently Updated</SelectItem>
+                  <SelectItem value="installed">Recently Downloaded</SelectItem>
                   <SelectItem value="name">Name</SelectItem>
                   <SelectItem value="author">Author</SelectItem>
                 </SelectContent>
@@ -772,6 +792,7 @@ export function AddonList({
                           isSelected={selectedFolders.has(addon.folderName)}
                           batchMode={batchMode}
                           hasUpdate={updatesMap.has(addon.folderName)}
+                          sortMode={sortMode}
                           onSelect={onSelect}
                           onToggleSelect={onToggleSelect}
                           onRightClick={handleRightClick}

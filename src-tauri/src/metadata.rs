@@ -223,22 +223,49 @@ pub fn record_install_ext(
     } else {
         esoui_last_update
     };
+    // `installed_at` records the last time Kalpa actually downloaded/installed
+    // this addon locally (a real install or update). It is intentionally
+    // refreshed on every such call so the "Recently Downloaded" sort reflects
+    // recent local activity. Metadata-only reconciliation (auto_link) must NOT
+    // route through here — it uses `reconcile_addon`, which leaves this field
+    // untouched — so a pending, un-downloaded update never falsely stamps it.
+    let installed_at = format_timestamp(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    );
     store.addons.insert(
         folder_name.to_string(),
         AddonMetadata {
             esoui_id,
             installed_version: version.to_string(),
             download_url: download_url.to_string(),
-            installed_at: format_timestamp(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            ),
+            installed_at,
             tags: existing_tags,
             esoui_last_update: last_update,
         },
     );
+}
+
+/// Reconcile API-derived fields on an existing metadata entry during `auto_link`
+/// without touching `installed_at` (the local download time) or `tags`. Used
+/// when ESOUI metadata changes (e.g. a new upstream version is published) but no
+/// download happened, so the "last downloaded" time must stay put. Keeps a known
+/// `esoui_id`/`download_url` rather than clobbering it with an empty API value.
+pub fn reconcile_addon(
+    meta: &mut AddonMetadata,
+    esoui_id: u32,
+    esoui_last_update: u64,
+    download_url: &str,
+) {
+    if esoui_id > 0 {
+        meta.esoui_id = esoui_id;
+    }
+    if meta.download_url.is_empty() && !download_url.is_empty() {
+        meta.download_url = download_url.to_string();
+    }
+    meta.esoui_last_update = esoui_last_update;
 }
 
 pub fn remove_entry(store: &mut MetadataStore, folder_name: &str) {
@@ -327,6 +354,46 @@ mod tests {
         let backup: MetadataStore =
             serde_json::from_str(&fs::read_to_string(&bak).unwrap()).unwrap();
         assert!(backup.addons.is_empty());
+    }
+
+    #[test]
+    fn installed_at_refreshes_on_real_rerecord() {
+        let mut store = MetadataStore::default();
+        record_install(&mut store, "Addon", 1, "1.0", "url");
+
+        // A real install/update is a download, so `installed_at` (the local
+        // "last downloaded" time) is refreshed. Pin a known old value, re-record,
+        // and confirm it moved forward while other fields also updated.
+        store.addons.get_mut("Addon").unwrap().installed_at = "2020-01-01T00:00:00Z".to_string();
+        record_install_ext(&mut store, "Addon", 1, "2.0", "url2", 12345);
+
+        let meta = &store.addons["Addon"];
+        assert_ne!(meta.installed_at, "2020-01-01T00:00:00Z");
+        assert!(meta.installed_at.starts_with("20"));
+        assert_eq!(meta.installed_version, "2.0");
+        assert_eq!(meta.esoui_last_update, 12345);
+    }
+
+    #[test]
+    fn reconcile_addon_preserves_install_time_and_tags() {
+        let mut store = MetadataStore::default();
+        record_install(&mut store, "Addon", 0, "1.0", "url");
+        let meta = store.addons.get_mut("Addon").unwrap();
+        meta.installed_at = "2020-01-01T00:00:00Z".to_string();
+        meta.tags = vec!["favorite".to_string()];
+
+        // Auto-link reconciliation: ESOUI publishes a newer version the user has
+        // NOT downloaded. The local download time and tags must not move; only
+        // the API-derived fields change.
+        reconcile_addon(store.addons.get_mut("Addon").unwrap(), 555, 999, "new-url");
+
+        let meta = &store.addons["Addon"];
+        assert_eq!(meta.installed_at, "2020-01-01T00:00:00Z");
+        assert_eq!(meta.tags, vec!["favorite".to_string()]);
+        assert_eq!(meta.esoui_id, 555);
+        assert_eq!(meta.esoui_last_update, 999);
+        // download_url was non-empty, so it is preserved (not clobbered).
+        assert_eq!(meta.download_url, "url");
     }
 
     #[test]

@@ -20,6 +20,10 @@ export interface AddonManifest {
   esouiId: number | null;
   tags: string[];
   esouiLastUpdate: number;
+  /** Last time Kalpa downloaded/installed this addon locally (refreshed on each
+   * real install/update; not touched by metadata reconciliation), as an ISO
+   * 8601 UTC string. Empty for addons Kalpa never downloaded. */
+  installedAt: string;
   disabled: boolean;
   modifiedFileCount: number;
 }
@@ -46,6 +50,10 @@ export interface UpdateCheckResult {
   remoteVersion: string;
   downloadUrl: string;
   hasUpdate: boolean;
+  /** Remote ESOUI last-updated timestamp (epoch ms) seen during this check.
+   * Merged into live addon state so the "Recently Updated" sort is accurate
+   * without waiting for a re-scan. */
+  remoteLastUpdate: number;
 }
 
 export interface BatchUpdateResult {
@@ -301,7 +309,7 @@ export interface EffectiveField {
 }
 
 // App-level UI state types
-export type SortMode = "name" | "author";
+export type SortMode = "name" | "author" | "updated" | "installed";
 export type FilterMode =
   | "all"
   | "addons"
