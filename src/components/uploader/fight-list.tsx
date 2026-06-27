@@ -6,7 +6,7 @@
 import { Radio, Swords } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
-import { formatDuration } from "./uploader-shared";
+import { fightDurationHint, formatDuration } from "./uploader-shared";
 import type { FightSummary, LiveFight } from "@/types/uploader";
 
 type FightRow = {
@@ -23,16 +23,6 @@ function fightTitle(zone: string | null, boss: string | null, index: number): st
   if (boss) return boss;
   if (zone) return zone;
   return `Fight ${index + 1}`;
-}
-
-/** A duration-derived hint (honest, not a kill/wipe claim): a very short fight is
- *  usually a quick reset/pull, a long one a sustained attempt. Null = no strong
- *  signal, so we show nothing rather than guess. */
-function durationHint(ms: number | undefined): { label: string; color: "muted" | "amber" } | null {
-  if (!ms || ms <= 0) return null;
-  if (ms < 12_000) return { label: "quick reset", color: "amber" };
-  if (ms >= 90_000) return { label: "long pull", color: "muted" };
-  return null;
 }
 
 export function FightList({
@@ -74,7 +64,7 @@ export function FightList({
         // fight; give it a one-shot accent so the eye catches the new arrival,
         // then it settles into the list.
         const isNewest = live && newestFirst && i === 0;
-        const hint = durationHint(f.durationMs);
+        const hint = fightDurationHint(f.durationMs);
         return (
           <li
             key={f.index}

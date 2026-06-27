@@ -12,16 +12,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import {
-  Scissors,
-  ChevronDown,
-  Swords,
-  Sparkles,
-  FolderOpen,
-  CheckCheck,
-  Filter,
-  X,
-} from "lucide-react";
+import { Scissors, Swords, Sparkles, FolderOpen, CheckCheck, Filter, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -41,7 +32,7 @@ import type {
   LogSession,
   SplitSelection,
 } from "@/types/uploader";
-import { compactBytes, formatDuration, relativeFromMs } from "./uploader-shared";
+import { compactBytes, fightDurationHint, formatDuration, relativeFromMs } from "./uploader-shared";
 import { RUN_TAGS, suggestFightName, suggestSplitName, withTag } from "./naming";
 
 // Remember the last prefix the user applied to a batch of splits (e.g. a guild
@@ -123,7 +114,6 @@ export function SplitWorkbench({
   }, [sessions.length, sessions[0]?.index, fights.length]);
 
   const [drafts, setDrafts] = useState<Record<number, SessionDraft>>(initialDrafts);
-  const [expanded, setExpanded] = useState<number | null>(null);
   const [splitting, setSplitting] = useState(false);
   // A common prefix applied to every included split name (e.g. a guild tag),
   // remembered across sessions so a recurring raid keeps its naming convention.
@@ -552,18 +542,15 @@ export function SplitWorkbench({
             sessions.map((s) => {
               const d = drafts[s.index] ?? { include: false, name: "" };
               const inFights = fightsInSession(s, fights);
-              const isOpen = expanded === s.index;
               return (
                 <SessionCard
                   key={s.index}
                   session={s}
                   draft={d}
                   fights={inFights}
-                  expanded={isOpen}
                   onToggleInclude={() => setDraft(s.index, { include: !d.include })}
                   onRename={(name) => setDraft(s.index, { name })}
                   onSuggest={() => setDraft(s.index, { name: suggestSplitName(s, inFights) })}
-                  onToggleExpand={() => setExpanded(isOpen ? null : s.index)}
                 />
               );
             })
@@ -751,20 +738,16 @@ function SessionCard({
   session,
   draft,
   fights,
-  expanded,
   onToggleInclude,
   onRename,
   onSuggest,
-  onToggleExpand,
 }: {
   session: LogSession;
   draft: SessionDraft;
   fights: FightSummary[];
-  expanded: boolean;
   onToggleInclude: () => void;
   onRename: (name: string) => void;
   onSuggest: () => void;
-  onToggleExpand: () => void;
 }) {
   const realm = session.realm?.replace(/megaserver/i, "").trim() || null;
   const suggestion = suggestSplitName(session, fights);
@@ -844,42 +827,48 @@ function SessionCard({
             )}
           </div>
 
-          {/* Fight breakdown toggle */}
+          {/* Fights — shown inline by default (no expander) so the user sees
+              exactly what's in this session before splitting. Each row carries a
+              duration and an honest quick-reset / long-pull hint. Capped height +
+              scroll keeps a dense session from dominating the modal. */}
           {fights.length > 0 && (
-            <button
-              type="button"
-              onClick={onToggleExpand}
-              aria-expanded={expanded}
-              className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground/80"
-            >
-              <ChevronDown
-                className={cn("size-3 transition-transform duration-200", expanded && "rotate-180")}
-                aria-hidden
-              />
-              {expanded ? "Hide" : "Show"} {fights.length} fight{fights.length === 1 ? "" : "s"}
-            </button>
-          )}
-
-          {/* Fight breakdown list */}
-          {expanded && fights.length > 0 && (
-            <ul className="mt-2 max-h-44 space-y-1 overflow-y-auto border-t border-white/[0.06] pt-2">
-              {fights.map((f) => (
-                <li
-                  key={f.index}
-                  className="flex items-center justify-between gap-3 rounded-md bg-white/[0.02] px-2 py-1"
-                >
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <Swords className="size-3 shrink-0 text-primary/70" aria-hidden />
-                    <span className="truncate text-xs text-foreground/85">
-                      {f.bossName || f.zoneName || `Fight ${f.index + 1}`}
-                    </span>
-                  </span>
-                  <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                    {formatDuration(f.endMs - f.startMs)}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <div className="mt-2.5 border-t border-white/[0.06] pt-2">
+              <div className="mb-1.5 flex items-center justify-between px-0.5">
+                <span className="font-heading text-[10px] font-bold tracking-[0.06em] text-muted-foreground/55 uppercase">
+                  Fights
+                </span>
+                <span className="text-[10px] tabular-nums text-muted-foreground/50">
+                  {fights.length}
+                </span>
+              </div>
+              <ul className="max-h-56 space-y-1 overflow-y-auto pr-0.5">
+                {fights.map((f) => {
+                  const ms = f.endMs - f.startMs;
+                  const hint = fightDurationHint(ms);
+                  return (
+                    <li
+                      key={f.index}
+                      className="flex items-center justify-between gap-3 rounded-md bg-white/[0.02] px-2 py-1.5"
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <Swords className="size-3 shrink-0 text-primary/70" aria-hidden />
+                        <span className="truncate text-xs text-foreground/85">{fightLabel(f)}</span>
+                      </span>
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        {hint && (
+                          <InfoPill color={hint.color} className="text-[10px]">
+                            {hint.label}
+                          </InfoPill>
+                        )}
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
+                          {formatDuration(ms)}
+                        </span>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
           )}
         </div>
       </div>

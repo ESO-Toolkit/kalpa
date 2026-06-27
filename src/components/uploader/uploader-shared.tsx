@@ -86,6 +86,19 @@ export function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/** A duration-derived hint for a fight (honest, not a kill/wipe claim): a very
+ *  short fight is usually a quick reset/pull, a long one a sustained attempt.
+ *  Null = no strong signal, so callers show nothing rather than guess. Shared by
+ *  the fight timeline and the split workbench so both read the same. */
+export function fightDurationHint(
+  ms: number | undefined
+): { label: string; color: "muted" | "amber" } | null {
+  if (!ms || ms <= 0) return null;
+  if (ms < 12_000) return { label: "quick reset", color: "amber" };
+  if (ms >= 90_000) return { label: "long pull", color: "muted" };
+  return null;
+}
+
 /** Format an elapsed duration as a session clock: `M:SS`, then `H:MM:SS` past an
  *  hour. Used by the live session timer (counts up; raids have no deadline). */
 export function formatElapsed(ms: number): string {
@@ -103,7 +116,7 @@ export function formatElapsed(ms: number): string {
  *  elapsed from a fixed start timestamp (drift-free; survives dropped ticks over
  *  a multi-hour raid). Mounted only while a session runs, so the interval is torn
  *  down with the component — no setState-after-unmount risk. */
-export function SessionTimer({ startMs }: { startMs: number }) {
+export function SessionTimer({ startMs, className }: { startMs: number; className?: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -111,7 +124,7 @@ export function SessionTimer({ startMs }: { startMs: number }) {
   }, []);
   return (
     <span
-      className="font-heading text-xs tabular-nums text-muted-foreground"
+      className={cn("font-heading text-xs tabular-nums text-muted-foreground", className)}
       aria-label="Session elapsed time"
     >
       {formatElapsed(now - startMs)}

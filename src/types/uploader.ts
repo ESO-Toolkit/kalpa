@@ -94,6 +94,14 @@ export interface UploadRecord {
   fightCount: number;
   report: ReportRef | null;
   error: string | null;
+  /** The report's human title (the name the user gave it). Only set on the
+   *  direct/native path, which applies it; null for handed-off uploads and
+   *  records written before this field existed. */
+  title: string | null;
+  /** The derived content label (dominant zone/trial) for the row headline, so
+   *  history reads "Lucent Citadel" rather than a bare file name. Null when no
+   *  zone could be derived or for pre-existing records. */
+  zone: string | null;
 }
 
 export interface TransportInfo {

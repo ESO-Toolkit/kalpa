@@ -77,13 +77,14 @@ import {
   WhatGetsUploaded,
   compactBytes,
   esotkReportUrl,
+  formatDuration,
   formatElapsed,
   relativeFromMs,
 } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
 import { FightList, rowsFromLive, rowsFromSummaries } from "./fight-list";
 import { SplitWorkbench } from "./split-workbench";
-import { dominantZone } from "./naming";
+import { dominantZone, shortDate } from "./naming";
 
 interface UploaderWorkspaceProps {
   authUser: AuthUser | null;
@@ -775,6 +776,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         // log just to fill the history record.
         fightCount: preflight?.totalFights ?? null,
         nativeOptIn,
+        // The derived content label for the history row's headline.
+        zone: dominantZone(fights),
       });
       if (dispatch.report) {
         toast.success("Upload complete — report ready.");
@@ -1066,6 +1069,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         options,
         channel,
         nativeOptIn,
+        // Best-effort content label from the pre-live preflight (live streams new
+        // fights, but the session usually continues in the same content).
+        zone: dominantZone(fights),
       });
       // The start can resolve Ok AFTER a stop / switch-to-Manual / superseding
       // start ran during the await (handleStopLive already fired
@@ -1275,6 +1281,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     [history]
   );
 
+  // The selected log's dominant zone — the content name the Mission Control band
+  // leads with when a log is scanned and ready.
+  const headerZone = useMemo(() => dominantZone(fights), [fights]);
+
   // Initial dialog focus: land on the first meaningful control (the Manual mode
   // tab) rather than the close button, so keyboard users start in the flow. When
   // logged out this ref is null and the dialog falls back to default focus (the
@@ -1300,26 +1310,41 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
             </DialogTitle>
             <HeaderStatusPill
               phase={headerPhase}
-              liveStartMs={liveStartMs}
-              liveFightCount={liveFightCount}
               totalFights={preflight?.totalFights ?? 0}
               logsCount={listError ? 0 : logs.length}
               lastUploadMs={lastUploadMs}
             />
           </div>
           {/* Keep an accessible description for the Dialog's aria-describedby but
-              drop the marketing prose — the route instrument below + the body's
+              drop the marketing prose — the Mission Control band below + the body's
               "What gets uploaded" note carry the real, honest explanation. */}
           <DialogDescription className="sr-only">
             Turn your Encounter.log into a shareable report on esologs.com.
           </DialogDescription>
           {isLoggedIn ? (
-            <HeaderRoute
+            <MissionControlBand
+              phase={headerPhase}
               mode={mode}
               routeDirect={routeDirect}
               officialInstalled={transport?.officialUploaderInstalled ?? false}
               userName={authUser?.userName ?? null}
               sessionPersisted={authUser?.sessionPersisted !== false}
+              logsCount={listError ? 0 : logs.length}
+              selectedFileName={
+                selectedLog ? (selectedLog.split(/[/\\]/).pop() ?? selectedLog) : null
+              }
+              readyZone={headerZone}
+              readyFights={preflight?.totalFights ?? 0}
+              readySessions={preflight?.sessions.length ?? 0}
+              readySizeBytes={preflight?.sizeBytes ?? 0}
+              live={liveSessionId !== null}
+              liveStartMs={liveStartMs}
+              liveFights={liveFights}
+              liveFightCount={liveFightCount}
+              liveReport={liveReport}
+              liveHandedOff={liveHandedOff}
+              sessionAnchored={sessionAnchored}
+              onCopyLink={copyLink}
             />
           ) : (
             <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
@@ -1633,39 +1658,18 @@ function DeleteLogConfirm({
 // region, so a screen reader never hears the per-second timer tick.
 function HeaderStatusPill({
   phase,
-  liveStartMs,
-  liveFightCount,
   totalFights,
   logsCount,
   lastUploadMs,
 }: {
   phase: HeaderPhase;
-  liveStartMs: number | null;
-  liveFightCount: number;
   totalFights: number;
   logsCount: number;
   lastUploadMs: number | null;
 }) {
-  // Live/armed reuse LiveDashboard's exact pulse-dot markup so the pinned pill
-  // matches the body. Amber = armed (waiting to anchor), emerald = live/ready
-  // (red is reserved for real errors, never used here).
-  const pulse = (tone: "amber" | "emerald") => (
-    <span className="relative flex size-2" aria-hidden>
-      <span
-        className={cn(
-          "absolute inline-flex size-full animate-ping rounded-full",
-          tone === "amber" ? "bg-amber-400/70" : "bg-emerald-400/70"
-        )}
-      />
-      <span
-        className={cn(
-          "relative inline-flex size-2 rounded-full",
-          tone === "amber" ? "bg-amber-400" : "bg-emerald-400"
-        )}
-      />
-    </span>
-  );
-
+  // Live/armed reuse the shared PulseDot so the pinned pill matches the live core
+  // and body. Amber = armed (waiting to anchor), emerald = live (red is reserved
+  // for real errors, never used here).
   let color: "muted" | "sky" | "emerald" | "amber";
   let icon: ReactNode;
   let label: string;
@@ -1687,12 +1691,12 @@ function HeaderStatusPill({
       break;
     case "armed":
       color = "amber";
-      icon = pulse("amber");
+      icon = <PulseDot tone="amber" />;
       label = "Armed";
       break;
     case "live":
       color = "emerald";
-      icon = pulse("emerald");
+      icon = <PulseDot tone="emerald" />;
       label = "Live";
       break;
     case "attention":
@@ -1712,21 +1716,13 @@ function HeaderStatusPill({
       break;
   }
 
-  // The aria-hidden companion stat sits OUTSIDE the announced region.
+  // The aria-hidden companion stat sits OUTSIDE the announced region. In live /
+  // armed / attention the new Mission Control band below carries the timer + fight
+  // count (and far more), so the pill stays just the announced phase word there —
+  // no duplicate readout. The ready / idle phases keep a one-glance companion.
   let companion: ReactNode = null;
   let companionTitle: string | undefined;
-  if (phase === "armed" || phase === "live" || phase === "attention") {
-    companion = (
-      <>
-        {liveStartMs !== null && <SessionTimer startMs={liveStartMs} />}
-        {liveFightCount > 0 && (
-          <span>
-            · {liveFightCount} fight{liveFightCount === 1 ? "" : "s"}
-          </span>
-        )}
-      </>
-    );
-  } else if (phase === "ready" && totalFights > 0) {
+  if (phase === "ready" && totalFights > 0) {
     companion = (
       <span>
         · {totalFights} fight{totalFights === 1 ? "" : "s"}
@@ -1759,31 +1755,76 @@ function HeaderStatusPill({
   );
 }
 
-// The header's "route" instrument: a mode micro-label, the data path your log
-// takes (your log → the active engine → esologs.com), terminating in the
-// signed-in account chip — so the header reads as the log's whole journey,
-// ending in the account that will own the report. The middle chip reflects the
-// effective transport (direct = sky/Zap, official = muted). The signature
-// element of the workspace, grounded in the subject.
-function HeaderRoute({
-  mode,
+// A pulsing status dot (ping ring + solid core), shared by the header pill and the
+// live core so the "live"/"armed" cue reads identically everywhere. Amber = armed
+// (waiting to anchor), emerald = live/streaming. Never red — red is for errors.
+function PulseDot({ tone }: { tone: "amber" | "emerald" }) {
+  return (
+    <span className="relative flex size-2" aria-hidden>
+      <span
+        className={cn(
+          "absolute inline-flex size-full animate-ping rounded-full",
+          tone === "amber" ? "bg-amber-400/70" : "bg-emerald-400/70"
+        )}
+      />
+      <span
+        className={cn(
+          "relative inline-flex size-2 rounded-full",
+          tone === "amber" ? "bg-amber-400" : "bg-emerald-400"
+        )}
+      />
+    </span>
+  );
+}
+
+// The signed-in ESO Logs account chip — the terminal of the route (the account
+// that will own the report). Sky = identity; an amber warning rides along when the
+// session won't persist past a restart.
+function AccountChip({
+  userName,
+  sessionPersisted,
+}: {
+  userName: string;
+  sessionPersisted: boolean;
+}) {
+  return (
+    <SimpleTooltip content="Reports upload to this ESO Logs account" side="bottom">
+      <span
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent-sky/20 bg-accent-sky/[0.05] px-2 py-1 font-medium text-accent-sky"
+        aria-label={`Signed in to ESO Logs as ${userName}`}
+      >
+        <UserRound className="size-3" aria-hidden />
+        <span className="max-w-[140px] truncate">{userName}</span>
+        {!sessionPersisted && (
+          <span
+            title="Signed in for this session only — it won't persist after you restart Kalpa."
+            className="inline-flex"
+          >
+            <AlertTriangle className="size-3 text-amber-400" aria-hidden />
+          </span>
+        )}
+      </span>
+    </SimpleTooltip>
+  );
+}
+
+// The route pipeline: your log → the active engine → esologs.com, then (as a
+// sibling terminal) the account chip. The engine chip reflects the effective
+// transport (direct = sky/Zap, official = muted). esologs.com stays NEUTRAL — gold
+// is reserved exclusively for the Upload action.
+function RouteFlow({
   routeDirect,
   officialInstalled,
   userName,
   sessionPersisted,
 }: {
-  mode: Mode;
   routeDirect: boolean;
   officialInstalled: boolean;
   userName: string | null;
   sessionPersisted: boolean;
 }) {
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[11px]">
-      <span className="font-heading text-[10px] font-bold tracking-[0.08em] text-muted-foreground/50 uppercase">
-        {mode === "live" ? "Live Log" : "Upload a Log"}
-      </span>
-      <span className="h-3 w-px bg-white/[0.08]" aria-hidden />
+    <>
       <span
         className="inline-flex items-center gap-2"
         aria-label={`Upload route: your log, ${routeDirect ? "Direct from Kalpa" : "Official uploader"}, to esologs.com`}
@@ -1805,30 +1846,384 @@ function HeaderRoute({
           </span>
         )}
         <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
-        <span className="inline-flex items-center gap-1.5 rounded-md border border-primary/25 bg-primary/[0.06] px-2 py-1 font-medium text-primary">
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.1] bg-white/[0.04] px-2 py-1 font-medium text-foreground/80">
           esologs.com
         </span>
       </span>
-      <span className="min-w-2 flex-1" aria-hidden />
       {userName && (
-        <SimpleTooltip content="Reports upload to this ESO Logs account" side="bottom">
-          <span
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent-sky/20 bg-accent-sky/[0.05] px-2 py-1 font-medium text-accent-sky"
-            aria-label={`Signed in to ESO Logs as ${userName}`}
-          >
-            <UserRound className="size-3" aria-hidden />
-            <span className="max-w-[140px] truncate">{userName}</span>
-            {!sessionPersisted && (
-              <span
-                title="Signed in for this session only — it won't persist after you restart Kalpa."
-                className="inline-flex"
-              >
-                <AlertTriangle className="size-3 text-amber-400" aria-hidden />
-              </span>
-            )}
-          </span>
-        </SimpleTooltip>
+        <>
+          <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
+          <AccountChip userName={userName} sessionPersisted={sessionPersisted} />
+        </>
       )}
+    </>
+  );
+}
+
+// ── Mission Control header band ──────────────────────────────────────────────
+// The pinned, adaptive header below the title. It stays a slim instrument row at
+// rest (a contextual readout + the route → account flow) and, the moment a live
+// session is running, expands into a real glance dashboard — a state core (orb +
+// big timer + fight count), a fight ticker, and the report link the instant it
+// lands — so the most relevant state is always visible while the body scrolls.
+function MissionControlBand({
+  phase,
+  mode,
+  routeDirect,
+  officialInstalled,
+  userName,
+  sessionPersisted,
+  logsCount,
+  selectedFileName,
+  readyZone,
+  readyFights,
+  readySessions,
+  readySizeBytes,
+  live,
+  liveStartMs,
+  liveFights,
+  liveFightCount,
+  liveReport,
+  liveHandedOff,
+  sessionAnchored,
+  onCopyLink,
+}: {
+  phase: HeaderPhase;
+  mode: Mode;
+  routeDirect: boolean;
+  officialInstalled: boolean;
+  userName: string | null;
+  sessionPersisted: boolean;
+  logsCount: number;
+  selectedFileName: string | null;
+  readyZone: string | null;
+  readyFights: number;
+  readySessions: number;
+  readySizeBytes: number;
+  live: boolean;
+  liveStartMs: number | null;
+  liveFights: LiveFight[];
+  liveFightCount: number;
+  liveReport: ReportRef | null;
+  liveHandedOff: boolean;
+  sessionAnchored: boolean;
+  onCopyLink: (url: string) => void | Promise<void>;
+}) {
+  if (live) {
+    return (
+      <LiveDashboardBand
+        phase={phase}
+        routeDirect={routeDirect}
+        officialInstalled={officialInstalled}
+        userName={userName}
+        sessionPersisted={sessionPersisted}
+        startMs={liveStartMs}
+        fights={liveFights}
+        fightCount={liveFightCount}
+        report={liveReport}
+        handedOff={liveHandedOff}
+        sessionAnchored={sessionAnchored}
+        onCopyLink={onCopyLink}
+      />
+    );
+  }
+
+  // ── Slim instrument row (idle / scanning / ready / uploading) ──────────────
+  // The phase-specific lead: what the header confirms at a glance right now.
+  let lead: ReactNode;
+  if (phase === "ready") {
+    lead = (
+      <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        <Swords className="size-3 shrink-0 text-primary/70" aria-hidden />
+        <span className="truncate font-medium text-foreground/90">{readyZone ?? "Combat log"}</span>
+        <span className="text-muted-foreground/70">
+          · {readyFights} fight{readyFights === 1 ? "" : "s"}
+          {readySessions > 0 && ` · ${readySessions} session${readySessions === 1 ? "" : "s"}`}
+          {readySizeBytes > 0 && ` · ${compactBytes(readySizeBytes)}`}
+        </span>
+      </span>
+    );
+  } else if (phase === "scanning") {
+    lead = (
+      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+        <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
+        <span className="truncate">Scanning {selectedFileName ?? "the log"}…</span>
+      </span>
+    );
+  } else if (phase === "uploading") {
+    lead = (
+      <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+        <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
+        <span className="truncate">Uploading {selectedFileName ?? "your log"}…</span>
+      </span>
+    );
+  } else {
+    // Idle — a quiet directive (the status pill already carries the log count).
+    lead = (
+      <span className="text-muted-foreground/80">
+        {logsCount > 0 ? "Pick a log to upload" : "Turn on /encounterlog in ESO to start a log"}
+      </span>
+    );
+  }
+
+  return (
+    <div className="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[11px]">
+      <span className="font-heading text-[10px] font-bold tracking-[0.08em] text-muted-foreground/50 uppercase">
+        {mode === "live" ? "Live Log" : "Upload a Log"}
+      </span>
+      <span className="h-3 w-px bg-white/[0.08]" aria-hidden />
+      {lead}
+      <span className="min-w-2 flex-1" aria-hidden />
+      <RouteFlow
+        routeDirect={routeDirect}
+        officialInstalled={officialInstalled}
+        userName={userName}
+        sessionPersisted={sessionPersisted}
+      />
+    </div>
+  );
+}
+
+// The live glance dashboard the header expands into while a session runs. Three
+// zones — state core, fight ticker, report CTA — over a route/account footer. Tone
+// follows the phase: emerald when streaming, amber while armed (waiting to anchor)
+// or needing attention (the ESO Logs session expired).
+function LiveDashboardBand({
+  phase,
+  routeDirect,
+  officialInstalled,
+  userName,
+  sessionPersisted,
+  startMs,
+  fights,
+  fightCount,
+  report,
+  handedOff,
+  sessionAnchored,
+  onCopyLink,
+}: {
+  phase: HeaderPhase;
+  routeDirect: boolean;
+  officialInstalled: boolean;
+  userName: string | null;
+  sessionPersisted: boolean;
+  startMs: number | null;
+  fights: LiveFight[];
+  fightCount: number;
+  report: ReportRef | null;
+  handedOff: boolean;
+  sessionAnchored: boolean;
+  onCopyLink: (url: string) => void | Promise<void>;
+}) {
+  const tone = phase === "live" ? "emerald" : "amber";
+  const routeLabel = routeDirect
+    ? "Direct to esologs.com"
+    : officialInstalled
+      ? "Via the official ESO Logs uploader"
+      : "Via the ESO Logs uploader";
+  return (
+    <div
+      className={cn(
+        "mt-2.5 rounded-xl border p-3",
+        tone === "emerald"
+          ? "border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.06] to-emerald-400/[0.01]"
+          : "border-amber-400/20 bg-gradient-to-b from-amber-400/[0.06] to-amber-400/[0.01]"
+      )}
+    >
+      <div className="flex flex-wrap items-stretch gap-3">
+        <LiveCore phase={phase} startMs={startMs} fightCount={fightCount} />
+        <FightTicker
+          fights={fights}
+          fightCount={fightCount}
+          armed={phase === "armed"}
+          attention={phase === "attention"}
+          handedOff={handedOff}
+        />
+        <LiveReportCTA
+          report={report}
+          handedOff={handedOff}
+          sessionAnchored={sessionAnchored}
+          onCopyLink={onCopyLink}
+        />
+      </div>
+      <div className="mt-2.5 flex flex-wrap items-center gap-2 border-t border-white/[0.06] pt-2 text-[11px]">
+        <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+          {routeDirect ? (
+            <Zap className="size-3 text-accent-sky" aria-hidden />
+          ) : (
+            <CloudUpload className="size-3" aria-hidden />
+          )}
+          {routeLabel}
+        </span>
+        <span className="min-w-2 flex-1" aria-hidden />
+        {userName && <AccountChip userName={userName} sessionPersisted={sessionPersisted} />}
+      </div>
+    </div>
+  );
+}
+
+// The state core: the orb + phase word, a big counting timer, and the fight count.
+function LiveCore({
+  phase,
+  startMs,
+  fightCount,
+}: {
+  phase: HeaderPhase;
+  startMs: number | null;
+  fightCount: number;
+}) {
+  const tone = phase === "live" ? "emerald" : "amber";
+  const label = phase === "attention" ? "ATTENTION" : phase === "armed" ? "ARMED" : "LIVE";
+  return (
+    <div
+      className={cn(
+        "flex min-w-[116px] flex-col justify-center gap-0.5 rounded-lg border px-3 py-2",
+        tone === "emerald"
+          ? "border-emerald-400/20 bg-emerald-400/[0.05]"
+          : "border-amber-400/20 bg-amber-400/[0.05]"
+      )}
+    >
+      <div className="flex items-center gap-1.5">
+        <PulseDot tone={tone} />
+        <span
+          className={cn(
+            "font-heading text-[10px] font-bold tracking-[0.12em]",
+            tone === "emerald" ? "text-emerald-300/90" : "text-amber-300/90"
+          )}
+        >
+          {label}
+        </span>
+      </div>
+      {startMs !== null && (
+        <SessionTimer
+          startMs={startMs}
+          className="text-xl leading-tight font-semibold text-foreground/95"
+        />
+      )}
+      <span className="text-[11px] text-muted-foreground">
+        {fightCount} fight{fightCount === 1 ? "" : "s"}
+      </span>
+    </div>
+  );
+}
+
+// The fight ticker: the few most-recent fights (newest first), with the most
+// recent emphasized, plus an "+N earlier" tail. Empty copy is phase-aware.
+function FightTicker({
+  fights,
+  fightCount,
+  armed,
+  attention,
+  handedOff,
+}: {
+  fights: LiveFight[];
+  fightCount: number;
+  armed: boolean;
+  attention: boolean;
+  handedOff: boolean;
+}) {
+  const recent = fights.slice(-3).reverse();
+  const empty = attention
+    ? "Paused — sign in to ESO Logs to resume posting."
+    : armed
+      ? "Waiting for a logging session to start…"
+      : handedOff
+        ? "The ESO Logs uploader is streaming this session."
+        : "Streaming fights to ESO Logs as they finish…";
+  return (
+    <div className="flex min-w-[150px] flex-1 flex-col justify-center">
+      <div className="font-heading text-[10px] font-bold tracking-[0.08em] text-muted-foreground/55 uppercase">
+        Fights this session
+      </div>
+      {recent.length === 0 ? (
+        <p className="mt-1 text-xs text-muted-foreground">{empty}</p>
+      ) : (
+        <ul className="mt-1 space-y-0.5" aria-label="Most recent fights">
+          {recent.map((f, i) => (
+            <li key={f.index} className="flex items-center justify-between gap-2 text-xs">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="text-muted-foreground/40" aria-hidden>
+                  ▸
+                </span>
+                <span
+                  className={cn("truncate", i === 0 ? "text-foreground/90" : "text-foreground/60")}
+                >
+                  {f.bossName || f.zoneName || `Fight ${f.index + 1}`}
+                </span>
+              </span>
+              <span className="shrink-0 tabular-nums text-muted-foreground/70">
+                {formatDuration(f.durationMs)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {fightCount > recent.length && (
+        <div className="mt-0.5 text-[10px] text-muted-foreground/50">
+          +{fightCount - recent.length} earlier
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The report CTA: once the report code lands, a one-tap "Watch live"/"Open" +
+// copy; before then, an honest placeholder so the slot doesn't pop in late.
+function LiveReportCTA({
+  report,
+  handedOff,
+  sessionAnchored,
+  onCopyLink,
+}: {
+  report: ReportRef | null;
+  handedOff: boolean;
+  sessionAnchored: boolean;
+  onCopyLink: (url: string) => void | Promise<void>;
+}) {
+  if (!report) {
+    return (
+      <div className="flex min-w-[112px] flex-col items-center justify-center gap-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-center">
+        <CircleDashed className="size-4 text-muted-foreground/50" aria-hidden />
+        <span className="text-[10px] leading-tight text-muted-foreground/70">
+          {handedOff
+            ? "Report opens in the uploader"
+            : sessionAnchored
+              ? "Reserving report…"
+              : "Report opens when logging starts"}
+        </span>
+      </div>
+    );
+  }
+  // Native sessions deep-link to the live analysis (esotk LiveLog, 30s repoll); a
+  // handed-off report isn't streaming through Kalpa, so it just opens.
+  const isNative = !handedOff;
+  return (
+    <div className="flex min-w-[124px] flex-col justify-center gap-1.5 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-2">
+      <span className="font-heading text-[10px] font-bold tracking-[0.08em] text-emerald-300/90 uppercase">
+        Report ready
+      </span>
+      <span className="truncate text-xs text-foreground/85" title={report.code}>
+        {report.code}
+      </span>
+      <div className="flex items-center gap-1">
+        <Button
+          size="sm"
+          className="h-7 flex-1 gap-1.5 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25"
+          onClick={() => void openReportUrl(esotkReportUrl(report.code, { live: isNative }))}
+        >
+          <Zap className="size-3" aria-hidden />
+          {isNative ? "Watch" : "Open"}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="size-7"
+          onClick={() => void onCopyLink(report.url)}
+          aria-label="Copy report link"
+        >
+          <Copy className="size-3" />
+        </Button>
+      </div>
     </div>
   );
 }
@@ -2709,48 +3104,78 @@ function Preflight({
       ? `${sessionCount} session${sessionCount === 1 ? "" : "s"}` +
         (fightCount > 0 ? ` · ${fightCount} fight${fightCount === 1 ? "" : "s"}` : "")
       : "";
+  // A peek at what's in the log, right on the card, so the user sees the fights
+  // before opening the workbench. Only when the per-fight list was scanned.
+  const fightPreview = perFightAvailable ? preflight.fights.slice(0, 4) : [];
+  const moreFights = preflight.fights.length - fightPreview.length;
   return (
     <div
       className={cn(
-        "flex items-center gap-3 rounded-xl border border-l-[3px] p-3 transition-colors",
+        "rounded-xl border border-l-[3px] p-3 transition-colors",
         urgent
           ? "border-amber-400/25 border-l-amber-400 bg-amber-400/[0.05]"
           : "border-accent-sky/20 border-l-accent-sky/70 bg-accent-sky/[0.04]"
       )}
     >
-      <span
-        className={cn(
-          "flex size-9 shrink-0 items-center justify-center rounded-lg",
-          urgent ? "bg-amber-400/12 text-amber-300" : "bg-accent-sky/12 text-accent-sky"
-        )}
-      >
-        <Scissors className="size-4" aria-hidden />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="text-sm font-semibold text-foreground/90">
-          {urgent ? "This log is large — split it to upload" : "Split this log"}
+      <div className="flex items-center gap-3">
+        <span
+          className={cn(
+            "flex size-9 shrink-0 items-center justify-center rounded-lg",
+            urgent ? "bg-amber-400/12 text-amber-300" : "bg-accent-sky/12 text-accent-sky"
+          )}
+        >
+          <Scissors className="size-4" aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-foreground/90">
+            {urgent ? "This log is large — split it to upload" : "Split this log"}
+          </div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            {perFightAvailable
+              ? "Carve it into per-session or per-fight files — upload a single fight or a whole night on its own."
+              : "Carve it into per-session files so each uploads cleanly (per-fight split is available on smaller logs)."}
+            {counts && <span className="text-muted-foreground/70"> {counts}.</span>}
+          </div>
         </div>
-        <div className="mt-0.5 text-xs text-muted-foreground">
-          {perFightAvailable
-            ? "Carve it into per-session or per-fight files — upload a single fight or a whole night on its own."
-            : "Carve it into per-session files so each uploads cleanly (per-fight split is available on smaller logs)."}
-          {counts && <span className="text-muted-foreground/70"> {counts}.</span>}
-        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onSplit}
+          className={cn(
+            "shrink-0",
+            urgent
+              ? "border-amber-400/40 bg-amber-400/[0.08] text-amber-200 hover:bg-amber-400/[0.16]"
+              : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
+          )}
+        >
+          <Scissors className="size-3.5" />
+          Split log…
+        </Button>
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={onSplit}
-        className={cn(
-          "shrink-0",
-          urgent
-            ? "border-amber-400/40 bg-amber-400/[0.08] text-amber-200 hover:bg-amber-400/[0.16]"
-            : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
-        )}
-      >
-        <Scissors className="size-3.5" />
-        Split log…
-      </Button>
+
+      {/* Fight peek — the first few fights with their durations, so the content is
+          visible before opening the workbench. */}
+      {fightPreview.length > 0 && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-white/[0.06] pt-2.5">
+          {fightPreview.map((f) => (
+            <span
+              key={f.index}
+              className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px]"
+            >
+              <Swords className="size-2.5 shrink-0 text-primary/60" aria-hidden />
+              <span className="max-w-[150px] truncate text-foreground/75">
+                {f.bossName || f.zoneName || `Fight ${f.index + 1}`}
+              </span>
+              <span className="tabular-nums text-muted-foreground/70">
+                {formatDuration(f.endMs - f.startMs)}
+              </span>
+            </span>
+          ))}
+          {moreFights > 0 && (
+            <span className="text-[11px] text-muted-foreground/60">+{moreFights} more</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -3275,23 +3700,9 @@ function HistoryPanel({
   // Inline two-step confirm: clicking trash arms the row; a second click on the
   // revealed "Remove" confirms. Removing a history record never touches the file.
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  // The top quick-paste bar: paste any esologs.com report link/code to open its
-  // analysis — a universal "open a report" utility, distinct from the per-row
-  // attach (which binds a link to a specific handed-off record).
-  const [quickDraft, setQuickDraft] = useState("");
 
-  // Only the first 8 records are rendered, so derive the visible slice once and
-  // base BOTH the rows and the handed-off count on it — otherwise the bridging
-  // helper ("paste its link on that row below") could point at a handed-off row
-  // beyond the cutoff that isn't actually shown.
+  // Only the first 8 records are rendered.
   const visibleHistory = useMemo(() => history.slice(0, 8), [history]);
-
-  // How many VISIBLE handed-off uploads still need a report link — drives the
-  // bridging helper that routes a top-bar paste to the right per-row attach.
-  const pendingHandoffCount = useMemo(
-    () => visibleHistory.filter((r) => r.status === "handedOff" && !r.report).length,
-    [visibleHistory]
-  );
 
   const submitLink = async (id: string) => {
     const code = parseReportCode(linkDraft);
@@ -3306,19 +3717,9 @@ function HistoryPanel({
     setLinkDraft("");
   };
 
-  const openQuick = () => {
-    const code = parseReportCode(quickDraft);
-    if (!code) {
-      toast.error("That doesn't look like an ESO Logs report link or code.");
-      return;
-    }
-    void openReportUrl(esotkReportUrl(code));
-    setQuickDraft("");
-  };
-
   return (
     <div className={cn(WORK_PANEL, "p-3.5")}>
-      <div className="mb-2 flex items-center justify-between">
+      <div className="mb-2.5 flex items-center justify-between">
         <SectionHeader>Recent Uploads</SectionHeader>
         <SimpleTooltip content="Refresh history" side="bottom">
           <Button
@@ -3332,58 +3733,26 @@ function HistoryPanel({
         </SimpleTooltip>
       </div>
 
-      {/* Quick-paste: open ANY report's analysis from a link or code. Recessed
-          (bg-black/20) so it reads as an inset utility inside the raised panel,
-          not a competing surface. focus-within ring keeps the borderless input
-          keyboard-visible. */}
-      <div className="mb-2 flex items-center gap-2 rounded-lg border border-white/[0.06] bg-black/20 px-2 py-1.5 transition-colors focus-within:border-accent-sky/40">
-        <LinkIcon className="ml-0.5 size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
-        <Input
-          value={quickDraft}
-          onChange={(e) => setQuickDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") openQuick();
-          }}
-          placeholder="Paste a report link or code (esologs.com or analysis link)"
-          aria-label="ESO Logs report link or code"
-          className="h-8 flex-1 border-0 bg-transparent px-1 text-xs shadow-none focus-visible:ring-0"
-        />
-        <Button
-          size="sm"
-          className="shrink-0 gap-1.5 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
-          onClick={openQuick}
-          disabled={!quickDraft.trim()}
-        >
-          <Zap className="size-3.5" />
-          Open analysis
-        </Button>
-      </div>
-      {pendingHandoffCount > 0 && (
-        <p className="mb-2 px-1 text-[11px] text-muted-foreground/70">
-          Have a handed-off upload below? Paste its link on that row to attach it.
-        </p>
-      )}
-
-      <div className="my-2 border-t border-white/[0.06]" />
-
       {history.length === 0 ? (
         <div className="px-1 py-6 text-center">
           <FileText className="mx-auto mb-2 size-5 text-muted-foreground/30" aria-hidden />
           <p className="text-xs text-muted-foreground/70">
             No uploads yet. Reports you create will appear here.
           </p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground/50">
-            Already uploaded elsewhere? Paste its link above to open the analysis.
-          </p>
         </div>
       ) : (
         <ul className="space-y-1.5">
           {visibleHistory.map((r) => {
             const loc = sourceLocation(r.sourcePath);
-            const tidy = tidyLogLabel(r.fileName);
-            // Only show the tidy chip when it actually condensed an archive name —
-            // otherwise it would just echo the headline.
-            const showTidy = tidy !== r.fileName.replace(/\.log$/i, "");
+            // Lead with a content name the raider recognizes: the derived zone +
+            // date, falling back to the report title, then a tidied file label.
+            const date = shortDate(r.createdAtMs);
+            const content = r.zone?.trim() ? `${r.zone.trim()}${date ? ` · ${date}` : ""}` : null;
+            const title = r.title?.trim() || null;
+            const lead = content ?? title ?? tidyLogLabel(r.fileName);
+            // Show the report title as a secondary line only when it adds something
+            // the lead doesn't already say.
+            const showTitle = title !== null && title !== lead;
             const handedOffNeedsLink = r.status === "handedOff" && !r.report;
             return (
               <li
@@ -3396,23 +3765,28 @@ function HistoryPanel({
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    {/* The EXACT log file name — so two "Encounter.log" uploads are
-                        distinguished by the folder line below, not collapsed to one
-                        prettified label. */}
-                    <div
-                      className="truncate text-sm font-medium text-foreground/90"
-                      title={r.fileName}
-                    >
-                      {r.fileName}
-                    </div>
-                    <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                    {/* Lead: the content name (zone · date), or the report title, or
+                        a tidied file label — what the raider recognizes at a glance. */}
+                    <div className="truncate text-sm font-semibold text-foreground/90">{lead}</div>
+                    {/* The ESO Logs report title, only when distinct from the lead. */}
+                    {showTitle && (
+                      <div
+                        className="truncate text-xs text-foreground/65"
+                        title={title ?? undefined}
+                      >
+                        {title}
+                      </div>
+                    )}
+                    {/* Quiet provenance: the exact file name (mono, so two
+                        "Encounter.log" uploads stay distinguishable) + hard facts.
+                        The full source folder lives on the file name's tooltip. */}
+                    <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                       <SimpleTooltip content={loc.dir} side="top">
                         <span
-                          className="flex min-w-0 max-w-[45%] items-center gap-1 text-foreground/55"
+                          className="truncate font-mono text-[11px] text-muted-foreground/70"
                           title={loc.dir}
                         >
-                          <FolderOpen className="size-3 shrink-0 opacity-70" aria-hidden />
-                          <span className="truncate">{loc.folder}</span>
+                          {r.fileName}
                         </span>
                       </SimpleTooltip>
                       <span className="text-muted-foreground/40">·</span>
@@ -3423,12 +3797,6 @@ function HistoryPanel({
                       <span className="capitalize">{r.visibility}</span>
                       <span className="text-muted-foreground/40">·</span>
                       <span>{relativeFromMs(r.createdAtMs)}</span>
-                      {showTidy && (
-                        <>
-                          <span className="text-muted-foreground/40">·</span>
-                          <span className="truncate text-muted-foreground/50">{tidy}</span>
-                        </>
-                      )}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1.5">

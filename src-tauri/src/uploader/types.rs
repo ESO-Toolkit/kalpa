@@ -209,6 +209,19 @@ pub struct UploadRecord {
     pub report: Option<ReportRef>,
     /// Last error message, if the upload failed.
     pub error: Option<String>,
+    /// The report's human title — the name the user gave the report
+    /// (`UploadOptions::description`). Only meaningful on the direct (native)
+    /// path, which actually applies it; the official uploader ignores it, so a
+    /// handed-off record leaves this `None` rather than persisting a stale name.
+    /// `serde(default)` so records written before this field deserialize cleanly.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The derived content label for the row's headline — the log's dominant
+    /// zone/trial (from the frontend's `dominantZone(fights)`), so history reads
+    /// "Lucent Citadel · Jun 27" instead of a bare file name. `serde(default)` for
+    /// backward compatibility with pre-existing records.
+    #[serde(default)]
+    pub zone: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
