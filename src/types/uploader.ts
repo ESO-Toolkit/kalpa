@@ -179,6 +179,18 @@ export interface SplitSelection {
   startTimeMs: number | null;
 }
 
+/** One fight's choice in the per-fight split workbench: which fight (by `index`,
+ *  matching `FightSummary.index`) and an optional custom name. Mirrors the Rust
+ *  `FightSelection`. Each selected fight is written as its own self-contained
+ *  single-fight `.log` (session preamble + only that fight's combat). */
+export interface FightSelection {
+  index: number;
+  name: string | null;
+  /** The fight's startMs at selection time; the backend verifies it still matches
+   *  after any rescan so a shifted index can't extract/mislabel the wrong fight. */
+  startMs: number | null;
+}
+
 export const REGION_OPTIONS: { id: number; label: string }[] = [
   { id: 1, label: "North America (NA)" },
   { id: 2, label: "Europe (EU)" },

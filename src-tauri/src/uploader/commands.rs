@@ -863,6 +863,36 @@ pub async fn uploader_split_to_disk_named(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Split selected FIGHTS out of a log, writing one self-contained `.log` per fight.
+///
+/// Mirrors [`uploader_split_to_disk_named`] but at fight granularity: each output
+/// file is the enclosing session's preamble (header + definitions) plus only the
+/// selected fight's combat block (see [`splitter::split_selected_fights`]). The UI
+/// passes the preflight's `sessions` + `fights` so a multi-GB file isn't re-scanned;
+/// the splitter re-scans itself only when those offsets can no longer be trusted.
+#[tauri::command]
+pub async fn uploader_split_fights_to_disk(
+    app: tauri::AppHandle,
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+    sessions: Option<Vec<LogSession>>,
+    fights: Option<Vec<FightSummary>>,
+    selections: Vec<splitter::FightSelection>,
+) -> Result<Vec<String>, String> {
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
+    let out_root = split_output_root(&app)?;
+    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_dir = out_root.join(format!("split-{}", now_ms()));
+    let out_str = out_dir.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        splitter::split_selected_fights(&safe, &out_str, sessions, fights, selections)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 // ── Transport availability ─────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]

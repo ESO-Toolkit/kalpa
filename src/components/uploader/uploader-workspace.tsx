@@ -4,7 +4,7 @@
 // first-run wizard. Uploads are handed to the official ESO Logs uploader (Kalpa
 // never speaks the private upload protocol itself).
 
-import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
@@ -33,6 +33,10 @@ import {
   Trash2,
   FolderInput,
   ClipboardCopy,
+  UserRound,
+  CircleDashed,
+  Loader2,
+  RotateCcw,
 } from "lucide-react";
 import {
   Dialog,
@@ -70,7 +74,6 @@ import {
 } from "@/types/uploader";
 import {
   SessionTimer,
-  StatusPill,
   WhatGetsUploaded,
   compactBytes,
   esotkReportUrl,
@@ -89,6 +92,19 @@ interface UploaderWorkspaceProps {
 }
 
 type Mode = "manual" | "live";
+
+/** The phase the pinned header's single adaptive status pill reflects. Priority
+ *  order (highest first): a running live session (armed→live), an in-flight manual
+ *  upload, an in-progress scan, a scanned-ready selection, else idle. */
+type HeaderPhase =
+  | "idle"
+  | "scanning"
+  | "ready"
+  | "uploading"
+  | "armed"
+  | "live"
+  | "attention"
+  | "signedOut";
 
 const DEFAULT_OPTIONS: UploadOptions = {
   region: 1,
@@ -512,6 +528,19 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       toast.error(`Couldn't open the folder picker: ${getTauriErrorMessage(e)}`);
     }
   };
+
+  // Switch back to the auto-detected Logs folder after the user manually picked a
+  // different one. Mirrors handlePickFolder's folder-switch body (minus the OS
+  // dialog): a one-tap, non-destructive undo — nothing is deleted, it just
+  // re-points logsDir at the detected path and re-lists. clearSelection() bumps
+  // selectTokenRef, orphaning any in-flight preflight scan on the custom folder.
+  const handleResetFolder = useCallback(() => {
+    const detected = detection?.path;
+    if (!detected || detected === logsDir) return;
+    clearSelection();
+    setLogsDir(detected);
+    void loadLogs(detected);
+  }, [detection, logsDir, clearSelection, loadLogs]);
 
   // Reveal the current logs directory in the OS file manager. Best-effort: a
   // missing dir or opener rejection toasts rather than silently no-ops.
@@ -1202,15 +1231,49 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     [refreshHistory]
   );
 
-  // The headline status pill reflects live state if a session is running,
-  // otherwise manual upload state.
-  const headlineStatus: UploaderStatus = useMemo(() => {
-    if (liveSessionId) return liveStatus;
-    if (uploading) return "uploading";
-    return "idle";
-  }, [liveSessionId, liveStatus, uploading]);
-
   const isLoggedIn = authUser !== null;
+
+  // ── Pinned header derivations ───────────────────────────────────────────────
+  // The single adaptive status pill in the header reflects, in priority order: a
+  // running live session (ARMED until its first BEGIN_LOG anchors, then LIVE), an
+  // in-flight manual upload, an in-progress scan, a scanned-and-ready selection,
+  // else idle. Matches LiveDashboard's armed/live split so the pinned pill never
+  // contradicts the body.
+  const headerPhase: HeaderPhase = useMemo(() => {
+    if (!isLoggedIn) return "signedOut";
+    if (liveSessionId) {
+      // A live session that needs the user's attention (e.g. the ESO Logs session
+      // expired mid-stream and posting is paused) outranks the healthy live state.
+      if (liveStatus === "attention") return "attention";
+      return sessionAnchored || liveHandedOff ? "live" : "armed";
+    }
+    if (uploading) return "uploading";
+    if (scanning) return "scanning";
+    if (selectedLog && preflight) return "ready";
+    return "idle";
+  }, [
+    isLoggedIn,
+    liveSessionId,
+    liveStatus,
+    sessionAnchored,
+    liveHandedOff,
+    uploading,
+    scanning,
+    selectedLog,
+    preflight,
+  ]);
+
+  // The route's middle (engine) chip must reflect the RUNNING session's real path
+  // (native vs handed-off), not just the intended path — a session that handed off
+  // should never still read "Direct from Kalpa".
+  const routeDirect = liveSessionId !== null ? !liveHandedOff : activeWillUseNative;
+
+  // The most recent upload time, derived order-agnostically (don't assume
+  // history[0] is newest), for the idle pill's tooltip.
+  const lastUploadMs = useMemo(
+    () => (history.length ? Math.max(...history.map((h) => h.createdAtMs)) : null),
+    [history]
+  );
 
   // Initial dialog focus: land on the first meaningful control (the Manual mode
   // tab) rather than the close button, so keyboard users start in the flow. When
@@ -1235,14 +1298,33 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               <CloudUpload className="size-5 text-primary" aria-hidden />
               Upload to ESO Logs
             </DialogTitle>
-            <StatusPill status={headlineStatus} />
+            <HeaderStatusPill
+              phase={headerPhase}
+              liveStartMs={liveStartMs}
+              liveFightCount={liveFightCount}
+              totalFights={preflight?.totalFights ?? 0}
+              logsCount={listError ? 0 : logs.length}
+              lastUploadMs={lastUploadMs}
+            />
           </div>
-          <DialogDescription>
-            Turn your <code className="text-foreground/80">Encounter.log</code> into a shareable
-            report on esologs.com — parses, rankings, and full fight breakdowns.
+          {/* Keep an accessible description for the Dialog's aria-describedby but
+              drop the marketing prose — the route instrument below + the body's
+              "What gets uploaded" note carry the real, honest explanation. */}
+          <DialogDescription className="sr-only">
+            Turn your Encounter.log into a shareable report on esologs.com.
           </DialogDescription>
-          {isLoggedIn && (
-            <TransportReadout willUseNative={activeWillUseNative} transport={transport} />
+          {isLoggedIn ? (
+            <HeaderRoute
+              mode={mode}
+              routeDirect={routeDirect}
+              officialInstalled={transport?.officialUploaderInstalled ?? false}
+              userName={authUser?.userName ?? null}
+              sessionPersisted={authUser?.sessionPersisted !== false}
+            />
+          ) : (
+            <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
+              Sign in to ESO Logs to upload your combat logs.
+            </p>
           )}
         </DialogHeader>
 
@@ -1312,6 +1394,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 onSelect={handleSelectLog}
                 onRefresh={() => logsDir && loadLogs(logsDir)}
                 onPickFolder={handlePickFolder}
+                onResetFolder={handleResetFolder}
                 onOpenFolder={handleOpenLogsFolder}
                 onReveal={handleRevealLog}
                 onCopyPath={handleCopyPath}
@@ -1543,41 +1626,209 @@ function DeleteLogConfirm({
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
-// A compact "route" instrument that dramatizes the data path the upload takes:
-// your machine → the active engine → esologs.com. The middle chip reflects which
-// transport will run (direct = sky/Zap, official = muted), so the user always
-// knows the route at a glance from the header — the signature element of the
-// workspace, grounded in the subject (a log's journey to the site).
-function TransportReadout({
-  willUseNative,
-  transport,
+// The pinned header's single adaptive status pill: one glanceable phase word
+// (Idle / Scanning / Ready / Uploading / Armed / Live / Signed out) with an
+// aria-hidden companion stat (the live timer + fight count, the ready fight
+// count, or the folder's log count). Only the phase word lives in the announced
+// region, so a screen reader never hears the per-second timer tick.
+function HeaderStatusPill({
+  phase,
+  liveStartMs,
+  liveFightCount,
+  totalFights,
+  logsCount,
+  lastUploadMs,
 }: {
-  willUseNative: boolean;
-  transport: TransportInfo | null;
+  phase: HeaderPhase;
+  liveStartMs: number | null;
+  liveFightCount: number;
+  totalFights: number;
+  logsCount: number;
+  lastUploadMs: number | null;
 }) {
-  const installed = transport?.officialUploaderInstalled ?? false;
-  return (
-    <div className="mt-2.5 flex items-center gap-2 text-[11px]">
-      <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-foreground/80">
-        <FileText className="size-3 text-muted-foreground" aria-hidden />
-        Your log
+  // Live/armed reuse LiveDashboard's exact pulse-dot markup so the pinned pill
+  // matches the body. Amber = armed (waiting to anchor), emerald = live/ready
+  // (red is reserved for real errors, never used here).
+  const pulse = (tone: "amber" | "emerald") => (
+    <span className="relative flex size-2" aria-hidden>
+      <span
+        className={cn(
+          "absolute inline-flex size-full animate-ping rounded-full",
+          tone === "amber" ? "bg-amber-400/70" : "bg-emerald-400/70"
+        )}
+      />
+      <span
+        className={cn(
+          "relative inline-flex size-2 rounded-full",
+          tone === "amber" ? "bg-amber-400" : "bg-emerald-400"
+        )}
+      />
+    </span>
+  );
+
+  let color: "muted" | "sky" | "emerald" | "amber";
+  let icon: ReactNode;
+  let label: string;
+  switch (phase) {
+    case "scanning":
+      color = "sky";
+      icon = <Loader2 className="size-3.5 animate-spin" aria-hidden />;
+      label = "Scanning";
+      break;
+    case "uploading":
+      color = "sky";
+      icon = <Loader2 className="size-3.5 animate-spin" aria-hidden />;
+      label = "Uploading";
+      break;
+    case "ready":
+      color = "emerald";
+      icon = <CheckCircle2 className="size-3.5" aria-hidden />;
+      label = "Ready";
+      break;
+    case "armed":
+      color = "amber";
+      icon = pulse("amber");
+      label = "Armed";
+      break;
+    case "live":
+      color = "emerald";
+      icon = pulse("emerald");
+      label = "Live";
+      break;
+    case "attention":
+      color = "amber";
+      icon = <AlertTriangle className="size-3.5" aria-hidden />;
+      label = "Attention";
+      break;
+    case "signedOut":
+      color = "muted";
+      icon = <CircleDashed className="size-3.5" aria-hidden />;
+      label = "Signed out";
+      break;
+    default:
+      color = "muted";
+      icon = <CircleDashed className="size-3.5" aria-hidden />;
+      label = "Idle";
+      break;
+  }
+
+  // The aria-hidden companion stat sits OUTSIDE the announced region.
+  let companion: ReactNode = null;
+  let companionTitle: string | undefined;
+  if (phase === "armed" || phase === "live" || phase === "attention") {
+    companion = (
+      <>
+        {liveStartMs !== null && <SessionTimer startMs={liveStartMs} />}
+        {liveFightCount > 0 && (
+          <span>
+            · {liveFightCount} fight{liveFightCount === 1 ? "" : "s"}
+          </span>
+        )}
+      </>
+    );
+  } else if (phase === "ready" && totalFights > 0) {
+    companion = (
+      <span>
+        · {totalFights} fight{totalFights === 1 ? "" : "s"}
       </span>
-      <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
-      {willUseNative ? (
-        <span className="inline-flex items-center gap-1.5 rounded-md border border-accent-sky/25 bg-accent-sky/[0.06] px-2 py-1 font-medium text-accent-sky">
-          <Zap className="size-3" aria-hidden />
-          Direct from Kalpa
-        </span>
-      ) : (
-        <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-muted-foreground">
-          <CloudUpload className="size-3" aria-hidden />
-          {installed ? "Official uploader" : "ESO Logs uploader"}
+    );
+  } else if (phase === "idle" && logsCount > 0) {
+    companion = (
+      <span>
+        · {logsCount} log{logsCount === 1 ? "" : "s"}
+      </span>
+    );
+    if (lastUploadMs) companionTitle = `Last upload ${relativeFromMs(lastUploadMs)}`;
+  }
+
+  return (
+    <div className="flex shrink-0 items-center gap-1.5" title={companionTitle}>
+      <InfoPill color={color} role="status" aria-live="polite" className="gap-1.5 px-2.5 py-1">
+        {icon}
+        {label}
+      </InfoPill>
+      {companion && (
+        <span
+          className="flex items-center gap-1.5 text-xs tabular-nums text-muted-foreground"
+          aria-hidden
+        >
+          {companion}
         </span>
       )}
-      <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
-      <span className="inline-flex items-center gap-1.5 rounded-md border border-primary/25 bg-primary/[0.06] px-2 py-1 font-medium text-primary">
-        esologs.com
+    </div>
+  );
+}
+
+// The header's "route" instrument: a mode micro-label, the data path your log
+// takes (your log → the active engine → esologs.com), terminating in the
+// signed-in account chip — so the header reads as the log's whole journey,
+// ending in the account that will own the report. The middle chip reflects the
+// effective transport (direct = sky/Zap, official = muted). The signature
+// element of the workspace, grounded in the subject.
+function HeaderRoute({
+  mode,
+  routeDirect,
+  officialInstalled,
+  userName,
+  sessionPersisted,
+}: {
+  mode: Mode;
+  routeDirect: boolean;
+  officialInstalled: boolean;
+  userName: string | null;
+  sessionPersisted: boolean;
+}) {
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[11px]">
+      <span className="font-heading text-[10px] font-bold tracking-[0.08em] text-muted-foreground/50 uppercase">
+        {mode === "live" ? "Live Log" : "Upload a Log"}
       </span>
+      <span className="h-3 w-px bg-white/[0.08]" aria-hidden />
+      <span
+        className="inline-flex items-center gap-2"
+        aria-label={`Upload route: your log, ${routeDirect ? "Direct from Kalpa" : "Official uploader"}, to esologs.com`}
+      >
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-foreground/80">
+          <FileText className="size-3 text-muted-foreground" aria-hidden />
+          Your log
+        </span>
+        <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
+        {routeDirect ? (
+          <span className="inline-flex items-center gap-1.5 rounded-md border border-accent-sky/25 bg-accent-sky/[0.06] px-2 py-1 font-medium text-accent-sky">
+            <Zap className="size-3" aria-hidden />
+            Direct from Kalpa
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 font-medium text-muted-foreground">
+            <CloudUpload className="size-3" aria-hidden />
+            {officialInstalled ? "Official uploader" : "ESO Logs uploader"}
+          </span>
+        )}
+        <ChevronRight className="size-3 shrink-0 text-muted-foreground/50" aria-hidden />
+        <span className="inline-flex items-center gap-1.5 rounded-md border border-primary/25 bg-primary/[0.06] px-2 py-1 font-medium text-primary">
+          esologs.com
+        </span>
+      </span>
+      <span className="min-w-2 flex-1" aria-hidden />
+      {userName && (
+        <SimpleTooltip content="Reports upload to this ESO Logs account" side="bottom">
+          <span
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent-sky/20 bg-accent-sky/[0.05] px-2 py-1 font-medium text-accent-sky"
+            aria-label={`Signed in to ESO Logs as ${userName}`}
+          >
+            <UserRound className="size-3" aria-hidden />
+            <span className="max-w-[140px] truncate">{userName}</span>
+            {!sessionPersisted && (
+              <span
+                title="Signed in for this session only — it won't persist after you restart Kalpa."
+                className="inline-flex"
+              >
+                <AlertTriangle className="size-3 text-amber-400" aria-hidden />
+              </span>
+            )}
+          </span>
+        </SimpleTooltip>
+      )}
     </div>
   );
 }
@@ -2005,6 +2256,7 @@ function LogPicker({
   onSelect,
   onRefresh,
   onPickFolder,
+  onResetFolder,
   onOpenFolder,
   onReveal,
   onCopyPath,
@@ -2021,6 +2273,7 @@ function LogPicker({
   onSelect: (path: string) => void;
   onRefresh: () => void;
   onPickFolder: () => void;
+  onResetFolder: () => void;
   onOpenFolder: () => void;
   onReveal: (path: string) => void;
   onCopyPath: (path: string) => void;
@@ -2033,6 +2286,12 @@ function LogPicker({
   // Only show the controls once the folder has enough logs to be worth filtering.
   const showControls = logs.length > 1;
   const totalBytes = logs.reduce((sum, l) => sum + l.sizeBytes, 0);
+
+  // The user has navigated away from the auto-detected folder iff a detected path
+  // exists AND differs from the current one. Gates BOTH the line-1 "Custom" tag
+  // and the line-2 "Back to detected" reset so they appear/disappear as a pair.
+  const detectedPath = detection?.path ?? null;
+  const isCustomFolder = detectedPath != null && logsDir != null && logsDir !== detectedPath;
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -2084,6 +2343,16 @@ function LogPicker({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold text-foreground/90">Logs folder</span>
+              {/* A neutral state tag (NOT sky — it's informational, not a control)
+                  marking that this isn't the auto-detected folder. The default
+                  state stays badge-free, so absence reads as "the folder Kalpa
+                  found". */}
+              {isCustomFolder && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  <FolderSearch className="size-2.5" aria-hidden />
+                  Custom
+                </span>
+              )}
               {logsDir && (
                 <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
                   {logs.length} {logs.length === 1 ? "file" : "files"}
@@ -2097,8 +2366,28 @@ function LogPicker({
               )}
             </div>
             {logsDir ? (
-              <div className="truncate font-mono text-[11px] text-muted-foreground" title={logsDir}>
-                {logsDir}
+              <div className="flex items-center gap-2">
+                <span
+                  className="min-w-0 truncate font-mono text-[11px] text-muted-foreground"
+                  title={logsDir}
+                >
+                  {logsDir}
+                </span>
+                {/* One-tap, non-destructive return to the detected folder — sky
+                    (interactive recovery), gated on the same isCustomFolder flag. */}
+                {isCustomFolder && (
+                  <SimpleTooltip content={`Detected: ${detectedPath}`} side="bottom">
+                    <button
+                      type="button"
+                      onClick={onResetFolder}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent-sky/30 bg-accent-sky/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-accent-sky transition-colors duration-150 hover:bg-accent-sky/[0.12] focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none animate-[fade-in_0.2s_ease-out]"
+                      aria-label="Switch back to the auto-detected Logs folder"
+                    >
+                      <RotateCcw className="size-3" aria-hidden />
+                      Back to detected
+                    </button>
+                  </SimpleTooltip>
+                )}
               </div>
             ) : (
               <div className="text-[11px] text-amber-400/90">{detection?.message}</div>
@@ -2405,34 +2694,62 @@ function Preflight({
   }
   if (!preflight) return null;
 
-  // The summary card carries the size/fights/sessions counts now; this row is the
-  // split-affordance + large-log nudge. Render nothing when there's neither a
-  // reason to split nor multiple sessions to carve.
-  // Split is always available for a selected log (the workbench handles the
-  // single-session case fine). The label/nudge adapts to the log.
+  // A PROMINENT split entry point — the old thin row was easy to miss. A bordered
+  // card with an icon chip, a clear heading, the session/fight counts, and an
+  // obvious CTA. It stays sky (or amber when the log is large enough to need
+  // splitting) — never gold, which is reserved for the Upload climax below it.
   const sessionCount = preflight.sessions.length;
+  const fightCount = preflight.totalFights;
+  const urgent = preflight.recommendSplit;
+  // Per-fight split needs the parsed fight list, which the backend omits for very
+  // large logs — so don't promise it in the card when the workbench can't offer it.
+  const perFightAvailable = preflight.fights.length > 0;
+  const counts =
+    sessionCount > 0
+      ? `${sessionCount} session${sessionCount === 1 ? "" : "s"}` +
+        (fightCount > 0 ? ` · ${fightCount} fight${fightCount === 1 ? "" : "s"}` : "")
+      : "";
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm">
+    <div
+      className={cn(
+        "flex items-center gap-3 rounded-xl border border-l-[3px] p-3 transition-colors",
+        urgent
+          ? "border-amber-400/25 border-l-amber-400 bg-amber-400/[0.05]"
+          : "border-accent-sky/20 border-l-accent-sky/70 bg-accent-sky/[0.04]"
+      )}
+    >
       <span
         className={cn(
-          "text-xs",
-          preflight.recommendSplit ? "text-amber-400/90" : "text-muted-foreground"
+          "flex size-9 shrink-0 items-center justify-center rounded-lg",
+          urgent ? "bg-amber-400/12 text-amber-300" : "bg-accent-sky/12 text-accent-sky"
         )}
       >
-        {preflight.recommendSplit
-          ? "This log is large — splitting by session helps it upload."
-          : sessionCount > 1
-            ? `${sessionCount} logging sessions in this file.`
-            : "Split this log into per-session files to upload them separately."}
+        <Scissors className="size-4" aria-hidden />
       </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-semibold text-foreground/90">
+          {urgent ? "This log is large — split it to upload" : "Split this log"}
+        </div>
+        <div className="mt-0.5 text-xs text-muted-foreground">
+          {perFightAvailable
+            ? "Carve it into per-session or per-fight files — upload a single fight or a whole night on its own."
+            : "Carve it into per-session files so each uploads cleanly (per-fight split is available on smaller logs)."}
+          {counts && <span className="text-muted-foreground/70"> {counts}.</span>}
+        </div>
+      </div>
       <Button
-        variant={preflight.recommendSplit ? "outline" : "ghost"}
+        variant="outline"
         size="sm"
         onClick={onSplit}
-        className={cn("ml-auto", !preflight.recommendSplit && "text-foreground/70")}
+        className={cn(
+          "shrink-0",
+          urgent
+            ? "border-amber-400/40 bg-amber-400/[0.08] text-amber-200 hover:bg-amber-400/[0.16]"
+            : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
+        )}
       >
         <Scissors className="size-3.5" />
-        {preflight.recommendSplit ? "Split by session…" : "Split…"}
+        Split log…
       </Button>
     </div>
   );
@@ -2896,6 +3213,50 @@ function tidyLogLabel(fileName: string): string {
   return base.replace(/-\d{13,}$/, "");
 }
 
+/** Split a stored source path into its immediate parent folder (for the row's
+ *  provenance line) and the full directory (for the tooltip). Handles Windows
+ *  (`\`) and POSIX (`/`) separators so the same record reads correctly on both. */
+function sourceLocation(sourcePath: string): { folder: string; dir: string } {
+  const sepIdx = Math.max(sourcePath.lastIndexOf("/"), sourcePath.lastIndexOf("\\"));
+  const dir = sepIdx > 0 ? sourcePath.slice(0, sepIdx) : sourcePath;
+  const dirParts = dir.split(/[/\\]/).filter(Boolean);
+  const folder = dirParts[dirParts.length - 1] ?? dir;
+  return { folder, dir };
+}
+
+/** Extract an ESO Logs report code from a pasted URL or bare code, or null if the
+ *  input doesn't look like one. Accepts BOTH link shapes Kalpa hands users — the
+ *  raw `esologs.com/reports/<code>` (plural) and the `esotk.com/#/report/<code>`
+ *  analysis deep-link (singular, the one the "Analysis" buttons open) — plus a bare
+ *  mixed-alphanumeric token (≥12 chars, containing at least one letter AND one
+ *  digit — ESO Logs codes are ~16 mixed chars) so a plain word isn't mistaken for a
+ *  code. Shared by the top quick-paste bar and the per-row attach so neither can
+ *  build a malformed report URL from a non-code. */
+function parseReportCode(raw: string): string | null {
+  const s = raw.trim();
+  // `reports?/` matches both the plural esologs path and the singular esotk path;
+  // the alphanumeric group can't over-match (e.g. "reportshistory/" won't match).
+  const fromUrl = s.match(/reports?\/([a-zA-Z0-9]+)/);
+  if (fromUrl?.[1]) return fromUrl[1];
+  if (/^[a-zA-Z0-9]{12,}$/.test(s) && /[a-zA-Z]/.test(s) && /[0-9]/.test(s)) return s;
+  return null;
+}
+
+/** The 3px status-accent left-border color per upload status (the app's signature
+ *  card idiom). Color encodes status REDUNDANTLY with the badge text — never color
+ *  alone. Emerald for `live` (a healthy in-progress session); red is reserved for
+ *  real failures only. */
+const STATUS_ACCENT: Record<UploadRecord["status"], string> = {
+  completed: "before:bg-emerald-400/70",
+  queued: "before:bg-accent-sky/70",
+  uploading: "before:bg-accent-sky/70",
+  live: "before:bg-emerald-400/70",
+  paused: "before:bg-amber-400/70",
+  handedOff: "before:bg-amber-400/70",
+  failed: "before:bg-red-400/80",
+  cancelled: "before:bg-white/15",
+};
+
 function HistoryPanel({
   history,
   onCopyLink,
@@ -2914,19 +3275,45 @@ function HistoryPanel({
   // Inline two-step confirm: clicking trash arms the row; a second click on the
   // revealed "Remove" confirms. Removing a history record never touches the file.
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  // The top quick-paste bar: paste any esologs.com report link/code to open its
+  // analysis — a universal "open a report" utility, distinct from the per-row
+  // attach (which binds a link to a specific handed-off record).
+  const [quickDraft, setQuickDraft] = useState("");
 
-  if (history.length === 0) return null;
+  // Only the first 8 records are rendered, so derive the visible slice once and
+  // base BOTH the rows and the handed-off count on it — otherwise the bridging
+  // helper ("paste its link on that row below") could point at a handed-off row
+  // beyond the cutoff that isn't actually shown.
+  const visibleHistory = useMemo(() => history.slice(0, 8), [history]);
+
+  // How many VISIBLE handed-off uploads still need a report link — drives the
+  // bridging helper that routes a top-bar paste to the right per-row attach.
+  const pendingHandoffCount = useMemo(
+    () => visibleHistory.filter((r) => r.status === "handedOff" && !r.report).length,
+    [visibleHistory]
+  );
 
   const submitLink = async (id: string) => {
-    const raw = linkDraft.trim();
-    if (!raw) return;
-    // The backend only accepts a full esologs.com/reports/<code> URL. We tell
-    // users they can paste just the code, so normalize a bare alphanumeric code
-    // into the canonical URL here before sending.
-    const url = /^[a-zA-Z0-9]+$/.test(raw) ? `https://www.esologs.com/reports/${raw}` : raw;
-    await onAttachReport(id, url);
+    const code = parseReportCode(linkDraft);
+    if (!code) {
+      toast.error("That doesn't look like an ESO Logs report link or code.");
+      return;
+    }
+    // Always rebuild the canonical URL from the parsed code, so neither a full URL
+    // nor a bare code can forward anything but a well-formed report link.
+    await onAttachReport(id, `https://www.esologs.com/reports/${code}`);
     setAttachingId(null);
     setLinkDraft("");
+  };
+
+  const openQuick = () => {
+    const code = parseReportCode(quickDraft);
+    if (!code) {
+      toast.error("That doesn't look like an ESO Logs report link or code.");
+      return;
+    }
+    void openReportUrl(esotkReportUrl(code));
+    setQuickDraft("");
   };
 
   return (
@@ -2944,146 +3331,255 @@ function HistoryPanel({
           </Button>
         </SimpleTooltip>
       </div>
-      <ul className="space-y-1.5">
-        {history.slice(0, 8).map((r) => (
-          <li
-            key={r.id}
-            className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 transition-colors hover:bg-white/[0.04]"
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate text-sm text-foreground/90">
-                  {tidyLogLabel(r.fileName)}
-                </div>
-                <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <span className="text-foreground/60">{relativeFromMs(r.createdAtMs)}</span>
-                  <span className="text-muted-foreground/40">·</span>
-                  <span>
-                    {r.fightCount} fight{r.fightCount === 1 ? "" : "s"}
-                  </span>
-                  <span className="text-muted-foreground/40">·</span>
-                  <span className="capitalize">{r.visibility}</span>
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-1.5">
-                <StatusBadge status={r.status} />
-                {r.report ? (
-                  <>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      onClick={() => void onCopyLink(r.report!.url)}
-                      aria-label="Copy report link"
+
+      {/* Quick-paste: open ANY report's analysis from a link or code. Recessed
+          (bg-black/20) so it reads as an inset utility inside the raised panel,
+          not a competing surface. focus-within ring keeps the borderless input
+          keyboard-visible. */}
+      <div className="mb-2 flex items-center gap-2 rounded-lg border border-white/[0.06] bg-black/20 px-2 py-1.5 transition-colors focus-within:border-accent-sky/40">
+        <LinkIcon className="ml-0.5 size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
+        <Input
+          value={quickDraft}
+          onChange={(e) => setQuickDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") openQuick();
+          }}
+          placeholder="Paste a report link or code (esologs.com or analysis link)"
+          aria-label="ESO Logs report link or code"
+          className="h-8 flex-1 border-0 bg-transparent px-1 text-xs shadow-none focus-visible:ring-0"
+        />
+        <Button
+          size="sm"
+          className="shrink-0 gap-1.5 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+          onClick={openQuick}
+          disabled={!quickDraft.trim()}
+        >
+          <Zap className="size-3.5" />
+          Open analysis
+        </Button>
+      </div>
+      {pendingHandoffCount > 0 && (
+        <p className="mb-2 px-1 text-[11px] text-muted-foreground/70">
+          Have a handed-off upload below? Paste its link on that row to attach it.
+        </p>
+      )}
+
+      <div className="my-2 border-t border-white/[0.06]" />
+
+      {history.length === 0 ? (
+        <div className="px-1 py-6 text-center">
+          <FileText className="mx-auto mb-2 size-5 text-muted-foreground/30" aria-hidden />
+          <p className="text-xs text-muted-foreground/70">
+            No uploads yet. Reports you create will appear here.
+          </p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground/50">
+            Already uploaded elsewhere? Paste its link above to open the analysis.
+          </p>
+        </div>
+      ) : (
+        <ul className="space-y-1.5">
+          {visibleHistory.map((r) => {
+            const loc = sourceLocation(r.sourcePath);
+            const tidy = tidyLogLabel(r.fileName);
+            // Only show the tidy chip when it actually condensed an archive name —
+            // otherwise it would just echo the headline.
+            const showTidy = tidy !== r.fileName.replace(/\.log$/i, "");
+            const handedOffNeedsLink = r.status === "handedOff" && !r.report;
+            return (
+              <li
+                key={r.id}
+                className={cn(
+                  "relative overflow-hidden rounded-lg border border-white/[0.06] bg-white/[0.02] py-2 pr-3 pl-3.5 transition-colors hover:bg-white/[0.04]",
+                  "before:absolute before:top-2 before:bottom-2 before:left-0 before:w-[3px] before:rounded-full before:content-['']",
+                  STATUS_ACCENT[r.status]
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    {/* The EXACT log file name — so two "Encounter.log" uploads are
+                        distinguished by the folder line below, not collapsed to one
+                        prettified label. */}
+                    <div
+                      className="truncate text-sm font-medium text-foreground/90"
+                      title={r.fileName}
                     >
-                      <Copy className="size-3.5" />
-                    </Button>
-                    <SimpleTooltip content="Open the raw report on ESO Logs" side="top">
+                      {r.fileName}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <SimpleTooltip content={loc.dir} side="top">
+                        <span
+                          className="flex min-w-0 max-w-[45%] items-center gap-1 text-foreground/55"
+                          title={loc.dir}
+                        >
+                          <FolderOpen className="size-3 shrink-0 opacity-70" aria-hidden />
+                          <span className="truncate">{loc.folder}</span>
+                        </span>
+                      </SimpleTooltip>
+                      <span className="text-muted-foreground/40">·</span>
+                      <span>
+                        {r.fightCount} fight{r.fightCount === 1 ? "" : "s"}
+                      </span>
+                      <span className="text-muted-foreground/40">·</span>
+                      <span className="capitalize">{r.visibility}</span>
+                      <span className="text-muted-foreground/40">·</span>
+                      <span>{relativeFromMs(r.createdAtMs)}</span>
+                      {showTidy && (
+                        <>
+                          <span className="text-muted-foreground/40">·</span>
+                          <span className="truncate text-muted-foreground/50">{tidy}</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <StatusBadge status={r.status} hasReport={!!r.report} />
+                    {r.report && (
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => void onCopyLink(r.report!.url)}
+                          aria-label="Copy report link"
+                        >
+                          <Copy className="size-3.5" />
+                        </Button>
+                        <SimpleTooltip content="Open the raw report on ESO Logs" side="top">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => void openReportUrl(r.report!.url)}
+                            aria-label="Open report on ESO Logs"
+                          >
+                            <ExternalLink className="size-3.5" />
+                          </Button>
+                        </SimpleTooltip>
+                        {/* The richer analysis (fight detection, rotation, scribing,
+                            replay) lives in the ESO Log Aggregator — the primary view. */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
+                          onClick={() => void openReportUrl(esotkReportUrl(r.report!.code))}
+                          aria-label="Open analysis in ESO Log Aggregator"
+                        >
+                          <Zap className="size-3.5" />
+                          Analysis
+                        </Button>
+                      </>
+                    )}
+                    <SimpleTooltip
+                      content="Remove from history (your log file stays on disk)"
+                      side="top"
+                    >
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        onClick={() => void openReportUrl(r.report!.url)}
-                        aria-label="Open report on ESO Logs"
+                        className="text-muted-foreground/70 hover:text-red-400"
+                        onClick={() => setConfirmDeleteId(confirmDeleteId === r.id ? null : r.id)}
+                        aria-label="Remove this upload from history"
                       >
-                        <ExternalLink className="size-3.5" />
+                        <Trash2 className="size-3.5" />
                       </Button>
                     </SimpleTooltip>
-                    {/* The richer analysis (fight detection, rotation, scribing, replay)
-                        lives in the ESO Log Aggregator — the primary "view" action. */}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
-                      onClick={() => void openReportUrl(esotkReportUrl(r.report!.code))}
-                      aria-label="Open analysis in ESO Log Aggregator"
-                    >
-                      <Zap className="size-3.5" />
-                      Analysis
-                    </Button>
-                  </>
-                ) : (
-                  // Handed-off uploads finish in the official uploader, so we
-                  // can't observe the report code — let the user paste it in.
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setAttachingId(attachingId === r.id ? null : r.id);
-                      setLinkDraft("");
-                    }}
-                  >
-                    <LinkIcon className="size-3.5" />
-                    Add link
-                  </Button>
-                )}
-                <SimpleTooltip
-                  content="Remove from history (your log file stays on disk)"
-                  side="top"
-                >
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="text-muted-foreground/70 hover:text-red-400"
-                    onClick={() => setConfirmDeleteId(confirmDeleteId === r.id ? null : r.id)}
-                    aria-label="Remove this upload from history"
-                  >
-                    <Trash2 className="size-3.5" />
-                  </Button>
-                </SimpleTooltip>
-              </div>
-            </div>
-            {confirmDeleteId === r.id && (
-              <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.05] px-3 py-2">
-                <span className="text-xs text-red-200/90">
-                  Remove this record? Your log file stays on disk.
-                </span>
-                <div className="flex shrink-0 gap-1.5">
-                  <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteId(null)}>
-                    Cancel
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={() => {
-                      setConfirmDeleteId(null);
-                      void onDelete(r.id);
-                    }}
-                  >
-                    Remove
-                  </Button>
+                  </div>
                 </div>
-              </div>
-            )}
-            {attachingId === r.id && (
-              <div className="mt-2 flex items-center gap-2">
-                <Input
-                  value={linkDraft}
-                  onChange={(e) => setLinkDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void submitLink(r.id);
-                    if (e.key === "Escape") setAttachingId(null);
-                  }}
-                  placeholder="Report code or full esologs.com link"
-                  aria-label="ESO Logs report link or code"
-                  autoFocus
-                  className="h-8 text-xs"
-                />
-                <Button
-                  size="sm"
-                  onClick={() => void submitLink(r.id)}
-                  disabled={!linkDraft.trim()}
-                >
-                  Save
-                </Button>
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
+
+                {/* Handed-off explainer + paste affordance, replacing the old
+                    context-free "Add link". ALWAYS visible (no hover) so the state
+                    is self-explanatory; clicking reveals the inline input in-place,
+                    with the prose still showing so the "why" never disappears. */}
+                {handedOffNeedsLink && (
+                  <div className="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2">
+                    <div className="flex items-start gap-2">
+                      <ExternalLink
+                        className="mt-0.5 size-3.5 shrink-0 text-amber-400/80"
+                        aria-hidden
+                      />
+                      <p className="text-xs leading-relaxed text-amber-100/80">
+                        Finished in the official ESO Logs uploader, so Kalpa doesn't have the report
+                        link yet. Paste it to open the analysis.
+                      </p>
+                    </div>
+                    {attachingId === r.id ? (
+                      <div className="mt-2 flex items-center gap-2">
+                        <Input
+                          value={linkDraft}
+                          onChange={(e) => setLinkDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void submitLink(r.id);
+                            if (e.key === "Escape") setAttachingId(null);
+                          }}
+                          placeholder="Paste esologs.com link or report code"
+                          aria-label="ESO Logs report link or code"
+                          autoFocus
+                          className="h-8 flex-1 text-xs"
+                        />
+                        <Button
+                          size="sm"
+                          onClick={() => void submitLink(r.id)}
+                          disabled={!linkDraft.trim()}
+                        >
+                          Attach
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setAttachingId(null)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="mt-1.5 -ml-1.5 gap-1.5 text-amber-200/90 hover:bg-amber-400/10 hover:text-amber-100"
+                        onClick={() => {
+                          setAttachingId(r.id);
+                          setLinkDraft("");
+                        }}
+                      >
+                        <LinkIcon className="size-3.5" />
+                        Paste report link
+                      </Button>
+                    )}
+                  </div>
+                )}
+
+                {confirmDeleteId === r.id && (
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.05] px-3 py-2">
+                    <span className="text-xs text-red-200/90">
+                      Remove this record? Your log file stays on disk.
+                    </span>
+                    <div className="flex shrink-0 gap-1.5">
+                      <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteId(null)}>
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => {
+                          setConfirmDeleteId(null);
+                          void onDelete(r.id);
+                        }}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
 
-function StatusBadge({ status }: { status: UploadRecord["status"] }) {
+function StatusBadge({
+  status,
+  hasReport,
+}: {
+  status: UploadRecord["status"];
+  hasReport: boolean;
+}) {
   switch (status) {
     case "completed":
       return <InfoPill color="emerald">Done</InfoPill>;
@@ -3091,18 +3587,28 @@ function StatusBadge({ status }: { status: UploadRecord["status"] }) {
     case "queued":
       return <InfoPill color="sky">Uploading</InfoPill>;
     case "live":
-      return <InfoPill color="red">Live</InfoPill>;
-    case "handedOff":
-      // The official uploader may still be streaming this one — neutral, not a
-      // green "Done" that would imply the upload finished. The external-link cue
-      // signals ownership transferred to the separate uploader.
+      // Emerald + pulse — a healthy in-progress live session (red is reserved for
+      // real errors). Matches the header / LiveDashboard live treatment.
       return (
-        <InfoPill
-          color="amber"
-          className="gap-1"
-          title="Finished in the official ESO Logs uploader — paste the report link to track it here."
-        >
-          <ExternalLink className="size-2.5" aria-hidden /> Handed off
+        <InfoPill color="emerald" className="gap-1.5">
+          <span className="relative flex size-2" aria-hidden>
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
+            <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+          </span>
+          Live
+        </InfoPill>
+      );
+    case "paused":
+      return <InfoPill color="amber">Paused</InfoPill>;
+    case "handedOff":
+      // Once a link is attached, the report is observable → "Done". Until then it's
+      // "Link needed" (amber), paired with the row's always-visible explainer strip
+      // so the badge is never jargon standing alone.
+      return hasReport ? (
+        <InfoPill color="emerald">Done</InfoPill>
+      ) : (
+        <InfoPill color="amber" className="gap-1">
+          <LinkIcon className="size-2.5" aria-hidden /> Link needed
         </InfoPill>
       );
     case "failed":

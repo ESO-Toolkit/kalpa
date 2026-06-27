@@ -81,6 +81,20 @@ export function suggestSplitName(session: LogSession, fights: FightSummary[]): s
   return `session-${session.index + 1}`;
 }
 
+/** Build a file-stem suggestion for a SINGLE fight's split — kebab-cased, from the
+ *  fight's boss (preferred) or zone name, disambiguated by its 1-based ordinal
+ *  within the session so repeated pulls of the same boss don't collide. Falls back
+ *  to `fight-NN`. Example: "yandir-the-butcher-02", "lucent-citadel-01". */
+export function suggestFightName(fight: FightSummary, ordinalInSession: number): string {
+  const raw = fight.bossName || fight.zoneName || "";
+  const base = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  const n = String(ordinalInSession).padStart(2, "0");
+  return base ? `${base}-${n}` : `fight-${n}`;
+}
+
 /** Apply or toggle a run-tag onto an existing name. Tags are appended as a
  *  trailing " · tag" segment for report names, idempotently. */
 export function withTag(name: string, tag: RunTagId): string {
