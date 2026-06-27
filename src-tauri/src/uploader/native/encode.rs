@@ -1663,6 +1663,174 @@ fn reaction_is_friendly(reaction: &str) -> bool {
     )
 }
 
+/// A live unit record for the [`classify_monsters`] relationship pre-pass.
+struct ClassifyUnit {
+    is_player: bool,
+    monster_id: String,
+    owner: String,
+}
+
+/// Whether `start` is a player-side unit (a PLAYER, or transitively owned by one —
+/// a pet/companion). Iterative with a depth cap so a cyclic owner chain can't loop.
+fn classify_player_side(
+    cur: &std::collections::HashMap<String, ClassifyUnit>,
+    start: &str,
+) -> bool {
+    let mut uid = start.to_string();
+    for _ in 0..6 {
+        match cur.get(&uid) {
+            None => return false,
+            Some(u) => {
+                if u.is_player {
+                    return true;
+                }
+                if !u.owner.is_empty() && u.owner != "0" {
+                    uid = u.owner.clone();
+                } else {
+                    return false;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The combat-relationship friend/foe classification of every monster — Archon's
+/// reclassification of scripted/charmed enemies, which OVERRIDES the raw ESO `reaction`
+/// tag. ESO marks some enemies `FRIENDLY` (Maarselok, Selene's boss phase, Azureblight-
+/// corrupted adds, IA "shackled"/charmed bosses); faithfully encoding that tag would
+/// bucket their damage-taken as friendly (the IA `DamageTaken(Friendlies)` residual).
+/// The derivable signal Archon uses is the COMBAT relationship.
+///
+/// - `force_hostile`: monsters the RAID damages (`rfp>0`) OR that attack players while
+///   fighting no other monsters (`d2p>0 && d2m==0`). These are UNIFORMLY hostile
+///   (mask 64) regardless of reaction — the charmed-boss reclassification.
+/// - `attacks_players`: monsters that ever deal damage to a player-side unit (`d2p>0`).
+///   A friendly-tagged one of these is a *scripted enemy that also fights other enemies*
+///   (e.g. a Selene-style NPC): it is hostile in the EVENTS where it attacks an ally
+///   (so a friendly→friendly own-side `16|16` becomes `64|16`), but stays friendly when
+///   fighting enemies — the per-event override in [`ActorTable::code1_masks`].
+///
+/// Genuine allies (pets, companions, charmed allies that only fight enemies) are in
+/// neither set and keep their per-event reaction side. Validated 0-mismatch vs the
+/// official segment masks on all five byte-captures (combat / cityofash / kynes /
+/// ossein / sunspire). Players and `monsterId 0` are never included. Needs a full pass
+/// over the log, so it runs once before event emission.
+#[derive(Default)]
+pub struct MonsterSides {
+    pub force_hostile: std::collections::HashSet<String>,
+    pub attacks_players: std::collections::HashSet<String>,
+}
+
+pub fn classify_monsters(lines: &[&str]) -> MonsterSides {
+    use std::collections::HashMap;
+    #[derive(Default)]
+    struct Rel {
+        d2p: u64,
+        d2m: u64,
+        rfp: u64,
+    }
+    const DMG: &[&str] = &[
+        "DAMAGE",
+        "CRITICAL_DAMAGE",
+        "DOT_TICK",
+        "DOT_TICK_CRITICAL",
+        "BLOCKED_DAMAGE",
+        "DAMAGE_SHIELDED",
+    ];
+    let mut rel: HashMap<String, Rel> = HashMap::new();
+    let mut cur: HashMap<String, ClassifyUnit> = HashMap::new();
+    for line in lines {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            continue;
+        };
+        match kind {
+            // [2]unitId [3]type [6]monsterId [15]ownerUnitId
+            "UNIT_ADDED" => {
+                let (Some(uid), Some(ty)) = (f.get(2), f.get(3)) else {
+                    continue;
+                };
+                let ty = ty.trim();
+                let monster_id = f.get(6).map(|s| s.trim().to_string()).unwrap_or_default();
+                let owner = f.get(15).map(|s| s.trim().to_string()).unwrap_or_default();
+                cur.insert(
+                    uid.trim().to_string(),
+                    ClassifyUnit {
+                        is_player: ty == "PLAYER",
+                        monster_id,
+                        owner,
+                    },
+                );
+            }
+            // [2]unitId [10]ownerUnitId
+            "UNIT_CHANGED" => {
+                let Some(uid) = f.get(2).map(|s| s.trim()) else {
+                    continue;
+                };
+                if let Some(u) = cur.get_mut(uid) {
+                    if let Some(o) = f.get(10) {
+                        u.owner = o.trim().to_string();
+                    }
+                }
+            }
+            "UNIT_REMOVED" => {
+                if let Some(uid) = f.get(2).map(|s| s.trim()) {
+                    cur.remove(uid);
+                }
+            }
+            // [2]actionResult [9]srcUnit [19]tgtUnit
+            "COMBAT_EVENT" => {
+                let Some(ar) = f.get(2).map(|s| s.trim()) else {
+                    continue;
+                };
+                if !DMG.contains(&ar) {
+                    continue;
+                }
+                let src = f.get(9).map(|s| s.trim()).unwrap_or("0");
+                let tgt = f.get(19).map(|s| s.trim()).unwrap_or("0");
+                let src_player = classify_player_side(&cur, src);
+                let tgt_player = classify_player_side(&cur, tgt);
+                // Source monster: damage it deals (to a player vs to another monster).
+                let src_mid = cur
+                    .get(src)
+                    .filter(|u| !u.is_player && !u.monster_id.is_empty() && u.monster_id != "0")
+                    .map(|u| u.monster_id.clone());
+                let tgt_is_monster = cur.get(tgt).map(|u| !u.is_player).unwrap_or(false);
+                if let Some(mid) = src_mid {
+                    let e = rel.entry(mid).or_default();
+                    if tgt_player {
+                        e.d2p += 1;
+                    } else if tgt_is_monster {
+                        e.d2m += 1;
+                    }
+                }
+                // Target monster: damage it receives from the raid (the enemy signal).
+                if src_player {
+                    if let Some(mid) = cur
+                        .get(tgt)
+                        .filter(|u| !u.is_player && !u.monster_id.is_empty() && u.monster_id != "0")
+                        .map(|u| u.monster_id.clone())
+                    {
+                        rel.entry(mid).or_default().rfp += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut sides = MonsterSides::default();
+    for (mid, r) in rel {
+        if r.rfp > 0 || (r.d2p > 0 && r.d2m == 0) {
+            sides.force_hostile.insert(mid.clone());
+        }
+        if r.d2p > 0 {
+            sides.attacks_players.insert(mid);
+        }
+    }
+    sides
+}
+
 /// Incremental runtime actor table for mask ordering. Built by replaying
 /// `UNIT_ADDED`/`UNIT_CHANGED` in order; answers "what is unit N's sort key right
 /// now?" Master indices are assigned on first appearance of a distinct actor
@@ -1680,6 +1848,17 @@ pub struct ActorTable {
     /// given monsterId gets the next index (so multiple copies of one monster are
     /// distinguished in the subordinal).
     monster_instance_count: std::collections::HashMap<String, u32>,
+    /// `monsterId`s FORCED hostile regardless of raw reaction ([`classify_monsters`]):
+    /// the scripted/charmed enemies the raid fights that ESO tags `FRIENDLY`.
+    /// Consulted by [`Self::sort_key_depth`]; a monster NOT in the set keeps its
+    /// per-event reaction side. Empty (the default) → pure reaction sides.
+    force_hostile: std::collections::HashSet<String>,
+    /// `monsterId`s that ever attack a player-side unit ([`classify_monsters`]). A
+    /// friendly-tagged one of these is a scripted enemy that also fights other enemies;
+    /// [`Self::code1_masks`] flips it to hostile in the events where it is the SOURCE
+    /// hitting an ally (so the friendly-fire `16|16` becomes `64|16`), but it stays
+    /// friendly when its target is an enemy.
+    attacks_players: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1693,6 +1872,10 @@ struct UnitRuntime {
     /// The unit's master-table identity (the dedup key). Lets a caller resolve a
     /// runtime unit id to the same identity the master table indexes by.
     identity: String,
+    /// The unit's `monsterId` (raw `UNIT_ADDED` field) — the key into
+    /// [`ActorTable::monster_hostility`] for the friend/foe override. Empty / `"0"`
+    /// for players (they always fall back to the reaction side).
+    monster_id: String,
 }
 
 impl ActorTable {
@@ -1759,8 +1942,27 @@ impl ActorTable {
                 reaction,
                 ordinal,
                 identity,
+                monster_id: monster_id.to_string(),
             },
         );
+    }
+
+    /// Install the combat-relationship classification ([`classify_monsters`]) so the
+    /// masks reclassify the scripted/charmed enemies the raid fights (uniformly) and
+    /// the friendly-tagged scripted enemies that attack allies (per event), while every
+    /// other unit keeps its per-event reaction side.
+    pub fn set_monster_sides(&mut self, m: MonsterSides) {
+        self.force_hostile = m.force_hostile;
+        self.attacks_players = m.attacks_players;
+    }
+
+    /// Whether the unit's monster is a known player-attacker (an `attacks_players`
+    /// scripted enemy) — the per-event hostile-when-hitting-an-ally signal.
+    fn is_attacks_players(&self, unit_id: &str) -> bool {
+        self.units
+            .get(unit_id.trim())
+            .map(|u| self.attacks_players.contains(&u.monster_id))
+            .unwrap_or(false)
     }
 
     /// The master-table identity currently bound to a runtime unit id, if known.
@@ -1812,6 +2014,20 @@ impl ActorTable {
 
     fn sort_key_depth(&self, unit_id: &str, depth: u8) -> Option<ActorSortKey> {
         let u = self.units.get(unit_id)?;
+        // A scripted/charmed enemy the raid fights ([`classify_monsters`]) is FORCED
+        // hostile even though ESO tags it `FRIENDLY` (or `NPC_ALLY`) — checked BEFORE
+        // owner resolution so a boss's summon (an NPC_ALLY pet owned by a hostile unit,
+        // e.g. Sunspire's Resonating Glyphic) is classified by its own enemy status,
+        // not by inheriting a side from its owner.
+        if self.force_hostile.contains(&u.monster_id) {
+            return Some(ActorSortKey {
+                side: 1,
+                master_index: u.master_index,
+            });
+        }
+        // Otherwise a pet/companion inherits its owner's side (a player's pet is
+        // friendly), and a plain unit takes its own per-event reaction side — exactly
+        // as the official segment does (including a unit that flips mid-fight).
         if depth < 4 && !u.owner.is_empty() && u.owner != "0" {
             if let Some(k) = self.sort_key_depth(&u.owner, depth + 1) {
                 return Some(k);
@@ -1823,27 +2039,25 @@ impl ActorTable {
         })
     }
 
-    /// Compute `(srcMask, tgtMask)` for a code-1 event. `src_unit`/`tgt_unit` are
-    /// the raw source/target unit ids; an absent side (unit id `"0"` / unknown)
-    /// yields [`MASK_ABSENT`]. Returns `None` if both sides are present but their
-    /// keys are equal (an unobserved self/co-located case — gated, not guessed).
+    /// Compute `(srcMask, tgtMask)` for a code-1/code-2 event. `src_unit`/`tgt_unit`
+    /// are the raw source/target unit ids; an absent side (unit id `"0"` / unknown)
+    /// yields [`MASK_ABSENT`]. Each PRESENT side gets its OWN side mask — `16`
+    /// friendly, `64` hostile (pets resolve to their owner's side). A cross-faction
+    /// pair reads `16|64` / `64|16` (friendly always sorts before hostile, so this
+    /// matches the proven combat ordering), but a SAME-side pair reads `16|16` or
+    /// `64|64`, NOT an index-relative `16|64`.
     ///
-    /// The masks use the EARLIER/LATER relative ordering by `(side, master_index)`,
-    /// not each unit's own side. This is deliberate and proven byte-exact (3733/3733
-    /// on the combat capture): relative ordering is *robust to Archon's server-side
-    /// monster reclassification*. ESO's encounter log marks some scripted/charmed
-    /// enemies with a `FRIENDLY` reaction (e.g. Maarselok, Selene's boss phase, IA
-    /// "Sparkstorm Myrinax"), which Archon overrides to hostile via its proprietary
-    /// monster DB — a rule NOT derivable from the raw (the byte captures show two
-    /// same-name `FRIENDLY`-only units classified *oppositely* — the same
-    /// proprietary-classification class as the abandoned code-9). Own-side masks
-    /// would faithfully encode
-    /// the raw `FRIENDLY` side and so mis-bucket those enemies' damage-taken; the
-    /// relative ordering side-steps the misclassification because index order
-    /// coincides with Archon's faction order for the cross-faction events that
-    /// dominate. The only events relative gets "wrong" are distinct same-side hits
-    /// (friendly↔friendly / hostile↔hostile), which are render-neutral on the
-    /// captures — so this is the tightest client-derivable rule.
+    /// Own-side is verified on the ossein capture (35 distinct player→player hits are
+    /// `16|16`; the combat capture's same-side code-1 events are all self / pet→owner,
+    /// which already collapse to own-side). It is correct ONLY because each unit's
+    /// side comes from the combat-relationship classification ([`classify_monsters`]),
+    /// which reclassifies the scripted/charmed enemies ESO tags `FRIENDLY` (Maarselok,
+    /// Azureblight-corrupted adds, IA charmed bosses) to hostile — so their
+    /// damage-taken lands in the enemy bucket like Archon's. With the classification
+    /// installed the masks reproduce the official segment exactly; without it (an
+    /// un-classified table) own-side would faithfully encode the raw `FRIENDLY` side
+    /// and leak those enemies into the friendly bucket. Returns `None` only when both
+    /// sides are absent (not a code-1 line).
     pub fn code1_masks(
         &self,
         src_unit: &str,
@@ -1851,20 +2065,35 @@ impl ActorTable {
     ) -> Option<(&'static str, &'static str)> {
         let src_absent = src_unit == "0";
         let tgt_absent = tgt_unit == "0";
+        let own = |side: u8| if side == 0 { MASK_EARLIER } else { MASK_LATER };
         match (src_absent, tgt_absent) {
             (true, true) => None, // no real state at all — not a code-1 line.
-            (true, false) => Some((MASK_ABSENT, MASK_EARLIER)),
-            (false, true) => Some((MASK_EARLIER, MASK_ABSENT)),
+            // One side absent (32): the PRESENT side still gets its own-side mask, not
+            // a hardcoded 16. An environmental/absent-caster DoT on a hostile victim
+            // must read `32|64` so its damage-taken lands in the enemy bucket (the IA
+            // Colossus/Risen-Dead leak); a friendly victim reads `32|16` as before.
+            (true, false) => Some((MASK_ABSENT, own(self.sort_key(tgt_unit)?.side))),
+            (false, true) => Some((own(self.sort_key(src_unit)?.side), MASK_ABSENT)),
             (false, false) => {
                 let sk = self.sort_key(src_unit)?;
                 let tk = self.sort_key(tgt_unit)?;
-                match sk.cmp(&tk) {
-                    std::cmp::Ordering::Less => Some((MASK_EARLIER, MASK_LATER)),
-                    std::cmp::Ordering::Greater => Some((MASK_LATER, MASK_EARLIER)),
-                    // Equal keys (self-cast / co-located) never appear in the
-                    // golden code-1 set — gate rather than guess.
-                    std::cmp::Ordering::Equal => None,
+                let mut src_mask = own(sk.side);
+                let tgt_mask = own(tk.side);
+                // Per-event override: a friendly-tagged scripted enemy (an
+                // `attacks_players` monster, NOT uniformly force-hostile) that DEALS
+                // damage to ANOTHER friendly-side unit is acting hostile in that event,
+                // so the would-be friendly-fire `16|16` becomes `64|16` (the official
+                // segment marks it that way — e.g. a Selene-style NPC hitting a pet).
+                // It still reads friendly when its target is an enemy (handled above)
+                // and on a SELF-cast (`src == tgt` — a self-buff is not an attack).
+                if src_mask == MASK_EARLIER
+                    && tgt_mask == MASK_EARLIER
+                    && src_unit.trim() != tgt_unit.trim()
+                    && self.is_attacks_players(src_unit)
+                {
+                    src_mask = MASK_LATER;
                 }
+                Some((src_mask, tgt_mask))
             }
         }
     }
@@ -2496,17 +2725,129 @@ mod tests {
         // Pet (owned by player 1) attacks bear: pet inherits owner's friendly key
         // (idx1) → earlier → 16|64.
         assert_eq!(t.code1_masks("25", "30"), Some(("16", "64")));
-        // Absent source (unit 0) → 32 on that side, the present side → 16.
-        assert_eq!(t.code1_masks("0", "30"), Some(("32", "16")));
-        assert_eq!(t.code1_masks("30", "0"), Some(("16", "32")));
+        // One side absent (unit 0) → 32 there; the PRESENT side keeps its own-side
+        // mask — the bear is hostile, so it reads 64 (an environmental DoT on a
+        // hostile victim must bucket as enemy damage-taken, not friendly).
+        assert_eq!(t.code1_masks("0", "30"), Some(("32", "64")));
+        assert_eq!(t.code1_masks("30", "0"), Some(("64", "32")));
+        // A friendly present side (the player) with an absent counterpart stays 16.
+        assert_eq!(t.code1_masks("0", "1"), Some(("32", "16")));
+        assert_eq!(t.code1_masks("1", "0"), Some(("16", "32")));
 
         // A reaction flip: Selene turns HOSTILE mid-fight (UNIT_CHANGED layout
         // `unitId,class,race,name,account,charId,level,CP,owner,reaction,...`).
         t.on_unit_changed("40,0,0,\"Selene\",\"\",0,50,160,0,HOSTILE,F");
-        // Now Selene (hostile idx3) vs bear (hostile idx2): same side → lower index
-        // first → bear earlier → Selene later. Selene as src → 64|16. (Relative
-        // ordering, NOT own-side — see `code1_masks` for why it's the robust rule.)
-        assert_eq!(t.code1_masks("40", "30"), Some(("64", "16")));
+        // Now Selene (hostile) vs bear (hostile): SAME side → each gets its own-side
+        // mask → 64|64 (NOT an index-relative 16|64). Same-side pairs are own-side;
+        // see `code1_masks`. (No classification installed here, so the side comes from
+        // the raw reaction.)
+        assert_eq!(t.code1_masks("40", "30"), Some(("64", "64")));
+    }
+
+    // The combat-relationship friend/foe reclassification ([`classify_monsters`]) +
+    // its effect on code-1/2 masks — the IA `DamageTaken(Friendlies)` fix. Locks the
+    // four cases the byte-captures proved: a raw-FRIENDLY enemy the raid fights is
+    // forced hostile; an NPC_ALLY summon owned by a boss but fought by the raid is
+    // forced hostile (force beats owner-inheritance — Sunspire's Resonating Glyphic);
+    // a player's pet stays friendly; and a friendly-tagged scripted enemy that also
+    // fights enemies (Selene-style) is hostile only in the events where it hits an ally.
+    #[test]
+    fn monster_reclassification_overrides_reaction() {
+        // UNIT_ADDED: ts,UNIT_ADDED,id,type,isLocal,perSession,monsterId,isBoss,class,
+        //   race,name,display,charId,level,CP,owner,reaction,grouped (monsterId=f[6],
+        //   owner=f[15], reaction=f[16]).
+        fn unit(id: &str, ty: &str, mid: &str, owner: &str, react: &str) -> String {
+            format!(
+                "0,UNIT_ADDED,{id},{ty},F,0,{mid},F,0,0,\"N{id}\",\"\",0,50,160,{owner},{react},F"
+            )
+        }
+        // COMBAT_EVENT DAMAGE: srcUnit=f[9], tgtUnit=f[19] (9 state fields between).
+        fn dmg(src: &str, tgt: &str) -> String {
+            format!(
+                "0,COMBAT_EVENT,DAMAGE,2,0,100,0,1,123,{src},1/1,1/1,1/1,1/1,1/1,0,0,0,0,{tgt},1/1,1/1,1/1,1/1,1/1,0,0,0,0"
+            )
+        }
+        let lines_owned = vec![
+            unit("1", "PLAYER", "0", "0", "PLAYER_ALLY"), // the logging player
+            unit("10", "MONSTER", "9001", "0", "HOSTILE"), // a normal boss
+            unit("20", "MONSTER", "9002", "0", "FRIENDLY"), // charmed enemy (Maarselok-style)
+            unit("30", "MONSTER", "9003", "10", "NPC_ALLY"), // a boss's summon (owner=boss 10)
+            unit("40", "MONSTER", "9004", "1", "NPC_ALLY"), // a player's pet (owner=player 1)
+            unit("50", "MONSTER", "9005", "0", "FRIENDLY"), // Selene-style scripted enemy
+            dmg("1", "10"),                               // raid → boss            (rfp 9001)
+            dmg("1", "20"),  // raid → charmed enemy    (rfp 9002 → force)
+            dmg("1", "30"),  // raid → boss's summon     (rfp 9003 → force, beats owner)
+            dmg("40", "10"), // player's pet → boss      (d2m 9004 → ally, not forced)
+            dmg("50", "1"),  // Selene → a player        (d2p 9005 → attacks_players)
+            dmg("50", "10"), // Selene → a hostile        (d2m 9005 → not forced)
+        ];
+        let lines: Vec<&str> = lines_owned.iter().map(|s| s.as_str()).collect();
+
+        let sides = classify_monsters(&lines);
+        assert!(
+            sides.force_hostile.contains("9001"),
+            "raid-fought boss is hostile"
+        );
+        assert!(
+            sides.force_hostile.contains("9002"),
+            "charmed FRIENDLY enemy the raid fights → forced hostile"
+        );
+        assert!(
+            sides.force_hostile.contains("9003"),
+            "boss's NPC_ALLY summon the raid fights → forced hostile"
+        );
+        assert!(
+            !sides.force_hostile.contains("9004"),
+            "a player's pet is NOT forced hostile"
+        );
+        assert!(
+            !sides.force_hostile.contains("9005"),
+            "a scripted enemy that also fights enemies is NOT uniformly forced"
+        );
+        assert!(
+            sides.attacks_players.contains("9005"),
+            "Selene-style attacker is tracked for the per-event override"
+        );
+
+        let mut t = ActorTable::new();
+        for l in &lines {
+            let mut it = l.splitn(3, ',');
+            let _ = it.next();
+            if it.next().map(str::trim) == Some("UNIT_ADDED") {
+                t.on_unit_added(it.next().unwrap_or(""));
+            }
+        }
+        t.set_monster_sides(sides);
+        // The charmed enemy and the boss-summon read hostile (64) even though ESO tags
+        // them FRIENDLY/NPC_ALLY — their damage-taken buckets as enemy like Archon.
+        assert_eq!(
+            t.code1_masks("1", "20"),
+            Some(("16", "64")),
+            "player → charmed enemy"
+        );
+        assert_eq!(
+            t.code1_masks("1", "30"),
+            Some(("16", "64")),
+            "player → boss-summon (force beats owner)"
+        );
+        // A player's pet stays friendly (owner inheritance): friendly-fire reads 16|16.
+        assert_eq!(
+            t.code1_masks("1", "40"),
+            Some(("16", "16")),
+            "player → own pet"
+        );
+        // Selene-style: hostile when it hits an ally (player), friendly when it hits an
+        // enemy — the per-event override.
+        assert_eq!(
+            t.code1_masks("50", "1"),
+            Some(("64", "16")),
+            "Selene → ally = hostile that event"
+        );
+        assert_eq!(
+            t.code1_masks("50", "10"),
+            Some(("16", "64")),
+            "Selene → enemy = friendly that event"
+        );
     }
 
     // Unit-id reuse: a unit id freed and re-added is a DIFFERENT actor and gets a

@@ -372,6 +372,12 @@ impl EventEmitter {
             self.identity_to_actor = id2a;
             self.ability_to_index = ab2i;
         }
+        // Compute the force-hostile reclassification up front so the code-1/2 own-side
+        // masks reclassify the scripted/charmed enemies the raid fights, like Archon
+        // does (the IA DamageTaken-bucket fix). A whole-log pre-pass — fine for the
+        // completed-file path; the live driver installs it via `set_force_hostile`.
+        self.actors
+            .set_monster_sides(super::encode::classify_monsters(lines));
         let mut out = String::new();
         let mut count: u64 = 0;
         for line in lines {
@@ -1365,12 +1371,13 @@ impl EventEmitter {
         }
 
         let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
-        // Mask rule is code-dependent (verified on the capture): the DAMAGE codes
-        // (1 damage, 2 dot) use the earlier/later ordering (16/64 by master index —
-        // a cross-faction attacker/victim pair), while the heal/power codes (3 heal,
-        // 4 hot, 26 power) use OWN-SIDE masks (source and target are always the same
-        // faction — you heal/energize allies — so both slots are that side: 16|16 for
-        // friendlies, 64|64 for hostiles, never crossed).
+        // Mask rule (verified on the captures): every damage/heal/power code uses
+        // OWN-SIDE masks — 16 friendly, 64 hostile, 32 absent — where each unit's side
+        // comes from the combat-relationship classification ([`classify_monsters`]),
+        // not its raw reaction. The damage codes (1, 2) route through `combat_masks`
+        // (which keeps the absent-side handling), the heal/power codes (3 heal, 4 hot,
+        // 26 power) through `masks`. So a same-side pair reads 16|16 / 64|64 and a
+        // cross-faction pair 16|64 / 64|16 (friendly sorts before hostile).
         let (src_mask, tgt_mask) = if matches!(code, "3" | "4" | "26") {
             self.masks(&src_unit, &tgt_unit)
         } else {
@@ -1688,11 +1695,11 @@ impl EventEmitter {
     }
 
     /// `(srcMask, tgtMask)` for the **combat damage** codes (1 damage, 2 dot) via
-    /// [`ActorTable::code1_masks`]: the proven earlier/later relative ordering
-    /// (earlier→16, later→64, absent→32, self/co-located→own side). Byte-exact
-    /// 3733/3733 on the code-1 golden pair; robust to Archon's server-side monster
-    /// reclassification (see `code1_masks`). The `None` fallback is the both-absent /
-    /// equal-key case → own side.
+    /// [`ActorTable::code1_masks`]: each present side's OWN side mask (16 friendly /
+    /// 64 hostile, absent→32), with the side taken from the combat-relationship
+    /// classification ([`super::encode::classify_monsters`]). Cross-faction reads
+    /// 16|64 / 64|16; same-side 16|16 / 64|64. The `None` fallback is the both-absent
+    /// case → own side.
     fn combat_masks(&self, src_unit: &str, tgt_unit: &str) -> (&'static str, &'static str) {
         if let Some(masks) = self.actors.code1_masks(src_unit, tgt_unit) {
             return masks;
