@@ -1060,11 +1060,13 @@ pub async fn uploader_upload_log(
         fight_count,
         report: None,
         error: None,
-        // Title is decided below, once we know whether this routes native (the
-        // only path that applies `description`); zone is the frontend's derived
-        // content label, carried regardless of transport.
+        // Title is set later, and ONLY if the upload actually completes via native
+        // (the one path that applies `description`) — see the Completed arm below. A
+        // native attempt that internally falls back to the official uploader returns
+        // HandedOff, so it must never carry a name the report doesn't have. zone is
+        // the frontend's derived content label, carried regardless of transport.
         title: None,
-        zone: zone.clone(),
+        zone,
     };
     let _ = super::history::upsert(&app, record.clone());
 
@@ -1093,13 +1095,6 @@ pub async fn uploader_upload_log(
     let native_opt_in = native_opt_in.unwrap_or(false);
     let routing = transport::assess_native_routing(&dispatch_path, native_opt_in);
     let use_native = matches!(routing, transport::NativeRouting::Native);
-    // Persist the report title only when we'll actually apply it: the native path
-    // sets the report's name from `description`, but the official uploader ignores
-    // it — so recording it for a handed-off upload would show a name the report
-    // never had (and could be a stale value from a prior native session).
-    if use_native {
-        record.title = options.description.clone();
-    }
     if let transport::NativeRouting::Fallback(reason) = &routing {
         // Honest diagnostics: why native wasn't used. Logged only (not user-facing
         // noise).
@@ -1166,6 +1161,14 @@ pub async fn uploader_upload_log(
             });
             record.status = UploadStatus::Completed;
             record.report = report.clone();
+            // Stamp the title from the actual OUTCOME, not the routing intent: only a
+            // genuine native completion applied `description` as the report name (a
+            // native attempt that fell back to the official uploader returns HandedOff,
+            // not Completed). The `use_native` gate also keeps a CLI Completed — which
+            // ignores `description` — title-less.
+            if use_native {
+                record.title = options.description.clone();
+            }
             let _ = super::history::upsert(&app, record);
             Ok(UploadDispatch {
                 handed_off: false,

@@ -86,6 +86,16 @@ export function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/** A short label for a fight: boss > zone > 1-based ordinal fallback. Shared so the
+ *  timeline, live ticker, split workbench, and preflight peek all read the same. */
+export function fightLabel(fight: {
+  bossName: string | null;
+  zoneName: string | null;
+  index: number;
+}): string {
+  return fight.bossName || fight.zoneName || `Fight ${fight.index + 1}`;
+}
+
 /** A duration-derived hint for a fight (honest, not a kill/wipe claim): a very
  *  short fight is usually a quick reset/pull, a long one a sustained attempt.
  *  Null = no strong signal, so callers show nothing rather than guess. Shared by
@@ -122,12 +132,17 @@ export function SessionTimer({ startMs, className }: { startMs: number; classNam
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+  // Fold the value INTO the label: the timer is now rendered in a non-aria-hidden
+  // place (the live core), so a bare "Session elapsed time" label would mask the
+  // visible value from screen readers. Safe because this is outside any aria-live
+  // region — it's read only on navigation, never announced on each tick.
+  const elapsed = formatElapsed(now - startMs);
   return (
     <span
       className={cn("font-heading text-xs tabular-nums text-muted-foreground", className)}
-      aria-label="Session elapsed time"
+      aria-label={`Session elapsed time: ${elapsed}`}
     >
-      {formatElapsed(now - startMs)}
+      {elapsed}
     </span>
   );
 }

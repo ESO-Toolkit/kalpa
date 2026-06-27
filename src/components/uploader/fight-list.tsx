@@ -6,7 +6,7 @@
 import { Radio, Swords } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
-import { fightDurationHint, formatDuration } from "./uploader-shared";
+import { fightDurationHint, fightLabel, formatDuration } from "./uploader-shared";
 import type { FightSummary, LiveFight } from "@/types/uploader";
 
 type FightRow = {
@@ -18,12 +18,6 @@ type FightRow = {
   /** When true, show a subtle "streaming" badge (live timeline). */
   live?: boolean;
 };
-
-function fightTitle(zone: string | null, boss: string | null, index: number): string {
-  if (boss) return boss;
-  if (zone) return zone;
-  return `Fight ${index + 1}`;
-}
 
 export function FightList({
   fights,
@@ -105,7 +99,7 @@ export function FightList({
 export function rowsFromSummaries(fights: FightSummary[]): FightRow[] {
   return fights.map((f) => ({
     index: f.index,
-    title: fightTitle(f.zoneName, f.bossName, f.index),
+    title: fightLabel(f),
     subtitle: `${formatDuration(f.endMs - f.startMs)}${f.zoneName && f.bossName ? ` · ${f.zoneName}` : ""}`,
     durationMs: f.endMs - f.startMs,
   }));
@@ -115,7 +109,7 @@ export function rowsFromSummaries(fights: FightSummary[]): FightRow[] {
 export function rowsFromLive(fights: LiveFight[]): FightRow[] {
   return fights.map((f) => ({
     index: f.index,
-    title: fightTitle(f.zoneName, f.bossName, f.index),
+    title: fightLabel(f),
     subtitle: `${formatDuration(f.durationMs)}${f.zoneName && f.bossName ? ` · ${f.zoneName}` : ""}`,
     durationMs: f.durationMs,
     live: true,

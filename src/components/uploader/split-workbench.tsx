@@ -32,7 +32,13 @@ import type {
   LogSession,
   SplitSelection,
 } from "@/types/uploader";
-import { compactBytes, fightDurationHint, formatDuration, relativeFromMs } from "./uploader-shared";
+import {
+  compactBytes,
+  fightDurationHint,
+  fightLabel,
+  formatDuration,
+  relativeFromMs,
+} from "./uploader-shared";
 import { RUN_TAGS, suggestFightName, suggestSplitName, withTag } from "./naming";
 
 // Remember the last prefix the user applied to a batch of splits (e.g. a guild
@@ -47,11 +53,6 @@ function fightsInSession(session: LogSession, fights: FightSummary[]): FightSumm
   return fights.filter(
     (f) => f.startOffset >= session.startOffset && f.startOffset < session.endOffset
   );
-}
-
-/** A short label for a fight (boss > zone > ordinal fallback). */
-function fightLabel(fight: FightSummary): string {
-  return fight.bossName || fight.zoneName || `Fight ${fight.index + 1}`;
 }
 
 /** Per-session editable state in the workbench. */

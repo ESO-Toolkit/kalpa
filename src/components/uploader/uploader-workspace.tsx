@@ -77,6 +77,7 @@ import {
   WhatGetsUploaded,
   compactBytes,
   esotkReportUrl,
+  fightLabel,
   formatDuration,
   formatElapsed,
   relativeFromMs,
@@ -1791,7 +1792,14 @@ function AccountChip({
     <SimpleTooltip content="Reports upload to this ESO Logs account" side="bottom">
       <span
         className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent-sky/20 bg-accent-sky/[0.05] px-2 py-1 font-medium text-accent-sky"
-        aria-label={`Signed in to ESO Logs as ${userName}`}
+        // Fold the session-only caution into the label: the amber icon is aria-hidden
+        // and the `title` lives on a non-focusable span, so without this a screen-reader
+        // user would never hear that the sign-in won't persist.
+        aria-label={
+          sessionPersisted
+            ? `Signed in to ESO Logs as ${userName}`
+            : `Signed in to ESO Logs as ${userName}. Signed in for this session only — it won't persist after you restart Kalpa.`
+        }
       >
         <UserRound className="size-3" aria-hidden />
         <span className="max-w-[140px] truncate">{userName}</span>
@@ -1934,7 +1942,7 @@ function MissionControlBand({
   if (phase === "ready") {
     lead = (
       <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
-        <Swords className="size-3 shrink-0 text-primary/70" aria-hidden />
+        <Swords className="size-3 shrink-0 text-muted-foreground" aria-hidden />
         <span className="truncate font-medium text-foreground/90">{readyZone ?? "Combat log"}</span>
         <span className="text-muted-foreground/70">
           · {readyFights} fight{readyFights === 1 ? "" : "s"}
@@ -2087,7 +2095,7 @@ function LiveCore({
         <PulseDot tone={tone} />
         <span
           className={cn(
-            "font-heading text-[10px] font-bold tracking-[0.12em]",
+            "font-heading text-[10px] font-bold tracking-[0.08em]",
             tone === "emerald" ? "text-emerald-300/90" : "text-amber-300/90"
           )}
         >
@@ -2148,7 +2156,7 @@ function FightTicker({
                 <span
                   className={cn("truncate", i === 0 ? "text-foreground/90" : "text-foreground/60")}
                 >
-                  {f.bossName || f.zoneName || `Fight ${f.index + 1}`}
+                  {fightLabel(f)}
                 </span>
               </span>
               <span className="shrink-0 tabular-nums text-muted-foreground/70">
@@ -2210,6 +2218,7 @@ function LiveReportCTA({
           size="sm"
           className="h-7 flex-1 gap-1.5 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25"
           onClick={() => void openReportUrl(esotkReportUrl(report.code, { live: isNative }))}
+          aria-label={isNative ? "Watch live report" : "Open report"}
         >
           <Zap className="size-3" aria-hidden />
           {isNative ? "Watch" : "Open"}
@@ -3163,9 +3172,7 @@ function Preflight({
               className="inline-flex items-center gap-1.5 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px]"
             >
               <Swords className="size-2.5 shrink-0 text-primary/60" aria-hidden />
-              <span className="max-w-[150px] truncate text-foreground/75">
-                {f.bossName || f.zoneName || `Fight ${f.index + 1}`}
-              </span>
+              <span className="max-w-[150px] truncate text-foreground/75">{fightLabel(f)}</span>
               <span className="tabular-nums text-muted-foreground/70">
                 {formatDuration(f.endMs - f.startMs)}
               </span>
@@ -3750,9 +3757,20 @@ function HistoryPanel({
             const content = r.zone?.trim() ? `${r.zone.trim()}${date ? ` · ${date}` : ""}` : null;
             const title = r.title?.trim() || null;
             const lead = content ?? title ?? tidyLogLabel(r.fileName);
-            // Show the report title as a secondary line only when it adds something
-            // the lead doesn't already say.
-            const showTitle = title !== null && title !== lead;
+            // Show the report title as a secondary line only when it actually adds
+            // something. Normalize separators + case so the COMMON suggested name
+            // ("Zone — date") isn't echoed as a near-duplicate of the lead
+            // ("Zone · date"), and a description that just repeats the zone is hidden.
+            const norm = (s: string) =>
+              s
+                .toLowerCase()
+                .replace(/[·—–-]+/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+            const showTitle =
+              title !== null &&
+              norm(title) !== norm(lead) &&
+              (r.zone ? norm(title) !== norm(r.zone) : true);
             const handedOffNeedsLink = r.status === "handedOff" && !r.report;
             return (
               <li
@@ -3789,6 +3807,9 @@ function HistoryPanel({
                           {r.fileName}
                         </span>
                       </SimpleTooltip>
+                      {/* The source folder is now visual-tooltip-only; expose it to
+                          screen readers so two same-named logs stay distinguishable. */}
+                      <span className="sr-only"> in {loc.dir}</span>
                       <span className="text-muted-foreground/40">·</span>
                       <span>
                         {r.fightCount} fight{r.fightCount === 1 ? "" : "s"}
