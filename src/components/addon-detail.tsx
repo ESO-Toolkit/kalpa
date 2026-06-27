@@ -567,6 +567,14 @@ export function AddonDetail({
                   <dd>{relativeDate(addon.esouiLastUpdate)}</dd>
                 </>
               )}
+              {addon.installedAt && !Number.isNaN(Date.parse(addon.installedAt)) && (
+                <>
+                  <dt className="text-muted-foreground/60 font-heading text-xs uppercase tracking-wider">
+                    Downloaded
+                  </dt>
+                  <dd>{relativeDate(Date.parse(addon.installedAt))}</dd>
+                </>
+              )}
             </dl>
             {addon.esouiId && (
               <div className="mt-3 pt-3 border-t border-white/[0.06]">

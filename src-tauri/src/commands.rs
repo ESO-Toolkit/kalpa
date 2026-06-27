@@ -161,6 +161,10 @@ pub struct UpdateCheckResult {
     pub remote_version: String,
     pub download_url: String,
     pub has_update: bool,
+    /// Remote ESOUI last-updated timestamp (epoch ms) observed during this
+    /// check. The frontend merges it into live addon state so the "Recently
+    /// Updated" sort is accurate immediately, without waiting for a re-scan.
+    pub remote_last_update: u64,
 }
 
 /// Determine the "primary" folder from a list of installed folders.
@@ -942,6 +946,7 @@ fn scan_installed_addons_blocking(
             addon.esoui_id = Some(meta.esoui_id);
             addon.tags = meta.tags.clone();
             addon.esoui_last_update = meta.esoui_last_update;
+            addon.installed_at = meta.installed_at.clone();
         }
 
         if let Some(hash_manifest) = file_hashes::load_hash_manifest(addons_dir, &addon.folder_name)
@@ -1295,6 +1300,7 @@ pub async fn check_for_updates(
                 remote_version: p.remote_version,
                 download_url: p.fallback_url,
                 has_update: p.has_update,
+                remote_last_update: p.remote_last_update,
             })
             .collect();
 
@@ -1311,6 +1317,7 @@ struct UpdatePending {
     remote_version: String,
     fallback_url: String,
     has_update: bool,
+    remote_last_update: u64,
 }
 
 /// Phase 1 of check_for_updates: compare local metadata against the ESOUI API
@@ -1379,6 +1386,7 @@ fn check_for_updates_metadata(
             remote_version: api_entry.version.clone(),
             fallback_url: meta.download_url.clone(),
             has_update,
+            remote_last_update: api_entry.last_update,
         });
     }
 
@@ -3426,19 +3434,26 @@ fn auto_link_addons_blocking(
                 None => true,
             };
             if needs_update {
-                let version = already_tracked
-                    .map(|m| m.installed_version.clone())
-                    .unwrap_or_else(|| read_local_version(addons_dir, &folder_name));
-                let download_url = already_tracked
-                    .map(|m| m.download_url.clone())
-                    .unwrap_or_else(|| api_entry.file_info_uri.clone());
-                metadata::record_install_ext(
-                    &mut store,
-                    &folder_name,
+                // Reconcile ESOUI metadata in place. This is NOT a download, so
+                // `installed_at` (the local "last downloaded" time) and tags must
+                // be preserved — only API-derived fields change. A brand-new,
+                // auto-linked entry was present on disk but never downloaded by
+                // Kalpa, so its `installed_at` is left empty (unknown).
+                let entry = store.addons.entry(folder_name.clone()).or_insert_with(|| {
+                    metadata::AddonMetadata {
+                        esoui_id: 0,
+                        installed_version: read_local_version(addons_dir, &folder_name),
+                        download_url: api_entry.file_info_uri.clone(),
+                        installed_at: String::new(),
+                        tags: Vec::new(),
+                        esoui_last_update: 0,
+                    }
+                });
+                metadata::reconcile_addon(
+                    entry,
                     api_entry.esoui_id,
-                    &version,
-                    &download_url,
                     api_entry.last_update,
+                    &api_entry.file_info_uri,
                 );
                 linked.push(folder_name);
             }
