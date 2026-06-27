@@ -1316,6 +1316,20 @@ impl EventEmitter {
         // ability is unknown until the paired real DAMAGE/DOT event arrives, so the
         // line is buffered and flushed (back-patched with f10) then.
         if action_result == "DAMAGE_SHIELDED" {
+            // On a REFLECTED cast (the boss-reflect case, e.g. Dreadsail Spell Wall),
+            // the absorbed shield is NOT its own code-38 line: the official segment
+            // folds it into the paired reflected hit's overflow (the same code-1
+            // temporary_damage_buffer mechanic) and emits no DamageShielded line.
+            // Verified on dreadsail (every reflect-cast DAMAGE_SHIELDED → 0 code-38,
+            // its value rides in the next code-54 line's overflow).
+            if self.reflect_casts.contains_key(cast_track_id) {
+                if let Ok(v) = hit_value.parse::<u64>() {
+                    if v > 0 {
+                        *self.temp_damage.entry(tgt_unit.clone()).or_insert(0) += v;
+                    }
+                }
+                return None; // folded into the paired reflected damage
+            }
             self.buffer_damage_shielded(raw_ts, hit_value, &ability, &src_unit, &tgt_unit);
             return None; // emitted later via the flush
         }
@@ -1332,18 +1346,31 @@ impl EventEmitter {
             Vec::new()
         };
 
-        // A DAMAGE/CRITICAL_DAMAGE event on a cast the game marked REFLECTED is the
-        // reflected hit striking back at the attacker. The official segment encodes it
-        // as a code-54 (Reflected) line crediting the reflect BUFF (the tuple's
-        // ability), with the actual reflected ability as a trailing master index — see
-        // [`Self::emit_reflected`]. We branch here (after the shield flush, so any
-        // pending code-38 still precedes it) rather than through the normal code router.
-        if matches!(action_result, "DAMAGE" | "CRITICAL_DAMAGE") {
+        // A DAMAGE/CRITICAL_DAMAGE/BLOCKED_DAMAGE/DODGED event on a cast the game
+        // marked REFLECTED is the reflected hit striking back at the attacker. The
+        // official segment encodes it as a code-54 (Reflected) line crediting the
+        // reflect BUFF (the tuple's ability), with the actual reflected ability as a
+        // trailing master index — see [`Self::emit_reflected`]. We branch here (after
+        // the shield flush, so any pending code-38 still precedes it) rather than
+        // through the normal code router. The crit flag mirrors code-1
+        // (DAMAGE→1, CRITICAL→2, BLOCKED→4, DODGED→7), derived byte-exact on dreadsail.
+        // NOTE: the official parser reclassifies a few reflected abilities to the boss
+        // as ordinary damage via its proprietary ability DB (Dreadsail "Sliver Assault"
+        // 220863 → code-1, while "Goading Throw" 222966 → code-54). The two are
+        // indistinguishable in the stream (same powerType 4 / PHYSICAL, neither in the
+        // boss kit, no separating icon), so we emit ALL reflects as code-54 — see the
+        // bounded Sliver-Assault residual in `per_code_counts_stay_within_known_bounds`.
+        // blackrose/sunspire (player-reflects-boss) carry only DAMAGE pt=1, no-op there.
+        if matches!(
+            action_result,
+            "DAMAGE" | "CRITICAL_DAMAGE" | "BLOCKED_DAMAGE" | "DODGED"
+        ) {
             if let Some(reflect_buff) = self.reflect_casts.get(cast_track_id).cloned() {
                 return self.emit_reflected(
                     raw_ts,
                     action_result,
                     hit_value,
+                    overflow,
                     cast_track_id,
                     &ability,
                     &reflect_buff,
@@ -1583,13 +1610,21 @@ impl EventEmitter {
     /// * a trailing master index for the ACTUAL reflected ability precedes the tail.
     ///
     /// Layout: `{ts}|54|{A}|{srcMask}|{tgtMask}|C{cast}|S{}|T{}|{dmgAbilityIdx}|{crit}|{final}`.
-    /// Reflects carry no overflow (verified on both captures), so nothing is folded.
+    ///
+    /// The crit/final tail reuses the unified [`super::encode::code1_tail`], so every
+    /// reflected result is handled the way code-1 handles it (DAMAGE→`1`,
+    /// CRITICAL_DAMAGE→`2`, BLOCKED_DAMAGE→`4|hit|ov|1`, DODGED→`7`). The boss-reflect
+    /// case (Dreadsail) showed reflects DO carry overflow and absorbed shield: a raw
+    /// overflow (`hit 0 / overflow 1794`) emits the 31-field overflow form
+    /// `…|1|1794|0|0|1794`, while a paired DAMAGE_SHIELDED folds into the normal
+    /// `…|1|0|{absorbed}` form (the same `temporary_damage_buffer` mechanic as code-1).
     #[allow(clippy::too_many_arguments)]
     fn emit_reflected(
         &mut self,
         raw_ts: i64,
         action_result: &str,
         hit_value: &str,
+        overflow: &str,
         cast_track_id: &str,
         damage_ability: &str,
         reflect_buff: &str,
@@ -1633,15 +1668,40 @@ impl EventEmitter {
             line.push_str(&format!("|T{t_block}"));
         }
         // Trailing: the actual reflected ability's master index, then the shared
-        // code-1 crit/final tail (DAMAGE → `1|{hit}`, CRITICAL_DAMAGE → `2|{hit}`).
+        // code-1 crit/final tail.
         let dmg_idx = self.ability_index(damage_ability);
         let hit = hit_value.parse::<u64>().unwrap_or(0);
-        let target_dead = tgt_state
+        let raw_overflow = overflow.parse::<u64>().unwrap_or(0);
+        // Fold any absorbed shield for this target (a reflect-cast DAMAGE_SHIELDED is
+        // never its own line — it rides here as overflow), mirroring the code-1 fold.
+        // Only actual hits fold (a DODGED takes no damage and consumes no shield).
+        let folds = matches!(
+            action_result,
+            "DAMAGE" | "CRITICAL_DAMAGE" | "BLOCKED_DAMAGE"
+        );
+        let absorbed = if folds {
+            self.temp_damage.remove(tgt_unit).unwrap_or(0)
+        } else {
+            0
+        };
+        let folded_overflow = raw_overflow + absorbed;
+        let real_dead = tgt_state
             .first()
             .and_then(|s| s.split('/').next())
             .map(|h| h.trim() == "0")
             .unwrap_or(false);
-        let tail = match super::encode::code1_tail(action_result, hit, 0, target_dead) {
+        // The 31-field overflow form (`{flag}|{total}|0|0|{overflow}`) fires on a real
+        // RAW overflow (the reflected hit's excess, e.g. hit 0 / overflow 1794 against
+        // a full-health target) OR an actual kill — but NOT on a pure shield-fold (raw
+        // overflow 0), which keeps the normal `{flag}|{hit}|{overflow}` form. Verified
+        // byte-exact on dreadsail.
+        let dead_or_overflow = real_dead || raw_overflow > 0;
+        let tail = match super::encode::code1_tail(
+            action_result,
+            hit,
+            folded_overflow,
+            dead_or_overflow,
+        ) {
             Some(t) => t,
             None => return prepend(None),
         };
@@ -2583,6 +2643,111 @@ mod tests {
             ab,
             ab2i.get("112895").copied().unwrap(),
             "code-54 A must reference the reflect buff (Sigil of Defense 112895)"
+        );
+    }
+
+    /// Guard: the BOSS-reflects-PLAYER direction (`64|16`, e.g. Dreadsail Reef's Spell
+    /// Wall) — a direction neither blackrose nor sunspire exhibit. Locks the four tail
+    /// forms derived byte-exact on the Dreadsail capture, all routed through the shared
+    /// `code1_tail`:
+    /// * DAMAGE with a RAW overflow → the 31-field overflow form `1|{total}|0|0|{ov}`
+    ///   (fires on raw overflow even when the target survives — NOT only on death);
+    /// * DAMAGE_SHIELDED on the reflect cast → folded into the paired hit's overflow
+    ///   (`1|0|{absorbed}`), emitting NO code-38 line;
+    /// * BLOCKED_DAMAGE → `4|{hit}|0|1`;
+    /// * DODGED → `7`.
+    #[test]
+    fn reflected_boss_to_player_overflow_blocked_dodged_and_shield_forms() {
+        let player =
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Sorc\",\"@sorc\",111,50,2136,0,PLAYER_ALLY,T";
+        let boss = "0,UNIT_ADDED,40,MONSTER,F,0,90001,T,0,0,\"Boss\",\"\",0,50,160,0,HOSTILE,F";
+        let ab_dmg = "0,ABILITY_INFO,119222,\"Frostbolt\",\"/esoui/art/icons/x.dds\",F,T";
+        let ab_refl = "0,ABILITY_INFO,170283,\"Spell Wall\",\"/esoui/art/icons/y.dds\",T,T";
+        let ab_shield = "0,ABILITY_INFO,146311,\"Frost Safeguard\",\"/esoui/art/icons/z.dds\",F,T";
+        let p = "39728/39728,16363/16363,21310/21310,500/500,1000/1000,0,0.5,0.5,1.0";
+        let b = "1426108/5864622,0/0,0/0,0/0,0/0,0,0.36,0.77,4.8";
+        // Each scenario: player(1) casts 119222 at boss(40) → REFLECTED (buff 170283,
+        // src=player,tgt=boss) → the bounced hit strikes back (src=boss,tgt=player).
+        // (1) overflow: raw hit 0 / overflow 1794.
+        let r1 = format!("100,COMBAT_EVENT,REFLECTED,PHYSICAL,0,170283,0,8000,119222,1,{p},40,{b}");
+        let d1 = format!("150,COMBAT_EVENT,DAMAGE,PHYSICAL,1,0,1794,8000,119222,40,{b},1,{p}");
+        // (2) blocked: hit 725.
+        let r2 = format!("200,COMBAT_EVENT,REFLECTED,PHYSICAL,0,170283,0,8001,119222,1,{p},40,{b}");
+        let d2 =
+            format!("250,COMBAT_EVENT,BLOCKED_DAMAGE,PHYSICAL,1,725,0,8001,119222,40,{b},1,{p}");
+        // (3) shield-fold: a DAMAGE_SHIELDED (absorb 1138) then a hit-0 DAMAGE on the
+        // same cast/target → folds to `1|0|1138`, no code-38.
+        let r3 = format!("300,COMBAT_EVENT,REFLECTED,PHYSICAL,0,170283,0,8002,119222,1,{p},40,{b}");
+        let s3 =
+            format!("350,COMBAT_EVENT,DAMAGE_SHIELDED,GENERIC,0,1138,0,8002,146311,40,{b},1,{p}");
+        let d3 = format!("360,COMBAT_EVENT,DAMAGE,PHYSICAL,1,0,0,8002,119222,40,{b},1,{p}");
+        // (4) dodged.
+        let r4 = format!("400,COMBAT_EVENT,REFLECTED,PHYSICAL,0,170283,0,8003,119222,1,{p},40,{b}");
+        let d4 = format!("450,COMBAT_EVENT,DODGED,PHYSICAL,0,0,0,8003,119222,40,{b},1,{p}");
+        let lines: Vec<&str> = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,ZONE_CHANGED,1129,\"Hall\",NONE",
+            player,
+            boss,
+            ab_dmg,
+            ab_refl,
+            ab_shield,
+            &r1,
+            &d1,
+            &r2,
+            &d2,
+            &r3,
+            &s3,
+            &d3,
+            &r4,
+            &d4,
+        ];
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+        let mut e = EventEmitter::with_master_indices(id2a, ab2i.clone());
+        let seg = render_segment(&lines, &mut e).expect("segment builds");
+        let body: Vec<&str> = seg.lines().skip(2).collect();
+        let dmg_idx = ab2i.get("119222").copied().unwrap().to_string();
+
+        let c54: Vec<&str> = body
+            .iter()
+            .copied()
+            .filter(|l| l.split('|').nth(1) == Some("54"))
+            .collect();
+        assert_eq!(c54.len(), 4, "exactly four code-54 lines, got:\n{seg}");
+        // No DamageShielded (code-38) line: the reflect-cast shield is folded.
+        assert!(
+            !body.iter().any(|l| l.split('|').nth(1) == Some("38")),
+            "a reflect-cast DAMAGE_SHIELDED must fold, not emit code-38:\n{seg}"
+        );
+        // Every code-54 here is the boss→player direction: masks 64|16, bare tuple A.
+        for l in &c54 {
+            let f: Vec<&str> = l.split('|').collect();
+            assert_eq!((f[3], f[4]), ("64", "16"), "boss-reflect masks 64|16: {l}");
+            assert!(!f[2].contains('.'), "bare tuple A: {l}");
+        }
+        // The four expected tail forms (each keyed by its dmgAbilityIdx|crit prefix).
+        let tail_of = |l: &str| -> String {
+            let f: Vec<&str> = l.split('|').collect();
+            // tail = from the dmgAbilityIdx (3 before crit) — locate the last `T…` block.
+            let tidx = f.iter().position(|x| x.starts_with('T')).unwrap();
+            f[tidx + 10..].join("|")
+        };
+        let tails: Vec<String> = c54.iter().map(|l| tail_of(l)).collect();
+        assert!(
+            tails.contains(&format!("{dmg_idx}|1|1794|0|0|1794")),
+            "overflow form missing in {tails:?}"
+        );
+        assert!(
+            tails.contains(&format!("{dmg_idx}|4|725|0|1")),
+            "blocked form missing in {tails:?}"
+        );
+        assert!(
+            tails.contains(&format!("{dmg_idx}|1|0|1138")),
+            "shield-fold form missing in {tails:?}"
+        );
+        assert!(
+            tails.contains(&format!("{dmg_idx}|7")),
+            "dodged form missing in {tails:?}"
         );
     }
 
@@ -4240,6 +4405,11 @@ mod combat_fixture {
                 "blackrose",
                 format!("{ds}/blackrose.log"),
                 format!("{ds}/blackrose_archon_master.txt"),
+            ),
+            (
+                "dreadsail",
+                format!("{ds}/dreadsail.log"),
+                format!("{ds}/dreadsail_archon_master.txt"),
             ),
         ];
 
