@@ -1228,6 +1228,24 @@ impl EventEmitter {
         let tgt_field = f.get(19).map(|s| s.trim()).unwrap_or("*");
         let (tgt_unit, tgt_state) = self.parse_combat_target(f, tgt_field, &src_unit, &src_state);
 
+        // LIVE incremental friend/foe: if the raid just dealt damage to a monster, force
+        // it hostile NOW (before this event's mask is computed) so a charmed/scripted
+        // enemy reads hostile from the raid's first hit onward — the streaming analog of
+        // `classify_monsters`'s `rfp>0` clause. On the completed-file path the full set is
+        // pre-installed by `build`, so this is a redundant no-op. Mirrors the DMG set the
+        // pre-pass uses (a dropped/buffered hit still establishes the relationship).
+        if matches!(
+            action_result,
+            "DAMAGE"
+                | "CRITICAL_DAMAGE"
+                | "DOT_TICK"
+                | "DOT_TICK_CRITICAL"
+                | "BLOCKED_DAMAGE"
+                | "DAMAGE_SHIELDED"
+        ) {
+            self.actors.note_raid_damage(&src_unit, &tgt_unit);
+        }
+
         // A soul-gem resurrection accept carries abilityId 0; the parser maps it to
         // the rez ability 26770 for tuple purposes.
         if ability == "0" && action_result == "SOUL_GEM_RESURRECTION_ACCEPTED" {

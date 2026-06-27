@@ -1873,9 +1873,12 @@ struct UnitRuntime {
     /// runtime unit id to the same identity the master table indexes by.
     identity: String,
     /// The unit's `monsterId` (raw `UNIT_ADDED` field) — the key into
-    /// [`ActorTable::monster_hostility`] for the friend/foe override. Empty / `"0"`
+    /// [`ActorTable::force_hostile`] for the friend/foe override. Empty / `"0"`
     /// for players (they always fall back to the reaction side).
     monster_id: String,
+    /// Whether this unit is a `PLAYER` (vs a MONSTER). Lets [`Self::note_raid_damage`]
+    /// detect "the raid attacked this monster" for the live incremental classifier.
+    is_player: bool,
 }
 
 impl ActorTable {
@@ -1943,8 +1946,51 @@ impl ActorTable {
                 ordinal,
                 identity,
                 monster_id: monster_id.to_string(),
+                is_player: unit_type == "PLAYER",
             },
         );
+    }
+
+    /// LIVE incremental classifier: note that a damage event went `src_unit` →
+    /// `tgt_unit`, and if the RAID (a player or player-owned pet) dealt it to a monster,
+    /// force that monster hostile (the `rfp>0` clause of [`classify_monsters`], applied
+    /// online). This is how the streaming live path — which cannot run the whole-log
+    /// pre-pass — reclassifies a charmed/scripted enemy the moment the raid first hits
+    /// it (called BEFORE the mask is computed, so even that first hit reads hostile).
+    /// On the completed-file path the full set is already pre-installed, so this is a
+    /// redundant no-op; it never ADDS beyond what the full pre-pass would (rfp>0 ⊆ the
+    /// full rule). Genuine allies (pets the raid never attacks) are never added.
+    pub fn note_raid_damage(&mut self, src_unit: &str, tgt_unit: &str) {
+        if !self.is_player_side(src_unit) {
+            return;
+        }
+        if let Some(u) = self.units.get(tgt_unit.trim()) {
+            if !u.is_player && !u.monster_id.is_empty() && u.monster_id != "0" {
+                self.force_hostile.insert(u.monster_id.clone());
+            }
+        }
+    }
+
+    /// Whether a unit is on the player's side: a `PLAYER`, or (transitively) a pet/
+    /// companion owned by one. Depth-capped against a cyclic owner chain.
+    fn is_player_side(&self, unit_id: &str) -> bool {
+        let mut uid = unit_id.trim().to_string();
+        for _ in 0..6 {
+            match self.units.get(&uid) {
+                None => return false,
+                Some(u) => {
+                    if u.is_player {
+                        return true;
+                    }
+                    if !u.owner.is_empty() && u.owner != "0" {
+                        uid = u.owner.clone();
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Install the combat-relationship classification ([`classify_monsters`]) so the
@@ -2847,6 +2893,40 @@ mod tests {
             t.code1_masks("50", "10"),
             Some(("16", "64")),
             "Selene → enemy = friendly that event"
+        );
+    }
+
+    // The LIVE incremental classifier ([`ActorTable::note_raid_damage`]): the streaming
+    // path can't run the whole-log pre-pass, so a charmed/scripted enemy ESO tags
+    // FRIENDLY reads friendly until the raid first hits it, then hostile — closing R1
+    // (the IA DamageTaken bucket) for the live scenario too, not just completed uploads.
+    #[test]
+    fn live_incremental_force_hostile_on_raid_damage() {
+        let mut t = ActorTable::new();
+        // logging player (unit 1) + a FRIENDLY-tagged charmed enemy (unit 20, mid 9002)
+        // + a genuine player-pet ally (unit 30, owned by player 1).
+        t.on_unit_added("1,PLAYER,T,1,0,F,1,3,\"Hero\",\"@hero\",111,50,1700,0,PLAYER_ALLY,T");
+        t.on_unit_added("20,MONSTER,F,0,9002,F,0,0,\"Charmed\",\"\",0,50,160,0,FRIENDLY,F");
+        t.on_unit_added("30,MONSTER,F,0,9003,F,0,0,\"Pet\",\"\",0,50,160,1,NPC_ALLY,F");
+        // No classification installed (live): the charmed enemy reads friendly (16|16).
+        assert_eq!(
+            t.code1_masks("20", "1"),
+            Some(("16", "16")),
+            "pre-hit: a FRIENDLY-tagged charmed enemy reads friendly"
+        );
+        // The raid (player 1) deals damage to the charmed enemy → force it hostile online.
+        t.note_raid_damage("1", "20");
+        assert_eq!(
+            t.code1_masks("1", "20"),
+            Some(("16", "64")),
+            "post-hit: the charmed enemy now reads hostile (damage-taken buckets as enemy)"
+        );
+        // A player's pet the raid never attacks stays friendly even if a monster hits it.
+        t.note_raid_damage("20", "30"); // a (now-hostile) enemy hitting the pet is NOT raid damage
+        assert_eq!(
+            t.code1_masks("30", "1"),
+            Some(("16", "16")),
+            "an untouched player-pet ally stays friendly"
         );
     }
 
