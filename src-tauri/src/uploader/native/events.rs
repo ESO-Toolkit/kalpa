@@ -1687,10 +1687,12 @@ impl EventEmitter {
         self.actors.side_mask(u).unwrap_or("32")
     }
 
-    /// `(srcMask, tgtMask)` for the **combat** codes (1/2/3/26), which use the
-    /// proven earlier/later relative ordering ([`ActorTable::code1_masks`]):
-    /// earlier→16, later→64, absent→32, with self/co-located falling back to the
-    /// own side. Byte-exact 3733/3733 on the code-1 golden pair.
+    /// `(srcMask, tgtMask)` for the **combat damage** codes (1 damage, 2 dot) via
+    /// [`ActorTable::code1_masks`]: the proven earlier/later relative ordering
+    /// (earlier→16, later→64, absent→32, self/co-located→own side). Byte-exact
+    /// 3733/3733 on the code-1 golden pair; robust to Archon's server-side monster
+    /// reclassification (see `code1_masks`). The `None` fallback is the both-absent /
+    /// equal-key case → own side.
     fn combat_masks(&self, src_unit: &str, tgt_unit: &str) -> (&'static str, &'static str) {
         if let Some(masks) = self.actors.code1_masks(src_unit, tgt_unit) {
             return masks;

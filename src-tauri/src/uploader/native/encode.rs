@@ -1827,6 +1827,23 @@ impl ActorTable {
     /// the raw source/target unit ids; an absent side (unit id `"0"` / unknown)
     /// yields [`MASK_ABSENT`]. Returns `None` if both sides are present but their
     /// keys are equal (an unobserved self/co-located case — gated, not guessed).
+    ///
+    /// The masks use the EARLIER/LATER relative ordering by `(side, master_index)`,
+    /// not each unit's own side. This is deliberate and proven byte-exact (3733/3733
+    /// on the combat capture): relative ordering is *robust to Archon's server-side
+    /// monster reclassification*. ESO's encounter log marks some scripted/charmed
+    /// enemies with a `FRIENDLY` reaction (e.g. Maarselok, Selene's boss phase, IA
+    /// "Sparkstorm Myrinax"), which Archon overrides to hostile via its proprietary
+    /// monster DB — a rule NOT derivable from the raw (the byte captures show two
+    /// same-name `FRIENDLY`-only units classified *oppositely* — the same
+    /// proprietary-classification class as the abandoned code-9). Own-side masks
+    /// would faithfully encode
+    /// the raw `FRIENDLY` side and so mis-bucket those enemies' damage-taken; the
+    /// relative ordering side-steps the misclassification because index order
+    /// coincides with Archon's faction order for the cross-faction events that
+    /// dominate. The only events relative gets "wrong" are distinct same-side hits
+    /// (friendly↔friendly / hostile↔hostile), which are render-neutral on the
+    /// captures — so this is the tightest client-derivable rule.
     pub fn code1_masks(
         &self,
         src_unit: &str,
@@ -2487,7 +2504,8 @@ mod tests {
         // `unitId,class,race,name,account,charId,level,CP,owner,reaction,...`).
         t.on_unit_changed("40,0,0,\"Selene\",\"\",0,50,160,0,HOSTILE,F");
         // Now Selene (hostile idx3) vs bear (hostile idx2): same side → lower index
-        // first → bear earlier → Selene later. Selene as src → 64|16.
+        // first → bear earlier → Selene later. Selene as src → 64|16. (Relative
+        // ordering, NOT own-side — see `code1_masks` for why it's the robust rule.)
         assert_eq!(t.code1_masks("40", "30"), Some(("64", "16")));
     }
 
