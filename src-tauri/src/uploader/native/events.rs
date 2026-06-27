@@ -180,6 +180,15 @@ pub struct EventEmitter {
     /// it fires only for a real Break Free and never for an unrelated source-driven
     /// removal (dispel/purge) that also carries a trailing source-cast id.
     break_free_cast_ids: std::collections::HashSet<String>,
+    /// `castTrackId → the reflect buff's abilityId` for casts the game marked
+    /// `REFLECTED` (an incoming hit a reflect skill bounced back — Sigil of Defense
+    /// 112895, Defensive Stance 126608…). The buff's abilityId rides in the
+    /// `REFLECTED` event's `hitValue` field. The subsequent `DAMAGE` event on the
+    /// SAME cast (the reflected hit striking back) renders as a code-54 line that
+    /// credits THIS buff, not the reflected projectile's ability — verified via
+    /// render-compare (the reflected damage shows under "Sigil of Defense", not
+    /// "Quick Shot"). Derived byte-exact on blackrose (3) + sunspire (5).
+    reflect_casts: HashMap<String, String>,
     /// The unit id of the most recent `INTERRUPT`-status COMBAT_EVENT target — the
     /// reference's `last_interrupt`, used as the interrupted-cast caster when the
     /// `END_CAST INTERRUPTED`'s cast id isn't in [`Self::cast_id_units`].
@@ -1246,6 +1255,21 @@ impl EventEmitter {
             self.actors.note_raid_damage(&src_unit, &tgt_unit);
         }
 
+        // REFLECTED: the game logs an incoming hit that a reflect skill bounced back.
+        // It emits NO line of its own, but MARKS its cast as a reflect — the reflect
+        // buff's abilityId rides in the `hitValue` field (Sigil of Defense 112895 /
+        // Defensive Stance 126608). The reflected damage strikes back as a normal
+        // DAMAGE event on the SAME cast a few hundred ms later; that event becomes a
+        // code-54 line (handled below). A `hitValue` of 0 is the reflect aura's own
+        // proc marker (no bounce), so it is ignored. Verified on blackrose + sunspire.
+        if action_result == "REFLECTED" {
+            if hit_value != "0" {
+                self.reflect_casts
+                    .insert(cast_track_id.to_string(), hit_value.to_string());
+            }
+            return None;
+        }
+
         // A soul-gem resurrection accept carries abilityId 0; the parser maps it to
         // the rez ability 26770 for tuple purposes.
         if ability == "0" && action_result == "SOUL_GEM_RESURRECTION_ACCEPTED" {
@@ -1307,6 +1331,30 @@ impl EventEmitter {
         } else {
             Vec::new()
         };
+
+        // A DAMAGE/CRITICAL_DAMAGE event on a cast the game marked REFLECTED is the
+        // reflected hit striking back at the attacker. The official segment encodes it
+        // as a code-54 (Reflected) line crediting the reflect BUFF (the tuple's
+        // ability), with the actual reflected ability as a trailing master index — see
+        // [`Self::emit_reflected`]. We branch here (after the shield flush, so any
+        // pending code-38 still precedes it) rather than through the normal code router.
+        if matches!(action_result, "DAMAGE" | "CRITICAL_DAMAGE") {
+            if let Some(reflect_buff) = self.reflect_casts.get(cast_track_id).cloned() {
+                return self.emit_reflected(
+                    raw_ts,
+                    action_result,
+                    hit_value,
+                    cast_track_id,
+                    &ability,
+                    &reflect_buff,
+                    &src_unit,
+                    &src_state,
+                    &tgt_unit,
+                    &tgt_state,
+                    flushed,
+                );
+            }
+        }
 
         // An INTERRUPT-status combat event records its target as the last interrupted
         // unit (the reference's `last_interrupt`), the fall-back caster for a later
@@ -1519,6 +1567,86 @@ impl EventEmitter {
             line.push_str(&format!("|T{t_block}"));
         }
         Some(line)
+    }
+
+    /// Emit a code-54 `Reflected` line for a `DAMAGE`/`CRITICAL_DAMAGE` event on a
+    /// cast the game previously marked `REFLECTED`. The structure mirrors code-1
+    /// (own-side masks, the `C` cast field, S + T state blocks, the shared crit/final
+    /// tail) with TWO differences derived byte-exact from the captures (blackrose
+    /// Sigil of Defense, sunspire Defensive Stance):
+    ///
+    /// * the subordinal `A` references the REFLECT BUFF tuple `(src, tgt,
+    ///   reflectBuff)` — NOT the reflected projectile's tuple — so the report
+    ///   attributes the reflected damage to the reflect skill on the player's bar
+    ///   (confirmed via render-compare: the bounced damage rendered under "Sigil of
+    ///   Defense", while the projectile "Quick Shot" rendered nothing);
+    /// * a trailing master index for the ACTUAL reflected ability precedes the tail.
+    ///
+    /// Layout: `{ts}|54|{A}|{srcMask}|{tgtMask}|C{cast}|S{}|T{}|{dmgAbilityIdx}|{crit}|{final}`.
+    /// Reflects carry no overflow (verified on both captures), so nothing is folded.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_reflected(
+        &mut self,
+        raw_ts: i64,
+        action_result: &str,
+        hit_value: &str,
+        cast_track_id: &str,
+        damage_ability: &str,
+        reflect_buff: &str,
+        src_unit: &str,
+        src_state: &[&str],
+        tgt_unit: &str,
+        tgt_state: &[&str],
+        flushed: Vec<String>,
+    ) -> Option<String> {
+        let prepend = |line: Option<String>| -> Option<String> {
+            match (flushed.is_empty(), line) {
+                (true, l) => l,
+                (false, Some(l)) => Some(format!("{}\n{}", flushed.join("\n"), l)),
+                (false, None) => Some(flushed.join("\n")),
+            }
+        };
+        // `A` keys on the damage event's own (src, tgt) but the REFLECT BUFF ability,
+        // so the credit lands on the reflect skill (e.g. Sigil of Defense), matching
+        // Archon.
+        let a = self.alloc_for(src_unit, reflect_buff, tgt_unit);
+        let (src_mask, tgt_mask) = self.combat_masks(src_unit, tgt_unit);
+        // code-54 uses the BARE tuple `A` — NOT the code-1 monster-instance suffix
+        // (`A.srcOrd.tgtOrd`). Verified on both captures: Archon emits `4495` /
+        // `69133`, never `4495.0.3`, even though the boss is a later instance.
+        let mut line = format!(
+            "{ts}|54|{a}|{src_mask}|{tgt_mask}|C{cast_track_id}",
+            ts = self.seg_ts(raw_ts),
+        );
+        if src_mask != "32" {
+            let s_block = match encode_state_block(src_state, &self.cp_of(src_unit)) {
+                Some(b) => b,
+                None => return prepend(None),
+            };
+            line.push_str(&format!("|S{s_block}"));
+        }
+        if tgt_mask != "32" {
+            let t_block = match encode_state_block(tgt_state, &self.cp_of(tgt_unit)) {
+                Some(b) => b,
+                None => return prepend(None),
+            };
+            line.push_str(&format!("|T{t_block}"));
+        }
+        // Trailing: the actual reflected ability's master index, then the shared
+        // code-1 crit/final tail (DAMAGE → `1|{hit}`, CRITICAL_DAMAGE → `2|{hit}`).
+        let dmg_idx = self.ability_index(damage_ability);
+        let hit = hit_value.parse::<u64>().unwrap_or(0);
+        let target_dead = tgt_state
+            .first()
+            .and_then(|s| s.split('/').next())
+            .map(|h| h.trim() == "0")
+            .unwrap_or(false);
+        let tail = match super::encode::code1_tail(action_result, hit, 0, target_dead) {
+            Some(t) => t,
+            None => return prepend(None),
+        };
+        line.push_str(&format!("|{dmg_idx}|{tail}"));
+        prepend(Some(line))
     }
 
     /// Buffer a code-38 DamageShielded line from a DAMAGE_SHIELDED combat event. The
@@ -2378,6 +2506,84 @@ mod tests {
         let seg = render_segment(&lines, &mut e).expect("segment builds");
         validate_segment_text(&seg, e.allocated())
             .expect("the real combat segment must pass the runtime self-check");
+    }
+
+    /// Guard: a `DAMAGE` on a cast the game marked `REFLECTED` becomes a code-54
+    /// (Reflected) line — NOT a code-1 — crediting the reflect BUFF (the abilityId in
+    /// the REFLECTED event's `hitValue`) with the actual reflected ability as a
+    /// trailing master index. Locks the derivation proven byte-exact on blackrose (3)
+    /// + sunspire (5): bare tuple `A` (no `.srcOrd.tgtOrd` suffix), own-side masks
+    /// 16|64, tail `{dmgAbilityIdx}|{crit}|{final}`.
+    #[test]
+    fn reflected_damage_emits_code_54_crediting_the_reflect_buff() {
+        // The reflector (player 1) bounces the boss's projectile (Quick Shot 110897)
+        // back via a reflect buff (Sigil of Defense 112895). The game logs a REFLECTED
+        // (boss→player, hitValue=112895) then a DAMAGE (player→boss, the bounced hit).
+        let player =
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Sorc\",\"@sorc\",111,50,2136,0,PLAYER_ALLY,T";
+        let boss = "0,UNIT_ADDED,40,MONSTER,F,0,90001,T,0,0,\"Boss\",\"\",0,50,160,0,HOSTILE,F";
+        let ab_dmg = "0,ABILITY_INFO,110897,\"Quick Shot\",\"/esoui/art/icons/x.dds\",F,T";
+        let ab_refl = "0,ABILITY_INFO,112895,\"Sigil of Defense\",\"/esoui/art/icons/y.dds\",T,T";
+        let p_state = "39728/39728,16363/16363,21310/21310,500/500,1000/1000,0,0.5,0.5,1.0";
+        let b_state = "1426108/5864622,0/0,0/0,0/0,0/0,0,0.36,0.77,4.8";
+        let reflected = format!(
+            "100,COMBAT_EVENT,REFLECTED,PHYSICAL,0,112895,0,7000,110897,40,{b_state},1,{p_state}"
+        );
+        let damage = format!(
+            "150,COMBAT_EVENT,DAMAGE,PHYSICAL,1,16591,0,7000,110897,1,{p_state},40,{b_state}"
+        );
+        let lines: Vec<&str> = vec![
+            "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"",
+            "0,ZONE_CHANGED,1129,\"Hall\",NONE",
+            player,
+            boss,
+            ab_dmg,
+            ab_refl,
+            &reflected,
+            &damage,
+        ];
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+        let mut e = EventEmitter::with_master_indices(id2a, ab2i.clone());
+        let seg = render_segment(&lines, &mut e).expect("segment builds");
+
+        // Skip the 2-line `{logVersion}|{gameVersion}` + count header (its `15|1`
+        // would otherwise read as a code-1 line).
+        let body: Vec<&str> = seg.lines().skip(2).collect();
+        let c54: Vec<&str> = body
+            .iter()
+            .copied()
+            .filter(|l| l.split('|').nth(1) == Some("54"))
+            .collect();
+        assert_eq!(c54.len(), 1, "exactly one code-54 line, got:\n{seg}");
+        assert!(
+            !body.iter().any(|l| l.split('|').nth(1) == Some("1")),
+            "the reflected damage must become code-54, not code-1:\n{seg}"
+        );
+        let f: Vec<&str> = c54[0].split('|').collect();
+        assert!(
+            !f[2].contains('.'),
+            "code-54 sub must be a bare tuple A (no instance suffix), got {}",
+            f[2]
+        );
+        assert_eq!(
+            (f[3], f[4]),
+            ("16", "64"),
+            "own-side masks: friendly|hostile"
+        );
+        let dmg_idx = ab2i.get("110897").copied().unwrap().to_string();
+        assert_eq!(
+            &f[f.len() - 3..],
+            &[dmg_idx.as_str(), "1", "16591"],
+            "tail = dmgAbilityIdx|crit|final"
+        );
+        // The A tuple must reference the reflect BUFF (112895), not the projectile.
+        let a: usize = f[2].parse().expect("numeric A");
+        let (_s, _t, ab) = e.tuples()[a - 1];
+        assert_eq!(
+            ab,
+            ab2i.get("112895").copied().unwrap(),
+            "code-54 A must reference the reflect buff (Sigil of Defense 112895)"
+        );
     }
 
     // The end-to-end seam: raw lines → ready-to-upload ZIP'd segment + master
@@ -4029,6 +4235,11 @@ mod combat_fixture {
                 "sunspire",
                 format!("{ds}/sunspire_raw.log"),
                 format!("{ds}/sunspire_official_master.txt"),
+            ),
+            (
+                "blackrose",
+                format!("{ds}/blackrose.log"),
+                format!("{ds}/blackrose_archon_master.txt"),
             ),
         ];
 
