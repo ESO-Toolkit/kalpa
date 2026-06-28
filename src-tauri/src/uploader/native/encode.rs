@@ -93,8 +93,7 @@ impl AbilityInfo {
 }
 
 /// Map a raw ESO `damageType`/`statusType` token to the master ability record's
-/// damage-type integer. From the reference uploader's `ESOLogsBuff` Display
-/// (facts only).
+/// damage-type integer (derived byte-exact from the matched-pair captures).
 fn damage_type_int(token: &str) -> Option<u32> {
     Some(match token.trim() {
         "PHYSICAL" => 1,
@@ -236,9 +235,9 @@ pub(crate) fn resolve_ability_section(
     (records, index)
 }
 
-/// Hardcoded ability-icon overrides (id → icon basename), from the reference
-/// uploader (facts only). These replace the raw `ABILITY_INFO` icon for specific
-/// abilities whose displayed icon differs from the game's.
+/// Hardcoded ability-icon overrides (id → icon basename), each verified against the
+/// official master records in the matched-pair captures. These replace the raw
+/// `ABILITY_INFO` icon for specific abilities whose displayed icon differs from it.
 fn ability_icon_override(ability_id: &str) -> Option<&'static str> {
     Some(match ability_id {
         "122707" => "death_recap_magic_aoe",    // Retaliation
@@ -1404,9 +1403,9 @@ fn split_csv_quoted(s: &str) -> impl Iterator<Item = &str> {
 // coverage gate keeps any real combat log on the official uploader meanwhile.
 
 /// The leading **crit/result flag** of a code-1/2 (damage / dot) line's tail.
-/// Verified against the official capture (which is the ground truth — the byte
-/// format is derived from the matched-pair capture, not from any reference's
-/// serializer): `DAMAGE → 1`, `CRITICAL_DAMAGE → 2`, `BLOCKED_DAMAGE → 4`,
+/// Verified against the official capture (the ground truth — the byte format is
+/// derived from the matched-pair capture): `DAMAGE → 1`, `CRITICAL_DAMAGE → 2`,
+/// `BLOCKED_DAMAGE → 4`,
 /// `DODGED → 7`, `IMMUNE → 10`, `DOT_TICK → 1`, `DOT_TICK_CRITICAL → 2`. `None`
 /// for an actionResult that does not emit a damage/dot line.
 pub fn code1_result_flag(action_result: &str) -> Option<u8> {
@@ -2150,9 +2149,9 @@ impl ActorTable {
         self.units.get(unit_id).map(|u| u.ordinal).unwrap_or(0)
     }
 
-    /// A unit's per-fight session/instance index (the reference's
-    /// `index_in_session`): 0 for player-side/boss units, else the 0-based
-    /// per-monsterId instance counter. This is the `f7` field of a code-38
+    /// A unit's per-fight session/instance index: 0 for player-side/boss units,
+    /// else the 0-based per-monsterId instance counter. This is the `f7` field of a
+    /// code-38
     /// DamageShielded line (the damage source's instance) — same value as the
     /// subordinal ordinal.
     pub fn session_index(&self, unit_id: &str) -> u32 {

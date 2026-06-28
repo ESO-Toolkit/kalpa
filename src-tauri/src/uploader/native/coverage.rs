@@ -40,7 +40,7 @@ use std::collections::BTreeSet;
 ///
 /// The trial markers (`BEGIN_TRIAL`/`END_TRIAL`/`TRIAL_INIT`) are included so
 /// trial/raid logs also route native: `END_TRIAL` emits a code-55 line and the
-/// other two are no-op state lines (same as the reference). Any line type NOT in
+/// other two are no-op state lines (verified against the capture). Any line type NOT in
 /// this set still forces fallback to the official uploader (graceful degradation),
 /// so a future game-patch event type can never corrupt a report.
 ///

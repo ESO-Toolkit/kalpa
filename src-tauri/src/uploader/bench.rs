@@ -2,8 +2,9 @@
 //! (byte-range copy on `BEGIN_LOG` boundaries) and the buffered **native encode**
 //! (raw log → ESO Logs segment + master table).
 //!
-//! Purpose: quantify Kalpa against the sheumais/logs reference's published figures
-//! (~6 s / ~40 MB RAM for a 1 GB log) and record where each stage stands.
+//! Purpose: quantify Kalpa's oversized-log throughput and peak memory and record
+//! where each stage stands against the performance target (a few seconds and low,
+//! flat memory for a ~1 GB log).
 //!
 //! This is an `#[ignore]`d test, not a shipping code path: it needs a real
 //! multi-GB log (`.decode-samples/sunspire_raw.log`, gitignored/machine-local) and
@@ -24,12 +25,12 @@
 //! isn't cross-contaminated by the two tests running in parallel):
 //!
 //! * SPLIT  : 2.72 s, 357 MB/s, **peak heap 8.0 MiB** (= the 8 MiB copy buffer →
-//!   truly O(1) memory). Beats the sheumais reference on both axes (~6 s / ~40 MB).
+//!   truly O(1) memory) — comfortably inside the target on both axes.
 //! * ENCODE : 200 MiB chunk in 8.74 s, 24 MB/s, peak heap 462.7 MiB (~2.3× input —
 //!   the buffered `contents` + `Vec<&str>` + rendered segment held at once). This is
-//!   the one axis Kalpa does NOT beat sheumais's streaming ~40 MB-at-1 GB; production
-//!   never hits it (the 256 MiB cap forces a split first), and a streaming encoder is
-//!   the future optimization to close it.
+//!   the one axis above the flat-memory target; production never hits it (the 256 MiB
+//!   cap forces a split first), and a streaming encoder is the future optimization to
+//!   close it.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -104,7 +105,7 @@ fn bench_split_one_gb() {
     eprintln!("  wall time    : {:.2} s", dt.as_secs_f64());
     eprintln!("  throughput   : {:.0} MB/s", mb_per_s(size, dt));
     eprintln!("  peak heap    : {peak}");
-    eprintln!("  (sheumais reference for a 1 GB log: ~6 s; split is IO-bound + flat-memory)");
+    eprintln!("  (target for a 1 GB log: ~a few s; split is IO-bound + flat-memory)");
 
     // Clean up the (potentially multi-GB) split output eagerly; tempdir would too,
     // but a giant log's splits are large enough to want gone the moment we're done.
@@ -191,5 +192,5 @@ fn bench_encode_chunk() {
     eprintln!("  peak heap    : {peak}");
     eprintln!("  NOTE: encode buffers the whole input (peak ∝ size) and is capped at");
     eprintln!("        256 MiB in production (split first). A streaming encoder is the");
-    eprintln!("        path to matching sheumais's ~40 MB-at-1 GB RAM (future work).");
+    eprintln!("        path to flat ~tens-of-MB RAM at 1 GB (future work).");
 }

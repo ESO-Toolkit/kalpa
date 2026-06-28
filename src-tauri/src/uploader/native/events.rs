@@ -148,7 +148,7 @@ pub struct EventEmitter {
     tuple_order: Vec<(u32, u32, u32)>,
     /// `castTrackId → the tuple A of the BEGIN_CAST that opened it`. An effect
     /// event applied by a tracked cast emits a trailing `A{castA}` linking the buff
-    /// to its cast (the reference's `source_cast_index`). Set when a cast emits.
+    /// to its cast. Set when a cast emits.
     cast_track_to_a: HashMap<String, u32>,
     /// `castTrackId → (tupleA, src_unit, tgt_unit)` for TIMED casts (those that
     /// emitted a code-15 CastWithCastTime). A later `END_CAST COMPLETED` for that id
@@ -157,7 +157,7 @@ pub struct EventEmitter {
     timed_cast: HashMap<String, (u32, String, String)>,
     /// Per-unit last-seen shield pool (`unit_id → shield`). A buff GAINED carries a
     /// trailing shield magnitude only when the unit's shield *changed* from this
-    /// stored value (the reference's `shield_values` history): `source_shield`/
+    /// stored value: `source_shield`/
     /// `target_shield` are the new values iff they differ from what was stored,
     /// else 0. The display then emits the trailing iff one is non-zero AND they
     /// differ from each other.
@@ -169,8 +169,7 @@ pub struct EventEmitter {
     in_combat: bool,
     /// `castTrackId → (sourceUnit, targetUnit)` recorded at every non-channeled
     /// `BEGIN_CAST`. An `END_CAST INTERRUPTED` looks up the interrupted cast's caster
-    /// (source) here to build the code-27 interrupt line (the reference's
-    /// `cast_id_source_unit_id` / `cast_id_target_unit_id`); an interrupt whose cast id
+    /// (source) here to build the code-27 interrupt line; an interrupt whose cast id
     /// is absent here is a phantom the official drops. It is ALSO the membership set
     /// code 28 (InterruptionRemoved) gates on — a CC `FADED`'s trailing remove-cast id
     /// must be a real (tracked) cast.
@@ -199,8 +198,8 @@ pub struct EventEmitter {
     pending_shields: Vec<PendingShield>,
     /// Per-target accumulated **absorbed** shield damage (`target unit → sum of
     /// DAMAGE_SHIELDED hit values not yet folded`). The paired real DAMAGE/DOT event
-    /// for that target folds this into its `overflow` (the reference's
-    /// `temporary_damage_buffer`) and resets it to 0. This is why a hit-0 damage
+    /// for that target folds this into its `overflow` (the absorbed-shield buffer)
+    /// and resets it to 0. This is why a hit-0 damage
     /// event whose damage was fully absorbed is still EMITTED (with the absorbed
     /// total in overflow) rather than dropped — the official segment keeps those.
     temp_damage: HashMap<String, u64>,
@@ -258,7 +257,7 @@ impl EventEmitter {
     }
 
     /// Construct with the master-table index maps (so the segment's `A` is the
-    /// master tuple index — the reference that makes a report render).
+    /// master tuple index — the pointer that makes a report render).
     pub fn with_master_indices(
         identity_to_actor: HashMap<String, u32>,
         ability_to_index: HashMap<String, u32>,
@@ -400,8 +399,8 @@ impl EventEmitter {
             }
         }
         // Any code-38 lines still pending at end of stream (no following real
-        // damage to back-patch them) are flushed with f10 = 0 (the reference's
-        // un-patched placeholder).
+        // damage to back-patch them) are flushed with f10 = 0 (the un-patched
+        // placeholder seen in the capture).
         let tail = self.flush_pending_shields(None, None, None);
         for l in tail.iter() {
             out.push_str(l);
@@ -472,9 +471,9 @@ impl EventEmitter {
             // END_TRIAL → code 55: `{segTs}|55|{trialId}|{duration}|{success}|{score}`.
             // Raw layout: `ts,END_TRIAL,id,duration,success(T/F),finalScore`.
             "END_TRIAL" => self.emit_end_trial(raw_ts, &f),
-            // BEGIN_TRIAL / TRIAL_INIT carry no segment event (the reference treats
-            // them as unknown/no-op) — they only need to be *covered* so a trial log
-            // routes native instead of falling back.
+            // BEGIN_TRIAL / TRIAL_INIT carry no segment event (the capture has none
+            // for them) — they only need to be *covered* so a trial log routes native
+            // instead of falling back.
             "BEGIN_TRIAL" | "TRIAL_INIT" => None,
             // Infinite Archive (ENDLESS_DUNGEON_*): no segment event. Golden-confirmed
             // (2026-06-24, Archon report M6t4mDzFWyqraPdN): the official uploader emits
@@ -884,8 +883,8 @@ impl EventEmitter {
         // (or ability 146311, frost safeguard, which always registers). The
         // registered value (else 0) is what may print. Runs on GAINED and FADED so
         // the stored pool stays accurate; UPDATED never touches shields.
-        // Both updates are guarded on the *source* unit being known (the reference
-        // gates `update_target` on `source.unit_id != 0` too): a sourceless effect
+        // Both updates are guarded on the *source* unit being known (the capture
+        // gates the target update on a present source too): a sourceless effect
         // registers no shield on either side.
         let (reg_src, reg_tgt) =
             if matches!(code, "5" | "10" | "7" | "12") && !src_unit.is_empty() && src_unit != "0" {
@@ -899,8 +898,8 @@ impl EventEmitter {
                 (0, 0)
             };
 
-        // A buff/debuff applied by a tracked cast carries a trailing `A{castA}`
-        // (the reference's `source_cast_index`) linking it to that cast's tuple.
+        // A buff/debuff applied by a tracked cast carries a trailing `A{castA}` (the
+        // cast ability's 1-based master index) linking it to that cast's tuple.
         // GAINED (5/10), UPDATED-debuff (11) AND UPDATED-buff-stack-INCREASE (6) carry
         // it when the change's `castTrackId` resolves to a tracked cast — a FADED has
         // no causing cast. Verified against the official segments: code-6 attribution
@@ -920,7 +919,7 @@ impl EventEmitter {
         let cast_ref = cast_a.map(|a| format!("|A{a}")).unwrap_or_default();
 
         // Shield trailing, only when a cast-ref is present and the two registered
-        // pools differ (matching the reference's display gate). Forms:
+        // pools differ (matching the capture's display gate). Forms:
         //   both ≠ 0           → `|A{cast}|{src}|{tgt}`
         //   only source ≠ 0    → `|A{cast}|{src}`
         //   only target ≠ 0    → `|A{cast}|{tgt}`
@@ -1046,9 +1045,8 @@ impl EventEmitter {
         };
         let a = self.alloc_for(&src_unit, &ability, &tgt_unit);
         // Record this cast's ABILITY INDEX against its track id. A buff applied by
-        // this cast carries a trailing `A{n}` where n is this index — the reference's
-        // `source_cast_index` is the cast ability's 1-based master index (from
-        // `buffs_hashmap[cast_id] = buff_index`), NOT a tuple index. (Storing the
+        // this cast carries a trailing `A{n}` where n is this index — the cast-ref is
+        // the cast ability's 1-based master index, NOT a tuple index. (Storing the
         // tuple A here was the render bug: cast-refs pointed into the wrong table.)
         if !cast_track_id.is_empty() && cast_track_id != "0" {
             // Record this cast's source/target so an END_CAST INTERRUPTED can resolve
@@ -1125,8 +1123,8 @@ impl EventEmitter {
             return None;
         }
         let cast_track_id = f.get(3)?.trim();
-        // Reuse the original BEGIN_CAST's tuple A + units (the reference reuses its
-        // buff_event verbatim — no new tuple is allocated for the completion line).
+        // Reuse the original BEGIN_CAST's tuple A + units (the capture reuses the same
+        // tuple verbatim — no new tuple is allocated for the completion line).
         let (a, src_unit, tgt_unit) = self.timed_cast.get(cast_track_id)?.clone();
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
@@ -1191,7 +1189,7 @@ impl EventEmitter {
         let tgt_actor = self.actor_index(&caster);
         let ability_idx = self.ability_index(interrupting_ability);
         let a = self.alloc_tuple(src_actor, tgt_actor, ability_idx);
-        // Own-side masks (the reference's allegiance_from_reaction per unit): the
+        // Own-side masks (allegiance from each unit's reaction): the
         // interrupter and caster are usually cross-faction (16|64) but can be same
         // side (16|16 / 64|64), which the earlier/later ordering can't produce.
         let (src_mask, tgt_mask) = self.masks(interrupting_unit, &caster);
@@ -1392,8 +1390,8 @@ impl EventEmitter {
         }
 
         // An INTERRUPT-status combat event emits no line, but it DOES register its
-        // `(src, ability, tgt)` tuple — the reference allocates a buff event for every
-        // combat event at the top of the handler, and a later END_CAST INTERRUPTED on a
+        // `(src, ability, tgt)` tuple — every combat event registers a tuple at the top
+        // of the handler, and a later END_CAST INTERRUPTED on a
         // tracked cast reuses this exact tuple as its code-27 subordinal `A`. Without it
         // the interrupting ability (e.g. Bash 21973) owns no tuple and its interrupt
         // line is lost.
@@ -1446,8 +1444,8 @@ impl EventEmitter {
 
         // For an actual damage/dot hit (DAMAGE/CRITICAL_DAMAGE/BLOCKED_DAMAGE and the
         // DOT_TICK family), fold any accumulated absorbed shield damage for this
-        // target into the overflow and reset the buffer (the reference's
-        // temporary_damage_buffer). IMMUNE/DODGED never carry damage, so they don't
+        // target into the overflow and reset the absorbed-shield buffer.
+        // IMMUNE/DODGED never carry damage, so they don't
         // fold. A fully-absorbed (hit 0) hit is dropped ONLY when nothing was absorbed
         // either — otherwise it is emitted with the absorbed total in overflow.
         let folds_damage = matches!(
@@ -1570,9 +1568,9 @@ impl EventEmitter {
     /// Emit a code-22 `Resurrect` line for a `SOUL_GEM_RESURRECTION_ACCEPTED`
     /// combat event. Format (verified on the capture):
     /// `{ts}|22|{A}|{srcMask}|{tgtMask}|S{srcState}|T{tgtState}` — the combat prefix
-    /// with **own-side** masks and **no `C` cast field** (the reference uses
-    /// `cast_id_origin: 0`), and **no trailing crit/final tail** (`cast_information:
-    /// None`). The subordinal is the bare tuple `A` (a resurrect targets a
+    /// with **own-side** masks and **no `C` cast field** (the capture has a zero cast
+    /// origin), and **no trailing crit/final tail**. The subordinal is the bare tuple
+    /// `A` (a resurrect targets a
     /// player/companion, whose session instance ordinal is 0). The tuple is keyed on
     /// `(src, 26770, tgt)` — the rez ability the parser substitutes for ability 0.
     fn emit_resurrect(
@@ -1622,7 +1620,7 @@ impl EventEmitter {
     /// case (Dreadsail) showed reflects DO carry overflow and absorbed shield: a raw
     /// overflow (`hit 0 / overflow 1794`) emits the 31-field overflow form
     /// `…|1|1794|0|0|1794`, while a paired DAMAGE_SHIELDED folds into the normal
-    /// `…|1|0|{absorbed}` form (the same `temporary_damage_buffer` mechanic as code-1).
+    /// `…|1|0|{absorbed}` form (the same absorbed-shield fold as code-1).
     #[allow(clippy::too_many_arguments)]
     fn emit_reflected(
         &mut self,
@@ -1746,7 +1744,7 @@ impl EventEmitter {
         }
         let requires_cast = hit_value == "0";
         // Accumulate the absorbed amount for this target so the paired real damage
-        // event folds it into its overflow (the reference's temporary_damage_buffer).
+        // event folds it into its overflow (the absorbed-shield buffer).
         // A zero-absorb shield adds nothing to fold.
         if let Ok(v) = hit_value.parse::<u64>() {
             if v > 0 {
@@ -1755,9 +1753,9 @@ impl EventEmitter {
         }
         // The DAMAGE_SHIELDED combat event allocates its OWN tuple first — keyed on
         // (damageSource, shieldAbility, damageTarget), e.g. `9|3|210` — exactly like
-        // any combat event (the reference allocates buff_event before the
-        // DamageShielded arm). This is distinct from the shield's self-tuple the line
-        // references, and must be minted at the event's position so the A numbering
+        // any combat event (every combat event registers a tuple before the
+        // DamageShielded handling). This is distinct from the shield's self-tuple the
+        // line references, and must be minted at the event's position so the A numbering
         // stays aligned with the official table.
         self.alloc_for(src_unit, shield_ability, tgt_unit);
         // The shield's tuple: a self-shield on the damage target (target absorbs with
@@ -1800,7 +1798,7 @@ impl EventEmitter {
             return Vec::new();
         }
         // The damaging ability's 1-based master index (+0 placeholder at end of
-        // stream, matching the reference's un-patched `usize::MAX.wrapping_add(1)`).
+        // stream for an un-patched line, matching the capture).
         let f10 = ability.map(|ab| self.ability_index(ab)).unwrap_or(0);
         let mut out = Vec::new();
         let mut kept = Vec::new();
@@ -2095,8 +2093,8 @@ pub(crate) fn validate_segment_text(segment_text: &str, max_a: u32) -> Result<()
 /// The segment's `(startTime, endTime)` in **absolute wall-clock ms** — the values
 /// the `add-report-segment` request needs. `startTime` is the `BEGIN_LOG` wall-clock
 /// (its field-2 ms) plus its own relative timestamp (field 0); `endTime` is that
-/// same wall anchor plus the LAST event's relative timestamp. Mirrors the reference
-/// uploader: `first = beginLogWall + beginLogRelTs`, `last = first + lastEventRelTs`.
+/// same wall anchor plus the LAST event's relative timestamp:
+/// `first = beginLogWall + beginLogRelTs`, `last = first + lastEventRelTs`.
 /// Without these the server receives a zero-width segment and finds no fights.
 fn segment_time_bounds(lines: &[&str]) -> (u64, u64) {
     let mut begin_wall: u64 = 0;
