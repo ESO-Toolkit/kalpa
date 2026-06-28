@@ -117,17 +117,15 @@ mod tests {
     // value; the CONFIRMED flag flips only once a produced segment round-trips.
     #[test]
     fn native_format_version_gate_is_explicit() {
+        let version = FORMAT_VERSION;
         assert!(
-            FORMAT_VERSION > 0,
+            version > 0,
             "the format version is pinned (11) — must be a real, non-zero value"
         );
         if FORMAT_VERSION_CONFIRMED {
             // Flipping this flag is the deliberate, human-verified step that
             // enables native upload by default after a byte-exact round-trip.
-            assert!(
-                FORMAT_VERSION > 0,
-                "a confirmed format must carry a real version"
-            );
+            assert!(version > 0, "a confirmed format must carry a real version");
         }
     }
 

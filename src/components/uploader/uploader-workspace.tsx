@@ -1,8 +1,8 @@
 // The ESO Logs uploader workspace. Full-screen dialog with a glanceable status
 // pill, Manual / Live mode tabs, an auto-detected log picker with preflight, a
 // per-fight timeline, split-to-disk for oversized logs, upload history, and a
-// first-run wizard. Uploads are handed to the official ESO Logs uploader (Kalpa
-// never speaks the private upload protocol itself).
+// first-run wizard. Uploads use the official ESO Logs uploader by default, with
+// an opt-in native direct route when the backend proves the log/session is safe.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { Channel } from "@tauri-apps/api/core";
@@ -76,10 +76,11 @@ import {
   SessionTimer,
   WhatGetsUploaded,
   compactBytes,
-  esotkReportUrl,
   fightLabel,
   formatDuration,
   formatElapsed,
+  parseReportCode,
+  primaryReportUrl,
   relativeFromMs,
 } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
@@ -141,8 +142,8 @@ async function openReportUrl(url: string): Promise<void> {
 /** Open the ESO Log Aggregator analysis for `code` IFF the user enabled auto-open
  *  (the `autoOpenAnalysis` setting, default off). Best-effort: a disabled setting,
  *  a read failure, or an opener-scope rejection is silent — the always-present
- *  "View analysis" button covers the manual case. `live` opens esotk's LiveLog view
- *  (for an in-progress native session). */
+ *  "View analysis" button covers the manual case. `live` opens raw ESO Logs with
+ *  fight=last for an in-progress native session. */
 /** The effective "use the official ESO Logs uploader" opt-out, read FAIL-CLOSED.
  *  Returns true (use official) if EITHER opt-out key is set OR a store read fails —
  *  the native path speaks ESO Logs' private endpoints, so a degraded store that
@@ -166,7 +167,11 @@ async function usesOfficialUploader(): Promise<boolean> {
   return !manual.ok || !live.ok || manual.value || live.value;
 }
 
-async function maybeAutoOpenAnalysis(code: string, opts?: { live?: boolean }): Promise<void> {
+async function maybeAutoOpenAnalysis(
+  report: ReportRef,
+  visibility: Visibility,
+  opts?: { live?: boolean }
+): Promise<void> {
   try {
     const auto = await getSetting<boolean>("autoOpenAnalysis", false);
     if (!auto) return;
@@ -175,7 +180,7 @@ async function maybeAutoOpenAnalysis(code: string, opts?: { live?: boolean }): P
     // pop a "couldn't open" toast. The always-present "View analysis" button covers
     // the manual path.
     const m = await import("@tauri-apps/plugin-opener");
-    await m.openUrl(esotkReportUrl(code, opts));
+    await m.openUrl(primaryReportUrl(report, visibility, opts));
   } catch {
     /* best-effort — the manual button still works */
   }
@@ -301,6 +306,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // invokes updaters twice), which over-counted every fight (e.g. "2 fights" for 1).
   const seenFightIndicesRef = useRef<Set<number>>(new Set());
   const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
+  const [liveVisibility, setLiveVisibility] = useState<Visibility>(options.visibility);
   const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
   // Which path this live session actually took: true = handed off to the official
   // uploader (a separate app keeps streaming); false = native in-process (Kalpa IS
@@ -339,6 +345,11 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // Gate for the live channel handler: late events queued during the ~poll
   // shutdown window must not fire setState/toast after stop or unmount.
   const liveActiveRef = useRef(false);
+  // Native live creates the report before any fight segment exists. Keep the code
+  // available for auto-open, but wait until the first accepted fight so raw ESO Logs
+  // doesn't open on an intentionally empty report.
+  const liveReportRef = useRef<ReportRef | null>(null);
+  const liveAutoOpenedRef = useRef(false);
 
   // Current selection, mirrored to a ref so loadLogs can reconcile it without
   // being re-created on every selection change.
@@ -784,7 +795,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         toast.success("Upload complete — report ready.");
         // Native upload produced a report code; offer to jump straight to the richer
         // ESO Log Aggregator analysis if the user opted into auto-open.
-        void maybeAutoOpenAnalysis(dispatch.report.code);
+        void maybeAutoOpenAnalysis(dispatch.report, options.visibility);
       } else {
         toast.success(dispatch.detail, { duration: 7000 });
       }
@@ -843,6 +854,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setStarting(true);
     const startedAt = Date.now();
     const sessionId = `live-${startedAt}`;
+    const reportVisibility = options.visibility;
     // Record the id before the await so unmount cleanup can stop the backend
     // watcher even if the dialog closes before the await resolves.
     liveSessionIdRef.current = sessionId;
@@ -851,6 +863,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setLiveFightCount(0);
     liveFightCountRef.current = 0;
     seenFightIndicesRef.current = new Set();
+    liveReportRef.current = null;
+    setLiveVisibility(reportVisibility);
+    liveAutoOpenedRef.current = false;
     setLiveReport(null);
     setSessionAnchored(false); // native: not anchored until the first BEGIN_LOG
     // Reset the handoff path indicator (state + its unmount-toast ref mirror) so this
@@ -862,8 +877,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     setLiveStatus("watching");
     liveActiveRef.current = true;
 
-    // The watcher emits UI-only fight-detection events; the actual upload is the
-    // single whole-file handoff performed by uploader_start_live below.
+    const autoOpenLiveAnalysisOnce = (report: ReportRef) => {
+      if (liveAutoOpenedRef.current || liveHandedOffRef.current) return;
+      liveAutoOpenedRef.current = true;
+      void maybeAutoOpenAnalysis(report, reportVisibility, { live: true });
+    };
+
+    // Live events come from either the native direct uploader or the official
+    // handoff watcher. Both feed the same session timeline and status UI.
     channel.onmessage = (ev) => {
       // Drop events that don't belong to the CURRENT session. The global
       // liveActiveRef alone is not enough: a previous session's queued event
@@ -884,8 +905,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           // before any fight has posted. Surface it immediately so the user can open
           // the live analysis in the ESO Log Aggregator while the raid is streaming —
           // previously the live code only appeared after the session settled.
-          setLiveReport({ code: ev.code, url: ev.url });
-          void maybeAutoOpenAnalysis(ev.code, { live: true });
+          liveReportRef.current = { code: ev.code, url: ev.url };
+          setLiveReport(liveReportRef.current);
+          if (liveFightCountRef.current > 0) autoOpenLiveAnalysisOnce(liveReportRef.current);
           break;
         case "sessionAnchored":
           // Native: the first BEGIN_LOG landed — flip waiting→streaming instantly.
@@ -903,6 +925,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           // events; both setStates below use PURE updaters (StrictMode-safe).
           if (seenFightIndicesRef.current.has(detected.index)) break;
           seenFightIndicesRef.current.add(detected.index);
+          if (liveReportRef.current) autoOpenLiveAnalysisOnce(liveReportRef.current);
           liveFightCountRef.current += 1;
           setLiveFightCount((c) => c + 1);
           setLiveFights((prev) => {
@@ -950,25 +973,21 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           break;
         case "stopped": {
           // A `stopped` event that passes the session guard above means THIS
-          // session's watcher thread died on its own (lost folder access,
-          // couldn't keep reading the log, etc.) — a user-initiated stop already
-          // cleared liveActiveRef/the ref before this could run. Beyond tearing
-          // down the UI, the backend still holds the now-dead `Running` slot and
-          // the history record is still `Live`, and nothing else settles them
-          // until the next-launch reconcile. Drive the existing stop path so the
-          // slot is evicted and the record settled immediately. Use this
-          // closure's own `sessionId` (the guard proved it is the current one) so
-          // we never settle some other session's id.
+          // session ended outside the user's Stop button path: either the watcher
+          // failed, or native live finished by END_LOG / idle / server end. The backend
+          // may still hold the now-dead `Running` slot, so drive the existing stop path
+          // to evict it. Use this closure's own `sessionId` (the guard proved it is the
+          // current one) so we never settle another session.
           const stoppedFightCount = liveFightCountRef.current;
           liveActiveRef.current = false;
           liveSessionIdRef.current = null;
           liveWasRunningRef.current = false; // settled; don't re-warn on close
           setLiveSessionId(null);
-          setLiveStatus("attention");
-          if (ev.reason && !/stopped\.?$/i.test(ev.reason)) toast.error(ev.reason);
+          setLiveStatus(ev.clean ? "upToDate" : "attention");
+          if (!ev.clean && ev.reason) toast.error(ev.reason);
           // Best-effort: evicts the dead `Running` slot (stop_slot_in_map) and
-          // settles the `Live` record to `Completed` (settle_live). Both are
-          // idempotent, so this is safe even if the record was already settled.
+          // settles the official-handoff record. Native live self-settles by exact id;
+          // this call is still idempotent and removes the finished slot if it remains.
           void invokeOrThrow("uploader_stop_live", {
             sessionId,
             fightCount: stoppedFightCount,
@@ -1088,7 +1107,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       const handed = dispatch?.handedOff ?? true; // default to the safe handoff wording
       setLiveHandedOff(handed);
       liveHandedOffRef.current = handed; // mirror for the unmount-cleanup toast
-      if (dispatch?.report) setLiveReport(dispatch.report);
+      if (dispatch?.report) {
+        liveReportRef.current = dispatch.report;
+        setLiveReport(dispatch.report);
+      }
       toast.success(
         dispatch?.handedOff
           ? "Live logging started in the official ESO Logs uploader."
@@ -1344,6 +1366,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
               liveFightCount={liveFightCount}
               liveReport={liveReport}
               liveHandedOff={liveHandedOff}
+              visibility={liveVisibility}
               sessionAnchored={sessionAnchored}
               onCopyLink={copyLink}
             />
@@ -1543,6 +1566,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                     // Which path the running session took — drives the callout/copy
                     // (handoff = a separate uploader app; native = Kalpa uploads).
                     handedOff={liveHandedOff}
+                    visibility={liveVisibility}
                     // Native waiting↔streaming: anchored once the first BEGIN_LOG lands.
                     sessionAnchored={sessionAnchored}
                     // Best-effort pre-start guess of what's coming (which waiting copy).
@@ -1893,6 +1917,7 @@ function MissionControlBand({
   liveFightCount,
   liveReport,
   liveHandedOff,
+  visibility,
   sessionAnchored,
   onCopyLink,
 }: {
@@ -1914,6 +1939,7 @@ function MissionControlBand({
   liveFightCount: number;
   liveReport: ReportRef | null;
   liveHandedOff: boolean;
+  visibility: Visibility;
   sessionAnchored: boolean;
   onCopyLink: (url: string) => void | Promise<void>;
 }) {
@@ -1930,6 +1956,7 @@ function MissionControlBand({
         fightCount={liveFightCount}
         report={liveReport}
         handedOff={liveHandedOff}
+        visibility={visibility}
         sessionAnchored={sessionAnchored}
         onCopyLink={onCopyLink}
       />
@@ -2007,6 +2034,7 @@ function LiveDashboardBand({
   fightCount,
   report,
   handedOff,
+  visibility,
   sessionAnchored,
   onCopyLink,
 }: {
@@ -2020,6 +2048,7 @@ function LiveDashboardBand({
   fightCount: number;
   report: ReportRef | null;
   handedOff: boolean;
+  visibility: Visibility;
   sessionAnchored: boolean;
   onCopyLink: (url: string) => void | Promise<void>;
 }) {
@@ -2050,6 +2079,7 @@ function LiveDashboardBand({
         <LiveReportCTA
           report={report}
           handedOff={handedOff}
+          visibility={visibility}
           sessionAnchored={sessionAnchored}
           onCopyLink={onCopyLink}
         />
@@ -2180,11 +2210,13 @@ function FightTicker({
 function LiveReportCTA({
   report,
   handedOff,
+  visibility,
   sessionAnchored,
   onCopyLink,
 }: {
   report: ReportRef | null;
   handedOff: boolean;
+  visibility: Visibility;
   sessionAnchored: boolean;
   onCopyLink: (url: string) => void | Promise<void>;
 }) {
@@ -2202,8 +2234,8 @@ function LiveReportCTA({
       </div>
     );
   }
-  // Native sessions deep-link to the live analysis (esotk LiveLog, 30s repoll); a
-  // handed-off report isn't streaming through Kalpa, so it just opens.
+  // Native sessions open raw ESO Logs with fight=last; a handed-off report isn't
+  // streaming through Kalpa, so it just opens.
   const isNative = !handedOff;
   return (
     <div className="flex min-w-[124px] flex-col justify-center gap-1.5 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-2">
@@ -2217,11 +2249,23 @@ function LiveReportCTA({
         <Button
           size="sm"
           className="h-7 flex-1 gap-1.5 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25"
-          onClick={() => void openReportUrl(esotkReportUrl(report.code, { live: isNative }))}
-          aria-label={isNative ? "Watch live report" : "Open report"}
+          onClick={() =>
+            void openReportUrl(primaryReportUrl(report, visibility, { live: isNative }))
+          }
+          aria-label={
+            visibility === "private"
+              ? "Open private report on ESO Logs"
+              : isNative
+                ? "Watch live report"
+                : "Open report"
+          }
         >
-          <Zap className="size-3" aria-hidden />
-          {isNative ? "Watch" : "Open"}
+          {visibility === "private" ? (
+            <ExternalLink className="size-3" aria-hidden />
+          ) : (
+            <Zap className="size-3" aria-hidden />
+          )}
+          {visibility === "private" ? "ESO Logs" : isNative ? "Watch" : "Open"}
         </Button>
         <Button
           variant="ghost"
@@ -3351,6 +3395,7 @@ function LiveDashboard({
   liveReport,
   priorFightCount,
   handedOff,
+  visibility,
   sessionAnchored,
   readiness,
   onStart,
@@ -3367,6 +3412,7 @@ function LiveDashboard({
   liveReport: ReportRef | null;
   priorFightCount: number;
   handedOff: boolean;
+  visibility: Visibility;
   sessionAnchored: boolean;
   readiness: LiveReadiness | null;
   onStart: () => void;
@@ -3454,18 +3500,21 @@ function LiveDashboard({
               <ExternalLink className="size-3.5" />
               ESO Logs
             </Button>
-            {/* The richer analysis lives in the ESO Log Aggregator (esotk) — make it
-                the primary action. While a native session is still streaming, deep-link
-                to esotk's LiveLog view (30s repoll follows the newest fight). */}
+            {/* Completed analysis lives in the ESO Log Aggregator. Active native live
+                sessions open raw ESO Logs so players/fight=last stay current. */}
             <Button
               size="sm"
               className="bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
               onClick={() =>
-                void openReportUrl(esotkReportUrl(liveReport.code, { live: isNative }))
+                void openReportUrl(primaryReportUrl(liveReport, visibility, { live: isNative }))
               }
             >
-              <Zap className="size-3.5" />
-              {isNative ? "Watch live" : "View analysis"}
+              {visibility === "private" ? (
+                <ExternalLink className="size-3.5" />
+              ) : (
+                <Zap className="size-3.5" />
+              )}
+              {visibility === "private" ? "Open report" : isNative ? "Watch live" : "View analysis"}
             </Button>
           </div>
         </div>
@@ -3593,19 +3642,17 @@ function LiveDashboard({
         </div>
       )}
 
-      {/* Pre-start expectation: live streams only NEW fights (the tail starts at the
-          current end of the log), so earlier fights already in this Encounter.log are
-          not part of this live report. Set the expectation; no destructive action —
-          the report is already clean, and ESO holds the file open so Kalpa can't
-          rotate it anyway. */}
+      {/* Pre-start expectation: completed fights already in this Encounter.log are
+          not part of this live report. Native live can preserve an already-open fight
+          once attached, but old completed pulls are intentionally left for manual
+          upload. Set the expectation without taking destructive action. */}
       {!running && priorFightCount > 0 && (
         <div className="flex items-start gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs text-muted-foreground">
           <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-foreground/50" aria-hidden />
           <span>
-            Live streams only fights from when you start. The {priorFightCount} earlier fight
-            {priorFightCount === 1 ? "" : "s"} already in this log{" "}
-            {priorFightCount === 1 ? "isn't" : "aren't"} part of this live report — upload{" "}
-            {priorFightCount === 1 ? "it" : "them"} separately with{" "}
+            Live skips the {priorFightCount} completed fight{priorFightCount === 1 ? "" : "s"}{" "}
+            already in this log. If combat is active when live attaches, Kalpa keeps that open
+            fight's context and streams it once it ends. Upload older completed fights with{" "}
             <span className="text-foreground/70">Upload a Log</span> if you want.
           </span>
         </div>
@@ -3654,24 +3701,6 @@ function sourceLocation(sourcePath: string): { folder: string; dir: string } {
   const dirParts = dir.split(/[/\\]/).filter(Boolean);
   const folder = dirParts[dirParts.length - 1] ?? dir;
   return { folder, dir };
-}
-
-/** Extract an ESO Logs report code from a pasted URL or bare code, or null if the
- *  input doesn't look like one. Accepts BOTH link shapes Kalpa hands users — the
- *  raw `esologs.com/reports/<code>` (plural) and the `esotk.com/#/report/<code>`
- *  analysis deep-link (singular, the one the "Analysis" buttons open) — plus a bare
- *  mixed-alphanumeric token (≥12 chars, containing at least one letter AND one
- *  digit — ESO Logs codes are ~16 mixed chars) so a plain word isn't mistaken for a
- *  code. Shared by the top quick-paste bar and the per-row attach so neither can
- *  build a malformed report URL from a non-code. */
-function parseReportCode(raw: string): string | null {
-  const s = raw.trim();
-  // `reports?/` matches both the plural esologs path and the singular esotk path;
-  // the alphanumeric group can't over-match (e.g. "reportshistory/" won't match).
-  const fromUrl = s.match(/reports?\/([a-zA-Z0-9]+)/);
-  if (fromUrl?.[1]) return fromUrl[1];
-  if (/^[a-zA-Z0-9]{12,}$/.test(s) && /[a-zA-Z]/.test(s) && /[0-9]/.test(s)) return s;
-  return null;
 }
 
 /** The 3px status-accent left-border color per upload status (the app's signature
@@ -3848,11 +3877,21 @@ function HistoryPanel({
                           variant="ghost"
                           size="sm"
                           className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
-                          onClick={() => void openReportUrl(esotkReportUrl(r.report!.code))}
-                          aria-label="Open analysis in ESO Log Aggregator"
+                          onClick={() =>
+                            void openReportUrl(primaryReportUrl(r.report!, r.visibility))
+                          }
+                          aria-label={
+                            r.visibility === "private"
+                              ? "Open private report on ESO Logs"
+                              : "Open analysis in ESO Log Aggregator"
+                          }
                         >
-                          <Zap className="size-3.5" />
-                          Analysis
+                          {r.visibility === "private" ? (
+                            <ExternalLink className="size-3.5" />
+                          ) : (
+                            <Zap className="size-3.5" />
+                          )}
+                          {r.visibility === "private" ? "ESO Logs" : "Analysis"}
                         </Button>
                       </>
                     )}

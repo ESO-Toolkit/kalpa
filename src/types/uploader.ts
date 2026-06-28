@@ -116,8 +116,9 @@ export interface UploadDispatch {
 }
 
 // Live event stream (tagged union mirroring the Rust `LiveEvent` enum).
-// Fights are UI-only: the whole log is uploaded once to the official uploader
-// with real-time enabled, so there is no per-fight upload status.
+// Fights drive the local timeline/count for both native direct live and the
+// official-uploader handoff; individual fights still do not have separate upload
+// status in the UI.
 export type LiveEvent =
   | { type: "started"; file: string; startOffset: number }
   | {
@@ -141,7 +142,8 @@ export type LiveEvent =
   // a fresh session resumed posting.
   | { type: "reauthRequired"; message: string }
   | { type: "reauthResolved" }
-  | { type: "stopped"; reason: string };
+  // `clean` is true for normal/user stops and false for watcher/native failures.
+  | { type: "stopped"; reason: string; clean: boolean };
 
 /// Result of the pre-Go-Live readiness probe (uploader_probe_live_readiness): a
 /// best-effort guess at whether a fresh logging session is coming, used only to pick
@@ -166,9 +168,9 @@ export type UploaderStatus =
   | "attention"
   | "retrying";
 
-/** A single fight detected during a live session (UI timeline entry). The
- *  whole log uploads once to the official uploader, so there is no per-fight
- *  upload status — detection means the official uploader is streaming it. */
+/** A single fight detected during a live session (UI timeline entry). Detection
+ *  means the live path accepted a completed fight for the session timeline; it is
+ *  not a separate per-fight upload status. */
 export interface LiveFight {
   index: number;
   zoneName: string | null;

@@ -1,20 +1,20 @@
 //! ESO Logs uploader.
 //!
 //! Locates ESO combat logs, understands their structure (sessions and fights)
-//! by streaming over byte offsets, can split oversized logs to disk, and hands
-//! prepared logs to the **official ESO Logs uploader** for the actual upload —
-//! Kalpa never speaks the private `/desktop-client/` protocol itself (see
-//! [`transport`] for the rationale).
+//! by streaming over byte offsets, can split oversized logs to disk, and uploads
+//! them through either the official ESO Logs uploader handoff or the gated
+//! native direct path.
 //!
 //! Module layout:
 //! * [`types`]     — IPC-serialized data types.
 //! * [`discovery`] — find the `Logs` directory and enumerate log files.
 //! * [`scanner`]   — streaming session/fight boundary detection.
 //! * [`splitter`]  — extract sessions/fights to standalone `.log` files.
-//! * [`transport`] — the [`transport::LogUploadTransport`] abstraction.
+//! * [`transport`] — official uploader GUI/CLI handoff.
 //! * [`watcher`]   — live tailing + per-fight dispatch.
 //! * [`history`]   — persistent upload history.
 //! * [`commands`]  — Tauri command handlers and managed state.
+//! * [`native`]    — opt-in direct uploader and live segment encoder.
 
 /// Performance benchmark for the split + native-encode pipeline (ignored by
 /// default; needs a local multi-GB log). See `bench.rs`.

@@ -5,12 +5,11 @@
 //! whenever a fight (`BEGIN_COMBAT`…`END_COMBAT`) completes. This drives the
 //! per-fight timeline in the UI **only** — it does not upload.
 //!
-//! The actual live upload is performed once per session by handing the whole
-//! `Encounter.log` to the official ESO Logs uploader with real-time uploading
-//! enabled (see `commands::uploader_start_live`). A single fight slice has no
-//! `BEGIN_LOG` header or actor/ability context, so it is not independently
-//! uploadable; the official uploader tails the full file itself. Decoupling
-//! detection from upload keeps this loop cheap and correct.
+//! On the official-uploader handoff path, this watcher is timeline-only while the
+//! official app tails the whole file. On the native direct-live path, the same
+//! [`LiveEvent`] enum is used by the in-process uploader to surface report, auth,
+//! and accepted-fight progress. In both paths, the UI treats fights as session
+//! progress rather than independently uploadable slices.
 //!
 //! Watching is built on `notify` with a short polling fallback because Windows
 //! `ReadDirectoryChangesW` modify events for a single appended file can coalesce
@@ -82,8 +81,9 @@ pub enum LiveEvent {
     ReauthRequired { message: String },
     /// (Native live only) a fresh session was captured — posting resumed.
     ReauthResolved,
-    /// Watching stopped (user-initiated or fatal error).
-    Stopped { reason: String },
+    /// Watching stopped. `clean` distinguishes a normal/user stop from a fatal watcher
+    /// or native-live failure so the UI doesn't infer severity from reason text.
+    Stopped { reason: String, clean: bool },
 }
 
 /// Handle controlling a running live watcher. Both [`stop`](Self::stop) and
@@ -206,6 +206,7 @@ fn tail_loop(
         if stop.load(Ordering::SeqCst) {
             let _ = channel.send(LiveEvent::Stopped {
                 reason: "Live logging stopped.".into(),
+                clean: true,
             });
             return;
         }
@@ -232,11 +233,11 @@ fn tail_loop(
                 // fatal exits below) rather than a silent `break`: otherwise the
                 // frontend never learns, and the backend's `Running` slot + the
                 // `Live` history record stay stuck until the next-launch reconcile
-                // (this process already ran `reconcile_stale_once`). The reason is
-                // worded to NOT end in "stopped" so the UI surfaces it (the
-                // frontend suppresses only the plain `…stopped.` user-stop text).
+                // (this process already ran `reconcile_stale_once`). `clean: false`
+                // tells the UI this is a failure regardless of the wording.
                 let _ = channel.send(LiveEvent::Stopped {
                     reason: "Lost connection to the folder watcher (stopped watching).".into(),
+                    clean: false,
                 });
                 return;
             }
@@ -247,6 +248,7 @@ fn tail_loop(
         if stop.load(Ordering::SeqCst) {
             let _ = channel.send(LiveEvent::Stopped {
                 reason: "Live logging stopped.".into(),
+                clean: true,
             });
             return;
         }
@@ -262,6 +264,7 @@ fn tail_loop(
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                     let _ = channel.send(LiveEvent::Stopped {
                         reason: format!("Lost access to the log file (stopped watching): {e}"),
+                        clean: false,
                     });
                     return;
                 }
@@ -303,6 +306,7 @@ fn tail_loop(
                         reason: format!(
                             "Could not keep reading the log file (stopped watching): {e}"
                         ),
+                        clean: false,
                     });
                     return;
                 }
@@ -442,5 +446,21 @@ mod tests {
         let j = serde_json::to_string(&started).unwrap();
         assert!(j.contains("\"startOffset\""), "{j}");
         assert!(!j.contains("start_offset"), "{j}");
+
+        let stopped = LiveEvent::Stopped {
+            reason: "Live upload finished.".into(),
+            clean: true,
+        };
+        let j = serde_json::to_string(&stopped).unwrap();
+        assert!(j.contains("\"type\":\"stopped\""), "{j}");
+        assert!(j.contains("\"reason\""), "{j}");
+        assert!(j.contains("\"clean\":true"), "{j}");
+
+        let failed_stop = LiveEvent::Stopped {
+            reason: "Lost access.".into(),
+            clean: false,
+        };
+        let j = serde_json::to_string(&failed_stop).unwrap();
+        assert!(j.contains("\"clean\":false"), "{j}");
     }
 }

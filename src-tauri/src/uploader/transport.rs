@@ -1,11 +1,9 @@
 //! Upload transport abstraction.
 //!
-//! The actual upload to ESO Logs is performed by the **official ESO Logs /
-//! Archon uploader**, which Kalpa drives rather than re-implementing. The native
-//! `/desktop-client/` REST protocol is private, version-coupled, and against
-//! RPGLogs' Terms of Service for third-party clients, so we deliberately do not
-//! speak it ourselves. Driving the official app keeps uploads legitimate and
-//! stable across protocol changes.
+//! The default upload route uses the **official ESO Logs / Archon uploader**.
+//! Kalpa drives its CLI or GUI handoff for compatibility and uses this module for
+//! that official-app transport. The separate `native` module owns the gated
+//! opt-in direct path.
 //!
 //! Two transports are provided behind one trait so the strategy can evolve:
 //!

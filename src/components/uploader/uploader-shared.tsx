@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
-import type { UploaderStatus } from "@/types/uploader";
+import type { ReportRef, UploaderStatus, Visibility } from "@/types/uploader";
 
 /** Map the uploader status to its pill color, label, and icon. */
 export function StatusPill({ status }: { status: UploaderStatus }) {
@@ -74,6 +74,45 @@ export function compactBytes(bytes: number): string {
 export function esotkReportUrl(code: string, opts?: { live?: boolean }): string {
   const base = `https://esotk.com/#/report/${encodeURIComponent(code)}`;
   return opts?.live ? `${base}/live` : base;
+}
+
+/** Raw ESO Logs report URL. During live streaming, `fight=last` follows the newest
+ *  fight and avoids esotk live-data lag where the report can have players on ESO
+ *  Logs while esotk's `playerDetails` resolver still returns an empty array. */
+export function esoLogsReportUrl(report: ReportRef, opts?: { live?: boolean }): string {
+  if (!opts?.live) return report.url;
+  try {
+    const url = new URL(report.url);
+    url.searchParams.set("fight", "last");
+    return url.toString();
+  } catch {
+    const separator = report.url.includes("?") ? "&" : "?";
+    return `${report.url}${separator}fight=last`;
+  }
+}
+
+/** Primary report destination for buttons/auto-open. Public and unlisted completed
+ *  reports can be read by esotk by code; private reports and active live reports
+ *  open directly on ESO Logs, where players/fight=last are reliable mid-stream. */
+export function primaryReportUrl(
+  report: ReportRef,
+  visibility: Visibility,
+  opts?: { live?: boolean }
+): string {
+  if (opts?.live || visibility === "private") return esoLogsReportUrl(report, opts);
+  return esotkReportUrl(report.code);
+}
+
+/** Extract an ESO Logs report code from a pasted URL or bare code, or null if the
+ *  input doesn't look like one. Accepts both link shapes Kalpa hands users: the raw
+ *  `esologs.com/reports/<code>` path and the `esotk.com/#/report/<code>` analysis
+ *  deep-link, plus a bare mixed-alphanumeric report token. */
+export function parseReportCode(raw: string): string | null {
+  const s = raw.trim();
+  const fromUrl = s.match(/reports?\/([a-zA-Z0-9]+)/);
+  if (fromUrl?.[1]) return fromUrl[1];
+  if (/^[a-zA-Z0-9]{12,}$/.test(s) && /[a-zA-Z]/.test(s) && /[0-9]/.test(s)) return s;
+  return null;
 }
 
 /** Format a millisecond duration as `m:ss` or `s.s s`. */

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use super::types::{UploadRecord, UploadStatus};
+use super::types::{ReportRef, UploadRecord, UploadStatus};
 use crate::metadata::{load_json_with_backup, save_json_with_backup};
 
 /// Cap the stored history so the file can't grow unbounded.
@@ -78,9 +78,9 @@ pub fn reconcile_stale_once(app: &tauri::AppHandle) {
 /// Reconcile records left in a transient state by a previous run.
 ///
 /// Uploads hand off to the official uploader, whose progress we don't observe,
-/// so a record stuck in `Uploading`/`Live` from before a crash/quit can never
-/// resolve on its own. Settle them to `Completed` so the history panel doesn't
-/// show a perpetual "Uploading"/"Live" badge. Invoked once per process via
+/// while native live owns a report in-process. A record stuck in
+/// `Uploading`/`Live`/`Paused` from before a crash/quit can never resolve on its own,
+/// so settle it to the most honest terminal state. Invoked once per process via
 /// [`reconcile_stale_once`].
 pub fn reconcile_stale(app: &tauri::AppHandle) {
     let Ok(path) = history_path(app) else {
@@ -90,12 +90,42 @@ pub fn reconcile_stale(app: &tauri::AppHandle) {
         return;
     };
     let mut file: HistoryFile = load_json_with_backup(&path);
+    if apply_reconcile_stale(&mut file.records) {
+        let _ = save_json_with_backup(&path, &file);
+    }
+}
+
+fn apply_reconcile_stale(records: &mut [UploadRecord]) -> bool {
     let mut changed = false;
-    for r in &mut file.records {
+    for r in records {
         match r.status {
-            // A leftover live session: the official uploader may well still be
-            // streaming, so settle to the honest `HandedOff` (not `Completed`,
-            // which would claim the upload finished).
+            // A leftover native-live session either knows its ESO Logs report code
+            // because the direct uploader persisted it immediately after create-report,
+            // or it was paused waiting for reauth. If this process died before final
+            // settle, the report may be partial; keep the link and mark it
+            // failed/incomplete rather than disguising it as an official handoff.
+            UploadStatus::Paused => {
+                r.status = UploadStatus::Failed;
+                r.error.get_or_insert_with(|| {
+                    "Kalpa closed before this native live report finished; the report may be \
+                     incomplete."
+                        .to_string()
+                });
+                changed = true;
+            }
+            UploadStatus::Live if r.report.is_some() => {
+                r.status = UploadStatus::Failed;
+                r.error.get_or_insert_with(|| {
+                    "Kalpa closed before this native live report finished; the report may be \
+                     incomplete."
+                        .to_string()
+                });
+                changed = true;
+            }
+            // A leftover live session without a report code is the official-uploader
+            // handoff path: the official uploader may well still be streaming, so settle
+            // to the honest `HandedOff` (not `Completed`, which would claim the upload
+            // finished).
             UploadStatus::Live => {
                 r.status = UploadStatus::HandedOff;
                 changed = true;
@@ -109,9 +139,7 @@ pub fn reconcile_stale(app: &tauri::AppHandle) {
             _ => {}
         }
     }
-    if changed {
-        let _ = save_json_with_backup(&path, &file);
-    }
+    changed
 }
 
 /// Insert or update a record (matched by `id`), then persist. The whole
@@ -194,17 +222,99 @@ pub fn settle_started(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
     let mut file: HistoryFile = load_json_with_backup(&path);
+    if !apply_settle_started(&mut file.records, id) {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
+fn apply_settle_started(records: &mut [UploadRecord], id: &str) -> bool {
     let mut changed = false;
-    for r in &mut file.records {
+    for r in records {
         if r.id == id && matches!(r.status, UploadStatus::Live | UploadStatus::Uploading) {
             r.status = UploadStatus::Cancelled;
             changed = true;
         }
     }
-    if !changed {
+    changed
+}
+
+/// Persist the native live report code as soon as create-report returns. This closes
+/// the crash window between report creation and normal driver settlement: on next
+/// launch, history reconciliation can preserve the link and mark the native report
+/// incomplete instead of losing the code and showing a generic handoff.
+pub fn attach_live_report(
+    app: &tauri::AppHandle,
+    id: &str,
+    report: ReportRef,
+) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    if !apply_attach_live_report(&mut file.records, id, report) {
         return Ok(());
     }
     save_json_with_backup(&path, &file)
+}
+
+fn apply_attach_live_report(records: &mut [UploadRecord], id: &str, report: ReportRef) -> bool {
+    let mut changed = false;
+    for r in records {
+        if r.id == id && matches!(r.status, UploadStatus::Live | UploadStatus::Paused) {
+            r.report = Some(report.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Mark a native live record as paused while its ESO Logs session is refreshed.
+///
+/// This is intentionally exact-id and native-driver-owned, like
+/// [`settle_native_live`]. If Kalpa exits during the pause, startup reconciliation sees
+/// `Paused` and marks the saved report incomplete instead of treating the session as a
+/// healthy official-uploader handoff.
+pub fn pause_native_live(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    if !apply_pause_native_live(&mut file.records, id) {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
+fn apply_pause_native_live(records: &mut [UploadRecord], id: &str) -> bool {
+    let mut changed = false;
+    for r in records {
+        if r.id == id && matches!(r.status, UploadStatus::Live) {
+            r.status = UploadStatus::Paused;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Return a reauthenticated native live record to the healthy live state.
+pub fn resume_native_live(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    if !apply_resume_native_live(&mut file.records, id) {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
+fn apply_resume_native_live(records: &mut [UploadRecord], id: &str) -> bool {
+    let mut changed = false;
+    for r in records {
+        if r.id == id && matches!(r.status, UploadStatus::Paused) {
+            r.status = UploadStatus::Live;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Settle a NATIVE live record by EXACT id when its in-process driver exits. Native
@@ -220,40 +330,58 @@ pub fn settle_started(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
 pub fn settle_native_live(
     app: &tauri::AppHandle,
     id: &str,
-    segments_built: usize,
+    fight_count: usize,
     report: Option<(String, String)>, // (url, code) — kept regardless of success
     succeeded: bool,
     error: Option<String>,
 ) -> Result<(), String> {
-    use super::types::ReportRef;
     let path = history_path(app)?;
     let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
     let mut file: HistoryFile = load_json_with_backup(&path);
+    let changed = apply_settle_native_live(
+        &mut file.records,
+        id,
+        fight_count,
+        report.as_ref().map(|(url, code)| ReportRef {
+            url: url.clone(),
+            code: code.clone(),
+        }),
+        succeeded,
+        error.as_deref(),
+    );
+    if !changed {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
+fn apply_settle_native_live(
+    records: &mut [UploadRecord],
+    id: &str,
+    fight_count: usize,
+    report: Option<ReportRef>,
+    succeeded: bool,
+    error: Option<&str>,
+) -> bool {
     let mut changed = false;
-    for r in &mut file.records {
+    for r in records {
         if r.id == id && matches!(r.status, UploadStatus::Live | UploadStatus::Paused) {
             r.status = if succeeded {
                 UploadStatus::Completed
             } else {
                 UploadStatus::Failed
             };
-            r.fight_count = segments_built;
-            if let Some((url, code)) = &report {
-                r.report = Some(ReportRef {
-                    url: url.clone(),
-                    code: code.clone(),
-                });
+            r.fight_count = fight_count;
+            if let Some(report) = &report {
+                r.report = Some(report.clone());
             }
-            if let Some(e) = &error {
-                r.error = Some(e.clone());
+            if let Some(error) = error {
+                r.error = Some(error.to_string());
             }
             changed = true;
         }
     }
-    if !changed {
-        return Ok(());
-    }
-    save_json_with_backup(&path, &file)
+    changed
 }
 
 /// Delete a record by id, then persist (serialized with other mutations).
@@ -323,5 +451,215 @@ mod tests {
         assert!(!apply_settle_live(&mut recs, sid, 99));
         assert_eq!(recs[0].fight_count, 3); // first settle wins; not overwritten
         assert_eq!(recs[0].status, UploadStatus::HandedOff); // and status unchanged
+    }
+
+    #[test]
+    fn native_live_report_code_attaches_before_terminal_settle() {
+        let mut recs = vec![
+            rec("native-live", UploadStatus::Live),
+            rec("native-done", UploadStatus::Completed),
+        ];
+
+        assert!(apply_attach_live_report(
+            &mut recs,
+            "native-live",
+            ReportRef {
+                url: "https://www.esologs.com/reports/EARLY".into(),
+                code: "EARLY".into(),
+            },
+        ));
+
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("EARLY")
+        );
+        assert_eq!(recs[0].status, UploadStatus::Live);
+        assert!(!apply_attach_live_report(
+            &mut recs,
+            "native-done",
+            ReportRef {
+                url: "https://www.esologs.com/reports/LATE".into(),
+                code: "LATE".into(),
+            },
+        ));
+        assert!(recs[1].report.is_none());
+    }
+
+    #[test]
+    fn settle_started_cancel_preserves_early_native_report_link() {
+        let mut recs = vec![rec("native-start", UploadStatus::Live)];
+        recs[0].report = Some(ReportRef {
+            url: "https://www.esologs.com/reports/STOPPED".into(),
+            code: "STOPPED".into(),
+        });
+
+        assert!(apply_settle_started(&mut recs, "native-start"));
+
+        assert_eq!(recs[0].status, UploadStatus::Cancelled);
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("STOPPED")
+        );
+    }
+
+    #[test]
+    fn native_live_reauth_pause_and_resume_are_exact_and_idempotent() {
+        let mut recs = vec![
+            rec("native-live", UploadStatus::Live),
+            rec("other-live", UploadStatus::Live),
+            rec("native-done", UploadStatus::Completed),
+        ];
+
+        assert!(apply_pause_native_live(&mut recs, "native-live"));
+        assert_eq!(recs[0].status, UploadStatus::Paused);
+        assert_eq!(recs[1].status, UploadStatus::Live);
+        assert_eq!(recs[2].status, UploadStatus::Completed);
+        assert!(!apply_pause_native_live(&mut recs, "native-live"));
+
+        assert!(apply_resume_native_live(&mut recs, "native-live"));
+        assert_eq!(recs[0].status, UploadStatus::Live);
+        assert!(!apply_resume_native_live(&mut recs, "native-live"));
+        assert!(!apply_pause_native_live(&mut recs, "native-done"));
+    }
+
+    #[test]
+    fn reconcile_stale_native_live_with_report_preserves_link_and_marks_failed() {
+        let mut native = rec("native-live", UploadStatus::Live);
+        native.report = Some(ReportRef {
+            url: "https://www.esologs.com/reports/CRASHED".into(),
+            code: "CRASHED".into(),
+        });
+        let mut paused = rec("native-paused", UploadStatus::Paused);
+        paused.report = Some(ReportRef {
+            url: "https://www.esologs.com/reports/PAUSED".into(),
+            code: "PAUSED".into(),
+        });
+        let mut recs = vec![native, rec("official-live", UploadStatus::Live), paused];
+
+        assert!(apply_reconcile_stale(&mut recs));
+
+        assert_eq!(recs[0].status, UploadStatus::Failed);
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("CRASHED")
+        );
+        assert!(
+            recs[0]
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("may be incomplete")),
+            "{:?}",
+            recs[0].error
+        );
+        assert_eq!(
+            recs[1].status,
+            UploadStatus::HandedOff,
+            "official live records without a report code still reconcile as handoff"
+        );
+        assert_eq!(recs[2].status, UploadStatus::Failed);
+        assert_eq!(
+            recs[2].report.as_ref().map(|r| r.code.as_str()),
+            Some("PAUSED")
+        );
+    }
+
+    #[test]
+    fn native_live_settle_success_completes_exact_record_with_report_and_count() {
+        let mut recs = vec![
+            rec("native-1", UploadStatus::Live),
+            rec("native-10", UploadStatus::Live),
+            rec("native-done", UploadStatus::Completed),
+        ];
+        assert!(apply_settle_native_live(
+            &mut recs,
+            "native-1",
+            2,
+            Some(ReportRef {
+                url: "https://www.esologs.com/reports/ABC123".into(),
+                code: "ABC123".into(),
+            }),
+            true,
+            None,
+        ));
+
+        assert_eq!(recs[0].status, UploadStatus::Completed);
+        assert_eq!(recs[0].fight_count, 2);
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("ABC123")
+        );
+        assert_eq!(
+            recs[1].status,
+            UploadStatus::Live,
+            "native settle must match exact id, not a suffix/prefix"
+        );
+        assert_eq!(
+            recs[2].status,
+            UploadStatus::Completed,
+            "already-terminal records are not rewritten"
+        );
+    }
+
+    #[test]
+    fn native_live_settle_failure_keeps_partial_report_link_and_error() {
+        let mut recs = vec![rec("native-failed", UploadStatus::Paused)];
+        assert!(apply_settle_native_live(
+            &mut recs,
+            "native-failed",
+            4,
+            Some(ReportRef {
+                url: "https://www.esologs.com/reports/PARTIAL".into(),
+                code: "PARTIAL".into(),
+            }),
+            false,
+            Some("session expired before final segment"),
+        ));
+
+        assert_eq!(recs[0].status, UploadStatus::Failed);
+        assert_eq!(recs[0].fight_count, 4);
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("PARTIAL")
+        );
+        assert_eq!(
+            recs[0].error.as_deref(),
+            Some("session expired before final segment"),
+            "failed native live records need an actionable history error"
+        );
+    }
+
+    #[test]
+    fn native_live_re_settle_is_idempotent_noop() {
+        let mut recs = vec![rec("native-once", UploadStatus::Live)];
+        assert!(apply_settle_native_live(
+            &mut recs,
+            "native-once",
+            5,
+            Some(ReportRef {
+                url: "https://www.esologs.com/reports/FIRST".into(),
+                code: "FIRST".into(),
+            }),
+            true,
+            None,
+        ));
+        assert!(!apply_settle_native_live(
+            &mut recs,
+            "native-once",
+            99,
+            Some(ReportRef {
+                url: "https://www.esologs.com/reports/SECOND".into(),
+                code: "SECOND".into(),
+            }),
+            false,
+            Some("late failure"),
+        ));
+
+        assert_eq!(recs[0].status, UploadStatus::Completed);
+        assert_eq!(recs[0].fight_count, 5);
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("FIRST")
+        );
+        assert_eq!(recs[0].error, None);
     }
 }

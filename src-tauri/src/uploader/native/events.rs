@@ -547,6 +547,15 @@ impl EventEmitter {
         self.segment_event_count = 0;
     }
 
+    /// Discard the current live segment while replaying an already-on-disk warm-up
+    /// prefix. This also drops shield output buffered for the discarded fight, while
+    /// keeping cumulative report tables and timestamp anchors intact.
+    pub fn discard_warmup_segment(&mut self) {
+        self.pending_shields.clear();
+        self.temp_damage.clear();
+        self.open_segment();
+    }
+
     /// Take the events emitted since the last [`Self::open_segment`] — the live
     /// segment body (`events_string` + `event_count`) ready to frame into a
     /// fights-segment. Does NOT reset the buffer (the live driver calls
@@ -566,15 +575,18 @@ impl EventEmitter {
     /// The live driver calls this once when logging ends, so a fully-absorbed final hit
     /// is not silently dropped. (Mid-stream the cut policy never cuts with pending
     /// shields, so this only fires on the terminal segment.)
-    pub fn drain_trailing_shields_into_segment(&mut self) {
+    pub fn drain_trailing_shields_into_segment(&mut self) -> u64 {
         let tail = self.flush_pending_shields(None, None, None);
+        let mut count = 0;
         for l in tail {
             // These lines carry no fresh ts of their own; keep the segment's existing
             // window (they belong to the final fight already accounted for).
             self.segment_events.push_str(&l);
             self.segment_events.push('\n');
             self.segment_event_count += 1;
+            count += 1;
         }
+        count
     }
 
     /// Whether no `DAMAGE_SHIELDED` is buffered awaiting its paired damage event — a
@@ -2656,7 +2668,7 @@ mod tests {
     /// the REFLECTED event's `hitValue`) with the actual reflected ability as a
     /// trailing master index. Locks the derivation proven byte-exact on blackrose (3)
     /// + sunspire (5): bare tuple `A` (no `.srcOrd.tgtOrd` suffix), own-side masks
-    /// 16|64, tail `{dmgAbilityIdx}|{crit}|{final}`.
+    ///   16|64, tail `{dmgAbilityIdx}|{crit}|{final}`.
     #[test]
     fn reflected_damage_emits_code_54_crediting_the_reflect_buff() {
         // The reflector (player 1) bounces the boss's projectile (Quick Shot 110897)
@@ -4050,10 +4062,10 @@ mod combat_fixture {
     ///   uniquely marks it.)
     /// * 19 (death): count is right but positioning is the parser's intra-timestamp
     ///   tiebreak (not in the stream); reworking it would regress the exact count.
-    /// Tighten these bounds (toward 0) as more rules are proven.
-    /// (code 27 interrupted is now EXACT 19/19 on combat and 3/3 on Ossein: phantom
-    /// interrupts of instant casts are dropped, and a self-interrupt's END_CAST-only
-    /// tuple is allocated lazily.)
+    ///   Tighten these bounds (toward 0) as more rules are proven.
+    ///   (code 27 interrupted is now EXACT 19/19 on combat and 3/3 on Ossein: phantom
+    ///   interrupts of instant casts are dropped, and a self-interrupt's END_CAST-only
+    ///   tuple is allocated lazily.)
     #[test]
     fn per_code_counts_stay_within_known_bounds() {
         let base = env!("CARGO_MANIFEST_DIR");
@@ -4307,11 +4319,11 @@ mod combat_fixture {
         // so the tuple/pet fix can't silently regress (tuples must NOT collapse back
         // toward 885 — the render-blocking bug).
         assert!(
-            actors >= 70 && actors <= 80,
+            (70..=80).contains(&actors),
             "actors {actors} out of expected ~75 band"
         );
         assert!(
-            abilities >= 860 && abilities <= 890,
+            (860..=890).contains(&abilities),
             "abilities {abilities} out of expected ~865 band"
         );
         assert!(
@@ -4523,7 +4535,7 @@ mod combat_fixture {
     ///     even though some decrease events carry a resolvable `castTrackId`.
     ///   * code-6 (stack INCREASE) is attributed on EXACTLY the timestamps the
     ///     official segment attributes (Maarselok 286, Ossein 43) — no more, no less.
-    /// No-op without the gitignored golden captures (like the other oracles).
+    ///     No-op without the gitignored golden captures (like the other oracles).
     #[test]
     fn applybuffstack_attribution_matches_official_on_validated_captures() {
         let base = env!("CARGO_MANIFEST_DIR");
@@ -4648,7 +4660,7 @@ mod combat_fixture {
             let mut i = 1;
             let last_actor = v.get(i).unwrap_or(&"?").to_string();
             i += 1;
-            let mut count = |v: &[&str], i: &mut usize| -> usize {
+            let count = |v: &[&str], i: &mut usize| -> usize {
                 let mut n = 0;
                 while *i < v.len() && !v[*i].is_empty() && v[*i].parse::<u64>().is_err() {
                     n += 1;

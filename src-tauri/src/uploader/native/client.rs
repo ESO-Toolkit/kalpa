@@ -1135,6 +1135,60 @@ mod tests {
     }
 
     #[test]
+    fn create_report_body_pins_all_visibility_ids() {
+        use crate::uploader::types::Visibility;
+
+        for (visibility, expected) in [
+            (Visibility::Public, 0),
+            (Visibility::Private, 1),
+            (Visibility::Unlisted, 2),
+        ] {
+            let opts = UploadOptions {
+                visibility,
+                ..UploadOptions::default()
+            };
+            let body = create_report_body_for(&opts);
+            let v: serde_json::Value =
+                serde_json::from_slice(&body).expect("create-report body must be valid JSON");
+            assert_eq!(
+                v["visibility"],
+                serde_json::json!(expected),
+                "{visibility:?} must match ESO Logs' reportVisibilityId table"
+            );
+        }
+    }
+
+    #[test]
+    fn live_segment_parameters_pin_fight_extraction_fields() {
+        let params = segment_parameters_json_live(7, 1_700_000_000_100, 1_700_000_003_900, 42);
+        let v: serde_json::Value =
+            serde_json::from_str(&params).expect("live segment parameters must be valid JSON");
+
+        assert_eq!(v["segmentId"], serde_json::json!(7));
+        assert_eq!(v["startTime"], serde_json::json!(1_700_000_000_100u64));
+        assert_eq!(v["endTime"], serde_json::json!(1_700_000_003_900u64));
+        assert_eq!(v["isLiveLog"], serde_json::json!(true));
+        assert_eq!(v["isRealTime"], serde_json::json!(true));
+        assert_eq!(v["inProgressEventCount"], serde_json::json!(42));
+        assert_eq!(v["mythic"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn finished_segment_parameters_are_not_realtime_or_in_progress() {
+        let params = segment_parameters_json(3, 1_700_000_000_000, 1_700_000_010_000);
+        let v: serde_json::Value =
+            serde_json::from_str(&params).expect("finished segment parameters must be valid JSON");
+
+        assert_eq!(v["segmentId"], serde_json::json!(3));
+        assert_eq!(v["startTime"], serde_json::json!(1_700_000_000_000u64));
+        assert_eq!(v["endTime"], serde_json::json!(1_700_000_010_000u64));
+        assert_eq!(v["isLiveLog"], serde_json::json!(false));
+        assert_eq!(v["isRealTime"], serde_json::json!(false));
+        assert_eq!(v["inProgressEventCount"], serde_json::json!(0));
+        assert_eq!(v["mythic"], serde_json::json!(0));
+    }
+
+    #[test]
     fn extract_next_segment_id_reads_numeric_value_including_terminal_zero() {
         // A numeric value (incl the explicit terminal 0) parses successfully.
         assert_eq!(

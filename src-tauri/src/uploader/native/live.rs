@@ -83,17 +83,27 @@ pub struct LiveSegmenter {
     next_segment_id: u64,
     /// How many segments have been cut+built (for diagnostics / progress).
     segments_built: usize,
+    /// Whether the current segment is inside a BEGIN_COMBAT/END_COMBAT window.
+    in_combat: bool,
+    /// Raw relative ms for the open fight in the current segment, if any.
+    current_fight_start_ms: Option<u64>,
+    /// Emitted event lines belonging to the open fight in the current segment.
+    current_fight_event_count: u64,
+    /// Completed fight durations contained in the current segment body.
+    segment_fight_durations_ms: Vec<u64>,
 }
 
 /// A built, ready-to-POST live segment: the ZIP'd segment + cumulative master, the
-/// server segment id to send them under, and the count of events in an unfinished
-/// fight at the tail (0 on a clean fight-boundary cut).
+/// server segment id to send them under, the count of events in an unfinished
+/// fight at the tail (0 on a clean fight-boundary cut), and completed fight
+/// durations that should advance the UI/history fight count after the POST lands.
 #[derive(Debug)]
 pub struct LiveSegmentPayload {
     pub segment: Segment,
     pub master: MasterTableBytes,
     pub segment_id: u64,
     pub in_progress_event_count: u64,
+    pub fight_durations_ms: Vec<u64>,
 }
 
 impl Default for LiveSegmenter {
@@ -111,6 +121,10 @@ impl LiveSegmenter {
             segment_lines: Vec::new(),
             next_segment_id: 1,
             segments_built: 0,
+            in_combat: false,
+            current_fight_start_ms: None,
+            current_fight_event_count: 0,
+            segment_fight_durations_ms: Vec::new(),
         }
     }
 
@@ -155,9 +169,64 @@ impl LiveSegmenter {
         ) {
             self.refresh_maps();
         }
-        let _ = self.emitter.feed(line);
         let kind = kind_of(line);
+        let emitted_count = self
+            .emitter
+            .feed(line)
+            .map(|events| events.lines().count() as u64)
+            .unwrap_or(0);
+        let raw_ms = line
+            .split(',')
+            .next()
+            .and_then(|ms| ms.trim().parse::<u64>().ok());
+        match kind {
+            Some("BEGIN_LOG") => {
+                self.in_combat = false;
+                self.current_fight_start_ms = None;
+                self.current_fight_event_count = 0;
+            }
+            Some("BEGIN_COMBAT") => {
+                self.in_combat = true;
+                self.current_fight_start_ms = raw_ms;
+                self.current_fight_event_count = emitted_count;
+            }
+            Some("END_COMBAT") => {
+                if self.in_combat {
+                    self.current_fight_event_count += emitted_count;
+                }
+                self.in_combat = false;
+                if let (Some(start), Some(end)) = (self.current_fight_start_ms.take(), raw_ms) {
+                    self.segment_fight_durations_ms
+                        .push(end.saturating_sub(start));
+                }
+                self.current_fight_event_count = 0;
+            }
+            _ if self.in_combat => {
+                self.current_fight_event_count += emitted_count;
+            }
+            _ => {}
+        }
         kind == Some("END_COMBAT") || kind == Some("BEGIN_LOG")
+    }
+
+    /// Feed a line while replaying the already-on-disk warm-up prefix. Completed
+    /// fights are discarded once they reach a safe cut, while an in-progress fight is
+    /// left buffered so the first live POST can include its BEGIN_COMBAT/PLAYER_INFO
+    /// preamble instead of uploading only a tail fragment.
+    fn feed_warmup(&mut self, line: &str) {
+        let boundary = self.feed(line);
+        if boundary && kind_of(line) == Some("END_COMBAT") {
+            self.discard_current_segment();
+        }
+    }
+
+    /// Drop the current per-segment body/window without touching report-scoped
+    /// actor, ability, tuple, wall-clock, or correlation state.
+    fn discard_current_segment(&mut self) {
+        self.segment_lines.clear();
+        self.segment_fight_durations_ms.clear();
+        self.current_fight_event_count = 0;
+        self.emitter.discard_warmup_segment();
     }
 
     /// Push the incrementally-maintained master index maps into the emitter. The
@@ -179,7 +248,10 @@ impl LiveSegmenter {
     /// logging ends, before the final [`Self::build_next_segment`], so a fully-absorbed
     /// final hit is not dropped.
     pub fn drain_trailing_shields(&mut self) {
-        self.emitter.drain_trailing_shields_into_segment();
+        let drained = self.emitter.drain_trailing_shields_into_segment();
+        if self.in_combat {
+            self.current_fight_event_count += drained;
+        }
     }
 
     /// Whether a cut at this moment is SAFE for in-flight correlations: no buffered
@@ -217,6 +289,8 @@ impl LiveSegmenter {
             // Nothing emitted in this window (e.g. a BEGIN_LOG with no fights yet).
             self.emitter.open_segment();
             self.segment_lines.clear();
+            self.segment_fight_durations_ms.clear();
+            self.current_fight_event_count = 0;
             return Ok(None);
         }
 
@@ -225,6 +299,8 @@ impl LiveSegmenter {
         let Some((start_time, end_time)) = self.emitter.live_segment_time_bounds() else {
             self.emitter.open_segment();
             self.segment_lines.clear();
+            self.segment_fight_durations_ms.clear();
+            self.current_fight_event_count = 0;
             return Ok(None);
         };
 
@@ -280,19 +356,28 @@ impl LiveSegmenter {
             MasterTableBytes::from_text(&master_text).map_err(|e| format!("zip master: {e}"))?;
         let segment_id = self.next_segment_id;
 
-        // A clean fight-boundary cut ends on END_COMBAT, so no fight is in progress.
-        // (A future true-mid-fight-streaming mode would compute a real count here.)
-        let in_progress_event_count = 0;
+        // Clean fight-boundary cuts end on END_COMBAT, so no fight is in progress.
+        // Terminal cuts can happen while a fight is still open; tell the live
+        // endpoint exactly how many emitted events at the segment tail belong to that
+        // unfinished fight.
+        let in_progress_event_count = if self.in_combat {
+            self.current_fight_event_count
+        } else {
+            0
+        };
 
         self.segments_built += 1;
+        let fight_durations_ms = std::mem::take(&mut self.segment_fight_durations_ms);
         self.emitter.open_segment();
         self.segment_lines.clear();
+        self.current_fight_event_count = 0;
 
         Ok(Some(LiveSegmentPayload {
             segment,
             master,
             segment_id,
             in_progress_event_count,
+            fight_durations_ms,
         }))
     }
 
@@ -331,10 +416,15 @@ impl LiveSegmenter {
         self.segment_lines.clear();
         self.next_segment_id = 1;
         self.segments_built = 0;
-        // Drop the in-progress segment's accumulated events + wall window so the first
-        // LIVE POST contains only post-join events (the cumulative tables/wall/anchor and
-        // in-flight correlations are NOT touched by open_segment).
-        self.emitter.open_segment();
+        // If warm-up ended between fights, drop the stale per-segment body/window. If it
+        // ended inside a fight, keep that fight's already-seen preamble/events so the
+        // first live POST is a complete fight segment rather than a tail fragment with
+        // missing player discovery.
+        if !self.in_combat {
+            self.emitter.open_segment();
+            self.current_fight_event_count = 0;
+            self.segment_fight_durations_ms.clear();
+        }
     }
 }
 
@@ -523,6 +613,7 @@ pub fn run_native_live_spike(
 pub struct LiveEnded {
     pub reason: EndReason,
     pub segments_built: usize,
+    pub fights_posted: usize,
 }
 
 /// Crash-recovery breadcrumb sink the driver writes to. Abstracted (like
@@ -710,12 +801,14 @@ pub fn run_native_live(
     terminate_report_and_settle(&driver.sender, sink, &code);
 
     let segments_built = driver.segments_built();
+    let fights_posted = driver.fights_posted();
     // A Stop is not an error — report it as a clean end with reason Stopped.
     Ok((
         code,
         LiveEnded {
             reason,
             segments_built,
+            fights_posted,
         },
     ))
 }
@@ -785,6 +878,10 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
 
     fn segments_built(&self) -> usize {
         self.seg.segments_built()
+    }
+
+    fn fights_posted(&self) -> usize {
+        self.fights_posted
     }
 
     /// Drive the line source to a terminal reason. Pulls batches from `poll`; on each
@@ -945,9 +1042,10 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
                         (ch.on_session_anchored)();
                     }
                 }
-                // Warm the cumulative state; IGNORE the cut boundary (no POST during
-                // warm-up — old fights are never sent).
-                let _ = self.seg.feed(&line);
+                // Warm the cumulative state without POSTing old fights. Completed
+                // prefix fights are discarded at safe cuts; an in-progress fight stays
+                // buffered so the first live POST keeps its combat/player preamble.
+                self.seg.feed_warmup(&line);
             }
             pos = chunk_end;
         }
@@ -1066,19 +1164,14 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
         // segments"). So advance the UI timeline/count + the orphan breadcrumb for the
         // accepted fight HERE, before branching on the terminal — otherwise the final
         // segment of a session that ends with `next == 0` would be undercounted in the
-        // UI. A fight event also backstops a missed on_session_anchored. 0-based index.
+        // UI. Fight events also backstop a missed on_session_anchored. 0-based index.
         sink.note_segment(&self.code.0, payload.segment_id);
         if let Some(ch) = self.channel {
-            // The fight's wall-clock duration is the segment's report-absolute window.
-            // A clean fight-boundary cut ends on END_COMBAT, so end-start is the fight
-            // length. saturating_sub guards a degenerate/zero-length window.
-            let duration_ms = payload
-                .segment
-                .end_time
-                .saturating_sub(payload.segment.start_time);
-            (ch.on_fight_posted)(self.fights_posted, duration_ms);
+            for (offset, duration_ms) in payload.fight_durations_ms.iter().copied().enumerate() {
+                (ch.on_fight_posted)(self.fights_posted + offset, duration_ms);
+            }
         }
-        self.fights_posted += 1;
+        self.fights_posted += payload.fight_durations_ms.len();
         if next == 0 {
             eprintln!(
                 "[uploader] live: server returned nextSegmentId=0 after segment {} \
@@ -1095,10 +1188,9 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
 
     /// PAUSE on a lost session: prompt re-login, poll for a fresh session every ~2s,
     /// then RE-POST the `held` payload (the one whose POST hit the auth wall — the
-    /// segmenter advanced past it, so it can't be rebuilt). Subsequent boundaries
-    /// during the pause keep feeding the emitter (state advances), and the next build
-    /// after resume produces one cumulative segment covering everything since the held
-    /// cut — valid because the master is cumulative+pinned and cuts are fight-granular.
+    /// segmenter advanced past it, so it can't be rebuilt). The pause blocks posting;
+    /// once reauth succeeds the tail resumes from its saved file offset and catches up on
+    /// bytes ESO appended while the user was signing back in.
     /// Returns `Some(reason)` if the pause ends the stream, `None` to resume.
     fn pause_until_reauth_or_end(
         &mut self,
@@ -1818,6 +1910,7 @@ mod tests {
 0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"
 0,ZONE_CHANGED,1129,\"Hall of the Lunar Champion\",NONE
 0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",820189967932710348,50,1735,0,PLAYER_ALLY,T
+0,UNIT_ADDED,7,PLAYER,F,2,0,F,6,9,\"Ally\",\"@ally\",820189967932710349,50,2200,0,PLAYER_ALLY,T
 0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Tenmar Bear\",\"\",0,50,160,0,HOSTILE,F
 0,UNIT_ADDED,31,MONSTER,F,0,88340,F,0,0,\"Tenmar Lynx\",\"\",0,50,160,0,HOSTILE,F
 100,ABILITY_INFO,28549,\"Roll Dodge\",\"/esoui/art/icons/ability_rogue_035.dds\",F,T
@@ -1919,6 +2012,7 @@ mod tests {
 0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"
 0,ZONE_CHANGED,1129,\"Hall of the Lunar Champion\",NONE
 0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",820189967932710348,50,1735,0,PLAYER_ALLY,T
+0,UNIT_ADDED,7,PLAYER,F,2,0,F,6,9,\"Ally\",\"@ally\",820189967932710349,50,2200,0,PLAYER_ALLY,T
 0,UNIT_ADDED,30,MONSTER,F,0,88330,F,0,0,\"Tenmar Bear\",\"\",0,50,160,0,HOSTILE,F
 0,UNIT_ADDED,31,MONSTER,F,0,88340,F,0,0,\"Tenmar Lynx\",\"\",0,50,160,0,HOSTILE,F
 100,ABILITY_INFO,28549,\"Roll Dodge\",\"/esoui/art/icons/ability_rogue_035.dds\",F,T
@@ -1927,6 +2021,7 @@ mod tests {
 100,EFFECT_INFO,29489,BUFF,NONE,DEFAULT
 100,ABILITY_INFO,38901,\"Crystal Frags\",\"/esoui/art/icons/ability_sorcerer_dark_magic.dds\",F,F
 200,BEGIN_COMBAT
+205,PLAYER_INFO,1,[142210,86673],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]
 210,BEGIN_CAST,800,F,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,40000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
 220,EFFECT_CHANGED,GAINED,1,5002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*
 230,COMBAT_EVENT,DAMAGE,FIRE,1,1500,0,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,38500/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
@@ -1934,6 +2029,8 @@ mod tests {
 700,EFFECT_CHANGED,FADED,1,5002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*
 800,END_COMBAT
 1000,BEGIN_COMBAT
+1005,PLAYER_INFO,1,[142210,86673],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]
+1006,PLAYER_INFO,7,[142210,63880],[1,1],[[HEAD,94773,T,16,ARMOR_DIVINES,LEGENDARY]],[63046],[40382]
 1010,END_CAST,COMPLETED,5001,38901
 1030,COMBAT_EVENT,DAMAGE,FIRE,1,2200,0,5003,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,31,30000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
 1060,COMBAT_EVENT,CRITICAL_DAMAGE,FIRE,1,4400,0,5003,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,31,25600/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0
@@ -1956,6 +2053,15 @@ mod tests {
         (lines[..cut].to_vec(), lines[cut..].to_vec())
     }
 
+    fn split_after_line<'a>(lines: &[&'a str], needle: &str) -> (Vec<&'a str>, Vec<&'a str>) {
+        let cut = lines
+            .iter()
+            .position(|line| line.starts_with(needle))
+            .expect("fixture contains split line")
+            + 1;
+        (lines[..cut].to_vec(), lines[cut..].to_vec())
+    }
+
     #[test]
     fn mid_session_seed_matches_from_start_stream_for_live_fights() {
         let session = two_fight_session_inline();
@@ -1973,7 +2079,7 @@ mod tests {
         // stream the live remainder, collecting only the live segments.
         let mut seg = LiveSegmenter::new();
         for line in &prefix {
-            let _ = seg.feed(line); // ignore cut boundaries — no POST during warm-up
+            seg.feed_warmup(line);
         }
         seg.finish_warmup();
         // First live segment id starts fresh at 1 (the prefix fight was never POSTed).
@@ -2030,6 +2136,752 @@ mod tests {
                  BEGIN_LOG in BOTH paths — never synthesized)"
             );
         }
+    }
+
+    #[test]
+    fn warmup_preserves_open_fight_preamble_for_first_live_segment() {
+        let session = two_fight_session_inline();
+        let full = collect_segments(&session);
+        assert!(full.len() >= 2, "baseline must have at least two fights");
+
+        // Simulate clicking Start Live after fight 2 has begun and its PLAYER_INFO
+        // was already written, but before the fight ends. The first posted live
+        // segment must keep that preamble; otherwise the report can render damage
+        // events without detecting players.
+        let (prefix, live) = split_after_line(&session, "1005,PLAYER_INFO");
+        let mut seg = LiveSegmenter::new();
+        for line in &prefix {
+            seg.feed_warmup(line);
+        }
+        seg.finish_warmup();
+
+        let mut live_segs: Vec<(Vec<u8>, Vec<u8>, u64, u64)> = Vec::new();
+        for line in &live {
+            if seg.feed(line) && seg.shields_settled() {
+                if let Ok(Some(p)) = seg.build_next_segment() {
+                    live_segs.push((
+                        p.segment.bytes.clone(),
+                        p.master.bytes.clone(),
+                        p.segment.start_time,
+                        p.segment.end_time,
+                    ));
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Ok(Some(p)) = seg.build_next_segment() {
+            live_segs.push((
+                p.segment.bytes.clone(),
+                p.master.bytes.clone(),
+                p.segment.start_time,
+                p.segment.end_time,
+            ));
+        }
+
+        assert_eq!(live_segs.len(), 1, "only the open fight should be posted");
+        let baseline_fight_2 = &full[1];
+        assert_eq!(
+            live_segs[0].0, baseline_fight_2.0,
+            "mid-fight live start must preserve the complete fight segment body"
+        );
+        assert_eq!(
+            live_segs[0].1, baseline_fight_2.1,
+            "mid-fight live start must preserve the cumulative master"
+        );
+        assert_eq!(
+            (live_segs[0].2, live_segs[0].3),
+            (baseline_fight_2.2, baseline_fight_2.3),
+            "mid-fight live start must preserve the fight wall window"
+        );
+        let body = unzip_segment_body_bytes(&live_segs[0].0);
+        assert!(
+            body.contains("|44|1|"),
+            "first live segment must include local player-info code 44"
+        );
+        assert!(
+            body.contains("|44|2|"),
+            "first live segment must include ally player-info code 44"
+        );
+    }
+
+    #[test]
+    fn warmup_preserves_open_fight_started_before_first_live_event() {
+        let session = two_fight_session_inline();
+        let full = collect_segments(&session);
+        assert!(full.len() >= 2, "baseline must have at least two fights");
+
+        // Simulate clicking Start Live immediately after the active fight's
+        // BEGIN_COMBAT was written, before PLAYER_INFO or damage arrived. The
+        // preserved warm-up line is the only way the completed fight uploads as a
+        // complete fight instead of an orphan tail.
+        let (prefix, live) = split_after_line(&session, "1000,BEGIN_COMBAT");
+        let mut seg = LiveSegmenter::new();
+        for line in &prefix {
+            seg.feed_warmup(line);
+        }
+        seg.finish_warmup();
+
+        let mut live_payloads = Vec::new();
+        for line in &live {
+            if seg.feed(line) && seg.shields_settled() {
+                if let Some(payload) = seg.build_next_segment().expect("build") {
+                    live_payloads.push(payload);
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Some(payload) = seg.build_next_segment().expect("final build") {
+            live_payloads.push(payload);
+        }
+
+        assert_eq!(live_payloads.len(), 1, "only the open fight should post");
+        assert_eq!(
+            live_payloads[0].segment.bytes, full[1].0,
+            "early mid-fight start must preserve the complete fight segment body"
+        );
+        assert_eq!(
+            live_payloads[0].master.bytes, full[1].1,
+            "early mid-fight start must preserve the cumulative master"
+        );
+        assert_eq!(
+            (
+                live_payloads[0].segment.start_time,
+                live_payloads[0].segment.end_time
+            ),
+            (full[1].2, full[1].3),
+            "early mid-fight start must preserve the fight wall window"
+        );
+        assert_eq!(
+            live_payloads[0].fight_durations_ms,
+            vec![500],
+            "the early-attached open fight counts once when it completes"
+        );
+        let body = unzip_segment_body_bytes(&live_payloads[0].segment.bytes);
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.split('|').nth(1) == Some("52"))
+                .count(),
+            1,
+            "first live segment must preserve exactly one BEGIN_COMBAT event"
+        );
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.split('|').nth(1) == Some("44"))
+                .count(),
+            2,
+            "first live segment must preserve every player-info event"
+        );
+        for player_index in ["1", "2"] {
+            assert_eq!(
+                body.lines()
+                    .filter(|line| {
+                        let mut fields = line.split('|');
+                        fields.nth(1) == Some("44") && fields.next() == Some(player_index)
+                    })
+                    .count(),
+                1,
+                "first live segment must preserve player-info for actor index {player_index}"
+            );
+        }
+    }
+
+    #[test]
+    fn warmup_partial_open_fight_flush_counts_preserved_begin_combat_tail() {
+        let session = two_fight_session_inline();
+        let (partial_from_start, _) = split_after_line(&session, "1030,COMBAT_EVENT");
+        let baseline = collect_segments(&partial_from_start);
+        assert!(
+            baseline.len() >= 2,
+            "from-start partial stream must build the prefix fight and open tail"
+        );
+
+        // Attach after BEGIN_COMBAT, then stop/flush before END_COMBAT. The server
+        // receives an in-progress tail rather than a completed fight, but the tail
+        // must still include the preserved BEGIN_COMBAT and count all emitted events.
+        let (prefix, after_begin) = split_after_line(&session, "1000,BEGIN_COMBAT");
+        let (live, _) = split_after_line(&after_begin, "1030,COMBAT_EVENT");
+        let mut seg = LiveSegmenter::new();
+        for line in &prefix {
+            seg.feed_warmup(line);
+        }
+        seg.finish_warmup();
+
+        let mut live_payloads = Vec::new();
+        for line in &live {
+            if seg.feed(line) && seg.shields_settled() {
+                if let Some(payload) = seg.build_next_segment().expect("build") {
+                    live_payloads.push(payload);
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Some(payload) = seg.build_next_segment().expect("final build") {
+            live_payloads.push(payload);
+        }
+
+        assert_eq!(live_payloads.len(), 1, "only the open tail should post");
+        assert_eq!(
+            live_payloads[0].segment.bytes, baseline[1].0,
+            "partial open fight crossing attach must match from-start output"
+        );
+        assert_eq!(
+            live_payloads[0].master.bytes, baseline[1].1,
+            "partial warm-up and live split must keep the cumulative master aligned"
+        );
+        assert_eq!(
+            (
+                live_payloads[0].segment.start_time,
+                live_payloads[0].segment.end_time
+            ),
+            (baseline[1].2, baseline[1].3),
+            "partial wall window must match the from-start baseline"
+        );
+        assert_eq!(
+            live_payloads[0].fight_durations_ms,
+            Vec::<u64>::new(),
+            "an early-attached unfinished tail must not count as a completed fight"
+        );
+        let body = unzip_segment_body_bytes(&live_payloads[0].segment.bytes);
+        assert_eq!(
+            live_payloads[0].in_progress_event_count,
+            body.lines().count() as u64,
+            "in-progress count must include the preserved BEGIN_COMBAT tail"
+        );
+        assert!(
+            body.lines()
+                .any(|line| line.split('|').nth(1) == Some("52")),
+            "partial live segment must include the preserved BEGIN_COMBAT"
+        );
+    }
+
+    #[test]
+    fn warmup_discards_pending_shield_from_completed_prefix_fight() {
+        let mut session = two_fight_session_inline();
+        let first_end = session
+            .iter()
+            .position(|line| kind_of(line) == Some("END_COMBAT"))
+            .expect("fixture has first fight");
+        session.insert(
+            first_end,
+            "790,COMBAT_EVENT,DAMAGE_SHIELDED,FIRE,1,500,0,7001,146311,30,36700/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0",
+        );
+        let (prefix, live) = split_after_first_fight(&session);
+
+        let mut seg = LiveSegmenter::new();
+        for line in &prefix {
+            seg.feed_warmup(line);
+        }
+        seg.finish_warmup();
+
+        let mut live_payloads = Vec::new();
+        for line in &live {
+            if seg.feed(line) && seg.shields_settled() {
+                if let Some(payload) = seg.build_next_segment().expect("build") {
+                    live_payloads.push(payload);
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Some(payload) = seg.build_next_segment().expect("final build") {
+            live_payloads.push(payload);
+        }
+
+        assert_eq!(
+            live_payloads.len(),
+            1,
+            "only the post-warm-up fight should be uploaded"
+        );
+        assert_eq!(
+            live_payloads[0].fight_durations_ms,
+            vec![500],
+            "completed prefix fight must not count toward live fights"
+        );
+        let body = unzip_segment_body_bytes(&live_payloads[0].segment.bytes);
+        assert!(
+            !body
+                .lines()
+                .any(|line| line.split('|').nth(1) == Some("38")),
+            "pending shield output from the discarded prefix fight must not leak into \
+             the first live segment"
+        );
+    }
+
+    #[test]
+    fn warmup_preserves_pending_shield_from_open_fight_until_live_damage() {
+        let mut session = two_fight_session_inline();
+        let paired_damage = session
+            .iter()
+            .position(|line| line.starts_with("1030,COMBAT_EVENT"))
+            .expect("fixture has fight-2 damage");
+        session.insert(
+            paired_damage,
+            "1020,COMBAT_EVENT,DAMAGE_SHIELDED,FIRE,1,500,0,5003,146311,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,31,30500/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0",
+        );
+        let full = collect_segments(&session);
+        assert!(full.len() >= 2, "baseline must have at least two fights");
+
+        // Simulate attach after the shielded event was already written but before
+        // its paired real damage event arrived. The pending code-38 correlation must
+        // survive finish_warmup and flush into the first live segment.
+        let (prefix, live) = split_after_line(&session, "1020,COMBAT_EVENT");
+        let mut seg = LiveSegmenter::new();
+        for line in &prefix {
+            seg.feed_warmup(line);
+        }
+        seg.finish_warmup();
+
+        let mut live_payloads = Vec::new();
+        for line in &live {
+            if seg.feed(line) && seg.shields_settled() {
+                if let Some(payload) = seg.build_next_segment().expect("build") {
+                    live_payloads.push(payload);
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Some(payload) = seg.build_next_segment().expect("final build") {
+            live_payloads.push(payload);
+        }
+
+        assert_eq!(live_payloads.len(), 1, "only the open fight should post");
+        assert_eq!(
+            live_payloads[0].segment.bytes, full[1].0,
+            "pending shield correlation crossing attach must match from-start output"
+        );
+        assert_eq!(
+            live_payloads[0].master.bytes, full[1].1,
+            "warm-up and live split must keep the cumulative master aligned"
+        );
+        assert_eq!(
+            (
+                live_payloads[0].segment.start_time,
+                live_payloads[0].segment.end_time
+            ),
+            (full[1].2, full[1].3),
+            "wall window must match the from-start baseline"
+        );
+        assert_eq!(
+            live_payloads[0].fight_durations_ms,
+            vec![500],
+            "the open fight counts only once when it completes"
+        );
+        let body = unzip_segment_body_bytes(&live_payloads[0].segment.bytes);
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.split('|').nth(1) == Some("38"))
+                .count(),
+            1,
+            "the pre-attach shield must flush as one code-38 event"
+        );
+    }
+
+    #[test]
+    fn warmup_preserves_open_fight_effect_stack_state_until_live_fade() {
+        let mut session = two_fight_session_inline();
+        let first_damage = session
+            .iter()
+            .position(|line| line.starts_with("1030,COMBAT_EVENT"))
+            .expect("fixture has fight-2 damage");
+        session.insert(
+            first_damage,
+            "1020,EFFECT_CHANGED,GAINED,1,9002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*",
+        );
+        let end_combat = session
+            .iter()
+            .position(|line| line.starts_with("1500,END_COMBAT"))
+            .expect("fixture has fight-2 end");
+        session.insert(
+            end_combat,
+            "1490,EFFECT_CHANGED,FADED,2,9002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*",
+        );
+        session.insert(
+            first_damage + 2,
+            "1045,EFFECT_CHANGED,UPDATED,2,9002,29489,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,*",
+        );
+
+        let full = collect_segments(&session);
+        assert!(full.len() >= 2, "baseline must have at least two fights");
+
+        // Simulate attach after the open fight's GAINED was already written. The
+        // preserved warm-up state must keep the effect active so the later UPDATED
+        // emits as a stack increase, not an orphan, and the FADED clears the same tuple.
+        let (prefix, live) = split_after_line(&session, "1020,EFFECT_CHANGED");
+        let mut seg = LiveSegmenter::new();
+        for line in &prefix {
+            seg.feed_warmup(line);
+        }
+        seg.finish_warmup();
+
+        let mut live_payloads = Vec::new();
+        for line in &live {
+            if seg.feed(line) && seg.shields_settled() {
+                if let Some(payload) = seg.build_next_segment().expect("build") {
+                    live_payloads.push(payload);
+                }
+            }
+        }
+        seg.drain_trailing_shields();
+        if let Some(payload) = seg.build_next_segment().expect("final build") {
+            live_payloads.push(payload);
+        }
+
+        assert_eq!(live_payloads.len(), 1, "only the open fight should post");
+        assert_eq!(
+            live_payloads[0].segment.bytes, full[1].0,
+            "effect stack state crossing attach must match from-start output"
+        );
+        assert_eq!(
+            live_payloads[0].master.bytes, full[1].1,
+            "warm-up and live split must keep the cumulative master aligned"
+        );
+        assert_eq!(
+            (
+                live_payloads[0].segment.start_time,
+                live_payloads[0].segment.end_time
+            ),
+            (full[1].2, full[1].3),
+            "wall window must match the from-start baseline"
+        );
+        assert_eq!(
+            live_payloads[0].fight_durations_ms,
+            vec![500],
+            "the open fight counts only once when it completes"
+        );
+
+        let body = unzip_segment_body_bytes(&live_payloads[0].segment.bytes);
+        for code in ["5", "6", "7"] {
+            assert_eq!(
+                body.lines()
+                    .filter(|line| line.split('|').nth(1) == Some(code))
+                    .count(),
+                1,
+                "the first live segment must preserve exactly one effect code {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_cut_payload_counts_each_completed_fight() {
+        let session = two_fight_session_inline();
+        let mut seg = LiveSegmenter::new();
+        for line in &session {
+            let _ = seg.feed(line);
+        }
+
+        let payload = seg
+            .build_next_segment()
+            .expect("build must succeed")
+            .expect("combined segment should be non-empty");
+        assert_eq!(
+            payload.fight_durations_ms,
+            vec![600, 500],
+            "one uploaded segment can contain multiple completed fights"
+        );
+    }
+
+    #[test]
+    fn partial_final_segment_reports_in_progress_events_without_completed_fight() {
+        let session = two_fight_session_inline();
+        let (partial, _) = split_after_line(&session, "230,COMBAT_EVENT");
+
+        let mut seg = LiveSegmenter::new();
+        for line in &partial {
+            let _ = seg.feed(line);
+        }
+        seg.drain_trailing_shields();
+
+        let payload = seg
+            .build_next_segment()
+            .expect("partial segment must build")
+            .expect("partial segment should contain emitted events");
+        let body = unzip_segment_body_bytes(&payload.segment.bytes);
+        let lines = body.lines().collect::<Vec<_>>();
+        let last_begin_combat = lines
+            .iter()
+            .rposition(|line| line.split('|').nth(1) == Some("52"))
+            .expect("partial body has BEGIN_COMBAT");
+        let unfinished_tail_events = (lines.len() - last_begin_combat) as u64;
+
+        assert!(
+            unfinished_tail_events > 0,
+            "fixture should emit a partial fight body"
+        );
+        assert_eq!(
+            payload.fight_durations_ms,
+            Vec::<u64>::new(),
+            "an unfinished tail must not be counted as a completed fight"
+        );
+        assert_eq!(
+            payload.in_progress_event_count, unfinished_tail_events,
+            "only events from the open BEGIN_COMBAT tail count as in-progress"
+        );
+    }
+
+    #[test]
+    fn combined_completed_and_partial_segment_counts_only_unfinished_tail() {
+        let session = two_fight_session_inline();
+        let (partial, _) = split_after_line(&session, "1030,COMBAT_EVENT");
+
+        let mut seg = LiveSegmenter::new();
+        for line in &partial {
+            let _ = seg.feed(line);
+        }
+        seg.drain_trailing_shields();
+
+        let payload = seg
+            .build_next_segment()
+            .expect("combined segment must build")
+            .expect("combined segment should contain emitted events");
+        let body = unzip_segment_body_bytes(&payload.segment.bytes);
+        let lines = body.lines().collect::<Vec<_>>();
+        let last_begin_combat = lines
+            .iter()
+            .rposition(|line| line.split('|').nth(1) == Some("52"))
+            .expect("combined body has a second BEGIN_COMBAT");
+        let unfinished_tail_events = (lines.len() - last_begin_combat) as u64;
+
+        assert_eq!(
+            payload.fight_durations_ms,
+            vec![600],
+            "only the closed first fight should count as completed"
+        );
+        assert_eq!(
+            payload.in_progress_event_count, unfinished_tail_events,
+            "inProgressEventCount should describe only the unfinished tail fight"
+        );
+    }
+
+    #[test]
+    fn driver_emits_one_ui_event_per_fight_in_combined_segment() {
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(vec![Ok(())], vec![Ok(2)], session_ok);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_events = Arc::clone(&seen);
+        let events = LiveEventSink {
+            on_report_open: Box::new(|_| {}),
+            on_session_anchored: Box::new(|| {}),
+            on_fight_posted: Box::new(move |index, duration_ms| {
+                seen_events.lock().unwrap().push((index, duration_ms));
+            }),
+            on_reauth_required: Box::new(|| {}),
+            on_reauth_resolved: Box::new(|| {}),
+        };
+        let mut driver =
+            LiveDriver::new(sender, ReportCode("TESTCODE".into()), cancel, Some(&events));
+        let payload = LiveSegmentPayload {
+            segment: Segment::from_text("15|1\n0\n", 100, 200).expect("segment"),
+            master: MasterTableBytes::from_text("15|1|\n0\n0\n0\n0\n").expect("master"),
+            segment_id: 1,
+            in_progress_event_count: 0,
+            fight_durations_ms: vec![600, 500],
+        };
+
+        match driver.post_built(payload, &NoopOrphanSink) {
+            PostOutcome::Posted { next_segment_id } => assert_eq!(next_segment_id, 2),
+            _ => panic!("combined segment post should succeed"),
+        }
+        assert_eq!(*seen.lock().unwrap(), vec![(0, 600), (1, 500)]);
+        assert_eq!(driver.fights_posted(), 2);
+    }
+
+    #[test]
+    fn driver_deferred_shield_cut_emits_each_completed_fight_once_on_final_flush() {
+        let mut session = two_fight_session_inline();
+        let first_end = session
+            .iter()
+            .position(|line| kind_of(line) == Some("END_COMBAT"))
+            .expect("fixture has first fight");
+        session.insert(
+            first_end,
+            "790,COMBAT_EVENT,DAMAGE_SHIELDED,FIRE,1,500,0,7001,146311,30,36700/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0",
+        );
+
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(vec![Ok(())], vec![Ok(2)], session_ok);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_events = Arc::clone(&seen);
+        let events = LiveEventSink {
+            on_report_open: Box::new(|_| {}),
+            on_session_anchored: Box::new(|| {}),
+            on_fight_posted: Box::new(move |index, duration_ms| {
+                seen_events.lock().unwrap().push((index, duration_ms));
+            }),
+            on_reauth_required: Box::new(|| {}),
+            on_reauth_resolved: Box::new(|| {}),
+        };
+        let mut driver =
+            LiveDriver::new(sender, ReportCode("TESTCODE".into()), cancel, Some(&events));
+        let sink = NoopOrphanSink;
+        let reason = driver.drive_assembled_lines(
+            session.iter().map(|line| (*line).to_string()).collect(),
+            &sink,
+        );
+
+        assert_eq!(reason, None, "deferred cuts should wait for final flush");
+        assert_eq!(
+            driver.segments_built(),
+            0,
+            "pending shield must defer boundary posts"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no completed fight UI event should emit before the deferred segment posts"
+        );
+
+        driver.seg.drain_trailing_shields();
+        match driver.post_current(&sink) {
+            PostOutcome::Posted { next_segment_id } => assert_eq!(next_segment_id, 2),
+            _ => panic!("final deferred segment should post successfully"),
+        }
+
+        assert_eq!(*seen.lock().unwrap(), vec![(0, 600), (1, 500)]);
+        assert_eq!(driver.fights_posted(), 2);
+        assert_eq!(
+            driver.sender.add_segment_requests(),
+            vec![PostedAddSegment {
+                segment_id: 1,
+                start_time: 1700000000000,
+                end_time: 1700000001500,
+                in_progress_event_count: 0,
+            }],
+            "the deferred terminal post should be one completed segment with no \
+             unfinished-tail count"
+        );
+    }
+
+    #[test]
+    fn post_built_sends_in_progress_count_without_completed_fight_event() {
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(vec![Ok(())], vec![Ok(2)], session_ok);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_events = Arc::clone(&seen);
+        let events = LiveEventSink {
+            on_report_open: Box::new(|_| {}),
+            on_session_anchored: Box::new(|| {}),
+            on_fight_posted: Box::new(move |index, duration_ms| {
+                seen_events.lock().unwrap().push((index, duration_ms));
+            }),
+            on_reauth_required: Box::new(|| {}),
+            on_reauth_resolved: Box::new(|| {}),
+        };
+        let mut driver =
+            LiveDriver::new(sender, ReportCode("TESTCODE".into()), cancel, Some(&events));
+        let payload = LiveSegmentPayload {
+            segment: Segment::from_text("15|1\n5\n", 1700000001000, 1700000001500)
+                .expect("segment"),
+            master: MasterTableBytes::from_text("15|1|\n0\n0\n0\n0\n").expect("master"),
+            segment_id: 7,
+            in_progress_event_count: 5,
+            fight_durations_ms: Vec::new(),
+        };
+
+        match driver.post_built(payload, &NoopOrphanSink) {
+            PostOutcome::Posted { next_segment_id } => assert_eq!(next_segment_id, 2),
+            _ => panic!("partial segment post should succeed"),
+        }
+
+        assert_eq!(
+            driver.sender.add_segment_requests(),
+            vec![PostedAddSegment {
+                segment_id: 7,
+                start_time: 1700000001000,
+                end_time: 1700000001500,
+                in_progress_event_count: 5,
+            }],
+            "the live request must carry the unfinished-tail count"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "a partial fight must not emit a completed-fight UI event"
+        );
+        assert_eq!(driver.fights_posted(), 0);
+    }
+
+    #[test]
+    fn reauth_repost_counts_held_segment_once_after_acceptance() {
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(
+            vec![Ok(()), Ok(())],
+            vec![Err(UploadError::Session(SessionError::Expired)), Ok(8)],
+            session_ok,
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_events = Arc::clone(&seen);
+        let auth = Arc::new(Mutex::new(Vec::new()));
+        let auth_required = Arc::clone(&auth);
+        let auth_resolved = Arc::clone(&auth);
+        let events = LiveEventSink {
+            on_report_open: Box::new(|_| {}),
+            on_session_anchored: Box::new(|| {}),
+            on_fight_posted: Box::new(move |index, duration_ms| {
+                seen_events.lock().unwrap().push((index, duration_ms));
+            }),
+            on_reauth_required: Box::new(move || {
+                auth_required.lock().unwrap().push("required");
+            }),
+            on_reauth_resolved: Box::new(move || {
+                auth_resolved.lock().unwrap().push("resolved");
+            }),
+        };
+        let mut driver =
+            LiveDriver::new(sender, ReportCode("TESTCODE".into()), cancel, Some(&events));
+        let payload = LiveSegmentPayload {
+            segment: Segment::from_text("15|1\n0\n", 100, 200).expect("segment"),
+            master: MasterTableBytes::from_text("15|1|\n0\n0\n0\n0\n").expect("master"),
+            segment_id: 3,
+            in_progress_event_count: 0,
+            fight_durations_ms: vec![600, 500],
+        };
+
+        let held = match driver.post_built(payload, &NoopOrphanSink) {
+            PostOutcome::NeedsReauth { held } => held,
+            _ => panic!("first post should pause for reauth"),
+        };
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "an auth-rejected segment was not accepted and must not advance fight UI"
+        );
+        assert_eq!(driver.fights_posted(), 0);
+        assert!(
+            auth.lock().unwrap().is_empty(),
+            "the UI prompt fires when the driver enters the pause loop, not on classify"
+        );
+
+        let reason = driver.pause_until_reauth_or_end(*held, &NoopOrphanSink);
+        assert_eq!(reason, None, "fresh session should re-post and resume");
+        assert_eq!(
+            *auth.lock().unwrap(),
+            vec!["required", "resolved"],
+            "reauth UI callbacks must bracket the held segment repost"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(0, 600), (1, 500)],
+            "held segment should advance fights once, after the accepted re-post"
+        );
+        assert_eq!(driver.fights_posted(), 2);
+        assert_eq!(
+            driver.sender.add_segment_requests(),
+            vec![
+                PostedAddSegment {
+                    segment_id: 3,
+                    start_time: 100,
+                    end_time: 200,
+                    in_progress_event_count: 0,
+                },
+                PostedAddSegment {
+                    segment_id: 3,
+                    start_time: 100,
+                    end_time: 200,
+                    in_progress_event_count: 0,
+                },
+            ],
+            "the held reauth retry must re-use the same segment metadata"
+        );
     }
 
     #[test]
@@ -2200,9 +3052,12 @@ mod tests {
     /// Unzip a built segment's `log.txt` and return just the event body (drop the
     /// 2-line header: `version|game` + count).
     fn unzip_segment_body(segment: &Segment) -> String {
+        unzip_segment_body_bytes(&segment.bytes)
+    }
+
+    fn unzip_segment_body_bytes(bytes: &[u8]) -> String {
         use std::io::Read;
-        let mut archive =
-            zip::ZipArchive::new(std::io::Cursor::new(segment.bytes.clone())).expect("zip");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("zip");
         let mut file = archive.by_index(0).unwrap();
         let mut s = String::new();
         file.read_to_string(&mut s).unwrap();
@@ -2377,6 +3232,14 @@ mod tests {
     /// a server. Per endpoint family (master / add-segment) it returns the NEXT scripted
     /// result; `add-segment` successes carry a `nextSegmentId`. `has_session` is a
     /// flippable flag (for pause-resume). Records the URLs it was asked to POST.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct PostedAddSegment {
+        segment_id: u64,
+        start_time: u64,
+        end_time: u64,
+        in_progress_event_count: u64,
+    }
+
     struct ScriptedSender {
         // Queued add-segment outcomes: Ok(nextSegmentId) or a scripted error.
         seg_results: Mutex<std::collections::VecDeque<Result<u64, UploadError>>>,
@@ -2384,6 +3247,7 @@ mod tests {
         master_results: Mutex<std::collections::VecDeque<Result<(), UploadError>>>,
         session_ok: Arc<AtomicBool>,
         posts: Mutex<Vec<String>>,
+        add_segments: Mutex<Vec<PostedAddSegment>>,
     }
 
     impl ScriptedSender {
@@ -2397,6 +3261,7 @@ mod tests {
                 master_results: Mutex::new(master.into_iter().collect()),
                 session_ok,
                 posts: Mutex::new(Vec::new()),
+                add_segments: Mutex::new(Vec::new()),
             }
         }
         fn post_count(&self, needle: &str) -> usize {
@@ -2407,13 +3272,16 @@ mod tests {
                 .filter(|u| u.contains(needle))
                 .count()
         }
+        fn add_segment_requests(&self) -> Vec<PostedAddSegment> {
+            self.add_segments.lock().unwrap().clone()
+        }
     }
 
     impl LivePoster for ScriptedSender {
         fn post(
             &self,
             url: &str,
-            _req: OwnedLiveRequest,
+            req: OwnedLiveRequest,
             cancel: &Arc<AtomicBool>,
         ) -> Result<Vec<u8>, UploadError> {
             self.posts.lock().unwrap().push(url.to_string());
@@ -2428,6 +3296,23 @@ mod tests {
                 };
             }
             if url.contains("add-report-segment") {
+                if let OwnedLiveRequest::AddSegment {
+                    segment_id,
+                    start_time,
+                    end_time,
+                    in_progress_event_count,
+                    ..
+                } = req
+                {
+                    self.add_segments.lock().unwrap().push(PostedAddSegment {
+                        segment_id,
+                        start_time,
+                        end_time,
+                        in_progress_event_count,
+                    });
+                } else {
+                    panic!("add-report-segment received a non-segment request");
+                }
                 return match self.seg_results.lock().unwrap().pop_front() {
                     Some(Ok(next)) => Ok(format!("{{\"nextSegmentId\":{next}}}").into_bytes()),
                     Some(Err(e)) => Err(e),
@@ -2789,6 +3674,66 @@ mod tests {
             reason,
             Some(EndReason::NewSession),
             "a second BEGIN_LOG must end the stream as NewSession (single-session contract), got {reason:?}"
+        );
+    }
+
+    #[test]
+    fn second_begin_log_flushes_deferred_shield_segment_with_old_session_clock() {
+        let mut session = two_fight_session_inline();
+        let first_end = session
+            .iter()
+            .position(|line| kind_of(line) == Some("END_COMBAT"))
+            .expect("fixture has first fight");
+        session.insert(
+            first_end,
+            "790,COMBAT_EVENT,DAMAGE_SHIELDED,FIRE,1,500,0,7001,146311,30,36700/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0",
+        );
+        let mut lines = session
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<String>>();
+        lines
+            .push("0,BEGIN_LOG,1700000099000,15,\"NA Megaserver\",\"en\",\"eso.live.11.3\"".into());
+        lines.push("0,ZONE_CHANGED,1129,\"Hall\",NONE".into());
+
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(vec![Ok(())], vec![Ok(2)], session_ok);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_events = Arc::clone(&seen);
+        let events = LiveEventSink {
+            on_report_open: Box::new(|_| {}),
+            on_session_anchored: Box::new(|| {}),
+            on_fight_posted: Box::new(move |index, duration_ms| {
+                seen_events.lock().unwrap().push((index, duration_ms));
+            }),
+            on_reauth_required: Box::new(|| {}),
+            on_reauth_resolved: Box::new(|| {}),
+        };
+        let mut driver =
+            LiveDriver::new(sender, ReportCode("TESTCODE".into()), cancel, Some(&events));
+        let reason = driver.drive_assembled_lines(lines, &NoopOrphanSink);
+
+        assert_eq!(
+            reason,
+            Some(EndReason::NewSession),
+            "a replacement BEGIN_LOG must end the current report as a new session"
+        );
+        assert_eq!(
+            driver.segments_built(),
+            1,
+            "the deferred old-session segment must be posted before NewSession"
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![(0, 600), (1, 500)]);
+        assert_eq!(
+            driver.sender.add_segment_requests(),
+            vec![PostedAddSegment {
+                segment_id: 1,
+                start_time: 1700000000000,
+                end_time: 1700000001500,
+                in_progress_event_count: 0,
+            }],
+            "the second BEGIN_LOG must not overwrite the closing segment's wall clock"
         );
     }
 

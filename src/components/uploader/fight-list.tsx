@@ -1,7 +1,7 @@
 // A per-fight timeline. Each detected fight is its own row with name + duration
 // — far more glanceable than the incumbents' single opaque progress bar. Used by
 // both the manual preflight (static fight list) and the live dashboard (fights
-// appear as the official uploader streams them).
+// appear as the selected live path streams them).
 
 import { Radio, Swords } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
