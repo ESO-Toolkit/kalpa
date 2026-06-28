@@ -203,6 +203,22 @@ pub struct EventEmitter {
     /// event whose damage was fully absorbed is still EMITTED (with the absorbed
     /// total in overflow) rather than dropped — the official segment keeps those.
     temp_damage: HashMap<String, u64>,
+    /// `(recipient unit, ability) → most-recent BuffGained source` — the caster of the
+    /// ward currently active on a unit. Populated on every EFFECT_CHANGED GAINED and
+    /// read by [`Self::buffer_damage_shielded`]: a GROUP/PROJECTED ward cast by an ALLY
+    /// is credited to the ward CASTER (tuple `(caster, ward, recipient)`), not to the
+    /// recipient's self. The ward's code-5 BuffGained carries the caster as source
+    /// (byte-identical native-vs-archon), so the most-recent GAINED is the active
+    /// caster — which also handles a ward re-cast by a different ally over time. A
+    /// self-cast ward (source == recipient) keeps the self tuple.
+    ///
+    /// RESIDUAL (bounded, code-9 class): when two allies' SAME-ability wards overlap on
+    /// one recipient, which ward absorbs a given hit is a server-side shield-pool
+    /// decision (a later re-cast does not always drain first), absent from the client
+    /// log. Most-recent-GAINED is the closest client-side attribution — total shielding
+    /// is conserved and per-source matches the official segment to ~99.6% on blackrose
+    /// and exactly on kynes; the small remainder is this irreducible overlap ambiguity.
+    shield_caster: HashMap<(String, String), String>,
     /// The current session's segment-timestamp offset (`segTs = rawTs + offset`).
     offset: i64,
     /// Whether the first `BEGIN_LOG` has been seen (anchors `first_wall`).
@@ -790,6 +806,16 @@ impl EventEmitter {
 
         // Stack tracking key (raw unit ids, like the line's masks/subordinal).
         let stack_key = (src_unit.clone(), ability.clone(), tgt_unit.clone());
+
+        // Track the ward caster: a GAINED records who applied this effect to the
+        // target, so a later DAMAGE_SHIELDED on an ALLY-cast ward can credit the caster
+        // (see `shield_caster` / `buffer_damage_shielded`). The most-recent GAINED wins,
+        // so a ward re-cast by a different ally updates the active caster. Keyed on the
+        // raw units (like the line's masks/tuples).
+        if change_type == "GAINED" {
+            self.shield_caster
+                .insert((tgt_unit.clone(), ability.clone()), src_unit.clone());
+        }
 
         // Allocate the tuple at FIRST SIGHT — BEFORE the emit decision. The parser
         // reserves a tuple/effects-table slot the moment an effect is seen, even for
@@ -1774,13 +1800,34 @@ impl EventEmitter {
         // line references, and must be minted at the event's position so the A numbering
         // stays aligned with the official table.
         self.alloc_for(src_unit, shield_ability, tgt_unit);
-        // The shield's tuple: a self-shield on the damage target (target absorbs with
-        // its own ward). alloc_for is idempotent, so this mints the shield self-tuple
-        // (e.g. Frost Safeguard `3|3|210`) if not already present.
-        let a = self.alloc_for(tgt_unit, shield_ability, tgt_unit);
-        let sub = self
-            .actors
-            .code1_subordinal(&a.to_string(), tgt_unit, tgt_unit);
+        // The shield's tuple. A SELF-cast ward is a self-shield on the damage target
+        // (recipient absorbs with its own ward) → tuple (recipient, ward, recipient).
+        // A GROUP/PROJECTED ward cast by an ALLY credits the ward CASTER → tuple
+        // (caster, ward, recipient): the recipient's most-recent BuffGained for this
+        // ward carries the caster as source. Verified byte-exact on blackrose — every
+        // ally-cast code-38 matches the official segment except this tuple (e.g. Frost
+        // Safeguard 146311 Darkai->M'zuraar); the f4..f10 fields are identical either
+        // way (recipient and caster are both friendly players, so the 16|16 owner masks
+        // and the damage-source f6/f7/f8 don't change). alloc_for is idempotent and
+        // mints the referenced tuple at the event's position so the A numbering stays
+        // aligned with the official table.
+        let ward_caster = self
+            .shield_caster
+            .get(&(tgt_unit.to_string(), shield_ability.to_string()))
+            .filter(|c| c.as_str() != tgt_unit)
+            .cloned();
+        let sub = match ward_caster {
+            Some(caster) => {
+                let a = self.alloc_for(&caster, shield_ability, tgt_unit);
+                self.actors
+                    .code1_subordinal(&a.to_string(), &caster, tgt_unit)
+            }
+            None => {
+                let a = self.alloc_for(tgt_unit, shield_ability, tgt_unit);
+                self.actors
+                    .code1_subordinal(&a.to_string(), tgt_unit, tgt_unit)
+            }
+        };
         let shield_mask = self.own_side(tgt_unit); // f4 == f5 (shield owner)
         let dmg_src_actor = self.actor_index(src_unit); // f6
         let dmg_src_session = self.actors.session_index(src_unit); // f7
@@ -2959,6 +3006,63 @@ mod tests {
             1,
             "exactly the cleanse-removed CC emits code-28; the natural fade does not:\n{body:?}"
         );
+    }
+
+    /// Guard (code 38): an ALLY-cast ward credits the ward CASTER. A DAMAGE_SHIELDED
+    /// absorbed by a ward an ALLY applied (the recipient's most-recent BuffGained source
+    /// differs from the recipient) emits a code-38 whose tuple is (caster, recipient,
+    /// ward) — verified byte-exact on blackrose (Frost Safeguard 146311 Darkai->M'zuraar).
+    /// A SELF-cast ward keeps the self tuple (recipient, recipient, ward). Only the tuple
+    /// changes; the f4..f10 fields are identical either way.
+    #[test]
+    fn ally_cast_shield_credits_the_ward_caster() {
+        const HEALER: &str =
+            "0,UNIT_ADDED,2,PLAYER,F,2,0,F,6,9,\"Healer\",\"@heal\",112,50,2200,0,PLAYER_ALLY,T";
+        let ward = "0,ABILITY_INFO,146311,\"Frost Safeguard\",\"/esoui/art/icons/x.dds\",F,T";
+        let dmg_ab = "0,ABILITY_INFO,12345,\"Boss Smash\",\"/esoui/art/icons/y.dds\",F,T";
+        // The boss (40) hits the target (1); the hit is absorbed (DAMAGE_SHIELDED) and a
+        // paired DAMAGE on the same cast flushes the buffered code-38.
+        let s = format!(
+            "200,COMBAT_EVENT,DAMAGE_SHIELDED,GENERIC,0,500,0,6000,146311,40,{G_B},1,{G_P}"
+        );
+        let d = format!("200,COMBAT_EVENT,DAMAGE,PHYSICAL,1,100,0,6000,12345,40,{G_B},1,{G_P}");
+
+        // Resolve the single code-38 line's tuple A → (srcActorIdx, tgtActorIdx, abilityIdx).
+        let shield_tuple = |gained: &str| -> (u32, u32, u32) {
+            let lines = vec![
+                G_LOG, G_ZONE, G_PLAYER, HEALER, G_BOSS, ward, dmg_ab, gained, &s, &d,
+            ];
+            let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+            let mut e = EventEmitter::with_master_indices(id2a, ab2i);
+            let seg = render_segment(&lines, &mut e).expect("segment builds");
+            let c38: Vec<&str> = seg
+                .lines()
+                .skip(2)
+                .filter(|l| l.split('|').nth(1) == Some("38"))
+                .collect();
+            assert_eq!(c38.len(), 1, "exactly one code-38 line:\n{seg}");
+            let a: usize = c38[0].split('|').nth(2).unwrap().parse().expect("bare A");
+            e.tuples()[a - 1]
+        };
+
+        // ALLY-cast: the healer (unit 2) applied the ward to the target (unit 1).
+        let g_ally = format!("100,EFFECT_CHANGED,GAINED,1,5000,146311,2,{G_P},1,{G_P}");
+        let (a_src, a_tgt, a_ab) = shield_tuple(&g_ally);
+        // SELF-cast: the target (unit 1) applied the ward to itself.
+        let g_self = format!("100,EFFECT_CHANGED,GAINED,1,5000,146311,1,{G_P},1,{G_P}");
+        let (s_src, s_tgt, s_ab) = shield_tuple(&g_self);
+
+        // Self-cast → a self tuple (src == tgt == recipient). Ally-cast → the caster is
+        // credited (src != tgt), but the RECIPIENT (tgt) and the ward ability are the
+        // same in both — only the source actor changes from the recipient to the caster.
+        assert_eq!(s_src, s_tgt, "self-cast shield tuple is self (src == tgt)");
+        assert_ne!(
+            a_src, a_tgt,
+            "ally-cast shield tuple credits the caster (src != tgt)"
+        );
+        assert_eq!(a_tgt, s_tgt, "both target the same recipient");
+        assert_eq!(a_tgt, s_src, "the recipient is the self-cast source");
+        assert_eq!(a_ab, s_ab, "both reference the same ward ability");
     }
 
     /// Guard (code 38): a zero-absorb DAMAGE_SHIELDED (hit==0) is kept ONLY when a real
