@@ -913,7 +913,7 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
                         _ => EndReason::Idle,
                     };
                 }
-                TailOutcome::Error(_) => return EndReason::Fatal("tail read failed".into()),
+                TailOutcome::Error(e) => return EndReason::Fatal(format!("tail read failed: {e}")),
             }
         }
     }
@@ -1335,9 +1335,10 @@ impl LiveTail for FileTail {
                 let mut saw_end_log = false;
                 for i in 0..data.len() {
                     if data[i] == b'\n' {
-                        let line = String::from_utf8_lossy(&data[start..i])
-                            .trim_end_matches('\r')
-                            .to_string();
+                        let line = match decode_log_line(&data[start..i]) {
+                            Ok(line) => line.to_string(),
+                            Err(e) => return TailOutcome::Error(e),
+                        };
                         if kind_of(&line) == Some("END_LOG") {
                             saw_end_log = true;
                         }
@@ -1400,10 +1401,11 @@ impl LiveTail for FileTail {
 // shared.
 
 /// A complete-line assembler over the raw tail bytes: carries a partial (un-newlined)
-/// trailing line across reads, strips a single `\r`, drops empties, and flags an
-/// `END_LOG`. Factored out so the line-assembly contract is unit-testable without
-/// notify or a real file. A 1 MiB partial cap guards against a non-line-atomic writer
-/// (a real adversarial file, unlike the trusted synthetic feeder) growing it forever.
+/// trailing line across reads, strictly decodes UTF-8, strips a single `\r`, drops
+/// empties, and flags an `END_LOG`. Factored out so the line-assembly contract is
+/// unit-testable without notify or a real file. A 1 MiB partial cap guards against a
+/// non-line-atomic writer (a real adversarial file, unlike the trusted synthetic
+/// feeder) growing it forever.
 struct LineAssembler {
     partial: Vec<u8>,
     /// True once any `BEGIN_LOG` has passed — used to DISCARD lines fed before the
@@ -1453,8 +1455,9 @@ impl LineAssembler {
     }
 
     /// Feed a freshly-read chunk; append to the carry, split complete lines, hold the
-    /// trailing partial. Returns `(lines, saw_end_log)` or an `Err` if the partial cap
-    /// is exceeded. Lines before the first `BEGIN_LOG` are DISCARDED (F4).
+    /// trailing partial. Returns `(lines, saw_end_log)` or an `Err` if a complete line
+    /// is not valid UTF-8 or the partial cap is exceeded. Lines before the first
+    /// `BEGIN_LOG` are DISCARDED (F4).
     fn push_chunk(&mut self, chunk: &[u8]) -> Result<(Vec<String>, bool), String> {
         self.partial.extend_from_slice(chunk);
         let mut lines = Vec::new();
@@ -1462,9 +1465,7 @@ impl LineAssembler {
         let mut start = 0usize;
         for i in 0..self.partial.len() {
             if self.partial[i] == b'\n' {
-                let line = String::from_utf8_lossy(&self.partial[start..i])
-                    .trim_end_matches('\r')
-                    .to_string();
+                let line = decode_log_line(&self.partial[start..i])?.to_string();
                 start = i + 1;
                 if line.is_empty() {
                     continue;
@@ -1492,6 +1493,13 @@ impl LineAssembler {
         }
         Ok((lines, saw_end_log))
     }
+}
+
+fn decode_log_line(bytes: &[u8]) -> Result<&str, String> {
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    std::str::from_utf8(bytes).map_err(|_| {
+        "Encounter.log contains invalid UTF-8; native live upload cannot safely encode it".into()
+    })
 }
 
 /// A production notify-backed [`LiveTail`] over a real growing `Encounter.log`.
@@ -3539,6 +3547,36 @@ mod tests {
             lines,
             vec![HDR.to_string(), "0,END_COMBAT".to_string()],
             "CRLF stripped and the blank line dropped"
+        );
+    }
+
+    #[test]
+    fn line_assembler_rejects_invalid_utf8_in_complete_line() {
+        let mut a = LineAssembler::new();
+        let mut bytes = format!("{HDR}\n0,ZONE_CHANGED,1129,\"").into_bytes();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"\",NONE\n");
+
+        let err = a.push_chunk(&bytes).unwrap_err();
+
+        assert!(
+            err.contains("invalid UTF-8"),
+            "invalid log bytes must fail closed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn line_assembler_rejects_invalid_utf8_after_split_line_completes() {
+        let mut a = LineAssembler::new_mid_session();
+        let (lines, end) = a.push_chunk(b"700,COMBAT_EVENT,").unwrap();
+        assert!(lines.is_empty());
+        assert!(!end);
+
+        let err = a.push_chunk(&[0xff, b'\n']).unwrap_err();
+
+        assert!(
+            err.contains("invalid UTF-8"),
+            "a split invalid line must fail when the newline arrives, got {err:?}"
         );
     }
 

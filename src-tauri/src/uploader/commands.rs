@@ -1140,6 +1140,7 @@ pub async fn uploader_upload_log(
     let fallback_note = match &routing {
         transport::NativeRouting::Fallback(
             reason @ (transport::NativeFallbackReason::UnprovenEvents(_)
+            | transport::NativeFallbackReason::InvalidEncoding
             | transport::NativeFallbackReason::TooLarge
             | transport::NativeFallbackReason::MultiSession),
         ) if native_opt_in => Some(reason.explain()),
@@ -1262,8 +1263,9 @@ fn native_live_upload_error_is_clean_stop(error: &super::native::client::UploadE
 /// silently-incomplete native report. Deciding this BEFORE `start_native_live_branch`
 /// runs means no native report is ever created for a session we can't encode (vs the old
 /// behaviour: create then hard-fail). Conservatively returns false on any IO/scan
-/// uncertainty. Returns true when there's no open-session prefix (a cold start native
-/// handles by waiting for a fresh `BEGIN_LOG`), so it never blocks the common case.
+/// uncertainty, including invalid UTF-8. Returns true when there's no open-session
+/// prefix (a cold start native handles by waiting for a fresh `BEGIN_LOG`), so it never
+/// blocks the common case.
 fn native_live_prefix_is_encodable(path: &str) -> bool {
     let p = Path::new(path);
     let eof = match std::fs::metadata(p) {
@@ -1294,8 +1296,7 @@ fn native_live_prefix_is_encodable(path: &str) -> bool {
         let mut ls = 0;
         for i in 0..combined.len() {
             if combined[i] == b'\n' {
-                let line = String::from_utf8_lossy(&combined[ls..i]);
-                if super::native::coverage::unproven_line_type(&line).is_some() {
+                if !native_live_prefix_line_is_encodable(&combined[ls..i]) {
                     return false;
                 }
                 ls = i + 1;
@@ -1304,13 +1305,18 @@ fn native_live_prefix_is_encodable(path: &str) -> bool {
         carry = combined[ls..].to_vec();
         pos = end;
     }
-    if !carry.is_empty() {
-        let line = String::from_utf8_lossy(&carry);
-        if super::native::coverage::unproven_line_type(&line).is_some() {
-            return false;
-        }
+    if !carry.is_empty() && !native_live_prefix_line_is_encodable(&carry) {
+        return false;
     }
     true
+}
+
+fn native_live_prefix_line_is_encodable(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    let Ok(line) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    super::native::coverage::unproven_line_type(line).is_none()
 }
 
 /// Start live logging on `file_path`.
@@ -2388,6 +2394,12 @@ mod native_live_routing_tests {
         path
     }
 
+    fn temp_bytes(name: &str, content: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("kalpa-route-{name}.log"));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
     // An OPEN session whose prefix is all proven types → native is encodable (route native).
     #[test]
     fn proven_open_prefix_routes_native() {
@@ -2415,8 +2427,24 @@ mod native_live_routing_tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    // A CLOSED session (ends in END_LOG) → no open prefix to gate → native ok (cold start
-    // waits for a fresh BEGIN_LOG).
+    // An OPEN session with invalid UTF-8 is not encodable; route to the official
+    // uploader before creating a native report.
+    #[test]
+    fn invalid_utf8_open_prefix_declines_native() {
+        let mut content = b"0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+                            0,ZONE_CHANGED,1129,\""
+            .to_vec();
+        content.push(0xff);
+        content.extend_from_slice(b"\",NONE\n100,BEGIN_COMBAT\n");
+
+        let p = temp_bytes("invalid-utf8", &content);
+
+        assert!(!native_live_prefix_is_encodable(p.to_str().unwrap()));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // A CLOSED session (ends in END_LOG) has no open prefix to gate, so native can wait
+    // for a fresh BEGIN_LOG.
     #[test]
     fn closed_session_is_encodable() {
         let p = temp(

@@ -1158,7 +1158,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     // starting? Only a running session left the official uploader streaming, so
     // only then do we remind the user it keeps going.
     const wasRunning = liveWasRunningRef.current;
+    const wasHandedOff = liveHandedOffRef.current;
     liveWasRunningRef.current = false;
+    liveHandedOffRef.current = false;
 
     // Snapshot the session stats NOW (before any state clears) so we can show a
     // calm end-of-session summary: how long, how many fights, what content.
@@ -1170,7 +1172,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     try {
       await invokeOrThrow("uploader_stop_live", {
         sessionId: id,
-        fightCount: liveFightCountRef.current,
+        fightCount: sessionFightCount,
       });
     } catch {
       /* best-effort */
@@ -1183,14 +1185,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     // it's ours to reset.
     if (liveSessionIdRef.current === null) {
       setLiveSessionId(null);
-      setLiveStatus(liveFightCount > 0 ? "upToDate" : "idle");
+      setLiveStatus(sessionFightCount > 0 ? "upToDate" : "idle");
     }
     if (wasRunning) {
       // Path-aware: on the HANDOFF path Kalpa can't stop the separate official
       // uploader (it may still be streaming); on the NATIVE path Kalpa IS the uploader,
       // so Stop genuinely ended the upload and closed the report.
       toast.info(
-        liveHandedOff
+        wasHandedOff
           ? "Stopped tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
           : "Stopped the live upload and closed the report on ESO Logs.",
         { duration: 8000 }

@@ -4062,10 +4062,11 @@ mod combat_fixture {
     ///   uniquely marks it.)
     /// * 19 (death): count is right but positioning is the parser's intra-timestamp
     ///   tiebreak (not in the stream); reworking it would regress the exact count.
-    ///   Tighten these bounds (toward 0) as more rules are proven.
-    ///   (code 27 interrupted is now EXACT 19/19 on combat and 3/3 on Ossein: phantom
-    ///   interrupts of instant casts are dropped, and a self-interrupt's END_CAST-only
-    ///   tuple is allocated lazily.)
+    ///
+    /// Tighten these bounds (toward 0) as more rules are proven. Code 27 interrupted
+    /// is now EXACT 19/19 on combat and 3/3 on Ossein: phantom interrupts of instant
+    /// casts are dropped, and a self-interrupt's END_CAST-only tuple is allocated
+    /// lazily.
     #[test]
     fn per_code_counts_stay_within_known_bounds() {
         let base = env!("CARGO_MANIFEST_DIR");
@@ -4535,7 +4536,8 @@ mod combat_fixture {
     ///     even though some decrease events carry a resolvable `castTrackId`.
     ///   * code-6 (stack INCREASE) is attributed on EXACTLY the timestamps the
     ///     official segment attributes (Maarselok 286, Ossein 43) — no more, no less.
-    ///     No-op without the gitignored golden captures (like the other oracles).
+    ///
+    /// No-op without the gitignored golden captures (like the other oracles).
     #[test]
     fn applybuffstack_attribution_matches_official_on_validated_captures() {
         let base = env!("CARGO_MANIFEST_DIR");

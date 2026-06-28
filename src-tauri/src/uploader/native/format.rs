@@ -117,15 +117,20 @@ mod tests {
     // value; the CONFIRMED flag flips only once a produced segment round-trips.
     #[test]
     fn native_format_version_gate_is_explicit() {
-        let version = FORMAT_VERSION;
+        let format_version = std::hint::black_box(FORMAT_VERSION);
+        let format_confirmed = std::hint::black_box(FORMAT_VERSION_CONFIRMED);
+
         assert!(
-            version > 0,
+            format_version > 0,
             "the format version is pinned (11) — must be a real, non-zero value"
         );
-        if FORMAT_VERSION_CONFIRMED {
+        if format_confirmed {
             // Flipping this flag is the deliberate, human-verified step that
             // enables native upload by default after a byte-exact round-trip.
-            assert!(version > 0, "a confirmed format must carry a real version");
+            assert!(
+                format_version > 0,
+                "a confirmed format must carry a real version"
+            );
         }
     }
 

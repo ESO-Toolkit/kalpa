@@ -5,7 +5,8 @@
 //! that official-app transport. The separate `native` module owns the gated
 //! opt-in direct path.
 //!
-//! Two transports are provided behind one trait so the strategy can evolve:
+//! Two official-uploader transports are provided behind one trait so that
+//! fallback strategy can evolve:
 //!
 //! * [`GuiHandoffTransport`] — the rock-solid default. Opens the official
 //!   uploader (or its download page) with the prepared log so the user finishes
@@ -578,6 +579,10 @@ pub enum NativeFallbackReason {
     /// using native could produce an inaccurate report. Carries the offending
     /// types for diagnostics.
     UnprovenEvents(Vec<String>),
+    /// The log contains bytes that are not valid UTF-8. The native encoder works on
+    /// decoded log lines; decoding lossily would change the payload, so route to
+    /// the official uploader instead.
+    InvalidEncoding,
     /// The log exceeds the native path's whole-file memory ceiling, so it routes
     /// to the official uploader instead of hard-failing. Split it to upload direct.
     TooLarge,
@@ -606,6 +611,11 @@ impl NativeFallbackReason {
                  can't yet upload directly with full accuracy ({}).",
                 types.join(", ")
             ),
+            NativeFallbackReason::InvalidEncoding => {
+                "Using the official ESO Logs uploader - this log contains bytes \
+                 Kalpa can't decode for direct upload without changing them."
+                    .into()
+            }
             NativeFallbackReason::TooLarge => {
                 "Using the official ESO Logs uploader — this log is too large for \
                  direct upload (split it to upload directly)."
@@ -702,8 +712,9 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
     // a second read. Only meaningful on the all-proven path below — the unproven
     // and early-break arms fall back regardless.
     let mut begin_log_count: u32 = 0;
-    // Read raw bytes per line and decode lossily (like the scanner), so invalid
-    // UTF-8 doesn't truncate the scan. An IO error mid-scan FAILS CLOSED — we must
+    // Read raw bytes per line, but require UTF-8 before routing native. The native
+    // encoder works on decoded text; lossy decoding would mutate the payload.
+    // An IO error mid-scan FAILS CLOSED — we must
     // not return Native off a partial read, or the all-or-nothing coverage gate is
     // bypassed and an unproven event later in the file could reach the encoder.
     let mut buf: Vec<u8> = Vec::with_capacity(256);
@@ -716,7 +727,10 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
             // partial-scan false "Native".
             Err(_) => return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed),
         }
-        let line = String::from_utf8_lossy(&buf);
+        let line = match std::str::from_utf8(&buf) {
+            Ok(line) => line,
+            Err(_) => return NativeRouting::Fallback(NativeFallbackReason::InvalidEncoding),
+        };
         // A BEGIN_LOG header has the type as field index 1: `<ms>,BEGIN_LOG,…`.
         if line
             .split(',')
@@ -726,7 +740,7 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
         {
             begin_log_count += 1;
         }
-        if let coverage::Coverage::Fallback { unproven: u } = coverage::assess([line.as_ref()]) {
+        if let coverage::Coverage::Fallback { unproven: u } = coverage::assess([line]) {
             unproven.extend(u);
             if unproven.len() >= 32 {
                 break; // the reported set is capped anyway; stop early.
@@ -795,8 +809,14 @@ pub fn run_native_upload(
 
     // Read the prepared log and split into lines for the encoder. Bounded by the
     // size ceiling above.
-    let contents =
-        std::fs::read_to_string(log_path).map_err(|e| format!("Failed to read log: {e}"))?;
+    let contents = match std::fs::read_to_string(log_path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            eprintln!("[uploader] native: log is not valid UTF-8 -> official handoff");
+            return GuiHandoffTransport.upload_file(log_path, opts);
+        }
+        Err(e) => return Err(format!("Failed to read log: {e}")),
+    };
     let lines: Vec<&str> = contents.lines().collect();
 
     // Build the ZIP'd (segment, master-table) payload. This also runs the structural
@@ -835,11 +855,15 @@ mod routing_tests {
     use std::io::Write;
 
     fn temp_log(contents: &str) -> (tempfile::TempDir, String) {
+        temp_log_bytes(contents.as_bytes())
+    }
+
+    fn temp_log_bytes(contents: &[u8]) -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("Encounter.log");
         std::fs::File::create(&p)
             .unwrap()
-            .write_all(contents.as_bytes())
+            .write_all(contents)
             .unwrap();
         let s = p.to_string_lossy().into_owned();
         (dir, s)
@@ -889,6 +913,20 @@ mod routing_tests {
     fn opted_in_with_unproven_type_falls_back() {
         let (_d, path) = temp_log("0,BEGIN_LOG,1,15\n100,SOME_FUTURE_EVENT,1,2\n");
         assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
+    }
+
+    #[test]
+    fn opted_in_with_invalid_utf8_falls_back() {
+        let (_d, path) =
+            temp_log_bytes(b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n5,ZONE_CHANGED,\xff\n");
+        if super::super::native::format::FORMAT_VERSION_CONFIRMED {
+            assert_eq!(
+                assess_native_routing(&path, true),
+                NativeRouting::Fallback(NativeFallbackReason::InvalidEncoding)
+            );
+        } else {
+            assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
+        }
     }
 
     /// A SessionProvider with a fixed cookie, for testing the native runner's
