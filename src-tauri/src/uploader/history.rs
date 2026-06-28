@@ -286,6 +286,8 @@ mod tests {
             fight_count: 0,
             report: None,
             error: None,
+            title: None,
+            zone: None,
         }
     }
 

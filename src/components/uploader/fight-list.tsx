@@ -6,7 +6,7 @@
 import { Radio, Swords } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
-import { formatDuration } from "./uploader-shared";
+import { fightDurationHint, fightLabel, formatDuration } from "./uploader-shared";
 import type { FightSummary, LiveFight } from "@/types/uploader";
 
 type FightRow = {
@@ -18,22 +18,6 @@ type FightRow = {
   /** When true, show a subtle "streaming" badge (live timeline). */
   live?: boolean;
 };
-
-function fightTitle(zone: string | null, boss: string | null, index: number): string {
-  if (boss) return boss;
-  if (zone) return zone;
-  return `Fight ${index + 1}`;
-}
-
-/** A duration-derived hint (honest, not a kill/wipe claim): a very short fight is
- *  usually a quick reset/pull, a long one a sustained attempt. Null = no strong
- *  signal, so we show nothing rather than guess. */
-function durationHint(ms: number | undefined): { label: string; color: "muted" | "amber" } | null {
-  if (!ms || ms <= 0) return null;
-  if (ms < 12_000) return { label: "quick reset", color: "amber" };
-  if (ms >= 90_000) return { label: "long pull", color: "muted" };
-  return null;
-}
 
 export function FightList({
   fights,
@@ -74,7 +58,7 @@ export function FightList({
         // fight; give it a one-shot accent so the eye catches the new arrival,
         // then it settles into the list.
         const isNewest = live && newestFirst && i === 0;
-        const hint = durationHint(f.durationMs);
+        const hint = fightDurationHint(f.durationMs);
         return (
           <li
             key={f.index}
@@ -115,7 +99,7 @@ export function FightList({
 export function rowsFromSummaries(fights: FightSummary[]): FightRow[] {
   return fights.map((f) => ({
     index: f.index,
-    title: fightTitle(f.zoneName, f.bossName, f.index),
+    title: fightLabel(f),
     subtitle: `${formatDuration(f.endMs - f.startMs)}${f.zoneName && f.bossName ? ` · ${f.zoneName}` : ""}`,
     durationMs: f.endMs - f.startMs,
   }));
@@ -125,7 +109,7 @@ export function rowsFromSummaries(fights: FightSummary[]): FightRow[] {
 export function rowsFromLive(fights: LiveFight[]): FightRow[] {
   return fights.map((f) => ({
     index: f.index,
-    title: fightTitle(f.zoneName, f.bossName, f.index),
+    title: fightLabel(f),
     subtitle: `${formatDuration(f.durationMs)}${f.zoneName && f.bossName ? ` · ${f.zoneName}` : ""}`,
     durationMs: f.durationMs,
     live: true,

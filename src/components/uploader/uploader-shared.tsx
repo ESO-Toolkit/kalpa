@@ -86,6 +86,29 @@ export function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/** A short label for a fight: boss > zone > 1-based ordinal fallback. Shared so the
+ *  timeline, live ticker, split workbench, and preflight peek all read the same. */
+export function fightLabel(fight: {
+  bossName: string | null;
+  zoneName: string | null;
+  index: number;
+}): string {
+  return fight.bossName || fight.zoneName || `Fight ${fight.index + 1}`;
+}
+
+/** A duration-derived hint for a fight (honest, not a kill/wipe claim): a very
+ *  short fight is usually a quick reset/pull, a long one a sustained attempt.
+ *  Null = no strong signal, so callers show nothing rather than guess. Shared by
+ *  the fight timeline and the split workbench so both read the same. */
+export function fightDurationHint(
+  ms: number | undefined
+): { label: string; color: "muted" | "amber" } | null {
+  if (!ms || ms <= 0) return null;
+  if (ms < 12_000) return { label: "quick reset", color: "amber" };
+  if (ms >= 90_000) return { label: "long pull", color: "muted" };
+  return null;
+}
+
 /** Format an elapsed duration as a session clock: `M:SS`, then `H:MM:SS` past an
  *  hour. Used by the live session timer (counts up; raids have no deadline). */
 export function formatElapsed(ms: number): string {
@@ -103,18 +126,23 @@ export function formatElapsed(ms: number): string {
  *  elapsed from a fixed start timestamp (drift-free; survives dropped ticks over
  *  a multi-hour raid). Mounted only while a session runs, so the interval is torn
  *  down with the component — no setState-after-unmount risk. */
-export function SessionTimer({ startMs }: { startMs: number }) {
+export function SessionTimer({ startMs, className }: { startMs: number; className?: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+  // Fold the value INTO the label: the timer is now rendered in a non-aria-hidden
+  // place (the live core), so a bare "Session elapsed time" label would mask the
+  // visible value from screen readers. Safe because this is outside any aria-live
+  // region — it's read only on navigation, never announced on each tick.
+  const elapsed = formatElapsed(now - startMs);
   return (
     <span
-      className="font-heading text-xs tabular-nums text-muted-foreground"
-      aria-label="Session elapsed time"
+      className={cn("font-heading text-xs tabular-nums text-muted-foreground", className)}
+      aria-label={`Session elapsed time: ${elapsed}`}
     >
-      {formatElapsed(now - startMs)}
+      {elapsed}
     </span>
   );
 }

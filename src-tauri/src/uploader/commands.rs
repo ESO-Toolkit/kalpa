@@ -1007,6 +1007,10 @@ pub async fn uploader_upload_log(
     // ALSO allows it (`FORMAT_VERSION_CONFIRMED` is now true + every event type
     // proven), so an opted-in user with an all-proven log uploads directly.
     native_opt_in: Option<bool>,
+    // The derived content label for the history row's headline (the frontend's
+    // `dominantZone(fights)`). Best-effort; `None` ⇒ the row falls back to the
+    // file name. Purely cosmetic — never gates routing.
+    zone: Option<String>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
     // Reconcile prior-run stale records before this upload writes its transient
@@ -1056,6 +1060,13 @@ pub async fn uploader_upload_log(
         fight_count,
         report: None,
         error: None,
+        // Title is set later, and ONLY if the upload actually completes via native
+        // (the one path that applies `description`) — see the Completed arm below. A
+        // native attempt that internally falls back to the official uploader returns
+        // HandedOff, so it must never carry a name the report doesn't have. zone is
+        // the frontend's derived content label, carried regardless of transport.
+        title: None,
+        zone,
     };
     let _ = super::history::upsert(&app, record.clone());
 
@@ -1150,6 +1161,14 @@ pub async fn uploader_upload_log(
             });
             record.status = UploadStatus::Completed;
             record.report = report.clone();
+            // Stamp the title from the actual OUTCOME, not the routing intent: only a
+            // genuine native completion applied `description` as the report name (a
+            // native attempt that fell back to the official uploader returns HandedOff,
+            // not Completed). The `use_native` gate also keeps a CLI Completed — which
+            // ignores `description` — title-less.
+            if use_native {
+                record.title = options.description.clone();
+            }
             let _ = super::history::upsert(&app, record);
             Ok(UploadDispatch {
                 handed_off: false,
@@ -1255,6 +1274,9 @@ pub async fn uploader_start_live(
     // in-process; otherwise it hands off to the official uploader (the default).
     // Absent → false (official handoff), preserving the prior behaviour exactly.
     native_opt_in: Option<bool>,
+    // The derived content label for the history row's headline (the frontend's
+    // `dominantZone(fights)` from the pre-live preflight). Best-effort and cosmetic.
+    zone: Option<String>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
 
@@ -1344,6 +1366,7 @@ pub async fn uploader_start_live(
             &safe,
             &file_name,
             &options,
+            zone,
             &cancelled,
             channel,
         )
@@ -1506,6 +1529,10 @@ pub async fn uploader_start_live(
         fight_count: 0,
         report: report.clone(),
         error: None,
+        // The official uploader owns this live report and ignores `description`,
+        // so leave the title unset; the zone is the frontend's content hint.
+        title: None,
+        zone,
     };
     let _ = super::history::upsert(&app, record);
 
@@ -1630,6 +1657,7 @@ async fn start_native_live_branch(
     safe: &str,
     file_name: &str,
     options: &UploadOptions,
+    zone: Option<String>,
     cancelled: &Arc<AtomicBool>,
     channel: Channel<LiveEvent>,
 ) -> Result<UploadDispatch, String> {
@@ -1690,6 +1718,10 @@ async fn start_native_live_branch(
         fight_count: 0,
         report: None,
         error: None,
+        // Native live owns the report end-to-end and applies `description` as its
+        // name, so persist it as the title; zone is the frontend's content hint.
+        title: options.description.clone(),
+        zone,
     };
     let _ = super::history::upsert(app, record);
 
