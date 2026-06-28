@@ -1552,11 +1552,27 @@ impl EventEmitter {
         } else {
             None
         };
+        // POWER_DRAIN renders as a NEGATIVE resource change (a resource taken FROM the
+        // target), while POWER_ENERGIZE stays positive. The official segment signs the
+        // value field negative for EVERY drain regardless of mask — verified raw-vs-
+        // official: combat 5 raw drains → 5 official negatives (16|16), sunspire 780 raw
+        // → 780 official negatives (16|16 and 64|16); cityofash/kynes/ossein have no
+        // raw drains. Only the hit value is signed; overflow/resourceIdx/poolMax are
+        // unchanged (drains carry overflow 0). Native previously emitted every drain
+        // positive, so this is purely additive sign correction (count-preserving).
+        let power_hit = if code == "26" && action_result == "POWER_DRAIN" {
+            match hit_value.parse::<i64>() {
+                Ok(v) => (-v.abs()).to_string(),
+                Err(_) => hit_value.to_string(),
+            }
+        } else {
+            hit_value.to_string()
+        };
         if !self.append_combat_tail(
             &mut line,
             code,
             action_result,
-            hit_value,
+            &power_hit,
             overflow,
             power_tail.as_deref(),
         ) {
@@ -2856,6 +2872,55 @@ mod tests {
             code_count(&body, "27"),
             1,
             "only the tracked-cast interrupt emits code-27; the untracked phantom is dropped:\n{body:?}"
+        );
+    }
+
+    /// Guard (code 26): a POWER_DRAIN signs its value field NEGATIVE (a resource taken
+    /// FROM the target), while POWER_ENERGIZE stays positive. Verified against the
+    /// official segments: the raw POWER_DRAIN count equals the official negative-code-26
+    /// count (combat 5/5 at mask 16|16, sunspire 780/780 across 16|16 and 64|16) — the
+    /// sign is the only difference, and it applies regardless of mask. Only the value
+    /// field is signed; overflow/resourceIdx/poolMax are unchanged.
+    #[test]
+    fn power_drain_emits_negative_value_energize_stays_positive() {
+        let ab = "0,ABILITY_INFO,42246,\"Absorb Magicka\",\"/esoui/art/icons/x.dds\",F,T";
+        // Player gains 500 magicka (self POWER_ENERGIZE) → positive code-26.
+        let energize =
+            format!("100,COMBAT_EVENT,POWER_ENERGIZE,GENERIC,1,500,0,6000,42246,1,{G_P},1,{G_P}");
+        // Boss drains 300 magicka from the player (POWER_DRAIN) → negative code-26.
+        let drain =
+            format!("200,COMBAT_EVENT,POWER_DRAIN,GENERIC,1,300,0,6001,42246,40,{G_B},1,{G_P}");
+        let lines = vec![G_LOG, G_ZONE, G_PLAYER, G_BOSS, ab, &energize, &drain];
+        let body = render(&lines);
+        let c26: Vec<&String> = body
+            .iter()
+            .filter(|l| l.split('|').nth(1) == Some("26"))
+            .collect();
+        assert_eq!(
+            c26.len(),
+            2,
+            "both power events emit a code-26 line:\n{body:?}"
+        );
+        // The value field is the 4th-from-last (`|{hit}|{overflow}|{resourceIdx}|{poolMax}`).
+        let hit = |l: &str| -> i64 {
+            let f: Vec<&str> = l.split('|').collect();
+            f[f.len() - 4].parse().unwrap()
+        };
+        assert_eq!(
+            c26.iter().filter(|l| hit(l) < 0).count(),
+            1,
+            "exactly the POWER_DRAIN is negative:\n{body:?}"
+        );
+        assert_eq!(
+            c26.iter().filter(|l| hit(l) > 0).count(),
+            1,
+            "exactly the POWER_ENERGIZE is positive:\n{body:?}"
+        );
+        let drain_line = c26.iter().find(|l| hit(l) < 0).unwrap();
+        assert_eq!(
+            hit(drain_line),
+            -300,
+            "the drain value is the negated raw hit:\n{body:?}"
         );
     }
 
