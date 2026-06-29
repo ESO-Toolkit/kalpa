@@ -89,9 +89,11 @@ import { SplitWorkbench } from "./split-workbench";
 import { dominantZone, shortDate } from "./naming";
 
 interface UploaderWorkspaceProps {
+  open: boolean;
   authUser: AuthUser | null;
   onAuthChange: (user: AuthUser | null) => void;
   onClose: () => void;
+  onOpen: () => void;
 }
 
 type Mode = "manual" | "live";
@@ -220,7 +222,13 @@ function loadSavedOptions(): UploadOptions {
   }
 }
 
-export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderWorkspaceProps) {
+export function UploaderWorkspace({
+  open,
+  authUser,
+  onAuthChange,
+  onClose,
+  onOpen,
+}: UploaderWorkspaceProps) {
   const [mode, setMode] = useState<Mode>("manual");
   const [detection, setDetection] = useState<LogPathDetection | null>(null);
   const [logsDir, setLogsDir] = useState<string | null>(null);
@@ -350,6 +358,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // doesn't open on an intentionally empty report.
   const liveReportRef = useRef<ReportRef | null>(null);
   const liveAutoOpenedRef = useRef(false);
+  const backgroundNoticeShownRef = useRef(false);
 
   // Current selection, mirrored to a ref so loadLogs can reconcile it without
   // being re-created on every selection change.
@@ -481,17 +490,17 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     };
   }, []);
 
-  // Stop any live session when the workspace unmounts (e.g. the dialog is
-  // closed). Reads the ref (set before the start await) so a session started but
-  // not yet reflected in state is still torn down. Empty deps: this must run
-  // only on final unmount.
+  // Stop any live session only when the workspace itself unmounts (app shutdown,
+  // hot reload, or another real teardown). Closing the uploader dialog no longer
+  // unmounts this component, so a live upload keeps running in the background.
+  // Reads the ref (set before the start await) so a session started but not yet
+  // reflected in state is still torn down. Empty deps: this must run only on
+  // final unmount.
   //
   // `liveWasRunningRef` tracks whether a session was actually running (handed off
   // to the official uploader). This unmount path bypasses handleStopLive, so it
-  // must carry the same honest reminder itself — closing the dialog stops Kalpa's
-  // tracking but NOT the separate uploader. The reminder is fired here (not only
-  // in handleStopLive) because the close/unmount is a real teardown path. Sonner's
-  // <Toaster> is mounted globally (main.tsx), so a toast survives this unmount.
+  // must carry the same honest reminder itself. Sonner's <Toaster> is mounted
+  // globally (main.tsx), so a toast survives non-app teardown.
   useEffect(() => {
     return () => {
       liveActiveRef.current = false; // drop any late channel events
@@ -505,18 +514,17 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       liveSessionIdRef.current = null;
       liveWasRunningRef.current = false;
       if (id) {
-        // Warn whenever a live session was active at close — including an
-        // in-flight start (`id` set but not yet promoted). Path-aware via the ref
-        // mirror (the state isn't readable in this empty-deps closure): a native
-        // session's close stops the upload + closes the report; a handoff session
-        // leaves the official uploader streaming. For an in-flight start that hasn't
-        // resolved handedOff yet, the ref defaults to false (native) — but such a
-        // start hasn't launched the official uploader either, so the native wording
-        // ("nothing left running") is the honest default there too.
+        // Warn whenever a live session is active during a real component teardown,
+        // including an in-flight start (`id` set but not yet promoted). Path-aware via
+        // the ref mirror (the state isn't readable in this empty-deps closure): native
+        // teardown stops the upload + closes the report; a handoff teardown leaves the
+        // official uploader streaming. For an in-flight start that hasn't resolved
+        // handedOff yet, the ref defaults to false (native), which is the honest
+        // default because the official uploader has not launched yet.
         toast.info(
           liveHandedOffRef.current
-            ? "Closed live tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
-            : "Closed live tracking in Kalpa — the direct upload was stopped and its report closed.",
+            ? "Kalpa stopped tracking this live session. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
+            : "Kalpa stopped the direct live upload and closed its report.",
           { duration: 8000 }
         );
         void invokeOrThrow("uploader_stop_live", {
@@ -855,8 +863,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     const startedAt = Date.now();
     const sessionId = `live-${startedAt}`;
     const reportVisibility = options.visibility;
-    // Record the id before the await so unmount cleanup can stop the backend
-    // watcher even if the dialog closes before the await resolves.
+    backgroundNoticeShownRef.current = false;
+    // Record the id before the await so final unmount cleanup can stop the
+    // backend watcher if the app tears down before the await resolves.
     liveSessionIdRef.current = sessionId;
     const channel = new Channel<LiveEvent>();
     setLiveFights([]);
@@ -982,6 +991,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
           liveActiveRef.current = false;
           liveSessionIdRef.current = null;
           liveWasRunningRef.current = false; // settled; don't re-warn on close
+          backgroundNoticeShownRef.current = false;
           setLiveSessionId(null);
           setLiveStatus(ev.clean ? "upToDate" : "attention");
           if (!ev.clean && ev.reason) toast.error(ev.reason);
@@ -1035,7 +1045,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       // Keep the lifted state in sync so the header readout/Direct Upload section
       // reflect the freshly captured (or still-missing) session.
       void refreshNativeState();
-      // A stop / mode-switch could have landed during the sign-in window.
+      // A Stop or final teardown could have landed during the sign-in window.
       if (liveSessionIdRef.current !== sessionId) {
         startingRef.current = false;
         setStarting(false);
@@ -1070,7 +1080,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
 
     // PRE-START ABORT CHECK. The settings/has_session reads and the readiness probe
     // above are awaited BEFORE `uploader_start_live` registers a backend `Starting`
-    // slot — so a stop / switch-to-Manual / dialog-close landing during them runs
+    // slot — so an explicit stop or final teardown landing during them runs
     // `uploader_stop_live` against a slot that doesn't exist yet (a no-op), and without
     // this guard the start would then resume and launch an ORPHAN backend session the
     // UI already asked to stop. If we lost ownership (the ref was cleared/replaced),
@@ -1139,15 +1149,13 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const handleStopLive = async () => {
     // Read the session id from the REF, not state: a start sets the ref before
     // the start await resolves but sets `liveSessionId` state only after. Using
-    // the ref lets us stop a session that is still starting (e.g. the user
-    // switches to Manual mid-start) — the backend turns this into a cancel of
-    // the in-flight Starting slot, so the start aborts instead of orphaning a
-    // Running watcher with no visible Stop control.
+    // the ref lets us stop a session that is still starting. The backend turns this
+    // into a cancel of the in-flight Starting slot, so the start aborts instead of
+    // orphaning a Running watcher with no visible Stop control.
     const id = liveSessionIdRef.current;
     if (!id) return;
     // Clear the ownership refs SYNCHRONOUSLY, before any await. A caller that stops
-    // then immediately starts (handleForceHandoffLive) or switches to Manual
-    // (`void handleStopLive()` then setMode) must see "no session" instantly — the
+    // then immediately starts (handleForceHandoffLive) must see "no session" instantly — the
     // backend stop is awaited below, but a synchronous follow-on (handleStartLive's
     // re-entry guard, the pre-start abort re-check, the Live-tab auto-select) reads
     // these refs and would otherwise act on the just-stopped session. The post-await
@@ -1161,6 +1169,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     const wasHandedOff = liveHandedOffRef.current;
     liveWasRunningRef.current = false;
     liveHandedOffRef.current = false;
+    backgroundNoticeShownRef.current = false;
 
     // Snapshot the session stats NOW (before any state clears) so we can show a
     // calm end-of-session summary: how long, how many fights, what content.
@@ -1316,8 +1325,42 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // sign-in button).
   const firstTabRef = useRef<HTMLButtonElement>(null);
 
+  const livePhase: "armed" | "live" | "attention" =
+    liveStatus === "attention" ? "attention" : sessionAnchored || liveHandedOff ? "live" : "armed";
+
+  const openLiveWorkspace = useCallback(() => {
+    setMode("live");
+    onOpen();
+  }, [onOpen]);
+
+  const handleDialogOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (nextOpen) {
+        openLiveWorkspace();
+        return;
+      }
+      if (liveSessionIdRef.current && !backgroundNoticeShownRef.current) {
+        backgroundNoticeShownRef.current = true;
+        toast.info(
+          `${
+            liveHandedOffRef.current ? "Live tracking" : "Live upload"
+          } continues in the background.`,
+          {
+            duration: 7000,
+            action: {
+              label: "Open",
+              onClick: openLiveWorkspace,
+            },
+          }
+        );
+      }
+      onClose();
+    },
+    [onClose, openLiveWorkspace]
+  );
+
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       {/* Cap height to the viewport and lay the dialog out as a flex column so the
           header stays pinned while the body scrolls. Without this the shared
           DialogContent (overflow-hidden, no max-height, vertically centered)
@@ -1391,6 +1434,21 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
             <div className="space-y-3.5">
               <WhatGetsUploaded />
 
+              {liveSessionId && mode !== "live" && (
+                <LiveSessionMiniBar
+                  phase={livePhase}
+                  startMs={liveStartMs}
+                  fightCount={liveFightCount}
+                  report={liveReport}
+                  handedOff={liveHandedOff}
+                  visibility={liveVisibility}
+                  sessionAnchored={sessionAnchored}
+                  onOpen={() => setMode("live")}
+                  onStop={handleStopLive}
+                  onCopyLink={copyLink}
+                />
+              )}
+
               {/* Mode tabs — a segmented control sitting in a recessed track, so
                   the active tab reads as raised out of the well, not as two equal
                   panels. */}
@@ -1399,13 +1457,6 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   buttonRef={firstTabRef}
                   active={mode === "manual"}
                   onClick={() => {
-                    // Leaving Live unmounts its only Stop control, so stop the
-                    // session first rather than orphaning the watcher. Check the
-                    // REF (not `liveSessionId` state): a session that is still
-                    // starting has its id in the ref before state lands, and
-                    // handleStopLive now keys off the ref too, so this also cancels
-                    // an in-flight start.
-                    if (liveSessionIdRef.current) void handleStopLive();
                     setMode("manual");
                   }}
                   Icon={Upload}
@@ -1528,10 +1579,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 />
               )}
 
-              {/* Action area. Keyed on `mode` so switching cross-fades the panel
-                (content opacity only — never the glass blur). The mode-switch
-                handler already stops a live session before setMode, so this
-                remount never bypasses the watcher teardown. */}
+              {/* Action area. Keyed on `mode` so switching cross-fades the panel.
+                Live sessions keep running until the explicit Stop control is used. */}
               <div key={mode} className="animate-[fade-in_0.2s_ease-out]">
                 {mode === "manual" ? (
                   <ManualActions
@@ -1623,7 +1672,170 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         onCancel={() => setDeleteTarget(null)}
         onConfirm={handleConfirmDelete}
       />
+      {liveSessionId && !open && (
+        <LiveSessionMiniBar
+          floating
+          phase={livePhase}
+          startMs={liveStartMs}
+          fightCount={liveFightCount}
+          report={liveReport}
+          handedOff={liveHandedOff}
+          visibility={liveVisibility}
+          sessionAnchored={sessionAnchored}
+          onOpen={openLiveWorkspace}
+          onStop={handleStopLive}
+          onCopyLink={copyLink}
+        />
+      )}
     </Dialog>
+  );
+}
+
+// Compact control surface for a live session that continues while the full
+// uploader workspace is hidden or while the user is looking at the manual tab.
+function LiveSessionMiniBar({
+  floating = false,
+  phase,
+  startMs,
+  fightCount,
+  report,
+  handedOff,
+  visibility,
+  sessionAnchored,
+  onOpen,
+  onStop,
+  onCopyLink,
+}: {
+  floating?: boolean;
+  phase: "armed" | "live" | "attention";
+  startMs: number | null;
+  fightCount: number;
+  report: ReportRef | null;
+  handedOff: boolean;
+  visibility: Visibility;
+  sessionAnchored: boolean;
+  onOpen: () => void;
+  onStop: () => void;
+  onCopyLink: (url: string) => void | Promise<void>;
+}) {
+  const tone = phase === "live" ? "emerald" : "amber";
+  const isNative = !handedOff;
+  const title =
+    phase === "attention"
+      ? "Live upload needs attention"
+      : handedOff
+        ? "Live tracking continues"
+        : phase === "armed"
+          ? "Live upload armed"
+          : "Live upload continues";
+  const detail = handedOff
+    ? "Kalpa keeps the timeline here; the ESO Logs uploader keeps streaming in its own window."
+    : phase === "attention"
+      ? "Posting is paused until the ESO Logs session is refreshed."
+      : sessionAnchored
+        ? "Kalpa keeps streaming while the uploader is hidden. Keep Kalpa running until you stop."
+        : "Kalpa is waiting for ESO to start a logging session. Keep Kalpa running until you stop.";
+
+  return (
+    <div
+      className={cn(
+        floating &&
+          "fixed right-4 bottom-4 left-4 z-40 sm:left-auto sm:w-[min(420px,calc(100vw-2rem))]"
+      )}
+    >
+      <GlassPanel
+        variant="primary"
+        className={cn(
+          "border p-3.5 shadow-[0_18px_48px_-18px_rgba(0,0,0,0.85),inset_0_1px_0_rgba(255,255,255,0.06)]",
+          tone === "emerald"
+            ? "border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.08] to-white/[0.015]"
+            : "border-amber-400/20 bg-gradient-to-b from-amber-400/[0.08] to-white/[0.015]"
+        )}
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <span
+              className={cn(
+                "flex size-9 shrink-0 items-center justify-center rounded-lg border",
+                tone === "emerald"
+                  ? "border-emerald-400/20 bg-emerald-400/[0.08]"
+                  : "border-amber-400/20 bg-amber-400/[0.08]"
+              )}
+            >
+              {phase === "attention" ? (
+                <AlertTriangle className="size-4 text-amber-300" aria-hidden />
+              ) : (
+                <PulseDot tone={tone} />
+              )}
+            </span>
+            <div className="min-w-0">
+              <div className="truncate font-heading text-sm font-semibold text-foreground/95">
+                {title}
+              </div>
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+                {startMs !== null && <SessionTimer startMs={startMs} />}
+                <span>
+                  {fightCount} fight{fightCount === 1 ? "" : "s"}
+                </span>
+                {report && (
+                  <span className="max-w-[120px] truncate font-mono text-foreground/70">
+                    {report.code}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+            {report && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => void onCopyLink(report.url)}
+                  aria-label="Copy report link"
+                >
+                  <Copy className="size-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    void openReportUrl(primaryReportUrl(report, visibility, { live: isNative }))
+                  }
+                >
+                  {isNative && visibility !== "private" ? (
+                    <Zap className="size-3.5" />
+                  ) : (
+                    <ExternalLink className="size-3.5" />
+                  )}
+                  {isNative && visibility !== "private" ? "Watch" : "Open"}
+                </Button>
+              </>
+            )}
+            <Button variant="outline" size="sm" onClick={onOpen}>
+              <Radio className="size-3.5" />
+              {floating ? "Open" : "Show live"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onStop}
+              className={
+                handedOff
+                  ? "border-amber-400/25 text-amber-200 hover:bg-amber-500/10"
+                  : "border-red-400/25 text-red-200 hover:bg-red-500/10"
+              }
+            >
+              {handedOff ? "Stop tracking" : "Stop upload"}
+            </Button>
+          </div>
+        </div>
+        <p className="mt-2 border-t border-white/[0.06] pt-2 text-xs text-muted-foreground">
+          {detail}
+        </p>
+      </GlassPanel>
+    </div>
   );
 }
 
@@ -3562,7 +3774,9 @@ function LiveDashboard({
                 <span className="text-emerald-400/90">Stop</span> ends the upload and closes the
                 report on esologs.com.
               </li>
-              <li className="list-disc">Keep Kalpa open until you stop or finish the raid.</li>
+              <li className="list-disc">
+                You can close this dialog; keep Kalpa running until you stop or finish the raid.
+              </li>
             </ul>
           </div>
         ))}

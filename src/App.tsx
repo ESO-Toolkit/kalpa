@@ -69,6 +69,7 @@ function App() {
   const [errorShowSettings, setErrorShowSettings] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
+  const [logUploaderMounted, setLogUploaderMounted] = useState(false);
   const [esoRunningPromptOpen, setEsoRunningPromptOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [updateResults, setUpdateResults] = useState<UpdateCheckResult[]>([]);
@@ -1352,6 +1353,7 @@ function App() {
   const batchMode = selectedFolders.size > 0 && viewMode === "installed";
 
   const handleOpenDialog = useCallback((dialog: Exclude<ActiveDialog, null>) => {
+    if (dialog === "log-upload") setLogUploaderMounted(true);
     setActiveDialog(dialog);
   }, []);
 
@@ -1392,10 +1394,10 @@ function App() {
           onBatchRemove={() => void handleBatchRemove()}
           onBatchTag={handleBatchTag}
           onBatchUpdate={() => void handleBatchUpdate()}
-          onOpenPacks={() => setActiveDialog("packs")}
-          onOpenSavedVars={() => setActiveDialog("saved-variables")}
-          onOpenSettings={() => setActiveDialog("settings")}
-          onOpenLogUpload={() => setActiveDialog("log-upload")}
+          onOpenPacks={() => handleOpenDialog("packs")}
+          onOpenSavedVars={() => handleOpenDialog("saved-variables")}
+          onOpenSettings={() => handleOpenDialog("settings")}
+          onOpenLogUpload={() => handleOpenDialog("log-upload")}
           onRefresh={handleRefresh}
         />
 
@@ -1523,6 +1525,7 @@ function App() {
           deepLinkPackId={deepLinkPackId}
           deepLinkShareCode={deepLinkShareCode}
           knownInstances={knownInstances}
+          logUploaderMounted={logUploaderMounted}
           onAuthChange={setAuthUser}
           onCheckForAppUpdate={() => void checkForAppUpdate(false)}
           onCloseDialog={handleCloseDialog}
