@@ -69,7 +69,7 @@ pub(crate) fn extract_from_lines(
         })
         .map(|p| {
             let class_name = p.class_name_from_mastery.or(p.class_name_from_unit);
-            let evidence = if !p.class_mastery_passives.is_empty() {
+            let evidence = if p.saw_player_info {
                 "raw-player-info"
             } else {
                 "raw-unit-added"
@@ -375,6 +375,24 @@ mod tests {
         assert_eq!(
             evidence.players[0].class_mastery_passives,
             vec![263603, 263604]
+        );
+        assert_eq!(evidence.players[0].front_bar_skill_ids, vec![63046]);
+        assert_eq!(evidence.players[0].back_bar_skill_ids, vec![40382]);
+    }
+
+    #[test]
+    fn labels_player_info_evidence_even_without_class_mastery() {
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "1,PLAYER_INFO,1,[12345],[1],[],[63046],[40382]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+
+        assert_eq!(evidence.players[0].evidence, "raw-player-info");
+        assert_eq!(
+            evidence.players[0].class_mastery_passives,
+            Vec::<u32>::new()
         );
         assert_eq!(evidence.players[0].front_bar_skill_ids, vec![63046]);
         assert_eq!(evidence.players[0].back_bar_skill_ids, vec![40382]);
