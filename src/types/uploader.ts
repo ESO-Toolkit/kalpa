@@ -78,9 +78,17 @@ export interface KalpaPlayerBuildEvidence {
   championPoints?: number | null;
   className?: string | null;
   classMasteryPassives?: number[];
+  championPointPassives?: number[];
+  food?: KalpaFoodEvidence | null;
   scribedSkills?: KalpaScribedSkillEvidence[];
   evidence: string;
   confidence: string;
+}
+
+export interface KalpaFoodEvidence {
+  abilityId: number;
+  name?: string | null;
+  icon?: string | null;
 }
 
 export interface KalpaScribedSkillEvidence {

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::uploader::types::{
-    KalpaBuildEvidence, KalpaPlayerBuildEvidence, KalpaScribedSkillEvidence,
+    KalpaBuildEvidence, KalpaFoodEvidence, KalpaPlayerBuildEvidence, KalpaScribedSkillEvidence,
 };
 
 use super::encode::split_csv_quoted_pub;
@@ -17,6 +17,23 @@ const SCHEMA_VERSION: u8 = 1;
 const SOURCE: &str = "kalpa-native-player-info";
 const CLASS_MASTERY_MAX_PICKS: usize = 2;
 const MAX_SCRIBED_SKILLS: usize = 12;
+const MAX_CHAMPION_POINT_PASSIVES: usize = 12;
+
+const CHAMPION_POINT_PASSIVE_IDS: &[u32] = &[
+    5857, 30923, 38963, 45546, 63663, 63880, 64079, 92134, 141899, 141942, 141991, 141993, 141997,
+    141999, 142007, 142034, 142079, 142092, 142094, 142121, 142207, 142210, 142224, 142230, 142231,
+    147889, 151748, 151749, 156008, 156017, 160057,
+];
+
+const FOOD_ABILITY_IDS: &[u32] = &[
+    17407, 17577, 61218, 61255, 61257, 61259, 61260, 61261, 61264, 61278, 61294, 61298, 61314,
+    61322, 61325, 61326, 61328, 66125, 66128, 66130, 66132, 66137, 66551, 66568, 66576, 66586,
+    66590, 66594, 68411, 68412, 72824, 72957, 72960, 72962, 73553, 84678, 84711, 84720, 84723,
+    84731, 84732, 84733, 84734, 85485, 85486, 86669, 86673, 89919, 89939, 89953, 89954, 89955,
+    89956, 89957, 89958, 89959, 89971, 89972, 89973, 91368, 91369, 93376, 100487, 100498, 100499,
+    107789, 107793, 127595, 127596, 146563, 146725, 153013, 158543, 158548, 158549, 160169, 160170,
+    160171, 160172, 160174, 160175, 160176, 160312, 160494, 161213, 161215,
+];
 
 #[derive(Debug, Default)]
 struct PlayerBuilder {
@@ -31,12 +48,14 @@ struct PlayerBuilder {
     class_name_from_unit: Option<String>,
     class_name_from_mastery: Option<String>,
     class_mastery_passives: Vec<u32>,
+    champion_point_passives: Vec<u32>,
+    passive_ability_ids: Vec<u32>,
     slotted_skill_ids: Vec<u32>,
     saw_player_info: bool,
 }
 
 #[derive(Debug, Clone)]
-struct ScribedAbilityInfo {
+struct AbilityEvidenceInfo {
     ability_id: u32,
     name: Option<String>,
     icon: Option<String>,
@@ -57,12 +76,12 @@ pub(crate) fn extract_from_lines(
     report_code: Option<String>,
 ) -> KalpaBuildEvidence {
     let mut players = BTreeMap::<String, PlayerBuilder>::new();
-    let mut scribed_abilities = BTreeMap::<u32, ScribedAbilityInfo>::new();
+    let mut ability_infos = BTreeMap::<u32, AbilityEvidenceInfo>::new();
 
     for line in lines {
         let fields = split_csv_quoted_pub(line);
         match fields.get(1).map(|s| s.trim()) {
-            Some("ABILITY_INFO") => ingest_ability_info(&mut scribed_abilities, &fields),
+            Some("ABILITY_INFO") => ingest_ability_info(&mut ability_infos, &fields),
             Some("UNIT_ADDED") => ingest_unit_added(&mut players, &fields),
             Some("PLAYER_INFO") => ingest_player_info(&mut players, &fields, line),
             _ => {}
@@ -77,9 +96,14 @@ pub(crate) fn extract_from_lines(
                 || p.character_name.is_some()
                 || p.account_name.is_some()
                 || !p.class_mastery_passives.is_empty()
-                || p.slotted_skill_ids
-                    .iter()
-                    .any(|ability_id| scribed_abilities.contains_key(ability_id))
+                || !p.champion_point_passives.is_empty()
+                || resolve_food(&p.passive_ability_ids, &ability_infos).is_some()
+                || p.slotted_skill_ids.iter().any(|ability_id| {
+                    ability_infos
+                        .get(ability_id)
+                        .and_then(|info| info.icon.as_deref())
+                        .is_some_and(is_grimoire_icon_slug)
+                })
         })
         .map(|p| {
             let class_name = p.class_name_from_mastery.or(p.class_name_from_unit);
@@ -88,7 +112,8 @@ pub(crate) fn extract_from_lines(
             } else {
                 "raw-unit-added"
             };
-            let scribed_skills = resolve_scribed_skills(&p.slotted_skill_ids, &scribed_abilities);
+            let food = resolve_food(&p.passive_ability_ids, &ability_infos);
+            let scribed_skills = resolve_scribed_skills(&p.slotted_skill_ids, &ability_infos);
             KalpaPlayerBuildEvidence {
                 unit_id: p.unit_id,
                 character_name: p.character_name,
@@ -100,6 +125,8 @@ pub(crate) fn extract_from_lines(
                 champion_points: p.champion_points,
                 class_name,
                 class_mastery_passives: p.class_mastery_passives,
+                champion_point_passives: p.champion_point_passives,
+                food,
                 scribed_skills,
                 evidence: evidence.to_string(),
                 confidence: "exact".to_string(),
@@ -115,19 +142,16 @@ pub(crate) fn extract_from_lines(
     }
 }
 
-fn ingest_ability_info(scribed_abilities: &mut BTreeMap<u32, ScribedAbilityInfo>, fields: &[&str]) {
+fn ingest_ability_info(ability_infos: &mut BTreeMap<u32, AbilityEvidenceInfo>, fields: &[&str]) {
     let Some(ability_id) = fields.get(2).and_then(|s| parse_u32(s)) else {
         return;
     };
     let name = fields.get(3).and_then(|s| non_empty_string(unquote(s)));
-    let icon = fields.get(4).and_then(|s| grimoire_icon_slug(unquote(s)));
-    if icon.is_none() {
-        return;
-    }
+    let icon = fields.get(4).and_then(|s| ability_icon_slug(unquote(s)));
 
-    scribed_abilities
+    ability_infos
         .entry(ability_id)
-        .or_insert(ScribedAbilityInfo {
+        .or_insert(AbilityEvidenceInfo {
             ability_id,
             name,
             icon,
@@ -194,6 +218,22 @@ fn ingest_player_info(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&
     let Some(passive_ids_raw) = top_level_arrays.first().copied() else {
         return;
     };
+    let passive_ids = parse_u32_array(passive_ids_raw);
+    entry.passive_ability_ids = passive_ids.iter().copied().filter(|id| *id > 0).collect();
+    entry.class_name_from_mastery = None;
+    entry.class_mastery_passives.clear();
+    entry.champion_point_passives.clear();
+    for ability_id in &entry.passive_ability_ids {
+        if entry.champion_point_passives.len() >= MAX_CHAMPION_POINT_PASSIVES {
+            break;
+        }
+        if is_champion_point_passive(*ability_id)
+            && !entry.champion_point_passives.contains(ability_id)
+        {
+            entry.champion_point_passives.push(*ability_id);
+        }
+    }
+
     entry.slotted_skill_ids.clear();
     if let Some(front_bar) = top_level_arrays.get(3) {
         entry
@@ -206,7 +246,7 @@ fn ingest_player_info(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&
             .extend(parse_positive_u32_array(back_bar));
     }
 
-    for ability_id in parse_u32_array(passive_ids_raw) {
+    for ability_id in passive_ids {
         let Some(owner) = class_name_from_class_mastery_passive(ability_id) else {
             continue;
         };
@@ -227,7 +267,7 @@ fn ingest_player_info(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&
 
 fn resolve_scribed_skills(
     slotted_skill_ids: &[u32],
-    scribed_abilities: &BTreeMap<u32, ScribedAbilityInfo>,
+    ability_infos: &BTreeMap<u32, AbilityEvidenceInfo>,
 ) -> Vec<KalpaScribedSkillEvidence> {
     let mut seen = std::collections::BTreeSet::<u32>::new();
     let mut result = Vec::new();
@@ -235,9 +275,12 @@ fn resolve_scribed_skills(
         if !seen.insert(*ability_id) {
             continue;
         }
-        let Some(info) = scribed_abilities.get(ability_id) else {
+        let Some(info) = ability_infos.get(ability_id) else {
             continue;
         };
+        if !info.icon.as_deref().is_some_and(is_grimoire_icon_slug) {
+            continue;
+        }
         result.push(KalpaScribedSkillEvidence {
             ability_id: info.ability_id,
             name: info.name.clone(),
@@ -248,6 +291,23 @@ fn resolve_scribed_skills(
         }
     }
     result
+}
+
+fn resolve_food(
+    passive_ability_ids: &[u32],
+    ability_infos: &BTreeMap<u32, AbilityEvidenceInfo>,
+) -> Option<KalpaFoodEvidence> {
+    for ability_id in passive_ability_ids {
+        let info = ability_infos.get(ability_id);
+        if is_food_ability(*ability_id, info) {
+            return Some(KalpaFoodEvidence {
+                ability_id: *ability_id,
+                name: info.and_then(|value| value.name.clone()),
+                icon: info.and_then(|value| value.icon.clone()),
+            });
+        }
+    }
+    None
 }
 
 fn tail_after_commas(line: &str, commas_to_skip: usize) -> &str {
@@ -334,12 +394,79 @@ fn unquote(input: &str) -> &str {
     input.trim().trim_matches('"')
 }
 
-fn grimoire_icon_slug(input: &str) -> Option<String> {
+fn ability_icon_slug(input: &str) -> Option<String> {
     let normalized = input.trim().trim_end_matches(".dds").to_lowercase();
     let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
-    basename
-        .starts_with("ability_grimoire_")
-        .then(|| basename.to_string())
+    non_empty_string(basename)
+}
+
+fn is_grimoire_icon_slug(input: &str) -> bool {
+    input.starts_with("ability_grimoire_")
+}
+
+fn is_champion_point_passive(ability_id: u32) -> bool {
+    CHAMPION_POINT_PASSIVE_IDS.contains(&ability_id)
+}
+
+fn is_food_ability(ability_id: u32, info: Option<&AbilityEvidenceInfo>) -> bool {
+    if FOOD_ABILITY_IDS.contains(&ability_id) {
+        return true;
+    }
+
+    let Some(info) = info else {
+        return false;
+    };
+    let name = info.name.as_deref().unwrap_or("");
+    if is_named_food(name) {
+        return true;
+    }
+
+    let icon = info.icon.as_deref().unwrap_or("");
+    has_food_icon(icon) && is_generic_food_effect(name)
+}
+
+fn is_named_food(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    [
+        "artaeum takeaway broth",
+        "bewitched sugar skulls",
+        "candied jester",
+        "clockwork citrus filet",
+        "crown fortifying meal",
+        "crown vigorous tincture",
+        "dubious camoran throne",
+        "eye scream",
+        "ghastly eye bowl",
+        "jewels of misrule",
+        "lava foot soup",
+        "smoked bear haunch",
+        "witchmother",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn is_generic_food_effect(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    [
+        "increase all primary stats",
+        "increase health regen",
+        "increase health",
+        "increase magicka",
+        "increase stamina",
+        "increase max health & magicka",
+        "increase max health & stamina",
+        "increase max magicka & stamina",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn has_food_icon(icon: &str) -> bool {
+    icon.contains("food")
+        || icon.contains("drink")
+        || icon.contains("tricolor")
+        || icon.contains("halloween_2016_iron_cup_bones")
 }
 
 fn class_name_from_unit_class_id(class_id: u16) -> Option<&'static str> {
@@ -376,7 +503,8 @@ mod tests {
     fn extracts_class_mastery_from_player_info() {
         let lines = [
             "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
-            "1,PLAYER_INFO,1,[263870,263871,12345],[1,1,1],[],[],[]",
+            "1,ABILITY_INFO,68411,\"Increase All Primary Stats\",\"/esoui/art/icons/store_tricolor_food_01.dds\",T,T",
+            "2,PLAYER_INFO,1,[263870,263871,142210,142079,68411],[1,1,1,1,1],[],[],[]",
         ];
 
         let evidence = extract_from_lines(&lines, Some("ABC123".to_string()));
@@ -392,6 +520,18 @@ mod tests {
         assert_eq!(
             evidence.players[0].class_mastery_passives,
             vec![263870, 263871]
+        );
+        assert_eq!(
+            evidence.players[0].champion_point_passives,
+            vec![142210, 142079]
+        );
+        assert_eq!(
+            evidence.players[0].food,
+            Some(KalpaFoodEvidence {
+                ability_id: 68411,
+                name: Some("Increase All Primary Stats".to_string()),
+                icon: Some("store_tricolor_food_01".to_string()),
+            })
         );
     }
 
@@ -467,6 +607,74 @@ mod tests {
         assert_eq!(skills[0].ability_id, 220543);
         assert_eq!(skills[0].name.as_deref(), Some("Dazing Trample"));
         assert_eq!(skills[0].icon.as_deref(), Some("ability_grimoire_assault"));
+    }
+
+    #[test]
+    fn extracts_build_facts_for_multiple_players() {
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "0,UNIT_ADDED,2,PLAYER,T,2,0,F,6,5,\"Sun Beam\",\"@healer\",222,50,2100,0,PLAYER_ALLY,T",
+            "1,ABILITY_INFO,84731,\"Witchmother's Potent Brew\",\"/esoui/art/icons/event_halloween_2016_iron_cup_bones.dds\",T,T",
+            "2,ABILITY_INFO,89958,\"Increase Stamina\",\"/esoui/art/icons/store_magickafood_001.dds\",T,T",
+            "3,PLAYER_INFO,1,[263870,263871,142210,142079,84731],[1,1,1,1,1],[],[],[]",
+            "4,PLAYER_INFO,2,[263585,263586,156017,142092,89958],[1,1,1,1,1],[],[],[]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+
+        assert_eq!(evidence.players.len(), 2);
+        assert_eq!(evidence.players[0].unit_id, "1");
+        assert_eq!(evidence.players[0].class_name.as_deref(), Some("Sorcerer"));
+        assert_eq!(
+            evidence.players[0].class_mastery_passives,
+            vec![263870, 263871]
+        );
+        assert_eq!(
+            evidence.players[0].champion_point_passives,
+            vec![142210, 142079]
+        );
+        assert_eq!(
+            evidence.players[0].food.as_ref().map(|f| f.ability_id),
+            Some(84731)
+        );
+
+        assert_eq!(evidence.players[1].unit_id, "2");
+        assert_eq!(evidence.players[1].race_id, Some(5));
+        assert_eq!(evidence.players[1].champion_points, Some(2100));
+        assert_eq!(evidence.players[1].class_name.as_deref(), Some("Templar"));
+        assert_eq!(
+            evidence.players[1].class_mastery_passives,
+            vec![263585, 263586]
+        );
+        assert_eq!(
+            evidence.players[1].champion_point_passives,
+            vec![156017, 142092]
+        );
+        assert_eq!(
+            evidence.players[1].food.as_ref().map(|f| f.ability_id),
+            Some(89958)
+        );
+    }
+
+    #[test]
+    fn later_player_info_replaces_build_facts_for_same_player() {
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "1,ABILITY_INFO,68411,\"Increase All Primary Stats\",\"/esoui/art/icons/store_tricolor_food_01.dds\",T,T",
+            "2,ABILITY_INFO,84731,\"Witchmother's Potent Brew\",\"/esoui/art/icons/event_halloween_2016_iron_cup_bones.dds\",T,T",
+            "3,PLAYER_INFO,1,[263870,142210,68411],[1,1,1],[],[],[]",
+            "4,PLAYER_INFO,1,[263871,142079,84731],[1,1,1],[],[],[]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+
+        assert_eq!(evidence.players.len(), 1);
+        assert_eq!(evidence.players[0].class_mastery_passives, vec![263871]);
+        assert_eq!(evidence.players[0].champion_point_passives, vec![142079]);
+        assert_eq!(
+            evidence.players[0].food.as_ref().map(|f| f.ability_id),
+            Some(84731)
+        );
     }
 
     #[test]

@@ -229,9 +229,23 @@ pub struct KalpaPlayerBuildEvidence {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub class_mastery_passives: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub champion_point_passives: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub food: Option<KalpaFoodEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scribed_skills: Vec<KalpaScribedSkillEvidence>,
     pub evidence: String,
     pub confidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KalpaFoodEvidence {
+    pub ability_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
