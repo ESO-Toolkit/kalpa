@@ -61,6 +61,87 @@ struct AbilityEvidenceInfo {
     icon: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct PlayerAccumulator {
+    players: BTreeMap<String, PlayerBuilder>,
+    active_key_by_unit: BTreeMap<String, String>,
+    next_reuse_index_by_unit: BTreeMap<String, usize>,
+}
+
+impl PlayerAccumulator {
+    fn active_player_mut(&mut self, unit_id: &str) -> &mut PlayerBuilder {
+        let key = self.active_key_for_unit(unit_id);
+        self.players.entry(key).or_insert_with(|| PlayerBuilder {
+            unit_id: unit_id.to_string(),
+            ..PlayerBuilder::default()
+        })
+    }
+
+    fn active_player_for_identity_mut(
+        &mut self,
+        unit_id: &str,
+        identity: &PlayerIdentity,
+    ) -> &mut PlayerBuilder {
+        let should_split = self
+            .active_key_by_unit
+            .get(unit_id)
+            .and_then(|key| self.players.get(key))
+            .is_some_and(|player| player_identity_conflicts(player, identity));
+
+        if should_split {
+            let key = self.next_player_key(unit_id);
+            self.active_key_by_unit
+                .insert(unit_id.to_string(), key.clone());
+            self.players.entry(key).or_insert_with(|| PlayerBuilder {
+                unit_id: unit_id.to_string(),
+                ..PlayerBuilder::default()
+            });
+        }
+
+        self.active_player_mut(unit_id)
+    }
+
+    fn into_players(self) -> BTreeMap<String, PlayerBuilder> {
+        self.players
+    }
+
+    fn active_key_for_unit(&mut self, unit_id: &str) -> String {
+        if let Some(key) = self.active_key_by_unit.get(unit_id) {
+            return key.clone();
+        }
+
+        let key = self.next_player_key(unit_id);
+        self.active_key_by_unit
+            .insert(unit_id.to_string(), key.clone());
+        key
+    }
+
+    fn next_player_key(&mut self, unit_id: &str) -> String {
+        let next_reuse_index = self
+            .next_reuse_index_by_unit
+            .entry(unit_id.to_string())
+            .or_insert(0);
+        loop {
+            let key = if *next_reuse_index == 0 {
+                unit_id.to_string()
+            } else {
+                format!("{unit_id}#{next_reuse_index}")
+            };
+            *next_reuse_index += 1;
+            if !self.players.contains_key(&key) {
+                return key;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct PlayerIdentity {
+    character_name: Option<String>,
+    account_name: Option<String>,
+    character_id: Option<String>,
+}
+
 pub(crate) fn extract_from_file(
     path: impl AsRef<Path>,
     report_code: Option<String>,
@@ -75,7 +156,7 @@ pub(crate) fn extract_from_lines(
     lines: &[&str],
     report_code: Option<String>,
 ) -> KalpaBuildEvidence {
-    let mut players = BTreeMap::<String, PlayerBuilder>::new();
+    let mut players = PlayerAccumulator::default();
     let mut ability_infos = BTreeMap::<u32, AbilityEvidenceInfo>::new();
 
     for line in lines {
@@ -89,6 +170,7 @@ pub(crate) fn extract_from_lines(
     }
 
     let players = players
+        .into_players()
         .into_values()
         .filter(|p| {
             p.saw_player_info
@@ -158,7 +240,7 @@ fn ingest_ability_info(ability_infos: &mut BTreeMap<u32, AbilityEvidenceInfo>, f
         });
 }
 
-fn ingest_unit_added(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&str]) {
+fn ingest_unit_added(players: &mut PlayerAccumulator, fields: &[&str]) {
     if fields.get(3).map(|s| unquote(s)) != Some("PLAYER") {
         return;
     }
@@ -167,12 +249,13 @@ fn ingest_unit_added(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&s
         return;
     };
 
-    let entry = players
-        .entry(unit_id.to_string())
-        .or_insert_with(|| PlayerBuilder {
-            unit_id: unit_id.to_string(),
-            ..PlayerBuilder::default()
-        });
+    let identity = PlayerIdentity {
+        character_name: fields.get(10).and_then(|s| non_empty_string(unquote(s))),
+        account_name: fields.get(11).and_then(|s| non_empty_string(unquote(s))),
+        character_id: fields.get(12).and_then(|s| non_zero_string(s.trim())),
+    };
+
+    let entry = players.active_player_for_identity_mut(unit_id, &identity);
 
     entry.class_id = fields.get(8).and_then(|s| parse_u16(s)).or(entry.class_id);
     entry.race_id = fields.get(9).and_then(|s| parse_u16(s)).or(entry.race_id);
@@ -186,31 +269,17 @@ fn ingest_unit_added(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&s
         .and_then(class_name_from_unit_class_id)
         .map(str::to_string)
         .or(entry.class_name_from_unit.take());
-    entry.character_name = fields
-        .get(10)
-        .and_then(|s| non_empty_string(unquote(s)))
-        .or(entry.character_name.take());
-    entry.account_name = fields
-        .get(11)
-        .and_then(|s| non_empty_string(unquote(s)))
-        .or(entry.account_name.take());
-    entry.character_id = fields
-        .get(12)
-        .and_then(|s| non_zero_string(s.trim()))
-        .or(entry.character_id.take());
+    entry.character_name = identity.character_name.or(entry.character_name.take());
+    entry.account_name = identity.account_name.or(entry.account_name.take());
+    entry.character_id = identity.character_id.or(entry.character_id.take());
 }
 
-fn ingest_player_info(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&str], line: &str) {
+fn ingest_player_info(players: &mut PlayerAccumulator, fields: &[&str], line: &str) {
     let Some(unit_id) = fields.get(2).map(|s| s.trim()).filter(|s| !s.is_empty()) else {
         return;
     };
 
-    let entry = players
-        .entry(unit_id.to_string())
-        .or_insert_with(|| PlayerBuilder {
-            unit_id: unit_id.to_string(),
-            ..PlayerBuilder::default()
-        });
+    let entry = players.active_player_mut(unit_id);
     entry.saw_player_info = true;
 
     let arrays = tail_after_commas(line, 3);
@@ -343,6 +412,36 @@ fn split_top_level_commas(input: &str) -> Vec<&str> {
     }
     fields.push(input[start..].trim());
     fields
+}
+
+fn player_identity_conflicts(player: &PlayerBuilder, identity: &PlayerIdentity) -> bool {
+    identity_field_conflicts(
+        player.character_id.as_deref(),
+        identity.character_id.as_deref(),
+    ) || identity_field_conflicts(
+        player.account_name.as_deref(),
+        identity.account_name.as_deref(),
+    ) || identity_field_conflicts(
+        player.character_name.as_deref(),
+        identity.character_name.as_deref(),
+    )
+}
+
+fn identity_field_conflicts(existing: Option<&str>, next: Option<&str>) -> bool {
+    let Some(existing) = existing
+        .map(normalize_identity_field)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let Some(next) = next.map(normalize_identity_field).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    existing != next
+}
+
+fn normalize_identity_field(input: &str) -> String {
+    input.trim().to_ascii_lowercase()
 }
 
 fn parse_u32_array(input: &str) -> Vec<u32> {
@@ -675,6 +774,44 @@ mod tests {
             evidence.players[0].food.as_ref().map(|f| f.ability_id),
             Some(84731)
         );
+    }
+
+    #[test]
+    fn unit_id_reuse_preserves_first_players_build_facts() {
+        let lines = [
+            "0,UNIT_ADDED,48,PLAYER,F,46,0,F,3,4,\"teach me too blade\",\"@Mayhem713\",2834060361547667383,50,1911,0,PLAYER_ALLY,T",
+            "1,PLAYER_INFO,48,[142210,142079,263605,263604,127596],[1,1,1,1,1],[],[],[]",
+            "2,UNIT_ADDED,48,PLAYER,F,53,0,F,117,7,\"Dud Spud Bud\",\"@conterri\",18432196684152629755,50,1651,0,PLAYER_ALLY,F",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+
+        assert_eq!(evidence.players.len(), 2);
+        let first = evidence
+            .players
+            .iter()
+            .find(|player| player.account_name.as_deref() == Some("@Mayhem713"))
+            .expect("first occupant should remain matchable by account");
+        assert_eq!(first.unit_id, "48");
+        assert_eq!(first.character_name.as_deref(), Some("teach me too blade"));
+        assert_eq!(first.race_id, Some(4));
+        assert_eq!(first.champion_points, Some(1911));
+        assert_eq!(first.class_name.as_deref(), Some("Nightblade"));
+        assert_eq!(first.class_mastery_passives, vec![263605, 263604]);
+        assert_eq!(first.champion_point_passives, vec![142210, 142079]);
+
+        let second = evidence
+            .players
+            .iter()
+            .find(|player| player.account_name.as_deref() == Some("@conterri"))
+            .expect("second occupant should get a separate sidecar row");
+        assert_eq!(second.unit_id, "48");
+        assert_eq!(second.character_name.as_deref(), Some("Dud Spud Bud"));
+        assert_eq!(second.race_id, Some(7));
+        assert_eq!(second.champion_points, Some(1651));
+        assert_eq!(second.class_name.as_deref(), Some("Arcanist"));
+        assert!(second.class_mastery_passives.is_empty());
+        assert!(second.champion_point_passives.is_empty());
     }
 
     #[test]
