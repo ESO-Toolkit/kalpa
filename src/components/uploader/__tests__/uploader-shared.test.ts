@@ -52,8 +52,9 @@ describe("esotkReportUrl", () => {
           championPoints: 1700,
           className: "Sorcerer",
           classMasteryPassives: [263870, 263871],
-          frontBarSkillIds: [38901, 29489],
-          backBarSkillIds: [23231, 23234],
+          scribedSkills: [
+            { abilityId: 220543, name: "Dazing Trample", icon: "ability_grimoire_assault" },
+          ],
           evidence: "raw-player-info",
           confidence: "exact",
         },
@@ -77,8 +78,6 @@ describe("esotkReportUrl", () => {
         {
           unitId: "1",
           classMasteryPassives: [263870],
-          frontBarSkillIds: [],
-          backBarSkillIds: [],
           evidence: "raw-player-info",
           confidence: "exact",
         },

@@ -229,11 +229,19 @@ pub struct KalpaPlayerBuildEvidence {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub class_mastery_passives: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub front_bar_skill_ids: Vec<u32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub back_bar_skill_ids: Vec<u32>,
+    pub scribed_skills: Vec<KalpaScribedSkillEvidence>,
     pub evidence: String,
     pub confidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KalpaScribedSkillEvidence {
+    pub ability_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A persisted record of an upload Kalpa initiated, shown in the history panel.

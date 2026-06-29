@@ -18,6 +18,7 @@ use tauri::{Manager, State};
 use super::types::*;
 use super::watcher::{LiveEvent, LiveWatchHandle};
 use super::{discovery, scanner, splitter, transport, watcher};
+use crate::auth::AuthState;
 use crate::AllowedAddonsPath;
 
 /// Internal sentinel returned by the live-handoff closure when it observes the
@@ -1027,6 +1028,7 @@ pub struct UploadDispatch {
 pub async fn uploader_upload_log(
     app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
+    auth_state: State<'_, AuthState>,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
     file_path: String,
     options: UploadOptions,
@@ -1211,6 +1213,39 @@ pub async fn uploader_upload_log(
             } else {
                 None
             };
+            if use_native {
+                if let (Some(report), Some(evidence)) = (&report, &build_evidence) {
+                    match auth_state.get_valid_token() {
+                        Ok(Some(token)) => {
+                            let report_code = report.code.clone();
+                            let evidence = evidence.clone();
+                            let visibility = options.visibility;
+                            std::thread::spawn(move || {
+                                if let Err(e) = super::sidecar::publish_build_evidence(
+                                    &report_code,
+                                    &evidence,
+                                    visibility,
+                                    &token,
+                                ) {
+                                    eprintln!(
+                                        "[uploader] native build evidence sidecar skipped: {e}"
+                                    );
+                                }
+                            });
+                        }
+                        Ok(None) => {
+                            eprintln!(
+                                "[uploader] native build evidence sidecar skipped: not signed in to ESOTK"
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[uploader] native build evidence sidecar skipped: auth unavailable: {e}"
+                            );
+                        }
+                    }
+                }
+            }
             record.status = UploadStatus::Completed;
             record.report = report.clone();
             record.build_evidence = build_evidence.clone();

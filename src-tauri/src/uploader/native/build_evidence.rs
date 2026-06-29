@@ -7,13 +7,16 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::uploader::types::{KalpaBuildEvidence, KalpaPlayerBuildEvidence};
+use crate::uploader::types::{
+    KalpaBuildEvidence, KalpaPlayerBuildEvidence, KalpaScribedSkillEvidence,
+};
 
 use super::encode::split_csv_quoted_pub;
 
 const SCHEMA_VERSION: u8 = 1;
 const SOURCE: &str = "kalpa-native-player-info";
 const CLASS_MASTERY_MAX_PICKS: usize = 2;
+const MAX_SCRIBED_SKILLS: usize = 12;
 
 #[derive(Debug, Default)]
 struct PlayerBuilder {
@@ -28,9 +31,15 @@ struct PlayerBuilder {
     class_name_from_unit: Option<String>,
     class_name_from_mastery: Option<String>,
     class_mastery_passives: Vec<u32>,
-    front_bar_skill_ids: Vec<u32>,
-    back_bar_skill_ids: Vec<u32>,
+    slotted_skill_ids: Vec<u32>,
     saw_player_info: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ScribedAbilityInfo {
+    ability_id: u32,
+    name: Option<String>,
+    icon: Option<String>,
 }
 
 pub(crate) fn extract_from_file(
@@ -48,10 +57,12 @@ pub(crate) fn extract_from_lines(
     report_code: Option<String>,
 ) -> KalpaBuildEvidence {
     let mut players = BTreeMap::<String, PlayerBuilder>::new();
+    let mut scribed_abilities = BTreeMap::<u32, ScribedAbilityInfo>::new();
 
     for line in lines {
         let fields = split_csv_quoted_pub(line);
         match fields.get(1).map(|s| s.trim()) {
+            Some("ABILITY_INFO") => ingest_ability_info(&mut scribed_abilities, &fields),
             Some("UNIT_ADDED") => ingest_unit_added(&mut players, &fields),
             Some("PLAYER_INFO") => ingest_player_info(&mut players, &fields, line),
             _ => {}
@@ -66,6 +77,9 @@ pub(crate) fn extract_from_lines(
                 || p.character_name.is_some()
                 || p.account_name.is_some()
                 || !p.class_mastery_passives.is_empty()
+                || p.slotted_skill_ids
+                    .iter()
+                    .any(|ability_id| scribed_abilities.contains_key(ability_id))
         })
         .map(|p| {
             let class_name = p.class_name_from_mastery.or(p.class_name_from_unit);
@@ -74,6 +88,7 @@ pub(crate) fn extract_from_lines(
             } else {
                 "raw-unit-added"
             };
+            let scribed_skills = resolve_scribed_skills(&p.slotted_skill_ids, &scribed_abilities);
             KalpaPlayerBuildEvidence {
                 unit_id: p.unit_id,
                 character_name: p.character_name,
@@ -85,8 +100,7 @@ pub(crate) fn extract_from_lines(
                 champion_points: p.champion_points,
                 class_name,
                 class_mastery_passives: p.class_mastery_passives,
-                front_bar_skill_ids: p.front_bar_skill_ids,
-                back_bar_skill_ids: p.back_bar_skill_ids,
+                scribed_skills,
                 evidence: evidence.to_string(),
                 confidence: "exact".to_string(),
             }
@@ -99,6 +113,25 @@ pub(crate) fn extract_from_lines(
         report_code,
         players,
     }
+}
+
+fn ingest_ability_info(scribed_abilities: &mut BTreeMap<u32, ScribedAbilityInfo>, fields: &[&str]) {
+    let Some(ability_id) = fields.get(2).and_then(|s| parse_u32(s)) else {
+        return;
+    };
+    let name = fields.get(3).and_then(|s| non_empty_string(unquote(s)));
+    let icon = fields.get(4).and_then(|s| grimoire_icon_slug(unquote(s)));
+    if icon.is_none() {
+        return;
+    }
+
+    scribed_abilities
+        .entry(ability_id)
+        .or_insert(ScribedAbilityInfo {
+            ability_id,
+            name,
+            icon,
+        });
 }
 
 fn ingest_unit_added(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&str]) {
@@ -122,7 +155,7 @@ fn ingest_unit_added(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&s
     entry.level = fields.get(13).and_then(|s| parse_u16(s)).or(entry.level);
     entry.champion_points = fields
         .get(14)
-        .and_then(|s| parse_u32(s))
+        .and_then(|s| parse_non_negative_u32(s))
         .or(entry.champion_points);
     entry.class_name_from_unit = entry
         .class_id
@@ -161,14 +194,17 @@ fn ingest_player_info(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&
     let Some(passive_ids_raw) = top_level_arrays.first().copied() else {
         return;
     };
-    entry.front_bar_skill_ids = top_level_arrays
-        .get(3)
-        .map(|ids| parse_positive_u32_array(ids))
-        .unwrap_or_default();
-    entry.back_bar_skill_ids = top_level_arrays
-        .get(4)
-        .map(|ids| parse_positive_u32_array(ids))
-        .unwrap_or_default();
+    entry.slotted_skill_ids.clear();
+    if let Some(front_bar) = top_level_arrays.get(3) {
+        entry
+            .slotted_skill_ids
+            .extend(parse_positive_u32_array(front_bar));
+    }
+    if let Some(back_bar) = top_level_arrays.get(4) {
+        entry
+            .slotted_skill_ids
+            .extend(parse_positive_u32_array(back_bar));
+    }
 
     for ability_id in parse_u32_array(passive_ids_raw) {
         let Some(owner) = class_name_from_class_mastery_passive(ability_id) else {
@@ -187,6 +223,31 @@ fn ingest_player_info(players: &mut BTreeMap<String, PlayerBuilder>, fields: &[&
             break;
         }
     }
+}
+
+fn resolve_scribed_skills(
+    slotted_skill_ids: &[u32],
+    scribed_abilities: &BTreeMap<u32, ScribedAbilityInfo>,
+) -> Vec<KalpaScribedSkillEvidence> {
+    let mut seen = std::collections::BTreeSet::<u32>::new();
+    let mut result = Vec::new();
+    for ability_id in slotted_skill_ids {
+        if !seen.insert(*ability_id) {
+            continue;
+        }
+        let Some(info) = scribed_abilities.get(ability_id) else {
+            continue;
+        };
+        result.push(KalpaScribedSkillEvidence {
+            ability_id: info.ability_id,
+            name: info.name.clone(),
+            icon: info.icon.clone(),
+        });
+        if result.len() >= MAX_SCRIBED_SKILLS {
+            break;
+        }
+    }
+    result
 }
 
 fn tail_after_commas(line: &str, commas_to_skip: usize) -> &str {
@@ -248,6 +309,10 @@ fn parse_u32(input: &str) -> Option<u32> {
     input.trim().parse::<u32>().ok().filter(|value| *value > 0)
 }
 
+fn parse_non_negative_u32(input: &str) -> Option<u32> {
+    input.trim().parse::<u32>().ok()
+}
+
 fn parse_positive_u32_array(input: &str) -> Vec<u32> {
     parse_u32_array(input)
         .into_iter()
@@ -267,6 +332,14 @@ fn non_zero_string(input: &str) -> Option<String> {
 
 fn unquote(input: &str) -> &str {
     input.trim().trim_matches('"')
+}
+
+fn grimoire_icon_slug(input: &str) -> Option<String> {
+    let normalized = input.trim().trim_end_matches(".dds").to_lowercase();
+    let basename = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
+    basename
+        .starts_with("ability_grimoire_")
+        .then(|| basename.to_string())
 }
 
 fn class_name_from_unit_class_id(class_id: u16) -> Option<&'static str> {
@@ -376,8 +449,24 @@ mod tests {
             evidence.players[0].class_mastery_passives,
             vec![263603, 263604]
         );
-        assert_eq!(evidence.players[0].front_bar_skill_ids, vec![63046]);
-        assert_eq!(evidence.players[0].back_bar_skill_ids, vec![40382]);
+    }
+
+    #[test]
+    fn extracts_only_scribed_skills_from_player_bars() {
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "1,ABILITY_INFO,63046,\"Regular Skill\",\"/esoui/art/icons/ability_sorcerer_dark_magic.dds\",F,T",
+            "1,ABILITY_INFO,220543,\"Dazing Trample\",\"/esoui/art/icons/ability_grimoire_assault.dds\",F,T",
+            "2,PLAYER_INFO,1,[12345],[1],[],[63046,220543],[40382]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+        let skills = &evidence.players[0].scribed_skills;
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].ability_id, 220543);
+        assert_eq!(skills[0].name.as_deref(), Some("Dazing Trample"));
+        assert_eq!(skills[0].icon.as_deref(), Some("ability_grimoire_assault"));
     }
 
     #[test]
@@ -394,7 +483,6 @@ mod tests {
             evidence.players[0].class_mastery_passives,
             Vec::<u32>::new()
         );
-        assert_eq!(evidence.players[0].front_bar_skill_ids, vec![63046]);
-        assert_eq!(evidence.players[0].back_bar_skill_ids, vec![40382]);
+        assert!(evidence.players[0].scribed_skills.is_empty());
     }
 }

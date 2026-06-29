@@ -78,10 +78,15 @@ export interface KalpaPlayerBuildEvidence {
   championPoints?: number | null;
   className?: string | null;
   classMasteryPassives?: number[];
-  frontBarSkillIds?: number[];
-  backBarSkillIds?: number[];
+  scribedSkills?: KalpaScribedSkillEvidence[];
   evidence: string;
   confidence: string;
+}
+
+export interface KalpaScribedSkillEvidence {
+  abilityId: number;
+  name?: string | null;
+  icon?: string | null;
 }
 
 export interface KalpaBuildEvidence {
