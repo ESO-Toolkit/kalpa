@@ -3,6 +3,7 @@
 
 export interface LogPathDetection {
   path: string | null;
+  logsDirExists: boolean;
   fromAddonPath: boolean;
   encounterLogExists: boolean;
   message: string;

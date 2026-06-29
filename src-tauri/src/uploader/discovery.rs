@@ -48,6 +48,7 @@ fn detection_for(logs_dir: &Path, from_addon_path: bool) -> LogPathDetection {
 
     LogPathDetection {
         path: Some(logs_dir.to_string_lossy().into_owned()),
+        logs_dir_exists: exists,
         from_addon_path,
         encounter_log_exists,
         message,
@@ -75,11 +76,47 @@ pub fn detect_log_path(addons_path: Option<&str>) -> LogPathDetection {
 
     LogPathDetection {
         path: None,
+        logs_dir_exists: false,
         from_addon_path: false,
         encounter_log_exists: false,
         message: "Could not find an ESO log directory. Select it manually, or \
                   enable combat logging in-game first."
             .into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_log_path;
+
+    #[test]
+    fn addon_path_detection_reports_missing_logs_dir_without_losing_expected_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addons = tmp
+            .path()
+            .join("Elder Scrolls Online")
+            .join("live")
+            .join("AddOns");
+        std::fs::create_dir_all(&addons).unwrap();
+        let expected_logs = addons.parent().unwrap().join("Logs");
+
+        let missing = detect_log_path(Some(&addons.to_string_lossy()));
+        assert_eq!(
+            missing.path.as_deref(),
+            Some(expected_logs.to_string_lossy().as_ref())
+        );
+        assert!(!missing.logs_dir_exists);
+        assert!(!missing.encounter_log_exists);
+
+        std::fs::create_dir_all(&expected_logs).unwrap();
+        let empty = detect_log_path(Some(&addons.to_string_lossy()));
+        assert!(empty.logs_dir_exists);
+        assert!(!empty.encounter_log_exists);
+
+        std::fs::write(expected_logs.join("Encounter.log"), "BEGIN_LOG,1\n").unwrap();
+        let with_log = detect_log_path(Some(&addons.to_string_lossy()));
+        assert!(with_log.logs_dir_exists);
+        assert!(with_log.encounter_log_exists);
     }
 }
 

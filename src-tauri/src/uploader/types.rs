@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub struct LogPathDetection {
     /// The detected (or expected) logs directory, if any.
     pub path: Option<String>,
+    /// Whether the detected/expected logs directory exists on disk.
+    pub logs_dir_exists: bool,
     /// Whether the path was derived from the configured AddOns folder.
     pub from_addon_path: bool,
     /// Whether an `Encounter.log` already exists in that directory.

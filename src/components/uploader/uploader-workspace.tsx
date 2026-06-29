@@ -408,6 +408,28 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     [clearSelection]
   );
 
+  const applyDetectedLogs = useCallback(
+    async (det: LogPathDetection) => {
+      if (!det.path) {
+        setLogsDir(null);
+        setLogs([]);
+        setListError(null);
+        clearSelection();
+        return;
+      }
+
+      setLogsDir(det.path);
+      if (det.logsDirExists) {
+        await loadLogs(det.path);
+      } else {
+        setLogs([]);
+        setListError(null);
+        clearSelection();
+      }
+    },
+    [clearSelection, loadLogs]
+  );
+
   // Initial detection + transport + history.
   useEffect(() => {
     let cancelled = false;
@@ -420,10 +442,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         if (cancelled) return;
         setDetection(det);
         setTransport(tinfo);
-        if (det.path) {
-          setLogsDir(det.path);
-          await loadLogs(det.path);
-        }
+        await applyDetectedLogs(det);
       } catch (e) {
         if (!cancelled) toast.error(getTauriErrorMessage(e));
       }
@@ -432,7 +451,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     return () => {
       cancelled = true;
     };
-  }, [loadLogs, refreshHistory]);
+  }, [applyDetectedLogs, refreshHistory]);
 
   // Re-read the direct-upload opt-in + session presence. Called on mount and
   // after the user enables/signs in/out inline, so the promoted section and the
@@ -551,9 +570,34 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     const detected = detection?.path;
     if (!detected || detected === logsDir) return;
     clearSelection();
-    setLogsDir(detected);
-    void loadLogs(detected);
-  }, [detection, logsDir, clearSelection, loadLogs]);
+    void applyDetectedLogs(detection);
+  }, [applyDetectedLogs, detection, logsDir, clearSelection]);
+
+  const handleRefreshLogs = useCallback(async () => {
+    if (!logsDir) {
+      try {
+        const det = await invokeOrThrow<LogPathDetection>("uploader_detect_path");
+        setDetection(det);
+        await applyDetectedLogs(det);
+      } catch (e) {
+        toast.error(getTauriErrorMessage(e));
+      }
+      return;
+    }
+
+    if (detection?.path === logsDir) {
+      try {
+        const det = await invokeOrThrow<LogPathDetection>("uploader_detect_path");
+        setDetection(det);
+        await applyDetectedLogs(det);
+      } catch (e) {
+        toast.error(getTauriErrorMessage(e));
+      }
+      return;
+    }
+
+    await loadLogs(logsDir);
+  }, [applyDetectedLogs, detection?.path, loadLogs, logsDir]);
 
   // Reveal the current logs directory in the OS file manager. Best-effort: a
   // missing dir or opener rejection toasts rather than silently no-ops.
@@ -1443,7 +1487,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 dragOver={dragOver}
                 importing={importing}
                 onSelect={handleSelectLog}
-                onRefresh={() => logsDir && loadLogs(logsDir)}
+                onRefresh={() => void handleRefreshLogs()}
                 onPickFolder={handlePickFolder}
                 onResetFolder={handleResetFolder}
                 onOpenFolder={handleOpenLogsFolder}
