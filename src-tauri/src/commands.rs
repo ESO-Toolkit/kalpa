@@ -5,6 +5,7 @@ use crate::installer;
 use crate::manifest::{self, AddonManifest};
 use crate::manifest_cache;
 use crate::metadata;
+use crate::uploader::native::session::{SessionProvider, StoredSessionProvider};
 use crate::AllowedAddonsPath;
 use crate::MetadataLock;
 use crate::{PendingDeepLink, PendingDeepLinkPayload};
@@ -6351,12 +6352,25 @@ fn clear_auth_tokens(_app: &tauri::AppHandle) {
     crate::token_store::clear_tokens();
 }
 
+fn clear_upload_session(upload_session: &Arc<StoredSessionProvider>) {
+    upload_session.invalidate();
+}
+
+fn clear_auth_and_upload_sessions(
+    app: &tauri::AppHandle,
+    upload_session: &Arc<StoredSessionProvider>,
+) {
+    clear_auth_tokens(app);
+    clear_upload_session(upload_session);
+}
+
 // ── Auth Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn auth_login(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
+    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<AuthUser, String> {
     let tokens = tokio::task::spawn_blocking(auth::login)
         .await
@@ -6381,6 +6395,11 @@ pub async fn auth_login(
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(tokens);
 
+    // The native upload cookie is a separate website session and carries no
+    // identity metadata here. Require a fresh upload login after an OAuth login
+    // so direct uploads cannot silently reuse a prior account's cookie.
+    clear_upload_session(&upload_session);
+
     Ok(user)
 }
 
@@ -6388,6 +6407,7 @@ pub async fn auth_login(
 pub async fn auth_logout(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
+    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<(), String> {
     // Clear in-memory state
     *state
@@ -6395,8 +6415,9 @@ pub async fn auth_logout(
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
 
-    // Clear from store
-    clear_auth_tokens(&app);
+    // Clear both credential families: OAuth tokens and the separate website
+    // cookie used by direct ESO Logs uploads.
+    clear_auth_and_upload_sessions(&app, &upload_session);
 
     Ok(())
 }
@@ -6405,6 +6426,7 @@ pub async fn auth_logout(
 pub async fn auth_get_user(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
+    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<Option<AuthUser>, String> {
     let tokens = {
         let guard = state
@@ -6458,7 +6480,7 @@ pub async fn auth_get_user(
                 .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-            clear_auth_tokens(&app);
+            clear_auth_and_upload_sessions(&app, &upload_session);
             Ok(None)
         }
     }
@@ -6786,6 +6808,7 @@ pub struct DeleteAccountSummary {
 pub async fn delete_pack_hub_account(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
+    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<DeleteAccountSummary, String> {
     let access_token = {
         let tokens = {
@@ -6873,7 +6896,7 @@ pub async fn delete_pack_hub_account(
         .tokens
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-    clear_auth_tokens(&app);
+    clear_auth_and_upload_sessions(&app, &upload_session);
 
     Ok(result)
 }

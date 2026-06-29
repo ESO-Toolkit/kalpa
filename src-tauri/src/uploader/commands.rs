@@ -1174,9 +1174,9 @@ pub async fn uploader_upload_log(
     match outcome {
         Ok(transport::UploadOutcome::HandedOff { detail }) => {
             // The user finishes in the official UI; we can't observe the report
-            // code, so mark completed-handed-off and let the user paste the
-            // link later if desired.
-            record.status = UploadStatus::Completed;
+            // code, so keep the record in the explicit handoff terminal state.
+            // The history UI uses that state to show the paste-link affordance.
+            record.status = UploadStatus::HandedOff;
             let _ = super::history::upsert(&app, record);
             Ok(UploadDispatch {
                 handed_off: true,

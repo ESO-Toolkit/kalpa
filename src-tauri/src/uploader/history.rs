@@ -130,10 +130,11 @@ fn apply_reconcile_stale(records: &mut [UploadRecord]) -> bool {
                 r.status = UploadStatus::HandedOff;
                 changed = true;
             }
-            // A leftover manual upload handed off to the official UI — we never
-            // observe its outcome, so `Completed` is the established semantic.
+            // A leftover manual upload may have handed off to the official UI.
+            // We never observe its outcome, so keep the paste-link affordance
+            // available instead of claiming it completed without a report.
             UploadStatus::Uploading => {
-                r.status = UploadStatus::Completed;
+                r.status = UploadStatus::HandedOff;
                 changed = true;
             }
             _ => {}
@@ -534,7 +535,14 @@ mod tests {
             url: "https://www.esologs.com/reports/PAUSED".into(),
             code: "PAUSED".into(),
         });
-        let mut recs = vec![native, rec("official-live", UploadStatus::Live), paused];
+        let mut manual = rec("manual-uploading", UploadStatus::Uploading);
+        manual.mode = UploadMode::Manual;
+        let mut recs = vec![
+            native,
+            rec("official-live", UploadStatus::Live),
+            paused,
+            manual,
+        ];
 
         assert!(apply_reconcile_stale(&mut recs));
 
@@ -560,6 +568,11 @@ mod tests {
         assert_eq!(
             recs[2].report.as_ref().map(|r| r.code.as_str()),
             Some("PAUSED")
+        );
+        assert_eq!(
+            recs[3].status,
+            UploadStatus::HandedOff,
+            "stale manual handoffs need the paste-link affordance"
         );
     }
 
