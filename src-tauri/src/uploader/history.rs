@@ -417,6 +417,7 @@ mod tests {
             error: None,
             title: None,
             zone: None,
+            build_evidence: None,
         }
     }
 

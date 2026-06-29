@@ -1010,6 +1010,7 @@ pub struct UploadDispatch {
     pub handed_off: bool,
     pub detail: String,
     pub report: Option<ReportRef>,
+    pub build_evidence: Option<KalpaBuildEvidence>,
 }
 
 /// Dispatch a prepared log to the official uploader. `prefer_cli` uses the CLI
@@ -1098,6 +1099,7 @@ pub async fn uploader_upload_log(
         // the frontend's derived content label, carried regardless of transport.
         title: None,
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(&app, record.clone());
 
@@ -1184,6 +1186,7 @@ pub async fn uploader_upload_log(
                 // is one; otherwise the transport's own handoff detail.
                 detail: fallback_note.unwrap_or(detail),
                 report: None,
+                build_evidence: None,
             })
         }
         Ok(transport::UploadOutcome::Completed { report_code }) => {
@@ -1191,8 +1194,26 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
+            let build_evidence = if use_native {
+                report.as_ref().and_then(|report| {
+                    match super::native::build_evidence::extract_from_file(
+                        &safe,
+                        Some(report.code.clone()),
+                    ) {
+                        Ok(evidence) if !evidence.players.is_empty() => Some(evidence),
+                        Ok(_) => None,
+                        Err(e) => {
+                            eprintln!("[uploader] native build evidence unavailable: {e}");
+                            None
+                        }
+                    }
+                })
+            } else {
+                None
+            };
             record.status = UploadStatus::Completed;
             record.report = report.clone();
+            record.build_evidence = build_evidence.clone();
             // Stamp the title from the actual OUTCOME, not the routing intent: only a
             // genuine native completion applied `description` as the report name (a
             // native attempt that fell back to the official uploader returns HandedOff,
@@ -1206,6 +1227,7 @@ pub async fn uploader_upload_log(
                 handed_off: false,
                 detail: "Upload complete.".into(),
                 report,
+                build_evidence,
             })
         }
         Err(e) => {
@@ -1603,6 +1625,7 @@ pub async fn uploader_start_live(
         // so leave the title unset; the zone is the frontend's content hint.
         title: None,
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(&app, record);
 
@@ -1641,6 +1664,7 @@ pub async fn uploader_start_live(
                              fight timeline is unavailable for this session."
                         .into(),
                     report,
+                    build_evidence: None,
                 });
             }
             // Nothing was launched (no handoff): settle our just-written `Live`
@@ -1687,6 +1711,7 @@ pub async fn uploader_start_live(
         handed_off,
         detail,
         report,
+        build_evidence: None,
     })
 }
 
@@ -1792,6 +1817,7 @@ async fn start_native_live_branch(
         // name, so persist it as the title; zone is the frontend's content hint.
         title: options.description.clone(),
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(app, record);
 
@@ -2087,6 +2113,7 @@ async fn start_native_live_branch(
         handed_off: false,
         detail: "Live logging started — uploading directly to ESO Logs.".into(),
         report: None,
+        build_evidence: None,
     })
 }
 

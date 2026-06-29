@@ -67,6 +67,30 @@ export interface ReportRef {
   url: string;
 }
 
+export interface KalpaPlayerBuildEvidence {
+  unitId: string;
+  characterName?: string | null;
+  accountName?: string | null;
+  characterId?: string | null;
+  classId?: number | null;
+  raceId?: number | null;
+  level?: number | null;
+  championPoints?: number | null;
+  className?: string | null;
+  classMasteryPassives?: number[];
+  frontBarSkillIds?: number[];
+  backBarSkillIds?: number[];
+  evidence: string;
+  confidence: string;
+}
+
+export interface KalpaBuildEvidence {
+  schemaVersion: number;
+  source: string;
+  reportCode?: string | null;
+  players: KalpaPlayerBuildEvidence[];
+}
+
 export type UploadStatus =
   | "queued"
   | "uploading"
@@ -103,6 +127,8 @@ export interface UploadRecord {
    *  history reads "Lucent Citadel" rather than a bare file name. Null when no
    *  zone could be derived or for pre-existing records. */
   zone: string | null;
+  /** Exact native raw-log build evidence for ESO Log Aggregator links. */
+  buildEvidence: KalpaBuildEvidence | null;
 }
 
 export interface TransportInfo {
@@ -114,6 +140,7 @@ export interface UploadDispatch {
   handedOff: boolean;
   detail: string;
   report: ReportRef | null;
+  buildEvidence: KalpaBuildEvidence | null;
 }
 
 // Live event stream (tagged union mirroring the Rust `LiveEvent` enum).

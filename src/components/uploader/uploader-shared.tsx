@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
-import type { ReportRef, UploaderStatus, Visibility } from "@/types/uploader";
+import type { KalpaBuildEvidence, ReportRef, UploaderStatus, Visibility } from "@/types/uploader";
 
 /** Map the uploader status to its pill color, label, and icon. */
 export function StatusPill({ status }: { status: UploaderStatus }) {
@@ -71,9 +71,29 @@ export function compactBytes(bytes: number): string {
  *  fight — the right link to open while a raid is still streaming. The code is always
  *  server-issued alphanumeric, but encode it defensively so a malformed value can't
  *  break out of the fragment path. */
-export function esotkReportUrl(code: string, opts?: { live?: boolean }): string {
-  const base = `https://esotk.com/#/report/${encodeURIComponent(code)}`;
-  return opts?.live ? `${base}/live` : base;
+export const KALPA_BUILD_EVIDENCE_PARAM = "kalpaBuildEvidence";
+
+function encodeJsonBase64Url(value: unknown): string {
+  const json = JSON.stringify(value);
+  const binary = encodeURIComponent(json).replace(/%([0-9A-F]{2})/g, (_match, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16))
+  );
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function buildEvidenceQuery(code: string, evidence?: KalpaBuildEvidence | null): string {
+  if (!evidence?.players?.length) return "";
+  if (evidence.reportCode && evidence.reportCode !== code) return "";
+  return `?${KALPA_BUILD_EVIDENCE_PARAM}=${encodeURIComponent(encodeJsonBase64Url(evidence))}`;
+}
+
+export function esotkReportUrl(
+  code: string,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): string {
+  const path = `/report/${encodeURIComponent(code)}${opts?.live ? "/live" : ""}`;
+  const query = opts?.live ? "" : buildEvidenceQuery(code, opts?.buildEvidence);
+  return `https://esotk.com/#${path}${query}`;
 }
 
 /** Raw ESO Logs report URL. During live streaming, `fight=last` follows the newest
@@ -97,10 +117,10 @@ export function esoLogsReportUrl(report: ReportRef, opts?: { live?: boolean }): 
 export function primaryReportUrl(
   report: ReportRef,
   visibility: Visibility,
-  opts?: { live?: boolean }
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
 ): string {
   if (opts?.live || visibility === "private") return esoLogsReportUrl(report, opts);
-  return esotkReportUrl(report.code);
+  return esotkReportUrl(report.code, { buildEvidence: opts?.buildEvidence });
 }
 
 /** Extract an ESO Logs report code from a pasted URL or bare code, or null if the

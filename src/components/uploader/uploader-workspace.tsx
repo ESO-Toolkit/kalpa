@@ -170,7 +170,7 @@ async function usesOfficialUploader(): Promise<boolean> {
 async function maybeAutoOpenAnalysis(
   report: ReportRef,
   visibility: Visibility,
-  opts?: { live?: boolean }
+  opts?: { live?: boolean; buildEvidence?: UploadDispatch["buildEvidence"] }
 ): Promise<void> {
   try {
     const auto = await getSetting<boolean>("autoOpenAnalysis", false);
@@ -839,7 +839,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         toast.success("Upload complete — report ready.");
         // Native upload produced a report code; offer to jump straight to the richer
         // ESO Log Aggregator analysis if the user opted into auto-open.
-        void maybeAutoOpenAnalysis(dispatch.report, options.visibility);
+        void maybeAutoOpenAnalysis(dispatch.report, options.visibility, {
+          buildEvidence: dispatch.buildEvidence,
+        });
       } else {
         toast.success(dispatch.detail, { duration: 7000 });
       }
@@ -3924,7 +3926,11 @@ function HistoryPanel({
                           size="sm"
                           className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
                           onClick={() =>
-                            void openReportUrl(primaryReportUrl(r.report!, r.visibility))
+                            void openReportUrl(
+                              primaryReportUrl(r.report!, r.visibility, {
+                                buildEvidence: r.buildEvidence,
+                              })
+                            )
                           }
                           aria-label={
                             r.visibility === "private"
