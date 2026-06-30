@@ -77,16 +77,20 @@ impl PlayerAccumulator {
         })
     }
 
-    fn active_player_for_identity_mut(
+    fn active_player_for_unit_added_mut(
         &mut self,
         unit_id: &str,
         identity: &PlayerIdentity,
+        facts: &PlayerUnitFacts,
     ) -> &mut PlayerBuilder {
         let should_split = self
             .active_key_by_unit
             .get(unit_id)
             .and_then(|key| self.players.get(key))
-            .is_some_and(|player| player_identity_conflicts(player, identity));
+            .is_some_and(|player| {
+                player_identity_conflicts(player, identity)
+                    || player_unit_facts_conflict(player, identity, facts)
+            });
 
         if should_split {
             let key = self.next_player_key(unit_id);
@@ -140,6 +144,14 @@ struct PlayerIdentity {
     character_name: Option<String>,
     account_name: Option<String>,
     character_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct PlayerUnitFacts {
+    class_id: Option<u16>,
+    race_id: Option<u16>,
+    level: Option<u16>,
+    champion_points: Option<u32>,
 }
 
 pub(crate) fn extract_from_file(
@@ -255,15 +267,19 @@ fn ingest_unit_added(players: &mut PlayerAccumulator, fields: &[&str]) {
         character_id: fields.get(12).and_then(|s| non_zero_string(s.trim())),
     };
 
-    let entry = players.active_player_for_identity_mut(unit_id, &identity);
+    let facts = PlayerUnitFacts {
+        class_id: fields.get(8).and_then(|s| parse_u16(s)),
+        race_id: fields.get(9).and_then(|s| parse_u16(s)),
+        level: fields.get(13).and_then(|s| parse_u16(s)),
+        champion_points: fields.get(14).and_then(|s| parse_non_negative_u32(s)),
+    };
 
-    entry.class_id = fields.get(8).and_then(|s| parse_u16(s)).or(entry.class_id);
-    entry.race_id = fields.get(9).and_then(|s| parse_u16(s)).or(entry.race_id);
-    entry.level = fields.get(13).and_then(|s| parse_u16(s)).or(entry.level);
-    entry.champion_points = fields
-        .get(14)
-        .and_then(|s| parse_non_negative_u32(s))
-        .or(entry.champion_points);
+    let entry = players.active_player_for_unit_added_mut(unit_id, &identity, &facts);
+
+    entry.class_id = facts.class_id.or(entry.class_id);
+    entry.race_id = facts.race_id.or(entry.race_id);
+    entry.level = facts.level.or(entry.level);
+    entry.champion_points = facts.champion_points.or(entry.champion_points);
     entry.class_name_from_unit = entry
         .class_id
         .and_then(class_name_from_unit_class_id)
@@ -427,6 +443,45 @@ fn player_identity_conflicts(player: &PlayerBuilder, identity: &PlayerIdentity) 
     )
 }
 
+fn player_unit_facts_conflict(
+    player: &PlayerBuilder,
+    identity: &PlayerIdentity,
+    facts: &PlayerUnitFacts,
+) -> bool {
+    if player_identity_matches(player, identity) {
+        return false;
+    }
+
+    fact_conflicts(player.class_id, facts.class_id)
+        || fact_conflicts(player.race_id, facts.race_id)
+        || fact_conflicts(player.level, facts.level)
+        || fact_conflicts(player.champion_points, facts.champion_points)
+}
+
+fn player_identity_matches(player: &PlayerBuilder, identity: &PlayerIdentity) -> bool {
+    if identity_field_matches(
+        player.character_id.as_deref(),
+        identity.character_id.as_deref(),
+    ) {
+        return true;
+    }
+
+    let account_matches = identity_field_matches(
+        player.account_name.as_deref(),
+        identity.account_name.as_deref(),
+    );
+    if !account_matches {
+        return false;
+    }
+
+    identity.character_name.is_none()
+        || player.character_name.is_none()
+        || identity_field_matches(
+            player.character_name.as_deref(),
+            identity.character_name.as_deref(),
+        )
+}
+
 fn identity_field_conflicts(existing: Option<&str>, next: Option<&str>) -> bool {
     let Some(existing) = existing
         .map(normalize_identity_field)
@@ -438,6 +493,26 @@ fn identity_field_conflicts(existing: Option<&str>, next: Option<&str>) -> bool 
         return false;
     };
     existing != next
+}
+
+fn identity_field_matches(existing: Option<&str>, next: Option<&str>) -> bool {
+    let Some(existing) = existing
+        .map(normalize_identity_field)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let Some(next) = next.map(normalize_identity_field).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    existing == next
+}
+
+fn fact_conflicts<T: Copy + PartialEq>(existing: Option<T>, next: Option<T>) -> bool {
+    match (existing, next) {
+        (Some(existing), Some(next)) => existing != next,
+        _ => false,
+    }
 }
 
 fn normalize_identity_field(input: &str) -> String {
@@ -812,6 +887,45 @@ mod tests {
         assert_eq!(second.class_name.as_deref(), Some("Arcanist"));
         assert!(second.class_mastery_passives.is_empty());
         assert!(second.champion_point_passives.is_empty());
+    }
+
+    #[test]
+    fn anonymous_unit_id_reuse_does_not_overwrite_named_player_facts() {
+        let lines = [
+            "0,UNIT_ADDED,45,PLAYER,F,39,0,F,1,7,\"Adolphc\",\"@hulin15823987726\",14384772626918308164,50,2145,0,PLAYER_ALLY,T",
+            "1,PLAYER_INFO,45,[142210,142079,61218,150054,147226],[1,1,1,1,1],[],[],[]",
+            "2,UNIT_ADDED,45,PLAYER,F,50,0,F,6,7,\"\",\"\",0,50,773,0,PLAYER_ALLY,F",
+            "3,PLAYER_INFO,45,[263585,263586,142092,156017,89958],[1,1,1,1,1],[],[],[]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+
+        assert_eq!(evidence.players.len(), 2);
+        let first = evidence
+            .players
+            .iter()
+            .find(|player| player.account_name.as_deref() == Some("@hulin15823987726"))
+            .expect("named first occupant should remain matchable by account");
+        assert_eq!(first.unit_id, "45");
+        assert_eq!(first.character_name.as_deref(), Some("Adolphc"));
+        assert_eq!(first.class_id, Some(1));
+        assert_eq!(first.race_id, Some(7));
+        assert_eq!(first.champion_points, Some(2145));
+        assert_eq!(first.class_name.as_deref(), Some("Dragonknight"));
+        assert!(first.class_mastery_passives.is_empty());
+        assert_eq!(first.champion_point_passives, vec![142210, 142079]);
+
+        let second = evidence
+            .players
+            .iter()
+            .find(|player| player.account_name.is_none() && player.champion_points == Some(773))
+            .expect("anonymous reused occupant should get a separate sidecar row");
+        assert_eq!(second.unit_id, "45");
+        assert_eq!(second.class_id, Some(6));
+        assert_eq!(second.race_id, Some(7));
+        assert_eq!(second.class_name.as_deref(), Some("Templar"));
+        assert_eq!(second.class_mastery_passives, vec![263585, 263586]);
+        assert_eq!(second.champion_point_passives, vec![142092, 156017]);
     }
 
     #[test]
