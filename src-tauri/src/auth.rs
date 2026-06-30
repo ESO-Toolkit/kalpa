@@ -14,7 +14,7 @@ const USER_API: &str = "https://www.esologs.com/api/v2/user";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthTokens {
     pub access_token: String,
@@ -29,6 +29,13 @@ pub struct AuthTokens {
 pub struct AuthUser {
     pub user_id: String,
     pub user_name: String,
+    /// Whether the session was durably persisted to the OS credential store.
+    /// `Some(false)` means the login is **memory-only** (a Credential Manager
+    /// failure) and will not survive a restart — the UI should warn the user.
+    /// `None`/absent for callers that don't establish a session (back-compat:
+    /// existing consumers ignore it).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub session_persisted: Option<bool>,
 }
 
 pub struct AuthState {
@@ -326,49 +333,6 @@ fn extract_tokens_from_request(request: &str, body: &[u8]) -> Option<CallbackTok
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_tokens_from_post_json_callback() {
-        let body = br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#;
-        let request = concat!(
-            "POST /callback HTTP/1.1\r\n",
-            "Host: localhost:12345\r\n",
-            "Content-Type: application/json\r\n",
-            "Content-Length: 69\r\n",
-            "\r\n"
-        );
-
-        let tokens = extract_tokens_from_request(request, body).expect("tokens");
-
-        assert_eq!(tokens.access_token, "access");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
-        assert_eq!(tokens.expires_in, Some(3600));
-    }
-
-    #[test]
-    fn extracts_tokens_from_legacy_get_callback() {
-        let encoded = STANDARD
-            .encode(br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#);
-        let request = format!("GET /callback?tokens={encoded} HTTP/1.1\r\n\r\n");
-
-        let tokens = extract_tokens_from_request(&request, &[]).expect("tokens");
-
-        assert_eq!(tokens.access_token, "access");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
-        assert_eq!(tokens.expires_in, Some(3600));
-    }
-
-    #[test]
-    fn parses_content_length_case_insensitively() {
-        let request = "POST /callback HTTP/1.1\r\ncontent-length: 42\r\n\r\n";
-
-        assert_eq!(content_length(request), 42);
-    }
-}
-
 // ── User Validation ──────────────────────────────────────────────────────
 
 pub fn validate_token(access_token: &str) -> Result<(String, String), String> {
@@ -492,4 +456,72 @@ fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> 
     response
         .json::<CallbackTokens>()
         .map_err(|e| format!("Failed to parse refresh response: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_tokens_from_post_json_callback() {
+        let body = br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#;
+        let request = concat!(
+            "POST /callback HTTP/1.1\r\n",
+            "Host: localhost:12345\r\n",
+            "Content-Type: application/json\r\n",
+            "Content-Length: 69\r\n",
+            "\r\n"
+        );
+
+        let tokens = extract_tokens_from_request(request, body).expect("tokens");
+
+        assert_eq!(tokens.access_token, "access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(tokens.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn extracts_tokens_from_legacy_get_callback() {
+        let encoded = STANDARD
+            .encode(br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#);
+        let request = format!("GET /callback?tokens={encoded} HTTP/1.1\r\n\r\n");
+
+        let tokens = extract_tokens_from_request(&request, &[]).expect("tokens");
+
+        assert_eq!(tokens.access_token, "access");
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(tokens.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn parses_content_length_case_insensitively() {
+        let request = "POST /callback HTTP/1.1\r\ncontent-length: 42\r\n\r\n";
+
+        assert_eq!(content_length(request), 42);
+    }
+
+    #[test]
+    fn auth_user_session_persisted_serializes_camelcase_and_omits_when_none() {
+        // Present → camelCase `sessionPersisted` field carries the bool.
+        let with = AuthUser {
+            user_id: "1".into(),
+            user_name: "n".into(),
+            session_persisted: Some(false),
+        };
+        let j = serde_json::to_value(&with).unwrap();
+        assert_eq!(j["sessionPersisted"], serde_json::json!(false));
+
+        // Absent → field is OMITTED entirely (back-compat: old consumers and
+        // status responses see no extra key).
+        let without = AuthUser {
+            user_id: "1".into(),
+            user_name: "n".into(),
+            session_persisted: None,
+        };
+        let j2 = serde_json::to_value(&without).unwrap();
+        assert!(
+            j2.get("sessionPersisted").is_none(),
+            "session_persisted: None must be omitted, got {j2}"
+        );
+    }
 }

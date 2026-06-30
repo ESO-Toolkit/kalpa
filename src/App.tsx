@@ -16,7 +16,12 @@ import { RosterPackInstall } from "./components/roster-pack-install";
 import { UpdateBanner, type BannerUpdate } from "./components/update-banner";
 import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
 import { getSetting, setSetting } from "@/lib/store";
-import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import {
+  getTauriErrorMessage,
+  invokeOrThrow,
+  invokeResult,
+  warnIfSessionNotPersisted,
+} from "@/lib/tauri";
 import { filterAddons, isFilterMode, isSortMode } from "@/lib/addon-helpers";
 import type {
   AddonManifest,
@@ -46,6 +51,7 @@ type ActiveDialog =
   | "saved-variables"
   | "migration-wizard"
   | "safety-center"
+  | "log-upload"
   | null;
 
 interface PendingDeepLinkPayload {
@@ -402,6 +408,7 @@ function App() {
     void invokeResult<AuthUser | null>("auth_get_user").then((authResult) => {
       if (authResult.ok) {
         setAuthUser(authResult.data ?? null);
+        warnIfSessionNotPersisted(authResult.data);
       } else {
         toast.error(`Could not restore sign-in: ${authResult.error}`);
       }
@@ -1388,6 +1395,7 @@ function App() {
           onOpenPacks={() => setActiveDialog("packs")}
           onOpenSavedVars={() => setActiveDialog("saved-variables")}
           onOpenSettings={() => setActiveDialog("settings")}
+          onOpenLogUpload={() => setActiveDialog("log-upload")}
           onRefresh={handleRefresh}
         />
 

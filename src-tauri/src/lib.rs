@@ -1,4 +1,8 @@
 mod auth;
+/// Heap high-water-mark allocator for the uploader perf benchmark. The
+/// `#[global_allocator]` below is installed ONLY under the `bench-alloc` feature,
+/// so normal builds are unaffected.
+pub mod bench_alloc;
 mod commands;
 mod edit_backups;
 mod esoui;
@@ -12,6 +16,15 @@ mod safe_migration;
 mod saved_variables;
 mod settings_store;
 mod token_store;
+pub mod uploader;
+
+// Benchmark-only heap tracker (see `bench_alloc`). Installed solely under the
+// `bench-alloc` feature so the app/release/normal-test builds keep the system
+// allocator. Used by the `cargo test --features bench-alloc … --ignored` perf
+// benchmark to report peak heap.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: bench_alloc::TrackingAlloc = bench_alloc::TrackingAlloc;
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -219,6 +232,16 @@ pub fn run() {
         )))
         .manage(PendingUpdates(Arc::new(Mutex::new(HashMap::new()))))
         .manage(UpdateCancels(Arc::new(Mutex::new(HashMap::new()))))
+        .manage(uploader::commands::UploaderState::default())
+        // The native upload session provider, shared between the in-app login
+        // (which captures the esologs cookie) and the upload path (which reads
+        // it). `new()` rehydrates any cookie persisted on a prior run. Wrapped in
+        // an `Arc` so the (blocking) native upload can clone an owned handle into
+        // `spawn_blocking` while the login/status commands borrow it — all sharing
+        // the one instance (so a mid-upload `invalidate` reaches the login path).
+        .manage(std::sync::Arc::new(
+            uploader::native::session::StoredSessionProvider::new(),
+        ))
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
@@ -323,13 +346,27 @@ pub fn run() {
                 }
             }
 
+            // Note: settling upload-history records left in a transient state by
+            // a previous run is deferred to first use of the uploader (see
+            // `uploader_list_history`), so a user who never opens the uploader
+            // pays no history read/parse at startup. It still runs at most once
+            // per process, before the history panel first renders.
+
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Hide to tray instead of closing
-                let _ = window.hide();
-                api.prevent_close();
+                // Hide-to-tray applies ONLY to the main app window. Auxiliary
+                // windows (e.g. the "esologs-login" sign-in webview) must close
+                // normally — intercepting their close would leave them hidden but
+                // alive, breaking flows that create a window, wait for the user to
+                // finish, then close it (the login flow detects a user cancel by
+                // the window disappearing, and closes the window itself on
+                // success). Only "main" hides to tray; everything else closes.
+                if window.label() == "main" {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -430,21 +467,54 @@ pub fn run() {
             commands::cancel_update,
             commands::list_edit_backups,
             commands::restore_edit_backup,
+            uploader::commands::uploader_detect_path,
+            uploader::commands::uploader_list_logs,
+            uploader::commands::uploader_preflight,
+            uploader::commands::uploader_probe_live_readiness,
+            uploader::commands::uploader_split_to_disk,
+            uploader::commands::uploader_split_to_disk_named,
+            uploader::commands::uploader_split_fights_to_disk,
+            uploader::commands::uploader_import_log,
+            uploader::commands::uploader_delete_log,
+            uploader::commands::uploader_restore_log,
+            uploader::commands::uploader_transport_info,
+            uploader::commands::uploader_login_esologs,
+            uploader::commands::uploader_has_session,
+            uploader::commands::uploader_logout_esologs,
+            uploader::commands::uploader_upload_log,
+            uploader::commands::uploader_start_live,
+            uploader::commands::uploader_stop_live,
+            uploader::commands::uploader_list_history,
+            uploader::commands::uploader_delete_history,
+            uploader::commands::uploader_attach_report,
+            #[cfg(debug_assertions)]
+            uploader::commands::uploader_run_native_live_spike,
             commands::flush_settings,
+            commands::settings_tainted,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
+        .run(|app, event| {
             // On a real app exit, detach settings.json from the plugin registry so
             // tauri-plugin-store's own RunEvent::Exit handler can't truncate-write
             // it. ExitRequested fires before Exit (and before the plugin's exit
             // save), so detaching here neutralises that non-atomic write. Settings
             // are already persisted atomically on every write, so nothing is
             // flushed here. (Window close hides to tray and never reaches this.)
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                settings_store::detach_on_exit(app_handle);
+            if let tauri::RunEvent::ExitRequested { .. } = &event {
+                settings_store::detach_on_exit(app);
+            }
+            // On any real process exit, signal every native live session to stop so
+            // its terminate-report + abandoned POSTs settle promptly (the OS reaps
+            // the driver threads; we don't join here, to avoid blocking exit on a
+            // wedged network). A hard exit's correctness is covered by the L2 orphan
+            // breadcrumb + next-launch recovery — this just closes reports faster.
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = &event {
+                if let Some(state) = app.try_state::<uploader::commands::UploaderState>() {
+                    state.signal_all_live_stop();
+                }
             }
         });
 }

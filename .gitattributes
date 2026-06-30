@@ -1,0 +1,4 @@
+# Native-uploader golden fixtures are byte-exact references for the encoder
+# tests — they MUST stay LF on every platform or the byte comparisons break.
+# `-text` disables all line-ending conversion (treat as verbatim bytes).
+src-tauri/src/uploader/native/testdata/** -text

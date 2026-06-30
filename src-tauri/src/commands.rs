@@ -5,6 +5,7 @@ use crate::installer;
 use crate::manifest::{self, AddonManifest};
 use crate::manifest_cache;
 use crate::metadata;
+use crate::uploader::native::session::{SessionProvider, StoredSessionProvider};
 use crate::AllowedAddonsPath;
 use crate::MetadataLock;
 use crate::{PendingDeepLink, PendingDeepLinkPayload};
@@ -6247,7 +6248,9 @@ pub async fn vote_pack(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -6325,12 +6328,40 @@ pub async fn track_pack_install(pack_id: String) -> Result<(), String> {
 
 // ── Auth Helpers ─────────────────────────────────────────────────────────
 
-fn save_auth_tokens(_app: &tauri::AppHandle, tokens: &AuthTokens) {
-    crate::token_store::save_tokens(tokens);
+/// Persist auth tokens, returning whether they were durably committed to the
+/// credential store. A `false` means the tokens are **memory-only** for this
+/// process (a Credential Manager failure) and the user may need to sign in again
+/// next launch — it is logged here so the failure is never silently swallowed,
+/// and the bool is returned so callers establishing auth (e.g. `auth_login`) can
+/// surface it. Refresh paths intentionally keep working in-memory on a `false`
+/// (the live token is still usable this session); they should not hard-fail the
+/// in-flight operation just because persistence hiccuped.
+#[must_use]
+fn save_auth_tokens(_app: &tauri::AppHandle, tokens: &AuthTokens) -> bool {
+    let persisted = crate::token_store::save_tokens(tokens);
+    if !persisted {
+        eprintln!(
+            "[auth] WARNING: failed to persist auth tokens to the credential store; \
+             the session is memory-only and will not survive a restart."
+        );
+    }
+    persisted
 }
 
 fn clear_auth_tokens(_app: &tauri::AppHandle) {
     crate::token_store::clear_tokens();
+}
+
+fn clear_upload_session(upload_session: &Arc<StoredSessionProvider>) {
+    upload_session.invalidate();
+}
+
+fn clear_auth_and_upload_sessions(
+    app: &tauri::AppHandle,
+    upload_session: &Arc<StoredSessionProvider>,
+) {
+    clear_auth_tokens(app);
+    clear_upload_session(upload_session);
 }
 
 // ── Auth Commands ────────────────────────────────────────────────────────
@@ -6339,24 +6370,35 @@ fn clear_auth_tokens(_app: &tauri::AppHandle) {
 pub async fn auth_login(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
+    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<AuthUser, String> {
     let tokens = tokio::task::spawn_blocking(auth::login)
         .await
         .map_err(|e| format!("Task failed: {e}"))??;
 
+    // Save to store first so the login response can report durability. A failure
+    // is logged in the helper and leaves the session memory-only (still usable
+    // this process), so we do NOT fail the login — instead we surface
+    // `sessionPersisted: false` to the UI so it can warn the user that they will
+    // need to sign in again after a restart.
+    let persisted = save_auth_tokens(&app, &tokens);
+
     let user = AuthUser {
         user_id: tokens.user_id.clone(),
         user_name: tokens.user_name.clone(),
+        session_persisted: Some(persisted),
     };
-
-    // Save to store
-    save_auth_tokens(&app, &tokens);
 
     // Update in-memory state
     *state
         .tokens
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = Some(tokens);
+
+    // The native upload cookie is a separate website session and carries no
+    // identity metadata here. Require a fresh upload login after an OAuth login
+    // so direct uploads cannot silently reuse a prior account's cookie.
+    clear_upload_session(&upload_session);
 
     Ok(user)
 }
@@ -6365,6 +6407,7 @@ pub async fn auth_login(
 pub async fn auth_logout(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
+    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<(), String> {
     // Clear in-memory state
     *state
@@ -6372,8 +6415,9 @@ pub async fn auth_logout(
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
 
-    // Clear from store
-    clear_auth_tokens(&app);
+    // Clear both credential families: OAuth tokens and the separate website
+    // cookie used by direct ESO Logs uploads.
+    clear_auth_and_upload_sessions(&app, &upload_session);
 
     Ok(())
 }
@@ -6382,6 +6426,7 @@ pub async fn auth_logout(
 pub async fn auth_get_user(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
+    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<Option<AuthUser>, String> {
     let tokens = {
         let guard = state
@@ -6404,13 +6449,16 @@ pub async fn auth_get_user(
     .map_err(|e| format!("Task failed: {e}"))?
     {
         Ok(Some(new_tokens)) => {
-            // Tokens were refreshed — save them
+            // Persistence failure is logged in the helper; keep the refreshed
+            // token working in-memory rather than failing the refresh. Report the
+            // durability so a status check can also reflect a memory-only session.
+            let persisted = save_auth_tokens(&app, &new_tokens);
+
             let user = AuthUser {
                 user_id: new_tokens.user_id.clone(),
                 user_name: new_tokens.user_name.clone(),
+                session_persisted: Some(persisted),
             };
-
-            save_auth_tokens(&app, &new_tokens);
 
             *state
                 .tokens
@@ -6419,10 +6467,11 @@ pub async fn auth_get_user(
             Ok(Some(user))
         }
         Ok(None) => {
-            // Token still valid
+            // Token still valid (no save happened) — durability unchanged/unknown.
             Ok(Some(AuthUser {
                 user_id: tokens.user_id,
                 user_name: tokens.user_name,
+                session_persisted: None,
             }))
         }
         Err(_) => {
@@ -6431,7 +6480,7 @@ pub async fn auth_get_user(
                 .tokens
                 .lock()
                 .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-            clear_auth_tokens(&app);
+            clear_auth_and_upload_sessions(&app, &upload_session);
             Ok(None)
         }
     }
@@ -6491,7 +6540,9 @@ pub async fn create_pack(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -6591,7 +6642,9 @@ pub async fn update_pack(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -6689,7 +6742,9 @@ pub async fn delete_pack(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -6753,6 +6808,7 @@ pub struct DeleteAccountSummary {
 pub async fn delete_pack_hub_account(
     state: tauri::State<'_, AuthState>,
     app: tauri::AppHandle,
+    upload_session: tauri::State<'_, Arc<StoredSessionProvider>>,
 ) -> Result<DeleteAccountSummary, String> {
     let access_token = {
         let tokens = {
@@ -6776,7 +6832,9 @@ pub async fn delete_pack_hub_account(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -6838,7 +6896,7 @@ pub async fn delete_pack_hub_account(
         .tokens
         .lock()
         .map_err(|e| format!("Auth lock poisoned: {e}"))? = None;
-    clear_auth_tokens(&app);
+    clear_auth_and_upload_sessions(&app, &upload_session);
 
     Ok(result)
 }
@@ -6953,7 +7011,9 @@ pub async fn create_share_code(
         {
             Ok(Some(new_tokens)) => {
                 let token = new_tokens.access_token.clone();
-                save_auth_tokens(&app, &new_tokens);
+                // Persistence failure is logged in the helper and keeps the
+                // refreshed token working in-memory; don't fail the refresh.
+                let _ = save_auth_tokens(&app, &new_tokens);
                 *state
                     .tokens
                     .lock()
@@ -8080,6 +8140,15 @@ pub fn update_tray_tooltip(
 #[tauri::command]
 pub async fn flush_settings(app: tauri::AppHandle) -> Result<(), String> {
     crate::settings_store::flush(&app)
+}
+
+/// Whether the settings store opened TAINTED (empty over an unreadable settings
+/// file), so cached reads are untrusted defaults. Security-sensitive frontend reads
+/// (the native-upload opt-out) consult this to fail CLOSED instead of trusting a
+/// default that may mask a real persisted opt-out.
+#[tauri::command]
+pub fn settings_tainted() -> bool {
+    crate::settings_store::is_tainted()
 }
 
 // ── Controlled Folder Access / write-access detection ──────────────────

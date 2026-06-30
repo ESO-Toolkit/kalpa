@@ -29,6 +29,18 @@ function enqueueWrite<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** Resolves once every settings write enqueued SO FAR has settled (committed or
+ * failed). A security-sensitive READ (the native-upload opt-out) calls this before
+ * reading so a fire-and-forget toggle write (`void setSettings(...)`) can't be read
+ * stale: the read is ordered AFTER any pending write rather than racing the IPC/disk
+ * flush. Never rejects. */
+export function settingsWritesSettled(): Promise<void> {
+  return writeChain.then(
+    () => undefined,
+    () => undefined
+  );
+}
+
 /** Structural equality for JSON-serializable values. Store reads come back as
  * freshly deserialized values over IPC, so reference equality (===) would treat
  * every object/array entry as changed — making the rollback guard below skip them.
@@ -76,6 +88,26 @@ export async function getSetting<T>(key: string, fallback: T): Promise<T> {
   } catch (err) {
     console.warn(`[store] Failed to read "${key}":`, err);
     return fallback;
+  }
+}
+
+/** Like {@link getSetting} but distinguishes a genuinely-absent key (`ok: true`,
+ * value = fallback) from a store READ FAILURE (`ok: false`). `getSetting` returns
+ * its fallback in both cases, which is wrong for a security/trust-boundary read
+ * (e.g. the native-upload opt-out): a degraded store would look like "not opted
+ * out" and silently route the unofficial path. Such callers can fail CLOSED by
+ * treating `ok: false` as opted-out. Never throws. */
+export async function getSettingChecked<T>(
+  key: string,
+  fallback: T
+): Promise<{ value: T; ok: boolean }> {
+  try {
+    const store = await getStore();
+    const val = await store.get<T>(key);
+    return { value: val ?? fallback, ok: true };
+  } catch (err) {
+    console.warn(`[store] Failed to read "${key}":`, err);
+    return { value: fallback, ok: false };
   }
 }
 

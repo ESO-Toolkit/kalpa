@@ -359,6 +359,16 @@ pub fn flush<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     atomic_write(&path, &bytes).map_err(|e| e.to_string())
 }
 
+/// Whether the settings store is currently TAINTED — it opened empty over a
+/// settings file that could not be loaded, so every cached value is an untrusted
+/// default (and [`flush`] refuses to overwrite the file until it loads). Exposed so
+/// a security-sensitive frontend read (the native-upload opt-out) can fail CLOSED
+/// rather than trust a default that may mask a real persisted value. Self-clears on
+/// the next successful flush/reload.
+pub fn is_tainted() -> bool {
+    SETTINGS_TAINTED.load(Ordering::SeqCst)
+}
+
 /// Drop the store from the plugin's registry at shutdown so tauri-plugin-store's
 /// own `RunEvent::Exit` handler can't perform a non-atomic truncate-write of
 /// `settings.json` after us (its exit save runs before our run-callback for the
