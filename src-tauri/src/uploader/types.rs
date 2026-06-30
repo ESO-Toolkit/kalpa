@@ -199,6 +199,8 @@ pub struct ReportRef {
 #[serde(rename_all = "camelCase")]
 pub struct KalpaBuildEvidence {
     pub schema_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor_version: Option<u16>,
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_code: Option<String>,
@@ -210,6 +212,8 @@ pub struct KalpaBuildEvidence {
 #[serde(rename_all = "camelCase")]
 pub struct KalpaPlayerBuildEvidence {
     pub unit_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_occurrence_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

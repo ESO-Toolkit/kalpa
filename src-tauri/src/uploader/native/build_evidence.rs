@@ -14,6 +14,7 @@ use crate::uploader::types::{
 use super::encode::split_csv_quoted_pub;
 
 const SCHEMA_VERSION: u8 = 1;
+const EXTRACTOR_VERSION: u16 = 2;
 const SOURCE: &str = "kalpa-native-player-info";
 const CLASS_MASTERY_MAX_PICKS: usize = 2;
 const MAX_SCRIBED_SKILLS: usize = 12;
@@ -38,6 +39,7 @@ const FOOD_ABILITY_IDS: &[u32] = &[
 #[derive(Debug, Default)]
 struct PlayerBuilder {
     unit_id: String,
+    unit_occurrence_id: String,
     character_name: Option<String>,
     account_name: Option<String>,
     character_id: Option<String>,
@@ -71,10 +73,13 @@ struct PlayerAccumulator {
 impl PlayerAccumulator {
     fn active_player_mut(&mut self, unit_id: &str) -> &mut PlayerBuilder {
         let key = self.active_key_for_unit(unit_id);
-        self.players.entry(key).or_insert_with(|| PlayerBuilder {
-            unit_id: unit_id.to_string(),
-            ..PlayerBuilder::default()
-        })
+        self.players
+            .entry(key.clone())
+            .or_insert_with(|| PlayerBuilder {
+                unit_id: unit_id.to_string(),
+                unit_occurrence_id: key,
+                ..PlayerBuilder::default()
+            })
     }
 
     fn active_player_for_unit_added_mut(
@@ -96,10 +101,13 @@ impl PlayerAccumulator {
             let key = self.next_player_key(unit_id);
             self.active_key_by_unit
                 .insert(unit_id.to_string(), key.clone());
-            self.players.entry(key).or_insert_with(|| PlayerBuilder {
-                unit_id: unit_id.to_string(),
-                ..PlayerBuilder::default()
-            });
+            self.players
+                .entry(key.clone())
+                .or_insert_with(|| PlayerBuilder {
+                    unit_id: unit_id.to_string(),
+                    unit_occurrence_id: key,
+                    ..PlayerBuilder::default()
+                });
         }
 
         self.active_player_mut(unit_id)
@@ -210,6 +218,7 @@ pub(crate) fn extract_from_lines(
             let scribed_skills = resolve_scribed_skills(&p.slotted_skill_ids, &ability_infos);
             KalpaPlayerBuildEvidence {
                 unit_id: p.unit_id,
+                unit_occurrence_id: Some(p.unit_occurrence_id),
                 character_name: p.character_name,
                 account_name: p.account_name,
                 character_id: p.character_id,
@@ -230,6 +239,7 @@ pub(crate) fn extract_from_lines(
 
     KalpaBuildEvidence {
         schema_version: SCHEMA_VERSION,
+        extractor_version: Some(EXTRACTOR_VERSION),
         source: SOURCE.to_string(),
         report_code,
         players,
@@ -684,6 +694,7 @@ mod tests {
         let evidence = extract_from_lines(&lines, Some("ABC123".to_string()));
 
         assert_eq!(evidence.schema_version, 1);
+        assert_eq!(evidence.extractor_version, Some(EXTRACTOR_VERSION));
         assert_eq!(evidence.report_code.as_deref(), Some("ABC123"));
         assert_eq!(evidence.players.len(), 1);
         assert_eq!(evidence.players[0].class_id, Some(2));
@@ -868,6 +879,7 @@ mod tests {
             .find(|player| player.account_name.as_deref() == Some("@Mayhem713"))
             .expect("first occupant should remain matchable by account");
         assert_eq!(first.unit_id, "48");
+        assert_eq!(first.unit_occurrence_id.as_deref(), Some("48"));
         assert_eq!(first.character_name.as_deref(), Some("teach me too blade"));
         assert_eq!(first.race_id, Some(4));
         assert_eq!(first.champion_points, Some(1911));
@@ -881,6 +893,7 @@ mod tests {
             .find(|player| player.account_name.as_deref() == Some("@conterri"))
             .expect("second occupant should get a separate sidecar row");
         assert_eq!(second.unit_id, "48");
+        assert_eq!(second.unit_occurrence_id.as_deref(), Some("48#1"));
         assert_eq!(second.character_name.as_deref(), Some("Dud Spud Bud"));
         assert_eq!(second.race_id, Some(7));
         assert_eq!(second.champion_points, Some(1651));
@@ -907,6 +920,7 @@ mod tests {
             .find(|player| player.account_name.as_deref() == Some("@hulin15823987726"))
             .expect("named first occupant should remain matchable by account");
         assert_eq!(first.unit_id, "45");
+        assert_eq!(first.unit_occurrence_id.as_deref(), Some("45"));
         assert_eq!(first.character_name.as_deref(), Some("Adolphc"));
         assert_eq!(first.class_id, Some(1));
         assert_eq!(first.race_id, Some(7));
@@ -921,6 +935,7 @@ mod tests {
             .find(|player| player.account_name.is_none() && player.champion_points == Some(773))
             .expect("anonymous reused occupant should get a separate sidecar row");
         assert_eq!(second.unit_id, "45");
+        assert_eq!(second.unit_occurrence_id.as_deref(), Some("45#1"));
         assert_eq!(second.class_id, Some(6));
         assert_eq!(second.race_id, Some(7));
         assert_eq!(second.class_name.as_deref(), Some("Templar"));

@@ -69,6 +69,7 @@ export interface ReportRef {
 
 export interface KalpaPlayerBuildEvidence {
   unitId: string;
+  unitOccurrenceId?: string | null;
   characterName?: string | null;
   accountName?: string | null;
   characterId?: string | null;
@@ -99,6 +100,7 @@ export interface KalpaScribedSkillEvidence {
 
 export interface KalpaBuildEvidence {
   schemaVersion: number;
+  extractorVersion?: number | null;
   source: string;
   reportCode?: string | null;
   players: KalpaPlayerBuildEvidence[];
