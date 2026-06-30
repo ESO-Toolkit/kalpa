@@ -18,6 +18,7 @@
 //! comparison. Built clean-room from protocol facts; no third-party code copied.
 
 pub mod a_counter;
+pub mod build_evidence;
 pub mod client;
 pub mod convert;
 pub mod coverage;

@@ -18,6 +18,7 @@ use tauri::{Manager, State};
 use super::types::*;
 use super::watcher::{LiveEvent, LiveWatchHandle};
 use super::{discovery, scanner, splitter, transport, watcher};
+use crate::auth::AuthState;
 use crate::AllowedAddonsPath;
 
 /// Internal sentinel returned by the live-handoff closure when it observes the
@@ -1010,6 +1011,7 @@ pub struct UploadDispatch {
     pub handed_off: bool,
     pub detail: String,
     pub report: Option<ReportRef>,
+    pub build_evidence: Option<KalpaBuildEvidence>,
 }
 
 /// Dispatch a prepared log to the official uploader. `prefer_cli` uses the CLI
@@ -1026,6 +1028,7 @@ pub struct UploadDispatch {
 pub async fn uploader_upload_log(
     app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
+    auth_state: State<'_, AuthState>,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
     file_path: String,
     options: UploadOptions,
@@ -1098,6 +1101,7 @@ pub async fn uploader_upload_log(
         // the frontend's derived content label, carried regardless of transport.
         title: None,
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(&app, record.clone());
 
@@ -1184,6 +1188,7 @@ pub async fn uploader_upload_log(
                 // is one; otherwise the transport's own handoff detail.
                 detail: fallback_note.unwrap_or(detail),
                 report: None,
+                build_evidence: None,
             })
         }
         Ok(transport::UploadOutcome::Completed { report_code }) => {
@@ -1191,8 +1196,59 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
+            let build_evidence = if use_native {
+                report.as_ref().and_then(|report| {
+                    match super::native::build_evidence::extract_from_file(
+                        &safe,
+                        Some(report.code.clone()),
+                    ) {
+                        Ok(evidence) if !evidence.players.is_empty() => Some(evidence),
+                        Ok(_) => None,
+                        Err(e) => {
+                            eprintln!("[uploader] native build evidence unavailable: {e}");
+                            None
+                        }
+                    }
+                })
+            } else {
+                None
+            };
+            if use_native {
+                if let (Some(report), Some(evidence)) = (&report, &build_evidence) {
+                    match auth_state.get_valid_token() {
+                        Ok(Some(token)) => {
+                            let report_code = report.code.clone();
+                            let evidence = evidence.clone();
+                            let visibility = options.visibility;
+                            std::thread::spawn(move || {
+                                if let Err(e) = super::sidecar::publish_build_evidence(
+                                    &report_code,
+                                    &evidence,
+                                    visibility,
+                                    &token,
+                                ) {
+                                    eprintln!(
+                                        "[uploader] native build evidence sidecar skipped: {e}"
+                                    );
+                                }
+                            });
+                        }
+                        Ok(None) => {
+                            eprintln!(
+                                "[uploader] native build evidence sidecar skipped: no ESO Logs OAuth token available"
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[uploader] native build evidence sidecar skipped: auth unavailable: {e}"
+                            );
+                        }
+                    }
+                }
+            }
             record.status = UploadStatus::Completed;
             record.report = report.clone();
+            record.build_evidence = build_evidence.clone();
             // Stamp the title from the actual OUTCOME, not the routing intent: only a
             // genuine native completion applied `description` as the report name (a
             // native attempt that fell back to the official uploader returns HandedOff,
@@ -1206,6 +1262,7 @@ pub async fn uploader_upload_log(
                 handed_off: false,
                 detail: "Upload complete.".into(),
                 report,
+                build_evidence,
             })
         }
         Err(e) => {
@@ -1603,6 +1660,7 @@ pub async fn uploader_start_live(
         // so leave the title unset; the zone is the frontend's content hint.
         title: None,
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(&app, record);
 
@@ -1641,6 +1699,7 @@ pub async fn uploader_start_live(
                              fight timeline is unavailable for this session."
                         .into(),
                     report,
+                    build_evidence: None,
                 });
             }
             // Nothing was launched (no handoff): settle our just-written `Live`
@@ -1687,6 +1746,7 @@ pub async fn uploader_start_live(
         handed_off,
         detail,
         report,
+        build_evidence: None,
     })
 }
 
@@ -1792,6 +1852,7 @@ async fn start_native_live_branch(
         // name, so persist it as the title; zone is the frontend's content hint.
         title: options.description.clone(),
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(app, record);
 
@@ -2087,6 +2148,7 @@ async fn start_native_live_branch(
         handed_off: false,
         detail: "Live logging started — uploading directly to ESO Logs.".into(),
         report: None,
+        build_evidence: None,
     })
 }
 

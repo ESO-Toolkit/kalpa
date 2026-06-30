@@ -81,6 +81,7 @@ import {
   formatElapsed,
   parseReportCode,
   primaryReportUrl,
+  primaryReportUrlForOpen,
   relativeFromMs,
 } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
@@ -172,7 +173,7 @@ async function usesOfficialUploader(): Promise<boolean> {
 async function maybeAutoOpenAnalysis(
   report: ReportRef,
   visibility: Visibility,
-  opts?: { live?: boolean }
+  opts?: { live?: boolean; buildEvidence?: UploadDispatch["buildEvidence"] }
 ): Promise<void> {
   try {
     const auto = await getSetting<boolean>("autoOpenAnalysis", false);
@@ -182,7 +183,7 @@ async function maybeAutoOpenAnalysis(
     // pop a "couldn't open" toast. The always-present "View analysis" button covers
     // the manual path.
     const m = await import("@tauri-apps/plugin-opener");
-    await m.openUrl(primaryReportUrl(report, visibility, opts));
+    await m.openUrl(await primaryReportUrlForOpen(report, visibility, opts));
   } catch {
     /* best-effort — the manual button still works */
   }
@@ -847,7 +848,9 @@ export function UploaderWorkspace({
         toast.success("Upload complete — report ready.");
         // Native upload produced a report code; offer to jump straight to the richer
         // ESO Log Aggregator analysis if the user opted into auto-open.
-        void maybeAutoOpenAnalysis(dispatch.report, options.visibility);
+        void maybeAutoOpenAnalysis(dispatch.report, options.visibility, {
+          buildEvidence: dispatch.buildEvidence,
+        });
       } else {
         toast.success(dispatch.detail, { duration: 7000 });
       }
@@ -4138,7 +4141,9 @@ function HistoryPanel({
                           size="sm"
                           className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
                           onClick={() =>
-                            void openReportUrl(primaryReportUrl(r.report!, r.visibility))
+                            void primaryReportUrlForOpen(r.report!, r.visibility, {
+                              buildEvidence: r.buildEvidence,
+                            }).then((url) => openReportUrl(url))
                           }
                           aria-label={
                             r.visibility === "private"

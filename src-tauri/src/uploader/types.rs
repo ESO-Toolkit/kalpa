@@ -193,6 +193,75 @@ pub struct ReportRef {
     pub url: String,
 }
 
+/// Exact build hints recovered from Kalpa's native raw-log path and handed to
+/// ESO Log Aggregator through the analysis link.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KalpaBuildEvidence {
+    pub schema_version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor_version: Option<u16>,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_code: Option<String>,
+    #[serde(default)]
+    pub players: Vec<KalpaPlayerBuildEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KalpaPlayerBuildEvidence {
+    pub unit_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_occurrence_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_id: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub race_id: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub champion_points: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub class_mastery_passives: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub champion_point_passives: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub food: Option<KalpaFoodEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scribed_skills: Vec<KalpaScribedSkillEvidence>,
+    pub evidence: String,
+    pub confidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KalpaFoodEvidence {
+    pub ability_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KalpaScribedSkillEvidence {
+    pub ability_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
 /// A persisted record of an upload Kalpa initiated, shown in the history panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -224,6 +293,10 @@ pub struct UploadRecord {
     /// backward compatibility with pre-existing records.
     #[serde(default)]
     pub zone: Option<String>,
+    /// Native raw-log evidence that ESO Log Aggregator can use to repair lossy
+    /// player-card build extraction. `serde(default)` preserves old history rows.
+    #[serde(default)]
+    pub build_evidence: Option<KalpaBuildEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
