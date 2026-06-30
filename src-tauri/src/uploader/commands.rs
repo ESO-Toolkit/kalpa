@@ -1235,7 +1235,7 @@ pub async fn uploader_upload_log(
                         }
                         Ok(None) => {
                             eprintln!(
-                                "[uploader] native build evidence sidecar skipped: not signed in to ESOTK"
+                                "[uploader] native build evidence sidecar skipped: no ESO Logs OAuth token available"
                             );
                         }
                         Err(e) => {
