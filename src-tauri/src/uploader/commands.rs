@@ -1042,6 +1042,10 @@ pub async fn uploader_upload_log(
     // `dominantZone(fights)`). Best-effort; `None` ⇒ the row falls back to the
     // file name. Purely cosmetic — never gates routing.
     zone: Option<String>,
+    // Per-upload progress stream for the UI's progress bar / ETA. Ticks fire only on
+    // the native direct path (the official handoff runs in a process Kalpa can't
+    // observe), so a handoff upload simply produces no events on this channel.
+    progress: Channel<UploadProgressEvent>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
     // Reconcile prior-run stale records before this upload writes its transient
@@ -1158,8 +1162,24 @@ pub async fn uploader_upload_log(
         // is added, lift this flag into managed state keyed by `record_id`.
         let provider = std::sync::Arc::clone(&session);
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        // Announce the build phase up front: reading the (possibly multi-GB) log and
+        // encoding the payload happens inside the blocking task before the first POST,
+        // so the bar shows "Preparing" the instant the user clicks rather than sitting
+        // empty. segments_total is 0 here — unknown until the payload is built.
+        let _ = progress.send(UploadProgressEvent {
+            phase: UploadPhase::Preparing,
+            segments_done: 0,
+            segments_total: 0,
+        });
+        // Move a clone of the channel into the blocking task; the native runner emits
+        // the real Uploading/Finalizing/Done ticks through it. `Channel` is cheap to
+        // clone (an Arc'd sender) and `Send`, so this is safe across the thread.
+        let progress_sink = progress.clone();
         tokio::task::spawn_blocking(move || {
-            transport::run_native_upload(&dispatch_path, &opts, provider.as_ref(), cancel)
+            let emit = move |ev: UploadProgressEvent| {
+                let _ = progress_sink.send(ev);
+            };
+            transport::run_native_upload(&dispatch_path, &opts, provider.as_ref(), cancel, &emit)
         })
         .await
         .map_err(|e| format!("Task failed: {e}"))?
