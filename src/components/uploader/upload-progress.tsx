@@ -22,31 +22,43 @@ export interface UploadProgressState {
   startMs: number;
 }
 
+/** Lower/upper bounds of the Uploading band — completed-segment progress fills the
+ *  space between them; Preparing owns everything below, Finalizing/Done above. */
+const UPLOAD_BAND_START = 0.15;
+const UPLOAD_BAND_END = 0.93;
+
 /** The settled (checkpoint) fraction a given progress state maps to, in [0, 1].
  *  Phases own contiguous bands so the bar advances monotonically: Preparing fills
- *  the first ~15%, Uploading the middle (driven by real segment counts when known,
- *  else a time-creep), Finalizing the last sliver, Done completes it.
+ *  the first ~15%, Uploading the middle (driven by real segment counts), Finalizing
+ *  the last sliver, Done completes it.
  *
- *  `elapsedMs` lets the open-ended sub-phases (Preparing, and Uploading before the
- *  segment count is known) creep toward — but never past — their band ceiling, so a
- *  long payload build or a single in-flight segment still shows motion. Exported for
- *  unit tests. */
-export function uploadTargetFraction(state: UploadProgressState, elapsedMs: number): number {
+ *  `phaseElapsedMs` is time spent in the CURRENT phase. It lets each phase creep
+ *  toward — but never past — its ceiling while no new backend tick has arrived, so a
+ *  long payload build, or the (single, large) segment whose POST is in flight, still
+ *  shows motion instead of freezing at a checkpoint. The key case: the native manual
+ *  path emits `uploading {done: 0, total: 1}` before the POST and only ticks again
+ *  once the segment is accepted, so `done/total = 0` must creep across that segment's
+ *  band rather than sit at its floor. Exported for unit tests. */
+export function uploadTargetFraction(state: UploadProgressState, phaseElapsedMs: number): number {
   const approach = (cap: number, base: number, tauMs: number) =>
-    base + (cap - base) * (1 - Math.exp(-Math.max(0, elapsedMs) / tauMs));
+    base + (cap - base) * (1 - Math.exp(-Math.max(0, phaseElapsedMs) / tauMs));
   switch (state.phase) {
     case "preparing":
       // 0 → 0.15, most of it in the first few seconds.
-      return approach(0.15, 0, 3000);
+      return approach(UPLOAD_BAND_START, 0, 3000);
     case "uploading": {
-      if (state.segmentsTotal <= 0) {
-        // Count not known yet: creep across the lower upload band so a slow first
-        // POST still moves, capped below where real ticks take over.
-        return approach(0.6, 0.15, 6000);
-      }
-      const seg = Math.min(1, Math.max(0, state.segmentsDone / state.segmentsTotal));
-      // Real fraction across the 0.15 → 0.93 band.
-      return 0.15 + 0.78 * seg;
+      // Treat a not-yet-known count as a single in-flight segment.
+      const total = Math.max(1, state.segmentsTotal);
+      const done = Math.min(total, Math.max(0, state.segmentsDone));
+      const span = UPLOAD_BAND_END - UPLOAD_BAND_START;
+      // Floor = segments already ACCEPTED. Ceiling = where the next accepted tick
+      // will land. The in-flight segment's true byte progress is unobservable, so
+      // creep from floor toward its checkpoint but stop just short (0.92 of the way)
+      // — the real "accepted" event then visibly completes that segment.
+      const floor = UPLOAD_BAND_START + span * (done / total);
+      const ceil = UPLOAD_BAND_START + span * Math.min(1, (done + 1) / total);
+      const cap = floor + (ceil - floor) * 0.92;
+      return approach(cap, floor, 5000);
     }
     case "finalizing":
       return 0.96;
@@ -126,6 +138,11 @@ export function UploadProgressPanel({
   const fractionRef = useRef(0);
   const maxTargetRef = useRef(0);
   const stateRef = useRef(state);
+  // When the current phase began (performance.now), so the creep is anchored to
+  // time-in-phase, not total elapsed — the in-flight segment must creep from the
+  // instant Uploading starts, regardless of how long Preparing took.
+  const phaseRef = useRef<UploadPhase | null>(null);
+  const phaseStartRef = useRef(0);
   // Keep the rAF loop's view of `state` current without re-subscribing each tick.
   useEffect(() => {
     stateRef.current = state;
@@ -145,9 +162,17 @@ export function UploadProgressPanel({
       const s = stateRef.current;
       const elapsed = Date.now() - s.startMs;
 
+      // Reset the per-phase clock whenever the phase changes so each phase's creep
+      // starts from zero.
+      if (phaseRef.current !== s.phase) {
+        phaseRef.current = s.phase;
+        phaseStartRef.current = now;
+      }
+      const phaseElapsed = now - phaseStartRef.current;
+
       // Targets are monotonic non-decreasing: a time-creep target from one phase must
       // never be undercut by a fresh-but-lower checkpoint from the next.
-      const rawTarget = uploadTargetFraction(s, elapsed);
+      const rawTarget = uploadTargetFraction(s, phaseElapsed);
       const target = Math.max(rawTarget, maxTargetRef.current);
       maxTargetRef.current = target;
 

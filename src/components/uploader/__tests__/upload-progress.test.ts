@@ -22,18 +22,37 @@ describe("uploadTargetFraction", () => {
     expect(fHuge).toBeGreaterThan(0.14);
   });
 
-  it("maps real segment counts onto the upload band", () => {
+  it("anchors the band floor at the segments already accepted", () => {
+    // At phase-elapsed 0 there is no creep yet, so the target is the accepted-segment
+    // floor.
     expect(uploadTargetFraction(state({ segmentsDone: 0, segmentsTotal: 4 }), 0)).toBeCloseTo(0.15);
     expect(uploadTargetFraction(state({ segmentsDone: 4, segmentsTotal: 4 }), 0)).toBeCloseTo(0.93);
     expect(uploadTargetFraction(state({ segmentsDone: 2, segmentsTotal: 4 }), 0)).toBeCloseTo(0.54);
   });
 
-  it("creeps within the lower upload band when the count is unknown, capped at 0.6", () => {
-    const early = uploadTargetFraction(state({ segmentsTotal: 0 }), 100);
-    const huge = uploadTargetFraction(state({ segmentsTotal: 0 }), 1_000_000);
-    expect(early).toBeGreaterThanOrEqual(0.15);
-    expect(huge).toBeLessThanOrEqual(0.6);
-    expect(huge).toBeGreaterThan(0.59);
+  it("creeps the single in-flight segment instead of freezing at its floor", () => {
+    // The native manual path: uploading {done: 0, total: 1} held for the whole POST.
+    // Must move past 0.15 over time, but stop short of the segment's 0.93 checkpoint
+    // so the real "accepted" tick still advances the bar visibly.
+    const atStart = uploadTargetFraction(state({ segmentsDone: 0, segmentsTotal: 1 }), 0);
+    const after5s = uploadTargetFraction(state({ segmentsDone: 0, segmentsTotal: 1 }), 5000);
+    const after30s = uploadTargetFraction(state({ segmentsDone: 0, segmentsTotal: 1 }), 30_000);
+    expect(atStart).toBeCloseTo(0.15);
+    expect(after5s).toBeGreaterThan(0.15);
+    expect(after30s).toBeGreaterThan(after5s);
+    expect(after30s).toBeLessThan(0.93);
+  });
+
+  it("treats an unknown segment count as a single in-flight segment", () => {
+    expect(uploadTargetFraction(state({ segmentsTotal: 0 }), 0)).toBeCloseTo(0.15);
+    expect(uploadTargetFraction(state({ segmentsTotal: 0 }), 30_000)).toBeGreaterThan(0.15);
+  });
+
+  it("creeps only within the current segment's band on a multi-segment upload", () => {
+    // One of four accepted: floor 0.34, next checkpoint 0.535 — creep stays under it.
+    const crept = uploadTargetFraction(state({ segmentsDone: 1, segmentsTotal: 4 }), 1_000_000);
+    expect(crept).toBeGreaterThan(0.34);
+    expect(crept).toBeLessThan(0.535);
   });
 
   it("reserves the tail for finalizing and completes when done", () => {
