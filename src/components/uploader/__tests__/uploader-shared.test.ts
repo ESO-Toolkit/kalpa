@@ -1,12 +1,26 @@
+/// <reference types="node" />
+
 import { describe, expect, it } from "vitest";
+import { CompressionStream as NodeCompressionStream } from "node:stream/web";
+import { inflateRawSync } from "node:zlib";
 
 import {
   esoLogsReportUrl,
   esotkReportUrl,
+  esotkReportUrlForOpen,
+  KALPA_BUILD_EVIDENCE_DEFLATE_PARAM,
   KALPA_BUILD_EVIDENCE_PARAM,
   parseReportCode,
   primaryReportUrl,
 } from "../uploader-shared";
+
+const globalWithStreams = globalThis as typeof globalThis & {
+  CompressionStream?: typeof CompressionStream;
+};
+
+if (typeof globalWithStreams.CompressionStream === "undefined") {
+  globalWithStreams.CompressionStream = NodeCompressionStream as typeof CompressionStream;
+}
 
 function decodeBase64UrlJson(encoded: string): unknown {
   const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
@@ -17,6 +31,12 @@ function decodeBase64UrlJson(encoded: string): unknown {
     (char) => `%${char.charCodeAt(0).toString(16).padStart(2, "0")}`
   ).join("");
   return JSON.parse(decodeURIComponent(percentEncoded));
+}
+
+function decodeDeflateBase64UrlJson(encoded: string): unknown {
+  const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  return JSON.parse(inflateRawSync(Buffer.from(padded, "base64")).toString("utf8"));
 }
 
 describe("esotkReportUrl", () => {
@@ -67,6 +87,39 @@ describe("esotkReportUrl", () => {
 
     expect(encoded).toBeTruthy();
     expect(decodeBase64UrlJson(encoded!)).toEqual(evidence);
+  });
+
+  it("uses a compressed native build evidence param for opened analysis links", async () => {
+    const evidence = {
+      schemaVersion: 1,
+      source: "kalpa-native-player-info",
+      reportCode: "1ZG23pzRcvMT8V46",
+      players: Array.from({ length: 70 }, (_, index) => ({
+        unitId: String(index + 1),
+        unitOccurrenceId: String(index + 1),
+        characterName: `Player ${index + 1}`,
+        accountName: `@player${index + 1}`,
+        classId: 2,
+        raceId: 9,
+        level: 50,
+        championPoints: 1700 + index,
+        className: "Sorcerer",
+        classMasteryPassives: [263870, 263871],
+        championPointPassives: [142210, 142079, 141993, 141991],
+        evidence: "raw-player-info",
+        confidence: "exact",
+      })),
+    };
+
+    const url = await esotkReportUrlForOpen("1ZG23pzRcvMT8V46", { buildEvidence: evidence });
+    const hashQuery = new URL(url).hash.split("?")[1];
+    const params = new URLSearchParams(hashQuery);
+    const encoded = params.get(KALPA_BUILD_EVIDENCE_DEFLATE_PARAM);
+
+    expect(params.get(KALPA_BUILD_EVIDENCE_PARAM)).toBeNull();
+    expect(encoded).toBeTruthy();
+    expect(url.length).toBeLessThan(8_000);
+    expect(decodeDeflateBase64UrlJson(encoded!)).toEqual(evidence);
   });
 
   it("does not carry mismatched evidence or live evidence", () => {

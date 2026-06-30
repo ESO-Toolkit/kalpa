@@ -72,6 +72,8 @@ export function compactBytes(bytes: number): string {
  *  server-issued alphanumeric, but encode it defensively so a malformed value can't
  *  break out of the fragment path. */
 export const KALPA_BUILD_EVIDENCE_PARAM = "kalpaBuildEvidence";
+export const KALPA_BUILD_EVIDENCE_DEFLATE_PARAM = "kalpaBuildEvidenceDeflate";
+const MAX_INLINE_RAW_BUILD_EVIDENCE_QUERY_LENGTH = 8_000;
 
 function encodeJsonBase64Url(value: unknown): string {
   const json = JSON.stringify(value);
@@ -81,10 +83,76 @@ function encodeJsonBase64Url(value: unknown): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
 }
 
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+async function readAllChunks(readable: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = readable.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.length;
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+async function encodeJsonDeflateBase64Url(value: unknown): Promise<string | null> {
+  if (typeof CompressionStream === "undefined") return null;
+
+  try {
+    const input = new TextEncoder().encode(JSON.stringify(value));
+    const stream = new CompressionStream("deflate-raw") as unknown as TransformStream<
+      Uint8Array,
+      Uint8Array
+    >;
+    const writer = stream.writable.getWriter();
+    const writeAndClose = writer.write(input).then(() => writer.close());
+    const [, readResult] = await Promise.allSettled([
+      writeAndClose,
+      readAllChunks(stream.readable),
+    ]);
+    if (readResult.status === "rejected") return null;
+    return bytesToBase64Url(readResult.value);
+  } catch {
+    return null;
+  }
+}
+
 function buildEvidenceQuery(code: string, evidence?: KalpaBuildEvidence | null): string {
   if (!evidence?.players?.length) return "";
   if (evidence.reportCode && evidence.reportCode !== code) return "";
   return `?${KALPA_BUILD_EVIDENCE_PARAM}=${encodeURIComponent(encodeJsonBase64Url(evidence))}`;
+}
+
+async function buildEvidenceQueryForOpen(
+  code: string,
+  evidence?: KalpaBuildEvidence | null
+): Promise<string> {
+  if (!evidence?.players?.length) return "";
+  if (evidence.reportCode && evidence.reportCode !== code) return "";
+
+  const compressed = await encodeJsonDeflateBase64Url(evidence);
+  if (compressed) {
+    return `?${KALPA_BUILD_EVIDENCE_DEFLATE_PARAM}=${encodeURIComponent(compressed)}`;
+  }
+
+  const raw = buildEvidenceQuery(code, evidence);
+  return raw.length <= MAX_INLINE_RAW_BUILD_EVIDENCE_QUERY_LENGTH ? raw : "";
 }
 
 export function esotkReportUrl(
@@ -93,6 +161,15 @@ export function esotkReportUrl(
 ): string {
   const path = `/report/${encodeURIComponent(code)}${opts?.live ? "/live" : ""}`;
   const query = opts?.live ? "" : buildEvidenceQuery(code, opts?.buildEvidence);
+  return `https://esotk.com/#${path}${query}`;
+}
+
+export async function esotkReportUrlForOpen(
+  code: string,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): Promise<string> {
+  const path = `/report/${encodeURIComponent(code)}${opts?.live ? "/live" : ""}`;
+  const query = opts?.live ? "" : await buildEvidenceQueryForOpen(code, opts?.buildEvidence);
   return `https://esotk.com/#${path}${query}`;
 }
 
@@ -121,6 +198,15 @@ export function primaryReportUrl(
 ): string {
   if (opts?.live || visibility === "private") return esoLogsReportUrl(report, opts);
   return esotkReportUrl(report.code, { buildEvidence: opts?.buildEvidence });
+}
+
+export async function primaryReportUrlForOpen(
+  report: ReportRef,
+  visibility: Visibility,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): Promise<string> {
+  if (opts?.live || visibility === "private") return esoLogsReportUrl(report, opts);
+  return esotkReportUrlForOpen(report.code, { buildEvidence: opts?.buildEvidence });
 }
 
 /** Extract an ESO Logs report code from a pasted URL or bare code, or null if the

@@ -81,6 +81,7 @@ import {
   formatElapsed,
   parseReportCode,
   primaryReportUrl,
+  primaryReportUrlForOpen,
   relativeFromMs,
 } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
@@ -180,7 +181,7 @@ async function maybeAutoOpenAnalysis(
     // pop a "couldn't open" toast. The always-present "View analysis" button covers
     // the manual path.
     const m = await import("@tauri-apps/plugin-opener");
-    await m.openUrl(primaryReportUrl(report, visibility, opts));
+    await m.openUrl(await primaryReportUrlForOpen(report, visibility, opts));
   } catch {
     /* best-effort — the manual button still works */
   }
@@ -3926,11 +3927,9 @@ function HistoryPanel({
                           size="sm"
                           className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
                           onClick={() =>
-                            void openReportUrl(
-                              primaryReportUrl(r.report!, r.visibility, {
-                                buildEvidence: r.buildEvidence,
-                              })
-                            )
+                            void primaryReportUrlForOpen(r.report!, r.visibility, {
+                              buildEvidence: r.buildEvidence,
+                            }).then((url) => openReportUrl(url))
                           }
                           aria-label={
                             r.visibility === "private"
