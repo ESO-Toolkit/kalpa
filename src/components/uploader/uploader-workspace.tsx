@@ -69,6 +69,7 @@ import {
   type UploaderStatus,
   type UploadDispatch,
   type UploadOptions,
+  type UploadProgressEvent,
   type UploadRecord,
   type Visibility,
 } from "@/types/uploader";
@@ -84,6 +85,7 @@ import {
   relativeFromMs,
 } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
+import { UploadProgressPanel, type UploadProgressState } from "./upload-progress";
 import { FightList, rowsFromLive, rowsFromSummaries } from "./fight-list";
 import { SplitWorkbench } from "./split-workbench";
 import { dominantZone, shortDate } from "./naming";
@@ -239,6 +241,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const [transport, setTransport] = useState<TransportInfo | null>(null);
   const [history, setHistory] = useState<UploadRecord[]>([]);
   const [uploading, setUploading] = useState(false);
+  // Live progress of an in-flight manual (native direct) upload, driven by the
+  // per-upload Channel. Null when no native progress is being reported (idle, or a
+  // handoff upload whose work Kalpa can't observe).
+  const [uploadProgress, setUploadProgress] = useState<UploadProgressState | null>(null);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   // True while a file is dragged over the window — drives the picker drop-zone
   // visual. `importing` covers the copy-in of a dropped out-of-folder log.
@@ -811,6 +817,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const handleManualUpload = async () => {
     if (!selectedLog) return;
     setUploading(true);
+    setUploadProgress(null);
     try {
       // Resolve the effective (unified, fail-closed) opt-out AND session presence fresh
       // per upload. Native is the DEFAULT, but it still needs a captured esologs session
@@ -824,6 +831,19 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
       ]);
       const nativeOptIn = !useOfficial && hasSession;
+      // Per-upload progress stream. Ticks arrive only on the native direct path; a
+      // handoff upload returns quickly with no ticks, leaving `uploadProgress` null so
+      // the bar never shows for work Kalpa can't observe. Anchor the ETA at click time.
+      const startMs = Date.now();
+      const progress = new Channel<UploadProgressEvent>();
+      progress.onmessage = (ev) => {
+        setUploadProgress({
+          phase: ev.phase,
+          segmentsDone: ev.segmentsDone,
+          segmentsTotal: ev.segmentsTotal,
+          startMs,
+        });
+      };
       const dispatch = await invokeOrThrow<UploadDispatch>("uploader_upload_log", {
         filePath: selectedLog,
         options,
@@ -834,6 +854,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         nativeOptIn,
         // The derived content label for the history row's headline.
         zone: dominantZone(fights),
+        progress,
       });
       if (dispatch.report) {
         toast.success("Upload complete — report ready.");
@@ -848,6 +869,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       toast.error(`Upload failed: ${getTauriErrorMessage(e)}`);
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -1587,6 +1609,10 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                       liveSessionId === null
                     }
                     uploading={uploading}
+                    progress={uploadProgress}
+                    fileName={
+                      selectedLog ? (selectedLog.split(/[/\\]/).pop() ?? selectedLog) : null
+                    }
                     transport={transport}
                     willUseNative={willUseNative}
                     onUpload={handleManualUpload}
@@ -3349,12 +3375,19 @@ function Toggle({
 function ManualActions({
   canUpload,
   uploading,
+  progress,
+  fileName,
   transport,
   willUseNative,
   onUpload,
 }: {
   canUpload: boolean;
   uploading: boolean;
+  // Live native-upload progress, or null. When present (native direct path), the
+  // action area becomes a determinate progress panel; otherwise the button shows an
+  // indeterminate "Preparing…" until the (unobservable) handoff returns.
+  progress: UploadProgressState | null;
+  fileName: string | null;
   transport: TransportInfo | null;
   // The *intended* transport (opt-in + a captured session). The backend coverage
   // gate still decides for real per log, so this is an honest hint, not a promise
@@ -3363,6 +3396,13 @@ function ManualActions({
   onUpload: () => void;
 }) {
   const installed = transport?.officialUploaderInstalled ?? false;
+
+  // Native upload in flight with real progress: show the determinate bar + ETA in
+  // place of the button. This is the climax surface taking over while work happens.
+  if (uploading && progress) {
+    return <UploadProgressPanel state={progress} fileName={fileName} />;
+  }
+
   const label = uploading
     ? "Preparing…"
     : willUseNative
@@ -3387,7 +3427,11 @@ function ManualActions({
         className="w-full sm:w-auto"
         aria-label="Upload your log to ESO Logs"
       >
-        <CloudUpload className="size-4" />
+        {uploading ? (
+          <Loader2 className="size-4 animate-spin" />
+        ) : (
+          <CloudUpload className="size-4" />
+        )}
         {label}
       </Button>
 
