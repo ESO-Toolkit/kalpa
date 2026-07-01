@@ -33,8 +33,8 @@
 //!   a timer / every-N-events window — so an in-flight correlation never strands.
 //! * Per-segment wall window from [`EventEmitter::live_segment_time_bounds`]
 //!   (`current_session_wall + raw_ts`), with a POST skipped if the window is unknown.
-//! * A structural self-check ([`events::validate_segment_text`]) plus a master/segment
-//!   tuple-count cross-check before every POST, so a malformed segment is never sent.
+//! * An append-time structural self-check plus a master/segment tuple-count
+//!   cross-check before every POST, so a malformed segment is never sent.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,6 +42,7 @@ use std::sync::Arc;
 use super::client::{
     LivePoster, LiveSender, MasterTableBytes, ReportCode, Segment, UploadError, LIVE_CANCEL_POLL,
 };
+use super::encode::{FileLineReplay, LineReplay};
 use super::events::EventEmitter;
 use super::incremental::{IncrementalIndexState, IncrementalMasterState};
 use super::session::SessionProvider;
@@ -76,8 +77,6 @@ pub struct LiveSegmenter {
     /// byte-identical to the re-walk oracle at every cut by the differential test
     /// `incremental_master_matches_rewalk_at_every_cut`.
     master_state: IncrementalMasterState,
-    /// Lines fed since the last cut (the body of the segment being assembled).
-    segment_lines: Vec<String>,
     /// The next segment id to use (server-sequenced; starts at 1, updated from each
     /// `add-segment` response).
     next_segment_id: u64,
@@ -95,15 +94,23 @@ pub struct LiveSegmenter {
 
 /// A built, ready-to-POST live segment: the ZIP'd segment + cumulative master, the
 /// server segment id to send them under, the count of events in an unfinished
-/// fight at the tail (0 on a clean fight-boundary cut), and completed fight
-/// durations that should advance the UI/history fight count after the POST lands.
+/// fight at the tail (0 on a clean fight-boundary cut), optional source-log raw
+/// bytes for finished-upload tuning, and completed fight durations that should
+/// advance the UI/history fight count after the POST lands.
 #[derive(Debug)]
 pub struct LiveSegmentPayload {
     pub segment: Segment,
     pub master: MasterTableBytes,
     pub segment_id: u64,
     pub in_progress_event_count: u64,
+    pub source_raw_bytes: Option<usize>,
     pub fight_durations_ms: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FinishedBuildProgress {
+    pub bytes_done: u64,
+    pub bytes_total: u64,
 }
 
 impl Default for LiveSegmenter {
@@ -114,11 +121,12 @@ impl Default for LiveSegmenter {
 
 impl LiveSegmenter {
     pub fn new() -> Self {
+        let mut emitter = EventEmitter::new();
+        emitter.open_segment();
         Self {
-            emitter: EventEmitter::new(),
+            emitter,
             index_state: IncrementalIndexState::default(),
             master_state: IncrementalMasterState::default(),
-            segment_lines: Vec::new(),
             next_segment_id: 1,
             segments_built: 0,
             in_combat: false,
@@ -135,14 +143,13 @@ impl LiveSegmenter {
     /// should be flushed BEFORE the new session's lines accumulate, which the driver
     /// handles by cutting when this returns true.
     pub fn feed(&mut self, line: &str) -> bool {
-        self.segment_lines.push(line.to_string());
         // Update the incremental index maps with THIS line first (it maintains the
         // time-aware live-monster binding, the synthetic-ability splice, and the
         // actor/ability assignments — all of which must reflect this line before the
         // emitter, below, allocates this line's tuple). `update` no-ops on lines that
         // can't change the maps, so calling it unconditionally is cheap and keeps its
         // internal state (live bindings cleared on UNIT_REMOVED, splice flag) correct.
-        self.index_state.update(line);
+        let maps_changed = self.index_state.update(line);
         // Fold this line into the incremental MASTER record state too (header,
         // captured actors, ability signals + appearance order, pet candidates), so the
         // cumulative master can be rendered each cut WITHOUT an `all_lines` re-walk.
@@ -157,24 +164,16 @@ impl LiveSegmenter {
         // amortized per line instead of re-walking `all_lines` (the L7 perf fix). The
         // pushed maps are content-identical to the prior re-walk (proven by the
         // `super::incremental` differential tests).
-        if matches!(
-            kind_of(line),
-            Some("UNIT_ADDED")
-                | Some("ABILITY_INFO")
-                | Some("EFFECT_INFO")
-                | Some("BEGIN_LOG")
-                | Some("COMBAT_EVENT")
-                | Some("EFFECT_CHANGED")
-                | Some("BEGIN_CAST")
-        ) {
+        if maps_changed {
             self.refresh_maps();
         }
         let kind = kind_of(line);
+        let segment_events_before = self.emitter.segment_event_count();
+        let _ = self.emitter.feed(line);
         let emitted_count = self
             .emitter
-            .feed(line)
-            .map(|events| events.lines().count() as u64)
-            .unwrap_or(0);
+            .segment_event_count()
+            .saturating_sub(segment_events_before);
         let raw_ms = line
             .split(',')
             .next()
@@ -223,7 +222,6 @@ impl LiveSegmenter {
     /// Drop the current per-segment body/window without touching report-scoped
     /// actor, ability, tuple, wall-clock, or correlation state.
     fn discard_current_segment(&mut self) {
-        self.segment_lines.clear();
         self.segment_fight_durations_ms.clear();
         self.current_fight_event_count = 0;
         self.emitter.discard_warmup_segment();
@@ -272,8 +270,6 @@ impl LiveSegmenter {
     /// which case the driver should fall back / stop rather than ship a broken
     /// segment.
     pub fn build_next_segment(&mut self) -> Result<Option<LiveSegmentPayload>, String> {
-        use super::events::validate_segment_text;
-
         // Render the events emitted since the last cut. We re-run the emitter's
         // framing over the segment lines is NOT how this works — the long-lived
         // emitter already advanced its state as lines were fed; we need the EMITTED
@@ -284,11 +280,10 @@ impl LiveSegmenter {
         // approach: the emitter assembles the whole report; for live we frame ONLY
         // this segment's emitted lines. Track them via the emitter's per-segment
         // emit log (see `drain_segment_events`).
-        let body = self.emitter.drain_segment_events();
+        let mut body = self.emitter.drain_segment_events()?;
         if body.event_count == 0 {
             // Nothing emitted in this window (e.g. a BEGIN_LOG with no fights yet).
             self.emitter.open_segment();
-            self.segment_lines.clear();
             self.segment_fight_durations_ms.clear();
             self.current_fight_event_count = 0;
             return Ok(None);
@@ -298,7 +293,6 @@ impl LiveSegmenter {
         // first/last emitted event). None ⇒ no BEGIN_LOG yet ⇒ skip the POST.
         let Some((start_time, end_time)) = self.emitter.live_segment_time_bounds() else {
             self.emitter.open_segment();
-            self.segment_lines.clear();
             self.segment_fight_durations_ms.clear();
             self.current_fight_event_count = 0;
             return Ok(None);
@@ -312,16 +306,6 @@ impl LiveSegmenter {
             .log_version()
             .ok_or("live segment has no BEGIN_LOG log version")?
             .to_string();
-        let segment_text = super::serialize::FightsSegmentDoc {
-            log_version: &log_version,
-            game_version: "1",
-            fights: &[(body.event_count, &body.events_string)],
-        }
-        .render();
-
-        // Structural self-check: every A in range, declared count == emitted lines.
-        validate_segment_text(&segment_text, self.emitter.allocated())?;
-
         // CUMULATIVE master pinned to the emitter's current frozen actor AND ability
         // indices (the H1 fix, both axes). `feed` keeps the emitter's maps current as
         // introduction/registering lines arrive, so the emitter's frozen maps ARE the
@@ -350,8 +334,16 @@ impl LiveSegmenter {
             ));
         }
 
-        let segment = Segment::from_text(&segment_text, start_time, end_time)
-            .map_err(|e| format!("zip segment: {e}"))?;
+        let segment_bytes = super::zip_segment::zip_log_txt_from_writer(|entry| {
+            write!(entry, "{log_version}|1\n{}\n", body.event_count)
+                .map_err(|e| format!("zip segment: write header failed: {e}"))?;
+            body.write_to(entry)
+        })?;
+        let segment = Segment {
+            bytes: segment_bytes.into(),
+            start_time,
+            end_time,
+        };
         let master =
             MasterTableBytes::from_text(&master_text).map_err(|e| format!("zip master: {e}"))?;
         let segment_id = self.next_segment_id;
@@ -369,7 +361,6 @@ impl LiveSegmenter {
         self.segments_built += 1;
         let fight_durations_ms = std::mem::take(&mut self.segment_fight_durations_ms);
         self.emitter.open_segment();
-        self.segment_lines.clear();
         self.current_fight_event_count = 0;
 
         Ok(Some(LiveSegmentPayload {
@@ -377,6 +368,7 @@ impl LiveSegmenter {
             master,
             segment_id,
             in_progress_event_count,
+            source_raw_bytes: None,
             fight_durations_ms,
         }))
     }
@@ -407,13 +399,11 @@ impl LiveSegmenter {
     ///
     /// Why this preserves the H1 index-stability pin: the pin lives entirely in
     /// `IncrementalIndexState`/`IncrementalMasterState`/the emitter's frozen maps, all of
-    /// which are KEPT. `segment_lines` is a write-only buffer (never read when building a
-    /// segment or master), so clearing it is pure hygiene. The only things reset are the
-    /// per-segment POST framing (`open_segment` drops the in-progress segment's events +
-    /// wall window) and the segment counters. Proven byte-identical to a real
-    /// from-BEGIN_LOG stream by the `mid_session_seed_matches_*` differential tests.
+    /// which are KEPT. The only things reset are the per-segment POST framing
+    /// (`open_segment` drops the in-progress segment's events + wall window) and the
+    /// segment counters. Proven byte-identical to a real from-BEGIN_LOG stream by the
+    /// `mid_session_seed_matches_*` differential tests.
     pub fn finish_warmup(&mut self) {
-        self.segment_lines.clear();
         self.next_segment_id = 1;
         self.segments_built = 0;
         // If warm-up ended between fights, drop the stale per-segment body/window. If it
@@ -425,6 +415,208 @@ impl LiveSegmenter {
             self.current_fight_event_count = 0;
             self.segment_fight_durations_ms.clear();
         }
+    }
+}
+
+/// Completed manual uploads batch finished fights per request. The raw-byte target
+/// below is the primary server-chunk guardrail; this cap is a secondary guard for
+/// logs with hundreds of tiny completed fights.
+pub(crate) const FINISHED_UPLOAD_FIGHTS_PER_SEGMENT: usize = 256;
+
+/// Safety target for completed-upload segments. Fight boundaries remain the only
+/// legal cut points, so one unusually long fight may exceed this, but logs with many
+/// medium fights won't grow one large server chunk just because the fight count is
+/// below the batch target. The 96 MiB default is based on authenticated ESO Logs
+/// report-ready sweeps: it keeps the server chunk size well below the native upload
+/// ceiling while cutting request count enough to improve full-load latency on real
+/// multi-fight logs.
+pub(crate) const FINISHED_UPLOAD_SEGMENT_RAW_BYTE_TARGET: usize = 96 * 1024 * 1024;
+
+/// Build progress updates are intentionally coarse: frequent enough to reassure the
+/// UI on large logs, sparse enough not to turn encoding into event traffic.
+const FINISHED_BUILD_PROGRESS_STRIDE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Build upload-ready fight segments for a completed single-session log using the
+/// same incremental encoder as native live upload. This avoids the completed-file
+/// one-shot path's repeated whole-log re-walks and gives ESO Logs smaller batched
+/// segment payloads to parse/render.
+pub fn build_finished_payloads_from_text(
+    text: &str,
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    build_finished_payloads_from_text_batched(text, FINISHED_UPLOAD_FIGHTS_PER_SEGMENT)
+}
+
+pub fn build_finished_payloads_from_file(
+    path: &std::path::Path,
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    build_finished_payloads_from_file_batched(path, FINISHED_UPLOAD_FIGHTS_PER_SEGMENT)
+}
+
+pub(crate) fn build_finished_payloads_from_file_batched(
+    path: &std::path::Path,
+    max_fights_per_segment: usize,
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    build_finished_payloads_from_file_limited(
+        path,
+        max_fights_per_segment,
+        FINISHED_UPLOAD_SEGMENT_RAW_BYTE_TARGET,
+    )
+}
+
+pub(crate) fn build_finished_payloads_from_file_limited(
+    path: &std::path::Path,
+    max_fights_per_segment: usize,
+    raw_byte_target: usize,
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    build_finished_payloads_from_file_limited_with_progress(
+        path,
+        max_fights_per_segment,
+        raw_byte_target,
+        |_| {},
+    )
+}
+
+pub(crate) fn build_finished_payloads_from_file_with_progress(
+    path: &std::path::Path,
+    progress: impl FnMut(FinishedBuildProgress),
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    build_finished_payloads_from_file_limited_with_progress(
+        path,
+        FINISHED_UPLOAD_FIGHTS_PER_SEGMENT,
+        FINISHED_UPLOAD_SEGMENT_RAW_BYTE_TARGET,
+        progress,
+    )
+}
+
+pub(crate) fn build_finished_payloads_from_file_limited_with_progress(
+    path: &std::path::Path,
+    max_fights_per_segment: usize,
+    raw_byte_target: usize,
+    mut progress: impl FnMut(FinishedBuildProgress),
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    let total = std::fs::metadata(path)
+        .map_err(|e| format!("native encode: read raw log metadata failed: {e}"))?
+        .len();
+    let source = FileLineReplay::new(path);
+    let mut done = 0u64;
+    let mut last_emitted = 0u64;
+    progress(FinishedBuildProgress {
+        bytes_done: 0,
+        bytes_total: total,
+    });
+    let mut on_raw_bytes = |bytes: usize| {
+        done = done.saturating_add(bytes as u64).min(total);
+        if done < total && done.saturating_sub(last_emitted) >= FINISHED_BUILD_PROGRESS_STRIDE_BYTES
+        {
+            last_emitted = done;
+            progress(FinishedBuildProgress {
+                bytes_done: done,
+                bytes_total: total,
+            });
+        }
+    };
+    let result = build_finished_payloads_from_replay_limited(
+        &source,
+        max_fights_per_segment,
+        raw_byte_target,
+        Some(&mut on_raw_bytes),
+    );
+    if result.is_ok() && done < total {
+        progress(FinishedBuildProgress {
+            bytes_done: total,
+            bytes_total: total,
+        });
+    }
+    result
+}
+
+pub(crate) fn build_finished_payloads_from_text_batched(
+    text: &str,
+    max_fights_per_segment: usize,
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    build_finished_payloads_from_text_limited(
+        text,
+        max_fights_per_segment,
+        FINISHED_UPLOAD_SEGMENT_RAW_BYTE_TARGET,
+    )
+}
+
+pub(crate) fn build_finished_payloads_from_text_limited(
+    text: &str,
+    max_fights_per_segment: usize,
+    raw_byte_target: usize,
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    let source = text;
+    build_finished_payloads_from_replay_limited(
+        &source,
+        max_fights_per_segment,
+        raw_byte_target,
+        None,
+    )
+}
+
+fn build_finished_payloads_from_replay_limited(
+    source: &impl LineReplay,
+    max_fights_per_segment: usize,
+    raw_byte_target: usize,
+    mut on_raw_bytes: Option<&mut dyn FnMut(usize)>,
+) -> Result<Option<Vec<LiveSegmentPayload>>, String> {
+    let mut seg = LiveSegmenter::new();
+    let mut out = Vec::new();
+    let mut seen_begin_log = false;
+    let max_fights_per_segment = max_fights_per_segment.max(1);
+    let raw_byte_target = raw_byte_target.max(1);
+    let mut segment_raw_bytes = 0usize;
+
+    source.replay_lines(&mut |line| {
+        let raw_line_bytes = line.len().saturating_add(1);
+        segment_raw_bytes = segment_raw_bytes.saturating_add(raw_line_bytes);
+        if let Some(on_raw_bytes) = on_raw_bytes.as_mut() {
+            on_raw_bytes(raw_line_bytes);
+        }
+
+        if let Some(t) = super::coverage::unproven_line_type(line) {
+            return Err(format!("unproven log line type '{t}'"));
+        }
+
+        let is_begin_log = kind_of(line) == Some("BEGIN_LOG");
+        if is_begin_log {
+            if seen_begin_log {
+                return Err("native completed upload does not support multi-session logs".into());
+            }
+            seen_begin_log = true;
+        }
+
+        let is_boundary = seg.feed(line);
+        if is_boundary && seg.shields_settled() {
+            let completed_fights = seg.segment_fight_durations_ms.len();
+            let reached_fight_batch = completed_fights >= max_fights_per_segment;
+            let reached_byte_target = completed_fights > 0 && segment_raw_bytes >= raw_byte_target;
+            if reached_fight_batch || reached_byte_target {
+                if let Some(mut payload) = seg.build_next_segment()? {
+                    payload.source_raw_bytes = Some(segment_raw_bytes);
+                    out.push(payload);
+                }
+                segment_raw_bytes = 0;
+            }
+        }
+        Ok(())
+    })?;
+
+    if !seen_begin_log {
+        return Ok(None);
+    }
+
+    seg.drain_trailing_shields();
+    if let Some(mut payload) = seg.build_next_segment()? {
+        payload.source_raw_bytes = Some(segment_raw_bytes);
+        out.push(payload);
+    }
+
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out))
     }
 }
 
@@ -1739,7 +1931,7 @@ mod tests {
         // mirroring the driver's skip-empty-window guard, so the comparison happens at
         // exactly the cuts the driver renders a master at.
         fn compare_if_buildable(seg: &LiveSegmenter, all_lines: &[String], compared: &mut usize) {
-            if seg.emitter.drain_segment_events().event_count == 0 {
+            if seg.emitter.segment_event_count() == 0 {
                 return;
             }
             if seg.emitter.live_segment_time_bounds().is_none() {
@@ -1872,7 +2064,7 @@ mod tests {
         for line in &lines {
             let boundary = seg.feed(line);
             if boundary && seg.shields_settled() {
-                if seg.emitter.drain_segment_events().event_count > 0
+                if seg.emitter.segment_event_count() > 0
                     && seg.emitter.live_segment_time_bounds().is_some()
                 {
                     let fa = seg.emitter.frozen_actor_index_map();
@@ -1983,7 +2175,7 @@ mod tests {
     /// Drive `lines` through a fresh segmenter, posting at every settled fight boundary
     /// (and a final flush), returning each built segment's `(segment.bytes, master.bytes,
     /// start_time, end_time)`. Mirrors the driver's cut/build loop without the network.
-    fn collect_segments(lines: &[&str]) -> Vec<(Vec<u8>, Vec<u8>, u64, u64)> {
+    fn collect_segments(lines: &[&str]) -> Vec<(bytes::Bytes, bytes::Bytes, u64, u64)> {
         let mut seg = LiveSegmenter::new();
         let mut out = Vec::new();
         for line in lines {
@@ -2049,6 +2241,156 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn finished_payload_builder_segments_a_single_session() {
+        let session = two_fight_session_inline().join("\n");
+        let payloads = build_finished_payloads_from_text(&session)
+            .expect("finished builder must not error")
+            .expect("fixture has a valid session");
+        assert_eq!(
+            payloads.len(),
+            1,
+            "two-fight fixture should fit in one batched payload"
+        );
+        for payload in payloads {
+            assert!(!payload.segment.bytes.is_empty());
+            assert!(!payload.master.bytes.is_empty());
+            assert!(payload.segment.start_time <= payload.segment.end_time);
+            assert_eq!(payload.fight_durations_ms.len(), 2);
+        }
+    }
+
+    #[test]
+    fn finished_payload_builder_file_matches_text() {
+        let session = two_fight_session_inline().join("\n");
+        let text_payloads = build_finished_payloads_from_text(&session)
+            .expect("text builder must not error")
+            .expect("fixture has a valid session");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Encounter.log");
+        std::fs::write(&path, session).unwrap();
+
+        let file_payloads = build_finished_payloads_from_file(&path)
+            .expect("file builder must not error")
+            .expect("fixture has a valid session");
+
+        assert_eq!(file_payloads.len(), text_payloads.len());
+        for (file, text) in file_payloads.iter().zip(text_payloads.iter()) {
+            assert_eq!(file.segment.bytes, text.segment.bytes);
+            assert_eq!(file.segment.start_time, text.segment.start_time);
+            assert_eq!(file.segment.end_time, text.segment.end_time);
+            assert_eq!(file.master.bytes, text.master.bytes);
+            assert_eq!(file.fight_durations_ms, text.fight_durations_ms);
+        }
+    }
+
+    #[test]
+    fn finished_payload_builder_progress_does_not_complete_on_rejected_input() {
+        let session = two_fight_session_inline().join("\n");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Encounter.log");
+        std::fs::write(&path, format!("{session}\n1,NOT_PROVEN")).unwrap();
+        let total = std::fs::metadata(&path).unwrap().len();
+        let mut updates = Vec::new();
+
+        let err = build_finished_payloads_from_file_with_progress(&path, |progress| {
+            updates.push(progress);
+        })
+        .unwrap_err();
+
+        assert!(err.contains("unproven log line type"));
+        assert_eq!(
+            updates.first(),
+            Some(&FinishedBuildProgress {
+                bytes_done: 0,
+                bytes_total: total,
+            })
+        );
+        assert!(
+            !updates.iter().any(|progress| progress.bytes_done == total),
+            "rejected input must not report final preparation progress"
+        );
+    }
+
+    #[test]
+    fn finished_payload_builder_rejects_multi_session_logs() {
+        let session = two_fight_session_inline().join("\n");
+        let raw = format!("{session}\n{session}");
+        let err = build_finished_payloads_from_text(&raw).unwrap_err();
+        assert!(
+            err.contains("multi-session"),
+            "multi-session input should be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn finished_payload_builder_can_cut_on_raw_byte_target() {
+        let session = two_fight_session_inline().join("\n");
+        let payloads = build_finished_payloads_from_text_limited(&session, usize::MAX, 1)
+            .expect("finished builder must not error")
+            .expect("fixture has a valid session");
+        assert_eq!(
+            payloads.len(),
+            2,
+            "tiny byte target should cut the two-fight fixture at each safe boundary"
+        );
+        assert!(payloads
+            .iter()
+            .all(|payload| payload.fight_durations_ms.len() == 1));
+    }
+
+    #[test]
+    fn finished_payload_builder_does_not_cut_inside_open_fight() {
+        let mut session = String::new();
+        let repeated_damage = "310,COMBAT_EVENT,DAMAGE,FIRE,1,1200,0,5001,38901,1,16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0,30,38000/45000,0/0,0/0,0/0,0/0,0,0.4,0.5,0.0";
+
+        for line in two_fight_session_inline() {
+            session.push_str(line);
+            session.push('\n');
+            if line.starts_with("700,EFFECT_CHANGED") {
+                for i in 0..32 {
+                    let (_, rest) = repeated_damage.split_once(',').unwrap();
+                    session.push_str(&(310 + i).to_string());
+                    session.push(',');
+                    session.push_str(rest);
+                    session.push('\n');
+                }
+            }
+            if line.starts_with("800,END_COMBAT") {
+                session.push_str("900,END_LOG\n");
+                break;
+            }
+        }
+
+        let payloads = build_finished_payloads_from_text_limited(&session, usize::MAX, 1)
+            .expect("finished builder must not error")
+            .expect("fixture has a valid session");
+
+        assert_eq!(
+            payloads.len(),
+            1,
+            "finished uploads must wait for END_COMBAT before cutting, even when the raw-byte target is exceeded"
+        );
+        assert_eq!(
+            payloads[0].fight_durations_ms,
+            vec![600],
+            "the oversized open fight should still be one completed fight"
+        );
+        assert_eq!(
+            payloads[0].in_progress_event_count, 0,
+            "completed-upload cuts must not create live-style partial fight tails"
+        );
+
+        let body = unzip_segment_body_bytes(&payloads[0].segment.bytes);
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.split('|').nth(1) == Some("52"))
+                .count(),
+            1,
+            "the completed segment should contain exactly one BEGIN_COMBAT"
+        );
+    }
+
     /// Split the fixture at the END_COMBAT that ends fight 1: everything up to and
     /// including the first END_COMBAT is the "already on disk" prefix; the rest is what
     /// the live tail will deliver.
@@ -2097,7 +2439,7 @@ mod tests {
             "warm-up resets the segment id to 1"
         );
 
-        let mut live_segs: Vec<(Vec<u8>, Vec<u8>, u64, u64)> = Vec::new();
+        let mut live_segs: Vec<(bytes::Bytes, bytes::Bytes, u64, u64)> = Vec::new();
         for line in &live {
             if seg.feed(line) && seg.shields_settled() {
                 if let Ok(Some(p)) = seg.build_next_segment() {
@@ -2163,7 +2505,7 @@ mod tests {
         }
         seg.finish_warmup();
 
-        let mut live_segs: Vec<(Vec<u8>, Vec<u8>, u64, u64)> = Vec::new();
+        let mut live_segs: Vec<(bytes::Bytes, bytes::Bytes, u64, u64)> = Vec::new();
         for line in &live {
             if seg.feed(line) && seg.shields_settled() {
                 if let Ok(Some(p)) = seg.build_next_segment() {
@@ -2682,6 +3024,7 @@ mod tests {
             master: MasterTableBytes::from_text("15|1|\n0\n0\n0\n0\n").expect("master"),
             segment_id: 1,
             in_progress_event_count: 0,
+            source_raw_bytes: None,
             fight_durations_ms: vec![600, 500],
         };
 
@@ -2783,6 +3126,7 @@ mod tests {
             master: MasterTableBytes::from_text("15|1|\n0\n0\n0\n0\n").expect("master"),
             segment_id: 7,
             in_progress_event_count: 5,
+            source_raw_bytes: None,
             fight_durations_ms: Vec::new(),
         };
 
@@ -2842,6 +3186,7 @@ mod tests {
             master: MasterTableBytes::from_text("15|1|\n0\n0\n0\n0\n").expect("master"),
             segment_id: 3,
             in_progress_event_count: 0,
+            source_raw_bytes: None,
             fight_durations_ms: vec![600, 500],
         };
 

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::Channel;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use super::types::*;
 use super::watcher::{LiveEvent, LiveWatchHandle};
@@ -1012,6 +1012,25 @@ pub struct UploadDispatch {
     pub report: Option<ReportRef>,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ManualUploadProgressPhase {
+    Building,
+    Uploading,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualUploadProgressEvent {
+    pub operation_id: String,
+    pub record_id: String,
+    pub phase: ManualUploadProgressPhase,
+    pub build_bytes_done: Option<u64>,
+    pub build_bytes_total: Option<u64>,
+    pub segments_done: usize,
+    pub segments_total: usize,
+}
+
 /// Dispatch a prepared log to the official uploader. `prefer_cli` uses the CLI
 /// transport when available; otherwise opens the uploader UI with the file.
 ///
@@ -1034,14 +1053,18 @@ pub async fn uploader_upload_log(
     // Whether the user has opted into Kalpa's direct (native) upload (the
     // Settings toggle, gated behind a ToS disclosure). `Option` so an
     // older/omitting caller deserializes to `None` (treated as `false`) and never
-    // enables native by accident. Native still only runs when the coverage gate
-    // ALSO allows it (`FORMAT_VERSION_CONFIRMED` is now true + every event type
-    // proven), so an opted-in user with an all-proven log uploads directly.
+    // enables native by accident. Native still only runs when the global format
+    // gate is open; per-line coverage is enforced during payload build before any
+    // native report is created.
     native_opt_in: Option<bool>,
     // The derived content label for the history row's headline (the frontend's
     // `dominantZone(fights)`). Best-effort; `None` ⇒ the row falls back to the
     // file name. Purely cosmetic — never gates routing.
     zone: Option<String>,
+    // Frontend-generated id for filtering progress events from this manual upload.
+    // Optional so older callers can omit it; in that case the history record id is
+    // used for both fields.
+    operation_id: Option<String>,
 ) -> Result<UploadDispatch, String> {
     validate_upload_options(&options)?;
     // Reconcile prior-run stale records before this upload writes its transient
@@ -1080,6 +1103,7 @@ pub async fn uploader_upload_log(
     };
 
     let record_id = super::history::next_record_id(now_ms(), &file_name);
+    let operation_id = operation_id.unwrap_or_else(|| record_id.clone());
     let mut record = UploadRecord {
         id: record_id.clone(),
         source_path: safe.clone(),
@@ -1110,19 +1134,17 @@ pub async fn uploader_upload_log(
     opts.include_entire_file = false;
     let dispatch_path = safe.clone();
 
-    // Coverage-gated native routing. Native upload runs ONLY when the user opted
-    // in, the format is confirmed, AND every event type in this log is within
-    // proven byte-exact coverage; otherwise we route to the official uploader.
-    // This guarantees the native path never produces a less-accurate report than
-    // the official app.
+    // Native routing. The cheap preflight checks opt-in, the global format gate,
+    // and the size ceiling. The native path itself then enforces UTF-8, per-line
+    // proven coverage, single-session input, and structural validation before it
+    // creates a report; any decline hands off to the official uploader.
     //
     // Driven by the Settings opt-in toggle (passed from the frontend). Absent →
     // false. With the format-version gate OPEN (native rendering confirmed
     // 2026-06-19, fidelity reconfirmed vs the official upload 2026-06-24), an
-    // opted-in user whose log is all proven types routes native; an un-opted-in
-    // user, or a log with any unproven event type, falls back to the official
-    // uploader. The native path itself also self-checks the built segment and
-    // falls back if it is ever malformed (see `run_native_upload`).
+    // opted-in user whose log is small enough attempts native; unproven,
+    // multi-session, invalid, or malformed input falls back during build without
+    // posting a native report (see `run_native_upload`).
     let native_opt_in = native_opt_in.unwrap_or(false);
     let routing = transport::assess_native_routing(&dispatch_path, native_opt_in);
     let use_native = matches!(routing, transport::NativeRouting::Native);
@@ -1158,8 +1180,54 @@ pub async fn uploader_upload_log(
         // is added, lift this flag into managed state keyed by `record_id`.
         let provider = std::sync::Arc::clone(&session);
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let progress_app = app.clone();
+        let progress_operation_id = operation_id.clone();
+        let progress_record_id = record_id.clone();
         tokio::task::spawn_blocking(move || {
-            transport::run_native_upload(&dispatch_path, &opts, provider.as_ref(), cancel)
+            let emit_progress = |progress: transport::NativeUploadProgress| {
+                let (phase, build_bytes_done, build_bytes_total, segments_done, segments_total) =
+                    match progress {
+                        transport::NativeUploadProgress::Building {
+                            bytes_done,
+                            bytes_total,
+                        } => (
+                            ManualUploadProgressPhase::Building,
+                            Some(bytes_done),
+                            Some(bytes_total),
+                            0,
+                            0,
+                        ),
+                        transport::NativeUploadProgress::Uploading {
+                            segments_done,
+                            segments_total,
+                        } => (
+                            ManualUploadProgressPhase::Uploading,
+                            None,
+                            None,
+                            segments_done,
+                            segments_total,
+                        ),
+                    };
+                let _ = progress_app.emit(
+                    "uploader-upload-progress",
+                    ManualUploadProgressEvent {
+                        operation_id: progress_operation_id.clone(),
+                        record_id: progress_record_id.clone(),
+                        phase,
+                        build_bytes_done,
+                        build_bytes_total,
+                        segments_done,
+                        segments_total,
+                    },
+                );
+            };
+            transport::run_native_upload(
+                &dispatch_path,
+                &opts,
+                provider.as_ref(),
+                cancel,
+                &emit_progress,
+            )
         })
         .await
         .map_err(|e| format!("Task failed: {e}"))?
