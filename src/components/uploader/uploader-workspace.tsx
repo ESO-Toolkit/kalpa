@@ -798,6 +798,14 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
             else if (paths.length > 0) toast.error("Drop a .log file to add it.");
           }
         });
+        // If the effect was already torn down while this registration was in
+        // flight (e.g. logsDir changed before the await resolved), the cleanup
+        // ran with `unlisten` still undefined and could not detach. Detach the
+        // just-registered native listener now so it can't accumulate.
+        if (!active) {
+          unlisten();
+          unlisten = undefined;
+        }
       } catch {
         /* drag-drop is an enhancement; ignore if the webview API is unavailable */
       }
