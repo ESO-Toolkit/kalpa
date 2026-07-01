@@ -211,6 +211,48 @@ fn cleanup_orphaned_pending_zips() {
     }
 }
 
+/// Hint WebView2 to trim its memory footprint while the main window is not in
+/// the foreground. `low = true` -> MemoryUsageTargetLevel = LOW (evicts decoded
+/// image/JS caches and nudges GC over the next few seconds) while keeping the
+/// webview fully alive and responsive — so the live-upload feed keeps updating
+/// via Tauri events even while Kalpa sits in the tray during a raid. `low =
+/// false` restores NORMAL. No-op on non-Windows and on WebView2 runtimes older
+/// than 1.0.1518.46 (which lack ICoreWebView2_19), where `.cast()` fails.
+#[cfg(windows)]
+fn set_webview_memory_target(app: &tauri::AppHandle, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows::core::Interface; // brings `.cast()` into scope
+
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let level = if low {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+    } else {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+    };
+    // with_webview dispatches this closure onto the WebView2 UI thread (where
+    // ICoreWebView2 COM calls must happen) and returns immediately.
+    let _ = window.with_webview(move |webview| {
+        // SAFETY: runs on the WebView2 UI thread; COM interfaces touched only here.
+        unsafe {
+            let controller = webview.controller();
+            let Ok(core) = controller.CoreWebView2() else {
+                return;
+            };
+            if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
+                let _ = core19.SetMemoryUsageTargetLevel(level);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn set_webview_memory_target(_app: &tauri::AppHandle, _low: bool) {}
+
 pub fn run() {
     // Enable Chrome DevTools Protocol in debug builds only
     #[cfg(debug_assertions)]
@@ -355,18 +397,41 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Hide-to-tray applies ONLY to the main app window. Auxiliary
-                // windows (e.g. the "esologs-login" sign-in webview) must close
-                // normally — intercepting their close would leave them hidden but
-                // alive, breaking flows that create a window, wait for the user to
-                // finish, then close it (the login flow detects a user cancel by
-                // the window disappearing, and closes the window itself on
-                // success). Only "main" hides to tray; everything else closes.
-                if window.label() == "main" {
-                    let _ = window.hide();
-                    api.prevent_close();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // Hide-to-tray applies ONLY to the main app window. Auxiliary
+                    // windows (e.g. the "esologs-login" sign-in webview) must close
+                    // normally — intercepting their close would leave them hidden but
+                    // alive, breaking flows that create a window, wait for the user to
+                    // finish, then close it (the login flow detects a user cancel by
+                    // the window disappearing, and closes the window itself on
+                    // success). Only "main" hides to tray; everything else closes.
+                    if window.label() == "main" {
+                        let _ = window.hide();
+                        api.prevent_close();
+                        // Backgrounded to tray (common during a raid while live
+                        // logging) — trim the webview's memory. The backend keeps
+                        // watching the log; LOW keeps the feed's event handlers live.
+                        set_webview_memory_target(window.app_handle(), true);
+                    }
                 }
+                // Trim webview memory only when the window is genuinely out of
+                // view — MINIMIZED — not merely unfocused. A multi-monitor player
+                // keeps Kalpa visible on a second screen while the game is focused
+                // and watches the live feed there; that window must stay at NORMAL
+                // with full caches. Regaining focus always restores NORMAL so the
+                // UI re-warms instantly (also covers restore-from-tray, which
+                // calls set_focus). Hide-to-tray is handled above in CloseRequested.
+                tauri::WindowEvent::Focused(focused) => {
+                    if window.label() == "main" {
+                        if *focused {
+                            set_webview_memory_target(window.app_handle(), false);
+                        } else if window.is_minimized().unwrap_or(false) {
+                            set_webview_memory_target(window.app_handle(), true);
+                        }
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
