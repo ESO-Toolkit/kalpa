@@ -551,10 +551,12 @@ pub fn select_transport(prefer_cli: bool) -> Box<dyn LogUploadTransport> {
     Box::new(GuiHandoffTransport)
 }
 
-/// Whole-file memory ceiling for the native path. The native encoder reads the
-/// log into memory, so a file above this routes to the official uploader (which
-/// streams) instead. Shared by `assess_native_routing` (route away) and
-/// `run_native_upload` (defence-in-depth refuse) so they agree on the limit.
+/// Conservative completed-upload ceiling for the native path. The encoder now
+/// replays the raw log from disk instead of copying it into heap, but it still
+/// builds compressed payloads in-process before creating the report, so very large
+/// files route to the official uploader (or should be split first). Shared by
+/// `assess_native_routing` (route away) and `run_native_upload`
+/// (defence-in-depth refuse) so they agree on the limit.
 const MAX_NATIVE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
 /// Why a given log was (not) routed to the native uploader. Surfaced for
@@ -562,7 +564,9 @@ const MAX_NATIVE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 /// because this log has events Kalpa can't encode yet").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeRouting {
-    /// Native path chosen — the log is fully within proven coverage.
+    /// Native path chosen by cheap preflight. The native payload builder still
+    /// enforces per-line coverage and multi-session rejection before any report is
+    /// created, so a late decline falls back to the official uploader safely.
     Native,
     /// Fell back to the official uploader. Carries a short, honest reason.
     Fallback(NativeFallbackReason),
@@ -664,20 +668,19 @@ pub fn assess_native_live_routing(opt_in: bool, has_session: bool) -> NativeRout
 }
 
 /// Decide whether a prepared log may use the native uploader, applying the
-/// safety gate that guarantees native output is byte-correct or not used:
+/// cheap gates that can decline without touching the whole file:
 ///
 /// 1. The user must have opted in (`opt_in`).
 /// 2. The upload format/version must be confirmed
 ///    ([`super::native::format::FORMAT_VERSION_CONFIRMED`]).
-/// 3. **Every** event type in the log must be within proven coverage
-///    ([`super::native::coverage::assess`]).
+/// 3. The file must be within the native memory ceiling.
 ///
-/// Any failure routes to the official uploader. This is intentionally
-/// conservative: native upload only runs when we can guarantee a report
-/// identical to the official uploader's. The actual line scan streams the file
-/// so it stays cheap on multi-GB logs.
+/// Per-line coverage, UTF-8 validity, and the single-session contract are enforced
+/// inside [`run_native_upload`] while it builds and validates payloads before
+/// `create-report`. That avoids a duplicate full-file scan on the fast path while
+/// preserving the all-or-official safety guarantee.
 pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
-    use super::native::{coverage, format};
+    use super::native::format;
 
     if !opt_in {
         return NativeRouting::Fallback(NativeFallbackReason::NotOptedIn);
@@ -686,76 +689,58 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
         return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed);
     }
 
-    // The native path reads the whole file into memory, so it refuses files over
-    // MAX_NATIVE_BYTES. Check the size HERE so an over-large covered log routes to
-    // the official uploader instead of reaching run_native_upload and hard-failing.
+    // The native path streams and builds compressed payloads in-process, so it
+    // refuses files over MAX_NATIVE_BYTES. Keep this in the router so an over-large
+    // log can hand off immediately without attempting native build work.
     if let Ok(meta) = std::fs::metadata(log_path) {
         if meta.len() > MAX_NATIVE_BYTES {
             return NativeRouting::Fallback(NativeFallbackReason::TooLarge);
         }
     }
 
-    // Scan the log's line types through the coverage gate WITHOUT materializing
-    // the whole file — logs can be multi-GB. We read one line at a time, assess it
-    // in isolation, and accumulate only the (tiny, capped) set of unproven types.
-    let file = match std::fs::File::open(log_path) {
-        Ok(f) => f,
-        // If we can't read it, let the official path surface the real error.
-        Err(_) => return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed),
-    };
-    use std::io::BufRead;
-    let mut reader = std::io::BufReader::new(file);
-    let mut unproven: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    // Count BEGIN_LOG markers: the native encoder builds ONE segment whose time
-    // bounds come from the first session, so a multi-session file (>1 BEGIN_LOG)
-    // must route to the official uploader. We tally during this same pass to avoid
-    // a second read. Only meaningful on the all-proven path below — the unproven
-    // and early-break arms fall back regardless.
-    let mut begin_log_count: u32 = 0;
-    // Read raw bytes per line, but require UTF-8 before routing native. The native
-    // encoder works on decoded text; lossy decoding would mutate the payload.
-    // An IO error mid-scan FAILS CLOSED — we must
-    // not return Native off a partial read, or the all-or-nothing coverage gate is
-    // bypassed and an unproven event later in the file could reach the encoder.
-    let mut buf: Vec<u8> = Vec::with_capacity(256);
-    loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break, // EOF — full file scanned
-            Ok(_) => {}
-            // Read error: fail closed to the official uploader rather than risk a
-            // partial-scan false "Native".
-            Err(_) => return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed),
-        }
-        let line = match std::str::from_utf8(&buf) {
-            Ok(line) => line,
-            Err(_) => return NativeRouting::Fallback(NativeFallbackReason::InvalidEncoding),
-        };
-        // A BEGIN_LOG header has the type as field index 1: `<ms>,BEGIN_LOG,…`.
-        if line
-            .split(',')
-            .nth(1)
-            .map(|t| t.trim().eq_ignore_ascii_case("BEGIN_LOG"))
-            .unwrap_or(false)
-        {
-            begin_log_count += 1;
-        }
-        if let coverage::Coverage::Fallback { unproven: u } = coverage::assess([line]) {
-            unproven.extend(u);
-            if unproven.len() >= 32 {
-                break; // the reported set is capped anyway; stop early.
-            }
-        }
-    }
-    if !unproven.is_empty() {
-        return NativeRouting::Fallback(NativeFallbackReason::UnprovenEvents(
-            unproven.into_iter().collect(),
-        ));
-    }
-    if begin_log_count > 1 {
-        return NativeRouting::Fallback(NativeFallbackReason::MultiSession);
-    }
     NativeRouting::Native
+}
+
+fn handoff_with_reason(
+    log_path: &str,
+    opts: &UploadOptions,
+    reason: NativeFallbackReason,
+) -> Result<UploadOutcome, String> {
+    eprintln!("[uploader] native → official: {}", reason.explain());
+    match GuiHandoffTransport.upload_file(log_path, opts) {
+        Ok(UploadOutcome::HandedOff { .. }) => Ok(UploadOutcome::HandedOff {
+            detail: reason.explain(),
+        }),
+        other => other,
+    }
+}
+
+fn payload_error_fallback_reason(error: &str) -> Option<NativeFallbackReason> {
+    if let Some(t) = error
+        .strip_prefix("unproven log line type '")
+        .and_then(|tail| tail.strip_suffix('\''))
+    {
+        return Some(NativeFallbackReason::UnprovenEvents(vec![t.to_string()]));
+    }
+    if error == "native completed upload does not support multi-session logs" {
+        return Some(NativeFallbackReason::MultiSession);
+    }
+    if error.starts_with("native encode: read raw log failed:") && error.contains("valid UTF-8") {
+        return Some(NativeFallbackReason::InvalidEncoding);
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeUploadProgress {
+    Building {
+        bytes_done: u64,
+        bytes_total: u64,
+    },
+    Uploading {
+        segments_done: usize,
+        segments_total: usize,
+    },
 }
 
 /// Run a **native** upload: read the prepared log, build the ZIP'd segment +
@@ -764,12 +749,11 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
 /// against `esologs.com/desktop-client/*` using the supplied session — no
 /// official-uploader handoff.
 ///
-/// This is the integration seam the `Native` routing arm calls — reached when
-/// [`assess_native_routing`] returns [`NativeRouting::Native`] (an opted-in user
-/// whose log is all proven types, with the format-version gate OPEN, which it is
-/// since the 2026-06-19 render confirmation). It builds + validates the payload and,
-/// if the payload can't be built or fails the structural self-check, falls back to
-/// the official [`GuiHandoffTransport`] so a broken segment is never shipped.
+/// This is the integration seam the `Native` routing arm calls after the cheap
+/// opt-in / format / size preflight passes. It builds + validates the payload,
+/// including per-line coverage and single-session checks, and if the payload can't
+/// be built or fails the structural self-check, falls back to the official
+/// [`GuiHandoffTransport`] so a broken segment is never shipped.
 ///
 /// `cancel` lets a Stop abort cleanly between segments (the client still
 /// `terminate-report`s so no draft is orphaned). On any failure a short, honest
@@ -779,22 +763,22 @@ pub fn run_native_upload(
     opts: &UploadOptions,
     session: &dyn super::native::session::SessionProvider,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    progress: &(dyn Fn(NativeUploadProgress) + Send + Sync),
 ) -> Result<UploadOutcome, String> {
-    use super::native::{client::NativeUpload, events};
+    use super::native::{client::NativeUpload, live};
+    let native_started = std::time::Instant::now();
 
     if !Path::new(log_path).is_file() {
         return Err(format!("Prepared log not found: {log_path}"));
     }
 
-    // Hard size ceiling BEFORE reading the file whole. The native encoder needs the
-    // lines in memory (`read_to_string` + a per-line slice vec), so an unbounded
-    // read would OOM on a multi-GB raw `Encounter.log`. The routing scan upstream
-    // streams the file and gates only on event-type coverage — it has NO size cap —
-    // so this is the one place that bounds memory on the native path. Above the
-    // ceiling we refuse native (the caller falls back to the official uploader,
-    // which streams). The user-facing route is to split first (the uploader already
-    // offers split-to-disk for large logs). Uses the module-level MAX_NATIVE_BYTES
-    // shared with assess_native_routing so routing and this guard agree.
+    // Hard size ceiling before encoding. Native replay no longer copies the raw log
+    // into heap, but it still builds compressed payloads in-process before report
+    // creation. Above the ceiling we refuse native (the caller falls back to the
+    // official uploader, which streams). The user-facing route is to split first
+    // (the uploader already offers split-to-disk for large logs). Uses the
+    // module-level MAX_NATIVE_BYTES shared with assess_native_routing so routing and
+    // this guard agree.
     let size = std::fs::metadata(log_path)
         .map_err(|e| format!("Failed to read log: {e}"))?
         .len();
@@ -807,46 +791,106 @@ pub fn run_native_upload(
         ));
     }
 
-    // Read the prepared log and split into lines for the encoder. Bounded by the
-    // size ceiling above.
-    let contents = match std::fs::read_to_string(log_path) {
-        Ok(contents) => contents,
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-            eprintln!("[uploader] native: log is not valid UTF-8 -> official handoff");
-            return GuiHandoffTransport.upload_file(log_path, opts);
-        }
-        Err(e) => return Err(format!("Failed to read log: {e}")),
+    // Build small batched ZIP'd (segment, master-table) payloads with the same
+    // incremental encoder used by native live upload. Each segment runs the structural
+    // self-check (`validate_segment_text`) before it can be returned. If an unseen
+    // log shape produces malformed or internally-inconsistent output, the builder
+    // returns `Err` and we fall back to the official uploader rather than failing
+    // the user's upload or shipping a report that never renders. `None` (no valid
+    // session) likewise falls back so native only ships verified segments.
+    let build_started = std::time::Instant::now();
+    let build_progress = |build: live::FinishedBuildProgress| {
+        progress(NativeUploadProgress::Building {
+            bytes_done: build.bytes_done,
+            bytes_total: build.bytes_total,
+        });
     };
-    let lines: Vec<&str> = contents.lines().collect();
-
-    // Build the ZIP'd (segment, master-table) payload. This also runs the structural
-    // self-check (`validate_segment_text`): if the encoder ever produced a malformed
-    // or internally-inconsistent segment for an unseen log shape, building returns
-    // `Err`. Rather than fail the user's upload — or worse, ship a segment that the
-    // server accepts but never renders — we FALL BACK to the official uploader. A
-    // `None` (no valid session) likewise falls back; the official path surfaces the
-    // real reason. This keeps the guarantee: native ships only a verified segment.
-    let payload = match events::build_native_payload(&lines) {
-        Ok(Some(pair)) => pair,
+    let payloads = match live::build_finished_payloads_from_file_with_progress(
+        Path::new(log_path),
+        build_progress,
+    ) {
+        Ok(Some(payloads)) => payloads,
         Ok(None) => {
             eprintln!("[uploader] native: no valid session in log → official handoff");
             return GuiHandoffTransport.upload_file(log_path, opts);
         }
         Err(e) => {
             eprintln!("[uploader] native payload rejected ({e}) → official handoff");
+            if let Some(reason) = payload_error_fallback_reason(&e) {
+                return handoff_with_reason(log_path, opts, reason);
+            }
             return GuiHandoffTransport.upload_file(log_path, opts);
         }
     };
-    let (segment, master) = payload;
+    let build_ms = elapsed_ms(build_started);
+    let raw_segment_bytes_total: usize = payloads
+        .iter()
+        .filter_map(|payload| payload.source_raw_bytes)
+        .sum();
+    let max_raw_segment_bytes = payloads
+        .iter()
+        .filter_map(|payload| payload.source_raw_bytes)
+        .max()
+        .unwrap_or(0);
+    let segments_over_raw_target = payloads
+        .iter()
+        .filter_map(|payload| payload.source_raw_bytes)
+        .filter(|&bytes| bytes > live::FINISHED_UPLOAD_SEGMENT_RAW_BYTE_TARGET)
+        .count();
+    let mut segments = Vec::with_capacity(payloads.len());
+    let mut masters = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        segments.push(payload.segment);
+        masters.push(payload.master);
+    }
+
+    progress(NativeUploadProgress::Uploading {
+        segments_done: 0,
+        segments_total: segments.len(),
+    });
 
     let upload = NativeUpload::new(session, opts, cancel);
-    let no_progress = |_p: super::native::client::UploadProgress| {};
-    match upload.upload_finished(&[segment], &[master], &no_progress) {
-        Ok(code) => Ok(UploadOutcome::Completed {
-            report_code: Some(code.0),
-        }),
+    let upload_progress = |upload: super::native::client::UploadProgress| {
+        progress(NativeUploadProgress::Uploading {
+            segments_done: upload.segments_done,
+            segments_total: upload.segments_total,
+        });
+    };
+    match upload.upload_finished_measured(&segments, &masters, &upload_progress) {
+        Ok(result) => {
+            let total_ms = elapsed_ms(native_started);
+            let code = result.code.0;
+            let metrics = result.metrics;
+            eprintln!(
+                "[uploader] native finished report={code} input_bytes={size} \
+                 segments={} requests={} segment_zip_bytes={} master_zip_bytes={} \
+                 raw_segment_bytes={} max_raw_segment_bytes={} segments_over_raw_target={} \
+                 build_ms={build_ms} session_ms={} create_ms={} \
+                 set_master_ms={} add_segment_ms={} terminate_ms={} upload_ms={} total_ms={total_ms}",
+                metrics.segments_total,
+                metrics.requests_total,
+                metrics.segment_zip_bytes,
+                metrics.master_zip_bytes,
+                raw_segment_bytes_total,
+                max_raw_segment_bytes,
+                segments_over_raw_target,
+                metrics.session_ms,
+                metrics.create_report_ms,
+                metrics.set_master_table_ms,
+                metrics.add_segment_ms,
+                metrics.terminate_report_ms,
+                metrics.upload_total_ms
+            );
+            Ok(UploadOutcome::Completed {
+                report_code: Some(code),
+            })
+        }
         Err(e) => Err(e.to_string()),
     }
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
@@ -882,9 +926,9 @@ mod routing_tests {
     fn opted_in_with_proven_types_routes_native() {
         // Gate-aware so it holds for BOTH the committed `FORMAT_VERSION_CONFIRMED =
         // false` (CI builds this) and the owner's local render-test flip to `true`:
-        // an opted-in user whose log is all proven types routes native ONCE the gate
-        // is open, and still falls back while it is closed. A ZONE_CHANGED-only log
-        // is all-proven, so the gate is the only thing deciding native vs fallback.
+        // an opted-in user routes native ONCE the gate is open, and still falls back
+        // while it is closed. Content safety is enforced during payload build so the
+        // fast path does not scan the whole file twice.
         let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
         if super::super::native::format::FORMAT_VERSION_CONFIRMED {
             assert_eq!(assess_native_routing(&path, true), NativeRouting::Native);
@@ -905,24 +949,35 @@ mod routing_tests {
         );
     }
 
-    // Coverage safety (gate is OPEN): an opted-in upload with ANY unproven line
-    // type must still fall back, never route native — so a novel/future event can
-    // never reach the encoder and corrupt a report. (The all-proven → native half,
-    // including Infinite Archive logs, is exercised by the coverage.rs unit tests.)
+    // Coverage safety moved out of the router and into the native payload builder
+    // so the fast path does not scan the whole file twice. A novel/future event must
+    // still fail closed before `create-report`, and its handoff detail must remain
+    // honest.
     #[test]
-    fn opted_in_with_unproven_type_falls_back() {
-        let (_d, path) = temp_log("0,BEGIN_LOG,1,15\n100,SOME_FUTURE_EVENT,1,2\n");
-        assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
+    fn finished_payload_builder_rejects_unproven_type_before_upload() {
+        use super::super::native::live::build_finished_payloads_from_text;
+
+        let err =
+            build_finished_payloads_from_text("0,BEGIN_LOG,1,15\n100,SOME_FUTURE_EVENT,1,2\n")
+                .unwrap_err();
+        assert_eq!(
+            payload_error_fallback_reason(&err),
+            Some(NativeFallbackReason::UnprovenEvents(vec![
+                "SOME_FUTURE_EVENT".into()
+            ]))
+        );
     }
 
     #[test]
-    fn opted_in_with_invalid_utf8_falls_back() {
+    fn opted_in_with_invalid_utf8_defers_to_runtime_fallback() {
         let (_d, path) =
             temp_log_bytes(b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n5,ZONE_CHANGED,\xff\n");
         if super::super::native::format::FORMAT_VERSION_CONFIRMED {
             assert_eq!(
                 assess_native_routing(&path, true),
-                NativeRouting::Fallback(NativeFallbackReason::InvalidEncoding)
+                NativeRouting::Native,
+                "preflight must not do a duplicate full UTF-8 scan; run_native_upload \
+                 maps invalid UTF-8 to InvalidEncoding handoff before create-report"
             );
         } else {
             assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
@@ -949,16 +1004,15 @@ mod routing_tests {
     // A log with no valid session yields no native payload — the native runner must
     // FALL BACK to the official handoff rather than fail the upload (and never ship
     // a bad/empty segment). We assert at the payload-builder level to avoid the
-    // handoff's process-spawn side effect in a unit test: `build_native_payload`
-    // returns `Ok(None)` for non-session input, which is exactly what triggers the
-    // fallback branch in `run_native_upload`.
+    // handoff's process-spawn side effect in a unit test:
+    // `build_finished_payloads_from_text` returns `Ok(None)` for non-session input,
+    // which is exactly what triggers the fallback branch in `run_native_upload`.
     #[test]
     fn no_valid_session_yields_no_native_payload_so_it_falls_back() {
-        use super::super::native::events::build_native_payload;
+        use super::super::native::live::build_finished_payloads_from_text;
         let raw = "not a real session line\n";
-        let lines: Vec<&str> = raw.lines().collect();
         assert!(
-            matches!(build_native_payload(&lines), Ok(None)),
+            matches!(build_finished_payloads_from_text(raw), Ok(None)),
             "junk input must produce no native payload (→ official handoff)"
         );
     }
@@ -967,8 +1021,15 @@ mod routing_tests {
     fn native_runner_rejects_missing_file() {
         let opts = UploadOptions::default();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let err =
-            run_native_upload("C:/nonexistent/nope.log", &opts, &FixedSession, cancel).unwrap_err();
+        let no_progress = |_p: crate::uploader::transport::NativeUploadProgress| {};
+        let err = run_native_upload(
+            "C:/nonexistent/nope.log",
+            &opts,
+            &FixedSession,
+            cancel,
+            &no_progress,
+        )
+        .unwrap_err();
         assert!(err.contains("not found"));
     }
 
@@ -1006,24 +1067,22 @@ mod routing_tests {
         );
     }
 
-    // A MULTI-session log (>1 BEGIN_LOG), even all-proven, must fall back: the
-    // native encoder's single-segment time bounds can't represent multiple
-    // sessions correctly.
+    // A MULTI-session log (>1 BEGIN_LOG), even all-proven, must fall back during
+    // payload build before any native report is created: the native encoder's
+    // single-segment time bounds can't represent multiple sessions correctly.
     #[test]
-    fn routing_multi_session_falls_back() {
-        if !super::super::native::format::FORMAT_VERSION_CONFIRMED {
-            return; // gate closed → falls back as FormatUnconfirmed, not MultiSession.
-        }
-        let (_d, path) = temp_log(
+    fn finished_payload_builder_rejects_multi_session_with_fallback_reason() {
+        use super::super::native::live::build_finished_payloads_from_text;
+
+        let err = build_finished_payloads_from_text(
             "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n\
              0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n",
-        );
-        assert!(
-            matches!(
-                assess_native_routing(&path, true),
-                NativeRouting::Fallback(NativeFallbackReason::MultiSession)
-            ),
-            "multi-session log must route to the official uploader"
+        )
+        .unwrap_err();
+        assert_eq!(
+            payload_error_fallback_reason(&err),
+            Some(NativeFallbackReason::MultiSession),
+            "multi-session log must hand off to the official uploader"
         );
     }
 }

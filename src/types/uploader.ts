@@ -116,6 +116,16 @@ export interface UploadDispatch {
   report: ReportRef | null;
 }
 
+export interface ManualUploadProgress {
+  operationId: string;
+  recordId: string;
+  phase: "building" | "uploading";
+  buildBytesDone: number | null;
+  buildBytesTotal: number | null;
+  segmentsDone: number;
+  segmentsTotal: number;
+}
+
 // Live event stream (tagged union mirroring the Rust `LiveEvent` enum).
 // Fights drive the local timeline/count for both native direct live and the
 // official-uploader handoff; individual fights still do not have separate upload

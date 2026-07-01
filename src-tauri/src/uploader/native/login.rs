@@ -5,10 +5,10 @@
 //! uses for the GraphQL API (an API bearer is empirically rejected with `401`).
 //! The only no-password way to obtain that cookie is to let the user log in on
 //! **ESO Logs' own login page inside an embedded webview that Kalpa owns**, then
-//! read the resulting `laravel_session` cookie from that webview's cookie jar.
+//! read the resulting `wcl_session` cookie from that webview's cookie jar.
 //!
 //! Why this is the chosen approach (and why the obvious alternatives can't work):
-//! * An external browser cannot hand Kalpa the cookie — `laravel_session` is
+//! * An external browser cannot hand Kalpa the cookie — `wcl_session` is
 //!   `HttpOnly` and esologs.com-scoped, living in a separate process; OS/browser
 //!   isolation blocks it (the very property that makes it secure).
 //! * `document.cookie` (via webview `eval`) cannot read it either — it is
@@ -38,7 +38,7 @@ use super::session::StoredSessionProvider;
 const LOGIN_WINDOW_LABEL: &str = "esologs-login";
 
 /// The real ESO Logs login page. After a successful login the site sets the
-/// `laravel_session` cookie for the esologs.com origin in this webview's jar.
+/// `wcl_session` cookie for the esologs.com origin in this webview's jar.
 const LOGIN_URL: &str = "https://www.esologs.com/login";
 
 /// Origins to scope the cookie read to (only http/https URLs return cookies).
@@ -176,12 +176,12 @@ fn cookie_header_from(cookies: &[(String, String)]) -> Option<String> {
 /// inferred from its current URL having navigated away from the login page.
 ///
 /// This is the critical guard against premature capture: Laravel issues a
-/// `laravel_session` cookie to *anonymous* visitors on the `/login` page load
+/// `wcl_session` cookie to *anonymous* visitors on the `/login` page load
 /// itself, so the mere presence of the cookie is NOT proof of login. ESO Logs
 /// (like most web apps) redirects a freshly-authenticated user away from
 /// `/login` to the site (dashboard/home/referrer). So we only accept the cookie
 /// once the webview is on the esologs host AND no longer on a `/login` path — at
-/// which point the `laravel_session` in the jar is the post-login (regenerated)
+/// which point the `wcl_session` in the jar is the post-login (regenerated)
 /// session, not the guest one.
 ///
 /// Pure over a URL string so it is unit-testable. We require the host to still be
@@ -207,7 +207,7 @@ fn url_is_authenticated_view(current_url: &str) -> bool {
 }
 
 /// Drive an in-app ESO Logs login: open (or reuse) the login webview, wait for
-/// the user to authenticate, capture the `laravel_session` cookie, and persist
+/// the user to authenticate, capture the `wcl_session` cookie, and persist
 /// it via the shared [`StoredSessionProvider`]. Returns once a session cookie is
 /// captured (success), the window is closed (cancel), or the timeout elapses.
 ///
@@ -250,7 +250,7 @@ pub async fn run_login<R: tauri::Runtime>(
 }
 
 /// The poll loop: wait until the webview is on an authenticated (post-login)
-/// view AND carries a `laravel_session`, then capture + persist it. Separated
+/// view AND carries a `wcl_session`, then capture + persist it. Separated
 /// from [`run_login`] so the caller can guarantee window cleanup on all paths.
 async fn poll_for_session<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,

@@ -4,8 +4,8 @@
 //! authenticated [`session::Session`] from a [`session::SessionProvider`]:
 //!
 //! 1. `create-report`          → returns a report code.
-//! 2. `add-report-segment/{c}` → one per converted segment (multipart).
-//! 3. `set-report-master-table/{c}` → the interned master table (multipart).
+//! 2. `set-report-master-table/{c}` → the interned master table (multipart).
+//! 3. `add-report-segment/{c}` → one per converted segment (multipart).
 //! 4. `terminate-report/{c}`   → close the report.
 //!
 //! **Cancellation** is a single [`AtomicBool`] checked between segments, mirroring
@@ -26,6 +26,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
 
 use super::session::{Session, SessionError, SessionProvider};
 use crate::uploader::types::UploadOptions;
@@ -33,19 +36,39 @@ use crate::uploader::types::UploadOptions;
 /// Base for the report lifecycle endpoints. A fact about the service.
 const DESKTOP_CLIENT_BASE: &str = "https://www.esologs.com/desktop-client";
 
+/// Absolute request backstop for native upload POSTs. Kept at the prior per-request
+/// value; only the client lifetime changed so reqwest can reuse pooled connections
+/// across a report lifecycle.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn desktop_http_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .expect("native upload HTTP client configuration must be valid")
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn add_elapsed_ms(slot: &mut u64, started: Instant) {
+    *slot = slot.saturating_add(elapsed_ms(started));
+}
+
 /// How often the cancel-aware live send polls the cancel flag while a blocking POST
 /// is in flight on a worker thread. Bounds Stop latency to ~this interval instead of
 /// the 120s request timeout. Short enough to feel instant, long enough to add no
 /// measurable busy-wait cost over a multi-hour session. `pub(crate)` so the live
 /// driver reuses the same slice for its cancel-aware backoff/pause loops.
-pub(crate) const LIVE_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const LIVE_CANCEL_POLL: Duration = Duration::from_millis(250);
 
 /// Grace window to let an in-flight `create-report` LAND after a Stop, so we capture its
 /// report code and TERMINATE it instead of leaking an untracked remote report. Create
 /// normally completes in well under a second; this only matters when a Stop races the
 /// create POST. Past this window (a wedged network during create) we give up — a rare,
 /// bounded leak — rather than block Stop indefinitely.
-pub(crate) const CREATE_REPORT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const CREATE_REPORT_GRACE: Duration = Duration::from_secs(10);
 
 /// A report code returned by `create-report` and used to address subsequent
 /// segment/master-table/terminate calls.
@@ -98,12 +121,47 @@ pub struct UploadProgress {
     pub segments_total: usize,
 }
 
+/// Successful finished-upload diagnostics. These are not user-facing UI state;
+/// they are developer evidence for tuning the native path without guessing which
+/// phase dominates a real upload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FinishedUploadMetrics {
+    pub segments_total: usize,
+    pub requests_total: usize,
+    pub segment_zip_bytes: usize,
+    pub master_zip_bytes: usize,
+    pub session_ms: u64,
+    pub create_report_ms: u64,
+    pub set_master_table_ms: u64,
+    pub add_segment_ms: u64,
+    pub terminate_report_ms: u64,
+    pub upload_total_ms: u64,
+}
+
+impl FinishedUploadMetrics {
+    fn from_payloads(segments: &[Segment], masters: &[MasterTableBytes]) -> Self {
+        Self {
+            segments_total: segments.len(),
+            requests_total: 2 + segments.len().saturating_mul(2), // create + terminate + pairs
+            segment_zip_bytes: segments.iter().map(|s| s.bytes.len()).sum(),
+            master_zip_bytes: masters.iter().map(|m| m.bytes.len()).sum(),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FinishedUploadResult {
+    pub code: ReportCode,
+    pub metrics: FinishedUploadMetrics,
+}
+
 /// One converted, ready-to-send segment (the serialized bytes from `convert`).
 /// Holding bytes (not borrowing the log) lets the converter and the uploader run
 /// on different cadences (e.g. live mode emits these per finished fight).
 #[derive(Debug, Clone)]
 pub struct Segment {
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
     /// Wall-clock ms of the segment's FIRST event, and of its LAST event. The
     /// `add-report-segment` request sends these as `startTime`/`endTime` so the
     /// server can place the segment on the report timeline and bound fight
@@ -115,12 +173,12 @@ pub struct Segment {
 
 impl Segment {
     /// Build a segment from its rendered fights-segment **text** by ZIP-wrapping
-    /// it into the `logfile` envelope (single `log.txt` entry, DEFLATE-9). This is
-    /// the bridge from [`super::serialize`]'s rendered string to the wire bytes.
+    /// it into the `logfile` envelope (single `log.txt` entry, configured DEFLATE).
+    /// This is the bridge from [`super::serialize`]'s rendered string to the wire bytes.
     /// `start_time`/`end_time` are the segment's first/last event wall-clock ms.
     pub fn from_text(text: &str, start_time: u64, end_time: u64) -> Result<Self, String> {
         Ok(Self {
-            bytes: super::zip_segment::zip_log_txt(text)?,
+            bytes: super::zip_segment::zip_log_txt(text)?.into(),
             start_time,
             end_time,
         })
@@ -130,16 +188,16 @@ impl Segment {
 /// The serialized master table for a report.
 #[derive(Debug, Clone)]
 pub struct MasterTableBytes {
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
 }
 
 impl MasterTableBytes {
     /// Build a master table from its rendered **text** by ZIP-wrapping it into the
-    /// `logfile` envelope (single `log.txt` entry, DEFLATE-9), mirroring
+    /// `logfile` envelope (single `log.txt` entry, configured DEFLATE), mirroring
     /// [`Segment::from_text`].
     pub fn from_text(text: &str) -> Result<Self, String> {
         Ok(Self {
-            bytes: super::zip_segment::zip_log_txt(text)?,
+            bytes: super::zip_segment::zip_log_txt(text)?.into(),
         })
     }
 }
@@ -150,6 +208,7 @@ pub struct NativeUpload<'a> {
     session: &'a dyn SessionProvider,
     opts: &'a UploadOptions,
     cancel: Arc<AtomicBool>,
+    client: reqwest::blocking::Client,
 }
 
 impl<'a> NativeUpload<'a> {
@@ -162,6 +221,7 @@ impl<'a> NativeUpload<'a> {
             session,
             opts,
             cancel,
+            client: desktop_http_client(),
         }
     }
 
@@ -193,6 +253,22 @@ impl<'a> NativeUpload<'a> {
         masters: &[MasterTableBytes],
         progress: &ProgressFn<'_>,
     ) -> Result<ReportCode, UploadError> {
+        self.upload_finished_measured(segments, masters, progress)
+            .map(|result| result.code)
+    }
+
+    /// Measured finished-upload lifecycle. The regular [`Self::upload_finished`]
+    /// wrapper preserves the existing API, while the native transport uses this to
+    /// log phase timings for real 10x validation runs.
+    pub(crate) fn upload_finished_measured(
+        &self,
+        segments: &[Segment],
+        masters: &[MasterTableBytes],
+        progress: &ProgressFn<'_>,
+    ) -> Result<FinishedUploadResult, UploadError> {
+        let total_started = Instant::now();
+        let mut metrics = FinishedUploadMetrics::from_payloads(segments, masters);
+
         // Nothing to upload: never create+terminate an empty report (that would
         // record a zero-fight conversion or a routing bug as a "successful"
         // upload). Reject before any network work.
@@ -222,10 +298,14 @@ impl<'a> NativeUpload<'a> {
         }
 
         // 1. Establish (or fail) the session up front — fail fast before any work.
+        let phase_started = Instant::now();
         let _session = self.session.session()?;
+        add_elapsed_ms(&mut metrics.session_ms, phase_started);
 
         // 2. create-report
+        let phase_started = Instant::now();
         let code = self.create_report()?;
+        add_elapsed_ms(&mut metrics.create_report_ms, phase_started);
 
         // 3+4. Push the segments and terminate. ANY error after create-report
         // (cancel, a failed master-table/segment upload, a server anomaly) must
@@ -233,10 +313,21 @@ impl<'a> NativeUpload<'a> {
         // report open server-side (which would confuse retries). On success the
         // inner path terminates itself; on error we best-effort terminate here
         // and return the ORIGINAL error.
-        match self.push_segments_and_terminate(&code, segments, masters, progress) {
-            Ok(()) => Ok(code),
+        match self.push_segments_and_terminate_measured(
+            &code,
+            segments,
+            masters,
+            progress,
+            &mut metrics,
+        ) {
+            Ok(()) => {
+                metrics.upload_total_ms = elapsed_ms(total_started);
+                Ok(FinishedUploadResult { code, metrics })
+            }
             Err(e) => {
+                let phase_started = Instant::now();
                 let _ = self.terminate_report(&code);
+                add_elapsed_ms(&mut metrics.terminate_report_ms, phase_started);
                 Err(e)
             }
         }
@@ -248,12 +339,13 @@ impl<'a> NativeUpload<'a> {
     /// terminating — the caller ([`Self::upload_finished`]) owns the
     /// terminate-on-error cleanup so every post-create error path is covered in
     /// one place.
-    fn push_segments_and_terminate(
+    fn push_segments_and_terminate_measured(
         &self,
         code: &ReportCode,
         segments: &[Segment],
         masters: &[MasterTableBytes],
         progress: &ProgressFn<'_>,
+        metrics: &mut FinishedUploadMetrics,
     ) -> Result<(), UploadError> {
         let total = segments.len();
         // segmentId starts at 1; the server returns the next id to use.
@@ -263,8 +355,15 @@ impl<'a> NativeUpload<'a> {
                 return Err(UploadError::Cancelled);
             }
             // a. master table for this segment id, then b. the fights segment.
-            self.set_master_table(code, segment_id, master)?;
-            let next = self.add_segment(code, segment_id, seg)?;
+            let phase_started = Instant::now();
+            let set_master = self.set_master_table(code, segment_id, master);
+            add_elapsed_ms(&mut metrics.set_master_table_ms, phase_started);
+            set_master?;
+
+            let phase_started = Instant::now();
+            let next = self.add_segment(code, segment_id, seg);
+            add_elapsed_ms(&mut metrics.add_segment_ms, phase_started);
+            let next = next?;
             progress(UploadProgress {
                 segments_done: i + 1,
                 segments_total: total,
@@ -295,7 +394,10 @@ impl<'a> NativeUpload<'a> {
         }
 
         // terminate (the success path).
-        self.terminate_report(code)
+        let phase_started = Instant::now();
+        let terminated = self.terminate_report(code);
+        add_elapsed_ms(&mut metrics.terminate_report_ms, phase_started);
+        terminated
     }
 
     // ── Lifecycle calls ──────────────────────────────────────────────────────
@@ -408,12 +510,8 @@ impl<'a> NativeUpload<'a> {
         kind: &RequestKind,
         session: &Session,
     ) -> Result<SendResult, String> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| format!("HTTP client error: {e}"))?;
-
-        let req = client
+        let req = self
+            .client
             .post(url)
             .header(reqwest::header::COOKIE, session.cookie_header())
             .header(reqwest::header::ACCEPT, "application/json");
@@ -537,8 +635,8 @@ pub(crate) fn is_definitively_closed(e: &UploadError) -> bool {
 
 // ── Cancel-aware LIVE sender (L4) ────────────────────────────────────────────
 //
-// The shared `send`/`send_once` above use `reqwest::blocking` with a 120s timeout
-// and check cancellation only BETWEEN segments, so a Stop during a mid-POST
+// The shared `send`/`send_once` above use pooled `reqwest::blocking` requests with
+// a 120s timeout and check cancellation only BETWEEN segments, so a Stop during a mid-POST
 // `req.send()` would hang up to ~120s. For a multi-hour live session that is
 // unacceptable (and it would block the Tokio executor thread that joins the driver
 // on Stop — the concurrency review's RACE-1). [`LiveSender`] is an OWNED,
@@ -547,17 +645,18 @@ pub(crate) fn is_definitively_closed(e: &UploadError) -> bool {
 // [`LIVE_CANCEL_POLL`], returning [`UploadError::Cancelled`] within ~250ms and
 // ABANDONING the in-flight POST (it completes server-side; we just stop waiting —
 // and since cancel always leads to terminate, no further segment is sent, so the
-// abandoned POST is harmless). This is ADDITIVE: it does not touch the proven
-// one-shot `send`/`send_once`, which the manual `upload_finished` path still uses.
+// abandoned POST is harmless). This is ADDITIVE: it preserves the proven request
+// envelope while changing only the cancellation model.
 //
 // Clean-room: the request envelopes are the same protocol facts; the construction
 // here is implemented from scratch (it cannot borrow `NativeUpload`'s `&dyn
 // SessionProvider`, which is not `'static`, so the sender owns an
-// `Arc<dyn SessionProvider>` and clones the bytes to cross the thread boundary).
+// `Arc<dyn SessionProvider>` and cheaply clones immutable byte handles to cross
+// the thread boundary).
 
 /// An owned, cloneable request body for the live path (the bytes are owned so the
 /// request can be built on a worker thread). Mirrors the live arms of
-/// [`RequestKind`] but carries `Vec<u8>` instead of a borrow.
+/// [`RequestKind`] but carries [`Bytes`] instead of a borrow.
 ///
 /// Gated with the rest of the live path until the de-gate step; the live module is
 /// unreachable in release until then, so this can't ship by accident.
@@ -566,11 +665,11 @@ pub(crate) enum OwnedLiveRequest {
     /// `create-report` — JSON body.
     CreateReport { body: Vec<u8> },
     /// `set-report-master-table/{code}` in live mode (`isRealTime=true`).
-    MasterTable { segment_id: u64, bytes: Vec<u8> },
+    MasterTable { segment_id: u64, bytes: Bytes },
     /// `add-report-segment/{code}` in live mode.
     AddSegment {
         segment_id: u64,
-        bytes: Vec<u8>,
+        bytes: Bytes,
         start_time: u64,
         end_time: u64,
         in_progress_event_count: u64,
@@ -603,11 +702,15 @@ pub(crate) trait LivePoster {
 #[derive(Clone)]
 pub(crate) struct LiveSender {
     session: Arc<dyn SessionProvider>,
+    client: reqwest::blocking::Client,
 }
 
 impl LiveSender {
     pub(crate) fn new(session: Arc<dyn SessionProvider>) -> Self {
-        Self { session }
+        Self {
+            session,
+            client: desktop_http_client(),
+        }
     }
 
     /// Whether a usable session is currently available (without prompting). The live
@@ -649,12 +752,13 @@ impl LiveSender {
         }
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
         let session = Arc::clone(&self.session);
+        let client = self.client.clone();
         let url = url.to_string();
         // Detached worker: it owns everything it needs and outlives an abandoned
         // wait. NOT `thread::scope` — scope's implicit join at scope end would
         // re-block on cancel, defeating the whole purpose.
         std::thread::spawn(move || {
-            let result = live_send_with_reauth(&session, &url, &req);
+            let result = live_send_with_reauth(&client, &session, &url, &req);
             // The receiver may already be gone (we abandoned the POST on cancel);
             // a failed send just drops the result, which is fine.
             let _ = tx.send(result);
@@ -680,9 +784,10 @@ impl LiveSender {
         }
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Vec<u8>, UploadError>>(1);
         let session = Arc::clone(&self.session);
+        let client = self.client.clone();
         let url = url.to_string();
         std::thread::spawn(move || {
-            let _ = tx.send(live_send_with_reauth(&session, &url, &req));
+            let _ = tx.send(live_send_with_reauth(&client, &session, &url, &req));
         });
         wait_for_create_or_cancel(rx, cancel, CREATE_REPORT_GRACE)
     }
@@ -752,16 +857,17 @@ fn wait_for_create_or_cancel(
 /// One live request with the shared single 401/419 re-auth-then-retry, run on a
 /// worker thread (so it takes owned data). Mirrors [`NativeUpload::send`]'s retry
 /// loop but for the owned live request; the actual wire attempt is
-/// [`live_send_once`]. Kept separate from the borrow-based `send` so the one-shot
-/// path is untouched.
+/// [`live_send_once`]. Kept separate from the borrow-based `send` so live can be
+/// cancelled without changing manual upload lifecycle semantics.
 fn live_send_with_reauth(
+    client: &reqwest::blocking::Client,
     session: &Arc<dyn SessionProvider>,
     url: &str,
     req: &OwnedLiveRequest,
 ) -> Result<Vec<u8>, UploadError> {
     let mut sess = session.session()?;
     for attempt in 0..2 {
-        match live_send_once(&sess, url, req) {
+        match live_send_once(client, &sess, url, req) {
             Ok(SendResult::Ok(body)) => return Ok(body),
             Ok(SendResult::AuthRejected) if attempt == 0 => {
                 session.invalidate();
@@ -787,14 +893,11 @@ fn live_send_with_reauth(
 /// multipart/JSON envelopes the borrow-based [`NativeUpload::send_once`] does, from
 /// owned data. No retry logic here.
 fn live_send_once(
+    client: &reqwest::blocking::Client,
     session: &Session,
     url: &str,
     req: &OwnedLiveRequest,
 ) -> Result<SendResult, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
     let base = client
         .post(url)
         .header(reqwest::header::COOKIE, session.cookie_header())
@@ -873,13 +976,13 @@ enum RequestKind<'a> {
     CreateReport,
     AddSegment {
         segment_id: u64,
-        bytes: &'a [u8],
+        bytes: &'a Bytes,
         start_time: u64,
         end_time: u64,
     },
     MasterTable {
         segment_id: u64,
-        bytes: &'a [u8],
+        bytes: &'a Bytes,
     },
     Terminate,
 }
@@ -919,8 +1022,9 @@ fn segment_parameters_json_live(
 /// part is sent with filename `"blob"` and an octet-stream type, matching the
 /// confirmed envelope. `bytes` is the ZIP-compressed segment produced by the
 /// serializer (a single `log.txt` entry).
-fn segment_logfile_part(bytes: &[u8]) -> Result<reqwest::blocking::multipart::Part, String> {
-    reqwest::blocking::multipart::Part::bytes(bytes.to_vec())
+fn segment_logfile_part(bytes: &Bytes) -> Result<reqwest::blocking::multipart::Part, String> {
+    let len = bytes.len() as u64;
+    reqwest::blocking::multipart::Part::reader_with_length(std::io::Cursor::new(bytes.clone()), len)
         .file_name("blob")
         .mime_str("application/octet-stream")
         .map_err(|e| format!("multipart part error: {e}"))
@@ -1000,6 +1104,37 @@ mod tests {
     fn no_progress(_p: UploadProgress) {}
 
     #[test]
+    fn finished_upload_metrics_count_payload_bytes_and_requests() {
+        let segs = vec![
+            Segment {
+                bytes: bytes::Bytes::from_static(&[1, 2, 3]),
+                start_time: 10,
+                end_time: 20,
+            },
+            Segment {
+                bytes: bytes::Bytes::from_static(&[4, 5]),
+                start_time: 30,
+                end_time: 40,
+            },
+        ];
+        let masters = vec![
+            MasterTableBytes {
+                bytes: bytes::Bytes::from_static(&[9]),
+            },
+            MasterTableBytes {
+                bytes: bytes::Bytes::from_static(&[8, 7, 6, 5]),
+            },
+        ];
+
+        let metrics = FinishedUploadMetrics::from_payloads(&segs, &masters);
+
+        assert_eq!(metrics.segments_total, 2);
+        assert_eq!(metrics.requests_total, 6); // create + terminate + 2 master/segment pairs
+        assert_eq!(metrics.segment_zip_bytes, 5);
+        assert_eq!(metrics.master_zip_bytes, 5);
+    }
+
+    #[test]
     fn cancel_before_first_segment_short_circuits() {
         let sess = FakeSession {
             invalidated: std::sync::Mutex::new(false),
@@ -1008,11 +1143,13 @@ mod tests {
         let opts = UploadOptions::default();
         let up = NativeUpload::new(&sess, &opts, cancel);
         let segs = vec![Segment {
-            bytes: vec![1, 2, 3],
+            bytes: bytes::Bytes::from_static(&[1, 2, 3]),
             start_time: 0,
             end_time: 0,
         }];
-        let masters = vec![MasterTableBytes { bytes: vec![] }];
+        let masters = vec![MasterTableBytes {
+            bytes: bytes::Bytes::new(),
+        }];
         let err = up
             .upload_finished(&segs, &masters, &no_progress)
             .unwrap_err();
@@ -1030,17 +1167,19 @@ mod tests {
         let up = NativeUpload::new(&sess, &opts, Arc::new(AtomicBool::new(false)));
         let segs = vec![
             Segment {
-                bytes: vec![1],
+                bytes: bytes::Bytes::from_static(&[1]),
                 start_time: 0,
                 end_time: 0,
             },
             Segment {
-                bytes: vec![2],
+                bytes: bytes::Bytes::from_static(&[2]),
                 start_time: 0,
                 end_time: 0,
             },
         ];
-        let masters = vec![MasterTableBytes { bytes: vec![] }]; // only 1
+        let masters = vec![MasterTableBytes {
+            bytes: bytes::Bytes::new(),
+        }]; // only 1
         let err = up
             .upload_finished(&segs, &masters, &no_progress)
             .unwrap_err();

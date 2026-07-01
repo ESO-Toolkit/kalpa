@@ -2346,6 +2346,7 @@ name = "kalpa"
 version = "0.1.0-beta.9"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "dirs",
  "dunce",
  "keyring",
@@ -2355,6 +2356,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rustc-hash",
  "scraper",
  "serde",
  "serde_json",

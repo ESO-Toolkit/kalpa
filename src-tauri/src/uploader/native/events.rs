@@ -38,11 +38,16 @@
 //! research prototypes; no third-party code.
 
 use std::collections::HashMap;
+use std::io::{BufRead, Seek, SeekFrom, Write};
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::encode::{
     combat_noncode1_crit_flag, encode_map_changed, encode_state_block, encode_zone_changed,
-    segment_ts, session_offset, split_csv_quoted_pub, ActorTable,
+    segment_ts, session_offset, split_csv_quoted_pub, ActorTable, FileLineReplay, LineReplay,
 };
+
+const SEGMENT_EVENT_MEMORY_LIMIT: usize = 4 * 1024 * 1024;
 
 /// `actionResult` values that never emit a segment line (no-op / failed casts).
 /// Mirrors [`super::a_counter::SKIP_ACTION_RESULTS`] — kept local so the assembler
@@ -125,43 +130,43 @@ struct PendingShield {
 pub struct EventEmitter {
     actors: ActorTable,
     /// Raw unit id → current championPoints (from `UNIT_ADDED`/`UNIT_CHANGED`).
-    champion_points: HashMap<String, String>,
+    champion_points: FxHashMap<String, String>,
     /// abilityId → effectType (`BUFF`/`DEBUFF`) from `EFFECT_INFO`.
-    effect_type: HashMap<String, String>,
+    effect_type: FxHashMap<String, String>,
     /// Per effect instance `(srcUnit, abilityId, tgtUnit)` → its last stack count.
     /// An `EFFECT_CHANGED UPDATED` emits (codes 6/8/11) only when the stack count
     /// *changes* from this value; a re-application with the same stack is dropped.
-    last_stack: HashMap<(String, String, String), String>,
+    last_stack: FxHashMap<(String, String, String), String>,
     /// `identity → 1-based actor master index` and `abilityId → 1-based ability
     /// index`, supplied from the master-table build. The event subordinal `A` is
     /// the index of the event's `(srcActorIndex, tgtActorIndex, abilityIndex)`
     /// **tuple** in the master tuple/effects table — so these maps tie the segment
     /// to the master.
-    identity_to_actor: HashMap<String, u32>,
-    ability_to_index: HashMap<String, u32>,
+    identity_to_actor: FxHashMap<String, u32>,
+    ability_to_index: FxHashMap<String, u32>,
     /// The tuple/effects table, built in event-emission order: a tuple key →
     /// its 1-based index (== the event's `A`). `tuple_order` keeps the records for
     /// the master's tuples section. Same `(src,tgt,ability)` → same index → same A,
     /// which is what makes a uploaded report *render* (events resolve to real
     /// effects).
-    tuple_to_index: HashMap<(u32, u32, u32), u32>,
+    tuple_to_index: FxHashMap<(u32, u32, u32), u32>,
     tuple_order: Vec<(u32, u32, u32)>,
     /// `castTrackId → the tuple A of the BEGIN_CAST that opened it`. An effect
     /// event applied by a tracked cast emits a trailing `A{castA}` linking the buff
     /// to its cast. Set when a cast emits.
-    cast_track_to_a: HashMap<String, u32>,
+    cast_track_to_a: FxHashMap<String, u32>,
     /// `castTrackId → (tupleA, src_unit, tgt_unit)` for TIMED casts (those that
     /// emitted a code-15 CastWithCastTime). A later `END_CAST COMPLETED` for that id
     /// emits a thin code-16 `Cast` line reusing the original cast's tuple A + units.
     /// Only timed casts are recorded (instant casts already emitted their code-16).
-    timed_cast: HashMap<String, (u32, String, String)>,
+    timed_cast: FxHashMap<String, (u32, String, String)>,
     /// Per-unit last-seen shield pool (`unit_id → shield`). A buff GAINED carries a
     /// trailing shield magnitude only when the unit's shield *changed* from this
     /// stored value: `source_shield`/
     /// `target_shield` are the new values iff they differ from what was stored,
     /// else 0. The display then emits the trailing iff one is non-zero AND they
     /// differ from each other.
-    shield_values: HashMap<String, u32>,
+    shield_values: FxHashMap<String, u32>,
     /// Whether we are inside a BEGIN_COMBAT/END_COMBAT window. A damage-class
     /// COMBAT_EVENT outside combat allocates NO tuple (the only pre-allocation skip
     /// the parser applies); every other combat event allocates its tuple regardless
@@ -173,14 +178,14 @@ pub struct EventEmitter {
     /// is absent here is a phantom the official drops. It is ALSO the membership set
     /// code 28 (InterruptionRemoved) gates on — a CC `FADED`'s trailing remove-cast id
     /// must be a real (tracked) cast.
-    cast_id_units: HashMap<String, (String, String)>,
+    cast_id_units: FxHashMap<String, (String, String)>,
     /// Cast track ids whose `BEGIN_CAST` had `duration == 0` (an instant cast that
     /// already emitted its code-16 at BEGIN_CAST). An `END_CAST INTERRUPTED` of such
     /// a cast is a *phantom* interrupt — the cast also COMPLETED at the same ts — and
     /// the official segment omits it. Tracked so [`Self::emit_interrupt`] can drop it.
     /// Rebound on every `BEGIN_CAST` (cleared when a timed cast reuses the id) so it
     /// reflects the id's CURRENT cast, not a stale historical one.
-    instant_cast_ids: std::collections::HashSet<String>,
+    instant_cast_ids: FxHashSet<String>,
     /// `castTrackId → the reflect buff's abilityId` for casts the game marked
     /// `REFLECTED` (an incoming hit a reflect skill bounced back — Sigil of Defense
     /// 112895, Defensive Stance 126608…). The buff's abilityId rides in the
@@ -189,7 +194,7 @@ pub struct EventEmitter {
     /// credits THIS buff, not the reflected projectile's ability — verified via
     /// render-compare (the reflected damage shows under "Sigil of Defense", not
     /// "Quick Shot"). Derived byte-exact on blackrose (3) + sunspire (5).
-    reflect_casts: HashMap<String, String>,
+    reflect_casts: FxHashMap<String, String>,
     /// Buffered code-38 (DamageShielded) lines awaiting their damaging-ability index
     /// (`f10`). A DAMAGE_SHIELDED carries the SHIELD ability (146311), not the
     /// damaging one; the damaging ability arrives on the paired real DAMAGE/DOT event
@@ -202,7 +207,7 @@ pub struct EventEmitter {
     /// and resets it to 0. This is why a hit-0 damage
     /// event whose damage was fully absorbed is still EMITTED (with the absorbed
     /// total in overflow) rather than dropped — the official segment keeps those.
-    temp_damage: HashMap<String, u64>,
+    temp_damage: FxHashMap<String, u64>,
     /// `(recipient unit, ability) → most-recent BuffGained source` — the caster of the
     /// ward currently active on a unit. Populated on every EFFECT_CHANGED GAINED and
     /// read by [`Self::buffer_damage_shielded`]: a GROUP/PROJECTED ward cast by an ALLY
@@ -218,7 +223,7 @@ pub struct EventEmitter {
     /// log. Most-recent-GAINED is the closest client-side attribution — total shielding
     /// is conserved and per-source matches the official segment to ~99.6% on blackrose
     /// and exactly on kynes; the small remainder is this irreducible overlap ambiguity.
-    shield_caster: HashMap<(String, String), String>,
+    shield_caster: FxHashMap<(String, String), String>,
     /// The current session's segment-timestamp offset (`segTs = rawTs + offset`).
     offset: i64,
     /// Whether the first `BEGIN_LOG` has been seen (anchors `first_wall`).
@@ -259,9 +264,17 @@ pub struct EventEmitter {
     /// The events emitted since the last [`Self::open_segment`] (the live segment
     /// body) and their count. `feed` appends here in addition to returning the line;
     /// the live driver [`Self::drain_segment_events`] takes them to frame a segment.
-    /// The one-shot `build()` path ignores these (it assembles its own string).
-    segment_events: String,
+    /// The body is memory-backed for small segments and spills to a temp file above
+    /// [`SEGMENT_EVENT_MEMORY_LIMIT`], so a long fight cannot retain hundreds of
+    /// MiB of event text in heap while normal live cuts avoid file I/O.
+    segment_events_buf: Vec<u8>,
+    segment_events_file: Option<std::fs::File>,
     segment_event_count: u64,
+    segment_spool_error: Option<String>,
+    /// Whether `feed` should retain emitted lines in `segment_events`. This is
+    /// enabled only by the live driver via `open_segment`; the completed-file path
+    /// already builds its own output string and must not keep a duplicate body.
+    capture_segment_events: bool,
 }
 
 impl EventEmitter {
@@ -280,8 +293,8 @@ impl EventEmitter {
     ) -> Self {
         Self {
             actors: ActorTable::new(),
-            identity_to_actor,
-            ability_to_index,
+            identity_to_actor: identity_to_actor.into_iter().collect(),
+            ability_to_index: ability_to_index.into_iter().collect(),
             ..Default::default()
         }
     }
@@ -296,6 +309,13 @@ impl EventEmitter {
     /// table's tuples section, guaranteeing the segment's `A` references resolve.
     pub fn tuples(&self) -> &[(u32, u32, u32)] {
         &self.tuple_order
+    }
+
+    /// Consume the emitter and return only the tuple table needed by the master
+    /// renderer. This lets completed-file encoding drop the rest of the emitter
+    /// state before building the master table.
+    pub fn into_tuples(self) -> Vec<(u32, u32, u32)> {
+        self.tuple_order
     }
 
     /// The set of actor identities currently in the frozen index map — the live
@@ -319,8 +339,8 @@ impl EventEmitter {
         identity_to_actor: HashMap<String, u32>,
         ability_to_index: HashMap<String, u32>,
     ) {
-        self.identity_to_actor = identity_to_actor;
-        self.ability_to_index = ability_to_index;
+        self.identity_to_actor = identity_to_actor.into_iter().collect();
+        self.ability_to_index = ability_to_index.into_iter().collect();
     }
 
     /// Allocate (or look up) the tuple index for an event's `(srcActorIndex,
@@ -391,8 +411,8 @@ impl EventEmitter {
     pub fn build(&mut self, lines: &[&str]) -> EventsOutput {
         if self.identity_to_actor.is_empty() && self.ability_to_index.is_empty() {
             let (id2a, ab2i) = super::encode::actor_ability_maps(lines);
-            self.identity_to_actor = id2a;
-            self.ability_to_index = ab2i;
+            self.identity_to_actor = id2a.into_iter().collect();
+            self.ability_to_index = ab2i.into_iter().collect();
         }
         // Compute the force-hostile reclassification up front so the code-1/2 own-side
         // masks reclassify the scripted/charmed enemies the raid fights, like Archon
@@ -436,9 +456,31 @@ impl EventEmitter {
     /// `pub(crate)` so the debug-only live driver ([`super::live`]) can feed lines
     /// one at a time across segment cuts; the one-shot path uses [`Self::build`].
     pub(crate) fn feed(&mut self, line: &str) -> Option<String> {
+        let mut head = line.splitn(3, ',');
+        let raw_ts_s = head.next()?;
+        let kind = head.next()?.trim();
+        if !matches!(
+            kind,
+            "BEGIN_LOG"
+                | "UNIT_ADDED"
+                | "UNIT_CHANGED"
+                | "EFFECT_INFO"
+                | "ZONE_CHANGED"
+                | "MAP_CHANGED"
+                | "PLAYER_INFO"
+                | "HEALTH_REGEN"
+                | "EFFECT_CHANGED"
+                | "BEGIN_CAST"
+                | "END_CAST"
+                | "COMBAT_EVENT"
+                | "BEGIN_COMBAT"
+                | "END_COMBAT"
+                | "END_TRIAL"
+        ) {
+            return None;
+        }
+        let raw_ts: i64 = raw_ts_s.trim().parse().ok()?;
         let f = split_csv_quoted_pub(line);
-        let kind = f.get(1).map(|s| s.trim())?;
-        let raw_ts: i64 = f.first().and_then(|s| s.trim().parse().ok())?;
         let emitted = match kind {
             "BEGIN_LOG" => {
                 self.on_begin_log(&f);
@@ -450,12 +492,6 @@ impl EventEmitter {
             }
             "UNIT_CHANGED" => {
                 self.on_unit_changed(&f, line);
-                None
-            }
-            "UNIT_REMOVED" => {
-                // The actor index map keeps the latest unit→actor binding (a
-                // recycled id is rebound on the next UNIT_ADDED), so no cleanup is
-                // needed here.
                 None
             }
             "EFFECT_INFO" => {
@@ -490,19 +526,6 @@ impl EventEmitter {
             // BEGIN_TRIAL / TRIAL_INIT carry no segment event (the capture has none
             // for them) — they only need to be *covered* so a trial log routes native
             // instead of falling back.
-            "BEGIN_TRIAL" | "TRIAL_INIT" => None,
-            // Infinite Archive (ENDLESS_DUNGEON_*): no segment event. Golden-confirmed
-            // (2026-06-24, Archon report M6t4mDzFWyqraPdN): the official uploader emits
-            // nothing for any of the six markers — they are pure state markers. IA
-            // fights themselves encode via the standard combat arms above. Listed
-            // explicitly (rather than via the `_` catch-all) so they count as *known*
-            // no-ops, matching their presence in coverage::PROVEN_LINE_TYPES.
-            "ENDLESS_DUNGEON_BEGIN"
-            | "ENDLESS_DUNGEON_END"
-            | "ENDLESS_DUNGEON_STAGE_END"
-            | "ENDLESS_DUNGEON_BUFF_ADDED"
-            | "ENDLESS_DUNGEON_BUFF_REMOVED"
-            | "ENDLESS_DUNGEON_INIT" => None,
             _ => None,
         };
         // Anchor the timestamp base on the first line that ACTUALLY emits (a
@@ -516,13 +539,62 @@ impl EventEmitter {
             // Accumulate the live segment body. `feed` may return multiple
             // \n-separated lines (a damage event flushing buffered code-38s); count
             // each, mirroring `build()`'s split. One-shot ignores this buffer.
-            for l in ev.split('\n') {
-                self.segment_events.push_str(l);
-                self.segment_events.push('\n');
-                self.segment_event_count += 1;
+            if self.capture_segment_events {
+                self.append_segment_events(ev);
             }
         }
         emitted
+    }
+
+    fn append_segment_events(&mut self, events: &str) {
+        if events.is_empty() {
+            return;
+        }
+        if self.segment_spool_error.is_some() {
+            return;
+        }
+        let bytes = events.as_bytes();
+        let count = 1 + bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+        if self.segment_events_file.is_none() {
+            let needed = bytes.len().saturating_add(1);
+            if self.segment_events_buf.len().saturating_add(needed) <= SEGMENT_EVENT_MEMORY_LIMIT {
+                self.segment_events_buf.extend_from_slice(bytes);
+                self.segment_events_buf.push(b'\n');
+                self.segment_event_count += count;
+                return;
+            }
+
+            match tempfile::tempfile() {
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(&self.segment_events_buf) {
+                        self.segment_spool_error =
+                            Some(format!("native live: write segment spool failed: {e}"));
+                        return;
+                    }
+                    self.segment_events_buf.clear();
+                    self.segment_events_file = Some(file);
+                }
+                Err(e) => {
+                    self.segment_spool_error =
+                        Some(format!("native live: create segment spool failed: {e}"));
+                    return;
+                }
+            }
+        }
+        let Some(file) = self.segment_events_file.as_mut() else {
+            return;
+        };
+        if let Err(e) = file.write_all(bytes) {
+            self.segment_spool_error =
+                Some(format!("native live: write segment spool failed: {e}"));
+            return;
+        }
+        if let Err(e) = file.write_all(b"\n") {
+            self.segment_spool_error =
+                Some(format!("native live: write segment spool failed: {e}"));
+            return;
+        }
+        self.segment_event_count += count;
     }
 
     /// Record the RAW ts of an emitted line for the current live segment's wall
@@ -541,10 +613,13 @@ impl EventEmitter {
     /// is deliberately untouched — that is what makes a headerless segment encode
     /// correctly. Used only by the live driver; the one-shot path never calls this.
     pub fn open_segment(&mut self) {
+        self.capture_segment_events = true;
         self.seg_first_raw = None;
         self.seg_last_raw = None;
-        self.segment_events.clear();
+        self.segment_events_buf.clear();
+        self.segment_events_file = None;
         self.segment_event_count = 0;
+        self.segment_spool_error = None;
     }
 
     /// Discard the current live segment while replaying an already-on-disk warm-up
@@ -562,11 +637,26 @@ impl EventEmitter {
     /// [`Self::open_segment`] after a successful build); the report-scoped encoder
     /// state (tuples, offset, correlations) is untouched. Returns an empty body if
     /// nothing was emitted this segment.
-    pub fn drain_segment_events(&self) -> EventsOutput {
-        EventsOutput {
-            events_string: self.segment_events.clone(),
-            event_count: self.segment_event_count,
+    pub fn segment_event_count(&self) -> u64 {
+        self.segment_event_count
+    }
+
+    pub fn drain_segment_events(&mut self) -> Result<SegmentEventsOutput, String> {
+        if let Some(e) = self.segment_spool_error.take() {
+            return Err(e);
         }
+        let events = match self.segment_events_file.take() {
+            Some(mut file) => {
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|e| format!("native live: rewind segment spool failed: {e}"))?;
+                SegmentEventsBody::File(file)
+            }
+            None => SegmentEventsBody::Memory(std::mem::take(&mut self.segment_events_buf)),
+        };
+        Ok(SegmentEventsOutput {
+            events,
+            event_count: self.segment_event_count,
+        })
     }
 
     /// Flush any `DAMAGE_SHIELDED` lines still buffered at end-of-stream (no following
@@ -581,9 +671,9 @@ impl EventEmitter {
         for l in tail {
             // These lines carry no fresh ts of their own; keep the segment's existing
             // window (they belong to the final fight already accounted for).
-            self.segment_events.push_str(&l);
-            self.segment_events.push('\n');
-            self.segment_event_count += 1;
+            if self.capture_segment_events {
+                self.append_segment_events(&l);
+            }
             count += 1;
         }
         count
@@ -601,7 +691,10 @@ impl EventEmitter {
     /// [`Self::frozen_actor_identities`] but with the indices, which is what
     /// [`super::encode::actor_ability_maps_forced`] needs.
     pub fn frozen_actor_index_map(&self) -> HashMap<String, u32> {
-        self.identity_to_actor.clone()
+        self.identity_to_actor
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     /// The emitter's current frozen `abilityId → ability index` map (a clone), the
@@ -610,7 +703,10 @@ impl EventEmitter {
     /// synthetic `HEALTH_RECOVERY` splice can't renumber prior abilities (the
     /// ability-axis half of the H1 fix).
     pub fn frozen_ability_index_map(&self) -> HashMap<String, u32> {
-        self.ability_to_index.clone()
+        self.ability_to_index
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     /// The current live segment's `(startTime, endTime)` wall-clock window for the
@@ -2050,6 +2146,109 @@ fn render_segment(lines: &[&str], emitter: &mut EventEmitter) -> Option<String> 
     Some(doc.render())
 }
 
+fn log_version_text(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let f = split_csv_quoted_pub(l);
+        if f.get(1).map(|s| s.trim()) == Some("BEGIN_LOG") {
+            f.get(3).map(|s| s.trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn log_version_replay(source: &impl LineReplay) -> Result<Option<String>, String> {
+    let mut out = None;
+    source.replay_lines(&mut |line| {
+        if out.is_some() {
+            return Ok(());
+        }
+        let f = split_csv_quoted_pub(line);
+        if f.get(1).map(|s| s.trim()) == Some("BEGIN_LOG") {
+            out = f.get(3).map(|s| s.trim().to_string());
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+fn spool_text_events(
+    emitter: &mut EventEmitter,
+    text: &str,
+) -> Result<(std::fs::File, u64), String> {
+    let mut body =
+        tempfile::tempfile().map_err(|e| format!("native encode: create temp body failed: {e}"))?;
+    let mut count: u64 = 0;
+
+    for line in text.lines() {
+        if let Some(ev) = emitter.feed(line) {
+            let max_a = emitter.allocated();
+            for l in ev.split('\n') {
+                validate_segment_event_line(l, max_a)?;
+                body.write_all(l.as_bytes())
+                    .map_err(|e| format!("native encode: write temp body failed: {e}"))?;
+                body.write_all(b"\n")
+                    .map_err(|e| format!("native encode: write temp body failed: {e}"))?;
+                count += 1;
+            }
+        }
+    }
+
+    let tail = emitter.flush_pending_shields(None, None, None);
+    let max_a = emitter.allocated();
+    for l in tail.iter() {
+        validate_segment_event_line(l, max_a)?;
+        body.write_all(l.as_bytes())
+            .map_err(|e| format!("native encode: write temp body failed: {e}"))?;
+        body.write_all(b"\n")
+            .map_err(|e| format!("native encode: write temp body failed: {e}"))?;
+        count += 1;
+    }
+
+    body.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("native encode: rewind temp body failed: {e}"))?;
+    Ok((body, count))
+}
+
+fn spool_replay_events(
+    emitter: &mut EventEmitter,
+    source: &impl LineReplay,
+) -> Result<(std::fs::File, u64), String> {
+    let mut body =
+        tempfile::tempfile().map_err(|e| format!("native encode: create temp body failed: {e}"))?;
+    let mut count: u64 = 0;
+
+    source.replay_lines(&mut |line| {
+        if let Some(ev) = emitter.feed(line) {
+            let max_a = emitter.allocated();
+            for l in ev.split('\n') {
+                validate_segment_event_line(l, max_a)?;
+                body.write_all(l.as_bytes())
+                    .map_err(|e| format!("native encode: write temp body failed: {e}"))?;
+                body.write_all(b"\n")
+                    .map_err(|e| format!("native encode: write temp body failed: {e}"))?;
+                count += 1;
+            }
+        }
+        Ok(())
+    })?;
+
+    let tail = emitter.flush_pending_shields(None, None, None);
+    let max_a = emitter.allocated();
+    for l in tail.iter() {
+        validate_segment_event_line(l, max_a)?;
+        body.write_all(l.as_bytes())
+            .map_err(|e| format!("native encode: write temp body failed: {e}"))?;
+        body.write_all(b"\n")
+            .map_err(|e| format!("native encode: write temp body failed: {e}"))?;
+        count += 1;
+    }
+
+    body.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("native encode: rewind temp body failed: {e}"))?;
+    Ok((body, count))
+}
+
 /// Build the complete, ready-to-upload native payload for a raw log: the ZIP'd
 /// fights segment + the ZIP'd master table, paired for one `add-report-segment`
 /// call. This is the single seam a native [`super::super::transport`] impl calls —
@@ -2075,9 +2274,6 @@ pub fn build_native_payload(
     let Some(segment_text) = render_segment(lines, &mut emitter) else {
         return Ok(None); // not a valid session
     };
-    let Some(master_text) = build_master_table_with_tuples(lines, emitter.tuples()) else {
-        return Ok(None);
-    };
     // Structural self-check BEFORE we ZIP and upload: a malformed segment (a short/
     // non-numeric line, a wrong declared count, or an `A` that points past the tuple
     // table) would be ACCEPTED by the server but never render — the exact "loads
@@ -2089,17 +2285,231 @@ pub fn build_native_payload(
     // these so the server can place the segment on the timeline and extract fights.
     let (start_time, end_time) = segment_time_bounds(lines);
     let segment = Segment::from_text(&segment_text, start_time, end_time)?;
+    drop(segment_text);
+
+    let tuples = emitter.into_tuples();
+    let Some(master_text) = build_master_table_with_tuples(lines, &tuples) else {
+        return Ok(None);
+    };
     let master = MasterTableBytes::from_text(&master_text)?;
     Ok(Some((segment, master)))
 }
 
+/// Text-backed entry point for callers that already have contiguous raw input. It
+/// writes completed segment/master payloads into their ZIP envelopes, so the native
+/// path does not keep raw input plus rendered upload text in heap at the same time.
+pub fn build_native_payload_from_text(
+    text: &str,
+) -> Result<Option<(super::client::Segment, super::client::MasterTableBytes)>, String> {
+    use super::client::{MasterTableBytes, Segment};
+    use super::encode::{
+        actor_ability_maps_text, build_master_table_zip_with_tuples_text, classify_monsters_text,
+    };
+
+    #[cfg(feature = "bench-alloc")]
+    let mut stage_t = std::time::Instant::now();
+    let Some(log_version) = log_version_text(text) else {
+        return Ok(None);
+    };
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage log header     : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let (id2a, ab2i) = actor_ability_maps_text(text);
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage actor/ability  : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let monster_sides = classify_monsters_text(text);
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage monster sides  : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+
+    let mut emitter = EventEmitter::with_master_indices(id2a, ab2i);
+    emitter.actors.set_monster_sides(monster_sides);
+    let (start_time, end_time) = segment_time_bounds_text(text);
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage time bounds    : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let (mut event_body, event_count) = spool_text_events(&mut emitter, text)?;
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage event spool    : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let bytes = super::zip_segment::zip_log_txt_from_writer(|entry| {
+        write!(entry, "{log_version}|1\n{event_count}\n")
+            .map_err(|e| format!("zip: write entry failed: {e}"))?;
+        std::io::copy(&mut event_body, entry)
+            .map_err(|e| format!("zip: write entry failed: {e}"))?;
+        Ok(())
+    })?;
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage segment zip    : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let segment = Segment {
+        bytes: bytes.into(),
+        start_time,
+        end_time,
+    };
+
+    let tuples = emitter.into_tuples();
+    let Some(master_bytes) = build_master_table_zip_with_tuples_text(text, &tuples)? else {
+        return Ok(None);
+    };
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage master zip     : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+    }
+    let master = MasterTableBytes {
+        bytes: master_bytes.into(),
+    };
+    Ok(Some((segment, master)))
+}
+
+pub fn build_native_payload_from_file(
+    path: &std::path::Path,
+) -> Result<Option<(super::client::Segment, super::client::MasterTableBytes)>, String> {
+    let source = FileLineReplay::new(path);
+    build_native_payload_from_replay(&source)
+}
+
+fn build_native_payload_from_replay(
+    source: &impl LineReplay,
+) -> Result<Option<(super::client::Segment, super::client::MasterTableBytes)>, String> {
+    use super::client::{MasterTableBytes, Segment};
+    use super::encode::{
+        actor_ability_maps_replay, build_master_table_zip_with_tuples_replay,
+        classify_monsters_replay,
+    };
+
+    #[cfg(feature = "bench-alloc")]
+    let mut stage_t = std::time::Instant::now();
+    let Some(log_version) = log_version_replay(source)? else {
+        return Ok(None);
+    };
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage log header     : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let (id2a, ab2i) = actor_ability_maps_replay(source)?;
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage actor/ability  : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let monster_sides = classify_monsters_replay(source)?;
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage monster sides  : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+
+    let mut emitter = EventEmitter::with_master_indices(id2a, ab2i);
+    emitter.actors.set_monster_sides(monster_sides);
+    let (start_time, end_time) = segment_time_bounds_replay(source)?;
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage time bounds    : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let (mut event_body, event_count) = spool_replay_events(&mut emitter, source)?;
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage event spool    : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let bytes = super::zip_segment::zip_log_txt_from_writer(|entry| {
+        write!(entry, "{log_version}|1\n{event_count}\n")
+            .map_err(|e| format!("zip: write entry failed: {e}"))?;
+        std::io::copy(&mut event_body, entry)
+            .map_err(|e| format!("zip: write entry failed: {e}"))?;
+        Ok(())
+    })?;
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage segment zip    : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+        stage_t = std::time::Instant::now();
+    }
+    let segment = Segment {
+        bytes: bytes.into(),
+        start_time,
+        end_time,
+    };
+
+    let tuples = emitter.into_tuples();
+    let Some(master_bytes) = build_master_table_zip_with_tuples_replay(source, &tuples)? else {
+        return Ok(None);
+    };
+    #[cfg(feature = "bench-alloc")]
+    {
+        eprintln!(
+            "  stage master zip     : {:.2} s",
+            stage_t.elapsed().as_secs_f64()
+        );
+    }
+    let master = MasterTableBytes {
+        bytes: master_bytes.into(),
+    };
+    Ok(Some((segment, master)))
+}
+
 /// Codes whose subordinal field LEADS with the tuple index `A` (so the leading
-/// `A.b.c` must reference a real master tuple). The pure markers (41/51/52/53/55)
-/// and the trial/zone lines carry literal ids or nothing in that slot, so they are
-/// not range-checked. Mirrors the `a_bearing` set the structural test asserts.
+/// `A.b.c` must reference a real master tuple). The pure markers (41/51/52/53/55),
+/// trial/zone lines, and code-44 `PLAYER_INFO` actor index carry literal ids or
+/// nothing in that slot, so they are not range-checked. Mirrors the `a_bearing` set
+/// the structural test asserts.
 const A_BEARING_CODES: &[&str] = &[
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "15", "16", "19", "22", "26",
-    "27", "28", "38", "44",
+    "27", "28", "38",
 ];
 
 /// Validate that a built fights-segment is **structurally uploadable**: the server
@@ -2131,36 +2541,86 @@ pub(crate) fn validate_segment_text(segment_text: &str, max_a: u32) -> Result<()
     let mut body_count: u64 = 0;
     for line in lines {
         body_count += 1;
-        let mut f = line.split('|');
-        let ts = f.next().unwrap_or("");
-        let code = f
-            .next()
-            .ok_or_else(|| format!("line too short: {line:?}"))?;
-        if ts.parse::<u64>().is_err() {
-            return Err(format!("non-numeric timestamp: {line:?}"));
-        }
-        if A_BEARING_CODES.contains(&code) {
-            // The subordinal is `A.b.c`; only the leading `A` is the tuple index.
-            let sub = f
-                .next()
-                .ok_or_else(|| format!("missing subordinal: {line:?}"))?;
-            let a: u32 = sub
-                .split('.')
-                .next()
-                .unwrap_or("")
-                .parse()
-                .map_err(|_| format!("non-numeric subordinal A: {line:?}"))?;
-            if a < 1 || a > max_a {
-                return Err(format!(
-                    "subordinal A={a} out of range 1..={max_a} (dangling tuple ref): {line:?}"
-                ));
-            }
-        }
+        validate_segment_event_line(line, max_a)?;
     }
     if body_count != declared {
         return Err(format!(
             "declared event count {declared} != {body_count} emitted lines"
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_segment_body(
+    declared: u64,
+    body: &mut std::fs::File,
+    max_a: u32,
+) -> Result<(), String> {
+    body.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("validate segment: rewind body failed: {e}"))?;
+    validate_segment_body_reader(declared, std::io::BufReader::new(&mut *body), max_a)?;
+    body.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("validate segment: rewind body failed: {e}"))?;
+    Ok(())
+}
+
+fn validate_segment_body_reader<R: BufRead>(
+    declared: u64,
+    mut reader: R,
+    max_a: u32,
+) -> Result<(), String> {
+    let mut body_count = 0u64;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("validate segment: read body failed: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        while line.ends_with('\n') || line.ends_with('\r') {
+            line.pop();
+        }
+        if line.is_empty() {
+            continue;
+        }
+        body_count += 1;
+        validate_segment_event_line(&line, max_a)?;
+    }
+    if declared != body_count {
+        return Err(format!(
+            "declared event count {declared} != {body_count} emitted lines"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_segment_event_line(line: &str, max_a: u32) -> Result<(), String> {
+    let mut f = line.split('|');
+    let ts = f.next().unwrap_or("");
+    let code = f
+        .next()
+        .ok_or_else(|| format!("line too short: {line:?}"))?;
+    if ts.parse::<u64>().is_err() {
+        return Err(format!("non-numeric timestamp: {line:?}"));
+    }
+    if A_BEARING_CODES.contains(&code) {
+        // The subordinal is `A.b.c`; only the leading `A` is the tuple index.
+        let sub = f
+            .next()
+            .ok_or_else(|| format!("missing subordinal: {line:?}"))?;
+        let a: u32 = sub
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .parse()
+            .map_err(|_| format!("non-numeric subordinal A: {line:?}"))?;
+        if a < 1 || a > max_a {
+            return Err(format!(
+                "subordinal A={a} out of range 1..={max_a} (dangling tuple ref): {line:?}"
+            ));
+        }
     }
     Ok(())
 }
@@ -2194,6 +2654,51 @@ fn segment_time_bounds(lines: &[&str]) -> (u64, u64) {
     let start = begin_wall + begin_rel;
     let end = begin_wall + last_rel;
     (start, end)
+}
+
+fn segment_time_bounds_text(text: &str) -> (u64, u64) {
+    let mut begin_wall: u64 = 0;
+    let mut begin_rel: u64 = 0;
+    let mut found_begin = false;
+    let mut last_rel: u64 = 0;
+    for line in text.lines() {
+        let f = split_csv_quoted_pub(line);
+        let kind = f.get(1).map(|s| s.trim()).unwrap_or("");
+        let rel: u64 = f.first().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        if kind == "BEGIN_LOG" && !found_begin {
+            begin_wall = f.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            begin_rel = rel;
+            found_begin = true;
+        }
+        last_rel = rel;
+    }
+    if !found_begin {
+        return (0, 0);
+    }
+    (begin_wall + begin_rel, begin_wall + last_rel)
+}
+
+fn segment_time_bounds_replay(source: &impl LineReplay) -> Result<(u64, u64), String> {
+    let mut begin_wall: u64 = 0;
+    let mut begin_rel: u64 = 0;
+    let mut found_begin = false;
+    let mut last_rel: u64 = 0;
+    source.replay_lines(&mut |line| {
+        let f = split_csv_quoted_pub(line);
+        let kind = f.get(1).map(|s| s.trim()).unwrap_or("");
+        let rel: u64 = f.first().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        if kind == "BEGIN_LOG" && !found_begin {
+            begin_wall = f.get(2).and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            begin_rel = rel;
+            found_begin = true;
+        }
+        last_rel = rel;
+        Ok(())
+    })?;
+    if !found_begin {
+        return Ok((0, 0));
+    }
+    Ok((begin_wall + begin_rel, begin_wall + last_rel))
 }
 
 /// Map a raw `powerType` to the segment's `(powerTypeIdx, powerMax)` pair for a
@@ -2231,6 +2736,44 @@ fn nth_comma_tail(line: &str, skip: usize) -> &str {
 pub struct EventsOutput {
     pub events_string: String,
     pub event_count: u64,
+}
+
+pub enum SegmentEventsBody {
+    Memory(Vec<u8>),
+    File(std::fs::File),
+}
+
+pub struct SegmentEventsOutput {
+    pub events: SegmentEventsBody,
+    pub event_count: u64,
+}
+
+impl SegmentEventsOutput {
+    pub fn validate(&mut self, max_a: u32) -> Result<(), String> {
+        match &mut self.events {
+            SegmentEventsBody::Memory(bytes) => validate_segment_body_reader(
+                self.event_count,
+                std::io::BufReader::new(std::io::Cursor::new(bytes.as_slice())),
+                max_a,
+            ),
+            SegmentEventsBody::File(file) => validate_segment_body(self.event_count, file, max_a),
+        }
+    }
+
+    pub fn write_to(&mut self, out: &mut dyn Write) -> Result<(), String> {
+        match &mut self.events {
+            SegmentEventsBody::Memory(bytes) => out
+                .write_all(bytes)
+                .map_err(|e| format!("zip segment: write body failed: {e}")),
+            SegmentEventsBody::File(file) => {
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|e| format!("zip segment: rewind body failed: {e}"))?;
+                std::io::copy(file, out)
+                    .map_err(|e| format!("zip segment: write body failed: {e}"))?;
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2617,6 +3160,14 @@ mod tests {
         // pure marker code-52). max_a = 2 → A=2 is in range.
         let seg = "15|1\n2\n100|1|2|16|64|C5|S1|T1|1|50\n200|52|";
         assert!(validate_segment_text(seg, 2).is_ok());
+    }
+
+    #[test]
+    fn validate_segment_text_accepts_player_info_actor_index_without_tuple() {
+        // Code 44 carries a master actor index, not a tuple A ref. PLAYER_INFO can
+        // appear before any tuple-bearing event, so max_a=0 must still validate.
+        let seg = "15|1\n1\n100|44|1|[142210],[1],[],[],[]";
+        assert!(validate_segment_text(seg, 0).is_ok());
     }
 
     #[test]
@@ -3128,13 +3679,24 @@ mod tests {
         let (segment, master) = build_native_payload(&lines)
             .expect("build payload")
             .expect("valid session");
+        let (text_segment, text_master) = build_native_payload_from_text(raw)
+            .expect("build text payload")
+            .expect("valid text session");
+        assert_eq!(
+            text_segment.bytes, segment.bytes,
+            "text-backed payload must produce the same segment ZIP"
+        );
+        assert_eq!(
+            text_master.bytes, master.bytes,
+            "text-backed payload must produce the same master ZIP"
+        );
         assert!(!segment.bytes.is_empty(), "segment must have ZIP bytes");
         assert!(!master.bytes.is_empty(), "master must have ZIP bytes");
 
         // The segment ZIP must unzip to the same text build_fights_segment renders.
         let expected = build_fights_segment(&lines).unwrap();
-        let mut archive =
-            zip::ZipArchive::new(std::io::Cursor::new(segment.bytes)).expect("open segment zip");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(segment.bytes.clone()))
+            .expect("open segment zip");
         let mut file = archive.by_index(0).unwrap();
         assert_eq!(file.name(), "log.txt");
         use std::io::Read;
@@ -3150,6 +3712,10 @@ mod tests {
     fn native_payload_needs_a_valid_session() {
         let lines = vec!["4,ZONE_CHANGED,1129,\"Hall\",NONE"];
         assert!(build_native_payload(&lines).unwrap().is_none());
+        assert!(
+            build_native_payload_from_text(lines[0]).unwrap().is_none(),
+            "text-backed payload should also require BEGIN_LOG"
+        );
     }
 
     // Regression: a UNIT_CHANGED updates championPoints from the CORRECT field

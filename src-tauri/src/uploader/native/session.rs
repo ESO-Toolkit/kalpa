@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn session_redacts_cookie_in_debug() {
-        let s = Session::from_cookie_header("laravel_session=supersecret; XSRF-TOKEN=abc");
+        let s = Session::from_cookie_header("wcl_session=supersecret; XSRF-TOKEN=abc");
         let dbg = format!("{s:?}");
         assert!(
             !dbg.contains("supersecret"),
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn empty_session_is_detected() {
         assert!(!Session::from_cookie_header("   ").is_nonempty());
-        assert!(Session::from_cookie_header("laravel_session=x").is_nonempty());
+        assert!(Session::from_cookie_header("wcl_session=x").is_nonempty());
     }
 
     #[test]
@@ -230,10 +230,10 @@ mod tests {
 
     #[test]
     fn provider_with_cookie_yields_session() {
-        let p = StoredSessionProvider::with_cached(Some("laravel_session=abc".into()));
+        let p = StoredSessionProvider::with_cached(Some("wcl_session=abc".into()));
         assert!(p.has_session());
         let s = p.session().expect("session available");
-        assert_eq!(s.cookie_header(), "laravel_session=abc");
+        assert_eq!(s.cookie_header(), "wcl_session=abc");
     }
 
     #[test]
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn invalidate_clears_in_memory_session() {
-        let p = StoredSessionProvider::with_cached(Some("laravel_session=abc".into()));
+        let p = StoredSessionProvider::with_cached(Some("wcl_session=abc".into()));
         assert!(p.has_session());
         p.invalidate();
         // In-memory copy is cleared immediately (persistence clear is a no-op
@@ -269,14 +269,14 @@ mod tests {
         // bool value.
         let p = StoredSessionProvider::with_cached(None);
         assert!(!p.has_session());
-        let _persisted: bool = p.store("laravel_session=xyz");
+        let _persisted: bool = p.store("wcl_session=xyz");
         assert!(
             p.has_session(),
             "session must be usable immediately after store"
         );
         assert_eq!(
             p.session().expect("session present").cookie_header(),
-            "laravel_session=xyz"
+            "wcl_session=xyz"
         );
         // Clean up any credential the store may have persisted so the test leaves
         // no durable side effect.

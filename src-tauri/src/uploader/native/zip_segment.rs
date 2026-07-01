@@ -31,14 +31,14 @@ use zip::{CompressionMethod, DateTime, ZipWriter};
 /// text alike), confirmed from the protocol.
 const ENTRY_NAME: &str = "log.txt";
 
-/// DEFLATE level for the entry. Level 9 is standard "best" DEFLATE — it maps to
-/// the `flate2` backend's maximum (not the slower zopfli path, which the `zip`
-/// crate only selects for levels *above* 9), matching the official uploader's
-/// "compress as a normal ZIP" behavior.
-const DEFLATE_LEVEL: i64 = 9;
+/// DEFLATE level for the entry. Level 3 keeps the standard DEFLATE ZIP envelope
+/// but avoids spending user-visible upload time chasing the final few percent of
+/// compression ratio. On representative segment text it is ~2.5x faster than
+/// level 9 while staying much smaller than level 1.
+const DEFLATE_LEVEL: i64 = 3;
 
 /// Wrap a rendered segment / master-table text in the ZIP envelope the upload
-/// expects: a single DEFLATE-9 entry named `log.txt`. Returns the archive bytes
+/// expects: a single DEFLATE entry named `log.txt`. Returns the archive bytes
 /// for the `logfile` multipart part.
 ///
 /// Deterministic: a fixed entry name and a fixed (ZIP-epoch) modification time, so
@@ -46,12 +46,36 @@ const DEFLATE_LEVEL: i64 = 9;
 /// `zip`/IO error (a single in-memory buffer, so these are not expected in
 /// practice); they surface as a short message rather than panicking.
 pub fn zip_log_txt(text: &str) -> Result<Vec<u8>, String> {
+    zip_log_txt_from_writer(|entry| {
+        entry
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("zip: write entry failed: {e}"))
+    })
+}
+
+/// Streaming variant of [`zip_log_txt`]. The caller writes the `log.txt` entry
+/// directly into the ZIP encoder, avoiding a large intermediate rendered string
+/// when the final upload only needs compressed bytes.
+pub fn zip_log_txt_from_writer<F>(write_entry: F) -> Result<Vec<u8>, String>
+where
+    F: FnOnce(&mut dyn Write) -> Result<(), String>,
+{
+    zip_log_txt_from_writer_with_level(DEFLATE_LEVEL, write_entry)
+}
+
+fn zip_log_txt_from_writer_with_level<F>(
+    deflate_level: i64,
+    write_entry: F,
+) -> Result<Vec<u8>, String>
+where
+    F: FnOnce(&mut dyn Write) -> Result<(), String>,
+{
     // In-memory cursor: the whole archive is small relative to the raw log, and
     // the client wants owned bytes for the multipart body.
     let mut writer = ZipWriter::new(Cursor::new(Vec::<u8>::new()));
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
-        .compression_level(Some(DEFLATE_LEVEL))
+        .compression_level(Some(deflate_level))
         // Fixed timestamp → deterministic, reproducible archive bytes (and no
         // wall-clock read). The ZIP epoch (1980-01-01) is `DateTime::default()`.
         .last_modified_time(DateTime::default());
@@ -59,9 +83,7 @@ pub fn zip_log_txt(text: &str) -> Result<Vec<u8>, String> {
     writer
         .start_file(ENTRY_NAME, options)
         .map_err(|e| format!("zip: start entry failed: {e}"))?;
-    writer
-        .write_all(text.as_bytes())
-        .map_err(|e| format!("zip: write entry failed: {e}"))?;
+    write_entry(&mut writer)?;
     let cursor = writer
         .finish()
         .map_err(|e| format!("zip: finalize failed: {e}"))?;
@@ -129,5 +151,50 @@ mod tests {
         let bytes = zip_log_txt("x").expect("zip");
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("open");
         assert_eq!(archive.by_index(0).unwrap().name(), "log.txt");
+    }
+
+    #[test]
+    #[ignore = "perf benchmark: compares ZIP deflate levels"]
+    fn bench_deflate_levels() {
+        let mut text = String::with_capacity(32 * 1024 * 1024);
+        for i in 0..1_000_000 {
+            use std::fmt::Write as _;
+            let a = (i % 20_000) + 1;
+            let b = (i % 4) * 16;
+            let c = (i % 17) + 1;
+            writeln!(
+                text,
+                "{}|5|{}.{}.{}|{}|{}|A{}",
+                i * 83,
+                a,
+                b,
+                c,
+                16 + (i % 3) * 16,
+                16 + (i % 5) * 16,
+                c
+            )
+            .unwrap();
+        }
+        eprintln!("\n=== ZIP DEFLATE LEVELS ===");
+        eprintln!(
+            "  input text   : {:.1} MiB",
+            text.len() as f64 / (1024.0 * 1024.0)
+        );
+        for level in [1, 3, 6, 9] {
+            let t = std::time::Instant::now();
+            let bytes = zip_log_txt_from_writer_with_level(level, |entry| {
+                entry
+                    .write_all(text.as_bytes())
+                    .map_err(|e| format!("zip: write entry failed: {e}"))
+            })
+            .expect("zip");
+            let dt = t.elapsed();
+            eprintln!(
+                "  level {level:<2}    : {:>6.2} s, {:>6.1} MiB, ratio {:.2}%",
+                dt.as_secs_f64(),
+                bytes.len() as f64 / (1024.0 * 1024.0),
+                100.0 * bytes.len() as f64 / text.len() as f64
+            );
+        }
     }
 }

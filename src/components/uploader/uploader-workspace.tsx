@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { Channel } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import {
@@ -64,6 +65,7 @@ import {
   type LogFileInfo,
   type LogPathDetection,
   type LogPreflight,
+  type ManualUploadProgress,
   type ReportRef,
   type TransportInfo,
   type UploaderStatus,
@@ -239,6 +241,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const [transport, setTransport] = useState<TransportInfo | null>(null);
   const [history, setHistory] = useState<UploadRecord[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [manualProgress, setManualProgress] = useState<ManualUploadProgress | null>(null);
+  const manualUploadOperationRef = useRef<string | null>(null);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   // True while a file is dragged over the window — drives the picker drop-zone
   // visual. `importing` covers the copy-in of a dropped out-of-folder log.
@@ -808,8 +812,30 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     };
   }, [handleImportLog]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    void listen<ManualUploadProgress>("uploader-upload-progress", (event) => {
+      const progress = event.payload;
+      if (manualUploadOperationRef.current !== progress.operationId) return;
+      setManualProgress(progress);
+    })
+      .then((fn) => {
+        if (active) unlisten = fn;
+        else fn();
+      })
+      .catch((e) => console.error("[tauri:uploader-upload-progress]", e));
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
   const handleManualUpload = async () => {
     if (!selectedLog) return;
+    const operationId = `manual-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    manualUploadOperationRef.current = operationId;
+    setManualProgress(null);
     setUploading(true);
     try {
       // Resolve the effective (unified, fail-closed) opt-out AND session presence fresh
@@ -834,6 +860,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         nativeOptIn,
         // The derived content label for the history row's headline.
         zone: dominantZone(fights),
+        operationId,
       });
       if (dispatch.report) {
         toast.success("Upload complete — report ready.");
@@ -848,6 +875,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
       toast.error(`Upload failed: ${getTauriErrorMessage(e)}`);
     } finally {
       setUploading(false);
+      setManualProgress(null);
+      manualUploadOperationRef.current = null;
     }
   };
 
@@ -1587,6 +1616,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                       liveSessionId === null
                     }
                     uploading={uploading}
+                    progress={manualProgress}
                     transport={transport}
                     willUseNative={willUseNative}
                     onUpload={handleManualUpload}
@@ -3349,12 +3379,14 @@ function Toggle({
 function ManualActions({
   canUpload,
   uploading,
+  progress,
   transport,
   willUseNative,
   onUpload,
 }: {
   canUpload: boolean;
   uploading: boolean;
+  progress: ManualUploadProgress | null;
   transport: TransportInfo | null;
   // The *intended* transport (opt-in + a captured session). The backend coverage
   // gate still decides for real per log, so this is an honest hint, not a promise
@@ -3363,8 +3395,31 @@ function ManualActions({
   onUpload: () => void;
 }) {
   const installed = transport?.officialUploaderInstalled ?? false;
+  const isBuilding = progress?.phase === "building";
+  const buildTotal = progress?.buildBytesTotal ?? 0;
+  const buildDone = Math.min(progress?.buildBytesDone ?? 0, buildTotal);
+  const uploadTotal = progress?.segmentsTotal ?? 0;
+  const uploadDone = Math.min(progress?.segmentsDone ?? 0, uploadTotal);
+  const progressTotal = isBuilding ? buildTotal : uploadTotal;
+  const progressDone = isBuilding ? buildDone : uploadDone;
+  const progressPct = progressTotal > 0 ? Math.round((progressDone / progressTotal) * 100) : 0;
+  const progressCaption = isBuilding
+    ? progressTotal > 0
+      ? `Direct upload is validating and preparing the report (${progressPct}%).`
+      : "Direct upload is validating and preparing the report."
+    : uploadDone <= 0 && uploadTotal > 0
+      ? `Direct upload is creating the report and posting segment 1 of ${uploadTotal}.`
+      : uploadTotal > 0
+        ? `Direct upload is posting report segment ${uploadDone} of ${uploadTotal}.`
+        : "Direct upload is preparing your report.";
   const label = uploading
-    ? "Preparing…"
+    ? isBuilding
+      ? progressTotal > 0
+        ? `Preparing ${progressPct}%`
+        : "Preparing..."
+      : uploadTotal > 0
+        ? `Uploading ${uploadDone}/${uploadTotal}`
+        : "Preparing..."
     : willUseNative
       ? "Upload directly"
       : installed
@@ -3387,17 +3442,43 @@ function ManualActions({
         className="w-full sm:w-auto"
         aria-label="Upload your log to ESO Logs"
       >
-        <CloudUpload className="size-4" />
+        {uploading ? (
+          <Loader2 className="size-4 animate-spin" />
+        ) : (
+          <CloudUpload className="size-4" />
+        )}
         {label}
       </Button>
 
       <p className="max-w-md text-center text-xs text-muted-foreground">
-        {willUseNative
-          ? "Your report appears here when it's done. If a log has an event type Kalpa can't upload directly, it falls back to the official uploader automatically."
-          : installed
-            ? "Uploads run through the official ESO Logs uploader installed on your PC."
-            : "We'll open the official ESO Logs uploader (or its download page) with your prepared log."}
+        {uploading
+          ? progressCaption
+          : willUseNative
+            ? "Your report appears here when it's done. If a log has an event type Kalpa can't upload directly, it falls back to the official uploader automatically."
+            : installed
+              ? "Uploads run through the official ESO Logs uploader installed on your PC."
+              : "We'll open the official ESO Logs uploader (or its download page) with your prepared log."}
       </p>
+      {uploading && progressTotal > 0 && (
+        <div
+          className="h-1.5 w-full max-w-md overflow-hidden rounded-full bg-black/35"
+          role="progressbar"
+          aria-label={isBuilding ? "Direct upload preparation progress" : "Direct upload progress"}
+          aria-valuemin={0}
+          aria-valuemax={progressTotal}
+          aria-valuenow={progressDone}
+          aria-valuetext={
+            isBuilding
+              ? `${progressPct}% prepared`
+              : `${uploadDone} of ${uploadTotal} report segments uploaded`
+          }
+        >
+          <div
+            className="h-full rounded-full bg-accent-sky transition-[width] duration-200"
+            style={{ width: `${progressPct}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 }

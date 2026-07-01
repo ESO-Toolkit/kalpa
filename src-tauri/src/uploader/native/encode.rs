@@ -18,6 +18,9 @@
 //! Clean-room: rules derived by comparing our own captured input/output; no
 //! third-party code.
 
+use std::io::BufRead;
+use std::path::Path;
+
 /// The pair of frozen index maps the live H1 fix threads through the master/emitter:
 /// `(identity → actor index, abilityId → ability index)`. A pinned pair keeps prior
 /// assignments stable across a cumulative rebuild (append-only).
@@ -25,6 +28,70 @@ pub(crate) type PinnedIndexMaps<'a> = (
     &'a std::collections::HashMap<String, u32>,
     &'a std::collections::HashMap<String, u32>,
 );
+
+pub(crate) type ActorAbilityMaps = (
+    std::collections::HashMap<String, u32>,
+    std::collections::HashMap<String, u32>,
+);
+
+/// A replayable raw-log source. Completed uploads use this to make several
+/// bounded passes over a file without mapping or copying the full log into the
+/// process working set.
+pub(crate) trait LineReplay {
+    fn replay_lines(&self, visit: &mut dyn FnMut(&str) -> Result<(), String>)
+        -> Result<(), String>;
+}
+
+impl LineReplay for &str {
+    fn replay_lines(
+        &self,
+        visit: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<(), String> {
+        for line in self.lines() {
+            visit(line)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct FileLineReplay<'a> {
+    path: &'a Path,
+}
+
+impl<'a> FileLineReplay<'a> {
+    pub(crate) fn new(path: &'a Path) -> Self {
+        Self { path }
+    }
+}
+
+impl LineReplay for FileLineReplay<'_> {
+    fn replay_lines(
+        &self,
+        visit: &mut dyn FnMut(&str) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let file = std::fs::File::open(self.path)
+            .map_err(|e| format!("native encode: open raw log failed: {e}"))?;
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|e| format!("native encode: read raw log failed: {e}"))?;
+            if read == 0 {
+                break;
+            }
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            visit(&line)?;
+        }
+        Ok(())
+    }
+}
 
 /// Strip an ESO icon path to the basename the master table uses:
 /// `/esoui/art/icons/ability_rogue_035.dds` → `ability_rogue_035`.
@@ -278,17 +345,20 @@ fn ability_icon_override(ability_id: &str) -> Option<&'static str> {
 /// The records `Vec` is returned in pinned-index order, so master ability record N ==
 /// the ability the tuples reference as index N (the lockstep invariant the actor fix
 /// maintains).
-fn build_ability_table_pinned(
-    lines: &[&str],
+fn build_ability_table_pinned_iter<'a, I>(
+    lines: I,
     prior: Option<&std::collections::HashMap<String, u32>>,
-) -> (Vec<String>, std::collections::HashMap<String, u32>) {
+) -> (Vec<String>, std::collections::HashMap<String, u32>)
+where
+    I: Clone + IntoIterator<Item = &'a str>,
+{
     // Pass 1: per-ability damage signals + the ABILITY_INFO records, all keyed by
     // ability id. Accumulated into the SAME [`AbilitySignals`] the incremental live
     // path maintains, then handed to the SHARED renderer below so the record bytes
     // can't drift between the re-walk and the incremental builder.
     let mut signals = AbilitySignals::default();
 
-    for line in lines {
+    for line in lines.clone() {
         let f = split_csv_quoted_pub(line);
         let Some(kind) = f.get(1).map(|s| s.trim()) else {
             continue;
@@ -336,6 +406,56 @@ fn build_ability_table_pinned(
     // Resolve indices + render records via the shared section assembler — the exact
     // code the incremental live builder calls, so both produce identical bytes.
     resolve_ability_section(&ordered_ids, &signals, prior)
+}
+
+fn build_ability_table_pinned_replay(
+    source: &impl LineReplay,
+    prior: Option<&std::collections::HashMap<String, u32>>,
+) -> Result<(Vec<String>, std::collections::HashMap<String, u32>), String> {
+    let mut signals = AbilitySignals::default();
+
+    source.replay_lines(&mut |line| {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            return Ok(());
+        };
+        accumulate_ability_signals(&mut signals, kind, &f, line);
+        Ok(())
+    })?;
+
+    let mut ordered_ids: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut synthetic_done = false;
+
+    source.replay_lines(&mut |line| {
+        let mut it = line.splitn(3, ',');
+        let _ts = it.next();
+        let Some(kind) = it.next().map(str::trim) else {
+            return Ok(());
+        };
+        let rest = it.next().unwrap_or("");
+        match kind {
+            "HEALTH_REGEN" if !synthetic_done => {
+                synthetic_done = true;
+                if seen.insert(HEALTH_RECOVERY_ID.to_string()) {
+                    ordered_ids.push(HEALTH_RECOVERY_ID.to_string());
+                }
+            }
+            "ABILITY_INFO" => {
+                let id = rest.split(',').next().unwrap_or("").trim().to_string();
+                if id.is_empty() || !seen.insert(id.clone()) {
+                    return Ok(());
+                }
+                if signals.info.contains_key(&id) {
+                    ordered_ids.push(id);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    Ok(resolve_ability_section(&ordered_ids, &signals, prior))
 }
 
 /// Fold one raw line's ability signals into `signals` (first-write-wins). Shared by
@@ -773,19 +893,27 @@ pub fn encode_state_block(stat_fields: &[&str], champion_points: &str) -> Option
 /// [`build_master_table_with_tuples`] to share the tuple table with the events
 /// encoder (so the segment's `A` references resolve).
 pub fn build_master_table(lines: &[&str]) -> Option<String> {
-    build_master_table_inner(lines, None, None)
+    build_master_table_inner_iter(lines.iter().copied(), None, None)
 }
 
 /// The 1-based `(identity → actor index, abilityId → ability index)` maps the
 /// events encoder needs to compute each event's tuple `A`. These are the same maps
 /// [`build_master_table`] uses internally.
-pub fn actor_ability_maps(
-    lines: &[&str],
-) -> (
-    std::collections::HashMap<String, u32>,
-    std::collections::HashMap<String, u32>,
-) {
-    actor_ability_maps_forced(lines, None)
+pub fn actor_ability_maps(lines: &[&str]) -> ActorAbilityMaps {
+    actor_ability_maps_forced_iter(lines.iter().copied(), None)
+}
+
+/// Text-backed variant for production callers that already have the log as one
+/// contiguous buffer. Scans the text directly instead of materializing a
+/// per-line slice vector.
+pub fn actor_ability_maps_text(text: &str) -> ActorAbilityMaps {
+    actor_ability_maps_forced_iter(text.lines(), None)
+}
+
+pub(crate) fn actor_ability_maps_replay(
+    source: &impl LineReplay,
+) -> Result<ActorAbilityMaps, String> {
+    actor_ability_maps_forced_replay(source, None)
 }
 
 /// Like [`actor_ability_maps`], but PINS prior actor-index assignments so the index
@@ -809,10 +937,17 @@ pub fn actor_ability_maps(
 pub fn actor_ability_maps_forced(
     lines: &[&str],
     prior: Option<PinnedIndexMaps<'_>>,
-) -> (
-    std::collections::HashMap<String, u32>,
-    std::collections::HashMap<String, u32>,
-) {
+) -> ActorAbilityMaps {
+    actor_ability_maps_forced_iter(lines.iter().copied(), prior)
+}
+
+fn actor_ability_maps_forced_iter<'a, I>(
+    lines: I,
+    prior: Option<PinnedIndexMaps<'_>>,
+) -> ActorAbilityMaps
+where
+    I: Clone + IntoIterator<Item = &'a str>,
+{
     let (prior_actors, prior_abilities) = match prior {
         Some((a, b)) => (Some(a), Some(b)),
         None => (None, None),
@@ -823,8 +958,8 @@ pub fn actor_ability_maps_forced(
     let mut next_index: u32 = identity_to_actor.values().copied().max().unwrap_or(0) + 1;
     // A prior identity (already pinned) is implicitly "forced-in" — it must keep its
     // slot even if it hasn't registered yet in this slice.
-    let registering = registering_monster_identities(lines);
-    for line in lines {
+    let registering = registering_monster_identities_iter(lines.clone());
+    for line in lines.clone() {
         let mut it = line.splitn(3, ',');
         let _ts = it.next();
         let Some(kind) = it.next().map(str::trim) else {
@@ -851,9 +986,51 @@ pub fn actor_ability_maps_forced(
     // The ability index MUST match the master table's (so a tuple's C index lines up)
     // AND must be pinned the same way (the ability-axis H1 fix), so a late-registering
     // ability or the synthetic HEALTH_RECOVERY splice can't renumber prior abilities.
-    let (_records, mut ability_to_index) = build_ability_table_pinned(lines, prior_abilities);
+    let (_records, mut ability_to_index) = build_ability_table_pinned_iter(lines, prior_abilities);
     ability_to_index.insert("0".to_string(), 0);
     (identity_to_actor, ability_to_index)
+}
+
+fn actor_ability_maps_forced_replay(
+    source: &impl LineReplay,
+    prior: Option<PinnedIndexMaps<'_>>,
+) -> Result<ActorAbilityMaps, String> {
+    let (prior_actors, prior_abilities) = match prior {
+        Some((a, b)) => (Some(a), Some(b)),
+        None => (None, None),
+    };
+    let mut identity_to_actor: std::collections::HashMap<String, u32> =
+        prior_actors.cloned().unwrap_or_default();
+    let mut next_index: u32 = identity_to_actor.values().copied().max().unwrap_or(0) + 1;
+    let registering = registering_monster_identities_replay(source)?;
+
+    source.replay_lines(&mut |line| {
+        let mut it = line.splitn(3, ',');
+        let _ts = it.next();
+        let Some(kind) = it.next().map(str::trim) else {
+            return Ok(());
+        };
+        let rest = it.next().unwrap_or("");
+        if kind == "UNIT_ADDED" {
+            if let Some(actor) = ActorInfo::parse(rest) {
+                let identity = actor.identity();
+                if identity_to_actor.contains_key(&identity) {
+                    return Ok(());
+                }
+                if matches!(actor, ActorInfo::Monster { .. }) && !registering.contains(&identity) {
+                    return Ok(());
+                }
+                identity_to_actor.insert(identity, next_index);
+                next_index += 1;
+            }
+        }
+        Ok(())
+    })?;
+
+    let (_records, mut ability_to_index) =
+        build_ability_table_pinned_replay(source, prior_abilities)?;
+    ability_to_index.insert("0".to_string(), 0);
+    Ok((identity_to_actor, ability_to_index))
 }
 
 /// Build the master table using an EXTERNAL tuple table (the events encoder's), so
@@ -862,7 +1039,16 @@ pub fn build_master_table_with_tuples(
     lines: &[&str],
     tuples: &[(u32, u32, u32)],
 ) -> Option<String> {
-    build_master_table_inner(lines, Some(tuples), None)
+    build_master_table_inner_iter(lines.iter().copied(), Some(tuples), None)
+}
+
+/// Text-backed variant for callers that already have contiguous text. Scans the
+/// text directly instead of materializing a per-line slice vector.
+pub fn build_master_table_with_tuples_text(
+    text: &str,
+    tuples: &[(u32, u32, u32)],
+) -> Option<String> {
+    build_master_table_inner_iter(text.lines(), Some(tuples), None)
 }
 
 /// Like [`build_master_table_with_tuples`], but PINS prior actor-index assignments so
@@ -886,15 +1072,127 @@ pub fn build_master_table_with_tuples_forced(
     pinned_actors: &std::collections::HashMap<String, u32>,
     pinned_abilities: &std::collections::HashMap<String, u32>,
 ) -> Option<String> {
-    build_master_table_inner(lines, Some(tuples), Some((pinned_actors, pinned_abilities)))
+    build_master_table_inner_iter(
+        lines.iter().copied(),
+        Some(tuples),
+        Some((pinned_actors, pinned_abilities)),
+    )
 }
 
-fn build_master_table_inner(
-    lines: &[&str],
+fn build_master_table_inner_iter<'a, I>(
+    lines: I,
     external_tuples: Option<&[(u32, u32, u32)]>,
     pinned: Option<PinnedIndexMaps<'_>>,
-) -> Option<String> {
-    use super::serialize::MasterTableDoc;
+) -> Option<String>
+where
+    I: Clone + IntoIterator<Item = &'a str>,
+{
+    build_master_table_sections_iter(lines, external_tuples, pinned)
+        .map(|sections| sections.render())
+}
+
+pub fn build_master_table_zip_with_tuples_text(
+    text: &str,
+    tuples: &[(u32, u32, u32)],
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(sections) = build_master_table_sections_iter(text.lines(), Some(tuples), None) else {
+        return Ok(None);
+    };
+    sections.zip().map(Some)
+}
+
+pub(crate) fn build_master_table_zip_with_tuples_replay(
+    source: &impl LineReplay,
+    tuples: &[(u32, u32, u32)],
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(sections) = build_master_table_sections_replay(source, Some(tuples), None)? else {
+        return Ok(None);
+    };
+    sections.zip().map(Some)
+}
+
+struct MasterTableSections {
+    log_version: String,
+    actors: Vec<String>,
+    ability_records: Vec<String>,
+    tuples: Vec<String>,
+    pets: Vec<String>,
+}
+
+impl MasterTableSections {
+    fn render(&self) -> String {
+        let mut s = String::with_capacity(
+            self.log_version.len()
+                + self.actors.iter().map(|r| r.len() + 1).sum::<usize>()
+                + self
+                    .ability_records
+                    .iter()
+                    .map(|r| r.len() + 1)
+                    .sum::<usize>()
+                + self.tuples.iter().map(|r| r.len() + 1).sum::<usize>()
+                + self.pets.iter().map(|r| r.len() + 1).sum::<usize>()
+                + 64,
+        );
+        self.write_to_string(&mut s);
+        s
+    }
+
+    fn zip(&self) -> Result<Vec<u8>, String> {
+        super::zip_segment::zip_log_txt_from_writer(|entry| self.write_to(entry))
+    }
+
+    fn write_to_string(&self, out: &mut String) {
+        out.push_str(&self.log_version);
+        out.push_str("|1|\n");
+        push_records_to_string(out, self.actors.len(), &self.actors);
+        push_records_to_string(out, self.ability_records.len(), &self.ability_records);
+        push_records_to_string(out, self.tuples.len(), &self.tuples);
+        push_records_to_string(out, self.pets.len(), &self.pets);
+    }
+
+    fn write_to(&self, out: &mut dyn std::io::Write) -> Result<(), String> {
+        writeln!(out, "{}|1|", self.log_version)
+            .map_err(|e| format!("zip: write entry failed: {e}"))?;
+        write_records_to(out, self.actors.len(), &self.actors)?;
+        write_records_to(out, self.ability_records.len(), &self.ability_records)?;
+        write_records_to(out, self.tuples.len(), &self.tuples)?;
+        write_records_to(out, self.pets.len(), &self.pets)?;
+        Ok(())
+    }
+}
+
+fn push_records_to_string(out: &mut String, last_id: usize, records: &[String]) {
+    out.push_str(&last_id.to_string());
+    out.push('\n');
+    for record in records {
+        out.push_str(record);
+        out.push('\n');
+    }
+}
+
+fn write_records_to(
+    out: &mut dyn std::io::Write,
+    last_id: usize,
+    records: &[String],
+) -> Result<(), String> {
+    writeln!(out, "{last_id}").map_err(|e| format!("zip: write entry failed: {e}"))?;
+    for record in records {
+        out.write_all(record.as_bytes())
+            .map_err(|e| format!("zip: write entry failed: {e}"))?;
+        out.write_all(b"\n")
+            .map_err(|e| format!("zip: write entry failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn build_master_table_sections_iter<'a, I>(
+    lines: I,
+    external_tuples: Option<&[(u32, u32, u32)]>,
+    pinned: Option<PinnedIndexMaps<'_>>,
+) -> Option<MasterTableSections>
+where
+    I: Clone + IntoIterator<Item = &'a str>,
+{
     let pinned_actors = pinned.map(|(a, _)| a);
     let pinned_abilities = pinned.map(|(_, b)| b);
 
@@ -919,9 +1217,9 @@ fn build_master_table_inner(
     let mut unit_is_player: std::collections::HashMap<String, bool> = Default::default();
     // Monster identities the actor master keeps (those referenced by ≥1
     // registering event); a never-referenced monster owns no tuple and is dropped.
-    let registering = registering_monster_identities(lines);
+    let registering = registering_monster_identities_iter(lines.clone());
 
-    for line in lines {
+    for line in lines.clone() {
         let mut it = line.splitn(3, ',');
         let _ts = it.next();
         let Some(kind) = it.next().map(str::trim) else {
@@ -1073,7 +1371,7 @@ fn build_master_table_inner(
     // ability axis too (the ability-axis H1 fix), so a late ABILITY_INFO or the
     // synthetic splice can't renumber prior abilities across a cumulative rebuild.
     let (ability_records, mut ability_to_index) =
-        build_ability_table_pinned(lines, pinned_abilities);
+        build_ability_table_pinned_iter(lines.clone(), pinned_abilities);
     // abilityId "0" → ability index 0 (e.g. SOUL_GEM_RESURRECTION_ACCEPTED).
     ability_to_index.insert("0".to_string(), 0);
 
@@ -1089,31 +1387,172 @@ fn build_master_table_inner(
     // `A` references and the master's tuple section are the SAME numbering (which
     // is what makes a report render). The internal build stays for the
     // self-contained `build_master_table` (tests + the master diff).
-    let (mut tuples, pets) = build_tuples_and_pets(lines, &identity_to_actor, &ability_to_index);
+    let (mut tuples, pets) =
+        build_tuples_and_pets_iter(lines, &identity_to_actor, &ability_to_index);
     if let Some(ext) = external_tuples {
         tuples = ext.iter().map(|(s, t, a)| format!("{s}|{t}|{a}")).collect();
     }
 
-    // Render sections.
-    let actors_string = join_lines(&actors);
-    let abilities_string = join_lines(&ability_records);
-    let tuples_string = join_lines(&tuples);
-    let pets_string = join_lines(&pets);
+    Some(MasterTableSections {
+        log_version,
+        actors,
+        ability_records,
+        tuples,
+        pets,
+    })
+}
 
-    let doc = MasterTableDoc {
-        log_version: &log_version,
-        game_version: "1", // observed constant; uploader-side, not in the raw log
-        log_file_details: "",
-        last_assigned_actor_id: actors.len() as u64,
-        actors_string: &actors_string,
-        last_assigned_ability_id: ability_records.len() as u64,
-        abilities_string: &abilities_string,
-        last_assigned_tuple_id: tuples.len() as u64,
-        tuples_string: &tuples_string,
-        last_assigned_pet_id: pets.len() as u64,
-        pets_string: &pets_string,
+fn build_master_table_sections_replay(
+    source: &impl LineReplay,
+    external_tuples: Option<&[(u32, u32, u32)]>,
+    pinned: Option<PinnedIndexMaps<'_>>,
+) -> Result<Option<MasterTableSections>, String> {
+    let pinned_actors = pinned.map(|(a, _)| a);
+    let pinned_abilities = pinned.map(|(_, b)| b);
+
+    let mut log_version: Option<String> = None;
+    let mut server: Option<String> = None;
+    let mut begin_wall: u64 = 0;
+    let mut actor_seen: std::collections::BTreeSet<String> = Default::default();
+    struct PendingActor {
+        identity: String,
+        actor: ActorInfo,
+        owner_is_player: bool,
+    }
+    let mut pending: Vec<PendingActor> = Vec::new();
+    let mut unit_is_player: std::collections::HashMap<String, bool> = Default::default();
+    let registering = registering_monster_identities_replay(source)?;
+
+    source.replay_lines(&mut |line| {
+        let mut it = line.splitn(3, ',');
+        let _ts = it.next();
+        let Some(kind) = it.next().map(str::trim) else {
+            return Ok(());
+        };
+        let rest = it.next().unwrap_or("");
+        match kind {
+            "BEGIN_LOG" if log_version.is_none() => {
+                let mut f = split_csv_quoted(rest);
+                begin_wall = f.next().and_then(|w| w.trim().parse().ok()).unwrap_or(0);
+                log_version = Some(f.next().unwrap_or("").trim().to_string());
+                server = Some(f.next().unwrap_or("").trim().to_string());
+            }
+            "UNIT_ADDED" => {
+                if let Some(actor) = ActorInfo::parse(rest) {
+                    let f = split_csv_quoted_pub(rest);
+                    if let Some(unit_id) = f.first().map(|s| s.trim().to_string()) {
+                        unit_is_player.insert(unit_id, matches!(actor, ActorInfo::Player { .. }));
+                    }
+                    let owner_is_player = match &actor {
+                        ActorInfo::Monster { owner_unit_id, .. }
+                            if !owner_unit_id.is_empty() && owner_unit_id != "0" =>
+                        {
+                            unit_is_player.get(owner_unit_id).copied().unwrap_or(false)
+                        }
+                        _ => false,
+                    };
+                    let identity = actor.identity();
+                    let is_pinned = pinned_actors.is_some_and(|m| m.contains_key(&identity));
+                    if matches!(actor, ActorInfo::Monster { .. })
+                        && !registering.contains(&identity)
+                        && !is_pinned
+                    {
+                        return Ok(());
+                    }
+                    if actor_seen.insert(identity.clone()) {
+                        pending.push(PendingActor {
+                            identity,
+                            actor,
+                            owner_is_player,
+                        });
+                    } else {
+                        let is_resolved = matches!(
+                            &actor,
+                            ActorInfo::Player { name, account, .. }
+                                if !name.is_empty()
+                                    && name.as_str() != "Offline"
+                                    && !account.is_empty()
+                        );
+                        if is_resolved {
+                            if let Some(p) = pending.iter_mut().find(|p| p.identity == identity) {
+                                let stored_is_placeholder = matches!(
+                                    &p.actor,
+                                    ActorInfo::Player { name, .. }
+                                        if name.is_empty() || name.as_str() == "Offline"
+                                );
+                                if stored_is_placeholder {
+                                    p.actor = actor;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    let Some(log_version) = log_version else {
+        return Ok(None);
     };
-    Some(doc.render())
+
+    let identity_to_actor: std::collections::HashMap<String, u32> = match pinned_actors {
+        None => pending
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.identity.clone(), i as u32 + 1))
+            .collect(),
+        Some(prior) => {
+            debug_assert!(
+                prior
+                    .keys()
+                    .all(|id| pending.iter().any(|p| &p.identity == id)),
+                "build_master_table_with_tuples_forced: a pinned actor identity is \
+                 absent from this line slice"
+            );
+            let mut map: std::collections::HashMap<String, u32> = prior.clone();
+            let mut next = map.values().copied().max().unwrap_or(0) + 1;
+            for p in &pending {
+                if !map.contains_key(&p.identity) {
+                    map.insert(p.identity.clone(), next);
+                    next += 1;
+                }
+            }
+            map
+        }
+    };
+    let srv = server.clone().unwrap_or_default();
+    let mut by_index: Vec<(u32, &PendingActor)> = pending
+        .iter()
+        .filter_map(|p| identity_to_actor.get(&p.identity).map(|&i| (i, p)))
+        .collect();
+    by_index.sort_by_key(|(i, _)| *i);
+    let actors: Vec<String> = by_index
+        .iter()
+        .map(|(index, p)| {
+            p.actor
+                .to_master_record(*index as usize, &srv, begin_wall, p.owner_is_player)
+        })
+        .collect();
+
+    let (ability_records, mut ability_to_index) =
+        build_ability_table_pinned_replay(source, pinned_abilities)?;
+    ability_to_index.insert("0".to_string(), 0);
+
+    let (mut tuples, pets) =
+        build_tuples_and_pets_replay(source, &identity_to_actor, &ability_to_index)?;
+    if let Some(ext) = external_tuples {
+        tuples = ext.iter().map(|(s, t, a)| format!("{s}|{t}|{a}")).collect();
+    }
+
+    Ok(Some(MasterTableSections {
+        log_version,
+        actors,
+        ability_records,
+        tuples,
+        pets,
+    }))
 }
 
 /// Build the master-table TUPLE and PET sections via a time-aware second pass.
@@ -1130,11 +1569,14 @@ fn build_master_table_inner(
 /// resolves (via the same live map) to a player-side actor.
 ///
 /// Returns `(tuples, pets)` as ordered, de-duplicated record lists.
-fn build_tuples_and_pets(
-    lines: &[&str],
+fn build_tuples_and_pets_iter<'a, I>(
+    lines: I,
     identity_to_actor: &std::collections::HashMap<String, u32>,
     ability_to_index: &std::collections::HashMap<String, u32>,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<String>, Vec<String>)
+where
+    I: IntoIterator<Item = &'a str>,
+{
     // Live unitId → (actorIndex, is_player). Set on UNIT_ADDED, cleared on REMOVE.
     let mut live: std::collections::HashMap<String, (u32, bool)> = Default::default();
     let mut tuple_seen: std::collections::HashSet<(u32, u32, u32)> = Default::default();
@@ -1226,6 +1668,98 @@ fn build_tuples_and_pets(
     (tuples, pets)
 }
 
+fn build_tuples_and_pets_replay(
+    source: &impl LineReplay,
+    identity_to_actor: &std::collections::HashMap<String, u32>,
+    ability_to_index: &std::collections::HashMap<String, u32>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut live: std::collections::HashMap<String, (u32, bool)> = Default::default();
+    let mut tuple_seen: std::collections::HashSet<(u32, u32, u32)> = Default::default();
+    let mut tuples: Vec<String> = Vec::new();
+    let mut pet_seen: std::collections::HashSet<(u32, u32)> = Default::default();
+    let mut pets: Vec<String> = Vec::new();
+
+    source.replay_lines(&mut |line| {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            return Ok(());
+        };
+        match kind {
+            "UNIT_ADDED" => {
+                let rest = line.splitn(3, ',').nth(2).unwrap_or("");
+                let Some(actor) = ActorInfo::parse(rest) else {
+                    return Ok(());
+                };
+                let identity = actor.identity();
+                let Some(&idx) = identity_to_actor.get(&identity) else {
+                    return Ok(());
+                };
+                let is_player = matches!(actor, ActorInfo::Player { .. });
+                let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) else {
+                    return Ok(());
+                };
+                if let Some(owner) = f.get(15).map(|s| s.trim()) {
+                    if owner != "0" && !owner.is_empty() {
+                        if let Some(&(owner_idx, owner_is_player)) = live.get(owner) {
+                            if owner_is_player && pet_seen.insert((idx, owner_idx)) {
+                                pets.push(format!("{idx}|{owner_idx}"));
+                            }
+                        }
+                    }
+                }
+                live.insert(unit_id, (idx, is_player));
+            }
+            "UNIT_REMOVED" => {
+                if let Some(u) = f.get(2) {
+                    live.remove(u.trim());
+                }
+            }
+            "COMBAT_EVENT" | "EFFECT_CHANGED" | "BEGIN_CAST" => {
+                let (result, ability, src, tgt) = if kind == "COMBAT_EVENT" {
+                    (
+                        f.get(2).map(|s| s.trim()).unwrap_or(""),
+                        f.get(8).map(|s| s.trim()).unwrap_or(""),
+                        f.get(9).map(|s| s.trim()).unwrap_or(""),
+                        f.get(19).map(|s| s.trim()).unwrap_or("0"),
+                    )
+                } else {
+                    (
+                        "",
+                        f.get(5).map(|s| s.trim()).unwrap_or(""),
+                        f.get(6).map(|s| s.trim()).unwrap_or(""),
+                        f.get(16).map(|s| s.trim()).unwrap_or("0"),
+                    )
+                };
+                let Some(&ci) = ability_to_index.get(ability) else {
+                    return Ok(());
+                };
+                let sa = live.get(src).map(|&(i, _)| i).unwrap_or(0);
+                let self_target = tgt == "*";
+                let ta = if self_target {
+                    sa
+                } else if tgt == "0" {
+                    0
+                } else {
+                    live.get(tgt).map(|&(i, _)| i).unwrap_or(0)
+                };
+                if sa == 0 && ta == 0 {
+                    return Ok(());
+                }
+                if kind == "COMBAT_EVENT" && !combat_event_registers(result, self_target) {
+                    return Ok(());
+                }
+                if tuple_seen.insert((sa, ta, ci)) {
+                    tuples.push(format!("{sa}|{ta}|{ci}"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    Ok((tuples, pets))
+}
+
 /// Whether a `COMBAT_EVENT` registers an actor-pairing tuple. The cast that never
 /// landed (`QUEUED`/`TARGET_DEAD`/`CASTER_DEAD`/`ABILITY_ON_COOLDOWN`) and the
 /// self-targeted control/movement results do not.
@@ -1269,7 +1803,10 @@ pub(crate) fn combat_event_registers(result: &str, self_target: bool) -> bool {
 /// this set only governs monster inclusion. Keying on IDENTITY (not unit id)
 /// handles recycled unit ids: a monster identity is included if ANY unit id
 /// bearing it registers.
-fn registering_monster_identities(lines: &[&str]) -> std::collections::HashSet<String> {
+fn registering_monster_identities_iter<'a, I>(lines: I) -> std::collections::HashSet<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
     // Live raw unit id → its monster identity (set on UNIT_ADDED, cleared on
     // UNIT_REMOVED — unit ids recycle, so the map must be time-aware).
     let mut live: std::collections::HashMap<String, String> = Default::default();
@@ -1328,6 +1865,66 @@ fn registering_monster_identities(lines: &[&str]) -> std::collections::HashSet<S
     registering
 }
 
+fn registering_monster_identities_replay(
+    source: &impl LineReplay,
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut live: std::collections::HashMap<String, String> = Default::default();
+    let mut registering: std::collections::HashSet<String> = Default::default();
+
+    source.replay_lines(&mut |line| {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            return Ok(());
+        };
+        match kind {
+            "UNIT_ADDED" => {
+                let rest = line.splitn(3, ',').nth(2).unwrap_or("");
+                if let Some(actor @ ActorInfo::Monster { .. }) = ActorInfo::parse(rest) {
+                    if let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) {
+                        live.insert(unit_id, actor.identity());
+                    }
+                }
+            }
+            "UNIT_REMOVED" => {
+                if let Some(u) = f.get(2) {
+                    live.remove(u.trim());
+                }
+            }
+            "COMBAT_EVENT" | "EFFECT_CHANGED" | "BEGIN_CAST" => {
+                let (result, src, tgt) = if kind == "COMBAT_EVENT" {
+                    (
+                        f.get(2).map(|s| s.trim()).unwrap_or(""),
+                        f.get(9).map(|s| s.trim()).unwrap_or(""),
+                        f.get(19).map(|s| s.trim()).unwrap_or("0"),
+                    )
+                } else {
+                    (
+                        "",
+                        f.get(6).map(|s| s.trim()).unwrap_or(""),
+                        f.get(16).map(|s| s.trim()).unwrap_or("0"),
+                    )
+                };
+                let self_target = tgt == "*";
+                if kind == "COMBAT_EVENT" && !combat_event_registers(result, self_target) {
+                    return Ok(());
+                }
+                if let Some(identity) = live.get(src) {
+                    registering.insert(identity.clone());
+                }
+                if !self_target && tgt != "0" {
+                    if let Some(identity) = live.get(tgt) {
+                        registering.insert(identity.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    Ok(registering)
+}
+
 /// Join records with trailing newlines (each record on its own `\n`-terminated
 /// line), matching the master-table section format. `pub(crate)` so the incremental
 /// live master builder ([`super::incremental`]) frames its sections identically.
@@ -1344,15 +1941,25 @@ pub(crate) fn join_lines(records: &[String]) -> String {
 /// like [`super::a_counter`] that parse whole raw lines). Returns the fields as a
 /// `Vec` for index access.
 pub(crate) fn split_csv_quoted_pub(s: &str) -> Vec<&str> {
-    split_csv_quoted(s).collect()
+    split_csv_quoted_vec(s)
 }
 
 /// Split a CSV tail honoring double-quoted fields (which may contain commas).
 /// Lightweight: ESO uses simple `"..."` quoting without escaped inner quotes for
 /// these fields.
 fn split_csv_quoted(s: &str) -> impl Iterator<Item = &str> {
-    let mut out = Vec::new();
+    split_csv_quoted_vec(s).into_iter()
+}
+
+fn split_csv_quoted_vec(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
+    if !bytes.contains(&b'"') {
+        let mut out = Vec::with_capacity(32);
+        out.extend(s.split(','));
+        return out;
+    }
+
+    let mut out = Vec::with_capacity(32);
     let mut start = 0;
     let mut in_q = false;
     for (i, &b) in bytes.iter().enumerate() {
@@ -1366,7 +1973,7 @@ fn split_csv_quoted(s: &str) -> impl Iterator<Item = &str> {
         }
     }
     out.push(&s[start..]);
-    out.into_iter()
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1715,13 +2322,20 @@ fn classify_player_side(
 /// official segment masks on all five byte-captures (combat / cityofash / kynes /
 /// ossein / sunspire). Players and `monsterId 0` are never included. Needs a full pass
 /// over the log, so it runs once before event emission.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MonsterSides {
     pub force_hostile: std::collections::HashSet<String>,
     pub attacks_players: std::collections::HashSet<String>,
 }
 
 pub fn classify_monsters(lines: &[&str]) -> MonsterSides {
+    classify_monsters_iter(lines.iter().copied())
+}
+
+fn classify_monsters_iter<'a, I>(lines: I) -> MonsterSides
+where
+    I: IntoIterator<Item = &'a str>,
+{
     use std::collections::HashMap;
     #[derive(Default)]
     struct Rel {
@@ -1828,6 +2442,118 @@ pub fn classify_monsters(lines: &[&str]) -> MonsterSides {
         }
     }
     sides
+}
+
+/// Text-backed variant for the completed-file encoder.
+pub fn classify_monsters_text(text: &str) -> MonsterSides {
+    classify_monsters_iter(text.lines())
+}
+
+pub(crate) fn classify_monsters_replay(source: &impl LineReplay) -> Result<MonsterSides, String> {
+    use std::collections::HashMap;
+    #[derive(Default)]
+    struct Rel {
+        d2p: u64,
+        d2m: u64,
+        rfp: u64,
+    }
+    const DMG: &[&str] = &[
+        "DAMAGE",
+        "CRITICAL_DAMAGE",
+        "DOT_TICK",
+        "DOT_TICK_CRITICAL",
+        "BLOCKED_DAMAGE",
+        "DAMAGE_SHIELDED",
+    ];
+    let mut rel: HashMap<String, Rel> = HashMap::new();
+    let mut cur: HashMap<String, ClassifyUnit> = HashMap::new();
+
+    source.replay_lines(&mut |line| {
+        let f = split_csv_quoted_pub(line);
+        let Some(kind) = f.get(1).map(|s| s.trim()) else {
+            return Ok(());
+        };
+        match kind {
+            "UNIT_ADDED" => {
+                let (Some(uid), Some(ty)) = (f.get(2), f.get(3)) else {
+                    return Ok(());
+                };
+                let ty = ty.trim();
+                let monster_id = f.get(6).map(|s| s.trim().to_string()).unwrap_or_default();
+                let owner = f.get(15).map(|s| s.trim().to_string()).unwrap_or_default();
+                cur.insert(
+                    uid.trim().to_string(),
+                    ClassifyUnit {
+                        is_player: ty == "PLAYER",
+                        monster_id,
+                        owner,
+                    },
+                );
+            }
+            "UNIT_CHANGED" => {
+                let Some(uid) = f.get(2).map(|s| s.trim()) else {
+                    return Ok(());
+                };
+                if let Some(u) = cur.get_mut(uid) {
+                    if let Some(o) = f.get(10) {
+                        u.owner = o.trim().to_string();
+                    }
+                }
+            }
+            "UNIT_REMOVED" => {
+                if let Some(uid) = f.get(2).map(|s| s.trim()) {
+                    cur.remove(uid);
+                }
+            }
+            "COMBAT_EVENT" => {
+                let Some(ar) = f.get(2).map(|s| s.trim()) else {
+                    return Ok(());
+                };
+                if !DMG.contains(&ar) {
+                    return Ok(());
+                }
+                let src = f.get(9).map(|s| s.trim()).unwrap_or("0");
+                let tgt = f.get(19).map(|s| s.trim()).unwrap_or("0");
+                let src_player = classify_player_side(&cur, src);
+                let tgt_player = classify_player_side(&cur, tgt);
+                let src_mid = cur
+                    .get(src)
+                    .filter(|u| !u.is_player && !u.monster_id.is_empty() && u.monster_id != "0")
+                    .map(|u| u.monster_id.clone());
+                let tgt_is_monster = cur.get(tgt).map(|u| !u.is_player).unwrap_or(false);
+                if let Some(mid) = src_mid {
+                    let e = rel.entry(mid).or_default();
+                    if tgt_player {
+                        e.d2p += 1;
+                    } else if tgt_is_monster {
+                        e.d2m += 1;
+                    }
+                }
+                if src_player {
+                    if let Some(mid) = cur
+                        .get(tgt)
+                        .filter(|u| !u.is_player && !u.monster_id.is_empty() && u.monster_id != "0")
+                        .map(|u| u.monster_id.clone())
+                    {
+                        rel.entry(mid).or_default().rfp += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    let mut sides = MonsterSides::default();
+    for (mid, r) in rel {
+        if r.rfp > 0 || (r.d2p > 0 && r.d2m == 0) {
+            sides.force_hostile.insert(mid.clone());
+        }
+        if r.d2p > 0 {
+            sides.attacks_players.insert(mid);
+        }
+    }
+    Ok(sides)
 }
 
 /// Incremental runtime actor table for mask ordering. Built by replaying

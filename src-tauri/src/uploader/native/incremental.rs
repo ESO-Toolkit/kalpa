@@ -138,10 +138,28 @@ impl IncrementalIndexState {
 
     /// Process one raw line, updating both maps. Idempotent semantics match the
     /// re-walk: an already-assigned identity/ability is never re-numbered.
-    pub fn update(&mut self, line: &str) {
+    pub fn update(&mut self, line: &str) -> bool {
+        let mut head = line.splitn(3, ',');
+        let _ts = head.next();
+        let Some(kind) = head.next().map(str::trim) else {
+            return false;
+        };
+        if !matches!(
+            kind,
+            "UNIT_ADDED"
+                | "UNIT_REMOVED"
+                | "ABILITY_INFO"
+                | "HEALTH_REGEN"
+                | "COMBAT_EVENT"
+                | "EFFECT_CHANGED"
+                | "BEGIN_CAST"
+        ) {
+            return false;
+        }
+
         let f = split_csv_quoted_pub(line);
         let Some(kind) = f.get(1).map(|s| s.trim()) else {
-            return;
+            return false;
         };
         match kind {
             "UNIT_ADDED" => self.on_unit_added(line, &f),
@@ -149,39 +167,40 @@ impl IncrementalIndexState {
                 if let Some(u) = f.get(2) {
                     self.live_monster_unit.remove(u.trim());
                 }
+                false
             }
             "ABILITY_INFO" => {
                 // id is the first field after `<ts>,ABILITY_INFO,` (mirrors
                 // build_ability_table_pinned: ai.ability_id from rest).
                 if let Some(id) = f.get(2).map(|s| s.trim()) {
                     if !id.is_empty() {
-                        self.assign_ability(id);
+                        return self.assign_ability(id);
                     }
                 }
+                false
             }
             "HEALTH_REGEN" => {
                 if !self.health_recovery_spliced {
                     self.health_recovery_spliced = true;
-                    self.assign_ability(HEALTH_RECOVERY_ID);
+                    return self.assign_ability(HEALTH_RECOVERY_ID);
                 }
+                false
             }
             "COMBAT_EVENT" | "EFFECT_CHANGED" | "BEGIN_CAST" => self.on_registering_line(kind, &f),
-            _ => {}
+            _ => false,
         }
     }
 
-    fn on_unit_added(&mut self, line: &str, f: &[&str]) {
+    fn on_unit_added(&mut self, line: &str, f: &[&str]) -> bool {
         let rest = line.splitn(3, ',').nth(2).unwrap_or("");
         let Some(actor) = ActorInfo::parse(rest) else {
-            return;
+            return false;
         };
         let identity = actor.identity();
         match actor {
             // Players always register → assign immediately, in file order (matches
             // the re-walk, which assigns players at their UNIT_ADDED unconditionally).
-            ActorInfo::Player { .. } => {
-                self.assign_actor(identity);
-            }
+            ActorInfo::Player { .. } => self.assign_actor(identity),
             ActorInfo::Monster { .. } => {
                 // Record the time-aware live binding (mirrors
                 // registering_monster_identities' `live`). Assignment is DEFERRED to
@@ -199,11 +218,12 @@ impl IncrementalIndexState {
                 if let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) {
                     self.live_monster_unit.insert(unit_id, identity);
                 }
+                false
             }
         }
     }
 
-    fn on_registering_line(&mut self, kind: &str, f: &[&str]) {
+    fn on_registering_line(&mut self, kind: &str, f: &[&str]) -> bool {
         // Field positions match registering_monster_identities (encode.rs:1225-1237).
         let (result, src, tgt) = if kind == "COMBAT_EVENT" {
             (
@@ -220,7 +240,7 @@ impl IncrementalIndexState {
         };
         let self_target = tgt == "*";
         if kind == "COMBAT_EVENT" && !combat_event_registers(result, self_target) {
-            return;
+            return false;
         }
         // Collect the monster identities this event newly-registers (src, then tgt),
         // de-duplicated and excluding any already assigned. Assign them in ascending
@@ -244,30 +264,34 @@ impl IncrementalIndexState {
         // Stable sort by first-UNIT_ADDED sequence (a monster always has one here —
         // it registered through a live binding set at its UNIT_ADDED).
         to_assign.sort_by_key(|id| self.monster_added_seq.get(id).copied().unwrap_or(u64::MAX));
+        let mut changed = false;
         for id in to_assign {
-            self.assign_actor(id);
+            changed |= self.assign_actor(id);
         }
+        changed
     }
 
     /// Assign `identity` the next actor index if it has none. Idempotent — a pinned
     /// or already-assigned identity keeps its index (the append-only pin).
-    fn assign_actor(&mut self, identity: String) {
+    fn assign_actor(&mut self, identity: String) -> bool {
         if self.identity_to_actor.contains_key(&identity) {
-            return;
+            return false;
         }
         self.identity_to_actor.insert(identity, self.actor_next);
         self.actor_next += 1;
+        true
     }
 
     /// Append-only ability assignment (matches the ability-axis H1 pin). A pinned or
     /// already-seen ability keeps its index.
-    fn assign_ability(&mut self, id: &str) {
+    fn assign_ability(&mut self, id: &str) -> bool {
         if self.ability_to_index.contains_key(id) {
-            return;
+            return false;
         }
         self.ability_to_index
             .insert(id.to_string(), self.ability_next);
         self.ability_next += 1;
+        true
     }
 }
 
@@ -358,6 +382,24 @@ impl IncrementalMasterState {
     /// first-write-wins field is never overwritten; an already-captured actor /
     /// already-seen ability is not re-captured.
     pub fn update(&mut self, line: &str) {
+        let mut head = line.splitn(3, ',');
+        let _ts = head.next();
+        let Some(kind) = head.next().map(str::trim) else {
+            return;
+        };
+        if !matches!(
+            kind,
+            "BEGIN_LOG"
+                | "UNIT_ADDED"
+                | "UNIT_REMOVED"
+                | "HEALTH_REGEN"
+                | "ABILITY_INFO"
+                | "EFFECT_INFO"
+                | "COMBAT_EVENT"
+        ) {
+            return;
+        }
+
         let f = split_csv_quoted_pub(line);
         let Some(kind) = f.get(1).map(|s| s.trim()) else {
             return;
