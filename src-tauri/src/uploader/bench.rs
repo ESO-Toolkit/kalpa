@@ -2067,21 +2067,27 @@ fn bench_finished_file_prefixes() {
     }
 }
 
-/// Local corpus sweep for the completed-upload raw-byte guardrail. This uses the
-/// full real sample instead of a synthetic fixture, so it is the best local signal
-/// for request count, local build time, and long-fight target overruns while the
-/// final ESO Logs report-ready proof is gated on credentials.
+/// Local corpus sweep for the completed-upload raw-byte guardrail. This uses
+/// `KALPA_BENCH_NATIVE_UPLOAD_LOG` when set, otherwise the staged real sample, so
+/// it is the best local signal for request count, local build time, and long-fight
+/// target overruns while the final ESO Logs report-ready proof is gated on
+/// credentials.
 #[test]
 #[ignore = "perf benchmark: needs .decode-samples/sunspire_raw.log; run --release"]
 fn bench_finished_file_raw_targets() {
-    let Some(log) = sample("sunspire_raw.log") else {
+    let Some(upload_log) = bench_upload_log() else {
         eprintln!(
-            "SKIP bench_finished_file_raw_targets: .decode-samples/sunspire_raw.log not present"
+            "SKIP bench_finished_file_raw_targets: set KALPA_BENCH_NATIVE_UPLOAD_LOG \
+             or stage .decode-samples/{BENCH_NATIVE_UPLOAD_SAMPLE}"
         );
         return;
     };
+    let log = upload_log.path;
 
-    const RAW_TARGETS_MIB: &[usize] = &[8, 16, 24, 32, 48, 64, 96];
+    let raw_targets_mib = bench_env("KALPA_BENCH_SEGMENT_TARGETS_MIB")
+        .map(|raw| parse_segment_target_mib_list(&raw))
+        .unwrap_or_else(|| Ok(vec![8, 16, 24, 32, 48, 64, 96]))
+        .expect("raw target sweep env is invalid");
     let input_bytes = std::fs::metadata(&log).unwrap().len();
 
     eprintln!("\n=== FINISHED FILE RAW TARGET SWEEP (production builder) ===");
@@ -2090,7 +2096,7 @@ fn bench_finished_file_raw_targets() {
         "  raw MiB | segments | fights | in-prog | max fight | requests | max raw | over | wall s | MB/s | seg zip | master zip | peak MiB"
     );
 
-    for &raw_target_mib in RAW_TARGETS_MIB {
+    for &raw_target_mib in &raw_targets_mib {
         let raw_target_bytes = raw_target_mib
             .checked_mul(1024 * 1024)
             .expect("raw target MiB is too large");

@@ -33,8 +33,8 @@
 //!   a timer / every-N-events window — so an in-flight correlation never strands.
 //! * Per-segment wall window from [`EventEmitter::live_segment_time_bounds`]
 //!   (`current_session_wall + raw_ts`), with a POST skipped if the window is unknown.
-//! * A structural self-check ([`events::validate_segment_body`]) plus a master/segment
-//!   tuple-count cross-check before every POST, so a malformed segment is never sent.
+//! * An append-time structural self-check plus a master/segment tuple-count
+//!   cross-check before every POST, so a malformed segment is never sent.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -306,9 +306,6 @@ impl LiveSegmenter {
             .log_version()
             .ok_or("live segment has no BEGIN_LOG log version")?
             .to_string();
-        // Structural self-check: every A in range, declared count == emitted lines.
-        body.validate(self.emitter.allocated())?;
-
         // CUMULATIVE master pinned to the emitter's current frozen actor AND ability
         // indices (the H1 fix, both axes). `feed` keeps the emitter's maps current as
         // introduction/registering lines arrive, so the emitter's frozen maps ARE the

@@ -47,7 +47,9 @@ use super::encode::{
     segment_ts, session_offset, split_csv_quoted_pub, ActorTable, FileLineReplay, LineReplay,
 };
 
-const SEGMENT_EVENT_MEMORY_LIMIT: usize = 4 * 1024 * 1024;
+// Keeps common completed-upload segments off the temp-file path longer while
+// preserving the 50 MiB bench-alloc guard on the authenticated Ossein proof log.
+const SEGMENT_EVENT_MEMORY_LIMIT: usize = 16 * 1024 * 1024;
 
 /// `actionResult` values that never emit a segment line (no-op / failed casts).
 /// Mirrors [`super::a_counter::SKIP_ACTION_RESULTS`] — kept local so the assembler
@@ -271,6 +273,7 @@ pub struct EventEmitter {
     segment_events_file: Option<std::fs::File>,
     segment_event_count: u64,
     segment_spool_error: Option<String>,
+    segment_validation_error: Option<String>,
     /// Whether `feed` should retain emitted lines in `segment_events`. This is
     /// enabled only by the live driver via `open_segment`; the completed-file path
     /// already builds its own output string and must not keep a duplicate body.
@@ -550,11 +553,33 @@ impl EventEmitter {
         if events.is_empty() {
             return;
         }
-        if self.segment_spool_error.is_some() {
+        if self.segment_spool_error.is_some() || self.segment_validation_error.is_some() {
             return;
         }
         let bytes = events.as_bytes();
         let count = 1 + bytes.iter().filter(|&&b| b == b'\n').count() as u64;
+        let max_a = self.allocated();
+        let mut validated_count = 0u64;
+        for raw_line in events.split('\n') {
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            if line.is_empty() {
+                continue;
+            }
+            validated_count += 1;
+            if let Err(e) = validate_segment_event_line(line, max_a) {
+                self.segment_validation_error = Some(format!(
+                    "native live: captured segment event validation failed: {e}"
+                ));
+                return;
+            }
+        }
+        if validated_count != count {
+            self.segment_validation_error = Some(format!(
+                "native live: captured segment event count mismatch: \
+                 counted {count} appended lines but validated {validated_count} non-empty lines"
+            ));
+            return;
+        }
         if self.segment_events_file.is_none() {
             let needed = bytes.len().saturating_add(1);
             if self.segment_events_buf.len().saturating_add(needed) <= SEGMENT_EVENT_MEMORY_LIMIT {
@@ -620,6 +645,7 @@ impl EventEmitter {
         self.segment_events_file = None;
         self.segment_event_count = 0;
         self.segment_spool_error = None;
+        self.segment_validation_error = None;
     }
 
     /// Discard the current live segment while replaying an already-on-disk warm-up
@@ -642,6 +668,9 @@ impl EventEmitter {
     }
 
     pub fn drain_segment_events(&mut self) -> Result<SegmentEventsOutput, String> {
+        if let Some(e) = self.segment_validation_error.take() {
+            return Err(e);
+        }
         if let Some(e) = self.segment_spool_error.take() {
             return Err(e);
         }
