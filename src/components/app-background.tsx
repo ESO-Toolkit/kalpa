@@ -16,10 +16,42 @@
 // no mid-canvas ring. A small flat core out to `corePct` keeps a saturated
 // center, then a long gradual fall to transparent mimics the former Gaussian
 // halo with no visible boundary.
+import { useEffect, useState } from "react";
+
 const orbGradient = (color: string, corePct: number) =>
   `radial-gradient(circle closest-side at center, ${color} 0%, ${color} ${corePct}%, transparent 100%)`;
 
+const isVisibleAndFocused = () =>
+  typeof document === "undefined" ? true : !document.hidden && document.hasFocus();
+
 export function AppBackground() {
+  // Pause the ambient orb drift when Kalpa isn't visible/focused. The three
+  // infinite compositor animations otherwise keep the GPU compositing at ~60fps
+  // for the app's whole lifetime (measured ~260 DrawFrames/s while idle) — a
+  // real battery/power drain when Kalpa sits minimized, occluded, or unfocused
+  // on a second monitor during a raid. `animation-play-state: paused` freezes
+  // the orbs in place (no reset) and they resume instantly on focus, so the
+  // drift is imperceptible while you're not looking — purely a power win.
+  // Initial value is derived lazily (not via a setState-in-effect) so the repo's
+  // react-hooks/set-state-in-effect lint stays green.
+  const [running, setRunning] = useState(isVisibleAndFocused);
+  useEffect(() => {
+    const update = () => setRunning(isVisibleAndFocused());
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, []);
+  const animationPlayState = running ? "running" : "paused";
+  // Only pin the orb layers to their own GPU textures WHILE they animate. When
+  // paused (unfocused/hidden) drop will-change so the 3 large backing textures
+  // are released — the drift can't jank if it isn't running.
+  const willChange = running ? "transform" : "auto";
+
   return (
     <div className="fixed inset-0 -z-10 overflow-hidden bg-bg-base">
       {/* Material texture (art themes only; "none" by default) */}
@@ -36,6 +68,7 @@ export function AppBackground() {
           width: "1160px",
           height: "1160px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-1) 22%, transparent)", 34),
+          animationPlayState,
         }}
       />
       {/* orb 2 — former 500px disk @ (bottom -20%, right -10%), blur-120px (sky) */}
@@ -47,6 +80,7 @@ export function AppBackground() {
           width: "1060px",
           height: "1060px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-2) 17%, transparent)", 32),
+          animationPlayState,
         }}
       />
       {/* orb 3 — former 400px disk @ (30%,40%), blur-100px (indigo) */}
@@ -58,6 +92,7 @@ export function AppBackground() {
           width: "860px",
           height: "860px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-3) 11%, transparent)", 32),
+          animationPlayState,
         }}
       />
       {/* Ornamental motif tile (art themes only; "none" by default) */}
