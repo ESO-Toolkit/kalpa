@@ -137,6 +137,18 @@ impl UploaderState {
     /// (the join could block process exit on a wedged network up to the terminate
     /// watchdog); correctness on a hard exit is covered by the L2 orphan breadcrumb +
     /// next-launch recovery. Setting the flag is enough to start a prompt close.
+    /// True while any live-logging session is tracked (starting / official
+    /// `Running` / `NativeRunning`). The webview may be deep-suspended when the
+    /// window is hidden ONLY if this is false — an active session needs its feed
+    /// event handlers running, so it falls back to MemoryUsageTargetLevel=LOW
+    /// instead. Fails safe to `true` (no suspend) if the lock is poisoned.
+    pub fn has_active_live_session(&self) -> bool {
+        self.live_sessions
+            .lock()
+            .map(|s| !s.is_empty())
+            .unwrap_or(true)
+    }
+
     pub fn signal_all_live_stop(&self) {
         if let Ok(sessions) = self.live_sessions.lock() {
             for slot in sessions.values() {
