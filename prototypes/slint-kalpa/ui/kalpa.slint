@@ -1076,10 +1076,21 @@ component AddonRow inherits Rectangle {
     in-out property <length> menu-y: 18px;
 
     height: 52px;
-    background: root.active-current ? Palette.gold-06 : (root.selected ? Palette.gold-04 : (root.hovered ? Palette.white-03 : #00000000));
+    background: #00000000;
     opacity: disabled ? 0.55 : 1.0;
 
     animate background, opacity { duration: 150ms; easing: ease-in-out; }
+
+    Rectangle {
+        visible: root.active-current || root.selected || root.hovered;
+        x: root.active-current || root.selected ? 0px : 8px;
+        y: root.active-current || root.selected ? 1px : 4px;
+        width: parent.width - (root.active-current || root.selected ? 0px : 16px);
+        height: parent.height - (root.active-current || root.selected ? 2px : 8px);
+        border-radius: root.active-current || root.selected ? 0px : 8px;
+        border-width: 0px;
+        background: root.active-current ? @linear-gradient(90deg, Palette.gold-06 0%, Palette.white-02 42%, #00000000 100%) : (root.selected ? @linear-gradient(90deg, Palette.gold-04 0%, Palette.white-02 42%, #00000000 100%) : Palette.white-02);
+    }
 
     Rectangle {
         x: 0px;
@@ -1096,28 +1107,6 @@ component AddonRow inherits Rectangle {
         height: root.height;
         visible: root.active-current || root.selected || state != 0 || disabled;
         background: root.active-current || root.selected ? @linear-gradient(90deg, Palette.gold-15 0%, #00000000 100%) : @linear-gradient(90deg, root.state-wash 0%, #00000000 100%);
-    }
-
-    Rectangle {
-        visible: root.active-current || root.selected;
-        x: 0px;
-        y: 0px;
-        width: root.width;
-        height: root.height;
-        background: #00000000;
-
-        Rectangle {
-            width: parent.width;
-            height: 1px;
-            background: Palette.gold-10;
-        }
-
-        Rectangle {
-            y: parent.height - 1px;
-            width: parent.width;
-            height: 1px;
-            background: Palette.gold-10;
-        }
     }
 
     Checkbox {
@@ -1548,7 +1537,9 @@ component DiscoverSortChip inherits Rectangle {
     horizontal-stretch: 0;
     height: 28px;
     border-radius: 8px;
-    background: root.active ? Palette.gold-10 : Palette.white-02;
+    border-width: 1px;
+    border-color: root.active ? Palette.gold-20 : Palette.border;
+    background: root.active ? Palette.gold-06 : Palette.white-02;
 
     Image {
         x: 12px;
@@ -1580,8 +1571,9 @@ component DiscoverSelectChip inherits Rectangle {
     width: root.chip-width;
     height: 28px;
     border-radius: 8px;
-    border-width: 0px;
-    background: root.active ? Palette.gold-10 : Palette.white-03;
+    border-width: 1px;
+    border-color: root.active ? Palette.gold-20 : Palette.border;
+    background: root.active ? Palette.gold-06 : Palette.white-02;
 
     Image {
         x: 10px;
@@ -3358,7 +3350,7 @@ component AppearanceOverlay inherits Rectangle {
     callback settings-changed;
     callback backup-restore-clicked;
     visible: root.open;
-    background: #000000dd;
+    background: #000000c8;
 
     TouchArea {
         width: root.width;
@@ -3377,7 +3369,8 @@ component AppearanceOverlay inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         border-radius: 16px;
-        border-width: 0px;
+        border-width: 1px;
+        border-color: Palette.border-strong;
         background: Tokens.surface;
         drop-shadow-blur: 30px;
         drop-shadow-offset-y: 12px;
@@ -3926,7 +3919,7 @@ component PackHubField inherits Rectangle {
     height: 36px;
     border-radius: 10px;
     border-width: 0px;
-    background: root.focused ? Tokens.accent-06 : Palette.white-06;
+    background: root.focused ? Palette.sky-15 : Palette.border;
 
     Rectangle {
         x: 1px;
@@ -3935,7 +3928,7 @@ component PackHubField inherits Rectangle {
         height: parent.height - 2px;
         border-radius: 9px;
         border-width: 0px;
-        background: Palette.white-03;
+        background: Palette.white-02;
     }
 
     Image {
@@ -3968,7 +3961,17 @@ component PackHubSelectField inherits Rectangle {
     height: 36px;
     border-radius: 10px;
     border-width: 0px;
-    background: Palette.white-04;
+    background: Palette.border;
+
+    Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        border-radius: 9px;
+        border-width: 0px;
+        background: Palette.white-02;
+    }
 
     Text {
         x: 14px;
@@ -4039,19 +4042,19 @@ component PackHubStep inherits Rectangle {
 component PackHubTag inherits Rectangle {
     in property <string> label;
     in property <color> tone: Palette.muted-strong;
-    width: label-text.preferred-width + 18px;
-    height: 24px;
-    border-radius: 8px;
+    width: label-text.preferred-width + 16px;
+    height: 21px;
+    border-radius: 7px;
     border-width: 0px;
-    background: Palette.white-04;
+    background: Palette.white-03;
 
     label-text := Text {
-        x: 9px;
+        x: 8px;
         y: 0px;
         height: parent.height;
         text: root.label;
         color: root.tone;
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 800;
         vertical-alignment: center;
     }
@@ -4064,7 +4067,7 @@ component PackHubPackCard inherits Rectangle {
     in property <string> addon-count;
     in property <bool> trial: false;
     callback open-detail;
-    height: 116px;
+    height: 98px;
     border-radius: 12px;
     border-width: 0px;
     background: touch.has-hover ? Palette.white-06 : Palette.white-03;
@@ -4075,7 +4078,7 @@ component PackHubPackCard inherits Rectangle {
     Rectangle {
         x: 0px;
         y: 0px;
-        width: 3px;
+        width: 2px;
         height: parent.height;
         border-radius: 2px;
         border-width: 0px;
@@ -4084,7 +4087,7 @@ component PackHubPackCard inherits Rectangle {
 
     title-text := Text {
         x: 16px;
-        y: 17px;
+        y: 14px;
         width: parent.width - 190px;
         text: root.title;
         color: Palette.foreground;
@@ -4095,17 +4098,17 @@ component PackHubPackCard inherits Rectangle {
 
     Pill {
         x: min(16px + title-text.preferred-width + 14px, parent.width - 158px);
-        y: 14px;
+        y: 12px;
         label: "Addon Pack";
         tone: Palette.gold;
         fill: Palette.gold-04;
-        pill-height: 24px;
-        label-font-size: 12px;
+        pill-height: 21px;
+        label-font-size: 11px;
     }
 
     Text {
         x: 16px;
-        y: 58px;
+        y: 48px;
         width: parent.width - 132px;
         text: root.description;
         color: Palette.muted-half;
@@ -4116,14 +4119,14 @@ component PackHubPackCard inherits Rectangle {
 
     PackHubTag {
         x: 16px;
-        y: 83px;
+        y: 72px;
         label: root.tag;
         tone: root.trial ? Palette.red : Palette.muted-strong;
     }
 
     Image {
         x: 96px;
-        y: 88px;
+        y: 77px;
         width: 12px;
         height: 12px;
         source: @image-url("../assets/icons/package.svg");
@@ -4133,7 +4136,7 @@ component PackHubPackCard inherits Rectangle {
 
     Text {
         x: 114px;
-        y: 84px;
+        y: 73px;
         width: 90px;
         height: 20px;
         text: root.addon-count;
@@ -4145,7 +4148,7 @@ component PackHubPackCard inherits Rectangle {
 
     Rectangle {
         x: parent.width - 48px;
-        y: 18px;
+        y: 14px;
         width: 32px;
         height: 42px;
         border-radius: 8px;
@@ -4177,7 +4180,7 @@ component PackHubPackCard inherits Rectangle {
 
     Rectangle {
         x: parent.width - 78px;
-        y: 83px;
+        y: 73px;
         width: 18px;
         height: 18px;
         border-radius: 9px;
@@ -4198,7 +4201,7 @@ component PackHubPackCard inherits Rectangle {
 
     Text {
         x: parent.width - 52px;
-        y: 84px;
+        y: 74px;
         width: 42px;
         text: "Spike'jo";
         color: Palette.muted-half;
@@ -4272,14 +4275,14 @@ component PackHubInstalledRow inherits Rectangle {
     in property <string> title;
     in property <string> meta;
     in property <bool> checked: true;
-    height: 58px;
+    height: 50px;
     border-radius: 10px;
     border-width: 0px;
     background: Palette.white-02;
 
     Image {
         x: 12px;
-        y: 18px;
+        y: 16px;
         width: 14px;
         height: 14px;
         source: @image-url("../assets/icons/check.svg");
@@ -4289,7 +4292,7 @@ component PackHubInstalledRow inherits Rectangle {
 
     Text {
         x: 36px;
-        y: 12px;
+        y: 8px;
         width: parent.width - 58px;
         text: root.title;
         color: Palette.foreground;
@@ -4300,7 +4303,7 @@ component PackHubInstalledRow inherits Rectangle {
 
     Text {
         x: 36px;
-        y: 34px;
+        y: 28px;
         width: parent.width - 58px;
         text: root.meta;
         color: Palette.muted-half;
@@ -4313,14 +4316,14 @@ component PackHubInstalledRow inherits Rectangle {
 component PackHubSelectedCard inherits Rectangle {
     in property <string> title;
     in property <bool> optional: false;
-    height: 70px;
+    height: 58px;
     border-radius: 9px;
     border-width: 0px;
     background: Palette.white-04;
 
     Text {
         x: 12px;
-        y: 10px;
+        y: 8px;
         width: parent.width - 24px;
         text: root.title;
         color: Palette.foreground;
@@ -4331,9 +4334,9 @@ component PackHubSelectedCard inherits Rectangle {
 
     Rectangle {
         x: 12px;
-        y: 38px;
+        y: 32px;
         width: (parent.width - 24px) / 2;
-        height: 22px;
+        height: 20px;
         border-radius: 6px;
         border-width: 0px;
         background: !root.optional ? Palette.gold-15 : Palette.white-03;
@@ -4352,9 +4355,9 @@ component PackHubSelectedCard inherits Rectangle {
 
     Rectangle {
         x: 12px + (parent.width - 24px) / 2;
-        y: 38px;
+        y: 32px;
         width: (parent.width - 24px) / 2;
-        height: 22px;
+        height: 20px;
         border-radius: 6px;
         border-width: 0px;
         background: root.optional ? Palette.gold-15 : Palette.white-03;
@@ -4511,7 +4514,7 @@ component PackHubBrowseView inherits Rectangle {
 
     PackHubPackCard {
         x: 0px;
-        y: 228px;
+        y: 210px;
         width: parent.width;
         title: "Spike's Trial Necessities";
         description: "just some addons i never play without";
@@ -4623,38 +4626,38 @@ component PackHubCreateAddonsView inherits Rectangle {
         x: 0px;
         y: 188px;
         width: parent.width - 244px;
-        height: 202px;
+        height: 216px;
         border-radius: 11px;
         border-width: 0px;
         background: @linear-gradient(180deg, Palette.white-02 0%, #00000000 100%);
         clip: true;
 
         PackHubInstalledRow { x: 0px; y: 0px; width: parent.width - 8px; title: "BSC's How To Kynes Aegis"; meta: "by BloodStainChild666 - v21.3"; }
-        PackHubInstalledRow { x: 0px; y: 62px; width: parent.width - 8px; title: "Caro's Skill Point Saver"; meta: "by Irniben - v6.0.0"; }
-        PackHubInstalledRow { x: 0px; y: 124px; width: parent.width - 8px; title: "Code's Combat Alerts"; meta: "by @code65536 - v2.4.10"; }
-        PackHubInstalledRow { x: 0px; y: 186px; width: parent.width - 8px; title: "Combat Metrics"; meta: "by Solinur - v1.7.4"; checked: false; }
+        PackHubInstalledRow { x: 0px; y: 54px; width: parent.width - 8px; title: "Caro's Skill Point Saver"; meta: "by Irniben - v6.0.0"; }
+        PackHubInstalledRow { x: 0px; y: 108px; width: parent.width - 8px; title: "Code's Combat Alerts"; meta: "by @code65536 - v2.4.10"; }
+        PackHubInstalledRow { x: 0px; y: 162px; width: parent.width - 8px; title: "Combat Metrics"; meta: "by Solinur - v1.7.4"; checked: false; }
     }
 
     Rectangle {
         x: parent.width - 224px;
         y: 188px;
         width: 224px;
-        height: 202px;
+        height: 216px;
         border-radius: 11px;
         border-width: 0px;
         background: Palette.white-02;
         clip: true;
 
         DetailSectionTitle { x: 12px; y: 0px; width: parent.width - 24px; label: "SELECTED (3)"; }
-        PackHubSelectedCard { x: 12px; y: 32px; width: parent.width - 24px; title: "BSC's How To Kynes Aegis"; }
-        PackHubSelectedCard { x: 12px; y: 112px; width: parent.width - 24px; title: "Caro's Skill Point Saver"; optional: true; }
-        PackHubSelectedCard { x: 12px; y: 192px; width: parent.width - 24px; title: "Code's Combat Alerts"; }
+        PackHubSelectedCard { x: 12px; y: 30px; width: parent.width - 24px; title: "BSC's How To Kynes Aegis"; }
+        PackHubSelectedCard { x: 12px; y: 94px; width: parent.width - 24px; title: "Caro's Skill Point Saver"; optional: true; }
+        PackHubSelectedCard { x: 12px; y: 158px; width: parent.width - 24px; title: "Code's Combat Alerts"; }
     }
 
-    PackHubButton { x: 0px; y: 408px; width: parent.width; icon: @image-url("../assets/icons/save.svg"); label: "Save to File"; }
-    Hairline { x: 0px; y: 452px; width: parent.width; height: 1px; opacity: 0.35; }
-    Checkbox { x: 0px; y: 476px; checked: false; }
-    Text { x: 28px; y: 472px; width: parent.width - 28px; text: "Publish anonymously"; color: Palette.muted-half; font-size: 12px; font-weight: 600; }
+    PackHubButton { x: 0px; y: 420px; width: parent.width; icon: @image-url("../assets/icons/save.svg"); label: "Save to File"; }
+    Hairline { x: 0px; y: 462px; width: parent.width; height: 1px; opacity: 0.35; }
+    Checkbox { x: 0px; y: 484px; checked: false; }
+    Text { x: 28px; y: 480px; width: parent.width - 28px; text: "Publish anonymously"; color: Palette.muted-half; font-size: 12px; font-weight: 600; }
     PackHubButton { x: 0px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/save.svg"); label: "Save as Draft"; }
     PackHubButton { x: (parent.width - 12px) / 2 + 12px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Publish"; primary: true; }
 }
@@ -4710,7 +4713,7 @@ component PackHubOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
     visible: root.open;
-    background: #000000d8;
+    background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
     private property <length> modal-height: root.view == 0 ? 536px : (root.view == 3 ? 560px : min(root.height - 48px, 724px));
 
@@ -4728,7 +4731,8 @@ component PackHubOverlay inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         border-radius: 16px;
-        border-width: 0px;
+        border-width: 1px;
+        border-color: Palette.border-strong;
         background: Tokens.surface;
         drop-shadow-blur: 30px;
         drop-shadow-offset-y: 12px;
@@ -5109,7 +5113,7 @@ component BackupRestoreOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
     visible: root.open;
-    background: #000000d8;
+    background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
     private property <length> modal-height: root.height < 748px ? root.height - 48px : 700px;
 
@@ -5125,7 +5129,8 @@ component BackupRestoreOverlay inherits Rectangle {
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         border-radius: 16px;
-        border-width: 0px;
+        border-width: 1px;
+        border-color: Palette.border-strong;
         background: Tokens.surface;
         drop-shadow-blur: 30px;
         drop-shadow-offset-y: 12px;
@@ -5685,7 +5690,7 @@ component SavedVariablesOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
     visible: root.open;
-    background: #000000d2;
+    background: #000000c4;
     private property <length> modal-width: root.width < 980px ? root.width - 48px : 900px;
     private property <length> modal-height: root.height < 738px ? root.height - 48px : 690px;
 
@@ -5702,7 +5707,7 @@ component SavedVariablesOverlay inherits Rectangle {
         y: (root.height - self.height) / 2;
         border-radius: 16px;
         border-width: 1px;
-        border-color: Palette.white-06;
+        border-color: Palette.border-strong;
         background: @linear-gradient(180deg, Tokens.surface 0%, Tokens.background 100%);
         drop-shadow-blur: 34px;
         drop-shadow-offset-y: 14px;
@@ -7536,8 +7541,9 @@ component DiscoverStatCard inherits Rectangle {
     width: root.card-width;
     height: 64px;
     border-radius: 12px;
-    border-width: 0px;
-    background: Palette.white-04;
+    border-width: 1px;
+    border-color: Palette.border;
+    background: Palette.white-03;
 
     Rectangle {
         x: 1px;
@@ -7729,10 +7735,11 @@ component DiscoverDetailPane inherits Rectangle {
 
             Rectangle {
                 width: parent.width;
-                height: 108px;
+                height: 118px;
                 border-radius: 12px;
-                border-width: 0px;
-                background: Palette.white-04;
+                border-width: 1px;
+                border-color: Palette.border;
+                background: Palette.white-03;
 
                 Rectangle {
                     x: 1px;
@@ -7753,15 +7760,15 @@ component DiscoverDetailPane inherits Rectangle {
                 DetailSectionTitle { x: parent.width * 0.68; y: 18px; width: 180px; label: "MD5"; }
                 Text { x: parent.width * 0.68; y: 46px; width: parent.width * 0.30 - 20px; text: root.entry.md5; color: Palette.foreground; font-family: "Space Grotesk Light"; font-size: 14px; font-weight: 700; overflow: elide; }
 
-                DetailSectionTitle { x: 22px; y: 72px; width: 180px; label: "CREATED"; }
-                Text { x: 22px; y: 92px; width: 280px; text: root.entry.created; color: Palette.foreground; font-size: 15px; font-weight: 700; overflow: elide; }
+                DetailSectionTitle { x: 22px; y: 76px; width: 180px; label: "CREATED"; }
+                Text { x: 22px; y: 96px; width: 280px; text: root.entry.created; color: Palette.foreground; font-size: 15px; font-weight: 700; overflow: elide; }
             }
 
             Rectangle { height: 26px; background: #00000000; }
 
             if (root.show-screenshots) : DetailSectionTitle {
                 width: parent.width;
-                label: "SCREENSHOTS";
+                label: "SCREENSHOTS (3)";
             }
 
             if (root.show-screenshots) : Rectangle { height: 8px; background: #00000000; }
@@ -7770,8 +7777,9 @@ component DiscoverDetailPane inherits Rectangle {
                 width: parent.width;
                 height: 300px;
                 border-radius: 12px;
-                border-width: 0px;
-                background: Palette.white-06;
+                border-width: 1px;
+                border-color: Palette.border;
+                background: Palette.white-04;
                 drop-shadow-blur: 16px;
                 drop-shadow-offset-y: 8px;
                 drop-shadow-color: #00000033;
