@@ -8,7 +8,7 @@
 //! Copies are streamed in fixed buffers so memory stays flat regardless of size.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::scanner;
@@ -191,6 +191,75 @@ fn session_file_name(stem: &str, session: &LogSession) -> String {
     )
 }
 
+fn latest_session_file_name(stem: &str, start_time_ms: u64) -> String {
+    if start_time_ms == 0 {
+        format!("{stem}-latest-session.log")
+    } else {
+        format!("{stem}-latest-session-{start_time_ms}.log")
+    }
+}
+
+fn begin_log_start_time_at(src: &Path, offset: u64) -> Result<u64, String> {
+    let mut reader = BufReader::new(File::open(src).map_err(|e| format!("Open source: {e}"))?);
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|e| format!("Seek: {e}"))?;
+    let mut line = Vec::with_capacity(256);
+    reader
+        .read_until(b'\n', &mut line)
+        .map_err(|e| format!("Read BEGIN_LOG: {e}"))?;
+    if line.ends_with(b"\n") {
+        line.pop();
+    }
+    if line.ends_with(b"\r") {
+        line.pop();
+    }
+    let text = String::from_utf8_lossy(&line);
+    let mut fields = text.split(',');
+    let _rel = fields.next();
+    if !matches!(fields.next(), Some(name) if name.eq_ignore_ascii_case("BEGIN_LOG")) {
+        return Err("Latest session anchor was not a BEGIN_LOG line.".into());
+    }
+    Ok(fields
+        .next()
+        .and_then(|ts| ts.trim().parse::<u64>().ok())
+        .unwrap_or(0))
+}
+
+/// Split only the latest/current logging session without scanning the whole file.
+///
+/// This is the fast path for the common "upload the one instance I just ran" workflow:
+/// scan backward to the most recent `BEGIN_LOG`, then stream-copy `[BEGIN_LOG, EOF)` at
+/// a single file-length snapshot. It deliberately does not build the full sessions/fights
+/// index; users who need older sessions or per-fight carving can still run preflight and
+/// open the full workbench.
+pub fn split_latest_session(source_path: &str, out_dir: &str) -> Result<Vec<String>, String> {
+    let src = Path::new(source_path);
+    if !src.is_file() {
+        return Err(format!("Source log not found: {source_path}"));
+    }
+    let out = PathBuf::from(out_dir);
+    std::fs::create_dir_all(&out).map_err(|e| format!("Create output dir: {e}"))?;
+
+    let snapshot_len = std::fs::metadata(src)
+        .map_err(|e| format!("Failed to stat source: {e}"))?
+        .len();
+    let begin_log_offset = scanner::find_latest_session_begin(src, snapshot_len)?
+        .ok_or_else(|| "No logging sessions found in this file.".to_string())?;
+    if snapshot_len <= begin_log_offset {
+        return Err("Latest logging session is empty.".into());
+    }
+
+    let start_time_ms = begin_log_start_time_at(src, begin_log_offset)?;
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Encounter");
+    let dst = out.join(latest_session_file_name(stem, start_time_ms));
+    copy_range(src, &dst, begin_log_offset, snapshot_len)?;
+    Ok(vec![dst.to_string_lossy().into_owned()])
+}
+
 /// Sanitize a user-supplied split name into a safe, single-segment file stem.
 ///
 /// The UI lets users name each split (e.g. "core-prog lucent hm"). That string
@@ -251,6 +320,10 @@ pub struct SplitSelection {
     pub index: usize,
     /// A user-supplied name (sanitized before use); falls back to the auto name.
     pub name: Option<String>,
+    /// Absolute byte offset of the session's `BEGIN_LOG` line. When present, this
+    /// is preferred over `index` so latest-session-only preflights (whose indices
+    /// are local to that bounded scan) still resolve correctly after a full rescan.
+    pub start_offset: Option<u64>,
     /// The session's `start_time_ms` at selection time. When present, it is
     /// verified against the resolved session so a rescan (the log was
     /// truncated/rotated between preflight and split) that shifted indices is
@@ -422,13 +495,15 @@ pub fn split_selected(
     let mut written = Vec::with_capacity(selections.len());
 
     for sel in &selections {
-        // Find the session this selection refers to. Ignore unknown indices
-        // rather than failing the whole split (the list may have been re-scanned).
-        let Some((pos, session)) = sessions
-            .iter()
-            .enumerate()
-            .find(|(_, s)| s.index == sel.index)
-        else {
+        // Find the session this selection refers to. Prefer the absolute offset
+        // when supplied; a latest-session-only preflight has local indices, while
+        // a fallback full rescan has file-global indices.
+        let found = sessions.iter().enumerate().find(|(_, s)| {
+            sel.start_offset
+                .map(|offset| s.start_offset == offset)
+                .unwrap_or(s.index == sel.index)
+        });
+        let Some((pos, session)) = found else {
             continue;
         };
         // If the caller pinned the session's identity, verify it still matches the
@@ -545,6 +620,10 @@ pub struct FightSelection {
     pub index: usize,
     /// A user-supplied name (sanitized before use); falls back to the auto name.
     pub name: Option<String>,
+    /// Absolute byte offset of the fight's `BEGIN_COMBAT` line. When present, this
+    /// is preferred over `index` so latest-session-only preflights can survive a
+    /// fallback full-file rescan where global fight indices differ.
+    pub start_offset: Option<u64>,
     /// The fight's `start_ms` at selection time. When present, it is verified
     /// against the resolved fight so a rescan (the log changed between preflight
     /// and split) that shifted indices is caught instead of mislabeling/mis-slicing.
@@ -660,9 +739,15 @@ pub fn split_selected_fights(
     let mut written = Vec::with_capacity(selections.len());
 
     for sel in &selections {
-        // Resolve the target fight by index (ignore unknown indices rather than
-        // failing the whole split — the list may have been re-scanned).
-        let Some(fight) = all_fights.iter().find(|f| f.index == sel.index) else {
+        // Resolve the target fight. Prefer the absolute offset when supplied; a
+        // latest-session-only preflight has local indices, while a fallback full
+        // rescan has file-global indices.
+        let found = all_fights.iter().find(|f| {
+            sel.start_offset
+                .map(|offset| f.start_offset == offset)
+                .unwrap_or(f.index == sel.index)
+        });
+        let Some(fight) = found else {
             continue;
         };
         // If the caller pinned the fight identity, verify it still matches the
@@ -753,6 +838,48 @@ mod tests {
         f.write_all(bytes).unwrap();
     }
 
+    #[test]
+    fn split_latest_session_writes_only_newest_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+
+        let first = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n\
+                      10,BEGIN_COMBAT\n11,COMBAT_EVENT,OLD\n20,END_COMBAT\n30,END_LOG\n";
+        let latest = b"0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n\
+                       10,BEGIN_COMBAT\n11,COMBAT_EVENT,LATEST\n20,END_COMBAT\n";
+        let mut full = first.to_vec();
+        full.extend_from_slice(latest);
+        write(&log, &full);
+
+        let written = split_latest_session(log.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+
+        assert_eq!(written.len(), 1);
+        assert!(
+            written[0].ends_with("Encounter-latest-session-2000.log"),
+            "got {}",
+            written[0]
+        );
+        let bytes = std::fs::read(&written[0]).unwrap();
+        assert_eq!(bytes, latest);
+    }
+
+    #[test]
+    fn split_latest_session_errors_without_begin_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Interface.log");
+        let out = tmp.path().join("out");
+        write(&log, b"plain ui log line\nanother line\n");
+
+        let err = split_latest_session(log.to_str().unwrap(), out.to_str().unwrap())
+            .expect_err("a log without BEGIN_LOG must fail");
+
+        assert!(
+            err.contains("No logging sessions"),
+            "unexpected error: {err}"
+        );
+    }
+
     // ── split_selected_fights (per-fight extraction) ─────────────────────────
 
     /// A three-fight session with a pre-combat definition block and an inter-fight
@@ -800,6 +927,7 @@ mod tests {
             vec![FightSelection {
                 index: 1,
                 name: Some("kynes-prog".into()),
+                start_offset: None,
                 start_ms: Some(scan.fights[1].start_ms),
             }],
         )
@@ -838,6 +966,7 @@ mod tests {
             vec![FightSelection {
                 index: 0,
                 name: None, // exercise the auto fallback name
+                start_offset: None,
                 start_ms: None,
             }],
         )
@@ -873,11 +1002,13 @@ mod tests {
                 FightSelection {
                     index: 0,
                     name: Some("pull".into()),
+                    start_offset: None,
                     start_ms: None,
                 },
                 FightSelection {
                     index: 2,
                     name: Some("pull".into()),
+                    start_offset: None,
                     start_ms: None,
                 },
             ],
@@ -909,10 +1040,59 @@ mod tests {
             vec![FightSelection {
                 index: 0,
                 name: None,
+                start_offset: None,
                 start_ms: Some(999_999), // does not match fight 0's real start_ms
             }],
         );
         assert!(res.is_err(), "a mismatched fight fingerprint must fail");
+    }
+
+    #[test]
+    fn split_fights_resolves_latest_session_local_index_by_offset_after_rescan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+
+        let old = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n\
+                    10,BEGIN_COMBAT\n11,COMBAT_EVENT,OLD\n20,END_COMBAT\n";
+        let latest = b"0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n\
+                       10,BEGIN_COMBAT\n11,COMBAT_EVENT,LATEST\n20,END_COMBAT\n";
+        let mut full = old.to_vec();
+        full.extend_from_slice(latest);
+        write(&log, &full);
+
+        // Latest-session preflight sees one local fight at index 0, but its byte
+        // offsets remain absolute in the original file.
+        let (latest_scan, _) = scanner::scan_latest_session(log.to_str().unwrap()).unwrap();
+        assert_eq!(latest_scan.fights[0].index, 0);
+
+        // ESO appends a new session after that preflight, forcing the split path
+        // to distrust the bounded scan and fall back to a full-file scan.
+        full.extend_from_slice(
+            b"0,BEGIN_LOG,3000,15,\"NA\",\"en\",\"10.0\"\n\
+              10,BEGIN_COMBAT\n11,COMBAT_EVENT,NEW\n20,END_COMBAT\n",
+        );
+        write(&log, &full);
+
+        let target = &latest_scan.fights[0];
+        let written = split_selected_fights(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(latest_scan.sessions.clone()),
+            Some(latest_scan.fights.clone()),
+            vec![FightSelection {
+                index: target.index,
+                name: Some("latest".into()),
+                start_offset: Some(target.start_offset),
+                start_ms: Some(target.start_ms),
+            }],
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&written[0]).unwrap();
+        assert!(bytes.windows(6).any(|w| w == b"LATEST"));
+        assert!(!bytes.windows(3).any(|w| w == b"OLD"));
+        assert!(!bytes.windows(3).any(|w| w == b"NEW"));
     }
 
     // A fight in the SECOND session must be extracted with the SECOND session's
@@ -942,6 +1122,7 @@ mod tests {
             vec![FightSelection {
                 index: 1,
                 name: None,
+                start_offset: None,
                 start_ms: None,
             }],
         )
@@ -1039,6 +1220,7 @@ mod tests {
             vec![SplitSelection {
                 index: 1,
                 name: Some("core prog/hm".into()),
+                start_offset: None,
                 start_time_ms: None,
             }],
         )
@@ -1099,11 +1281,13 @@ mod tests {
                 SplitSelection {
                     index: 0,
                     name: Some("raid".into()),
+                    start_offset: None,
                     start_time_ms: None,
                 },
                 SplitSelection {
                     index: 1,
                     name: Some("raid".into()),
+                    start_offset: None,
                     start_time_ms: None,
                 },
             ],
@@ -1142,10 +1326,52 @@ mod tests {
             vec![SplitSelection {
                 index: 0,
                 name: Some("raid".into()),
+                start_offset: None,
                 start_time_ms: Some(9999),
             }],
         );
         assert!(res.is_err(), "a mismatched session fingerprint must fail");
+    }
+
+    #[test]
+    fn split_selected_resolves_latest_session_local_index_by_offset_after_rescan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+
+        let old = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let latest =
+            b"0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let mut full = old.to_vec();
+        full.extend_from_slice(latest);
+        write(&log, &full);
+
+        let (latest_scan, _) = scanner::scan_latest_session(log.to_str().unwrap()).unwrap();
+        assert_eq!(latest_scan.sessions[0].index, 0);
+
+        full.extend_from_slice(
+            b"0,BEGIN_LOG,3000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n",
+        );
+        write(&log, &full);
+
+        let target = &latest_scan.sessions[0];
+        let written = split_selected(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(latest_scan.sessions.clone()),
+            vec![SplitSelection {
+                index: target.index,
+                name: Some("latest-session".into()),
+                start_offset: Some(target.start_offset),
+                start_time_ms: Some(target.start_time_ms),
+            }],
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&written[0]).unwrap();
+        assert!(bytes.windows(4).any(|w| w == b"2000"));
+        assert!(!bytes.windows(4).any(|w| w == b"1000"));
+        assert!(!bytes.windows(4).any(|w| w == b"3000"));
     }
 
     // A preflight that saw ONE session must not, after the file appends a SECOND

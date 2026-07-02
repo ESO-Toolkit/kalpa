@@ -27,6 +27,7 @@ use crate::AllowedAddonsPath;
 /// so the caller can report it as cancelled rather than an error. Not shown to
 /// the user — the caller maps it to a friendly message.
 const LIVE_CANCELLED_BEFORE_LAUNCH: &str = "__live_cancelled_before_launch__";
+const MAX_SHIPPED_FIGHTS: usize = 500;
 
 /// A live session slot. A session is registered as `Starting` *before* the
 /// (blocking) uploader handoff so a concurrent stop/unmount during that window
@@ -482,26 +483,61 @@ pub async fn uploader_preflight(
         let size_bytes = std::fs::metadata(&safe)
             .map_err(|e| format!("Failed to read file: {e}"))?
             .len();
-        let scan = scanner::scan_file(&safe)?;
-        let total_fights = scan.fights.len();
         let recommend_split = size_bytes > scanner::SPLIT_RECOMMEND_BYTES;
+        let fight_collect_limit = if recommend_split {
+            Some(0)
+        } else {
+            Some(MAX_SHIPPED_FIGHTS)
+        };
+        let scan = scanner::scan_file_with_fight_limit(&safe, fight_collect_limit)?;
+        let total_fights = scan.total_fights;
         // Don't ship a huge fight list over IPC: bound by fight COUNT (a dense
         // sub-512-MiB log can still hold thousands of fights, which would be a
         // ~MB payload + thousands of DOM rows). `total_fights` still drives the
         // count pills, so omitting the list is safe.
-        const MAX_SHIPPED_FIGHTS: usize = 500;
-        let fights = if recommend_split || total_fights > MAX_SHIPPED_FIGHTS {
-            Vec::new()
-        } else {
-            scan.fights
-        };
+        let fights_omitted = scan.fights.len() < total_fights;
         Ok::<_, String>(LogPreflight {
             path: file_path,
             size_bytes,
             sessions: scan.sessions,
             total_fights,
-            fights,
+            fights: scan.fights,
+            fights_omitted,
             recommend_split,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Preflight only the latest/current logging session. This gives the split
+/// workbench a per-fight list for the common "just this instance" workflow
+/// without scanning older sessions in a multi-GB log.
+#[tauri::command]
+pub async fn uploader_preflight_latest_session(
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<LogPreflight, String> {
+    let safe = confine_log_path(&allowed, &file_path)?;
+    let safe = safe.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let (scan, file_size_bytes) =
+            scanner::scan_latest_session_with_fight_limit(&safe, Some(MAX_SHIPPED_FIGHTS))?;
+        let total_fights = scan.total_fights;
+        let latest_size = scan
+            .sessions
+            .first()
+            .map(|s| s.size_bytes)
+            .unwrap_or(file_size_bytes);
+        let fights_omitted = scan.fights.len() < total_fights;
+        Ok::<_, String>(LogPreflight {
+            path: file_path,
+            size_bytes: latest_size,
+            sessions: scan.sessions,
+            total_fights,
+            fights: scan.fights,
+            fights_omitted,
+            recommend_split: latest_size > scanner::SPLIT_RECOMMEND_BYTES,
         })
     })
     .await
@@ -610,6 +646,27 @@ pub async fn uploader_split_to_disk(
     // Reuse the preflight's sessions (the UI passes them) to avoid a second full
     // scan of a multi-GB file; fall back to scanning when not supplied.
     tokio::task::spawn_blocking(move || splitter::split_by_session(&safe, &out_str, sessions))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Fast path for the common case: split only the latest/current session from a
+/// large log without preflight-scanning the whole file. Uses the same app-owned
+/// destination and confinement as the full split workbench.
+#[tauri::command]
+pub async fn uploader_split_latest_session_to_disk(
+    app: tauri::AppHandle,
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<Vec<String>, String> {
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
+    let out_root = split_output_root(&app)?;
+    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_dir = out_root.join(format!("split-{}", now_ms()));
+    let out_str = out_dir.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || splitter::split_latest_session(&safe, &out_str))
         .await
         .map_err(|e| format!("Task failed: {e}"))?
 }
@@ -1074,7 +1131,7 @@ pub async fn uploader_upload_log(
                 .await
                 .map_err(|e| format!("Fight-count task failed: {e}"))
                 .and_then(|r| r)
-                .map(|s| s.fights.len())
+                .map(|s| s.total_fights)
                 .unwrap_or_else(|e| {
                     eprintln!("[uploader] fight count scan failed: {e}");
                     0

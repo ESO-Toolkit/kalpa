@@ -48,6 +48,9 @@ export interface LogPreflight {
   /** Per-fight summaries from the single preflight scan. Empty for very large
    *  logs (see recommendSplit) to bound the IPC payload. */
   fights: FightSummary[];
+  /** True when fights was intentionally omitted to bound IPC/DOM work. False
+   *  with an empty fights list means the scan really found no fights. */
+  fightsOmitted: boolean;
   recommendSplit: boolean;
 }
 
@@ -227,6 +230,9 @@ export interface LiveFight {
 export interface SplitSelection {
   index: number;
   name: string | null;
+  /** Absolute BEGIN_LOG byte offset; preferred by the backend when present so
+   *  latest-session-only preflights can survive a full rescan. */
+  startOffset: number | null;
   /** The session's startTimeMs at selection time; the backend verifies it still
    *  matches after any rescan so a shifted index can't mislabel a split. */
   startTimeMs: number | null;
@@ -239,6 +245,9 @@ export interface SplitSelection {
 export interface FightSelection {
   index: number;
   name: string | null;
+  /** Absolute BEGIN_COMBAT byte offset; preferred by the backend when present so
+   *  latest-session-only preflights can survive a full rescan. */
+  startOffset: number | null;
   /** The fight's startMs at selection time; the backend verifies it still matches
    *  after any rescan so a shifted index can't extract/mislabel the wrong fight. */
   startMs: number | null;

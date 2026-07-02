@@ -39,6 +39,12 @@ use std::time::{Duration, Instant};
 /// Resolve a gitignored sample log under the worktree's `.decode-samples/`.
 /// `CARGO_MANIFEST_DIR` is `…/src-tauri`, so the corpus sits one level up.
 fn sample(name: &str) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("KALPA_BENCH_LOG") {
+        let p = PathBuf::from(path);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join(".decode-samples")
@@ -112,9 +118,120 @@ fn bench_split_one_gb() {
     drop(tmp);
 }
 
-/// Benchmark the buffered native encode (raw → segment + master). Production caps a
+/// Benchmark the latest-session fast path. Unlike `bench_split_one_gb`, this avoids
+/// building the full sessions/fights index and copies only the byte range from the
+/// newest `BEGIN_LOG` to the file-length snapshot. On a multi-day/multi-session log,
+/// this is the common "I only want the latest run" workflow.
+#[test]
+#[ignore = "perf benchmark: needs .decode-samples/sunspire_raw.log; run --release"]
+fn bench_split_latest_session_one_gb() {
+    let Some(log) = sample("sunspire_raw.log") else {
+        eprintln!(
+            "SKIP bench_split_latest_session_one_gb: .decode-samples/sunspire_raw.log not present"
+        );
+        return;
+    };
+    let size = std::fs::metadata(&log).unwrap().len();
+    let tmp = tempfile::tempdir().unwrap();
+
+    crate::bench_alloc::reset_peak();
+    let t = Instant::now();
+    let written =
+        super::splitter::split_latest_session(log.to_str().unwrap(), tmp.path().to_str().unwrap())
+            .expect("latest-session split should succeed on a valid log");
+    let dt = t.elapsed();
+    let peak = peak_heap_line();
+    let copied = written
+        .first()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    eprintln!("\n=== SPLIT LATEST SESSION (backward anchor + copy) ===");
+    eprintln!(
+        "  input        : {:.1} MiB ({:.2} GB)",
+        mib(size),
+        size as f64 / 1e9
+    );
+    eprintln!("  files out    : {}", written.len());
+    eprintln!("  copied       : {:.1} MiB", mib(copied));
+    eprintln!("  wall time    : {:.2} s", dt.as_secs_f64());
+    eprintln!("  copy rate    : {:.0} MB/s", mb_per_s(copied, dt));
+    eprintln!("  peak heap    : {peak}");
+    eprintln!(
+        "  (avoids full preflight; best win is on logs with older sessions before the latest)"
+    );
+
+    drop(tmp);
+}
+
+/// Benchmark a full scanner preflight: this is the cost the UI pays before it can
+/// list per-fight choices for a giant multi-session log.
+#[test]
+#[ignore = "perf benchmark: needs .decode-samples/sunspire_raw.log or KALPA_BENCH_LOG; run --release"]
+fn bench_scan_one_gb() {
+    let Some(log) = sample("sunspire_raw.log") else {
+        eprintln!("SKIP bench_scan_one_gb: no sample log present");
+        return;
+    };
+    let size = std::fs::metadata(&log).unwrap().len();
+
+    crate::bench_alloc::reset_peak();
+    let t = Instant::now();
+    let scan = super::scanner::scan_file(log.to_str().unwrap())
+        .expect("full scan should succeed on a valid log");
+    let dt = t.elapsed();
+    let peak = peak_heap_line();
+
+    eprintln!("\n=== SCAN FULL LOG (preflight sessions + fights) ===");
+    eprintln!(
+        "  input        : {:.1} MiB ({:.2} GB)",
+        mib(size),
+        size as f64 / 1e9
+    );
+    eprintln!("  sessions     : {}", scan.sessions.len());
+    eprintln!("  fights       : {}", scan.total_fights);
+    eprintln!("  wall time    : {:.2} s", dt.as_secs_f64());
+    eprintln!("  throughput   : {:.0} MB/s", mb_per_s(size, dt));
+    eprintln!("  peak heap    : {peak}");
+}
+
+/// Benchmark the latest-session preflight used by the fast fight picker: backward
+/// anchor to the newest `BEGIN_LOG`, then scan only that session for fights.
+#[test]
+#[ignore = "perf benchmark: needs .decode-samples/sunspire_raw.log or KALPA_BENCH_LOG; run --release"]
+fn bench_scan_latest_session_one_gb() {
+    let Some(log) = sample("sunspire_raw.log") else {
+        eprintln!("SKIP bench_scan_latest_session_one_gb: no sample log present");
+        return;
+    };
+    let size = std::fs::metadata(&log).unwrap().len();
+
+    crate::bench_alloc::reset_peak();
+    let t = Instant::now();
+    let (scan, _) = super::scanner::scan_latest_session(log.to_str().unwrap())
+        .expect("latest-session scan should succeed on a valid log");
+    let dt = t.elapsed();
+    let peak = peak_heap_line();
+    let latest_bytes = scan.sessions.first().map(|s| s.size_bytes).unwrap_or(0);
+
+    eprintln!("\n=== SCAN LATEST SESSION (fast fight preflight) ===");
+    eprintln!(
+        "  input        : {:.1} MiB ({:.2} GB)",
+        mib(size),
+        size as f64 / 1e9
+    );
+    eprintln!("  scanned      : {:.1} MiB", mib(latest_bytes));
+    eprintln!("  sessions     : {}", scan.sessions.len());
+    eprintln!("  fights       : {}", scan.total_fights);
+    eprintln!("  wall time    : {:.2} s", dt.as_secs_f64());
+    eprintln!("  throughput   : {:.0} MB/s", mb_per_s(latest_bytes, dt));
+    eprintln!("  peak heap    : {peak}");
+}
+
+/// Benchmark the buffered native encode (raw -> segment + master). Production caps a
 /// single native encode at 256 MiB (`MAX_NATIVE_BYTES`) and splits first, so this
-/// feeds the leading, BEGIN_LOG-anchored ~200 MiB of a real trial log — a realistic
+/// feeds the leading, BEGIN_LOG-anchored ~200 MiB of a real trial log - a realistic
 /// large single-session encode workload. Unlike the split, this path buffers the
 /// whole input (read_to_string + `Vec<&str>` + the rendered segment String), so peak
 /// heap scales with input size; recording it shows the gap to a streaming encoder.
