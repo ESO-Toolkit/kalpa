@@ -391,9 +391,14 @@ impl Detector {
                     .filter(|s| !s.is_empty());
             }
             LineType::UnitAdded => {
-                // A boss unit has isBoss="T"; name is field 10. Skip @handles
-                // (player display names) so we only adopt monster names.
-                if line.contains(",T,") {
+                // isBoss is field 7 (isLocalPlayer is field 4 — a different
+                // "T" flag at a different offset). A bare `,T,` substring
+                // search previously matched the local player's own
+                // UNIT_ADDED line via its isLocalPlayer="T", wrongly naming
+                // fights after the player. Name is field 10; the @-handle
+                // filter is kept as defense in depth so only monster names
+                // are ever adopted.
+                if field(line, 7).is_some_and(|f| f.eq_ignore_ascii_case("T")) {
                     if let Some(name) =
                         field(line, 10).filter(|s| !s.is_empty() && !s.starts_with('@'))
                     {
@@ -498,6 +503,15 @@ pub struct ChunkScan {
     /// from 0, and re-anchors here — past the boundary line, so it isn't
     /// re-detected on the next pass.
     pub new_session_at: Option<u64>,
+    /// The zone name still pending (seen via `ZONE_CHANGED` but not yet consumed
+    /// by a completed fight) at the END of this chunk. The watcher carries this
+    /// into the next pass's `pending_zone` seed so a zone/boss line consumed by
+    /// an earlier read isn't lost by the time a later fight closes (E2). Cleared
+    /// whenever a `BEGIN_LOG` is fed, mirroring `Detector::feed`'s `BeginLog` arm.
+    pub pending_zone: Option<String>,
+    /// The boss name still pending at the end of this chunk — same carry
+    /// discipline as `pending_zone`.
+    pub pending_boss: Option<String>,
 }
 
 /// Scan an in-memory raw byte chunk for completed fights, plus the boundary
@@ -512,9 +526,24 @@ pub struct ChunkScan {
 /// (false — a leading `BEGIN_LOG` is just the session header, not a re-enable).
 /// The watcher passes `false` right after a truncation reset to avoid a spurious
 /// second `SessionReset`.
-pub fn scan_chunk_for_fights(chunk: &[u8], base: u64, session_already_open: bool) -> ChunkScan {
+///
+/// `pending_zone`/`pending_boss` seed the detector's naming state from the
+/// PREVIOUS chunk's [`ChunkScan::pending_zone`]/[`ChunkScan::pending_boss`] (E2):
+/// without this, each chunk starts naming state fresh, so a fight whose
+/// `ZONE_CHANGED`/boss `UNIT_ADDED` lines were consumed by an earlier read (and
+/// thus never re-scanned) would always come out unnamed. A `BEGIN_LOG` fed
+/// during this scan still clears the seed exactly like a fresh session would.
+pub fn scan_chunk_for_fights(
+    chunk: &[u8],
+    base: u64,
+    session_already_open: bool,
+    pending_zone: Option<String>,
+    pending_boss: Option<String>,
+) -> ChunkScan {
     let mut detector = Detector {
         session_open: session_already_open,
+        pending_zone,
+        pending_boss,
         ..Default::default()
     };
     let mut offset: u64 = 0;
@@ -539,6 +568,8 @@ pub fn scan_chunk_for_fights(chunk: &[u8], base: u64, session_already_open: bool
     }
 
     ChunkScan {
+        pending_zone: detector.pending_zone,
+        pending_boss: detector.pending_boss,
         fights: detector.fights,
         open_fight_start: detector.fight_start.map(|(off, _)| off),
         new_session_at: detector.new_session_at,
@@ -623,7 +654,7 @@ mod tests {
         chunk.extend_from_slice(b"10,BEGIN_COMBAT\n");
         chunk.extend_from_slice(b"20,END_COMBAT\n");
 
-        let scan = scan_chunk_for_fights(&chunk, 0, true);
+        let scan = scan_chunk_for_fights(&chunk, 0, true, None, None);
         assert_eq!(scan.fights.len(), 1);
         // start_offset must equal the true byte position of BEGIN_COMBAT.
         assert_eq!(scan.fights[0].start_offset, begin_at);
@@ -637,7 +668,7 @@ mod tests {
         // watcher must re-anchor here, not treat it as oversized.
         let chunk = b"5,ZONE_CHANGED,1,\"Cloudrest\",VETERAN\n100,BEGIN_COMBAT\n";
         let begin_at = chunk.iter().position(|&b| b == b'\n').unwrap() as u64 + 1;
-        let scan = scan_chunk_for_fights(chunk, 0, true);
+        let scan = scan_chunk_for_fights(chunk, 0, true, None, None);
         assert!(scan.fights.is_empty());
         assert_eq!(scan.open_fight_start, Some(begin_at));
     }
@@ -653,7 +684,7 @@ mod tests {
         let expected = (prefix.len() + begin_line.len()) as u64;
         // session_already_open = true: the chunk is read from inside an ongoing
         // session, so the embedded BEGIN_LOG is a mid-stream re-enable.
-        let scan = scan_chunk_for_fights(&chunk, 0, true);
+        let scan = scan_chunk_for_fights(&chunk, 0, true, None, None);
         assert_eq!(scan.new_session_at, Some(expected));
         // Both fights are still detected within the chunk (the watcher uses the
         // boundary to split pre/post-session dispatch).
@@ -668,7 +699,7 @@ mod tests {
         let chunk =
             "0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"x\"\n5,BEGIN_COMBAT\n15,END_COMBAT\n"
                 .as_bytes();
-        let scan = scan_chunk_for_fights(chunk, 0, false);
+        let scan = scan_chunk_for_fights(chunk, 0, false, None, None);
         assert_eq!(scan.new_session_at, None);
         assert_eq!(scan.fights.len(), 1);
     }
@@ -679,13 +710,95 @@ mod tests {
         // flushed BEGIN_LOG must NOT fire a (spurious) new-session signal until
         // its terminating newline arrives.
         let chunk = b"10,BEGIN_COMBAT\n20,END_COMBAT\n30,BEGIN_LOG,1700001000000,15";
-        let scan = scan_chunk_for_fights(chunk, 0, true);
+        let scan = scan_chunk_for_fights(chunk, 0, true, None, None);
         assert_eq!(
             scan.new_session_at, None,
             "partial BEGIN_LOG must be deferred"
         );
         // The complete fight before the partial line is still detected.
         assert_eq!(scan.fights.len(), 1);
+    }
+
+    // ── UNIT_ADDED boss naming (E1: isBoss is field 7, not a `,T,` substring) ──
+
+    // The local player's own UNIT_ADDED line has isLocalPlayer="T" (field 4) but
+    // isBoss="F" (field 7). A bare `,T,` substring search used to match this line
+    // (every session has exactly one) and wrongly name trash fights after the
+    // player. With the positional field-7 check, a fight with no real boss unit
+    // must come out with no boss name.
+    #[test]
+    fn unit_added_player_line_does_not_set_boss_name() {
+        let log = "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"H\",\"@h\",1,50,160,0,PLAYER_ALLY,T\n\
+                   10,BEGIN_COMBAT\n\
+                   20,END_COMBAT\n";
+        let r = scan_text(log);
+        assert_eq!(r.fights.len(), 1);
+        assert_eq!(r.fights[0].boss_name, None);
+    }
+
+    // A monster UNIT_ADDED with isBoss="T" at field 7 must still set the pending
+    // boss name (positive case — the fix must not regress real boss detection).
+    #[test]
+    fn unit_added_boss_monster_line_sets_boss_name() {
+        let log = "0,UNIT_ADDED,40,MONSTER,F,0,90001,T,0,0,\"Boss\",\"\",0,50,160,0,HOSTILE,F\n\
+                   10,BEGIN_COMBAT\n\
+                   20,END_COMBAT\n";
+        let r = scan_text(log);
+        assert_eq!(r.fights.len(), 1);
+        assert_eq!(r.fights[0].boss_name.as_deref(), Some("Boss"));
+    }
+
+    // ── naming carry across chunk passes (E2) ─────────────────────────────────
+
+    // Chunk 1 contains only a ZONE_CHANGED line (no fight yet) — the shape of a
+    // live pass that reads the zone change but nothing else. Chunk 2, read later,
+    // contains a full fight with no zone line of its own. Without carrying
+    // chunk 1's `pending_zone` forward into chunk 2's seed, the fight would come
+    // out unnamed even though the zone is known.
+    #[test]
+    fn scan_chunk_carries_pending_zone_across_passes() {
+        let chunk1 = b"5,ZONE_CHANGED,1,\"Cloudrest\",VETERAN\n";
+        let scan1 = scan_chunk_for_fights(chunk1, 0, true, None, None);
+        assert!(scan1.fights.is_empty());
+        assert_eq!(scan1.pending_zone.as_deref(), Some("Cloudrest"));
+        assert_eq!(scan1.pending_boss, None);
+
+        let base2 = chunk1.len() as u64;
+        let chunk2 = b"100,BEGIN_COMBAT\n5200,END_COMBAT\n";
+        let scan2 =
+            scan_chunk_for_fights(chunk2, base2, true, scan1.pending_zone, scan1.pending_boss);
+        assert_eq!(scan2.fights.len(), 1);
+        assert_eq!(
+            scan2.fights[0].zone_name.as_deref(),
+            Some("Cloudrest"),
+            "the zone seen in an earlier pass must still name a fight closed in a later pass"
+        );
+    }
+
+    // A `BEGIN_LOG` — a fresh session or `/encounterlog` re-enable — must clear
+    // any carried naming state, mirroring `Detector::feed`'s `BeginLog` arm.
+    // Without this, a zone/boss name from the PREVIOUS session could leak onto a
+    // fight logged under a brand new one.
+    #[test]
+    fn scan_chunk_carry_is_cleared_by_begin_log() {
+        let chunk1 = b"5,ZONE_CHANGED,1,\"Cloudrest\",VETERAN\n";
+        let scan1 = scan_chunk_for_fights(chunk1, 0, true, None, None);
+        assert_eq!(scan1.pending_zone.as_deref(), Some("Cloudrest"));
+
+        let base2 = chunk1.len() as u64;
+        let chunk2 = b"0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"x\"\n\
+                       5,BEGIN_COMBAT\n15,END_COMBAT\n";
+        let scan2 =
+            scan_chunk_for_fights(chunk2, base2, true, scan1.pending_zone, scan1.pending_boss);
+        assert_eq!(scan2.fights.len(), 1);
+        assert_eq!(
+            scan2.fights[0].zone_name, None,
+            "BEGIN_LOG must clear the carried pending_zone, not leak the prior session's zone"
+        );
+        assert_eq!(
+            scan2.pending_zone, None,
+            "the outgoing carry after a BEGIN_LOG must also be cleared"
+        );
     }
 
     // ── tail_session_state (native-live readiness probe) ─────────────────────

@@ -76,8 +76,6 @@ pub struct LiveSegmenter {
     /// byte-identical to the re-walk oracle at every cut by the differential test
     /// `incremental_master_matches_rewalk_at_every_cut`.
     master_state: IncrementalMasterState,
-    /// Lines fed since the last cut (the body of the segment being assembled).
-    segment_lines: Vec<String>,
     /// The next segment id to use (server-sequenced; starts at 1, updated from each
     /// `add-segment` response).
     next_segment_id: u64,
@@ -114,11 +112,15 @@ impl Default for LiveSegmenter {
 
 impl LiveSegmenter {
     pub fn new() -> Self {
+        let mut emitter = EventEmitter::new();
+        // Enable the per-segment events buffer (drained per cut) AND the incremental
+        // friend/foe classifier — the two live-only concerns the one-shot path skips
+        // (D2/E3). The live driver is the only constructor of a tracked emitter.
+        emitter.enable_segment_tracking();
         Self {
-            emitter: EventEmitter::new(),
+            emitter,
             index_state: IncrementalIndexState::default(),
             master_state: IncrementalMasterState::default(),
-            segment_lines: Vec::new(),
             next_segment_id: 1,
             segments_built: 0,
             in_combat: false,
@@ -135,7 +137,6 @@ impl LiveSegmenter {
     /// should be flushed BEFORE the new session's lines accumulate, which the driver
     /// handles by cutting when this returns true.
     pub fn feed(&mut self, line: &str) -> bool {
-        self.segment_lines.push(line.to_string());
         // Update the incremental index maps with THIS line first (it maintains the
         // time-aware live-monster binding, the synthetic-ability splice, and the
         // actor/ability assignments — all of which must reflect this line before the
@@ -223,7 +224,6 @@ impl LiveSegmenter {
     /// Drop the current per-segment body/window without touching report-scoped
     /// actor, ability, tuple, wall-clock, or correlation state.
     fn discard_current_segment(&mut self) {
-        self.segment_lines.clear();
         self.segment_fight_durations_ms.clear();
         self.current_fight_event_count = 0;
         self.emitter.discard_warmup_segment();
@@ -288,7 +288,6 @@ impl LiveSegmenter {
         if body.event_count == 0 {
             // Nothing emitted in this window (e.g. a BEGIN_LOG with no fights yet).
             self.emitter.open_segment();
-            self.segment_lines.clear();
             self.segment_fight_durations_ms.clear();
             self.current_fight_event_count = 0;
             return Ok(None);
@@ -298,7 +297,6 @@ impl LiveSegmenter {
         // first/last emitted event). None ⇒ no BEGIN_LOG yet ⇒ skip the POST.
         let Some((start_time, end_time)) = self.emitter.live_segment_time_bounds() else {
             self.emitter.open_segment();
-            self.segment_lines.clear();
             self.segment_fight_durations_ms.clear();
             self.current_fight_event_count = 0;
             return Ok(None);
@@ -333,15 +331,17 @@ impl LiveSegmenter {
         // differential test `incremental_master_matches_rewalk_at_every_cut`.
         let frozen_actors = self.emitter.frozen_actor_index_map();
         let frozen_abilities = self.emitter.frozen_ability_index_map();
-        let master_text = self
+        let (master_text, master_tuple_count) = self
             .master_state
             .render_master(self.emitter.tuples(), &frozen_actors, &frozen_abilities)
             .ok_or("live cumulative master failed to build")?;
 
         // Master/segment tuple-count cross-check — the validator can't see the master
         // bytes, so a stale/delta master would pass validation but not render. The
-        // master's tuple section has exactly `emitter.allocated()` records.
-        let master_tuple_count = count_master_tuples(&master_text);
+        // master's tuple section has exactly `emitter.allocated()` records. The count
+        // comes straight from the renderer (the `tuple_records.len()` it already
+        // computes) rather than re-parsing rendered text, so a future record-shape change
+        // can't silently mis-count and kill a healthy session (C5).
         if master_tuple_count != self.emitter.allocated() as u64 {
             return Err(format!(
                 "master/segment desync: master has {master_tuple_count} tuples, \
@@ -369,7 +369,6 @@ impl LiveSegmenter {
         self.segments_built += 1;
         let fight_durations_ms = std::mem::take(&mut self.segment_fight_durations_ms);
         self.emitter.open_segment();
-        self.segment_lines.clear();
         self.current_fight_event_count = 0;
 
         Ok(Some(LiveSegmentPayload {
@@ -407,13 +406,11 @@ impl LiveSegmenter {
     ///
     /// Why this preserves the H1 index-stability pin: the pin lives entirely in
     /// `IncrementalIndexState`/`IncrementalMasterState`/the emitter's frozen maps, all of
-    /// which are KEPT. `segment_lines` is a write-only buffer (never read when building a
-    /// segment or master), so clearing it is pure hygiene. The only things reset are the
-    /// per-segment POST framing (`open_segment` drops the in-progress segment's events +
-    /// wall window) and the segment counters. Proven byte-identical to a real
-    /// from-BEGIN_LOG stream by the `mid_session_seed_matches_*` differential tests.
+    /// which are KEPT. The only things reset are the per-segment POST framing
+    /// (`open_segment` drops the in-progress segment's events + wall window) and the
+    /// segment counters. Proven byte-identical to a real from-BEGIN_LOG stream by the
+    /// `mid_session_seed_matches_*` differential tests.
     pub fn finish_warmup(&mut self) {
-        self.segment_lines.clear();
         self.next_segment_id = 1;
         self.segments_built = 0;
         // If warm-up ended between fights, drop the stale per-segment body/window. If it
@@ -913,6 +910,7 @@ impl<'a, P: LivePoster> LiveDriver<'a, P> {
                         _ => EndReason::Idle,
                     };
                 }
+                TailOutcome::Cancelled => return EndReason::Stopped,
                 TailOutcome::Error(e) => return EndReason::Fatal(format!("tail read failed: {e}")),
             }
         }
@@ -1254,6 +1252,11 @@ pub enum TailOutcome {
     /// Flush the final segment, but settle distinctly from a clean end so a real
     /// crash is observable (L3).
     Idle,
+    /// The driver's cancel flag was observed while the tail was parked between polls
+    /// (a Stop). Returned promptly so the driver isn't held hostage by a non-growing
+    /// file until the idle deadline; the driver maps this to `EndReason::Stopped` and
+    /// its normal exit path terminates the report on a fresh cancel flag.
+    Cancelled,
     /// An unrecoverable read failure (the failure-streak teardown tripped).
     Error(String),
 }
@@ -1277,19 +1280,24 @@ pub struct FileTail {
     last_growth: std::sync::Mutex<Option<std::time::Instant>>,
     poll_interval: std::time::Duration,
     idle_deadline: std::time::Duration,
+    /// The driver's cancel flag, checked each poll so a Stop returns promptly instead
+    /// of parking until the idle deadline (A1, mirroring [`NotifyTail`]).
+    cancel: Arc<AtomicBool>,
 }
 
 #[cfg(debug_assertions)]
 impl FileTail {
     /// Tail from byte 0 (stream the whole file as it grows). `idle_secs` = stop after
-    /// this many seconds with no new bytes (treat as logging-ended).
-    pub fn new(idle_secs: u64) -> Self {
+    /// this many seconds with no new bytes (treat as logging-ended). `cancel` is the
+    /// driver's cancel flag so the tail is Stop-aware between polls.
+    pub fn new(idle_secs: u64, cancel: Arc<AtomicBool>) -> Self {
         Self {
             offset: std::sync::Mutex::new(0),
             partial: std::sync::Mutex::new(Vec::new()),
             last_growth: std::sync::Mutex::new(None),
             poll_interval: std::time::Duration::from_millis(300),
             idle_deadline: std::time::Duration::from_secs(idle_secs),
+            cancel,
         }
     }
 }
@@ -1299,6 +1307,10 @@ impl LiveTail for FileTail {
     fn next_lines(&self, path: &str) -> TailOutcome {
         use std::io::{Read, Seek, SeekFrom};
         loop {
+            // Observe a Stop before each poll's work (A1).
+            if self.cancel.load(Ordering::SeqCst) {
+                return TailOutcome::Cancelled;
+            }
             let size = match std::fs::metadata(path) {
                 Ok(m) => m.len(),
                 Err(e) => return TailOutcome::Error(format!("stat {path}: {e}")),
@@ -1506,6 +1518,10 @@ fn decode_log_line(bytes: &[u8]) -> Result<&str, String> {
 pub struct NotifyTail {
     inner: std::sync::Mutex<NotifyTailState>,
     idle_deadline: std::time::Duration,
+    /// The driver's cancel flag (the SAME `Arc` the driver polls). Checked once per
+    /// poll window so a Stop returns promptly even when the file has stopped growing,
+    /// instead of parking here until the idle deadline (A1).
+    cancel: Arc<AtomicBool>,
 }
 
 struct NotifyTailState {
@@ -1532,6 +1548,7 @@ impl NotifyTail {
         path: &std::path::Path,
         start_offset: u64,
         mid_session: bool,
+        cancel: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1567,6 +1584,7 @@ impl NotifyTail {
                 ended: false,
             }),
             idle_deadline: IDLE_DEADLINE,
+            cancel,
         })
     }
 }
@@ -1584,6 +1602,13 @@ impl LiveTail for NotifyTail {
         loop {
             // Wait for an FS event or the poll deadline (mirrors watcher.rs:239).
             let _ = st.rx.recv_timeout(POLL_INTERVAL);
+            // Observe a Stop the instant we wake, before any coalesce/stat/read work, so
+            // a Stop against a non-growing file returns in one poll window instead of
+            // parking here until the idle deadline (A1). The driver maps this to
+            // EndReason::Stopped and terminates the report on its own fresh cancel flag.
+            if self.cancel.load(Ordering::SeqCst) {
+                return TailOutcome::Cancelled;
+            }
             if st.last_poll.elapsed() < POLL_INTERVAL {
                 // Coalesced wakeups: only act once per poll window.
                 continue;
@@ -1663,23 +1688,6 @@ fn kind_of(line: &str) -> Option<&str> {
     line.split(',').nth(1).map(str::trim)
 }
 
-/// Count the tuple records in a rendered master table (the section after the third
-/// `lastAssignedId` header line). The master format lists, per section, a
-/// `{lastAssignedId}` line then the records; the tuples section is the 3rd. We rely
-/// on the `last_assigned_tuple_id` the doc renders, which equals the tuple count.
-fn count_master_tuples(master_text: &str) -> u64 {
-    // The master table embeds the tuple count as `last_assigned_tuple_id`. Rather than
-    // re-parse the whole grammar, count lines matching the tuple record shape
-    // `int|int|int` (3 numeric pipe-separated fields) — robust for the cross-check.
-    master_text
-        .lines()
-        .filter(|l| {
-            let parts: Vec<&str> = l.split('|').collect();
-            parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok())
-        })
-        .count() as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1755,10 +1763,15 @@ mod tests {
                 &frozen_abilities,
             )
             .expect("re-walk oracle master must build");
-            let incremental = seg
+            let (incremental, tuple_count) = seg
                 .master_state
                 .render_master(seg.emitter.tuples(), &frozen_actors, &frozen_abilities)
                 .expect("incremental master must build");
+            assert_eq!(
+                tuple_count,
+                seg.emitter.tuples().len() as u64,
+                "render_master's returned tuple count must equal the emitter's tuples len"
+            );
             assert_eq!(
                 incremental,
                 oracle,
@@ -1877,7 +1890,7 @@ mod tests {
                 {
                     let fa = seg.emitter.frozen_actor_index_map();
                     let fb = seg.emitter.frozen_ability_index_map();
-                    let m = seg
+                    let (m, _) = seg
                         .master_state
                         .render_master(seg.emitter.tuples(), &fa, &fb)
                         .expect("master");
@@ -3043,6 +3056,7 @@ mod tests {
                     }
                     break;
                 }
+                TailOutcome::Cancelled => panic!("scripted tail never cancels"),
                 TailOutcome::Error(e) => panic!("unexpected tail error: {e}"),
             }
         }
@@ -3513,6 +3527,93 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(true)); // already stopped
         let (reason, _b, _s) = drive_with(sender, cancel, two_fight_session(), false);
         assert_eq!(reason, Some(EndReason::Stopped));
+    }
+
+    // ── A1: cancel-aware production tail ──────────────────────────────────────
+
+    #[test]
+    fn notify_tail_returns_cancelled_promptly_on_a_static_file() {
+        use std::io::Write;
+        // A real NotifyTail over a file that never grows: a Stop must unpark it within a
+        // poll window (~400ms) instead of parking until the 30-min idle deadline (A1).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Encounter.log");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "{HDR}").unwrap();
+        }
+        let eof = std::fs::metadata(&path).unwrap().len();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tail = NotifyTail::new(&path, eof, false, Arc::clone(&cancel))
+            .expect("notify tail must construct");
+
+        let c = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            c.store(true, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let outcome = tail.next_lines(path.to_str().unwrap());
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, TailOutcome::Cancelled),
+            "a Stop on a non-growing file must return Cancelled"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "cancel must be observed within one poll window, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn driver_run_stops_promptly_against_a_static_tail_and_terminates() {
+        use std::io::Write;
+        // Drive the real production tail (NotifyTail over a non-growing file) through the
+        // driver: a Stop must return EndReason::Stopped in <2s (A1), and the shared
+        // terminate discipline (as run_native_live's exit path applies on every reason)
+        // must then attempt terminate-report.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Encounter.log");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "{HDR}").unwrap();
+        }
+        let eof = std::fs::metadata(&path).unwrap().len();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tail = NotifyTail::new(&path, eof, false, Arc::clone(&cancel))
+            .expect("notify tail must construct");
+
+        let session_ok = Arc::new(AtomicBool::new(true));
+        let sender = ScriptedSender::new(vec![], vec![], session_ok);
+        let code = ReportCode("TESTCODE".into());
+        let mut driver = LiveDriver::new(sender, code.clone(), Arc::clone(&cancel), None);
+
+        let c = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            c.store(true, Ordering::SeqCst);
+        });
+
+        let sink = NoopOrphanSink;
+        let started = std::time::Instant::now();
+        let reason = driver.run(path.to_str().unwrap(), &tail, &sink);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            reason,
+            EndReason::Stopped,
+            "a Stop against a parked tail must end as Stopped"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "the stop must return promptly, took {elapsed:?}"
+        );
+        // Mirror run_native_live's exit path: terminate-report on the way out.
+        terminate_report_and_settle(&driver.sender, &sink, &code);
+        assert!(
+            driver.sender.post_count("terminate-report") >= 1,
+            "the driver's exit path must attempt terminate-report"
+        );
     }
 
     // ── Production tail line assembly (L-tail, Step 6) ───────────────────────

@@ -170,6 +170,19 @@ impl<'a> NativeUpload<'a> {
         self.cancel.load(Ordering::SeqCst)
     }
 
+    /// Full lifecycle for a finished (manual) upload — a thin wrapper over
+    /// [`Self::upload_finished_with_orphans`] with a no-op orphan sink, for callers that
+    /// don't need crash-recovery breadcrumbs (existing call sites / tests). Preserves the
+    /// original 3-argument signature so those callers compile unchanged.
+    pub fn upload_finished(
+        &self,
+        segments: &[Segment],
+        masters: &[MasterTableBytes],
+        progress: &ProgressFn<'_>,
+    ) -> Result<ReportCode, UploadError> {
+        self.upload_finished_with_orphans(segments, masters, progress, &super::live::NoopOrphanSink)
+    }
+
     /// Full lifecycle for a finished (manual) upload, matching the official
     /// protocol's real sequence:
     ///
@@ -187,11 +200,22 @@ impl<'a> NativeUpload<'a> {
     ///
     /// `master` carries the per-segment master table aligned with `segments`
     /// (one entry each); the actual HTTP sends are routed through [`Self::send`].
-    pub fn upload_finished(
+    ///
+    /// **Crash-recovery (L2, C2)**: `sink` receives the SAME breadcrumb discipline the
+    /// live driver uses (`super::live::terminate_report_and_settle`): `record_open` the
+    /// instant the report exists (right after `create-report`, BEFORE the first segment
+    /// POST), `note_segment` per accepted segment, and `clear` ONLY on a confirmed close
+    /// (a clean `terminate-report`, or a definitive `404`/`410` via
+    /// [`is_definitively_closed`]). A transient terminate failure KEEPS the breadcrumb so
+    /// next-launch recovery closes the orphaned draft. A kill/panic between
+    /// `create-report` and `terminate-report` therefore always leaves a recoverable
+    /// `{code}`.
+    pub fn upload_finished_with_orphans(
         &self,
         segments: &[Segment],
         masters: &[MasterTableBytes],
         progress: &ProgressFn<'_>,
+        sink: &dyn super::live::OrphanSink,
     ) -> Result<ReportCode, UploadError> {
         // Nothing to upload: never create+terminate an empty report (that would
         // record a zero-fight conversion or a routing bug as a "successful"
@@ -216,7 +240,7 @@ impl<'a> NativeUpload<'a> {
         }
 
         // Already cancelled before we started? Short-circuit before any network
-        // work — there is no report to terminate yet.
+        // work — there is no report to terminate yet (no breadcrumb written).
         if self.is_cancelled() {
             return Err(UploadError::Cancelled);
         }
@@ -227,16 +251,33 @@ impl<'a> NativeUpload<'a> {
         // 2. create-report
         let code = self.create_report()?;
 
+        // L2/C2: persist the crash-recovery breadcrumb the INSTANT the report exists —
+        // after create-report, BEFORE the first segment POST — mirroring the live path
+        // (`super::live::run_native_live`). `segmentId` starts at 1.
+        sink.record_open(&code.0, 1);
+
         // 3+4. Push the segments and terminate. ANY error after create-report
         // (cancel, a failed master-table/segment upload, a server anomaly) must
         // still attempt `terminate-report` so we never leave an orphaned/partial
         // report open server-side (which would confuse retries). On success the
         // inner path terminates itself; on error we best-effort terminate here
         // and return the ORIGINAL error.
-        match self.push_segments_and_terminate(&code, segments, masters, progress) {
-            Ok(()) => Ok(code),
+        match self.push_segments_and_terminate(&code, segments, masters, progress, sink) {
+            Ok(()) => {
+                // The inner path's own `terminate-report` returned Ok → the report is
+                // confirmed closed; drop the breadcrumb (clear-only-on-confirmed-close).
+                sink.clear(&code.0);
+                Ok(code)
+            }
             Err(e) => {
-                let _ = self.terminate_report(&code);
+                // Best-effort terminate; clear the breadcrumb ONLY if THAT terminate
+                // confirms the report is closed (clean Ok, or a definitive 404/410) —
+                // the exact rule `super::live::terminate_report_and_settle` applies. A
+                // transient failure KEEPS it for next-launch recovery.
+                let term = self.terminate_report(&code);
+                if terminate_confirms_closed(&term) {
+                    sink.clear(&code.0);
+                }
                 Err(e)
             }
         }
@@ -254,6 +295,7 @@ impl<'a> NativeUpload<'a> {
         segments: &[Segment],
         masters: &[MasterTableBytes],
         progress: &ProgressFn<'_>,
+        sink: &dyn super::live::OrphanSink,
     ) -> Result<(), UploadError> {
         let total = segments.len();
         // segmentId starts at 1; the server returns the next id to use.
@@ -265,6 +307,10 @@ impl<'a> NativeUpload<'a> {
             // a. master table for this segment id, then b. the fights segment.
             self.set_master_table(code, segment_id, master)?;
             let next = self.add_segment(code, segment_id, seg)?;
+            // Segment ACCEPTED → advance the breadcrumb's last-sequenced id (diagnostics;
+            // terminate needs only the code). Mirrors the live driver's `note_segment`
+            // after an accepted add-segment.
+            sink.note_segment(&code.0, segment_id);
             progress(UploadProgress {
                 segments_done: i + 1,
                 segments_total: total,
@@ -408,8 +454,21 @@ impl<'a> NativeUpload<'a> {
         kind: &RequestKind,
         session: &Session,
     ) -> Result<SendResult, String> {
+        // C4: scale the total request timeout with the multipart body size — a large
+        // segment/master-table upload on a slow uplink must finish inside ONE timeout
+        // (the one-shot path has no retry); create/terminate carry no body → the flat
+        // floor. C3: disable redirect-following so an expired-session bounce to /login
+        // is classified as an auth rejection (see `classify_status`) instead of being
+        // followed POST→GET and misread as a fatal server error.
+        let payload_len = match kind {
+            RequestKind::AddSegment { bytes, .. } | RequestKind::MasterTable { bytes, .. } => {
+                bytes.len()
+            }
+            RequestKind::CreateReport | RequestKind::Terminate => 0,
+        };
         let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(request_timeout_for(payload_len))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("HTTP client error: {e}"))?;
 
@@ -448,9 +507,10 @@ impl<'a> NativeUpload<'a> {
 
         let resp = req.send().map_err(|e| format!("request failed: {e}"))?;
         let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status.as_u16() == 419
-        // 419 = Laravel CSRF/session mismatch.
-        {
+        // C3: classify by (status, headers) BEFORE reading the body so a 401/419 — or a
+        // redirect to a login page (an expired session bounce) — engages the re-auth
+        // retry instead of being read back as a fatal server error.
+        if let StatusClass::AuthRejected = classify_status(status, resp.headers()) {
             return Ok(SendResult::AuthRejected);
         }
         let code = status.as_u16();
@@ -533,6 +593,19 @@ pub(crate) fn is_definitively_closed(e: &UploadError) -> bool {
         e,
         UploadError::Server { status: 404, .. } | UploadError::Server { status: 410, .. }
     )
+}
+
+/// Whether a `terminate-report` outcome confirms the report is CLOSED, so the L2
+/// crash-recovery breadcrumb may be dropped: a clean terminate (`Ok`) or a definitive
+/// already-gone (`404`/`410` via [`is_definitively_closed`]). Every transient failure
+/// returns `false` → KEEP the breadcrumb for next-launch recovery. This is the SAME rule
+/// `super::live::terminate_report_and_settle` applies, lifted into a pure fn so the
+/// one-shot path (C2) shares the discipline and it stays unit-testable without a server.
+fn terminate_confirms_closed(term: &Result<(), UploadError>) -> bool {
+    match term {
+        Ok(()) => true,
+        Err(e) => is_definitively_closed(e),
+    }
 }
 
 // ── Cancel-aware LIVE sender (L4) ────────────────────────────────────────────
@@ -791,8 +864,19 @@ fn live_send_once(
     url: &str,
     req: &OwnedLiveRequest,
 ) -> Result<SendResult, String> {
+    // Same C3/C4 hardening as the one-shot `send_once`: a size-scaled timeout for the
+    // (small, live) segment/master bodies, and redirects disabled so an auth bounce is
+    // classified for re-auth rather than followed and misread. Live payloads are small,
+    // so the timeout formula naturally yields ~120s here.
+    let payload_len = match req {
+        OwnedLiveRequest::AddSegment { bytes, .. }
+        | OwnedLiveRequest::MasterTable { bytes, .. } => bytes.len(),
+        OwnedLiveRequest::CreateReport { body } => body.len(),
+        OwnedLiveRequest::Terminate => 0,
+    };
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(request_timeout_for(payload_len))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
     let base = client
@@ -836,7 +920,8 @@ fn live_send_once(
 
     let resp = base.send().map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status.as_u16() == 419 {
+    // C3: same status+headers classification as the one-shot path.
+    if let StatusClass::AuthRejected = classify_status(status, resp.headers()) {
         return Ok(SendResult::AuthRejected);
     }
     let code = status.as_u16();
@@ -864,6 +949,86 @@ enum SendResult {
     AuthRejected,
     /// Other non-2xx — a hard server error with a short detail.
     ServerError { status: u16, detail: String },
+}
+
+/// The status-only classification of a response, decided from `(status, headers)`
+/// BEFORE the body is read, so the send loops can engage the re-auth retry without
+/// misreading a login page as a fatal error.
+enum StatusClass {
+    /// Re-authenticate: a `401`/`419`, or a redirect whose target is a login page (an
+    /// expired session bounce) — see [`classify_status`].
+    AuthRejected,
+    /// A normal 2xx/4xx/5xx: read the body and decide success vs. server error by status.
+    ReadBody,
+}
+
+/// Classify an HTTP response by status + headers alone (C3). `401`/`419` are the
+/// server's direct auth rejections (`419` = Laravel CSRF/session mismatch). With
+/// client-side redirect-following DISABLED (see the builders in
+/// [`NativeUpload::send_once`] / [`live_send_once`]), a `3xx` on these same-host POST
+/// endpoints is anomalous; the dominant cause is an expired session redirecting to the
+/// login page. Under reqwest's default policy that redirect would be followed POST→GET,
+/// return login HTML with `200`, fail JSON extraction, and be misclassified as a fatal
+/// `Server` error — bypassing the re-auth machinery. So a redirect to a login page (or
+/// one whose `Location` we cannot read, failing conservatively toward re-auth) is
+/// reported as [`StatusClass::AuthRejected`] to engage the single re-auth retry and the
+/// live pause-reauth. Everything else defers to a body read.
+///
+/// Pure over `(status, headers)` so the classification is unit-testable without a server.
+fn classify_status(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> StatusClass {
+    if status == reqwest::StatusCode::UNAUTHORIZED || status.as_u16() == 419 {
+        return StatusClass::AuthRejected;
+    }
+    if status.is_redirection() && redirect_is_auth_related(headers) {
+        return StatusClass::AuthRejected;
+    }
+    StatusClass::ReadBody
+}
+
+/// Whether a `3xx`'s `Location` indicates an auth bounce: it points at a login/auth page,
+/// OR it is missing/unreadable (fail conservatively toward re-auth rather than treat the
+/// redirect as a fatal server error). Same-host redirects are the only ones these
+/// endpoints emit, so a login `Location` is the expired-session signal.
+fn redirect_is_auth_related(headers: &reqwest::header::HeaderMap) -> bool {
+    match headers.get(reqwest::header::LOCATION) {
+        Some(loc) => match loc.to_str() {
+            Ok(s) => {
+                let l = s.to_ascii_lowercase();
+                l.contains("/login") || l.contains("signin") || l.contains("sign-in")
+            }
+            // An unreadable Location on a redirect: fail toward re-auth.
+            Err(_) => true,
+        },
+        // No Location on a 3xx: unusual for these endpoints — fail toward re-auth.
+        None => true,
+    }
+}
+
+/// Total per-request timeout for a POST carrying a `payload_bytes` multipart body (C4).
+/// `create-report`/`terminate-report` carry no large body → the flat `BASE_SECS` floor
+/// (payload 0 ⇒ exactly the floor). Segment/master-table POSTs can be tens of MB near
+/// the native size ceiling; the whole multipart body must upload inside this single
+/// total timeout, so on a slow uplink a flat 120s would abort a large one-shot segment
+/// mid-upload (a `Transport` error → the no-retry one-shot path fails the report). We
+/// add time proportional to the payload at an assumed worst-case throughput floor,
+/// capped so a genuinely wedged upload still fails in bounded time. Live segments are
+/// small, so this yields ~`BASE_SECS` for them (behavior effectively unchanged).
+///
+/// Pure fn so the computation is unit-testable.
+fn request_timeout_for(payload_bytes: usize) -> std::time::Duration {
+    // Flat floor for control-plane POSTs and small bodies.
+    const BASE_SECS: u64 = 120;
+    // Assumed worst-case sustained upload throughput (~0.5 Mbps): grant 1s of headroom
+    // per this many payload bytes so a large segment still fits inside the total timeout.
+    const MIN_THROUGHPUT_BYTES_PER_SEC: u64 = 64 * 1024;
+    // Absolute ceiling so a wedged connection can't hold the request open ~forever.
+    const CAP_SECS: u64 = 15 * 60;
+    let extra_secs = payload_bytes as u64 / MIN_THROUGHPUT_BYTES_PER_SEC;
+    let total_secs = BASE_SECS.saturating_add(extra_secs).min(CAP_SECS);
+    std::time::Duration::from_secs(total_secs)
 }
 
 /// Which lifecycle call a `send` is performing — selects the envelope shape.
@@ -1335,5 +1500,201 @@ mod tests {
             &cancel,
         );
         assert!(matches!(r, Err(UploadError::Cancelled)), "{r:?}");
+    }
+
+    // ── C3: status classification ────────────────────────────────────────────
+
+    #[test]
+    fn classify_status_maps_auth_and_login_redirects() {
+        use reqwest::header::{HeaderMap, HeaderValue, LOCATION};
+        use reqwest::StatusCode;
+
+        let empty = HeaderMap::new();
+        // 401 / 419 → AuthRejected (unchanged behavior).
+        assert!(matches!(
+            classify_status(StatusCode::UNAUTHORIZED, &empty),
+            StatusClass::AuthRejected
+        ));
+        assert!(matches!(
+            classify_status(StatusCode::from_u16(419).unwrap(), &empty),
+            StatusClass::AuthRejected
+        ));
+
+        // THE C3 FIX: a 302 → /login (an expired-session bounce) is an auth rejection,
+        // not a fatal server error.
+        let mut login = HeaderMap::new();
+        login.insert(
+            LOCATION,
+            HeaderValue::from_static("https://www.esologs.com/login"),
+        );
+        assert!(matches!(
+            classify_status(StatusCode::FOUND, &login),
+            StatusClass::AuthRejected
+        ));
+
+        // A 3xx with no readable Location → conservatively AuthRejected.
+        assert!(matches!(
+            classify_status(StatusCode::FOUND, &empty),
+            StatusClass::AuthRejected
+        ));
+
+        // 2xx / 5xx defer to a body read.
+        assert!(matches!(
+            classify_status(StatusCode::OK, &empty),
+            StatusClass::ReadBody
+        ));
+        assert!(matches!(
+            classify_status(StatusCode::INTERNAL_SERVER_ERROR, &empty),
+            StatusClass::ReadBody
+        ));
+        // A redirect to a non-login page is treated as a normal (anomalous) response.
+        let mut other = HeaderMap::new();
+        other.insert(
+            LOCATION,
+            HeaderValue::from_static("https://www.esologs.com/reports/abc"),
+        );
+        assert!(matches!(
+            classify_status(StatusCode::SEE_OTHER, &other),
+            StatusClass::ReadBody
+        ));
+    }
+
+    // ── C4: timeout scaling ──────────────────────────────────────────────────
+
+    #[test]
+    fn request_timeout_scales_with_payload_and_is_capped() {
+        use std::time::Duration;
+        // Control-plane / small bodies → flat 120s floor.
+        assert_eq!(request_timeout_for(0), Duration::from_secs(120));
+        assert_eq!(request_timeout_for(1024), Duration::from_secs(120));
+        // A 10 MiB segment scales above the floor (10 MiB / 64 KiB/s = 160s extra).
+        assert_eq!(
+            request_timeout_for(10 * 1024 * 1024),
+            Duration::from_secs(280)
+        );
+        // A pathological payload is capped at 15 minutes, never unbounded.
+        assert_eq!(
+            request_timeout_for(usize::MAX),
+            Duration::from_secs(15 * 60)
+        );
+        // Monotonic: a bigger payload never shrinks the timeout.
+        assert!(request_timeout_for(100 * 1024 * 1024) >= request_timeout_for(10 * 1024 * 1024));
+    }
+
+    // ── C2: one-shot crash-recovery breadcrumb ───────────────────────────────
+
+    /// A fake [`super::super::live::OrphanSink`] recording the ordered breadcrumb calls,
+    /// so the one-shot lifecycle's record/note/clear discipline is assertable without a
+    /// server (mirrors the pure list tests in `orphans.rs`).
+    #[derive(Default)]
+    struct RecordingSink {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+    impl crate::uploader::native::live::OrphanSink for RecordingSink {
+        fn record_open(&self, code: &str, segment_id: u64) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("open:{code}:{segment_id}"));
+        }
+        fn note_segment(&self, code: &str, segment_id: u64) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("note:{code}:{segment_id}"));
+        }
+        fn clear(&self, code: &str) {
+            self.calls.lock().unwrap().push(format!("clear:{code}"));
+        }
+    }
+
+    #[test]
+    fn rejected_inputs_write_no_breadcrumb_before_a_report_exists() {
+        // Empty input, count mismatch, and already-cancelled all return BEFORE
+        // create-report, so no breadcrumb may be written — record_open must never fire
+        // for a report that never existed (else next-launch recovery chases a ghost).
+        let sess = FakeSession {
+            invalidated: std::sync::Mutex::new(false),
+        };
+        let opts = UploadOptions::default();
+
+        // empty input
+        let sink = RecordingSink::default();
+        let up = NativeUpload::new(&sess, &opts, Arc::new(AtomicBool::new(false)));
+        assert!(up
+            .upload_finished_with_orphans(&[], &[], &no_progress, &sink)
+            .is_err());
+        assert!(
+            sink.calls.lock().unwrap().is_empty(),
+            "empty input must not record a breadcrumb"
+        );
+
+        // count mismatch
+        let sink = RecordingSink::default();
+        let up = NativeUpload::new(&sess, &opts, Arc::new(AtomicBool::new(false)));
+        let segs = vec![
+            Segment {
+                bytes: vec![1],
+                start_time: 0,
+                end_time: 0,
+            },
+            Segment {
+                bytes: vec![2],
+                start_time: 0,
+                end_time: 0,
+            },
+        ];
+        let masters = vec![MasterTableBytes { bytes: vec![] }];
+        assert!(up
+            .upload_finished_with_orphans(&segs, &masters, &no_progress, &sink)
+            .is_err());
+        assert!(
+            sink.calls.lock().unwrap().is_empty(),
+            "count mismatch must not record a breadcrumb"
+        );
+
+        // already cancelled before start
+        let sink = RecordingSink::default();
+        let up = NativeUpload::new(&sess, &opts, Arc::new(AtomicBool::new(true)));
+        let segs = vec![Segment {
+            bytes: vec![1, 2, 3],
+            start_time: 0,
+            end_time: 0,
+        }];
+        let masters = vec![MasterTableBytes { bytes: vec![] }];
+        assert!(matches!(
+            up.upload_finished_with_orphans(&segs, &masters, &no_progress, &sink),
+            Err(UploadError::Cancelled)
+        ));
+        assert!(
+            sink.calls.lock().unwrap().is_empty(),
+            "a pre-create cancel must not record a breadcrumb"
+        );
+    }
+
+    #[test]
+    fn terminate_confirms_closed_matches_live_settle_rule() {
+        // Confirmed close → the breadcrumb may be dropped (clear-only-on-confirmed-close).
+        assert!(terminate_confirms_closed(&Ok(())));
+        assert!(terminate_confirms_closed(&Err(UploadError::Server {
+            status: 404,
+            detail: String::new()
+        })));
+        assert!(terminate_confirms_closed(&Err(UploadError::Server {
+            status: 410,
+            detail: String::new()
+        })));
+        // Every transient → KEEP the breadcrumb for next-launch recovery.
+        assert!(!terminate_confirms_closed(&Err(UploadError::Transport(
+            "net".into()
+        ))));
+        assert!(!terminate_confirms_closed(&Err(UploadError::Server {
+            status: 500,
+            detail: String::new()
+        })));
+        assert!(!terminate_confirms_closed(&Err(UploadError::Session(
+            SessionError::Expired
+        ))));
+        assert!(!terminate_confirms_closed(&Err(UploadError::Cancelled)));
     }
 }

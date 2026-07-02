@@ -61,7 +61,7 @@ export function AppBackground() {
       />
       {/* orb 1 — former 600px disk @ (-15%,-10%), blur-120px (gold) */}
       <div
-        className="absolute [will-change:transform] animate-[orb-drift_25s_ease-in-out_infinite]"
+        className="absolute animate-[orb-drift_25s_ease-in-out_infinite]"
         style={{
           left: "calc(-10% - 280px)",
           top: "calc(-15% - 280px)",
@@ -69,11 +69,12 @@ export function AppBackground() {
           height: "1160px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-1) 22%, transparent)", 34),
           animationPlayState,
+          willChange,
         }}
       />
       {/* orb 2 — former 500px disk @ (bottom -20%, right -10%), blur-120px (sky) */}
       <div
-        className="absolute [will-change:transform] animate-[orb-drift_20s_ease-in-out_infinite_reverse]"
+        className="absolute animate-[orb-drift_20s_ease-in-out_infinite_reverse]"
         style={{
           right: "calc(-10% - 280px)",
           bottom: "calc(-20% - 280px)",
@@ -81,11 +82,12 @@ export function AppBackground() {
           height: "1060px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-2) 17%, transparent)", 32),
           animationPlayState,
+          willChange,
         }}
       />
       {/* orb 3 — former 400px disk @ (30%,40%), blur-100px (indigo) */}
       <div
-        className="absolute [will-change:transform] animate-[orb-drift_30s_ease-in-out_infinite]"
+        className="absolute animate-[orb-drift_30s_ease-in-out_infinite]"
         style={{
           left: "calc(40% - 230px)",
           top: "calc(30% - 230px)",
@@ -93,6 +95,7 @@ export function AppBackground() {
           height: "860px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-3) 11%, transparent)", 32),
           animationPlayState,
+          willChange,
         }}
       />
       {/* Ornamental motif tile (art themes only; "none" by default) */}
