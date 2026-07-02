@@ -2084,7 +2084,10 @@ fn seed_initial_theme_draft(ui: &KalpaWindow, custom_themes: &[CatalogTheme]) {
 
 fn open_theme_draft_editor(ui: &KalpaWindow, draft: &CatalogTheme, is_new: bool) {
     set_theme_draft(ui, draft, is_new);
-    apply_theme_selection(ui, &ThemeSelection::colors_only(draft.colors.clone()));
+    apply_theme_selection(
+        ui,
+        &ThemeSelection::with_skin(draft.colors.clone(), draft.skin_id.as_deref()),
+    );
     ui.set_settings_open(true);
     ui.set_settings_tab(1);
     ui.set_settings_editor_open(true);
@@ -2285,7 +2288,7 @@ fn custom_theme_draft_from_base(base: &CatalogTheme, suffix: &str) -> CatalogThe
             base.description.clone()
         },
         colors: base.colors.clone(),
-        skin_id: None,
+        skin_id: normalize_skin_id(base.skin_id.clone()),
     }
 }
 
@@ -2323,7 +2326,7 @@ fn new_custom_theme_id() -> String {
 
 fn upsert_custom_theme(custom_themes: &mut Vec<CatalogTheme>, mut theme: CatalogTheme) {
     theme.category = "Custom".to_string();
-    theme.skin_id = None;
+    theme.skin_id = normalize_skin_id(theme.skin_id);
     match custom_themes
         .iter()
         .position(|existing| existing.id == theme.id)
@@ -2348,7 +2351,7 @@ fn parse_imported_custom_theme(json: &str) -> Option<CatalogTheme> {
                 theme.description = "Imported custom theme.".to_string();
             }
             theme.category = "Custom".to_string();
-            theme.skin_id = None;
+            theme.skin_id = normalize_skin_id(theme.skin_id);
             Some(theme)
         })
 }
@@ -2474,7 +2477,7 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         let mut draft = save_draft.borrow().clone();
         draft.name = normalized_name.to_string();
         draft.category = "Custom".to_string();
-        draft.skin_id = None;
+        draft.skin_id = normalize_skin_id(draft.skin_id);
         draft.colors = draft_colors_from_ui(&ui, &draft.colors);
         set_theme_draft_color_fields(&ui, &draft.colors);
         set_theme_draft_contrast(&ui, &draft.colors);
@@ -2485,7 +2488,10 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         set_theme_gallery(&ui, &custom_themes);
         set_theme_draft(&ui, &draft, false);
         *save_draft.borrow_mut() = draft.clone();
-        apply_theme_selection(&ui, &ThemeSelection::colors_only(draft.colors.clone()));
+        apply_theme_selection(
+            &ui,
+            &ThemeSelection::with_skin(draft.colors.clone(), draft.skin_id.as_deref()),
+        );
         ui.set_active_theme_id(draft.id.clone().into());
         persist_active_theme_id(&draft.id);
         ui.set_settings_editor_open(false);
@@ -2513,7 +2519,10 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
             String::new(),
         ));
         set_theme_draft_contrast(&ui, &draft.colors);
-        apply_theme_selection(&ui, &ThemeSelection::colors_only(draft.colors));
+        apply_theme_selection(
+            &ui,
+            &ThemeSelection::with_skin(draft.colors, draft.skin_id.as_deref()),
+        );
     });
 
     let delete_ui = ui.as_weak();
@@ -2590,7 +2599,10 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         upsert_custom_theme(&mut custom_themes, theme.clone());
         persist_custom_themes(&custom_themes);
         set_theme_gallery(&ui, &custom_themes);
-        apply_theme_selection(&ui, &ThemeSelection::colors_only(theme.colors.clone()));
+        apply_theme_selection(
+            &ui,
+            &ThemeSelection::with_skin(theme.colors.clone(), theme.skin_id.as_deref()),
+        );
         ui.set_active_theme_id(theme.id.clone().into());
         persist_active_theme_id(&theme.id);
         set_theme_draft(&ui, &theme, false);
@@ -4492,7 +4504,7 @@ fn theme_selection_by_id(theme_id: &str, custom_themes: &[CatalogTheme]) -> Opti
     custom_themes
         .iter()
         .find(|theme| theme.id == theme_id)
-        .map(|theme| ThemeSelection::colors_only(theme.colors.clone()))
+        .map(|theme| ThemeSelection::with_skin(theme.colors.clone(), theme.skin_id.as_deref()))
         .or_else(|| catalog_theme_selection_by_id(theme_id))
 }
 
@@ -4634,7 +4646,7 @@ fn read_custom_themes_from_path(path: &Path) -> Result<Vec<CatalogTheme>, String
                 .into_iter()
                 .map(|mut theme| {
                     theme.category = "Custom".to_string();
-                    theme.skin_id = None;
+                    theme.skin_id = normalize_skin_id(theme.skin_id);
                     theme
                 })
                 .collect()
@@ -4825,6 +4837,7 @@ fn theme_entry_from_catalog_theme(
         name: theme.name.clone().into(),
         category: theme.category.clone().into(),
         description: theme.description.clone().into(),
+        skin_id: theme.skin_id.clone().unwrap_or_default().into(),
         bg_base: hex_color(&theme.colors.bg_base),
         background: hex_color(&theme.colors.background),
         surface: hex_color(&theme.colors.surface),
@@ -4869,6 +4882,15 @@ fn skin_kind(skin_id: Option<&str>) -> i32 {
         Some("clockwork-city") => 7,
         Some("nordic-runestone") => 8,
         _ => 0,
+    }
+}
+
+fn normalize_skin_id(skin_id: Option<String>) -> Option<String> {
+    let skin_id = skin_id?.trim().to_string();
+    if skin_kind(Some(&skin_id)) == 0 {
+        None
+    } else {
+        Some(skin_id)
     }
 }
 
@@ -5192,7 +5214,7 @@ mod tests {
         assert_eq!(themes[0].id, "custom-one");
         assert_eq!(themes[0].name, "Custom One");
         assert_eq!(themes[0].category, "Custom");
-        assert_eq!(themes[0].skin_id, None);
+        assert_eq!(themes[0].skin_id.as_deref(), Some("nordic-runestone"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -5206,6 +5228,7 @@ mod tests {
         assert_eq!(first.id.as_str(), "custom-one");
         assert_eq!(first.category.as_str(), "Custom");
         assert_eq!(first.category_heading.as_str(), "Your Themes");
+        assert_eq!(first.skin_id.as_str(), "nordic-runestone");
         assert!(
             entries
                 .iter()
@@ -5232,12 +5255,18 @@ mod tests {
 
         assert_eq!(imported.colors.accent, "#AABBCC");
         assert_eq!(imported.category, "Custom");
-        assert_eq!(imported.skin_id, None);
+        assert_eq!(imported.skin_id.as_deref(), Some("nordic-runestone"));
 
         let mut invalid = theme;
         invalid.colors.primary = "not-a-color".to_string();
         let json = serde_json::to_string(&invalid).expect("serialize invalid theme");
         assert!(parse_imported_custom_theme(&json).is_none());
+
+        let mut unknown_skin = sample_custom_theme("unknown-skin", "Unknown Skin");
+        unknown_skin.skin_id = Some("missing-skin".to_string());
+        let json = serde_json::to_string(&unknown_skin).expect("serialize unknown skin theme");
+        let imported = parse_imported_custom_theme(&json).expect("parse unknown skin theme");
+        assert_eq!(imported.skin_id, None);
     }
 
     #[cfg(target_os = "windows")]

@@ -61,6 +61,7 @@ export struct ThemeEntry {
     name: string,
     category: string,
     description: string,
+    skin-id: string,
     bg-base: color,
     background: color,
     surface: color,
@@ -3892,6 +3893,7 @@ component PackHubButton inherits Rectangle {
     label-text := Text {
         x: root.group-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
+        width: label-text.preferred-width;
         height: root.height;
         text: root.label;
         color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
@@ -4681,9 +4683,9 @@ component PackHubInstallView inherits Rectangle {
     Pill { x: 102px; y: 40px; label: "utility"; tone: Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
     Text { x: 190px; y: 44px; text: "by Spike'jo"; color: Palette.muted-half; font-size: 11px; font-weight: 600; }
     Text { x: 265px; y: 44px; text: "Updated 7 days ago"; color: Palette.muted-half; font-size: 10px; font-weight: 600; }
-    PackHubButton { x: parent.width - 258px; y: 36px; width: 78px; icon: @image-url("../assets/icons/pencil.svg"); label: "Edit"; }
-    PackHubButton { x: parent.width - 170px; y: 36px; width: 86px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; }
-    PackHubButton { x: parent.width - 74px; y: 36px; width: 74px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Share"; }
+    PackHubButton { x: parent.width - 322px; y: 36px; width: 94px; icon: @image-url("../assets/icons/pencil.svg"); label: "Edit"; }
+    PackHubButton { x: parent.width - 216px; y: 36px; width: 104px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; }
+    PackHubButton { x: parent.width - 100px; y: 36px; width: 100px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Share"; }
 
     Rectangle {
         x: 0px;
