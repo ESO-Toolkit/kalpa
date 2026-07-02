@@ -115,6 +115,26 @@ struct PendingShield {
     requires_cast: bool,
 }
 
+/// A live unit record for the incremental friend/foe classifier (E3) — the streaming
+/// analog of [`super::encode`]'s whole-log `classify_monsters` pre-pass. Mirrors the
+/// `[3]type / [6]monsterId / [15]owner` fields the one-shot classifier reads, so the
+/// live path can maintain the SAME `(d2p, d2m, rfp)` relationship counters online.
+struct ClassifyUnitLive {
+    is_player: bool,
+    monster_id: String,
+    owner: String,
+}
+
+/// Per-monster combat-relationship counters for the incremental classifier (E3):
+/// damage this monster dealt to players (`d2p`), to other monsters (`d2m`), and that
+/// the raid dealt to it (`rfp`). Identical signal to `classify_monsters`'s local `Rel`.
+#[derive(Default)]
+struct ClassifyRel {
+    d2p: u64,
+    d2m: u64,
+    rfp: u64,
+}
+
 /// The running parser state for one log's event assembly.
 ///
 /// Holds the actor table (master indices, reactions, owners — for masks and the
@@ -262,7 +282,48 @@ pub struct EventEmitter {
     /// The one-shot `build()` path ignores these (it assembles its own string).
     segment_events: String,
     segment_event_count: u64,
+    /// Whether the LIVE driver is active. Enabled once by
+    /// [`Self::enable_segment_tracking`] (called by [`super::live::LiveSegmenter::new`]);
+    /// the one-shot `build()` path leaves it `false`. It gates two live-only concerns
+    /// that would otherwise cost the one-shot path for nothing:
+    ///  * the per-segment [`Self::segment_events`] buffer (D2 — one-shot never reads it,
+    ///    so writing it double-buffers the whole events string, ~4-5× input peak RSS);
+    ///  * the incremental friend/foe classifier (E3 — one-shot installs the whole-log
+    ///    `classify_monsters` pre-pass up front, so it must NOT run the online classifier
+    ///    or it would overwrite that with a partial as-of-current-line classification).
+    live_tracking: bool,
+    /// Incremental friend/foe classifier state (E3), LIVE-ONLY (`live_tracking`). The
+    /// online analog of [`super::encode::classify_monsters`]: `classify_units` mirrors
+    /// its per-unit `(is_player, monster_id, owner)` map (fed from UNIT_ADDED/CHANGED/
+    /// REMOVED) and `classify_rel` accumulates the same `(d2p, d2m, rfp)` counters as
+    /// combat events arrive. After a counter first crosses 0→1 the derived
+    /// [`super::encode::MonsterSides`] is recomputed and re-installed into the actor
+    /// table, so a friendly-tagged enemy that attacks players is reclassified exactly as
+    /// the one-shot pre-pass would — without an all-lines re-walk.
+    classify_units: HashMap<String, ClassifyUnitLive>,
+    classify_rel: HashMap<String, ClassifyRel>,
+    /// Per-cast map bounding (D1b). ESO recycles `castTrackId`s and every `BEGIN_CAST`
+    /// (and REFLECTED) inserts into the five per-cast maps (`cast_id_units`,
+    /// `instant_cast_ids`, `cast_track_to_a`, `timed_cast`, `reflect_casts`); over a
+    /// multi-hour session those grow unbounded. Cast references are TEMPORALLY LOCAL
+    /// (an effect/completion/interrupt/reflected-hit follows its cast within seconds —
+    /// far under [`CAST_MAP_CAP`] casts), so evicting the oldest live cast once the live
+    /// set exceeds the cap is output-preserving. `cast_registrations` is the FIFO of
+    /// `(castTrackId, generation)` in registration order; `cast_current_gen` maps each
+    /// live id to its latest generation so a recycled id is only evicted when its
+    /// CURRENT registration ages out (a stale entry for a re-registered id is skipped).
+    cast_registrations: std::collections::VecDeque<(String, u64)>,
+    cast_current_gen: HashMap<String, u64>,
+    next_cast_gen: u64,
 }
+
+/// Upper bound on the number of distinct live `castTrackId`s the per-cast correlation
+/// maps retain (D1b). Generous by ~10× vs the longest realistic reference distance (a
+/// channel/DoT tick referencing its cast is within seconds ≈ a few thousand casts), so
+/// eviction never fires on any golden/differential fixture (each has <20 casts) and the
+/// output stays byte-for-byte identical; it only caps the unbounded growth of a real
+/// multi-hour live session. See [`EventEmitter::register_cast`].
+const CAST_MAP_CAP: usize = 50_000;
 
 impl EventEmitter {
     pub fn new() -> Self {
@@ -397,7 +458,10 @@ impl EventEmitter {
         // Compute the force-hostile reclassification up front so the code-1/2 own-side
         // masks reclassify the scripted/charmed enemies the raid fights, like Archon
         // does (the IA DamageTaken-bucket fix). A whole-log pre-pass — fine for the
-        // completed-file path; the live driver installs it via `set_force_hostile`.
+        // completed-file path. The live driver, which cannot pre-pass the whole log,
+        // maintains the SAME classification online in [`Self::update_live_classification`]
+        // (gated on `live_tracking`), so a live report reclassifies the same way
+        // forward-only (E3) — see that fn's PARITY LIMITATION for the one true→false edge.
         self.actors
             .set_monster_sides(super::encode::classify_monsters(lines));
         let mut out = String::new();
@@ -455,7 +519,14 @@ impl EventEmitter {
             "UNIT_REMOVED" => {
                 // The actor index map keeps the latest unit→actor binding (a
                 // recycled id is rebound on the next UNIT_ADDED), so no cleanup is
-                // needed here.
+                // needed there. The LIVE classifier (E3) DOES drop the unit id — like
+                // `classify_monsters`'s `cur.remove` — so a recycled id doesn't inherit
+                // the prior actor's monster_id/owner. LIVE-ONLY.
+                if self.live_tracking {
+                    if let Some(uid) = f.get(2).map(|s| s.trim()) {
+                        self.classify_units.remove(uid);
+                    }
+                }
                 None
             }
             "EFFECT_INFO" => {
@@ -513,13 +584,17 @@ impl EventEmitter {
         if let Some(ev) = &emitted {
             self.commit_anchor(raw_ts);
             self.note_emitted_raw(raw_ts);
-            // Accumulate the live segment body. `feed` may return multiple
-            // \n-separated lines (a damage event flushing buffered code-38s); count
-            // each, mirroring `build()`'s split. One-shot ignores this buffer.
-            for l in ev.split('\n') {
-                self.segment_events.push_str(l);
-                self.segment_events.push('\n');
-                self.segment_event_count += 1;
+            // Accumulate the live segment body — ONLY when the live driver is tracking
+            // (D2). `feed` may return multiple \n-separated lines (a damage event
+            // flushing buffered code-38s); count each, mirroring `build()`'s split. The
+            // one-shot `build()` path never reads this buffer (it assembles its own
+            // `out`), so writing it there just double-buffers the whole events string.
+            if self.live_tracking {
+                for l in ev.split('\n') {
+                    self.segment_events.push_str(l);
+                    self.segment_events.push('\n');
+                    self.segment_event_count += 1;
+                }
             }
         }
         emitted
@@ -533,6 +608,181 @@ impl EventEmitter {
             self.seg_first_raw = Some(raw_ts);
         }
         self.seg_last_raw = Some(raw_ts);
+    }
+
+    /// Enable LIVE tracking (D2/E3): turn on the per-segment [`Self::segment_events`]
+    /// buffer and the incremental friend/foe classifier. Called ONCE by the live driver
+    /// ([`super::live::LiveSegmenter::new`]) when it constructs its emitter; the one-shot
+    /// `build()` path never calls it, so it keeps its lean single-buffer output and its
+    /// whole-log `classify_monsters` pre-pass. Idempotent.
+    pub fn enable_segment_tracking(&mut self) {
+        self.live_tracking = true;
+    }
+
+    /// Record a `castTrackId` registration for the per-cast map bound (D1b). Called on
+    /// every `BEGIN_CAST` (and REFLECTED) that inserts into a per-cast map. Assigns a
+    /// fresh monotonic generation to the id (superseding any prior one), logs it in the
+    /// registration FIFO, and evicts the oldest LIVE cast once the live set exceeds
+    /// [`CAST_MAP_CAP`]. Because a golden/differential fixture never registers anywhere
+    /// near the cap, eviction never fires there and the output is byte-for-byte
+    /// unchanged; only a real multi-hour live session is bounded.
+    fn register_cast(&mut self, cast_track_id: &str) {
+        self.next_cast_gen += 1;
+        let g = self.next_cast_gen;
+        self.cast_current_gen.insert(cast_track_id.to_string(), g);
+        self.cast_registrations
+            .push_back((cast_track_id.to_string(), g));
+        // Bound BOTH the live-id set and the registration log. A stale FIFO entry
+        // (an id re-registered later, so its `cast_current_gen` no longer matches) is
+        // dropped without touching the maps — its live entry sits later in the FIFO;
+        // the oldest LIVE id is evicted from every per-cast map. This keeps the FIFO
+        // itself bounded even under heavy id recycling.
+        while self.cast_registrations.len() > CAST_MAP_CAP {
+            let Some((id, gen)) = self.cast_registrations.pop_front() else {
+                break;
+            };
+            if self.cast_current_gen.get(&id) == Some(&gen) {
+                self.cast_current_gen.remove(&id);
+                self.cast_id_units.remove(&id);
+                self.instant_cast_ids.remove(&id);
+                self.cast_track_to_a.remove(&id);
+                self.timed_cast.remove(&id);
+                self.reflect_casts.remove(&id);
+            }
+        }
+    }
+
+    /// Update the LIVE incremental friend/foe classifier (E3) for one damage-class
+    /// `COMBAT_EVENT`, then re-install the derived [`super::encode::MonsterSides`] into
+    /// the actor table iff a relationship counter just crossed 0→1 (the only transitions
+    /// that can change set membership — so this recomputes O(distinct monsters) at most
+    /// a few times per monster, not per event). Tracks the same `(d2p, d2m, rfp)` signal
+    /// as `classify_monsters`: a monster's damage to a player is `d2p`, to another monster
+    /// is `d2m`, and raid damage to it is `rfp`; `force_hostile = rfp>0 || (d2p>0 &&
+    /// d2m==0)`, `attacks_players = d2p>0`. Called BEFORE this event's mask is computed
+    /// (like the one-shot pre-pass is installed before emission), so even the classifying
+    /// event itself reads the reclassified side.
+    ///
+    /// `raw_tgt` is the RAW (unfolded) `f[19]` target field — the same value
+    /// `classify_monsters` reads — so a `*` self-target is an unknown unit that bumps no
+    /// counter here either (see the caller). LIVE-ONLY — the one-shot path keeps its
+    /// whole-log pre-pass and never calls this.
+    ///
+    /// PARITY LIMITATION (forward-only): this matches the one-shot `classify_monsters`
+    /// verdict as of the current line, but it CANNOT match one-shot's whole-log FINAL
+    /// verdict across a `force_hostile` true→false transition. A monster can be
+    /// transiently `force_hostile` (it damaged a player: `d2p>0 && d2m==0`) and later lose
+    /// it (it then damages another monster, so `d2m>0`). Any segment line already emitted
+    /// while it was transiently hostile keeps the hostile mask and has been POSTed
+    /// forward-only, so it cannot be retroactively corrected to the friendly side the
+    /// one-shot pre-pass (which sees `d2m>0` from the start) assigns. This is an accepted,
+    /// irreducible limitation of forward-only live segments — a later demotion cannot
+    /// rewrite an already-streamed line (and cannot cross a segment boundary at all). See
+    /// the `live_classification_force_hostile_true_to_false_is_forward_only` test.
+    fn update_live_classification(&mut self, action_result: &str, src_unit: &str, raw_tgt: &str) {
+        // Only damage-class results feed the relationship signal (mirror `classify_monsters`).
+        if !matches!(
+            action_result,
+            "DAMAGE"
+                | "CRITICAL_DAMAGE"
+                | "DOT_TICK"
+                | "DOT_TICK_CRITICAL"
+                | "BLOCKED_DAMAGE"
+                | "DAMAGE_SHIELDED"
+        ) {
+            return;
+        }
+        let mut changed = false;
+        // Source monster: damage it deals (to a player-side unit vs to another monster).
+        if let Some(mid) = self.classify_monster_id(src_unit) {
+            let tgt_player = self.classify_is_player_side(raw_tgt);
+            let tgt_is_monster = self
+                .classify_units
+                .get(raw_tgt.trim())
+                .map(|u| !u.is_player)
+                .unwrap_or(false);
+            let rel = self.classify_rel.entry(mid).or_default();
+            if tgt_player {
+                if rel.d2p == 0 {
+                    changed = true;
+                }
+                rel.d2p += 1;
+            } else if tgt_is_monster {
+                if rel.d2m == 0 {
+                    changed = true;
+                }
+                rel.d2m += 1;
+            }
+        }
+        // Target monster: damage it receives from the raid (the enemy signal).
+        if self.classify_is_player_side(src_unit) {
+            if let Some(mid) = self.classify_monster_id(raw_tgt) {
+                let rel = self.classify_rel.entry(mid).or_default();
+                if rel.rfp == 0 {
+                    changed = true;
+                }
+                rel.rfp += 1;
+            }
+        }
+        if changed {
+            self.install_live_classification();
+        }
+    }
+
+    /// Recompute the derived [`super::encode::MonsterSides`] from the current
+    /// `classify_rel` counters and install it into the actor table (E3). A full
+    /// recompute-and-replace so a monster that starts qualifying — or STOPS qualifying
+    /// for `force_hostile` once it also attacks another monster (`d2m` goes >0) — is
+    /// reclassified for all SUBSEQUENT lines. This tracks the one-shot `classify_monsters`
+    /// classification forward-only: it matches the one-shot verdict from the current line
+    /// on, but lines already emitted while a monster was transiently `force_hostile` keep
+    /// the hostile mask (see [`Self::update_live_classification`]'s PARITY LIMITATION) —
+    /// they were streamed forward-only and cannot be rewritten to one-shot's whole-log
+    /// final side.
+    fn install_live_classification(&mut self) {
+        let mut sides = super::encode::MonsterSides::default();
+        for (mid, r) in &self.classify_rel {
+            if r.rfp > 0 || (r.d2p > 0 && r.d2m == 0) {
+                sides.force_hostile.insert(mid.clone());
+            }
+            if r.d2p > 0 {
+                sides.attacks_players.insert(mid.clone());
+            }
+        }
+        self.actors.set_monster_sides(sides);
+    }
+
+    /// The `monsterId` of a unit iff it is a non-player monster with a real id — the
+    /// key `classify_monsters` accumulates relationship counters under. `None` for a
+    /// player, an unknown unit, or a `monsterId` of `""`/`"0"`.
+    fn classify_monster_id(&self, unit_id: &str) -> Option<String> {
+        self.classify_units
+            .get(unit_id.trim())
+            .filter(|u| !u.is_player && !u.monster_id.is_empty() && u.monster_id != "0")
+            .map(|u| u.monster_id.clone())
+    }
+
+    /// Whether a unit is player-side: a `PLAYER`, or transitively owned by one (a
+    /// pet/companion). Iterative with a depth cap — the online twin of
+    /// `super::encode::classify_player_side`.
+    fn classify_is_player_side(&self, unit_id: &str) -> bool {
+        let mut uid = unit_id.trim().to_string();
+        for _ in 0..6 {
+            match self.classify_units.get(&uid) {
+                None => return false,
+                Some(u) => {
+                    if u.is_player {
+                        return true;
+                    }
+                    if !u.owner.is_empty() && u.owner != "0" {
+                        uid = u.owner.clone();
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Begin a new live segment: clear the per-segment RAW-ts window so the NEXT
@@ -695,6 +945,19 @@ impl EventEmitter {
         let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) else {
             return;
         };
+        // LIVE friend/foe classifier (E3): mirror `classify_monsters`'s per-unit map —
+        // `[3]type` (PLAYER?), `[6]monsterId`, `[15]ownerUnitId`. LIVE-ONLY (the
+        // one-shot path installs the whole-log classification up front).
+        if self.live_tracking {
+            self.classify_units.insert(
+                unit_id.clone(),
+                ClassifyUnitLive {
+                    is_player: f.get(3).map(|s| s.trim()) == Some("PLAYER"),
+                    monster_id: f.get(6).map(|s| s.trim().to_string()).unwrap_or_default(),
+                    owner: f.get(15).map(|s| s.trim().to_string()).unwrap_or_default(),
+                },
+            );
+        }
         // championPoints: UNIT_ADDED field [12] (after the `<ts>,UNIT_ADDED,`
         // header these are f[2+0]=unitId … f[2+12]=champ → absolute index 14).
         if let Some(cp) = f.get(14) {
@@ -715,6 +978,16 @@ impl EventEmitter {
         let Some(unit_id) = f.get(2).map(|s| s.trim().to_string()) else {
             return;
         };
+        // LIVE classifier (E3): `classify_monsters` refreshes only `ownerUnitId`
+        // (absolute `[10]`) on UNIT_CHANGED; do the same so pet/owner resolution stays
+        // correct. LIVE-ONLY.
+        if self.live_tracking {
+            if let Some(owner) = f.get(10) {
+                if let Some(u) = self.classify_units.get_mut(unit_id.trim()) {
+                    u.owner = owner.trim().to_string();
+                }
+            }
+        }
         if let Some(cp) = f.get(9) {
             self.champion_points.insert(unit_id, cp.trim().to_string());
         }
@@ -1087,6 +1360,11 @@ impl EventEmitter {
         // the cast ability's 1-based master index, NOT a tuple index. (Storing the
         // tuple A here was the render bug: cast-refs pointed into the wrong table.)
         if !cast_track_id.is_empty() && cast_track_id != "0" {
+            // Bound the per-cast correlation maps over a long session (D1b): register
+            // this id so the oldest live cast is evicted once the live set exceeds the
+            // cap. Cast references are temporally local, so the generous cap never
+            // evicts an id that a later line still references.
+            self.register_cast(cast_track_id);
             // Record this cast's source/target so an END_CAST INTERRUPTED can resolve
             // the interrupted cast's caster (the code-27 line's target).
             self.cast_id_units.insert(
@@ -1281,13 +1559,27 @@ impl EventEmitter {
         let tgt_field = f.get(19).map(|s| s.trim()).unwrap_or("*");
         let (tgt_unit, tgt_state) = self.parse_combat_target(f, tgt_field, &src_unit, &src_state);
 
-        // LIVE incremental friend/foe: if the raid just dealt damage to a monster, force
-        // it hostile NOW (before this event's mask is computed) so a charmed/scripted
-        // enemy reads hostile from the raid's first hit onward — the streaming analog of
-        // `classify_monsters`'s `rfp>0` clause. On the completed-file path the full set is
-        // pre-installed by `build`, so this is a redundant no-op. Mirrors the DMG set the
-        // pre-pass uses (a dropped/buffered hit still establishes the relationship).
-        if matches!(
+        // LIVE incremental friend/foe classification (E3), run BEFORE this event's mask
+        // so even the classifying event reads the reclassified side. The live driver
+        // cannot run the whole-log `classify_monsters` pre-pass, so it maintains the
+        // SAME `(d2p, d2m, rfp)` relationship counters online and re-derives all THREE
+        // clauses (`rfp>0`, the `d2p>0 && d2m==0` force-hostile, and the `attacks_players`
+        // per-event mask override) — matching the one-shot classification. On the
+        // completed-file path `build` already installed the whole-log set, so this runs
+        // the cheaper redundant `note_raid_damage` (the `rfp` subset) instead, leaving
+        // the pre-installed classification untouched.
+        //
+        // Both classifiers get the RAW target field (`tgt_field`), NOT the folded
+        // `tgt_unit`: `classify_monsters` (the one-shot pre-pass) reads the raw `f[19]`,
+        // so a `*` self-target is an unknown unit there that bumps NO counter. Feeding the
+        // folded `tgt_unit` instead would rewrite a `*` into `src_unit`, letting a monster
+        // that self-targets a damage-class event wrongly bump `d2m` (or, via
+        // `note_raid_damage`, force a self-targeting player pet hostile) — diverging from
+        // the one-shot verdict. For a non-`*` target the raw field equals `tgt_unit`, so
+        // this is a no-op there.
+        if self.live_tracking {
+            self.update_live_classification(action_result, &src_unit, tgt_field);
+        } else if matches!(
             action_result,
             "DAMAGE"
                 | "CRITICAL_DAMAGE"
@@ -1296,7 +1588,7 @@ impl EventEmitter {
                 | "BLOCKED_DAMAGE"
                 | "DAMAGE_SHIELDED"
         ) {
-            self.actors.note_raid_damage(&src_unit, &tgt_unit);
+            self.actors.note_raid_damage(&src_unit, tgt_field);
         }
 
         // REFLECTED: the game logs an incoming hit that a reflect skill bounced back.
@@ -1308,6 +1600,10 @@ impl EventEmitter {
         // proc marker (no bounce), so it is ignored. Verified on blackrose + sunspire.
         if action_result == "REFLECTED" {
             if hit_value != "0" {
+                // Bound `reflect_casts` too (D1b): the reflected DAMAGE strikes back on
+                // the same cast within ~1s, so the id is read long before it could age
+                // out of the generous cap.
+                self.register_cast(cast_track_id);
                 self.reflect_casts
                     .insert(cast_track_id.to_string(), hit_value.to_string());
             }
@@ -3607,6 +3903,202 @@ mod tests {
             cut_emitter.tuples(),
             one_shot.tuples(),
             "the cut path's tuple table must match the one-shot table exactly"
+        );
+    }
+
+    // ── E3: LIVE-TRACKED CLASSIFICATION == ONE-SHOT (friend/foe reclassification) ──
+    // The live driver enables segment tracking, which also turns on the incremental
+    // friend/foe classifier (E3). This simulates that path — like
+    // `assemble_with_fight_cuts` but with tracking ON — so the online classifier's masks
+    // can be gated byte-for-byte against the one-shot `classify_monsters` whole-log
+    // pre-pass. (The plain `assemble_with_fight_cuts` above stays tracking-OFF so it
+    // keeps testing the note_raid_damage rfp path.)
+    fn assemble_with_fight_cuts_tracked(lines: &[&str]) -> Vec<String> {
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(lines);
+        let mut e = EventEmitter::with_master_indices(id2a, ab2i);
+        e.enable_segment_tracking(); // the real live driver (LiveSegmenter::new) does this
+        let mut all_emitted: Vec<String> = Vec::new();
+        e.open_segment();
+        for line in lines {
+            if let Some(ev) = e.feed(line) {
+                for l in ev.split('\n') {
+                    all_emitted.push(l.to_string());
+                }
+            }
+            if split_csv_quoted_pub(line).get(1).map(|s| s.trim()) == Some("END_COMBAT") {
+                e.open_segment();
+            }
+        }
+        for l in e.flush_pending_shields(None, None, None) {
+            all_emitted.push(l);
+        }
+        all_emitted
+    }
+
+    #[test]
+    fn live_tracked_classification_matches_one_shot_on_friendly_attacker() {
+        // A fixture with two FRIENDLY-tagged monsters that attack the raid but take no
+        // raid damage: Q (attacks players only → force-hostile via the `d2p>0 && d2m==0`
+        // clause) and M (attacks a monster THEN a player → the `attacks_players`
+        // per-event mask override, NOT force-hostile). Neither clause fired on the live
+        // path before E3, so the online masks diverged from the one-shot pre-pass.
+        let raw = include_str!("testdata/live_friendly_attacker.log");
+        let lines: Vec<&str> = raw.lines().collect();
+
+        // One-shot: the proven whole-log `classify_monsters` pre-pass.
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+        let mut one_shot = EventEmitter::with_master_indices(id2a, ab2i);
+        let out = one_shot.build(&lines);
+        let one_shot_lines: Vec<String> = out.events_string.lines().map(str::to_string).collect();
+
+        // Live (tracking ON): the incremental classifier must reproduce it byte-for-byte.
+        let live_tracked = assemble_with_fight_cuts_tracked(&lines);
+        assert_eq!(
+            live_tracked.len(),
+            one_shot_lines.len(),
+            "tracked-live emitted {} lines vs one-shot {}",
+            live_tracked.len(),
+            one_shot_lines.len()
+        );
+        for (i, (live, shot)) in live_tracked.iter().zip(one_shot_lines.iter()).enumerate() {
+            assert_eq!(
+                live, shot,
+                "E3: tracked-live line {i} differs from one-shot:\n  live: {live}\n  shot: {shot}"
+            );
+        }
+
+        // Fail-before guard: WITHOUT the incremental classifier (the pre-E3
+        // note_raid_damage-only path, i.e. tracking OFF) the SAME log diverges — proving
+        // the new clauses are load-bearing, not a vacuous no-op.
+        let untracked = assemble_with_fight_cuts(&lines);
+        assert_ne!(
+            untracked, one_shot_lines,
+            "the friendly-attacker fixture must diverge WITHOUT the incremental classifier \
+             (else the test proves nothing)"
+        );
+    }
+
+    // ── E3 KNOWN LIMITATION: forward-only classification cannot cross a force_hostile
+    //    true→false transition ────────────────────────────────────────────────────────
+    // This DOCUMENTS (does not "fix") the one irreducible way the live incremental
+    // classifier diverges from the one-shot `classify_monsters` whole-log verdict. A
+    // FRIENDLY-tagged monster M first damages a player (`d2p>0 && d2m==0` → transiently
+    // force-hostile), an enemy E then damages M (a line emitted while M is transiently
+    // hostile), and only AFTER that does M damage another monster (`d2m>0` → M is demoted,
+    // no longer force-hostile). The one-shot pre-pass sees the whole log at once, so it
+    // knows M ends up NOT force-hostile and encodes E→M with M's FRIENDLY (16) target
+    // mask. The live path streams forward-only: when it emits E→M, M is still transiently
+    // force-hostile, so E→M carries the HOSTILE (64) target mask, and that segment line
+    // has already been POSTed — a later demotion cannot rewrite it. This is fundamental to
+    // forward-only live segments (and a demotion cannot cross a segment boundary at all),
+    // so we pin the CURRENT behavior rather than assert an equality that cannot hold.
+    #[test]
+    fn live_classification_force_hostile_true_to_false_is_forward_only() {
+        let raw = include_str!("testdata/live_force_hostile_true_to_false.log");
+        let lines: Vec<&str> = raw.lines().collect();
+
+        // One-shot: the whole-log `classify_monsters` pre-pass (knows M's final side).
+        let (id2a, ab2i) = super::super::encode::actor_ability_maps(&lines);
+        let mut one_shot = EventEmitter::with_master_indices(id2a, ab2i);
+        let out = one_shot.build(&lines);
+        let one_shot_lines: Vec<String> = out.events_string.lines().map(str::to_string).collect();
+
+        // Live (tracking ON): the forward-only incremental classifier.
+        let live_lines = assemble_with_fight_cuts_tracked(&lines);
+
+        // Locate the E→M damage line in each output by its unique cast id (C7002). The
+        // emitted code-1 layout is `ts|1|sub|srcMask|tgtMask|C<cast>|S…|T…|tail`, so the
+        // target-side mask is pipe-field index 4.
+        let find_em = |ls: &[String]| {
+            ls.iter()
+                .find(|l| l.contains("|C7002|"))
+                .cloned()
+                .expect("E→M line (cast 7002) must be emitted")
+        };
+        let live_em = find_em(&live_lines);
+        let shot_em = find_em(&one_shot_lines);
+        let field = |l: &str, i: usize| l.split('|').nth(i).unwrap().to_string();
+
+        // Sanity: the SOURCE (enemy E, raw HOSTILE) is hostile (64) on both paths.
+        assert_eq!(field(&live_em, 3), "64", "E→M src mask (live)");
+        assert_eq!(field(&shot_em, 3), "64", "E→M src mask (one-shot)");
+
+        // One-shot's whole-log verdict: M also damages another monster (d2m>0), so it is
+        // NOT force-hostile → E→M carries M's FRIENDLY (16) target mask.
+        assert_eq!(
+            field(&shot_em, 4),
+            "16",
+            "one-shot: M is not force-hostile whole-log, so E→M target mask is friendly (16)"
+        );
+
+        // Live forward-only: at the E→M line M is still TRANSIENTLY force-hostile (it has
+        // only hit a player so far), so E→M carries the HOSTILE (64) target mask. This is
+        // the documented, irreducible divergence — a later demotion cannot rewrite this
+        // already-streamed line. Asserting the current behavior (NOT byte-equality with
+        // one-shot, which cannot hold here) so a future regression that silently changes
+        // it is caught.
+        assert_eq!(
+            field(&live_em, 4),
+            "64",
+            "live: M is transiently force-hostile at the E→M line, so its target mask is \
+             hostile (64) — the accepted forward-only divergence"
+        );
+
+        // The two E→M lines therefore differ ONLY in the target mask; every other emitted
+        // line (M→P and M→M2, whose reclassification lands before their own mask) matches.
+        assert_ne!(
+            live_em, shot_em,
+            "the E→M line is the pinned forward-only divergence and must differ"
+        );
+    }
+
+    // ── D1(b): per-cast maps stay bounded over a long session ─────────────────────
+    // Every BEGIN_CAST inserts into the per-cast correlation maps keyed by a unique
+    // castTrackId; over a multi-hour session those grow unbounded. `register_cast`
+    // evicts the oldest live cast once the live set exceeds `CAST_MAP_CAP`. Feeding far
+    // more distinct casts than the cap must leave every per-cast map — and the eviction
+    // bookkeeping (`cast_current_gen` / `cast_registrations`) — bounded by the cap, while
+    // the newest cast (whose correlation is still needed) is retained.
+    #[test]
+    fn per_cast_maps_stay_bounded_over_a_long_session() {
+        let mut e = EventEmitter::new();
+        // A BEGIN_LOG + one player unit so the cast masks/state resolve.
+        let _ = e.feed("0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live.11.3\"");
+        let _ = e.feed(
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",111,50,1735,0,PLAYER_ALLY,T",
+        );
+        let total = CAST_MAP_CAP + 10_000;
+        let state = "16000/16000,12000/12000,7960/12000,53/500,0/1000,0,0.5,0.5,4.0";
+        for i in 1..=total {
+            // Instant self-cast (code 16) with a UNIQUE castTrackId each time.
+            let line = format!("{i},BEGIN_CAST,0,F,{i},30000,1,{state},*");
+            let _ = e.feed(&line);
+        }
+        assert!(
+            e.cast_id_units.len() <= CAST_MAP_CAP,
+            "cast_id_units grew to {} (cap {CAST_MAP_CAP})",
+            e.cast_id_units.len()
+        );
+        assert!(
+            e.instant_cast_ids.len() <= CAST_MAP_CAP,
+            "instant_cast_ids grew to {} (cap {CAST_MAP_CAP})",
+            e.instant_cast_ids.len()
+        );
+        assert!(
+            e.cast_current_gen.len() <= CAST_MAP_CAP,
+            "cast_current_gen grew to {} (cap {CAST_MAP_CAP})",
+            e.cast_current_gen.len()
+        );
+        assert!(
+            e.cast_registrations.len() <= CAST_MAP_CAP,
+            "cast_registrations grew to {} (cap {CAST_MAP_CAP})",
+            e.cast_registrations.len()
+        );
+        // Eviction drops the OLDEST cast, so the newest one is always retained (its
+        // effect/completion/interrupt correlation must survive the bound).
+        assert!(
+            e.cast_id_units.contains_key(&total.to_string()),
+            "the newest cast must be retained after eviction"
         );
     }
 
