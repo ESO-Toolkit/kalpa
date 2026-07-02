@@ -3316,6 +3316,8 @@ component AppearanceOverlay inherits Rectangle {
     in-out property <bool> auto-open-analysis: false;
     in-out property <int> conflict-policy: 0;
     in-out property <string> addons-path;
+    in-out property <bool> minion-detected: false;
+    in-out property <bool> pack-hub-authenticated: false;
     callback close;
     callback theme-selected(string);
     callback theme-create;
@@ -3768,8 +3770,8 @@ component AppearanceOverlay inherits Rectangle {
             SettingsToolRow { x: 0px; y: 68px; width: parent.width; icon: @image-url("../assets/icons/files.svg"); label: "Characters"; description: "View and manage your ESO characters"; }
             SettingsToolRow { x: 0px; y: 136px; width: parent.width; icon: @image-url("../assets/icons/file-sliders.svg"); label: "API Compatibility"; description: "Check addons against current API version"; }
             SettingsToolRow { x: 0px; y: 204px; width: parent.width; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Check for App Updates"; description: "See if a newer version of Kalpa is available"; }
-            SettingsToolRow { x: 0px; y: 272px; width: parent.width; icon: @image-url("../assets/icons/flame.svg"); label: "Minion Migration"; description: "Import tracking data from Minion with backup and preview"; accent: true; }
-            SettingsToolRow { x: 0px; y: 340px; width: parent.width; icon: @image-url("../assets/icons/power.svg"); label: "Safety Center"; description: "Snapshots, integrity checks, and operation log"; }
+            SettingsToolRow { visible: root.minion-detected; x: 0px; y: 272px; width: parent.width; icon: @image-url("../assets/icons/flame.svg"); label: "Minion Migration"; description: "Import tracking data from Minion with backup and preview"; accent: true; }
+            SettingsToolRow { x: 0px; y: root.minion-detected ? 340px : 272px; width: parent.width; icon: @image-url("../assets/icons/power.svg"); label: "Safety Center"; description: "Snapshots, integrity checks, and operation log"; }
         }
 
         if (root.active-tab == 3) : Rectangle {
@@ -3795,6 +3797,7 @@ component AppearanceOverlay inherits Rectangle {
             }
 
             Rectangle {
+                visible: root.pack-hub-authenticated;
                 x: 0px;
                 y: 150px;
                 width: parent.width;
@@ -8359,6 +8362,8 @@ export component KalpaWindow inherits Window {
     in-out property <bool> settings-auto-open-analysis: false;
     in-out property <int> settings-conflict-policy: 0;
     in-out property <string> settings-addons-path;
+    in-out property <bool> settings-minion-detected: false;
+    in-out property <bool> settings-pack-hub-authenticated: false;
     private property <length> error-banner-height: root.status-error-message != "" ? 36px : 0px;
     private property <length> offline-banner-height: root.offline-active ? 36px : 0px;
     private property <length> app-update-banner-height: root.app-update-message != "" ? 36px : 0px;
@@ -8691,6 +8696,8 @@ export component KalpaWindow inherits Window {
             auto-open-analysis <=> root.settings-auto-open-analysis;
             conflict-policy <=> root.settings-conflict-policy;
             addons-path <=> root.settings-addons-path;
+            minion-detected <=> root.settings-minion-detected;
+            pack-hub-authenticated <=> root.settings-pack-hub-authenticated;
             themes: root.themes;
             close => { root.settings-open = false; }
             theme-selected(id) => {

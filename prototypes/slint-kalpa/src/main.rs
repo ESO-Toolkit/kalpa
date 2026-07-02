@@ -4316,6 +4316,10 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     ui.set_detail_files_active(detail_files_active);
     ui.set_settings_open(env_flag("KALPA_SETTINGS_OPEN"));
     ui.set_settings_editor_open(env_flag("KALPA_SETTINGS_EDITOR"));
+    ui.set_settings_minion_detected(env_flag("KALPA_MINION_DETECTED"));
+    ui.set_settings_pack_hub_authenticated(
+        env_flag("KALPA_PACK_HUB_AUTHENTICATED") || env_flag("KALPA_AUTH_USER"),
+    );
     ui.set_pack_hub_open(env_flag("KALPA_PACK_HUB_OPEN"));
     ui.set_uploader_open(env_flag("KALPA_UPLOADER_OPEN"));
     ui.set_svm_open(env_flag("KALPA_SVM_OPEN"));
