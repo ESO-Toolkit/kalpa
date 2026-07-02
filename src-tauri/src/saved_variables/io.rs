@@ -41,12 +41,38 @@ pub fn file_stamp(path: &Path) -> Result<SvFileStamp, String> {
     })
 }
 
-/// Extract character keys from a SavedVariables .lua file.
-/// Tracks brace depth while respecting string literals so that
-/// braces inside string values don't corrupt the depth counter.
+/// Extract character keys from an in-memory SavedVariables .lua string.
+///
+/// Thin wrapper over [`extract_character_keys_from_reader`] so callers that
+/// already hold the whole file as a string (and existing tests) keep working.
+// The streaming variant is used on the hot path (list_saved_variables_blocking),
+// so this string wrapper currently only has test callers; keep it available as
+// public API without tripping dead_code in non-test builds (pub fns in a
+// cdylib/staticlib crate are treated as potentially dead unless externally used).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_character_keys(content: &str) -> Vec<String> {
+    // BufRead over the string's bytes; this cannot error, so unwrap_or reuses
+    // whatever keys were collected before an (impossible) I/O error.
+    extract_character_keys_from_reader(std::io::Cursor::new(content.as_bytes())).unwrap_or_default()
+}
+
+/// Extract character keys by streaming a reader line-by-line.
+///
+/// Tracks brace depth while respecting string literals so that braces inside
+/// string values don't corrupt the depth counter. Reads raw bytes per line and
+/// converts each with `String::from_utf8_lossy`, so files containing non-UTF8
+/// bytes are tolerated without loading the whole file into memory.
+///
+/// Stops after `MAX_SCAN_BYTES` have been read as a safety bound against
+/// pathological/never-ending input.
+pub fn extract_character_keys_from_reader<R: std::io::BufRead>(
+    mut reader: R,
+) -> std::io::Result<Vec<String>> {
     static RE_KEY: OnceLock<Regex> = OnceLock::new();
     let re_key = RE_KEY.get_or_init(|| Regex::new(r#"^\["([^"]+)"\]\s*=\s*\{?\s*$"#).unwrap());
+
+    // Sanity bound: never scan more than 64 MB, even for a pathological file.
+    const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
     let mut keys: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -59,8 +85,23 @@ pub fn extract_character_keys(content: &str) -> Vec<String> {
     //               ["$AccountWide"] = { depth 3→4  ← skip this
     //               ["CharName"] = {     depth 3→4  ← these are character keys
     let mut depth: i32 = 0;
+    let mut scanned: u64 = 0;
+    let mut raw: Vec<u8> = Vec::new();
 
-    for line in content.lines() {
+    loop {
+        if scanned >= MAX_SCAN_BYTES {
+            break;
+        }
+        raw.clear();
+        let n = reader.read_until(b'\n', &mut raw)?;
+        if n == 0 {
+            break; // EOF
+        }
+        scanned += n as u64;
+
+        // Convert this line, tolerating non-UTF8 bytes.
+        let line = String::from_utf8_lossy(&raw);
+        // Strip the trailing newline (and any \r) for the key-match regex.
         let trimmed = line.trim();
 
         if depth == 3 {
@@ -104,7 +145,7 @@ pub fn extract_character_keys(content: &str) -> Vec<String> {
         }
     }
 
-    keys
+    Ok(keys)
 }
 
 /// Cache entry for character key extraction. Keyed by file path.
@@ -187,32 +228,18 @@ pub fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVaria
             if let Some(entry) = cached {
                 entry.keys
             } else {
+                // Stream the whole file line-by-line rather than capping the
+                // read. ESO SavedVariables files are commonly multi-megabyte,
+                // so a fixed prefix would hide characters later in the file.
+                // The reader-based extractor keeps memory bounded (one line at
+                // a time) and tolerates non-UTF8 bytes via lossy conversion.
                 let keys = match fs::File::open(&path) {
-                    Ok(mut f) => {
-                        use std::io::Read;
-                        let read_limit = 256 * 1024;
-                        let mut buf = vec![0u8; read_limit.min(size_bytes as usize)];
-                        let n = f
-                            .read(&mut buf)
-                            .map_err(|e| {
-                                eprintln!("Warning: failed to read {}: {}", path.display(), e);
-                                e
-                            })
-                            .unwrap_or(0);
-                        buf.truncate(n);
-                        match String::from_utf8(buf) {
-                            Ok(content) => extract_character_keys(&content),
-                            Err(e) => {
-                                // Fall back to lossy conversion but log the issue
-                                eprintln!(
-                                    "Warning: {} contains invalid UTF-8: {}",
-                                    path.display(),
-                                    e
-                                );
-                                let content = String::from_utf8_lossy(e.as_bytes());
-                                extract_character_keys(&content)
-                            }
-                        }
+                    Ok(f) => {
+                        let reader = std::io::BufReader::new(f);
+                        extract_character_keys_from_reader(reader).unwrap_or_else(|e| {
+                            eprintln!("Warning: failed to read {}: {}", path.display(), e);
+                            Vec::new()
+                        })
                     }
                     Err(e) => {
                         eprintln!("Warning: failed to open {}: {}", path.display(), e);
@@ -598,6 +625,51 @@ mod tests {
         assert!(!dir.join("x.lua.tmp").exists());
         assert!(!dir.join("x.lua.old").exists());
         assert!(!dir.join("x.lua.bak").exists());
+    }
+
+    #[test]
+    fn extract_character_keys_finds_keys_past_256kb() {
+        // Build a file where a character sits well past the old 256 KB prefix
+        // cap, so a capped read would miss it. Padding lives inside a string
+        // value at character-key depth (3) so it doesn't disturb brace depth.
+        let padding = "x".repeat(400 * 1024);
+        let content = format!(
+            "TopVar =\n{{\n\t[\"Default\"] =\n\t{{\n\t\t[\"@Acct\"] =\n\t\t{{\n\
+             \t\t\t[\"EarlyChar\"] =\n\t\t\t{{\n\t\t\t\t[\"pad\"] = \"{padding}\",\n\t\t\t}},\n\
+             \t\t\t[\"LateChar\"] =\n\t\t\t{{\n\t\t\t\t[\"level\"] = 50,\n\t\t\t}},\n\
+             \t\t}},\n\t}},\n}}\n"
+        );
+        let keys = extract_character_keys(&content);
+        assert!(keys.contains(&"EarlyChar".to_string()));
+        assert!(
+            keys.contains(&"LateChar".to_string()),
+            "character after 256 KB should still be extracted via streaming"
+        );
+    }
+
+    #[test]
+    fn extract_character_keys_from_reader_matches_string_variant() {
+        let content = r#"TopVar =
+{
+	["Default"] =
+	{
+		["@Acct"] =
+		{
+			["$AccountWide"] =
+			{
+			},
+			["Baelthor"] =
+			{
+			},
+		},
+	},
+}
+"#;
+        let via_str = extract_character_keys(content);
+        let via_reader =
+            extract_character_keys_from_reader(std::io::Cursor::new(content.as_bytes())).unwrap();
+        assert_eq!(via_str, via_reader);
+        assert_eq!(via_str, vec!["Baelthor".to_string()]);
     }
 
     #[test]
