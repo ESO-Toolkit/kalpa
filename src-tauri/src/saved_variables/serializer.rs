@@ -72,11 +72,14 @@ fn serialize_table(out: &mut String, node: &SvTreeNode, depth: usize) {
     if let Some(children) = &node.children {
         for child in children {
             out.push_str(&child_indent);
-            // Determine key format. Numeric indices use `[n] = `; string keys
-            // are always bracket-quoted (`["key"] = `), matching how ESO itself
-            // writes table keys. The regex-based tools that scan these files
-            // (extract_character_keys, copy_sv_profile) only match bracket
-            // style, so identifier-safe keys must never be emitted bare.
+            // Determine key format. Numeric keys use the bare `[N] =` array
+            // form; all other (string) keys use the bracketed-quoted
+            // `["key"] =` form. ESO's own SavedVariables writer always emits
+            // the quoted form for string keys even when they are valid Lua
+            // identifiers, and kalpa features that scan the game format
+            // (character-key extraction in io.rs, copy-profile in profile.rs)
+            // depend on that. Emitting bare identifiers here would make
+            // identifier-like character names vanish from those features.
             if is_numeric_key(&child.key) {
                 out.push('[');
                 out.push_str(&child.key);
@@ -171,8 +174,9 @@ mod tests {
         };
 
         let lua = serialize_to_lua(&root);
-        // Top-level variables stay bare identifiers; table keys are bracket-quoted.
+        // Top-level variable names stay bare identifiers.
         assert!(lua.contains("MyVar ="));
+        // Nested string keys use the bracketed-quoted game format.
         assert!(lua.contains("[\"enabled\"] = true"));
         assert!(lua.contains("[\"count\"] = 42"));
         assert!(lua.contains("[\"name\"] = \"hello\""));
@@ -473,6 +477,53 @@ Var2 =
         assert!(output.contains("[\"level\"] = 10"));
         assert!(!output.contains("enabled = true"));
         assert!(!output.contains("level = 10"));
+    }
+
+    #[test]
+    fn nested_identifier_key_serializes_bracketed() {
+        // Even though "Baelthor" is a valid Lua identifier, a nested string key
+        // must be emitted in ESO's `["Name"] =` game format so that
+        // character-key extraction (io.rs) and copy-profile (profile.rs), which
+        // scan for that format, keep working after a save through the SV editor.
+        let root = SvTreeNode {
+            key: "test.lua".into(),
+            value_type: SvValueType::Table,
+            value: None,
+            raw_lua_value: None,
+            children: Some(vec![SvTreeNode {
+                key: "MyAddon_SV".into(),
+                value_type: SvValueType::Table,
+                value: None,
+                raw_lua_value: None,
+                children: Some(vec![SvTreeNode {
+                    key: "Baelthor".into(),
+                    value_type: SvValueType::Table,
+                    value: None,
+                    raw_lua_value: None,
+                    children: Some(vec![SvTreeNode {
+                        key: "level".into(),
+                        value_type: SvValueType::Number,
+                        value: Some(serde_json::json!(50.0)),
+                        children: None,
+                        raw_lua_value: None,
+                    }]),
+                }]),
+            }]),
+        };
+
+        let lua = serialize_to_lua(&root);
+        // Top-level variable name stays a bare identifier.
+        assert!(lua.contains("MyAddon_SV ="));
+        // Identifier-like nested key round-trips in bracketed-quoted form.
+        assert!(lua.contains("[\"Baelthor\"] ="));
+        assert!(!lua.contains("Baelthor ="));
+
+        // And extraction sees it: place Baelthor at character-key depth (3).
+        let wrapped = format!(
+            "MyAddon_SV =\n{{\n\t[\"Default\"] =\n\t{{\n\t\t[\"@Acct\"] =\n\t\t{{\n\t\t\t[\"Baelthor\"] =\n\t\t\t{{\n\t\t\t\t[\"level\"] = 50,\n\t\t\t}},\n\t\t}},\n\t}},\n}}\n"
+        );
+        let keys = super::super::io::extract_character_keys(&wrapped);
+        assert!(keys.contains(&"Baelthor".to_string()));
     }
 
     #[test]
