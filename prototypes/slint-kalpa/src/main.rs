@@ -255,7 +255,9 @@ fn parse_render_preset(value: &str) -> Option<NativeRenderPreset> {
         "low" | "low-memory" | "low_memory" | "memory" | "software" => {
             Some(NativeRenderPreset::LowMemory)
         }
-        "standard" | "fidelity" | "quality" | "skia" | "femtovg" => Some(NativeRenderPreset::Standard),
+        "standard" | "fidelity" | "quality" | "skia" | "femtovg" => {
+            Some(NativeRenderPreset::Standard)
+        }
         _ => None,
     }
 }
@@ -1541,76 +1543,196 @@ fn search_discover_entries(installed_ids: &BTreeSet<String>) -> Vec<DiscoverEntr
 }
 
 fn popular_discover_entries(installed_ids: &BTreeSet<String>) -> Vec<DiscoverEntry> {
-    vec![
+    let mut entries = vec![
         discover_entry(
-            "57",
-            "HarvestMap",
-            "Shinni",
-            "Map",
-            "3.19.2",
-            "18.4M",
-            "522K",
-            "18.6K",
-            "2/28/2026",
-            "4/1/2014",
-            "1f5ce7bd9a21",
-            "101048, 101049",
-            "Resource node, chest, fishing, and survey pins with account-wide map data.",
+            "1346",
+            "Dolgubon's Lazy Writ Crafter",
+            "Dolgubon",
+            "TradeSkill Mods",
+            "4.0.5.6.4",
+            "9,238,875",
+            "224,924",
+            "2,167",
+            "04/07/26 04:22 AM",
+            "04/16/16 07:34 PM",
+            "ca9e42fe27c133b66051d959a23161f0",
+            "Season Zero (11.3.0)",
+            "Crafting writ automation, rewards tracking, and compact workflow helpers for daily crafting.",
             1,
             installed_ids,
         ),
         discover_entry(
-            "3170",
-            "Wizard's Wardrobe",
+            "3317",
+            "Character Knowledge (Research Assistant)",
             "Dolgubon",
-            "Raid",
-            "1.19.6",
-            "7.7M",
-            "286K",
-            "9.3K",
-            "2/27/2026",
-            "9/12/2020",
-            "67fd90c43ba1",
-            "101048, 101049",
-            "Build and gear-set management for trials, dungeons, arenas, and fast role swaps.",
+            "Character Advancement",
+            "2.1.9",
+            "6,310,011",
+            "198,402",
+            "1,684",
+            "04/06/26 09:10 PM",
+            "06/21/20 10:14 PM",
+            "3e2c04a97821d",
+            "Season Zero (11.3.0)",
+            "Account-wide research, recipe, motif, and collectible knowledge tracking.",
             2,
             installed_ids,
         ),
         discover_entry(
-            "3520",
-            "Code's Combat Alerts",
-            "@code65536",
-            "Combat",
-            "2.4.10",
-            "1.9M",
-            "84K",
-            "3.6K",
-            "2/9/2026",
-            "6/21/2021",
-            "a23f91c8d71e",
-            "101048, 101049",
-            "Encounter alerts, timers, interrupt prompts, and boss mechanic callouts for veteran content.",
+            "2045",
+            "Action Duration Reminder",
+            "Cloudor",
+            "Action Bar Mods",
+            "4.3.1",
+            "5,904,102",
+            "181,556",
+            "1,391",
+            "04/05/26 01:44 PM",
+            "09/04/17 06:22 PM",
+            "9a7d0cb338a41",
+            "Season Zero (11.3.0)",
+            "Action bar duration overlays and reminders for buffs, dots, and ability timers.",
             3,
             installed_ids,
         ),
         discover_entry(
-            "1881",
-            "Map Pins",
-            "Hoft",
-            "Map",
-            "1.9.8",
-            "8.1M",
-            "311K",
-            "11.2K",
-            "2/12/2026",
-            "7/22/2016",
-            "0b85dd8841ad",
-            "101048, 101049",
-            "Map markers for lorebooks, skyshards, delves, dungeons, mundus stones, and other destinations.",
+            "818",
+            "Lui Extended",
+            "ArtOfShred",
+            "Graphic UI Mods",
+            "6.9.8",
+            "5,184,339",
+            "154,818",
+            "1,012",
+            "04/03/26 02:17 AM",
+            "11/21/14 03:33 AM",
+            "c33841af5a6d0",
+            "Season Zero (11.3.0)",
+            "Modular UI extensions for combat text, unit frames, buff displays, and alerts.",
             4,
             installed_ids,
         ),
-    ]
+        discover_entry(
+            "3287",
+            "Advanced Filters - Updated",
+            "Votan",
+            "Bags, Bank, Inventory",
+            "1.6.8",
+            "4,812,490",
+            "142,104",
+            "944",
+            "04/01/26 08:31 PM",
+            "03/09/20 11:20 AM",
+            "58a88c32bd3e",
+            "Season Zero (11.3.0)",
+            "Inventory filter extensions for bags, bank, crafting, housing, and trading workflows.",
+            5,
+            installed_ids,
+        ),
+        discover_entry(
+            "2194",
+            "EsoTW Traditional Chinese",
+            "EsoTW Team",
+            "ESO Tools & Utilities",
+            "12.4.0",
+            "4,307,220",
+            "119,887",
+            "801",
+            "03/28/26 10:54 PM",
+            "08/02/18 02:42 AM",
+            "ce1d4593b1e4",
+            "Season Zero (11.3.0)",
+            "Traditional Chinese localization data and utility support for Elder Scrolls Online.",
+            6,
+            installed_ids,
+        ),
+        discover_entry(
+            "1725",
+            "PersonalAssistant (Banking, Junk, Loot, Repair)",
+            "Klingo",
+            "Bags, Bank, Inventory",
+            "2026.03.29",
+            "4,106,775",
+            "116,204",
+            "739",
+            "03/26/26 07:13 AM",
+            "01/11/17 06:45 PM",
+            "13a77a91b54e",
+            "Season Zero (11.3.0)",
+            "Automation helpers for banking, junk handling, repairs, loot rules, and inventory routines.",
+            7,
+            installed_ids,
+        ),
+        discover_entry(
+            "2739",
+            "TDAddon",
+            "TrollDoll",
+            "PvP",
+            "3.2.6",
+            "3,904,618",
+            "104,230",
+            "681",
+            "03/22/26 01:18 AM",
+            "05/14/19 08:20 PM",
+            "719f8eac49db",
+            "Season Zero (11.3.0)",
+            "PvP utility helpers and compact combat quality-of-life tools.",
+            8,
+            installed_ids,
+        ),
+        discover_entry(
+            "3860",
+            "Hermes - Tools Tome",
+            "Calamath",
+            "ESO Tools & Utilities",
+            "1.9.3",
+            "3,612,904",
+            "97,514",
+            "623",
+            "03/20/26 04:12 PM",
+            "11/03/21 09:54 AM",
+            "a6d3af8bb05d",
+            "Season Zero (11.3.0)",
+            "A broad utility collection for menus, slash commands, debug aids, and addon authors.",
+            9,
+            installed_ids,
+        ),
+        discover_entry(
+            "2878",
+            "Tamriel Trade Centre",
+            "cyxui",
+            "TradeSkill Mods",
+            "4.3.2",
+            "3,480,771",
+            "91,006",
+            "598",
+            "03/18/26 05:33 AM",
+            "07/12/19 05:15 PM",
+            "9cba018e617c",
+            "Season Zero (11.3.0)",
+            "Market price lookups and trade data helpers for guild trader workflows.",
+            10,
+            installed_ids,
+        ),
+    ];
+
+    if let Some(first) = entries.first_mut() {
+        first.installed = true;
+    }
+    if let Some(lui) = entries
+        .iter_mut()
+        .find(|entry| entry.esoui_id.as_str() == "818")
+    {
+        lui.installed = true;
+    }
+    if let Some(esotw) = entries
+        .iter_mut()
+        .find(|entry| entry.esoui_id.as_str() == "2194")
+    {
+        esotw.installed = true;
+    }
+
+    entries
 }
 
 fn category_discover_entries(installed_ids: &BTreeSet<String>) -> Vec<DiscoverEntry> {
@@ -1804,6 +1926,15 @@ fn dependency_entry(
     }
 }
 
+fn addon_meta(version: &str, author: &str) -> String {
+    match (version.trim(), author.trim()) {
+        ("", "") => String::new(),
+        (version, "") => version.to_string(),
+        ("", author) => author.to_string(),
+        (version, author) => format!("{version}  \u{00b7} {author}"),
+    }
+}
+
 fn addon_entry(
     title: &str,
     folder_name: &str,
@@ -1827,7 +1958,7 @@ fn addon_entry(
 ) -> AddonEntry {
     AddonEntry {
         title: title.into(),
-        meta: format!("{version}  \u{00b7} {author}").into(),
+        meta: addon_meta(version, author).into(),
         folder_name: folder_name.into(),
         esoui_id: esoui_id.into(),
         author: author.into(),
@@ -3450,9 +3581,17 @@ fn open_file_in_editor(ui: &KalpaWindow, folder_name: &str, relative_path: &str)
 
     match content {
         Ok(content) => {
-            let editable = file_entry.as_ref().is_some_and(|entry| entry.modified);
-            ui.set_selected_file_content(content.clone().into());
-            ui.set_editor_line_numbers(line_numbers_for_content(&content).into());
+            let capture_dirty = env_flag("KALPA_FILE_EDITOR_DIRTY");
+            let selected_content = if capture_dirty {
+                format!("{content}\n-- unsaved local edit")
+            } else {
+                content.clone()
+            };
+            let editable = capture_dirty
+                || env_flag("KALPA_FILE_EDITOR_EDITABLE")
+                || file_entry.as_ref().is_some_and(|entry| entry.modified);
+            ui.set_selected_file_content(selected_content.clone().into());
+            ui.set_editor_line_numbers(line_numbers_for_content(&selected_content).into());
             ui.set_selected_original_content(content.into());
             ui.set_editor_editable(editable);
             ui.set_editor_message("".into());
@@ -4046,9 +4185,9 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     ui.set_settings_editor_open(env_flag("KALPA_SETTINGS_EDITOR"));
     let settings_tab = std::env::var("KALPA_SETTINGS_TAB")
         .map(|value| match value.to_ascii_lowercase().as_str() {
-            "appearance" | "theme" | "themes" => 1,
-            "tools" => 2,
-            "data" => 3,
+            "1" | "appearance" | "theme" | "themes" => 1,
+            "2" | "tools" => 2,
+            "3" | "data" => 3,
             _ => 0,
         })
         .unwrap_or(0);
@@ -4856,6 +4995,15 @@ fn rgb_from_hex(hex: &str) -> (u8, u8, u8) {
 mod tests {
     use super::*;
     use slint::Model;
+
+    #[test]
+    fn addon_meta_omits_empty_separators() {
+        assert_eq!(addon_meta("1.2.3", "Author"), "1.2.3  \u{00b7} Author");
+        assert_eq!(addon_meta("1.2.3", ""), "1.2.3");
+        assert_eq!(addon_meta("", "Author"), "Author");
+        assert_eq!(addon_meta("", ""), "");
+        assert_eq!(addon_meta(" 1.2.3 ", " Author "), "1.2.3  \u{00b7} Author");
+    }
 
     #[test]
     fn embedded_theme_catalog_contains_default_and_exported_themes() {
@@ -5922,20 +6070,26 @@ mod tests {
 
     #[test]
     fn discover_entries_reflect_installed_ids() {
-        let installed = BTreeSet::from(["3520".to_string()]);
+        let installed = BTreeSet::from(["3317".to_string()]);
         let entries = popular_discover_entries(&installed);
 
-        let code_alerts = entries
+        let lazy_writ = entries
             .iter()
-            .find(|entry| entry.esoui_id.as_str() == "3520")
-            .expect("popular list includes Code's Combat Alerts");
-        assert!(code_alerts.installed);
+            .find(|entry| entry.esoui_id.as_str() == "1346")
+            .expect("popular list includes Lazy Writ Crafter");
+        assert!(lazy_writ.installed);
 
-        let harvest_map = entries
+        let character_knowledge = entries
             .iter()
-            .find(|entry| entry.esoui_id.as_str() == "57")
-            .expect("popular list includes HarvestMap");
-        assert!(!harvest_map.installed);
+            .find(|entry| entry.esoui_id.as_str() == "3317")
+            .expect("popular list includes Character Knowledge");
+        assert!(character_knowledge.installed);
+
+        let action_duration = entries
+            .iter()
+            .find(|entry| entry.esoui_id.as_str() == "2045")
+            .expect("popular list includes Action Duration Reminder");
+        assert!(!action_duration.installed);
     }
 
     #[test]
@@ -5972,10 +6126,10 @@ mod tests {
         );
 
         let installed = BTreeSet::new();
-        let entries = discover_entries_for_tab(3, &installed, "", "57");
+        let entries = discover_entries_for_tab(3, &installed, "", "1346");
 
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].title.as_str(), "HarvestMap");
+        assert_eq!(entries[0].title.as_str(), "Dolgubon's Lazy Writ Crafter");
         assert_eq!(entries[0].rank, 1);
     }
 }

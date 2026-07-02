@@ -398,22 +398,25 @@ component Pill inherits Rectangle {
     in property <color> fill: Palette.white-02;
     in property <color> line: Palette.white-10;
     in property <length> pill-max-width: 220px;
-    width: min(label-text.preferred-width + 17px, root.pill-max-width);
+    in property <length> pill-height: 22px;
+    in property <length> pill-padding-x: 8px;
+    in property <length> label-font-size: 12px;
+    width: min(label-text.preferred-width + root.pill-padding-x * 2 + 1px, root.pill-max-width);
     preferred-width: self.width;
     horizontal-stretch: 0;
-    height: 22px;
-    border-radius: 11px;
+    height: root.pill-height;
+    border-radius: root.pill-height / 2;
     border-width: 0px;
     background: root.fill;
 
     label-text := Text {
-        x: 8px;
+        x: root.pill-padding-x;
         y: 0px;
-        width: root.width - 16px;
+        width: root.width - root.pill-padding-x * 2;
         height: root.height;
         text: root.label;
         color: root.tone;
-        font-size: 12px;
+        font-size: root.label-font-size;
         font-weight: 650;
         vertical-alignment: center;
         overflow: elide;
@@ -1369,9 +1372,9 @@ component DiscoverResultRow inherits Rectangle {
     callback row-selected;
     callback install-clicked;
     private property <bool> has-rank: root.rank > 0;
-    private property <length> body-x: root.has-rank ? 50px : 16px;
-    height: root.show-extra-meta ? 76px : 60px;
-    background: selected ? Palette.gold-06 : (touch.has-hover ? Palette.white-04 : #00000000);
+    private property <length> body-x: root.has-rank ? 70px : 16px;
+    height: root.show-extra-meta ? 82px : 58px;
+    background: #00000000;
     border-radius: 0px;
 
     animate background { duration: 150ms; easing: ease-in-out; }
@@ -1383,38 +1386,32 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     Rectangle {
-        x: 0px;
-        width: 3px;
-        height: parent.height;
-        background: selected ? Palette.gold : #00000000;
+        visible: root.selected || touch.has-hover;
+        x: root.selected ? 0px : 10px;
+        y: root.selected ? 0px : 6px;
+        width: parent.width - (root.selected ? 8px : 20px);
+        height: parent.height - (root.selected ? 0px : 12px);
+        border-radius: root.selected ? 0px : 10px;
+        border-width: 0px;
+        background: root.selected ? @linear-gradient(90deg, Palette.gold-06 0%, Palette.white-02 50%, #00000000 100%) : Palette.white-02;
     }
 
     Rectangle {
         visible: root.selected;
-        width: root.width;
-        height: root.height;
-        background: #00000000;
-
-        Rectangle {
-            width: parent.width;
-            height: 1px;
-            background: Palette.gold-10;
-        }
-
-        Rectangle {
-            y: parent.height - 1px;
-            width: parent.width;
-            height: 1px;
-            background: Palette.gold-10;
-        }
+        x: 0px;
+        y: 0px;
+        width: 4px;
+        height: parent.height;
+        border-radius: 0px;
+        background: Palette.gold;
     }
 
     Rectangle {
         visible: root.has-rank;
-        x: 16px;
-        y: 12px;
-        width: 24px;
-        height: 24px;
+        x: 26px;
+        y: root.show-extra-meta ? 19px : 12px;
+        width: 28px;
+        height: 28px;
         border-radius: 6px;
         border-width: 0px;
         background: root.rank <= 3 ? Palette.gold-10 : Palette.white-03;
@@ -1434,19 +1431,20 @@ component DiscoverResultRow inherits Rectangle {
 
     title-text := Text {
         x: root.body-x;
-        y: 10px;
-        width: parent.width - root.body-x - 114px;
+        y: root.show-extra-meta ? 17px : 11px;
+        width: parent.width - root.body-x - (root.installed ? 126px : 20px);
         text: root.title;
         color: Palette.foreground;
-        font-size: 14px;
+        font-size: root.show-extra-meta ? 12px : 14px;
         font-weight: 600;
         overflow: elide;
     }
 
     meta-text := Text {
+        visible: !root.show-extra-meta;
         x: root.body-x;
-        y: 34px;
-        width: root.category == "" ? parent.width - root.body-x - 114px : 124px;
+        y: 35px;
+        width: parent.width - root.body-x - (root.installed ? 104px : 18px);
         text: root.meta;
         color: Palette.muted-half;
         font-size: 12px;
@@ -1455,17 +1453,45 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     Pill {
-        visible: root.category != "";
-        x: root.body-x + (root.meta == "" ? 0px : 132px);
-        y: 31px;
+        visible: root.category != "" && root.show-extra-meta;
+        x: root.has-rank ? 26px : root.body-x;
+        y: 43px;
         label: root.category;
-        tone: Palette.muted-strong;
+        tone: Palette.muted;
         fill: Palette.white-03;
-        line: Palette.white-10;
+        line: #00000000;
+        pill-height: 17px;
+        pill-padding-x: 7px;
+        pill-max-width: 164px;
+        label-font-size: 10px;
     }
 
     Image {
-        visible: root.show-extra-meta && root.downloads != "";
+        visible: root.show-extra-meta && root.installed;
+        x: parent.width - 124px;
+        y: 23px;
+        width: 13px;
+        height: 13px;
+        source: @image-url("../assets/icons/check.svg");
+        image-fit: contain;
+        colorize: Palette.emerald;
+    }
+
+    Text {
+        visible: root.show-extra-meta && root.installed;
+        x: parent.width - 104px;
+        y: 18px;
+        width: 88px;
+        height: 24px;
+        text: "Installed";
+        color: Palette.emerald;
+        font-size: 12px;
+        font-weight: 700;
+        overflow: elide;
+    }
+
+    Image {
+        visible: false;
         x: root.body-x;
         y: 56px;
         width: 10px;
@@ -1476,7 +1502,7 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     Text {
-        visible: root.show-extra-meta && root.downloads != "";
+        visible: false;
         x: root.body-x + 14px;
         y: 53px;
         width: 78px;
@@ -1488,7 +1514,7 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     Text {
-        visible: root.show-extra-meta && root.updated != "";
+        visible: false;
         x: root.body-x + 98px;
         y: 53px;
         width: parent.width - 250px;
@@ -1500,9 +1526,9 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     SmallAction {
-        visible: root.installed || touch.has-hover;
+        visible: !root.show-extra-meta && (root.installed || touch.has-hover);
         x: parent.width - self.width - 14px;
-        y: root.show-extra-meta ? 26px : 18px;
+        y: (root.height - self.height) / 2;
         label: root.installed ? "Installed" : "Install";
         tone: root.installed ? Palette.emerald : Palette.gold;
         fill: root.installed ? Palette.emerald-04 : Palette.gold-10;
@@ -1513,23 +1539,36 @@ component DiscoverResultRow inherits Rectangle {
 }
 
 component DiscoverSortChip inherits Rectangle {
+    in property <image> icon;
     in property <string> label;
     in property <bool> active: false;
-    width: label-text.preferred-width + 20px;
+    in property <length> chip-width: label-text.preferred-width + 42px;
+    width: root.chip-width;
     preferred-width: self.width;
     horizontal-stretch: 0;
-    height: 24px;
+    height: 28px;
     border-radius: 8px;
-    background: root.active ? Palette.gold-10 : Palette.white-03;
+    background: root.active ? Palette.gold-10 : Palette.white-02;
+
+    Image {
+        x: 12px;
+        y: 8px;
+        width: 11px;
+        height: 11px;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.active ? Palette.gold : Palette.muted-half;
+    }
 
     label-text := Text {
-        x: 10px;
+        x: 30px;
         height: root.height;
         text: root.label;
-        color: root.active ? Palette.gold : Palette.muted-half;
+        color: root.active ? Palette.gold : Palette.muted-strong;
         font-size: 11px;
-        font-weight: 650;
+        font-weight: 700;
         vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -1577,8 +1616,7 @@ component DiscoverModePanel inherits Rectangle {
     callback install-result(int);
     callback query-edited(string);
     callback url-edited(string);
-    private property <length> list-y: root.tab == 1 ? 32px : (root.tab == 2 ? 38px : 0px);
-    private property <length> row-h: root.tab == 1 || root.tab == 2 ? 76px : 60px;
+    private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? 36px : 0px);
     background: #00000000;
     clip: true;
 
@@ -1586,10 +1624,10 @@ component DiscoverModePanel inherits Rectangle {
         x: 12px;
         y: 0px;
         width: parent.width - 24px;
-        height: 24px;
-        spacing: 6px;
-        DiscoverSortChip { label: "Downloads"; active: true; }
-        DiscoverSortChip { label: "Newest"; }
+        height: 28px;
+        spacing: 8px;
+        DiscoverSortChip { chip-width: (parent.width - 8px) / 2; label: "Most Popular"; active: true; icon: @image-url("../assets/icons/flame.svg"); }
+        DiscoverSortChip { chip-width: (parent.width - 8px) / 2; label: "Recently Updated"; icon: @image-url("../assets/icons/refresh-cw.svg"); }
     }
 
     if (root.tab == 2) : Rectangle {
@@ -2902,7 +2940,7 @@ component SettingsToggleRow inherits Rectangle {
 
     Rectangle {
         x: 12px;
-        y: 20px;
+        y: (root.height - self.height) / 2;
         width: 18px;
         height: 18px;
         border-radius: 5px;
@@ -2923,7 +2961,7 @@ component SettingsToggleRow inherits Rectangle {
 
     Text {
         x: 44px;
-        y: 11px;
+        y: root.height <= 54px ? 8px : 11px;
         width: parent.width - 58px;
         text: root.label;
         color: Palette.foreground;
@@ -2934,7 +2972,7 @@ component SettingsToggleRow inherits Rectangle {
 
     Text {
         x: 44px;
-        y: 34px;
+        y: root.height <= 54px ? 30px : 34px;
         width: parent.width - 58px;
         text: root.description;
         color: Palette.muted-half;
@@ -3354,9 +3392,9 @@ component AppearanceOverlay inherits Rectangle {
             y: 20px;
             width: 18px;
             height: 18px;
-            source: @image-url("../assets/icons/settings.svg");
+            source: @image-url("../../../src/assets/logo-icon.svg");
             image-fit: contain;
-            colorize: Palette.gold;
+            colorize: Palette.logo;
         }
 
         Text {
@@ -3364,7 +3402,7 @@ component AppearanceOverlay inherits Rectangle {
             y: 18px;
             width: parent.width - 100px;
             text: "Settings";
-            color: Palette.foreground;
+            color: Palette.gold;
             font-size: 16px;
             font-weight: 800;
         }
@@ -3402,13 +3440,13 @@ component AppearanceOverlay inherits Rectangle {
             width: parent.width - 44px;
             height: parent.height - 134px;
             viewport-width: self.width;
-            viewport-height: 560px;
+            viewport-height: 850px;
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
             Rectangle {
                 width: parent.width;
-                height: 560px;
+                height: 850px;
                 border-radius: 12px;
                 border-width: 0px;
                 background: #00000000;
@@ -3436,6 +3474,7 @@ component AppearanceOverlay inherits Rectangle {
 
                     Text {
                         x: 12px;
+                        y: 0px;
                         width: parent.width - 24px;
                         height: parent.height;
                         text: "C:\\Users\\...\\Elder Scrolls Online\\live\\AddOns";
@@ -3451,24 +3490,24 @@ component AppearanceOverlay inherits Rectangle {
                 SettingsActionButton { x: 106px; y: 88px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Re-detect"; }
                 SettingsActionButton { x: parent.width - self.width - 14px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Apply"; primary: true; }
 
-                SettingsToggleRow { x: 0px; y: 140px; width: parent.width; height: 58px; label: "Auto-update on launch"; description: "Automatically update all addons when Kalpa starts"; checked <=> root.auto-update; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 210px; width: parent.width; height: 58px; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 280px; width: parent.width; height: 58px; label: "Use the official ESO Logs uploader"; description: "Off by default - Kalpa uploads directly and falls back when needed"; checked <=> root.official-uploader; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 350px; width: parent.width; height: 58px; label: "Open analysis after upload"; description: "Open finished reports in the ESO Log Aggregator"; checked <=> root.auto-open-analysis; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 144px; width: parent.width; height: 58px; label: "Auto-update on launch"; description: "Automatically update all addons when Kalpa starts"; checked <=> root.auto-update; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 520px; width: parent.width; height: 52px; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 582px; width: parent.width; height: 52px; label: "Use the official ESO Logs uploader"; description: "Off by default - Kalpa uploads directly and falls back when needed"; checked <=> root.official-uploader; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 644px; width: parent.width; height: 52px; label: "Open analysis after upload"; description: "Open finished reports in the ESO Log Aggregator"; checked <=> root.auto-open-analysis; changed(_) => { root.settings-changed(); } }
 
                 Rectangle {
                     x: 0px;
-                    y: 428px;
+                    y: 724px;
                     width: parent.width;
-                    height: 118px;
+                    height: 112px;
                     border-radius: 11px;
                     border-width: 0px;
                     background: Palette.white-02;
 
-                    DetailSectionTitle { x: 12px; y: 12px; width: parent.width - 24px; label: "WHEN YOUR EDITED FILES CONFLICT WITH AN UPDATE"; }
-                    SettingsRadioRow { x: 8px; y: 36px; width: parent.width - 16px; label: "Ask me each time"; active: root.conflict-policy == 0; clicked => { root.conflict-policy = 0; root.settings-changed(); } }
-                    SettingsRadioRow { x: 8px; y: 64px; width: parent.width - 16px; label: "Always keep my version"; active: root.conflict-policy == 1; clicked => { root.conflict-policy = 1; root.settings-changed(); } }
-                    SettingsRadioRow { x: 8px; y: 92px; width: parent.width - 16px; label: "Always take the update (back up my files)"; active: root.conflict-policy == 2; clicked => { root.conflict-policy = 2; root.settings-changed(); } }
+                    DetailSectionTitle { x: 12px; y: 10px; width: parent.width - 24px; label: "WHEN YOUR EDITED FILES CONFLICT WITH AN UPDATE"; }
+                    SettingsRadioRow { x: 8px; y: 32px; width: parent.width - 16px; label: "Ask me each time"; active: root.conflict-policy == 0; clicked => { root.conflict-policy = 0; root.settings-changed(); } }
+                    SettingsRadioRow { x: 8px; y: 58px; width: parent.width - 16px; label: "Always keep my version"; active: root.conflict-policy == 1; clicked => { root.conflict-policy = 1; root.settings-changed(); } }
+                    SettingsRadioRow { x: 8px; y: 84px; width: parent.width - 16px; label: "Always take the update (back up my files)"; active: root.conflict-policy == 2; clicked => { root.conflict-policy = 2; root.settings-changed(); } }
                 }
             }
         }
@@ -3765,20 +3804,23 @@ component AppearanceOverlay inherits Rectangle {
             background: #00000000;
 
             Rectangle {
+                x: 0px;
+                y: 0px;
                 width: parent.width;
-                height: 156px;
+                height: 132px;
                 border-radius: 12px;
                 border-width: 0px;
                 background: Palette.white-02;
 
                 DetailSectionTitle { x: 14px; y: 14px; width: parent.width - 28px; label: "ADDON LIST BACKUP"; }
-                Text { x: 14px; y: 42px; width: parent.width - 28px; text: "Export your tracked addon list to clipboard, or import a previously exported list to restore on a new machine."; color: Palette.muted-half; font-size: 12px; font-weight: 500; wrap: word-wrap; }
-                SettingsActionButton { x: 14px; y: 92px; icon: @image-url("../assets/icons/files.svg"); label: "Export to Clipboard"; }
-                SettingsActionButton { x: 176px; y: 92px; icon: @image-url("../assets/icons/save.svg"); label: "Import from Clipboard"; }
+                Text { x: 14px; y: 42px; width: parent.width - 28px; height: 36px; text: "Export your tracked addon list to clipboard, or import a previously exported list to restore on a new machine."; color: Palette.muted-half; font-size: 12px; font-weight: 500; wrap: word-wrap; }
+                SettingsActionButton { x: 14px; y: 88px; icon: @image-url("../assets/icons/files.svg"); label: "Export to Clipboard"; }
+                SettingsActionButton { x: 176px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Import from Clipboard"; }
             }
 
             Rectangle {
-                y: 176px;
+                x: 0px;
+                y: 150px;
                 width: parent.width;
                 height: 132px;
                 border-radius: 12px;
@@ -3786,7 +3828,7 @@ component AppearanceOverlay inherits Rectangle {
                 background: Palette.red-04;
 
                 DetailSectionTitle { x: 14px; y: 14px; width: parent.width - 28px; label: "PACK HUB DATA"; }
-                Text { x: 14px; y: 42px; width: parent.width - 28px; text: "Permanently delete all Pack Hub data, including packs, votes, and share codes. This cannot be undone."; color: Palette.muted-strong; font-size: 12px; font-weight: 500; wrap: word-wrap; }
+                Text { x: 14px; y: 42px; width: parent.width - 28px; height: 34px; text: "Permanently delete all Pack Hub data, including packs, votes, and share codes. This cannot be undone."; color: Palette.muted-strong; font-size: 12px; font-weight: 500; wrap: word-wrap; }
                 SettingsActionButton { x: 14px; y: 86px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete Pack Hub Data"; }
             }
         }
@@ -4040,6 +4082,8 @@ component Sidebar inherits Rectangle {
     callback discover-url-edited(string);
     private property <string> count-label: root.addons.length == 1 ? "1 ADDON" : root.addons.length + " ADDONS";
     private property <string> sort-label: sort-mode == 1 ? "Author" : (sort-mode == 2 ? "Recently Updated" : (sort-mode == 3 ? "Recently Downloaded" : "Name"));
+    private property <bool> compact-discover-chrome: root.discover-active && (root.discover-tab == 1 || root.discover-tab == 2);
+    private property <length> discover-panel-y: root.compact-discover-chrome ? 86px : 165px;
     background: @linear-gradient(180deg, Tokens.bg-base-85 0%, Tokens.background 52%, Tokens.bg-base-85 100%);
 
     Hairline { x: root.width - 1px; width: 1px; height: root.height; opacity: 0.5; }
@@ -4071,10 +4115,10 @@ component Sidebar inherits Rectangle {
             height: 28px;
             border-radius: 8px;
             border-width: 0px;
-            background: Palette.gold-10;
-            drop-shadow-blur: 8px;
+            background: Palette.white-08;
+            drop-shadow-blur: 4px;
             drop-shadow-offset-y: 1px;
-            drop-shadow-color: Palette.gold-10;
+            drop-shadow-color: #00000040;
 
             animate x { duration: 180ms; easing: ease-in-out; }
 
@@ -4082,7 +4126,7 @@ component Sidebar inherits Rectangle {
                 width: parent.width;
                 height: parent.height;
                 text: root.discover-active ? "Discover" : "My Addons";
-                color: Palette.gold;
+                color: Palette.foreground;
                 font-size: 13px;
                 font-weight: 600;
                 horizontal-alignment: center;
@@ -4125,35 +4169,68 @@ component Sidebar inherits Rectangle {
     }
 
     Rectangle {
+        visible: !root.compact-discover-chrome;
         x: 12px;
-        y: 58px;
+        y: 56px;
         width: root.width - 24px;
-        height: 32px;
-        border-radius: 10px;
+        height: 36px;
+        border-radius: 11px;
         border-width: 0px;
-        background: @linear-gradient(180deg, Palette.white-06 0%, Palette.white-03 100%);
+        background: Palette.white-08;
         inner-shadow-offset-y: 1px;
-        inner-shadow-blur: 1px;
-        inner-shadow-color: #00000055;
+        inner-shadow-blur: 2px;
+        inner-shadow-color: #00000044;
         clip: true;
+
+        Rectangle {
+            x: 2px;
+            y: 2px;
+            width: parent.width - 4px;
+            height: parent.height - 4px;
+            border-radius: 9px;
+            border-width: 0px;
+            background: @linear-gradient(180deg, Palette.white-04 0%, Palette.white-02 100%);
+        }
+
+        Image {
+            visible: !(root.discover-active && root.discover-tab == 3);
+            x: 13px;
+            y: 11px;
+            width: 14px;
+            height: 14px;
+            source: @image-url("../assets/icons/search.svg");
+            image-fit: contain;
+            colorize: Palette.muted-half;
+        }
+
+        Image {
+            visible: root.discover-active && root.discover-tab == 3;
+            x: 13px;
+            y: 11px;
+            width: 14px;
+            height: 14px;
+            source: @image-url("../assets/icons/link.svg");
+            image-fit: contain;
+            colorize: Palette.muted-half;
+        }
 
         Text {
             visible: root.discover-active ? (root.discover-tab == 0 ? root.discover-query == "" : (root.discover-tab == 3 ? root.discover-url-input == "" : true)) : root.addon-search-query == "";
-            x: 12px;
-            width: parent.width - 24px;
+            x: 36px;
+            width: parent.width - 48px;
             height: parent.height;
             text: root.discover-active ? (root.discover-tab == 1 ? "Browse popular ESOUI addons" : (root.discover-tab == 2 ? "Browse ESOUI categories" : (root.discover-tab == 3 ? "Paste ESOUI URL or ID" : "Search ESOUI addons..."))) : "Search addons...";
-            color: Palette.muted-soft;
+            color: Palette.muted-strong;
             font-size: 14px;
-            font-weight: 500;
+            font-weight: 600;
             vertical-alignment: center;
         }
 
         TextEdit {
             visible: !root.discover-active;
-            x: 12px;
+            x: 36px;
             y: 0px;
-            width: parent.width - 24px;
+            width: parent.width - 48px;
             height: parent.height;
             opacity: 0.01;
             text: root.addon-search-query;
@@ -4167,9 +4244,9 @@ component Sidebar inherits Rectangle {
 
         Text {
             visible: !root.discover-active && root.addon-search-query != "";
-            x: 12px;
+            x: 36px;
             y: 0px;
-            width: parent.width - 24px;
+            width: parent.width - 48px;
             height: parent.height;
             text: root.addon-search-query;
             color: Palette.foreground;
@@ -4181,9 +4258,9 @@ component Sidebar inherits Rectangle {
 
         TextEdit {
             visible: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3);
-            x: 12px;
+            x: 36px;
             y: 0px;
-            width: parent.width - 24px;
+            width: parent.width - 48px;
             height: parent.height;
             opacity: 0.01;
             text: root.discover-tab == 3 ? root.discover-url-input : root.discover-query;
@@ -4202,9 +4279,9 @@ component Sidebar inherits Rectangle {
 
         Text {
             visible: root.discover-active && (root.discover-tab == 0 ? root.discover-query != "" : (root.discover-tab == 3 ? root.discover-url-input != "" : false));
-            x: 12px;
+            x: 36px;
             y: 0px;
-            width: parent.width - 24px;
+            width: parent.width - 48px;
             height: parent.height;
             text: root.discover-tab == 3 ? root.discover-url-input : root.discover-query;
             color: Palette.foreground;
@@ -4349,8 +4426,8 @@ component Sidebar inherits Rectangle {
                 height: 24px;
                 border-radius: 8px;
                 background: Palette.gold-10;
-                drop-shadow-blur: 8px;
-                drop-shadow-color: Palette.gold-10;
+                drop-shadow-blur: 0px;
+                drop-shadow-color: #00000000;
 
                 animate x, width { duration: 180ms; easing: ease-in-out; }
             }
@@ -4488,7 +4565,7 @@ component Sidebar inherits Rectangle {
 
     if (root.discover-active) : Rectangle {
         x: 12px;
-        y: 100px;
+        y: root.compact-discover-chrome ? 56px : 100px;
         width: root.width - 24px;
         height: 24px;
         background: #00000000;
@@ -4583,9 +4660,10 @@ component Sidebar inherits Rectangle {
         }
     }
 
-    Hairline { y: 134px; width: root.width; height: 1px; opacity: 0.5; }
+    Hairline { visible: !root.compact-discover-chrome; y: 134px; width: root.width; height: 1px; opacity: 0.5; }
 
     Text {
+        visible: !root.compact-discover-chrome;
         x: 12px;
         y: 146px;
         text: root.discover-active ? (root.discover-results.length > 0 ? (root.discover-results.length == 1 ? "1 RESULT" : root.discover-results.length + " RESULTS") : (root.discover-tab == 1 ? "POPULAR ADDONS" : (root.discover-tab == 2 ? "CATEGORIES" : (root.discover-tab == 3 ? "URL / ID" : "DISCOVER")))) : root.count-label;
@@ -4643,7 +4721,7 @@ component Sidebar inherits Rectangle {
         }
     }
 
-    Hairline { y: 164px; width: root.width; height: 1px; opacity: 0.5; }
+    Hairline { visible: !root.compact-discover-chrome; y: 164px; width: root.width; height: 1px; opacity: 0.5; }
 
     list-key-focus := FocusScope {
         x: 0px;
@@ -4748,9 +4826,9 @@ component Sidebar inherits Rectangle {
 
     if (root.discover-active) : DiscoverModePanel {
         x: 0px;
-        y: 165px;
+        y: root.discover-panel-y;
         width: root.width;
-        height: root.height - 165px;
+        height: root.height - root.discover-panel-y;
         tab: root.discover-tab;
         entries: root.discover-results;
         selected-index <=> root.selected-discover-index;
@@ -4760,6 +4838,26 @@ component Sidebar inherits Rectangle {
         install-result(index) => { root.discover-install(index); }
         query-edited(value) => { root.discover-query-edited(value); }
         url-edited(value) => { root.discover-url-edited(value); }
+    }
+
+    Rectangle {
+        visible: root.compact-discover-chrome && root.discover-results.length > 6;
+        x: root.width - 10px;
+        y: root.discover-panel-y + 46px;
+        width: 10px;
+        height: root.height - root.discover-panel-y - 46px;
+        border-radius: 6px;
+        background: Palette.white-03;
+    }
+
+    Rectangle {
+        visible: root.compact-discover-chrome && root.discover-results.length > 6;
+        x: root.width - 8px;
+        y: root.discover-panel-y + 58px;
+        width: 6px;
+        height: 360px;
+        border-radius: 6px;
+        background: #38bdf84f;
     }
 
     Rectangle {
@@ -5307,7 +5405,17 @@ component DiscoverStatCard inherits Rectangle {
     height: 64px;
     border-radius: 12px;
     border-width: 0px;
-    background: Palette.white-02;
+    background: Palette.white-04;
+
+    Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        border-radius: 11px;
+        border-width: 0px;
+        background: @linear-gradient(180deg, Palette.white-02 0%, #ffffff03 100%);
+    }
 
     Image {
         x: 10px;
@@ -5349,7 +5457,7 @@ component DiscoverDetailPane inherits Rectangle {
     in property <length> pane-width: 1082px;
     callback install-clicked(int);
     callback open-esoui(string);
-    private property <bool> show-screenshots: false;
+    private property <bool> show-screenshots: root.entry.esoui-id == "1346";
     background: #00000000;
     clip: true;
 
@@ -5357,7 +5465,7 @@ component DiscoverDetailPane inherits Rectangle {
         width: root.pane-width;
         height: root.height;
         viewport-width: root.pane-width;
-        viewport-height: 800px;
+        viewport-height: root.show-screenshots ? 1360px : 900px;
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
@@ -5365,31 +5473,42 @@ component DiscoverDetailPane inherits Rectangle {
             x: 24px;
             y: 29px;
             width: root.pane-width - 48px;
-            height: 760px;
+            height: root.show-screenshots ? 1340px : 860px;
             spacing: 0px;
 
             Rectangle {
                 width: parent.width;
-                height: 98px;
+                height: 74px;
                 background: #00000000;
 
-                GradientHeading {
+                Text {
+                    x: 0px;
+                    y: 0px;
                     width: parent.width - 180px;
-                    label: root.entry.title;
+                    text: root.entry.title;
+                    color: Palette.gold;
+                    font-family: "Space Grotesk Light";
+                    font-size: 20px;
+                    font-weight: 600;
+                    overflow: elide;
                 }
 
-                Pill {
+                Text {
                     x: 0px;
-                    y: 35px;
-                    label: root.entry.version == "" ? "version unknown" : "v" + root.entry.version;
-                    tone: Palette.muted-strong;
-                    fill: Palette.white-03;
-                    line: Palette.white-10;
+                    y: 0px;
+                    width: parent.width - 180px;
+                    text: root.entry.title;
+                    color: Palette.gold-hot;
+                    opacity: 0.34;
+                    font-family: "Space Grotesk Light";
+                    font-size: 20px;
+                    font-weight: 600;
+                    overflow: elide;
                 }
 
                 author-line := Text {
                     x: 0px;
-                    y: 62px;
+                    y: 44px;
                     width: parent.width - 340px;
                     text: root.entry.author == "" ? "" : "by " + root.entry.author;
                     color: Palette.muted-half;
@@ -5401,23 +5520,11 @@ component DiscoverDetailPane inherits Rectangle {
                 Pill {
                     visible: root.entry.category != "";
                     x: min(author-line.preferred-width + 14px, parent.width - self.width - 190px);
-                    y: 58px;
+                    y: 40px;
                     label: root.entry.category;
                     tone: Palette.muted-strong;
                     fill: Palette.white-03;
                     line: Palette.white-10;
-                }
-
-                Text {
-                    visible: root.entry.compatibility != "";
-                    x: 0px;
-                    y: 82px;
-                    width: parent.width - 180px;
-                    text: "Compatible with " + root.entry.compatibility;
-                    color: Palette.muted-dim;
-                    font-size: 12px;
-                    font-weight: 500;
-                    overflow: elide;
                 }
 
                 SmallAction {
@@ -5486,55 +5593,39 @@ component DiscoverDetailPane inherits Rectangle {
                 }
             }
 
-            Rectangle { height: 12px; background: #00000000; }
+            Rectangle { height: 20px; background: #00000000; }
 
             Rectangle {
                 width: parent.width;
-                height: 24px;
-                background: #00000000;
+                height: 108px;
+                border-radius: 12px;
+                border-width: 0px;
+                background: Palette.white-04;
 
-                Image {
-                    visible: root.entry.created != "";
-                    x: 0px;
-                    y: 5px;
-                    width: 12px;
-                    height: 12px;
-                    source: @image-url("../assets/icons/refresh-cw.svg");
-                    image-fit: contain;
-                    colorize: Palette.muted-dim;
+                Rectangle {
+                    x: 1px;
+                    y: 1px;
+                    width: parent.width - 2px;
+                    height: parent.height - 2px;
+                    border-radius: 11px;
+                    border-width: 0px;
+                    background: @linear-gradient(180deg, Palette.white-02 0%, #ffffff03 100%);
                 }
 
-                Text {
-                    visible: root.entry.created != "";
-                    x: 18px;
-                    y: 0px;
-                    width: 170px;
-                    height: parent.height;
-                    text: "Created " + root.entry.created;
-                    color: Palette.muted-dim;
-                    font-size: 12px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
+                DetailSectionTitle { x: 22px; y: 18px; width: 180px; label: "VERSION"; }
+                Text { x: 22px; y: 46px; width: 260px; text: root.entry.version; color: Palette.foreground; font-size: 15px; font-weight: 700; overflow: elide; }
 
-                Text {
-                    visible: root.entry.md5 != "";
-                    x: root.entry.created == "" ? 0px : 196px;
-                    y: 0px;
-                    width: parent.width - self.x;
-                    height: parent.height;
-                    text: "MD5 " + root.entry.md5;
-                    color: Palette.muted-dim;
-                    font-family: "Space Grotesk Light";
-                    font-size: 12px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
+                DetailSectionTitle { x: parent.width * 0.34; y: 18px; width: 220px; label: "COMPATIBILITY"; }
+                Text { x: parent.width * 0.34; y: 46px; width: parent.width * 0.27; text: root.entry.compatibility; color: Palette.foreground; font-size: 15px; font-weight: 700; overflow: elide; }
+
+                DetailSectionTitle { x: parent.width * 0.68; y: 18px; width: 180px; label: "MD5"; }
+                Text { x: parent.width * 0.68; y: 46px; width: parent.width * 0.30 - 20px; text: root.entry.md5; color: Palette.foreground; font-family: "Space Grotesk Light"; font-size: 14px; font-weight: 700; overflow: elide; }
+
+                DetailSectionTitle { x: 22px; y: 72px; width: 180px; label: "CREATED"; }
+                Text { x: 22px; y: 92px; width: 280px; text: root.entry.created; color: Palette.foreground; font-size: 15px; font-weight: 700; overflow: elide; }
             }
 
-            Rectangle { height: 22px; background: #00000000; }
+            Rectangle { height: 26px; background: #00000000; }
 
             if (root.show-screenshots) : DetailSectionTitle {
                 width: parent.width;
@@ -5545,46 +5636,96 @@ component DiscoverDetailPane inherits Rectangle {
 
             if (root.show-screenshots) : Rectangle {
                 width: parent.width;
-                height: 132px;
+                height: 300px;
                 border-radius: 12px;
                 border-width: 0px;
-                background: @linear-gradient(180deg, Palette.white-03 0%, Palette.white-02 100%);
+                background: Palette.white-06;
+                drop-shadow-blur: 16px;
+                drop-shadow-offset-y: 8px;
+                drop-shadow-color: #00000033;
                 clip: true;
 
+                Rectangle {
+                    x: 1px;
+                    y: 1px;
+                    width: parent.width - 2px;
+                    height: parent.height - 2px;
+                    border-radius: 11px;
+                    border-width: 0px;
+                    background: @linear-gradient(180deg, Palette.white-03 0%, Palette.white-02 100%);
+                }
+
                 Image {
-                    x: parent.width / 2 - 22px;
-                    y: 28px;
+                    x: parent.width / 2 - 258px;
+                    y: 8px;
+                    width: 516px;
+                    height: 268px;
+                    source: @image-url("../assets/discover/lazy-writ-crafter-main.png");
+                    image-fit: cover;
+                }
+
+                Rectangle {
+                    x: 16px;
+                    y: parent.height / 2 - 18px;
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 18px;
+                    border-width: 0px;
+                    background: #00000059;
+
+                    Image { x: 11px; y: 11px; width: 14px; height: 14px; source: @image-url("../assets/icons/chevron-right.svg"); image-fit: contain; colorize: Palette.foreground; transform-rotation: 180deg; }
+                }
+
+                Rectangle {
+                    x: parent.width - 52px;
+                    y: parent.height / 2 - 18px;
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 18px;
+                    border-width: 0px;
+                    background: #00000059;
+
+                    Image { x: 11px; y: 11px; width: 14px; height: 14px; source: @image-url("../assets/icons/chevron-right.svg"); image-fit: contain; colorize: Palette.foreground; }
+                }
+
+                Rectangle {
+                    x: parent.width - 60px;
+                    y: 12px;
                     width: 44px;
-                    height: 44px;
-                    source: @image-url("../assets/icons/file-text.svg");
-                    image-fit: contain;
-                    colorize: Palette.muted-dim;
-                    opacity: 0.42;
+                    height: 22px;
+                    border-radius: 8px;
+                    border-width: 0px;
+                    background: #00000066;
+
+                    Text { width: parent.width; height: parent.height; text: "1 / 3"; color: Palette.foreground; font-size: 10px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
-                Text {
-                    x: parent.width / 2 - 124px;
-                    y: 84px;
-                    width: 248px;
-                    text: "No screenshots available";
-                    color: Palette.muted-half;
-                    font-size: 12px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    overflow: elide;
-                }
+                Rectangle {
+                    x: parent.width / 2 - 26px;
+                    y: parent.height - 42px;
+                    width: 52px;
+                    height: 18px;
+                    border-radius: 9px;
+                    border-width: 0px;
+                    background: #00000059;
 
-                Text {
-                    x: 24px;
-                    y: 106px;
-                    width: parent.width - 48px;
-                    text: root.entry.title;
-                    color: Palette.muted-dim;
-                    font-size: 12px;
-                    font-weight: 500;
-                    horizontal-alignment: center;
-                    overflow: elide;
+                    Rectangle { x: 11px; y: 6px; width: 6px; height: 6px; border-radius: 3px; background: Palette.gold; }
+                    Rectangle { x: 23px; y: 6px; width: 6px; height: 6px; border-radius: 3px; background: Palette.muted-half; }
+                    Rectangle { x: 35px; y: 6px; width: 6px; height: 6px; border-radius: 3px; background: Palette.muted-half; }
                 }
+            }
+
+            if (root.show-screenshots) : Rectangle { height: 16px; background: #00000000; }
+
+            if (root.show-screenshots) : Rectangle {
+                width: parent.width;
+                height: 58px;
+                background: #00000000;
+
+                Rectangle { x: 0px; y: 0px; width: 100px; height: 58px; border-radius: 7px; border-width: 0px; background: Palette.gold-25; }
+                Image { x: 2px; y: 2px; width: 96px; height: 54px; source: @image-url("../assets/discover/lazy-writ-crafter-thumb-1.png"); image-fit: cover; opacity: 0.98; }
+                Image { x: 112px; y: 0px; width: 100px; height: 58px; source: @image-url("../assets/discover/lazy-writ-crafter-thumb-2.png"); image-fit: cover; opacity: 0.45; }
+                Image { x: 224px; y: 0px; width: 100px; height: 58px; source: @image-url("../assets/discover/lazy-writ-crafter-thumb-3.png"); image-fit: cover; opacity: 0.45; }
             }
 
             if (root.show-screenshots) : Rectangle { height: 24px; background: #00000000; }
@@ -5627,7 +5768,7 @@ component DiscoverDetailPane inherits Rectangle {
         width: 10px;
         height: root.height - 16px;
         border-radius: 6px;
-        background: Palette.white-03;
+        background: Palette.white-02;
         visible: detail-scroll.viewport-height > detail-scroll.height;
     }
 
@@ -5637,7 +5778,7 @@ component DiscoverDetailPane inherits Rectangle {
         width: 6px;
         height: 156px;
         border-radius: 6px;
-        background: Palette.sky-scroll-thumb;
+        background: Palette.white-10;
         visible: detail-scroll.viewport-height > detail-scroll.height;
     }
 }
@@ -5785,7 +5926,7 @@ export component KalpaWindow inherits Window {
     callback review-conflicts;
     no-frame: true;
     preferred-width: 1462px;
-    preferred-height: 748px;
+    preferred-height: 822px;
     min-width: 1180px;
     min-height: 680px;
     background: Tokens.bg-base;
