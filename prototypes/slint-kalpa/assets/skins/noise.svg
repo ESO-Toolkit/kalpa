@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <defs>
+    <pattern id="grain" width="64" height="64" patternUnits="userSpaceOnUse">
+      <rect width="64" height="64" fill="none"/>
+      <g fill="#ffffff" fill-opacity=".09">
+        <rect x="5" y="8" width="1" height="1"/>
+        <rect x="21" y="13" width="1" height="1"/>
+        <rect x="38" y="6" width="1" height="1"/>
+        <rect x="56" y="18" width="1" height="1"/>
+        <rect x="12" y="30" width="1" height="1"/>
+        <rect x="31" y="27" width="1" height="1"/>
+        <rect x="47" y="35" width="1" height="1"/>
+        <rect x="6" y="52" width="1" height="1"/>
+        <rect x="24" y="48" width="1" height="1"/>
+        <rect x="42" y="58" width="1" height="1"/>
+        <rect x="60" y="44" width="1" height="1"/>
+      </g>
+      <g fill="#000000" fill-opacity=".12">
+        <rect x="15" y="5" width="1" height="1"/>
+        <rect x="34" y="17" width="1" height="1"/>
+        <rect x="51" y="29" width="1" height="1"/>
+        <rect x="19" y="43" width="1" height="1"/>
+        <rect x="37" y="54" width="1" height="1"/>
+      </g>
+    </pattern>
+  </defs>
+  <rect width="1200" height="800" fill="url(#grain)"/>
+</svg>
