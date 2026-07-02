@@ -504,12 +504,17 @@ impl IncrementalMasterState {
     /// index maps (the emitter's, == the companion `IncrementalIndexState`'s maps);
     /// `tuples` is `emitter.tuples()`. Returns `None` only when no `BEGIN_LOG` has
     /// been seen (no log version), matching the oracle's `log_version?`.
+    ///
+    /// The returned `u64` is the number of tuple records embedded in the master
+    /// (`tuple_records.len()`, == the doc's `last_assigned_tuple_id`). The live driver
+    /// cross-checks it against `emitter.allocated()` before every POST — an exact,
+    /// structural count rather than a fragile text re-parse of the rendered master (C5).
     pub fn render_master(
         &self,
         tuples: &[(u32, u32, u32)],
         pinned_actors: &HashMap<String, u32>,
         pinned_abilities: &HashMap<String, u32>,
-    ) -> Option<String> {
+    ) -> Option<(String, u64)> {
         let log_version = self.log_version.clone()?;
 
         // ── Actors: rendered in PINNED-INDEX order. The pinned actor map IS the set
@@ -583,7 +588,7 @@ impl IncrementalMasterState {
             last_assigned_pet_id: pets.len() as u64,
             pets_string: &pets_string,
         };
-        Some(doc.render())
+        Some((doc.render(), tuple_records.len() as u64))
     }
 }
 
@@ -715,9 +720,14 @@ mod tests {
             mst.update(l);
         }
         let tuples: Vec<(u32, u32, u32)> = Vec::new();
-        let live = mst
+        let (live, tuple_count) = mst
             .render_master(&tuples, idx.actor_map(), idx.ability_map())
             .expect("live master builds");
+        assert_eq!(
+            tuple_count,
+            tuples.len() as u64,
+            "render_master must return the embedded tuple count (== tuples.len())"
+        );
         let refs: Vec<&str> = lines.to_vec();
         let oracle = build_master_table_with_tuples_forced(
             &refs,
@@ -730,6 +740,32 @@ mod tests {
         assert!(
             live.contains("Sidekick^@side^222^") && !live.contains("Offline"),
             "offline-first player must resolve to its real name in the live master; got:\n{live}"
+        );
+    }
+
+    // C5: the tuple count `render_master` returns is exactly the number of tuples it was
+    // handed (`tuples.len()`), for a non-empty table — the desync cross-check depends on
+    // this equality, and it must not rely on re-parsing rendered text.
+    #[test]
+    fn render_master_returns_tuple_count_equal_to_tuples_len() {
+        let lines = [
+            "0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"10.0\"",
+            "5,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",111,50,1000,0,PLAYER_ALLY,T",
+        ];
+        let mut idx = IncrementalIndexState::default();
+        let mut mst = IncrementalMasterState::default();
+        for l in lines {
+            idx.update(l);
+            mst.update(l);
+        }
+        let tuples: Vec<(u32, u32, u32)> = vec![(0, 1, 2), (3, 4, 5), (6, 7, 8)];
+        let (_text, tuple_count) = mst
+            .render_master(&tuples, idx.actor_map(), idx.ability_map())
+            .expect("live master builds");
+        assert_eq!(
+            tuple_count,
+            tuples.len() as u64,
+            "render_master must return tuples.len() as its embedded tuple count"
         );
     }
 
