@@ -40,6 +40,18 @@ const VISIBILITY_TIERS: {
   },
 ];
 
+/** Caption under the visibility control, explaining WHEN the chosen visibility takes
+ *  effect — which depends on the transport that will actually run:
+ *  - direct/native: applied immediately by Kalpa;
+ *  - official CLI (the headless uploader is installed): forwarded as
+ *    `--report-visibility` with no confirm step, so this choice is the final say;
+ *  - official GUI fallback (no CLI): the user confirms in the uploader window. */
+export function visibilityCaption(willUseNative: boolean, officialInstalled: boolean): string {
+  if (willUseNative) return "Direct upload applies this visibility immediately.";
+  if (officialInstalled) return "Applied when the official uploader runs — pick it here.";
+  return "You'll confirm visibility in the official ESO Logs uploader before the report goes live.";
+}
+
 export function UploadOptionsControl({
   options,
   onChange,
@@ -47,6 +59,9 @@ export function UploadOptionsControl({
   // When direct upload is the intended path, visibility is applied immediately;
   // the official uploader instead asks the user to confirm before publishing.
   willUseNative = false,
+  // Whether the official headless uploader is installed — it forwards visibility via
+  // CLI (no confirm step), so the caption must not promise a confirm that won't happen.
+  officialInstalled = false,
   // Parsed fights + the log's time, used to suggest a report name from content.
   fights = [],
   whenMs = null,
@@ -55,6 +70,7 @@ export function UploadOptionsControl({
   onChange: (next: UploadOptions) => void;
   disabled?: boolean;
   willUseNative?: boolean;
+  officialInstalled?: boolean;
   fights?: FightSummary[];
   whenMs?: number | null;
 }) {
@@ -184,9 +200,7 @@ export function UploadOptionsControl({
           })}
         </div>
         <p className="text-[11px] text-muted-foreground/80">
-          {willUseNative
-            ? "Direct upload applies this visibility immediately."
-            : "You'll confirm visibility in the official ESO Logs uploader before the report goes live."}
+          {visibilityCaption(willUseNative, officialInstalled)}
         </p>
       </div>
     </div>

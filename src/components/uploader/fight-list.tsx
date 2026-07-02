@@ -3,6 +3,7 @@
 // both the manual preflight (static fight list) and the live dashboard (fights
 // appear as the selected live path streams them).
 
+import { memo } from "react";
 import { Radio, Swords } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
@@ -19,7 +20,7 @@ type FightRow = {
   live?: boolean;
 };
 
-export function FightList({
+export const FightList = memo(function FightList({
   fights,
   emptyHint,
   // Live mode shows the most-recent fight on top so the current action never
@@ -93,7 +94,7 @@ export function FightList({
       })}
     </ul>
   );
-}
+});
 
 /** Build display rows from static preflight fight summaries. */
 export function rowsFromSummaries(fights: FightSummary[]): FightRow[] {

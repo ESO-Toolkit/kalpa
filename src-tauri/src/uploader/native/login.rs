@@ -27,6 +27,7 @@
 //! facts about the ESO Logs website; the capture flow here is implemented from
 //! scratch.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -206,6 +207,41 @@ fn url_is_authenticated_view(current_url: &str) -> bool {
     !in_auth_flow
 }
 
+/// Subfolder (under the app data dir) holding the login webview's dedicated WebView2
+/// profile. Kept in one const so both call sites agree.
+const LOGIN_WEBVIEW_PROFILE_DIR: &str = "login-webview";
+
+/// Dedicated WebView2 `data_directory` for the login window (B1).
+///
+/// The login window MUST NOT share the DEFAULT WebView2 profile with the main app
+/// window. No `data_directory` is set on the main window, so absent this the login
+/// window inherits the shared default profile — and [`clear_login_webview_data`]'s
+/// `clear_all_browsing_data()` (explicit sign-out) clears the WHOLE profile it runs
+/// against. On the shared profile that wipes the MAIN app's `localStorage` (the theme
+/// pre-paint mirror → a one-time theme flash on the next launch, plus uploader prefs)
+/// on every sign-out. Giving the login window its OWN profile scopes both the login
+/// cookies and the sign-out clear to just that profile, leaving the main app untouched.
+///
+/// [`run_login`] and [`clear_login_webview_data`] MUST pass the SAME path so the window
+/// that stores the cookies and the window whose profile is cleared are the same profile.
+/// Returns `None` if the app data dir cannot be resolved; callers then handle that
+/// explicitly (login falls back to the shared default so sign-in still works; sign-out
+/// SKIPS the clear rather than wipe the shared profile).
+///
+/// Windows-only in effect: `WebviewWindowBuilder::data_directory` is a no-op on other
+/// platforms, but Kalpa ships Windows only.
+fn login_webview_data_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join(LOGIN_WEBVIEW_PROFILE_DIR);
+    // Best-effort create so the path exists before WebView2 opens it; WebView2 would
+    // create it too, but doing it here keeps both call sites consistent.
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+}
+
 /// Drive an in-app ESO Logs login: open (or reuse) the login webview, wait for
 /// the user to authenticate, capture the `laravel_session` cookie, and persist
 /// it via the shared [`StoredSessionProvider`]. Returns once a session cookie is
@@ -232,11 +268,20 @@ pub async fn run_login<R: tauri::Runtime>(
             .parse()
             .map_err(|e| LoginError::WindowCreation(format!("bad login URL: {e}")))?,
     );
-    let window = WebviewWindowBuilder::new(&app, LOGIN_WINDOW_LABEL, url)
+    let mut builder = WebviewWindowBuilder::new(&app, LOGIN_WINDOW_LABEL, url)
         .title("Sign in to ESO Logs")
         .inner_size(520.0, 720.0)
         .resizable(true)
-        .focused(true)
+        .focused(true);
+    // Isolate the login webview's WebView2 profile from the main app window's (B1). The
+    // cookies land in — and sign-out clears — this dedicated profile, never the shared
+    // default (see `login_webview_data_dir`). If the app data dir can't be resolved we
+    // fall back to the shared default so sign-in still works (sign-out then can't scope
+    // its clear, but a blocked login is worse than a wider clear).
+    if let Some(dir) = login_webview_data_dir(&app) {
+        builder = builder.data_directory(dir);
+    }
+    let window = builder
         .build()
         .map_err(|e| LoginError::WindowCreation(e.to_string()))?;
 
@@ -343,6 +388,66 @@ async fn poll_for_session<R: tauri::Runtime>(
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// Clear the login webview's persistent cookie jar on an EXPLICIT sign-out (B1).
+///
+/// WebView2 persists the login webview's cookies (`wcl_session`, the long-lived
+/// `remember_web_*` "remember me" cookie) in the login window's WebView2 profile.
+/// Clearing only the stored upload-session copy (`SessionProvider::invalidate`) leaves a
+/// valid ESO Logs web session on disk, so the next "Sign in" auto-completes with zero
+/// interaction — sign-out would be merely cosmetic. This clears that profile's browsing
+/// data so a re-sign-in shows the real login form.
+///
+/// The clear is scoped to the login window's DEDICATED profile
+/// ([`login_webview_data_dir`]): `clear_all_browsing_data()` clears the whole profile it
+/// runs against, so the login window must not share the main app window's default
+/// profile (else sign-out would wipe the main app's `localStorage` — the theme pre-paint
+/// mirror and uploader prefs). Note: users who signed in before this isolation landed
+/// have their old session in the shared default profile, so their first sign-in after
+/// the update shows the login form again (one-time). Their captured upload token in the
+/// OS credential store is a separate copy and is unaffected.
+///
+/// Get-or-build the login window (built HIDDEN on a blank page on the SAME dedicated
+/// profile — no network, no re-login navigation — if it isn't already open), clear all
+/// browsing data for that profile, then close it. Best-effort: every failure is
+/// swallowed (the stored-session invalidation already happened, which is the load-bearing
+/// half). If the dedicated profile path can't be resolved when a rebuild is needed, the
+/// clear is SKIPPED rather than run against the shared default profile.
+///
+/// **Invariant**: this is attached ONLY to the explicit sign-out command. The
+/// mid-upload `SessionProvider::invalidate` (a 401/419 during an upload) must NOT reach
+/// here — clearing the jar mid-upload would break the reauth pause→re-login UX. This fn
+/// has no other caller (see `uploader_logout_esologs`).
+pub fn clear_login_webview_data<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let window = match app.get_webview_window(LOGIN_WINDOW_LABEL) {
+        Some(w) => w,
+        None => {
+            // Build a hidden window on `about:blank` purely so we have a handle whose
+            // profile we can clear — no navigation to esologs, so nothing can re-set a
+            // cookie in the race between build and clear.
+            let Ok(url) = "about:blank".parse::<tauri::webview::Url>() else {
+                return;
+            };
+            // Rebuild on the SAME dedicated profile `run_login` used, so the clear scopes
+            // to the login cookies only. If that path can't be resolved, SKIP the clear
+            // rather than build a shared-default-profile window whose clear would wipe the
+            // main app's browsing data (the exact regression this fixes).
+            let Some(dir) = login_webview_data_dir(app) else {
+                return;
+            };
+            match WebviewWindowBuilder::new(app, LOGIN_WINDOW_LABEL, WebviewUrl::External(url))
+                .visible(false)
+                .data_directory(dir)
+                .build()
+            {
+                Ok(w) => w,
+                Err(_) => return,
+            }
+        }
+    };
+    let _ = window.clear_all_browsing_data();
+    let _ = window.close();
 }
 
 #[cfg(test)]

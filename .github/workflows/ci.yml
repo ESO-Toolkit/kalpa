@@ -63,10 +63,19 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
+      # RUSTSEC-2026-0194 / -0195 (quick-xml quadratic-runtime DoS on duplicate
+      # attribute names, fixed in quick-xml >=0.41.0) are transitive advisories
+      # with no available non-breaking fix: quick-xml <0.41 is pinned by plist
+      # (via tauri-utils / tauri 2.11) and by tauri-winrt-notification (via
+      # tauri-plugin-notification -> notify-rust), neither of which yet accepts
+      # quick-xml 0.41. The desktop client never parses untrusted XML through
+      # these paths (build-time plist + Windows toast notifications), so ignore
+      # until the upstream tauri crates bump quick-xml. Mirrors the npm audit
+      # dev-only suppressions above.
       - name: Rust dependency audit
         run: |
           cargo install cargo-audit@0.22.1 --quiet --locked
-          cargo audit --file src-tauri/Cargo.lock
+          cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
 
       - name: Install worker dependencies
         run: npm ci

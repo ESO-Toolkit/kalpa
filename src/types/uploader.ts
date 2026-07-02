@@ -160,15 +160,6 @@ export interface LiveReadiness {
   grew: boolean;
 }
 
-/** The display-level status of the whole uploader, for the glanceable pill. */
-export type UploaderStatus =
-  | "idle"
-  | "watching"
-  | "uploading"
-  | "upToDate"
-  | "attention"
-  | "retrying";
-
 /** A single fight detected during a live session (UI timeline entry). Detection
  *  means the live path accepted a completed fight for the session timeline; it is
  *  not a separate per-fight upload status. */
