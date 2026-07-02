@@ -2077,6 +2077,60 @@ fn wire_settings_actions(ui: &KalpaWindow) {
         };
         persist_native_settings(&native_settings_from_ui(&ui));
     });
+
+    let open_addons_path_ui = ui.as_weak();
+    ui.on_settings_addons_path_opened(move || {
+        let Some(ui) = open_addons_path_ui.upgrade() else {
+            return;
+        };
+        let path = ui.get_settings_addons_path().to_string();
+        let path = PathBuf::from(path.trim());
+        if path.is_dir() {
+            open_path(&path);
+        } else {
+            ui.set_status_error_message("Configured AddOns folder was not found.".into());
+        }
+    });
+
+    let redetect_addons_path_ui = ui.as_weak();
+    ui.on_settings_addons_path_redetected(move || {
+        let Some(ui) = redetect_addons_path_ui.upgrade() else {
+            return;
+        };
+        if let Some(path) = default_addons_root().filter(|path| path.is_dir()) {
+            ui.set_settings_addons_path(path.to_string_lossy().into_owned().into());
+            ui.set_status_error_message(
+                "Found the default ESO AddOns folder. Click Apply to save it.".into(),
+            );
+        } else {
+            ui.set_status_error_message("No default ESO AddOns folder was found.".into());
+        }
+    });
+
+    let apply_addons_path_ui = ui.as_weak();
+    ui.on_settings_addons_path_applied(move |path| {
+        let Some(ui) = apply_addons_path_ui.upgrade() else {
+            return;
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            ui.set_status_error_message("Choose an AddOns folder before applying.".into());
+            return;
+        }
+
+        let path_buf = PathBuf::from(path);
+        if !path_buf.is_dir() {
+            ui.set_status_error_message("AddOns folder was not found.".into());
+            return;
+        }
+
+        match persist_addons_path(path) {
+            Ok(()) => ui.set_status_error_message("Saved AddOns folder.".into()),
+            Err(error) => {
+                ui.set_status_error_message(format!("Failed to save AddOns folder: {error}").into())
+            }
+        }
+    });
 }
 
 fn seed_initial_theme_draft(ui: &KalpaWindow, custom_themes: &[CatalogTheme]) {
@@ -3851,6 +3905,22 @@ fn read_addons_path_from_settings_path(path: &Path) -> Result<Option<PathBuf>, S
         .map(PathBuf::from))
 }
 
+fn persist_addons_path(addons_path: &str) -> Result<(), String> {
+    let Some(path) = native_settings_store_path() else {
+        return Err("settings store path was not available".to_string());
+    };
+    persist_addons_path_to_settings_path(&path, addons_path)
+}
+
+fn persist_addons_path_to_settings_path(path: &Path, addons_path: &str) -> Result<(), String> {
+    let mut object = read_settings_store_object_from_path(path)?;
+    object.insert(
+        STORE_KEY_ADDONS_PATH.to_string(),
+        serde_json::Value::String(addons_path.to_string()),
+    );
+    write_settings_store_object_to_path(path, object)
+}
+
 fn default_addons_root() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -5613,6 +5683,40 @@ mod tests {
         assert_eq!(
             addons_path.to_string_lossy(),
             "C:/Users/Example/Documents/Elder Scrolls Online/live/AddOns"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn addons_path_persists_production_settings_key() {
+        let root = test_temp_dir("addons-path-persist");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings directory");
+        fs::write(&path, r#"{"autoUpdate":true,"conflictPolicy":"ask"}"#)
+            .expect("seed settings store");
+
+        persist_addons_path_to_settings_path(&path, "D:/ESO/live/AddOns")
+            .expect("persist addons path");
+
+        let object = read_settings_store_object_from_path(&path).expect("read settings object");
+        assert_eq!(
+            object
+                .get(STORE_KEY_ADDONS_PATH)
+                .and_then(serde_json::Value::as_str),
+            Some("D:/ESO/live/AddOns")
+        );
+        assert_eq!(
+            object
+                .get("autoUpdate")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            object
+                .get("conflictPolicy")
+                .and_then(serde_json::Value::as_str),
+            Some("ask")
         );
 
         let _ = fs::remove_dir_all(root);

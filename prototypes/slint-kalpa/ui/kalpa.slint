@@ -3328,6 +3328,9 @@ component AppearanceOverlay inherits Rectangle {
     callback theme-draft-updated;
     callback theme-editor-cancelled;
     callback settings-changed;
+    callback addons-path-opened;
+    callback addons-path-redetected;
+    callback addons-path-applied(string);
     callback backup-restore-clicked;
     visible: root.open;
     background: #000000c8;
@@ -3462,9 +3465,9 @@ component AppearanceOverlay inherits Rectangle {
                     }
                 }
 
-                SettingsActionButton { x: 14px; y: 88px; icon: @image-url("../assets/icons/folder-open.svg"); label: "Browse"; }
-                SettingsActionButton { x: 106px; y: 88px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Re-detect"; }
-                SettingsActionButton { x: parent.width - self.width - 14px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Apply"; primary: true; }
+                SettingsActionButton { x: 14px; y: 88px; icon: @image-url("../assets/icons/folder-open.svg"); label: "Browse"; clicked => { root.addons-path-opened(); } }
+                SettingsActionButton { x: 106px; y: 88px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Re-detect"; clicked => { root.addons-path-redetected(); } }
+                SettingsActionButton { x: parent.width - self.width - 14px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Apply"; primary: true; clicked => { root.addons-path-applied(root.addons-path); } }
 
                 SettingsToggleRow { x: 0px; y: 144px; width: parent.width; height: 58px; label: "Auto-update on launch"; description: "Automatically update all addons when Kalpa starts"; checked <=> root.auto-update; changed(_) => { root.settings-changed(); } }
                 SettingsToggleRow { x: 0px; y: 208px; width: parent.width; height: 52px; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
@@ -8424,6 +8427,9 @@ export component KalpaWindow inherits Window {
     callback theme-draft-updated;
     callback theme-editor-cancelled;
     callback settings-changed;
+    callback settings-addons-path-opened;
+    callback settings-addons-path-redetected;
+    callback settings-addons-path-applied(string);
     callback review-conflicts;
     no-frame: true;
     preferred-width: 1462px;
@@ -8701,6 +8707,9 @@ export component KalpaWindow inherits Window {
             theme-draft-updated => { root.theme-draft-updated(); }
             theme-editor-cancelled => { root.theme-editor-cancelled(); }
             settings-changed => { root.settings-changed(); }
+            addons-path-opened => { root.settings-addons-path-opened(); }
+            addons-path-redetected => { root.settings-addons-path-redetected(); }
+            addons-path-applied(path) => { root.settings-addons-path-applied(path); }
             backup-restore-clicked => {
                 root.settings-open = false;
                 root.backup-restore-open = true;
