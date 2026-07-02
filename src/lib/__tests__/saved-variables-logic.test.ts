@@ -207,9 +207,7 @@ describe("updateTreeNode", () => {
     const rawTree: SvTreeNode = {
       key: "root",
       valueType: "table",
-      children: [
-        { key: "weird", valueType: "string", value: "�", rawLuaValue: '"\\195"' },
-      ],
+      children: [{ key: "weird", valueType: "string", value: "�", rawLuaValue: '"\\195"' }],
     };
     const updated = updateTreeNode(rawTree, ["weird"], "clean");
     expect(updated.children![0]!.value).toBe("clean");
