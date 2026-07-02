@@ -1373,7 +1373,7 @@ component DiscoverResultRow inherits Rectangle {
     callback install-clicked;
     private property <bool> has-rank: root.rank > 0;
     private property <length> body-x: root.has-rank ? 70px : 16px;
-    height: root.show-extra-meta ? 82px : 58px;
+    height: root.show-extra-meta ? 66px : 54px;
     background: #00000000;
     border-radius: 0px;
 
@@ -1409,10 +1409,10 @@ component DiscoverResultRow inherits Rectangle {
     Rectangle {
         visible: root.has-rank;
         x: 26px;
-        y: root.show-extra-meta ? 19px : 12px;
+        y: root.show-extra-meta ? 10px : 11px;
         width: 28px;
         height: 28px;
-        border-radius: 6px;
+        border-radius: 7px;
         border-width: 0px;
         background: root.rank <= 3 ? Palette.gold-10 : Palette.white-03;
 
@@ -1431,7 +1431,7 @@ component DiscoverResultRow inherits Rectangle {
 
     title-text := Text {
         x: root.body-x;
-        y: root.show-extra-meta ? 17px : 11px;
+        y: root.show-extra-meta ? 9px : 10px;
         width: parent.width - root.body-x - (root.installed ? 126px : 20px);
         text: root.title;
         color: Palette.foreground;
@@ -1455,7 +1455,7 @@ component DiscoverResultRow inherits Rectangle {
     Pill {
         visible: root.category != "" && root.show-extra-meta;
         x: root.has-rank ? 26px : root.body-x;
-        y: 43px;
+        y: 36px;
         label: root.category;
         tone: Palette.muted;
         fill: Palette.white-03;
@@ -1469,7 +1469,7 @@ component DiscoverResultRow inherits Rectangle {
     Image {
         visible: root.show-extra-meta && root.installed;
         x: parent.width - 124px;
-        y: 23px;
+        y: 26px;
         width: 13px;
         height: 13px;
         source: @image-url("../assets/icons/check.svg");
@@ -1480,7 +1480,7 @@ component DiscoverResultRow inherits Rectangle {
     Text {
         visible: root.show-extra-meta && root.installed;
         x: parent.width - 104px;
-        y: 18px;
+        y: 20px;
         width: 88px;
         height: 24px;
         text: "Installed";
@@ -3041,6 +3041,7 @@ component SettingsToolRow inherits Rectangle {
     in property <string> label;
     in property <string> description;
     in property <bool> accent: false;
+    callback clicked;
     height: 58px;
     border-radius: 10px;
     border-width: 0px;
@@ -3093,6 +3094,7 @@ component SettingsToolRow inherits Rectangle {
     touch := TouchArea {
         width: root.width;
         height: root.height;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -3354,6 +3356,7 @@ component AppearanceOverlay inherits Rectangle {
     callback theme-draft-updated;
     callback theme-editor-cancelled;
     callback settings-changed;
+    callback backup-restore-clicked;
     visible: root.open;
     background: #000000dd;
 
@@ -3556,15 +3559,15 @@ component AppearanceOverlay inherits Rectangle {
             x: 22px;
             y: 112px;
             width: parent.width - 44px;
-            height: parent.height - 134px;
+            height: parent.height - 196px;
             viewport-width: self.width;
-            viewport-height: 976px;
+            viewport-height: 928px;
             vertical-scrollbar-policy: ScrollBarPolicy.always-on;
             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
             Rectangle {
                 width: parent.width;
-                height: 976px;
+                height: 928px;
                 background: #00000000;
 
                 GhostIconButton { x: 0px; y: 0px; icon: @image-url("../assets/icons/arrow-left.svg"); clicked => { root.theme-editor-cancelled(); } }
@@ -3763,9 +3766,6 @@ component AppearanceOverlay inherits Rectangle {
                     }
                 }
 
-                SettingsActionButton { x: 0px; y: 912px; icon: @image-url("../assets/icons/save.svg"); label: root.draft-theme-new ? "Save theme" : "Save changes"; primary: true; clicked => { root.theme-save(root.draft-theme-name); } }
-                SettingsActionButton { x: 128px; y: 912px; icon: @image-url("../assets/icons/x.svg"); label: "Cancel"; clicked => { root.theme-editor-cancelled(); } }
-                SettingsActionButton { visible: !root.draft-theme-new; x: parent.width - self.width; y: 912px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; clicked => { root.theme-delete(root.draft-theme-id); } }
             }
         }
 
@@ -3788,7 +3788,7 @@ component AppearanceOverlay inherits Rectangle {
             height: parent.height - 134px;
             background: #00000000;
 
-            SettingsToolRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../assets/icons/package.svg"); label: "Backup & Restore"; description: "Save and recover your addon settings"; }
+            SettingsToolRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../assets/icons/package.svg"); label: "Backup & Restore"; description: "Save and recover your addon settings"; clicked => { root.backup-restore-clicked(); } }
             SettingsToolRow { x: 0px; y: 68px; width: parent.width; icon: @image-url("../assets/icons/files.svg"); label: "Characters"; description: "View and manage your ESO characters"; }
             SettingsToolRow { x: 0px; y: 136px; width: parent.width; icon: @image-url("../assets/icons/file-sliders.svg"); label: "API Compatibility"; description: "Check addons against current API version"; }
             SettingsToolRow { x: 0px; y: 204px; width: parent.width; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Check for App Updates"; description: "See if a newer version of Kalpa is available"; }
@@ -3926,7 +3926,7 @@ component PackHubField inherits Rectangle {
     height: 36px;
     border-radius: 10px;
     border-width: 0px;
-    background: root.focused ? Tokens.accent-20 : Palette.white-06;
+    background: root.focused ? Tokens.accent-06 : Palette.white-06;
 
     Rectangle {
         x: 1px;
@@ -3946,7 +3946,7 @@ component PackHubField inherits Rectangle {
         height: 14px;
         source: @image-url("../assets/icons/search.svg");
         image-fit: contain;
-        colorize: root.focused ? Tokens.accent : Palette.muted-half;
+        colorize: root.focused ? Palette.sky : Palette.muted-half;
     }
 
     Text {
@@ -3955,7 +3955,7 @@ component PackHubField inherits Rectangle {
         width: parent.width - (root.search ? 48px : 28px);
         height: parent.height;
         text: root.placeholder;
-        color: root.focused ? Palette.muted-strong : Palette.muted-half;
+        color: root.focused ? Palette.foreground : Palette.muted-half;
         font-size: 13px;
         font-weight: 600;
         vertical-alignment: center;
@@ -4858,6 +4858,1113 @@ component PackHubOverlay inherits Rectangle {
     }
 }
 
+component BackupStatusCard inherits Rectangle {
+    height: 74px;
+    border-radius: 14px;
+    border-width: 0px;
+    background: Tokens.accent-06;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: parent.border-radius;
+        border-width: 1px;
+        border-color: Palette.emerald-20;
+        background: #00000000;
+    }
+
+    Rectangle {
+        x: 22px;
+        y: 24px;
+        width: 26px;
+        height: 26px;
+        border-radius: 8px;
+        background: Palette.emerald-15;
+
+        Image {
+            x: 6px;
+            y: 6px;
+            width: 14px;
+            height: 14px;
+            source: @image-url("../assets/icons/check.svg");
+            image-fit: contain;
+            colorize: Palette.emerald;
+        }
+    }
+
+    Text {
+        x: 64px;
+        y: 18px;
+        width: parent.width - 86px;
+        text: "Your settings are protected";
+        color: Palette.foreground;
+        font-size: 17px;
+        font-weight: 900;
+        overflow: elide;
+    }
+
+    Text {
+        x: 64px;
+        y: 42px;
+        width: parent.width - 86px;
+        text: "Last backup 3 days ago - 40 files - 13.2 MB";
+        color: Palette.muted-strong;
+        font-size: 14px;
+        font-weight: 600;
+        overflow: elide;
+    }
+}
+
+component BackupListRow inherits Rectangle {
+    in property <string> title;
+    in property <string> meta;
+    in property <bool> latest: false;
+    callback restore-clicked;
+    height: 76px;
+    border-radius: 13px;
+    border-width: 0px;
+    background: Palette.white-03;
+
+    title-text := Text {
+        x: 16px;
+        y: 15px;
+        width: 238px;
+        text: root.title;
+        color: Palette.foreground;
+        font-size: 16px;
+        font-weight: 900;
+        overflow: elide;
+    }
+
+    Pill {
+        x: 270px;
+        y: 13px;
+        label: "Character";
+        tone: Tokens.accent;
+        fill: Tokens.accent-10;
+        pill-height: 26px;
+        label-font-size: 13px;
+    }
+
+    Pill {
+        visible: root.latest;
+        x: 378px;
+        y: 13px;
+        label: "Latest";
+        tone: Palette.emerald;
+        fill: Palette.emerald-04;
+        pill-height: 26px;
+        label-font-size: 13px;
+    }
+
+    Image {
+        x: 16px;
+        y: 48px;
+        width: 13px;
+        height: 13px;
+        source: @image-url("../assets/icons/refresh-cw.svg");
+        image-fit: contain;
+        colorize: Palette.muted-strong;
+    }
+
+    Text {
+        x: 36px;
+        y: 43px;
+        width: parent.width - 236px;
+        text: root.meta;
+        color: Palette.muted-strong;
+        font-size: 13px;
+        font-weight: 600;
+        overflow: elide;
+    }
+
+    PackHubButton {
+        x: parent.width - 170px;
+        y: 22px;
+        width: 112px;
+        icon: @image-url("../assets/icons/undo-2.svg");
+        label: "Restore";
+        primary: true;
+        clicked => { root.restore-clicked(); }
+    }
+
+    GhostIconButton {
+        x: parent.width - 42px;
+        y: 24px;
+        icon: @image-url("../assets/icons/trash-2.svg");
+    }
+}
+
+component BackupCreateCard inherits Rectangle {
+    in property <bool> label-open: false;
+    callback begin-label;
+    height: root.label-open ? 166px : 142px;
+    border-radius: 14px;
+    border-width: 0px;
+    background: Palette.white-03;
+
+    Text {
+        x: 18px;
+        y: 18px;
+        width: parent.width - 210px;
+        text: "Create a new backup";
+        color: Palette.foreground;
+        font-size: 17px;
+        font-weight: 900;
+        overflow: elide;
+    }
+
+    Text {
+        x: 18px;
+        y: 48px;
+        width: parent.width - 260px;
+        height: 42px;
+        text: "Takes a snapshot of your current addon settings. Safe to do anytime.";
+        color: Palette.muted-strong;
+        font-size: 13px;
+        font-weight: 600;
+        wrap: word-wrap;
+    }
+
+    PackHubButton {
+        x: parent.width - 172px;
+        y: 28px;
+        width: 148px;
+        icon: @image-url("../assets/icons/plus.svg");
+        label: "Back Up Now";
+        primary: true;
+        clicked => { root.begin-label(); }
+    }
+
+    if (!root.label-open) : Text {
+        x: 18px;
+        y: 92px;
+        width: parent.width - 36px;
+        text: "Add a custom label (optional)";
+        color: Palette.muted-strong;
+        font-size: 13px;
+        font-weight: 600;
+    }
+
+    if (root.label-open) : PackHubField {
+        x: 18px;
+        y: 92px;
+        width: parent.width - 120px;
+        placeholder: "Manual backup May 5 2026 9-23-PM";
+        search: false;
+        focused: true;
+    }
+
+    if (root.label-open) : PackHubButton {
+        x: parent.width - 92px;
+        y: 94px;
+        width: 68px;
+        icon: @image-url("../assets/icons/x.svg");
+        label: "Cancel";
+        show-icon: false;
+    }
+
+    Rectangle {
+        x: 18px;
+        y: root.label-open ? 136px : 114px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: #00000000;
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "i";
+            color: Palette.muted-strong;
+            font-size: 12px;
+            font-weight: 900;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        x: 42px;
+        y: root.label-open ? 132px : 110px;
+        width: parent.width - 86px;
+        text: "What gets backed up?";
+        color: Palette.muted-strong;
+        font-size: 13px;
+        font-weight: 600;
+    }
+
+    Image {
+        x: 210px;
+        y: root.label-open ? 136px : 114px;
+        width: 13px;
+        height: 13px;
+        source: @image-url("../assets/icons/chevron-down.svg");
+        image-fit: contain;
+        colorize: Palette.muted-strong;
+    }
+}
+
+component BackupRestoreOverlay inherits Rectangle {
+    in-out property <bool> open: false;
+    in-out property <int> view: 0;
+    visible: root.open;
+    background: #000000d8;
+    private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
+    private property <length> modal-height: root.height < 748px ? root.height - 48px : 700px;
+
+    TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.open = false; }
+    }
+
+    panel := Rectangle {
+        width: root.modal-width;
+        height: root.modal-height;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: 16px;
+        border-width: 0px;
+        background: Tokens.surface;
+        drop-shadow-blur: 30px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: #00000099;
+        clip: true;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { }
+        }
+
+        Text {
+            x: 28px;
+            y: 28px;
+            width: parent.width - 92px;
+            text: "Backup & Restore";
+            color: Palette.gold;
+            font-size: 18px;
+            font-weight: 900;
+            overflow: elide;
+        }
+
+        Text {
+            x: 28px;
+            y: 62px;
+            width: parent.width - 92px;
+            height: 54px;
+            text: "Save a copy of your addon settings so you can recover them if something goes wrong, or move them to a new PC.";
+            color: Palette.muted-strong;
+            font-size: 14px;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+
+        GhostIconButton {
+            x: parent.width - 52px;
+            y: 24px;
+            width: 36px;
+            height: 36px;
+            icon: @image-url("../assets/icons/x.svg");
+            clicked => { root.open = false; }
+        }
+
+        Hairline { x: 0px; y: 132px; width: parent.width; height: 1px; opacity: 0.45; }
+
+        BackupStatusCard {
+            x: 28px;
+            y: 152px;
+            width: parent.width - 56px;
+        }
+
+        BackupCreateCard {
+            x: 28px;
+            y: 246px;
+            width: parent.width - 56px;
+            label-open: root.view == 1;
+            begin-label => { root.view = 1; }
+        }
+
+        DetailSectionTitle { x: 28px; y: root.view == 1 ? 432px : 410px; width: 130px; label: "YOUR BACKUPS"; }
+        Text { x: 150px; y: root.view == 1 ? 430px : 408px; text: "2 - 29.2 MB total"; color: Palette.muted-half; font-size: 13px; font-weight: 800; }
+
+        BackupListRow {
+            x: 28px;
+            y: root.view == 1 ? 458px : 436px;
+            width: parent.width - 56px;
+            title: "Grappa'Ko'Laid-backup";
+            meta: "3 days ago - 40 files - 13.2 MB";
+            latest: true;
+            restore-clicked => { root.view = 2; }
+        }
+
+        BackupListRow {
+            x: 28px;
+            y: root.view == 1 ? 544px : 522px;
+            width: parent.width - 56px;
+            title: "Spike'jo-backup";
+            meta: "Apr 5, 2026 - 89 files - 16.0 MB";
+            restore-clicked => { root.view = 2; }
+        }
+
+        Rectangle {
+            x: 0px;
+            y: parent.height - 70px;
+            width: parent.width;
+            height: 70px;
+            background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
+
+            Image {
+                x: 32px;
+                y: 29px;
+                width: 14px;
+                height: 14px;
+                source: @image-url("../assets/icons/folder-open.svg");
+                image-fit: contain;
+                colorize: Palette.muted-strong;
+            }
+
+            Text {
+                x: 54px;
+                y: 20px;
+                height: 32px;
+                text: "Show in folder";
+                color: Palette.muted-strong;
+                font-size: 12px;
+                font-weight: 800;
+                vertical-alignment: center;
+            }
+
+            TouchArea { x: 24px; y: 18px; width: 144px; height: 36px; }
+            PackHubButton { x: parent.width - 96px; y: 20px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => { root.open = false; } }
+        }
+
+        if (root.view == 2) : Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            background: #020617a8;
+
+            TouchArea { width: parent.width; height: parent.height; }
+
+            dialog := Rectangle {
+                x: 64px;
+                y: 126px;
+                width: parent.width - 128px;
+                height: 444px;
+                border-radius: 16px;
+                border-width: 0px;
+                background: Tokens.surface;
+                drop-shadow-blur: 28px;
+                drop-shadow-offset-y: 8px;
+                drop-shadow-color: #00000099;
+                clip: true;
+
+            Text { x: 32px; y: 28px; text: "Restore this backup?"; color: Palette.gold; font-size: 18px; font-weight: 900; }
+            Text { x: 32px; y: 64px; width: parent.width - 64px; height: 46px; text: "This will replace your current addon settings with the ones in this backup."; color: Palette.muted-strong; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+            GhostIconButton { x: parent.width - 52px; y: 24px; width: 36px; height: 36px; icon: @image-url("../assets/icons/x.svg"); clicked => { root.view = 0; } }
+            Hairline { x: 0px; y: 118px; width: parent.width; height: 1px; opacity: 0.45; }
+
+            Rectangle {
+                x: 32px;
+                y: 144px;
+                width: parent.width - 64px;
+                height: 74px;
+                border-radius: 12px;
+                border-width: 0px;
+                background: Palette.white-03;
+
+                Text { x: 18px; y: 16px; width: parent.width - 36px; text: "Grappa'Ko'Laid-backup"; color: Palette.foreground; font-size: 15px; font-weight: 900; overflow: elide; }
+                Text { x: 18px; y: 42px; width: parent.width - 36px; text: "3 days ago - 40 files - 13.2 MB"; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
+            }
+
+            Rectangle {
+                x: 32px;
+                y: 238px;
+                width: parent.width - 64px;
+                height: 76px;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Palette.emerald-20;
+                background: Tokens.accent-06;
+
+                Image { x: 18px; y: 28px; width: 18px; height: 18px; source: @image-url("../assets/icons/check.svg"); image-fit: contain; colorize: Palette.emerald; }
+                Text { x: 48px; y: 16px; width: parent.width - 66px; height: 44px; text: "Don't worry - this is reversible. We'll save your current settings as a safety snapshot first."; color: Palette.foreground; font-size: 12px; font-weight: 750; wrap: word-wrap; }
+            }
+
+            Text { x: 32px; y: 336px; width: parent.width - 64px; text: "ESO must be closed for the new settings to load - restart the game after restoring."; color: Palette.muted-strong; font-size: 12px; font-weight: 600; wrap: word-wrap; }
+
+                Rectangle {
+                    x: 0px;
+                    y: parent.height - 68px;
+                    width: parent.width;
+                    height: 68px;
+                    background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 75%, #00000000 100%);
+
+                    PackHubButton { x: parent.width - 254px; y: 18px; width: 86px; icon: @image-url("../assets/icons/x.svg"); label: "Cancel"; show-icon: false; clicked => { root.view = 0; } }
+                    PackHubButton { x: parent.width - 158px; y: 18px; width: 134px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Yes, Restore"; primary: true; }
+                }
+            }
+        }
+    }
+}
+
+component SvmTabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked;
+    width: label-text.preferred-width + 28px;
+    height: 38px;
+    border-radius: 8px;
+    background: touch.has-hover ? Palette.white-04 : #00000000;
+
+    Text {
+        x: 10px;
+        y: 0px;
+        height: parent.height - 4px;
+        text: root.label;
+        color: root.active ? Palette.foreground : Palette.muted-strong;
+        font-size: 13px;
+        font-weight: 850;
+        vertical-alignment: center;
+    }
+
+    label-text := Text {
+        visible: false;
+        text: root.label;
+        font-size: 13px;
+        font-weight: 850;
+    }
+
+    Rectangle {
+        x: 8px;
+        y: parent.height - 3px;
+        width: parent.width - 16px;
+        height: 2px;
+        border-radius: 1px;
+        background: root.active ? Palette.foreground : #00000000;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SvmStatCard inherits Rectangle {
+    in property <string> value;
+    in property <string> label;
+    in property <bool> warning: false;
+    height: 68px;
+    border-radius: 10px;
+    border-width: root.warning ? 1px : 0px;
+    border-color: root.warning ? Palette.gold-20 : #00000000;
+    background: root.warning ? Palette.gold-04 : Palette.white-03;
+
+    Text {
+        y: 16px;
+        width: parent.width;
+        text: root.value;
+        color: root.warning ? Palette.gold : Palette.foreground;
+        font-size: 20px;
+        font-weight: 900;
+        horizontal-alignment: center;
+    }
+
+    Text {
+        y: 43px;
+        width: parent.width;
+        text: root.label;
+        color: Palette.muted-strong;
+        font-size: 11px;
+        font-weight: 800;
+        horizontal-alignment: center;
+    }
+}
+
+component SvmOverviewRow inherits Rectangle {
+    in property <string> title;
+    in property <string> meta;
+    in property <string> size-label;
+    in property <length> meter-width: 42px;
+    in property <bool> system: false;
+    height: 58px;
+    border-radius: 11px;
+    border-width: 0px;
+    background: touch.has-hover ? Palette.white-04 : Palette.white-03;
+
+    Rectangle {
+        x: 12px;
+        y: 19px;
+        width: 56px;
+        height: 6px;
+        border-radius: 3px;
+        background: Palette.white-06;
+    }
+
+    Rectangle {
+        x: 12px;
+        y: 19px;
+        width: root.meter-width;
+        height: 6px;
+        border-radius: 3px;
+        background: Palette.gold;
+    }
+
+    Text {
+        x: 24px;
+        y: 30px;
+        width: 56px;
+        text: root.size-label;
+        color: Palette.gold;
+        font-size: 11px;
+        font-weight: 900;
+        horizontal-alignment: center;
+    }
+
+    Text {
+        x: 88px;
+        y: 10px;
+        width: parent.width - 150px;
+        text: root.title;
+        color: Palette.foreground;
+        font-size: 16px;
+        font-weight: 850;
+        overflow: elide;
+    }
+
+    Pill {
+        visible: root.system;
+        x: 230px;
+        y: 10px;
+        label: "System";
+        tone: Palette.muted-strong;
+        fill: Palette.white-06;
+        pill-height: 22px;
+        label-font-size: 12px;
+    }
+
+    Text {
+        x: 88px;
+        y: 34px;
+        width: parent.width - 150px;
+        text: root.meta;
+        color: Palette.muted-strong;
+        font-size: 12px;
+        font-weight: 600;
+        overflow: elide;
+    }
+
+    Image {
+        x: parent.width - 34px;
+        y: 22px;
+        width: 14px;
+        height: 14px;
+        source: @image-url("../assets/icons/chevron-right.svg");
+        image-fit: contain;
+        colorize: touch.has-hover ? Palette.muted-strong : Palette.muted-dim;
+    }
+
+    touch := TouchArea { width: root.width; height: root.height; }
+}
+
+component SvmCleanupRow inherits Rectangle {
+    in property <string> title;
+    in property <string> meta;
+    in property <bool> checked: false;
+    height: 58px;
+    border-radius: 10px;
+    background: touch.has-hover ? Palette.white-04 : Palette.white-03;
+
+    Checkbox { x: 12px; y: 21px; checked: root.checked; }
+
+    Text {
+        x: 44px;
+        y: 11px;
+        width: parent.width - 70px;
+        text: root.title;
+        color: Palette.foreground;
+        font-size: 15px;
+        font-weight: 850;
+        overflow: elide;
+    }
+
+    Text {
+        x: 44px;
+        y: 35px;
+        width: parent.width - 70px;
+        text: root.meta;
+        color: Palette.muted-strong;
+        font-size: 12px;
+        font-weight: 600;
+        overflow: elide;
+    }
+
+    touch := TouchArea { width: root.width; height: root.height; }
+}
+
+component SvmSelectField inherits Rectangle {
+    in property <string> label;
+    height: 38px;
+    border-radius: 10px;
+    border-width: 0px;
+    background: Palette.white-03;
+
+    Text {
+        x: 12px;
+        y: 0px;
+        height: parent.height;
+        width: parent.width - 46px;
+        text: root.label;
+        color: Palette.foreground;
+        font-size: 14px;
+        font-weight: 850;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Image {
+        x: parent.width - 26px;
+        y: 12px;
+        width: 14px;
+        height: 14px;
+        source: @image-url("../assets/icons/chevron-down.svg");
+        image-fit: contain;
+        colorize: Palette.muted-strong;
+    }
+}
+
+component SvmToggle inherits Rectangle {
+    in property <bool> checked: false;
+    width: 40px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.checked ? Palette.gold : Palette.white-08;
+
+    Rectangle {
+        x: root.checked ? parent.width - 20px : 2px;
+        y: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: Palette.foreground;
+    }
+}
+
+component SvmEditorTreeRow inherits Rectangle {
+    in property <string> label;
+    in property <string> count;
+    in property <int> indent: 0;
+    in property <bool> active: false;
+    in property <bool> expanded: false;
+    height: 28px;
+    border-radius: 7px;
+    background: root.active ? Palette.white-10 : #00000000;
+
+    Image {
+        visible: root.indent > 0 || root.expanded;
+        x: 8px + root.indent * 18px;
+        y: 8px;
+        width: 12px;
+        height: 12px;
+        source: root.expanded ? @image-url("../assets/icons/chevron-down.svg") : @image-url("../assets/icons/chevron-right.svg");
+        image-fit: contain;
+        colorize: Palette.muted-strong;
+    }
+
+    Text {
+        x: 24px + root.indent * 18px;
+        y: 0px;
+        height: parent.height;
+        width: parent.width - 76px - root.indent * 18px;
+        text: root.label;
+        color: root.active ? Palette.foreground : Palette.muted-strong;
+        font-size: 12px;
+        font-weight: root.active ? 900 : 750;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Text {
+        x: parent.width - 46px;
+        y: 0px;
+        height: parent.height;
+        width: 36px;
+        text: root.count;
+        color: Palette.muted-dim;
+        font-size: 11px;
+        font-weight: 700;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
+
+component SvmSettingRow inherits Rectangle {
+    in property <string> label;
+    in property <string> key-name;
+    in property <int> kind: 0;
+    in property <string> value: "";
+    in property <bool> checked: false;
+    height: 42px;
+
+    Text {
+        x: 12px;
+        y: 8px;
+        width: parent.width - 250px;
+        text: root.label;
+        color: Palette.foreground;
+        font-size: 13px;
+        font-weight: 850;
+        overflow: elide;
+    }
+
+    Text {
+        x: 190px;
+        y: 9px;
+        width: parent.width - 420px;
+        text: root.key-name;
+        color: Palette.muted-dim;
+        font-size: 11px;
+        font-weight: 650;
+        overflow: elide;
+    }
+
+    if (root.kind == 0) : SvmToggle {
+        x: parent.width - 64px;
+        y: 8px;
+        checked: root.checked;
+    }
+
+    if (root.kind == 1) : Rectangle {
+        x: parent.width - 210px;
+        y: 4px;
+        width: 176px;
+        height: 30px;
+        border-radius: 9px;
+        background: Palette.white-03;
+
+        Text {
+            x: 12px;
+            y: 0px;
+            height: parent.height;
+            width: parent.width - 24px;
+            text: root.value;
+            color: Palette.foreground;
+            font-size: 13px;
+            font-weight: 750;
+            vertical-alignment: center;
+        }
+    }
+
+    if (root.kind == 2) : Rectangle {
+        x: parent.width - 190px;
+        y: 4px;
+        width: 154px;
+        height: 30px;
+        background: #00000000;
+
+        GhostIconButton { x: 0px; y: 1px; width: 28px; height: 28px; icon: @image-url("../assets/icons/minus.svg"); }
+        Rectangle {
+            x: 34px;
+            y: 0px;
+            width: 92px;
+            height: 30px;
+            border-radius: 9px;
+            background: Palette.white-03;
+
+            Text { width: parent.width; height: parent.height; text: root.value; color: Palette.foreground; font-size: 13px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+        }
+        GhostIconButton { x: 132px; y: 1px; width: 28px; height: 28px; icon: @image-url("../assets/icons/plus.svg"); }
+    }
+}
+
+component SavedVariablesOverlay inherits Rectangle {
+    in-out property <bool> open: false;
+    in-out property <int> view: 0;
+    visible: root.open;
+    background: #000000d2;
+    private property <length> modal-width: root.width < 980px ? root.width - 48px : 900px;
+    private property <length> modal-height: root.height < 738px ? root.height - 48px : 690px;
+
+    TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.open = false; }
+    }
+
+    panel := Rectangle {
+        width: root.modal-width;
+        height: root.modal-height;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Palette.white-06;
+        background: @linear-gradient(180deg, Tokens.surface 0%, Tokens.background 100%);
+        drop-shadow-blur: 34px;
+        drop-shadow-offset-y: 14px;
+        drop-shadow-color: #00000099;
+        clip: true;
+
+        TouchArea { width: parent.width; height: parent.height; clicked => { } }
+
+        Text {
+            x: 28px;
+            y: 26px;
+            width: parent.width - 96px;
+            text: "SavedVariables Manager";
+            color: Palette.gold;
+            font-size: 18px;
+            font-weight: 900;
+            overflow: elide;
+        }
+
+        GhostIconButton {
+            x: parent.width - 52px;
+            y: 22px;
+            width: 36px;
+            height: 36px;
+            icon: @image-url("../assets/icons/x.svg");
+            clicked => { root.open = false; }
+        }
+
+        Hairline { x: 0px; y: 72px; width: parent.width; height: 1px; opacity: 0.5; }
+
+        SvmTabButton { x: 28px; y: 88px; label: "Overview"; active: root.view == 0; clicked => { root.view = 0; } }
+        SvmTabButton { x: 110px; y: 88px; label: "Cleanup"; active: root.view == 1; clicked => { root.view = 1; } }
+        SvmTabButton { x: 192px; y: 88px; label: "Copy Profile"; active: root.view == 2; clicked => { root.view = 2; } }
+        SvmTabButton { x: 306px; y: 88px; label: "Editor"; active: root.view == 3; clicked => { root.view = 3; } }
+
+        if (root.view == 0) : Rectangle {
+            x: 28px;
+            y: 134px;
+            width: parent.width - 56px;
+            height: parent.height - 222px;
+            background: #00000000;
+
+            SvmStatCard { x: 0px; y: 0px; width: (parent.width - 24px) / 3; value: "111"; label: "FILES"; }
+            SvmStatCard { x: (parent.width - 24px) / 3 + 12px; y: 0px; width: (parent.width - 24px) / 3; value: "16.6 MB"; label: "TOTAL SIZE"; }
+            SvmStatCard { x: ((parent.width - 24px) / 3 + 12px) * 2; y: 0px; width: (parent.width - 24px) / 3; value: "24"; label: "ORPHANED"; warning: true; }
+
+            Rectangle {
+                x: 0px;
+                y: 78px;
+                width: parent.width;
+                height: 42px;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Palette.gold-20;
+                background: Palette.gold-04;
+
+                Image { x: 14px; y: 13px; width: 16px; height: 16px; source: @image-url("../assets/icons/package.svg"); image-fit: contain; colorize: Palette.gold; }
+                Text { x: 40px; y: 0px; height: parent.height; text: "24 orphaned files (1.0 MB) from uninstalled addons. Clean up ->"; color: Palette.gold; font-size: 13px; font-weight: 900; vertical-alignment: center; }
+                TouchArea { width: parent.width; height: parent.height; clicked => { root.view = 1; } }
+            }
+
+            FilterTab { x: 0px; y: 130px; label: "All"; active: true; }
+            FilterTab { x: 58px; y: 130px; label: "Orphaned (24)"; }
+            FilterTab { x: 170px; y: 130px; label: "Large (0)"; }
+            Text { x: parent.width - 140px; y: 136px; text: "Size"; color: Palette.muted-strong; font-size: 12px; font-weight: 750; }
+            PackHubButton { x: parent.width - 88px; y: 126px; width: 88px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; }
+
+            Rectangle {
+                x: 0px;
+                y: 176px;
+                width: parent.width;
+                height: 312px;
+                border-radius: 12px;
+                background: Palette.white-02;
+                clip: true;
+
+                SvmOverviewRow { x: 0px; y: 0px; width: parent.width; title: "CraftStoreFixedAndImproved"; meta: "Apr 2, 2026"; size-label: "3.4 MB"; meter-width: 56px; }
+                SvmOverviewRow { x: 0px; y: 62px; width: parent.width; title: "CombatMetricsFightData"; meta: "Apr 2, 2026"; size-label: "2.9 MB"; meter-width: 48px; }
+                SvmOverviewRow { x: 0px; y: 124px; width: parent.width; title: "IlIfA"; meta: "Apr 2, 2026 - 4 profiles"; size-label: "1.4 MB"; meter-width: 32px; }
+                SvmOverviewRow { x: 0px; y: 186px; width: parent.width; title: "AccountSettings"; meta: "Jul 4, 2025"; size-label: "1.4 MB"; meter-width: 31px; system: true; }
+                SvmOverviewRow { x: 0px; y: 248px; width: parent.width; title: "Srendarr"; meta: "Mar 25, 2026 - 3 profiles"; size-label: "1.1 MB"; meter-width: 25px; }
+
+                Rectangle { x: parent.width - 10px; y: 14px; width: 5px; height: 260px; border-radius: 3px; background: Palette.white-04; }
+                Rectangle { x: parent.width - 10px; y: 26px; width: 5px; height: 34px; border-radius: 3px; background: Palette.sky; }
+            }
+        }
+
+        if (root.view == 1) : Rectangle {
+            x: 28px;
+            y: 134px;
+            width: parent.width - 56px;
+            height: parent.height - 222px;
+            background: #00000000;
+
+            Image { x: 0px; y: 5px; width: 16px; height: 16px; source: @image-url("../assets/icons/package.svg"); image-fit: contain; colorize: Palette.gold; }
+            Text { x: 24px; y: 0px; text: "Orphaned Files"; color: Palette.foreground; font-size: 16px; font-weight: 900; }
+            Text { x: 184px; y: 1px; text: "(24 files, 1.0 MB)"; color: Palette.muted-strong; font-size: 15px; font-weight: 700; }
+            Text { x: 0px; y: 32px; width: parent.width - 120px; text: "These files belong to addons that are no longer installed."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; }
+            Text { x: parent.width - 62px; y: 4px; text: "Select all"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; horizontal-alignment: right; }
+
+            Rectangle {
+                x: 0px;
+                y: 62px;
+                width: parent.width;
+                height: 244px;
+                border-radius: 12px;
+                background: Palette.white-02;
+                clip: true;
+
+                SvmCleanupRow { x: 0px; y: 0px; width: parent.width; title: "AbilityIconsFramework"; meta: "12.5 KB - Apr 2, 2026"; }
+                SvmCleanupRow { x: 0px; y: 64px; width: parent.width; title: "ActionDurationReminder"; meta: "47.1 KB - Apr 2, 2026"; }
+                SvmCleanupRow { x: 0px; y: 128px; width: parent.width; title: "AddonSelector"; meta: "20.5 KB - Apr 2, 2026"; }
+                SvmCleanupRow { x: 0px; y: 192px; width: parent.width; title: "AsquartOsseinCageHelper"; meta: "3.5 KB - Apr 2, 2026"; }
+                Rectangle { x: parent.width - 10px; y: 8px; width: 5px; height: 214px; border-radius: 3px; background: Palette.white-04; }
+                Rectangle { x: parent.width - 10px; y: 16px; width: 5px; height: 42px; border-radius: 3px; background: Palette.sky; }
+            }
+
+            Rectangle {
+                x: 0px;
+                y: 322px;
+                width: parent.width;
+                height: 56px;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Palette.white-06;
+                background: Palette.white-03;
+
+                Text { x: 14px; y: 0px; height: parent.height; text: "Select files to clean up"; color: Palette.muted-strong; font-size: 13px; font-weight: 750; vertical-alignment: center; }
+                PackHubButton { x: parent.width - 116px; y: 12px; width: 102px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Clean Up"; primary: true; }
+            }
+        }
+
+        if (root.view == 2) : Rectangle {
+            x: 28px;
+            y: 134px;
+            width: parent.width - 56px;
+            height: parent.height - 222px;
+            background: #00000000;
+
+            Text { x: 0px; y: 0px; width: parent.width; text: "Copy addon settings from one character to another within the same SavedVariables file."; color: Palette.muted-strong; font-size: 15px; font-weight: 650; }
+
+            Text { x: 0px; y: 46px; text: "1. Select SavedVariables file"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; }
+            SvmSelectField { x: 0px; y: 68px; width: parent.width; label: "Cooldowns.lua"; }
+
+            Text { x: 0px; y: 124px; text: "2. Source character"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; }
+            SvmSelectField { x: 0px; y: 146px; width: parent.width; label: "Spike'jo"; }
+
+            Text { x: 0px; y: 202px; text: "3. Destination character"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; }
+            SvmSelectField { x: 0px; y: 224px; width: parent.width; label: "Spike jona"; }
+
+            Rectangle {
+                x: 0px;
+                y: 292px;
+                width: parent.width;
+                height: 92px;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Palette.gold-20;
+                background: Palette.gold-04;
+
+                Text { x: 14px; y: 16px; text: "Copy "; color: Palette.foreground; font-size: 14px; font-weight: 850; }
+                Text { x: 52px; y: 16px; text: "Spike'jo"; color: Palette.gold; font-size: 14px; font-weight: 900; }
+                Text { x: 116px; y: 16px; text: "->"; color: Palette.foreground; font-size: 14px; font-weight: 850; }
+                Text { x: 140px; y: 16px; text: "Spike jona"; color: Palette.sky; font-size: 14px; font-weight: 900; }
+                Text { x: 216px; y: 16px; text: "in Cooldowns.lua"; color: Palette.foreground; font-size: 14px; font-weight: 850; }
+                PackHubButton { x: 14px; y: 48px; width: 132px; icon: @image-url("../assets/icons/copy.svg"); label: "Copy Profile"; primary: true; }
+            }
+        }
+
+        if (root.view == 3) : Rectangle {
+            x: 28px;
+            y: 126px;
+            width: parent.width - 56px;
+            height: parent.height - 196px;
+            background: #00000000;
+
+            SvmSelectField { x: 0px; y: 0px; width: 320px; label: "LuiExtended.lua"; }
+            PackHubButton { x: 328px; y: 0px; width: 116px; icon: @image-url("../assets/icons/save.svg"); label: "Save Changes"; primary: true; }
+            PackHubButton { x: 452px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Preview"; }
+            PackHubButton { x: 538px; y: 0px; width: 76px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: true; }
+            PackHubButton { x: 622px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; }
+            PackHubButton { x: 714px; y: 0px; width: 78px; icon: @image-url("../assets/icons/settings.svg"); label: "Settings"; }
+            PackHubButton { x: 800px; y: 0px; width: 44px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; show-icon: false; }
+
+            Rectangle {
+                x: 0px;
+                y: 50px;
+                width: parent.width;
+                height: 382px;
+                border-radius: 12px;
+                background: Palette.white-02;
+                clip: true;
+
+                Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: 214px;
+                    height: parent.height;
+                    background: Palette.white-02;
+                    border-width: 0px;
+
+                    PackHubField { x: 10px; y: 10px; width: parent.width - 20px; placeholder: "Search..."; }
+
+                    Text { x: 34px; y: 58px; text: "LUIESV"; color: Palette.muted-strong; font-size: 12px; font-weight: 900; }
+                    Pill { x: 88px; y: 82px; label: "Default"; tone: Palette.muted-strong; fill: Palette.white-06; pill-height: 18px; label-font-size: 10px; }
+                    Pill { x: 84px; y: 108px; label: "@Spike'jo"; tone: Palette.sky; fill: Palette.sky-10; pill-height: 18px; label-font-size: 10px; }
+
+                    SvmEditorTreeRow { x: 10px; y: 132px; width: parent.width - 20px; label: "$AccountWide"; count: "50"; active: true; expanded: true; }
+                    SvmEditorTreeRow { x: 10px; y: 160px; width: parent.width - 20px; label: "SpellCastBuffs"; count: "154"; indent: 1; }
+                    SvmEditorTreeRow { x: 10px; y: 188px; width: parent.width - 20px; label: "ZO_HUDEquipme..."; count: "2"; indent: 1; }
+                    SvmEditorTreeRow { x: 10px; y: 216px; width: parent.width - 20px; label: "ZO_ActiveComba..."; count: "2"; indent: 1; }
+                    SvmEditorTreeRow { x: 10px; y: 244px; width: parent.width - 20px; label: "InfoPanel"; count: "10"; indent: 1; }
+                    SvmEditorTreeRow { x: 10px; y: 272px; width: parent.width - 20px; label: "ActionBar"; count: "55"; indent: 1; }
+                    SvmEditorTreeRow { x: 10px; y: 300px; width: parent.width - 20px; label: "UnitFrames"; count: "203"; indent: 1; }
+
+                    Rectangle { x: parent.width - 8px; y: 64px; width: 5px; height: 266px; border-radius: 3px; background: Palette.white-04; }
+                    Rectangle { x: parent.width - 8px; y: 78px; width: 5px; height: 142px; border-radius: 3px; background: Palette.sky; }
+
+                    Hairline { x: 0px; y: parent.height - 34px; width: parent.width; height: 1px; opacity: 0.45; }
+                    Text { x: 34px; y: parent.height - 24px; text: "Expand All"; color: Palette.muted-strong; font-size: 11px; font-weight: 800; }
+                    Text { x: parent.width - 86px; y: parent.height - 24px; text: "Collapse All"; color: Palette.muted-strong; font-size: 11px; font-weight: 800; }
+                }
+
+                Hairline { x: 214px; y: 0px; width: 1px; height: parent.height; opacity: 0.45; }
+
+                Rectangle {
+                    x: 226px;
+                    y: 14px;
+                    width: parent.width - 246px;
+                    height: 30px;
+                    border-radius: 9px;
+                    background: Palette.white-03;
+
+                    Text { x: 12px; y: 0px; height: parent.height; text: "Root  >  LUIESV  >  Default  >  @Spike'jo  >  $AccountWide"; color: Palette.muted-strong; font-size: 12px; font-weight: 800; vertical-alignment: center; }
+                }
+
+                Text { x: 226px; y: 58px; text: "SETTINGS"; color: Palette.muted-strong; font-size: 11px; font-weight: 900; }
+                SvmSettingRow { x: 226px; y: 88px; width: parent.width - 246px; label: "Snap To Grid unit Frames"; key-name: "snapToGrid_unitFrames"; checked: true; }
+                SvmSettingRow { x: 226px; y: 130px; width: parent.width - 246px; label: "Welcome Version"; key-name: "WelcomeVersion"; kind: 1; value: "6.6.9"; }
+                SvmSettingRow { x: 226px; y: 172px; width: parent.width - 246px; label: "Snap To Grid Size default"; key-name: "snapToGridSize_default"; kind: 2; value: "15"; }
+                SvmSettingRow { x: 226px; y: 214px; width: parent.width - 246px; label: "Combat Text Enabled"; key-name: "CombatText_Enabled"; checked: false; }
+                SvmSettingRow { x: 226px; y: 256px; width: parent.width - 246px; label: "Snap To Grid Size buffs"; key-name: "snapToGridSize_buffs"; kind: 2; value: "15"; }
+                SvmSettingRow { x: 226px; y: 298px; width: parent.width - 246px; label: "Startup Info"; key-name: "StartupInfo"; checked: false; }
+                SvmSettingRow { x: 226px; y: 340px; width: parent.width - 246px; label: "Snap To Grid default"; key-name: "snapToGrid_default"; checked: false; }
+
+                Rectangle { x: parent.width - 14px; y: 64px; width: 5px; height: 286px; border-radius: 3px; background: Palette.white-04; }
+                Rectangle { x: parent.width - 14px; y: 80px; width: 5px; height: 72px; border-radius: 3px; background: Palette.sky; }
+            }
+        }
+
+        Rectangle {
+            x: 0px;
+            y: parent.height - 76px;
+            width: parent.width;
+            height: 76px;
+            background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
+
+            PackHubButton { x: parent.width - 96px; y: 22px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => { root.open = false; } }
+        }
+    }
+}
+
 component Header inherits Rectangle {
     in property <int> addons-count: 113;
     in-out property <int> displayed-addons-count: 113;
@@ -4877,6 +5984,7 @@ component Header inherits Rectangle {
     callback batch-clear;
     callback refresh-requested;
     callback open-pack-hub-clicked;
+    callback open-svm-clicked;
     callback open-settings-clicked;
 
     background: @linear-gradient(180deg, Tokens.bg-base-85 0%, Tokens.bg-base-60 100%);
@@ -4993,7 +6101,7 @@ component Header inherits Rectangle {
 
     HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 292px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/refresh-cw.svg"); rotation: root.loading ? root.spinner-angle : 0deg; clicked => { root.refresh-requested(); } }
     HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 256px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/package.svg"); clicked => { root.open-pack-hub-clicked(); } }
-    HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 220px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/file-sliders.svg"); }
+    HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 220px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/file-sliders.svg"); clicked => { root.open-svm-clicked(); } }
     HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 184px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/cloud-upload.svg"); }
     HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 148px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/settings.svg"); clicked => { root.open-settings-clicked(); } }
 
@@ -5200,20 +6308,20 @@ component Sidebar inherits Rectangle {
         height: 36px;
         border-radius: 11px;
         border-width: 0px;
-        background: Palette.white-08;
+        background: Palette.white-06;
         inner-shadow-offset-y: 1px;
-        inner-shadow-blur: 2px;
-        inner-shadow-color: #00000044;
+        inner-shadow-blur: 1px;
+        inner-shadow-color: #00000033;
         clip: true;
 
         Rectangle {
-            x: 2px;
-            y: 2px;
-            width: parent.width - 4px;
-            height: parent.height - 4px;
-            border-radius: 9px;
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            border-radius: 10px;
             border-width: 0px;
-            background: @linear-gradient(180deg, Palette.white-04 0%, Palette.white-02 100%);
+            background: @linear-gradient(180deg, Palette.white-03 0%, Palette.white-02 100%);
         }
 
         Image {
@@ -5245,7 +6353,7 @@ component Sidebar inherits Rectangle {
             height: parent.height;
             text: root.discover-active ? (root.discover-tab == 1 ? "Browse popular ESOUI addons" : (root.discover-tab == 2 ? "Browse ESOUI categories" : (root.discover-tab == 3 ? "Paste ESOUI URL or ID" : "Search ESOUI addons..."))) : "Search addons...";
             color: Palette.muted-strong;
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 600;
             vertical-alignment: center;
         }
@@ -6846,6 +7954,10 @@ export component KalpaWindow inherits Window {
     in-out property <bool> settings-editor-open: false;
     in-out property <bool> pack-hub-open: false;
     in-out property <int> pack-hub-view: 0;
+    in-out property <bool> svm-open: false;
+    in-out property <int> svm-view: 0;
+    in-out property <bool> backup-restore-open: false;
+    in-out property <int> backup-restore-view: 0;
     in-out property <int> selected-index: 5;
     in-out property <int> selected-discover-index: 0;
     in-out property <bool> detail-files-active: false;
@@ -6938,6 +8050,8 @@ export component KalpaWindow inherits Window {
     callback discover-query-edited(string);
     callback discover-url-edited(string);
     callback open-pack-hub;
+    callback open-svm;
+    callback open-backup-restore;
     callback open-settings;
     callback theme-selected(string);
     callback theme-create;
@@ -6990,6 +8104,11 @@ export component KalpaWindow inherits Window {
                 root.pack-hub-open = true;
                 root.pack-hub-view = 0;
                 root.open-pack-hub();
+            }
+            open-svm-clicked => {
+                root.svm-open = true;
+                root.svm-view = 0;
+                root.open-svm();
             }
             open-settings-clicked => {
                 root.settings-open = true;
@@ -7148,6 +8267,20 @@ export component KalpaWindow inherits Window {
             view <=> root.pack-hub-view;
         }
 
+        if (root.svm-open) : SavedVariablesOverlay {
+            width: root.width;
+            height: root.height;
+            open <=> root.svm-open;
+            view <=> root.svm-view;
+        }
+
+        if (root.backup-restore-open) : BackupRestoreOverlay {
+            width: root.width;
+            height: root.height;
+            open <=> root.backup-restore-open;
+            view <=> root.backup-restore-view;
+        }
+
         AppearanceOverlay {
             width: root.width;
             height: root.height;
@@ -7195,6 +8328,12 @@ export component KalpaWindow inherits Window {
             theme-draft-updated => { root.theme-draft-updated(); }
             theme-editor-cancelled => { root.theme-editor-cancelled(); }
             settings-changed => { root.settings-changed(); }
+            backup-restore-clicked => {
+                root.settings-open = false;
+                root.backup-restore-open = true;
+                root.backup-restore-view = 0;
+                root.open-backup-restore();
+            }
         }
 
     }

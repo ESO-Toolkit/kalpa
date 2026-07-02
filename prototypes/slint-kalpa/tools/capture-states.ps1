@@ -169,6 +169,34 @@ function New-StateEnvironment {
       $env.KALPA_PACK_HUB_OPEN = "1"
       $env.KALPA_PACK_HUB_VIEW = "install-detail"
     }
+    "svm-overview" {
+      $env.KALPA_SVM_OPEN = "1"
+      $env.KALPA_SVM_VIEW = "overview"
+    }
+    "svm-cleanup" {
+      $env.KALPA_SVM_OPEN = "1"
+      $env.KALPA_SVM_VIEW = "cleanup"
+    }
+    "svm-copy" {
+      $env.KALPA_SVM_OPEN = "1"
+      $env.KALPA_SVM_VIEW = "copy-profile"
+    }
+    "svm-editor" {
+      $env.KALPA_SVM_OPEN = "1"
+      $env.KALPA_SVM_VIEW = "editor"
+    }
+    "backup-restore-main" {
+      $env.KALPA_BACKUP_RESTORE_OPEN = "1"
+      $env.KALPA_BACKUP_RESTORE_VIEW = "main"
+    }
+    "backup-restore-label" {
+      $env.KALPA_BACKUP_RESTORE_OPEN = "1"
+      $env.KALPA_BACKUP_RESTORE_VIEW = "custom-label"
+    }
+    "backup-restore-confirm" {
+      $env.KALPA_BACKUP_RESTORE_OPEN = "1"
+      $env.KALPA_BACKUP_RESTORE_VIEW = "restore-confirm"
+    }
     "theme-crimson" {
       $env.KALPA_THEME = "daedric-crimson"
     }
@@ -317,7 +345,7 @@ function Capture-State {
     [KalpaCaptureNative]::SetWindowPos($window.Hwnd, [IntPtr](-2), 0, 0, 0, 0, $flags) | Out-Null
 
     $signature = Get-HeaderSignature -Path $path
-    $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-")
+    $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-") -or $Name.StartsWith("svm-") -or $Name.StartsWith("backup-restore-")
     [pscustomobject]@{
       State = $Name
       Path = $path

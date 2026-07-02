@@ -4184,6 +4184,8 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     ui.set_settings_open(env_flag("KALPA_SETTINGS_OPEN"));
     ui.set_settings_editor_open(env_flag("KALPA_SETTINGS_EDITOR"));
     ui.set_pack_hub_open(env_flag("KALPA_PACK_HUB_OPEN"));
+    ui.set_svm_open(env_flag("KALPA_SVM_OPEN"));
+    ui.set_backup_restore_open(env_flag("KALPA_BACKUP_RESTORE_OPEN"));
     let pack_hub_view = std::env::var("KALPA_PACK_HUB_VIEW")
         .map(|value| match value.to_ascii_lowercase().as_str() {
             "1" | "create" | "create-details" | "details" => 1,
@@ -4193,6 +4195,23 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
         })
         .unwrap_or(0);
     ui.set_pack_hub_view(pack_hub_view);
+    let svm_view = std::env::var("KALPA_SVM_VIEW")
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "1" | "cleanup" => 1,
+            "2" | "copy" | "copy-profile" => 2,
+            "3" | "editor" => 3,
+            _ => 0,
+        })
+        .unwrap_or(0);
+    ui.set_svm_view(svm_view);
+    let backup_restore_view = std::env::var("KALPA_BACKUP_RESTORE_VIEW")
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "1" | "label" | "custom-label" | "backup-label" => 1,
+            "2" | "confirm" | "restore-confirm" | "restore" => 2,
+            _ => 0,
+        })
+        .unwrap_or(0);
+    ui.set_backup_restore_view(backup_restore_view);
     let settings_tab = std::env::var("KALPA_SETTINGS_TAB")
         .map(|value| match value.to_ascii_lowercase().as_str() {
             "1" | "appearance" | "theme" | "themes" => 1,
