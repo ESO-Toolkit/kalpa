@@ -338,20 +338,11 @@ pub fn write_saved_variable_blocking(
             .map_err(|e| format!("Failed to create backup before saving: {e}"))?;
     }
 
-    // Write atomically via temp file + rename
-    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
-    fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {e}"))?;
-    // On Windows, fs::rename fails if the destination exists. Remove it first.
-    if file_path.exists() {
-        fs::remove_file(&file_path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            format!("Failed to replace existing file: {e}")
-        })?;
-    }
-    fs::rename(&tmp_path, &file_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {e}")
-    })?;
+    // Write atomically via temp file + rename. `std::fs::rename` replaces the
+    // destination atomically on both Unix (`rename(2)`) and Windows
+    // (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`), so the live file is
+    // never momentarily absent and a failed write leaves the original intact.
+    write_raw_bytes(&sv_dir, file_name, content.as_bytes())?;
 
     // Return the new stamp so frontend can track for subsequent saves
     file_stamp(&file_path)
@@ -607,5 +598,87 @@ mod tests {
         write_raw_bytes(dir, "new.lua", b"hello").unwrap();
         assert_eq!(fs::read(dir.join("new.lua")).unwrap(), b"hello");
         assert!(!dir.join("new.lua.tmp").exists());
+    }
+
+    #[test]
+    fn write_saved_variable_replaces_content_and_leaves_no_tmp() {
+        // Lay out <tmp>/live/AddOns and <tmp>/live/SavedVariables so the
+        // function's addons_dir.parent()/SavedVariables derivation resolves.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("live").join("AddOns");
+        let sv_dir = tmp.path().join("live").join("SavedVariables");
+        fs::create_dir_all(&addons_dir).unwrap();
+        fs::create_dir_all(&sv_dir).unwrap();
+
+        let file_name = "MyAddon.lua";
+        let file_path = sv_dir.join(file_name);
+
+        // Seed an existing file whose content differs from what we'll write back.
+        let initial = "MyAddon_SV =\n{\n\t[\"old\"] = 1,\n}\n";
+        fs::write(&file_path, initial).unwrap();
+        let stamp = file_stamp(&file_path).unwrap();
+
+        // Build the tree to write from a small SV source.
+        let new_source = r#"MyAddon_SV =
+{
+	["Default"] =
+	{
+		["@Account"] =
+		{
+			["CharName"] =
+			{
+				["enabled"] = true,
+			},
+		},
+	},
+}
+"#;
+        let tree = parser::parse_sv_file(new_source, file_name).unwrap();
+
+        let new_stamp =
+            write_saved_variable_blocking(&addons_dir, file_name, &tree, &stamp).unwrap();
+
+        // Content was replaced with the serialized tree.
+        let written = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(written, serializer::serialize_to_lua(&tree));
+        assert_ne!(written, initial);
+        assert!(written.contains("[\"CharName\"]"));
+
+        // No .tmp sidecar left behind, and a .lua.bak was created.
+        assert!(!sv_dir.join(format!("{file_name}.tmp")).exists());
+        assert!(file_path.with_extension("lua.bak").is_file());
+
+        // The returned stamp matches the freshly written file.
+        let disk_stamp = file_stamp(&file_path).unwrap();
+        assert_eq!(new_stamp.size, disk_stamp.size);
+        assert_eq!(new_stamp.modified_epoch_ms, disk_stamp.modified_epoch_ms);
+    }
+
+    #[test]
+    fn extract_character_keys_finds_identifier_safe_key_in_serializer_output() {
+        // A character key that is a valid Lua identifier must still be emitted
+        // in ["key"] = form so extract_character_keys (which only matches
+        // bracket style at depth 3) keeps seeing it after a round-trip save.
+        let input = r#"MyAddon_SV =
+{
+	["Default"] =
+	{
+		["@Account"] =
+		{
+			CharName =
+			{
+				["enabled"] = true,
+			},
+		},
+	},
+}
+"#;
+        let tree = parser::parse_sv_file(input, "MyAddon.lua").unwrap();
+        let output = serializer::serialize_to_lua(&tree);
+        let keys = extract_character_keys(&output);
+        assert!(
+            keys.contains(&"CharName".to_string()),
+            "expected CharName in {keys:?}"
+        );
     }
 }

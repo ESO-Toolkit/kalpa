@@ -72,14 +72,15 @@ fn serialize_table(out: &mut String, node: &SvTreeNode, depth: usize) {
     if let Some(children) = &node.children {
         for child in children {
             out.push_str(&child_indent);
-            // Determine key format
+            // Determine key format. Numeric indices use `[n] = `; string keys
+            // are always bracket-quoted (`["key"] = `), matching how ESO itself
+            // writes table keys. The regex-based tools that scan these files
+            // (extract_character_keys, copy_sv_profile) only match bracket
+            // style, so identifier-safe keys must never be emitted bare.
             if is_numeric_key(&child.key) {
                 out.push('[');
                 out.push_str(&child.key);
                 out.push_str("] = ");
-            } else if is_identifier(&child.key) {
-                out.push_str(&child.key);
-                out.push_str(" = ");
             } else {
                 out.push_str("[\"");
                 escape_lua_string(out, &child.key);
@@ -92,19 +93,6 @@ fn serialize_table(out: &mut String, node: &SvTreeNode, depth: usize) {
 
     out.push_str(&indent);
     out.push('}');
-}
-
-/// Check if a key is a valid Lua identifier (no quoting needed).
-fn is_identifier(key: &str) -> bool {
-    if key.is_empty() {
-        return false;
-    }
-    let mut chars = key.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Check if a key is a numeric index (e.g. "1", "42", "-3").
@@ -183,10 +171,11 @@ mod tests {
         };
 
         let lua = serialize_to_lua(&root);
+        // Top-level variables stay bare identifiers; table keys are bracket-quoted.
         assert!(lua.contains("MyVar ="));
-        assert!(lua.contains("enabled = true"));
-        assert!(lua.contains("count = 42"));
-        assert!(lua.contains("name = \"hello\""));
+        assert!(lua.contains("[\"enabled\"] = true"));
+        assert!(lua.contains("[\"count\"] = 42"));
+        assert!(lua.contains("[\"name\"] = \"hello\""));
     }
 
     #[test]
@@ -239,7 +228,7 @@ mod tests {
             }]),
         };
         let lua = serialize_to_lua(&node);
-        assert!(lua.contains("nothing = nil"));
+        assert!(lua.contains("[\"nothing\"] = nil"));
     }
 
     #[test]
@@ -468,14 +457,22 @@ Var2 =
     }
 
     #[test]
-    fn is_identifier_tests() {
-        assert!(is_identifier("enabled"));
-        assert!(is_identifier("_private"));
-        assert!(is_identifier("myVar123"));
-        assert!(!is_identifier("123abc"));
-        assert!(!is_identifier(""));
-        assert!(!is_identifier("my-var"));
-        assert!(!is_identifier("my var"));
+    fn identifier_safe_keys_serialize_bracket_quoted() {
+        // Even keys that are valid Lua identifiers must serialize as
+        // ["key"] = ... so the regex-based tools that scan these files
+        // (extract_character_keys, copy_sv_profile) keep matching them.
+        let input = r#"Var =
+{
+	enabled = true,
+	level = 10,
+}
+"#;
+        let tree = parser::parse_sv_file(input, "test.lua").unwrap();
+        let output = serialize_to_lua(&tree);
+        assert!(output.contains("[\"enabled\"] = true"));
+        assert!(output.contains("[\"level\"] = 10"));
+        assert!(!output.contains("enabled = true"));
+        assert!(!output.contains("level = 10"));
     }
 
     #[test]
