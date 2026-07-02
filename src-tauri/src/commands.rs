@@ -7935,6 +7935,9 @@ pub async fn copy_sv_profile(
     if from_key.chars().any(|c| c.is_control()) || to_key.chars().any(|c| c.is_control()) {
         return Err("Character keys must not contain control characters.".to_string());
     }
+    if from_key == to_key {
+        return Err("Source and destination are the same character.".to_string());
+    }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
         crate::saved_variables::profile::copy_sv_profile_blocking(

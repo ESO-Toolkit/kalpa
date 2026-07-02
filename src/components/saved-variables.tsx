@@ -1744,11 +1744,13 @@ function CopyProfileTab({
   files,
   characters,
   addonsPath,
+  esoRunning,
   onRefresh,
 }: {
   files: SavedVariableFile[];
   characters: CharacterInfo[];
   addonsPath: string;
+  esoRunning: boolean;
   onRefresh: () => void;
 }) {
   const [selectedFile, setSelectedFile] = useState<string>("");
@@ -1781,10 +1783,32 @@ function CopyProfileTab({
     [allCharNames, sourceKey, charKeys]
   );
 
-  const actualDest = destKey === "__custom__" ? customDest : destKey;
+  const actualDest = destKey === "__custom__" ? customDest.trim() : destKey;
+
+  // Client-side validation for the custom destination key (mirrors backend checks).
+  const customError = useMemo(() => {
+    if (destKey !== "__custom__") return null;
+    const trimmed = customDest.trim();
+    if (!trimmed) return null;
+    if (/["'\\]/.test(trimmed) || /\p{Cc}/u.test(trimmed)) {
+      return "Key cannot contain quotes, backslashes, or control characters.";
+    }
+    if (trimmed === sourceKey) return "Source and destination are the same.";
+    if (trimmed === "$AccountWide") {
+      return "$AccountWide is the account-wide settings bucket, not a character.";
+    }
+    return null;
+  }, [destKey, customDest, sourceKey]);
+
+  // Whether the chosen destination already exists in the selected file (settings
+  // for this addon will be overwritten).
+  const destExists = useMemo(
+    () => !!actualDest && (currentFile?.characterKeys ?? []).includes(actualDest),
+    [actualDest, currentFile]
+  );
 
   const handleCopy = async () => {
-    if (!selectedFile || !sourceKey || !actualDest) return;
+    if (!selectedFile || !sourceKey || !actualDest || customError) return;
     setCopying(true);
     try {
       await invokeOrThrow("copy_sv_profile", {
@@ -1807,6 +1831,13 @@ function CopyProfileTab({
 
   return (
     <div className="space-y-4">
+      {esoRunning && (
+        <div className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-xs text-amber-400 shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent)]">
+          <AlertTriangleIcon className="size-4 shrink-0" />
+          ESO is running. Copied settings may be overwritten when you exit the game.
+        </div>
+      )}
+
       <p className="text-sm text-muted-foreground">
         Copy addon settings from one character to another within the same SavedVariables file.
       </p>
@@ -1891,12 +1922,15 @@ function CopyProfileTab({
             </SelectContent>
           </Select>
           {destKey === "__custom__" && (
-            <Input
-              className="mt-2"
-              placeholder='e.g. "CharName^NA"'
-              value={customDest}
-              onChange={(e) => setCustomDest(e.target.value)}
-            />
+            <>
+              <Input
+                className="mt-2"
+                placeholder="e.g. CharName^NA"
+                value={customDest}
+                onChange={(e) => setCustomDest(e.target.value)}
+              />
+              {customError && <p className="mt-1 text-xs text-red-400">{customError}</p>}
+            </>
           )}
         </div>
       )}
@@ -1911,11 +1945,17 @@ function CopyProfileTab({
             {" in "}
             <span className="font-medium">{currentFile?.addonName}.lua</span>
           </p>
+          {destExists && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-amber-400">
+              <AlertTriangleIcon className="size-3.5 shrink-0" />
+              {actualDest}&rsquo;s existing settings for this addon will be replaced.
+            </p>
+          )}
           <Button
             className="mt-2"
             size="sm"
             onClick={() => void handleCopy()}
-            disabled={copying || !actualDest.trim()}
+            disabled={copying || !actualDest.trim() || !!customError}
           >
             <CopyIcon className="mr-1 size-3" />
             {copying ? "Copying..." : "Copy Profile"}
@@ -2231,6 +2271,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
                     files={files}
                     characters={characters}
                     addonsPath={addonsPath}
+                    esoRunning={esoRunning}
                     onRefresh={() => void loadFiles()}
                   />
                 </motion.div>

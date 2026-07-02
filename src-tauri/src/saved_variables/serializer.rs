@@ -72,14 +72,18 @@ fn serialize_table(out: &mut String, node: &SvTreeNode, depth: usize) {
     if let Some(children) = &node.children {
         for child in children {
             out.push_str(&child_indent);
-            // Determine key format
+            // Determine key format. Numeric keys use the bare `[N] =` array
+            // form; all other (string) keys use the bracketed-quoted
+            // `["key"] =` form. ESO's own SavedVariables writer always emits
+            // the quoted form for string keys even when they are valid Lua
+            // identifiers, and kalpa features that scan the game format
+            // (character-key extraction in io.rs, copy-profile in profile.rs)
+            // depend on that. Emitting bare identifiers here would make
+            // identifier-like character names vanish from those features.
             if is_numeric_key(&child.key) {
                 out.push('[');
                 out.push_str(&child.key);
                 out.push_str("] = ");
-            } else if is_identifier(&child.key) {
-                out.push_str(&child.key);
-                out.push_str(" = ");
             } else {
                 out.push_str("[\"");
                 escape_lua_string(out, &child.key);
@@ -92,19 +96,6 @@ fn serialize_table(out: &mut String, node: &SvTreeNode, depth: usize) {
 
     out.push_str(&indent);
     out.push('}');
-}
-
-/// Check if a key is a valid Lua identifier (no quoting needed).
-fn is_identifier(key: &str) -> bool {
-    if key.is_empty() {
-        return false;
-    }
-    let mut chars = key.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Check if a key is a numeric index (e.g. "1", "42", "-3").
@@ -183,10 +174,12 @@ mod tests {
         };
 
         let lua = serialize_to_lua(&root);
+        // Top-level variable names stay bare identifiers.
         assert!(lua.contains("MyVar ="));
-        assert!(lua.contains("enabled = true"));
-        assert!(lua.contains("count = 42"));
-        assert!(lua.contains("name = \"hello\""));
+        // Nested string keys use the bracketed-quoted game format.
+        assert!(lua.contains("[\"enabled\"] = true"));
+        assert!(lua.contains("[\"count\"] = 42"));
+        assert!(lua.contains("[\"name\"] = \"hello\""));
     }
 
     #[test]
@@ -239,7 +232,7 @@ mod tests {
             }]),
         };
         let lua = serialize_to_lua(&node);
-        assert!(lua.contains("nothing = nil"));
+        assert!(lua.contains("[\"nothing\"] = nil"));
     }
 
     #[test]
@@ -468,14 +461,50 @@ Var2 =
     }
 
     #[test]
-    fn is_identifier_tests() {
-        assert!(is_identifier("enabled"));
-        assert!(is_identifier("_private"));
-        assert!(is_identifier("myVar123"));
-        assert!(!is_identifier("123abc"));
-        assert!(!is_identifier(""));
-        assert!(!is_identifier("my-var"));
-        assert!(!is_identifier("my var"));
+    fn nested_identifier_key_serializes_bracketed() {
+        // Even though "Baelthor" is a valid Lua identifier, a nested string key
+        // must be emitted in ESO's `["Name"] =` game format so that
+        // character-key extraction (io.rs) and copy-profile (profile.rs), which
+        // scan for that format, keep working after a save through the SV editor.
+        let root = SvTreeNode {
+            key: "test.lua".into(),
+            value_type: SvValueType::Table,
+            value: None,
+            raw_lua_value: None,
+            children: Some(vec![SvTreeNode {
+                key: "MyAddon_SV".into(),
+                value_type: SvValueType::Table,
+                value: None,
+                raw_lua_value: None,
+                children: Some(vec![SvTreeNode {
+                    key: "Baelthor".into(),
+                    value_type: SvValueType::Table,
+                    value: None,
+                    raw_lua_value: None,
+                    children: Some(vec![SvTreeNode {
+                        key: "level".into(),
+                        value_type: SvValueType::Number,
+                        value: Some(serde_json::json!(50.0)),
+                        children: None,
+                        raw_lua_value: None,
+                    }]),
+                }]),
+            }]),
+        };
+
+        let lua = serialize_to_lua(&root);
+        // Top-level variable name stays a bare identifier.
+        assert!(lua.contains("MyAddon_SV ="));
+        // Identifier-like nested key round-trips in bracketed-quoted form.
+        assert!(lua.contains("[\"Baelthor\"] ="));
+        assert!(!lua.contains("Baelthor ="));
+
+        // And extraction sees it: place Baelthor at character-key depth (3).
+        let wrapped = format!(
+            "MyAddon_SV =\n{{\n\t[\"Default\"] =\n\t{{\n\t\t[\"@Acct\"] =\n\t\t{{\n\t\t\t[\"Baelthor\"] =\n\t\t\t{{\n\t\t\t\t[\"level\"] = 50,\n\t\t\t}},\n\t\t}},\n\t}},\n}}\n"
+        );
+        let keys = super::super::io::extract_character_keys(&wrapped);
+        assert!(keys.contains(&"Baelthor".to_string()));
     }
 
     #[test]

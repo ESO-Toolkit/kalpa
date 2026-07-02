@@ -1500,10 +1500,18 @@ mod tests {
         );
         let (out, _) = scrub(&tree, &ctx());
         let serialized = serialize_to_lua(&out);
-        assert!(serialized.contains("enabled = true"), "{}", serialized);
-        assert!(serialized.contains("scale = 1.25"), "{}", serialized);
-        assert!(serialized.contains("mode = \"compact\""), "{}", serialized);
-        assert!(serialized.contains("r = 0.8"), "{}", serialized);
+        assert!(
+            serialized.contains("[\"enabled\"] = true"),
+            "{}",
+            serialized
+        );
+        assert!(serialized.contains("[\"scale\"] = 1.25"), "{}", serialized);
+        assert!(
+            serialized.contains("[\"mode\"] = \"compact\""),
+            "{}",
+            serialized
+        );
+        assert!(serialized.contains("[\"r\"] = 0.8"), "{}", serialized);
     }
 
     #[test]
@@ -1892,7 +1900,7 @@ mod tests {
             !serialized.contains("Mainchar"),
             "character name leaked via lastCharname: {serialized}"
         );
-        assert!(serialized.contains("enabled = true"));
+        assert!(serialized.contains("[\"enabled\"] = true"));
         assert!(report
             .drops
             .iter()
