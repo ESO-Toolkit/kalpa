@@ -288,6 +288,31 @@ mod webview_power {
         });
     }
 
+    /// A live-upload session just ended. At hide time a live session had only
+    /// dropped the renderer to `MemoryUsageTargetLevel = LOW` (to keep its feed
+    /// event handlers running in the tray) rather than deep-suspending it — and
+    /// nothing re-runs that decision when the session ends while the window is
+    /// still out of view. So if the main window is currently hidden (tray) or
+    /// minimized, run the idle-hide path now to deep-suspend and reclaim the large
+    /// idle-memory win. If the window is on-screen, do nothing: a later hide will
+    /// suspend correctly. `on_hidden(_, false)` sets `SUSPENDED`, so a subsequent
+    /// `on_shown` still resumes + restores NORMAL exactly as after a normal idle
+    /// hide. No-op on non-Windows.
+    pub fn on_live_session_ended(app: &AppHandle) {
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        // Only act when the window is genuinely out of view. Hidden-to-tray shows
+        // up as `is_visible() == false`; a minimized window reports `is_visible()
+        // == true` but `is_minimized() == true`. Both queries fail safe to
+        // "on-screen" (do nothing) so a query error never suspends a live window.
+        let hidden = !window.is_visible().unwrap_or(true);
+        let minimized = window.is_minimized().unwrap_or(false);
+        if hidden || minimized {
+            on_hidden(app, false);
+        }
+    }
+
     /// The main window is being shown/focused. Resume if suspended and restore
     /// NORMAL. Idempotent — safe (and intended) to call from every show path.
     pub fn on_shown(app: &AppHandle) {
@@ -324,6 +349,7 @@ mod webview_power {
     use tauri::AppHandle;
     pub fn on_hidden(_app: &AppHandle, _live: bool) {}
     pub fn on_shown(_app: &AppHandle) {}
+    pub fn on_live_session_ended(_app: &AppHandle) {}
 }
 
 pub fn run() {
