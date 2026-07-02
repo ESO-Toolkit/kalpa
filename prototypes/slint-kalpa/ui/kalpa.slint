@@ -1362,8 +1362,10 @@ component DiscoverResultRow inherits Rectangle {
     callback row-selected;
     callback install-clicked;
     private property <bool> has-rank: root.rank > 0;
-    private property <length> body-x: root.has-rank ? 70px : 16px;
-    height: root.show-extra-meta ? 66px : 54px;
+    private property <length> body-x: root.has-rank ? 58px : 16px;
+    private property <length> action-reserve: 104px;
+    private property <length> meta-y: root.show-extra-meta ? 31px : 34px;
+    height: root.show-extra-meta ? 72px : 54px;
     background: #00000000;
     border-radius: 0px;
 
@@ -1377,32 +1379,32 @@ component DiscoverResultRow inherits Rectangle {
 
     Rectangle {
         visible: root.selected || touch.has-hover;
-        x: root.selected ? 0px : 10px;
-        y: root.selected ? 0px : 6px;
-        width: parent.width - (root.selected ? 8px : 20px);
-        height: parent.height - (root.selected ? 0px : 12px);
-        border-radius: root.selected ? 0px : 10px;
+        x: root.selected ? 0px : 8px;
+        y: root.selected ? 0px : 5px;
+        width: parent.width - (root.selected ? 6px : 16px);
+        height: parent.height - (root.selected ? 0px : 10px);
+        border-radius: root.selected ? 0px : 9px;
         border-width: 0px;
-        background: root.selected ? @linear-gradient(90deg, Palette.gold-06 0%, Palette.white-02 50%, #00000000 100%) : Palette.white-02;
+        background: root.selected ? Palette.gold-06 : Palette.white-02;
     }
 
     Rectangle {
         visible: root.selected;
         x: 0px;
-        y: 0px;
-        width: 4px;
-        height: parent.height;
-        border-radius: 0px;
+        y: 8px;
+        width: 3px;
+        height: parent.height - 16px;
+        border-radius: 2px;
         background: Palette.gold;
     }
 
     Rectangle {
         visible: root.has-rank;
-        x: 26px;
-        y: root.show-extra-meta ? 10px : 11px;
-        width: 28px;
-        height: 28px;
-        border-radius: 7px;
+        x: 16px;
+        y: 12px;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
         border-width: 0px;
         background: root.rank <= 3 ? Palette.gold-10 : Palette.white-03;
 
@@ -1422,68 +1424,44 @@ component DiscoverResultRow inherits Rectangle {
     title-text := Text {
         x: root.body-x;
         y: root.show-extra-meta ? 9px : 10px;
-        width: parent.width - root.body-x - (root.installed ? 126px : 20px);
+        width: parent.width - root.body-x - root.action-reserve;
         text: root.title;
         color: Palette.foreground;
-        font-size: root.show-extra-meta ? 12px : 14px;
+        font-size: 13px;
         font-weight: 600;
         overflow: elide;
     }
 
-    meta-text := Text {
-        visible: !root.show-extra-meta;
+    author-text := Text {
+        visible: root.meta != "";
         x: root.body-x;
-        y: 35px;
-        width: parent.width - root.body-x - (root.installed ? 104px : 18px);
+        y: root.meta-y;
+        width: root.category == "" ? parent.width - root.body-x - root.action-reserve : max(48px, parent.width - root.body-x - root.action-reserve - 126px);
         text: root.meta;
         color: Palette.muted-half;
-        font-size: 12px;
+        font-size: 11px;
         font-weight: 500;
         overflow: elide;
     }
 
-    Pill {
-        visible: root.category != "" && root.show-extra-meta;
-        x: root.has-rank ? 26px : root.body-x;
-        y: 36px;
+    category-pill := Pill {
+        visible: root.category != "";
+        x: root.meta == "" ? root.body-x : root.body-x + min(author-text.preferred-width, author-text.width) + 8px;
+        y: root.meta-y - 2px;
         label: root.category;
         tone: Palette.muted;
         fill: Palette.white-03;
         line: #00000000;
         pill-height: 17px;
         pill-padding-x: 7px;
-        pill-max-width: 164px;
+        pill-max-width: min(122px, parent.width - root.body-x - root.action-reserve - 8px);
         label-font-size: 10px;
     }
 
     Image {
-        visible: root.show-extra-meta && root.installed;
-        x: parent.width - 124px;
-        y: 26px;
-        width: 13px;
-        height: 13px;
-        source: @image-url("../assets/icons/check.svg");
-        image-fit: contain;
-        colorize: Palette.emerald;
-    }
-
-    Text {
-        visible: root.show-extra-meta && root.installed;
-        x: parent.width - 104px;
-        y: 20px;
-        width: 88px;
-        height: 24px;
-        text: "Installed";
-        color: Palette.emerald;
-        font-size: 12px;
-        font-weight: 700;
-        overflow: elide;
-    }
-
-    Image {
-        visible: false;
+        visible: root.show-extra-meta && root.downloads != "";
         x: root.body-x;
-        y: 56px;
+        y: 55px;
         width: 10px;
         height: 10px;
         source: @image-url("../assets/icons/cloud-upload.svg");
@@ -1492,9 +1470,9 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     Text {
-        visible: false;
+        visible: root.show-extra-meta && root.downloads != "";
         x: root.body-x + 14px;
-        y: 53px;
+        y: 51px;
         width: 78px;
         text: root.downloads;
         color: Palette.muted-dim;
@@ -1504,10 +1482,10 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     Text {
-        visible: false;
-        x: root.body-x + 98px;
-        y: 53px;
-        width: parent.width - 250px;
+        visible: root.show-extra-meta && root.updated != "";
+        x: root.body-x + 96px;
+        y: 51px;
+        width: parent.width - root.body-x - root.action-reserve - 96px;
         text: root.updated;
         color: Palette.muted-dim;
         font-size: 10px;
@@ -1516,9 +1494,9 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     SmallAction {
-        visible: !root.show-extra-meta && (root.installed || touch.has-hover);
-        x: parent.width - self.width - 14px;
-        y: (root.height - self.height) / 2;
+        visible: root.installed || touch.has-hover;
+        x: parent.width - self.width - 16px;
+        y: root.show-extra-meta ? 8px : (root.height - self.height) / 2;
         label: root.installed ? "Installed" : "Install";
         tone: root.installed ? Palette.emerald : Palette.gold;
         fill: root.installed ? Palette.emerald-04 : Palette.gold-10;
@@ -3366,7 +3344,7 @@ component AppearanceOverlay inherits Rectangle {
 
     panel := Rectangle {
         width: root.width < 700px ? root.width - 44px : 620px;
-        height: root.height < 640px ? root.height - 44px : 575px;
+        height: root.height < 740px ? root.height - 44px : 650px;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         border-radius: 16px;
@@ -3437,13 +3415,13 @@ component AppearanceOverlay inherits Rectangle {
             width: parent.width - 44px;
             height: parent.height - 134px;
             viewport-width: self.width;
-            viewport-height: 850px;
+            viewport-height: 538px;
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
             Rectangle {
                 width: parent.width;
-                height: 850px;
+                height: 538px;
                 border-radius: 12px;
                 border-width: 0px;
                 background: #00000000;
@@ -3488,13 +3466,13 @@ component AppearanceOverlay inherits Rectangle {
                 SettingsActionButton { x: parent.width - self.width - 14px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Apply"; primary: true; }
 
                 SettingsToggleRow { x: 0px; y: 144px; width: parent.width; height: 58px; label: "Auto-update on launch"; description: "Automatically update all addons when Kalpa starts"; checked <=> root.auto-update; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 520px; width: parent.width; height: 52px; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 582px; width: parent.width; height: 52px; label: "Use the official ESO Logs uploader"; description: "Off by default - Kalpa uploads directly and falls back when needed"; checked <=> root.official-uploader; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 644px; width: parent.width; height: 52px; label: "Open analysis after upload"; description: "Open finished reports in the ESO Log Aggregator"; checked <=> root.auto-open-analysis; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 208px; width: parent.width; height: 52px; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 268px; width: parent.width; height: 52px; label: "Use the official ESO Logs uploader"; description: "Off by default - Kalpa uploads directly and falls back when needed"; checked <=> root.official-uploader; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 328px; width: parent.width; height: 52px; label: "Open analysis after upload"; description: "Open finished reports in the ESO Log Aggregator"; checked <=> root.auto-open-analysis; changed(_) => { root.settings-changed(); } }
 
                 Rectangle {
                     x: 0px;
-                    y: 724px;
+                    y: 408px;
                     width: parent.width;
                     height: 112px;
                     border-radius: 11px;

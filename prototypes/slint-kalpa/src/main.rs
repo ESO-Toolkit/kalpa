@@ -10,6 +10,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeSet, HashMap},
     fs,
+    io::Write,
     path::{Path, PathBuf},
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
@@ -109,6 +110,9 @@ enum NativeRenderPreset {
     LowMemory,
     Standard,
 }
+
+const STORE_KEY_ACTIVE_THEME: &str = "appearance.activeThemeId";
+const STORE_KEY_CUSTOM_THEMES: &str = "appearance.customThemes";
 
 #[derive(Debug, PartialEq, Eq)]
 struct NativeRenderConfig {
@@ -4577,16 +4581,46 @@ fn custom_theme_store_path() -> Option<PathBuf> {
 }
 
 fn native_settings_store_path() -> Option<PathBuf> {
-    let filename = if std::env::var("KALPA_NATIVE_STATE_DIR").is_ok() {
-        "settings.json"
-    } else {
-        "native-settings.json"
+    native_settings_store_paths().into_iter().next()
+}
+
+fn native_settings_store_paths() -> Vec<PathBuf> {
+    if let Ok(path) = std::env::var("KALPA_NATIVE_STATE_DIR") {
+        return vec![PathBuf::from(path).join("settings.json")];
+    }
+
+    let Some(appdata) = std::env::var("APPDATA").ok().map(PathBuf::from) else {
+        return Vec::new();
     };
-    native_state_dir().map(|path| path.join(filename))
+
+    vec![
+        appdata.join("com.kalpa.desktop").join("settings.json"),
+        appdata.join("Kalpa").join("native-settings.json"),
+    ]
 }
 
 fn read_persisted_active_theme_id() -> Option<String> {
+    for path in native_settings_store_paths() {
+        match read_active_theme_id_from_settings_path(&path) {
+            Ok(Some(theme_id)) => return Some(theme_id),
+            Ok(None) => {}
+            Err(error) => eprintln!("Failed to read active theme from {path:?}: {error}"),
+        }
+    }
+
     read_active_theme_id_from_path(&active_theme_store_path()?)
+}
+
+fn read_active_theme_id_from_settings_path(path: &Path) -> Result<Option<String>, String> {
+    let Some(value) = read_settings_store_key_from_path(path, STORE_KEY_ACTIVE_THEME)? else {
+        return Ok(None);
+    };
+
+    Ok(value
+        .as_str()
+        .map(str::trim)
+        .filter(|theme_id| !theme_id.is_empty())
+        .map(str::to_string))
 }
 
 fn read_active_theme_id_from_path(path: &Path) -> Option<String> {
@@ -4599,13 +4633,27 @@ fn read_active_theme_id_from_path(path: &Path) -> Option<String> {
 }
 
 fn persist_active_theme_id(theme_id: &str) {
-    let Some(path) = active_theme_store_path() else {
+    if let Some(path) = native_settings_store_path() {
+        if let Err(error) = persist_active_theme_id_to_settings_path(&path, theme_id) {
+            eprintln!("Failed to persist native theme selection: {error}");
+        }
         return;
-    };
-
-    if let Err(error) = persist_active_theme_id_to_path(&path, theme_id) {
-        eprintln!("Failed to persist native theme selection: {error}");
     }
+
+    if let Some(path) = active_theme_store_path() {
+        if let Err(error) = persist_active_theme_id_to_path(&path, theme_id) {
+            eprintln!("Failed to persist native theme selection: {error}");
+        }
+    }
+}
+
+fn persist_active_theme_id_to_settings_path(path: &Path, theme_id: &str) -> Result<(), String> {
+    let mut object = read_settings_store_object_from_path(path)?;
+    object.insert(
+        STORE_KEY_ACTIVE_THEME.to_string(),
+        serde_json::Value::String(theme_id.to_string()),
+    );
+    write_settings_store_object_to_path(path, object)
 }
 
 fn persist_active_theme_id_to_path(path: &Path, theme_id: &str) -> Result<(), String> {
@@ -4621,10 +4669,29 @@ fn persist_active_theme_id_to_path(path: &Path, theme_id: &str) -> Result<(), St
 }
 
 fn read_custom_themes() -> Vec<CatalogTheme> {
+    for path in native_settings_store_paths() {
+        match read_custom_themes_from_settings_path(&path) {
+            Ok(Some(themes)) => return themes,
+            Ok(None) => {}
+            Err(error) => eprintln!("Failed to read custom themes from {path:?}: {error}"),
+        }
+    }
+
     let Some(path) = custom_theme_store_path() else {
         return Vec::new();
     };
     read_custom_themes_from_path(&path).unwrap_or_default()
+}
+
+fn read_custom_themes_from_settings_path(path: &Path) -> Result<Option<Vec<CatalogTheme>>, String> {
+    let Some(value) = read_settings_store_key_from_path(path, STORE_KEY_CUSTOM_THEMES)? else {
+        return Ok(None);
+    };
+
+    serde_json::from_value::<Vec<CatalogTheme>>(value)
+        .map(normalize_custom_themes)
+        .map(Some)
+        .map_err(|error| format!("Failed to parse production custom themes: {error}"))
 }
 
 fn read_custom_themes_from_path(path: &Path) -> Result<Vec<CatalogTheme>, String> {
@@ -4641,27 +4708,36 @@ fn read_custom_themes_from_path(path: &Path) -> Result<Vec<CatalogTheme>, String
     serde_json::from_str::<NativeCustomThemeStore>(&contents)
         .map(|store| store.themes)
         .or_else(|_| serde_json::from_str::<Vec<CatalogTheme>>(&contents))
-        .map(|themes| {
-            themes
-                .into_iter()
-                .map(|mut theme| {
-                    theme.category = "Custom".to_string();
-                    theme.skin_id = normalize_skin_id(theme.skin_id);
-                    theme
-                })
-                .collect()
-        })
+        .map(normalize_custom_themes)
         .map_err(|error| format!("Failed to parse custom themes: {error}"))
 }
 
 fn persist_custom_themes(custom_themes: &[CatalogTheme]) {
-    let Some(path) = custom_theme_store_path() else {
+    if let Some(path) = native_settings_store_path() {
+        if let Err(error) = persist_custom_themes_to_settings_path(&path, custom_themes) {
+            eprintln!("Failed to persist native custom themes: {error}");
+        }
         return;
-    };
-
-    if let Err(error) = persist_custom_themes_to_path(&path, custom_themes) {
-        eprintln!("Failed to persist native custom themes: {error}");
     }
+
+    if let Some(path) = custom_theme_store_path() {
+        if let Err(error) = persist_custom_themes_to_path(&path, custom_themes) {
+            eprintln!("Failed to persist native custom themes: {error}");
+        }
+    }
+}
+
+fn persist_custom_themes_to_settings_path(
+    path: &Path,
+    custom_themes: &[CatalogTheme],
+) -> Result<(), String> {
+    let mut object = read_settings_store_object_from_path(path)?;
+    object.insert(
+        STORE_KEY_CUSTOM_THEMES.to_string(),
+        serde_json::to_value(normalize_custom_themes(custom_themes.to_vec()))
+            .map_err(|error| format!("Failed to serialize production custom themes: {error}"))?,
+    );
+    write_settings_store_object_to_path(path, object)
 }
 
 fn persist_custom_themes_to_path(
@@ -4681,11 +4757,60 @@ fn persist_custom_themes_to_path(
     fs::write(path, json).map_err(|error| format!("Failed to write custom themes: {error}"))
 }
 
-fn read_native_settings() -> NativeSettings {
-    let Some(path) = native_settings_store_path() else {
-        return NativeSettings::default();
+fn normalize_custom_themes(themes: Vec<CatalogTheme>) -> Vec<CatalogTheme> {
+    themes
+        .into_iter()
+        .map(|mut theme| {
+            theme.category = "Custom".to_string();
+            theme.skin_id = normalize_skin_id(theme.skin_id);
+            theme
+        })
+        .collect()
+}
+
+fn read_settings_store_key_from_path(
+    path: &Path,
+    key: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    Ok(read_settings_store_object_from_path(path)?.remove(key))
+}
+
+fn read_settings_store_object_from_path(
+    path: &Path,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(format!("Failed to read settings store: {error}")),
     };
-    read_native_settings_from_path(&path).unwrap_or_default()
+
+    if contents.trim().is_empty() {
+        return Ok(Default::default());
+    }
+
+    serde_json::from_str::<serde_json::Value>(&contents)
+        .map_err(|error| format!("Failed to parse settings store: {error}"))
+        .map(|value| value.as_object().cloned().unwrap_or_default())
+}
+
+fn write_settings_store_object_to_path(
+    path: &Path,
+    object: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(object))
+        .map_err(|error| format!("Failed to serialize settings store: {error}"))?;
+    write_string_atomic(path, &json)
+}
+
+fn read_native_settings() -> NativeSettings {
+    for path in native_settings_store_paths() {
+        match read_native_settings_from_path(&path) {
+            Ok(settings) => return settings,
+            Err(error) => eprintln!("Failed to read native settings from {path:?}: {error}"),
+        }
+    }
+
+    NativeSettings::default()
 }
 
 fn read_native_settings_from_path(path: &Path) -> Result<NativeSettings, String> {
@@ -4701,12 +4826,9 @@ fn read_native_settings_from_path(path: &Path) -> Result<NativeSettings, String>
         return Ok(NativeSettings::default());
     }
 
-    serde_json::from_str::<NativeSettings>(&contents)
-        .map(|mut settings| {
-            settings.conflict_policy = settings.conflict_policy.clamp(0, 2);
-            settings
-        })
-        .map_err(|error| format!("Failed to parse native settings: {error}"))
+    let value = serde_json::from_str::<serde_json::Value>(&contents)
+        .map_err(|error| format!("Failed to parse native settings: {error}"))?;
+    Ok(native_settings_from_store_value(&value))
 }
 
 fn persist_native_settings(settings: &NativeSettings) {
@@ -4720,16 +4842,152 @@ fn persist_native_settings(settings: &NativeSettings) {
 }
 
 fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create native settings directory: {error}"))?;
-    }
-
     let mut settings = settings.clone();
     settings.conflict_policy = settings.conflict_policy.clamp(0, 2);
-    let json = serde_json::to_string_pretty(&settings)
+    let existing = fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+    let store_value = native_settings_to_store_value(&settings, existing);
+    let json = serde_json::to_string_pretty(&store_value)
         .map_err(|error| format!("Failed to serialize native settings: {error}"))?;
-    fs::write(path, json).map_err(|error| format!("Failed to write native settings: {error}"))
+    write_string_atomic(path, &json)
+        .map_err(|error| format!("Failed to write native settings: {error}"))
+}
+
+fn bool_from_store_object(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<bool> {
+    object.get(key).and_then(serde_json::Value::as_bool)
+}
+
+fn conflict_policy_from_store_value(value: &serde_json::Value) -> Option<i32> {
+    if let Some(index) = value.as_i64() {
+        return Some((index as i32).clamp(0, 2));
+    }
+
+    match value.as_str()? {
+        "keep_mine" => Some(1),
+        "take_update" => Some(2),
+        "ask" => Some(0),
+        _ => None,
+    }
+}
+
+fn conflict_policy_to_store_value(index: i32) -> serde_json::Value {
+    serde_json::Value::String(
+        match index.clamp(0, 2) {
+            1 => "keep_mine",
+            2 => "take_update",
+            _ => "ask",
+        }
+        .to_string(),
+    )
+}
+
+fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings {
+    let Some(object) = value.as_object() else {
+        return NativeSettings::default();
+    };
+
+    let defaults = NativeSettings::default();
+    let manual_official = bool_from_store_object(object, "manualUseOfficialUploader");
+    let live_official = bool_from_store_object(object, "liveUseOfficialUploader");
+
+    NativeSettings {
+        auto_update: bool_from_store_object(object, "autoUpdate").unwrap_or(defaults.auto_update),
+        warn_eso_running: bool_from_store_object(object, "warnEsoRunning")
+            .or_else(|| {
+                bool_from_store_object(object, "suppressEsoRunningWarning").map(|value| !value)
+            })
+            .unwrap_or(defaults.warn_eso_running),
+        official_uploader: bool_from_store_object(object, "officialUploader")
+            .or_else(|| {
+                manual_official
+                    .or(live_official)
+                    .map(|manual| manual || live_official.unwrap_or(false))
+            })
+            .unwrap_or(defaults.official_uploader),
+        auto_open_analysis: bool_from_store_object(object, "autoOpenAnalysis")
+            .unwrap_or(defaults.auto_open_analysis),
+        conflict_policy: object
+            .get("conflictPolicy")
+            .and_then(conflict_policy_from_store_value)
+            .unwrap_or(defaults.conflict_policy)
+            .clamp(0, 2),
+    }
+}
+
+fn native_settings_to_store_value(
+    settings: &NativeSettings,
+    existing: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut object = existing
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    object.remove("warnEsoRunning");
+    object.remove("officialUploader");
+    object.insert(
+        "autoUpdate".to_string(),
+        serde_json::Value::Bool(settings.auto_update),
+    );
+    object.insert(
+        "suppressEsoRunningWarning".to_string(),
+        serde_json::Value::Bool(!settings.warn_eso_running),
+    );
+    object.insert(
+        "manualUseOfficialUploader".to_string(),
+        serde_json::Value::Bool(settings.official_uploader),
+    );
+    object.insert(
+        "liveUseOfficialUploader".to_string(),
+        serde_json::Value::Bool(settings.official_uploader),
+    );
+    object.insert(
+        "autoOpenAnalysis".to_string(),
+        serde_json::Value::Bool(settings.auto_open_analysis),
+    );
+    object.insert(
+        "conflictPolicy".to_string(),
+        conflict_policy_to_store_value(settings.conflict_policy),
+    );
+
+    serde_json::Value::Object(object)
+}
+
+fn write_string_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create settings directory: {error}"))?;
+    }
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.json");
+    let staging = path.with_file_name(format!("{file_name}.tmp-{}-{unique}", std::process::id()));
+
+    let write_result = (|| -> Result<(), String> {
+        let mut file = fs::File::create(&staging)
+            .map_err(|error| format!("Failed to stage settings: {error}"))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|error| format!("Failed to write staged settings: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("Failed to sync staged settings: {error}"))?;
+        drop(file);
+        fs::rename(&staging, path).map_err(|error| format!("Failed to publish settings: {error}"))
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+
+    write_result
 }
 
 fn parse_theme_catalog() -> Option<ThemeCatalog> {
@@ -5201,6 +5459,34 @@ mod tests {
     }
 
     #[test]
+    fn active_theme_id_round_trips_through_production_settings_store() {
+        let root = test_temp_dir("active-theme-production");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings directory");
+        fs::write(&path, r#"{"autoUpdate":true}"#).expect("seed settings store");
+
+        persist_active_theme_id_to_settings_path(&path, "apocrypha-ink")
+            .expect("persist active theme");
+
+        assert_eq!(
+            read_active_theme_id_from_settings_path(&path)
+                .expect("read active theme")
+                .as_deref(),
+            Some("apocrypha-ink")
+        );
+
+        let object = read_settings_store_object_from_path(&path).expect("read settings object");
+        assert_eq!(
+            object
+                .get("autoUpdate")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn custom_theme_store_round_trips_native_json() {
         let root = test_temp_dir("custom-theme-store");
         let path = root.join("custom-themes.json");
@@ -5215,6 +5501,40 @@ mod tests {
         assert_eq!(themes[0].name, "Custom One");
         assert_eq!(themes[0].category, "Custom");
         assert_eq!(themes[0].skin_id.as_deref(), Some("nordic-runestone"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn custom_theme_store_round_trips_production_settings_key() {
+        let root = test_temp_dir("custom-theme-production");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings directory");
+        fs::write(&path, r#"{"conflictPolicy":"ask"}"#).expect("seed settings store");
+        let theme = sample_custom_theme("custom-one", "Custom One");
+
+        persist_custom_themes_to_settings_path(&path, std::slice::from_ref(&theme))
+            .expect("persist custom themes");
+        let themes = read_custom_themes_from_settings_path(&path)
+            .expect("read production custom themes")
+            .expect("custom themes key exists");
+
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].id, "custom-one");
+        assert_eq!(themes[0].category, "Custom");
+        assert_eq!(themes[0].skin_id.as_deref(), Some("nordic-runestone"));
+
+        let object = read_settings_store_object_from_path(&path).expect("read settings object");
+        assert_eq!(
+            object
+                .get("conflictPolicy")
+                .and_then(serde_json::Value::as_str),
+            Some("ask")
+        );
+        assert!(object
+            .get(STORE_KEY_CUSTOM_THEMES)
+            .and_then(serde_json::Value::as_array)
+            .is_some());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -5340,6 +5660,18 @@ mod tests {
     fn native_settings_round_trip_and_clamp_conflict_policy() {
         let root = test_temp_dir("native-settings");
         let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create temp settings directory");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "addonsPath": "C:/Games/Elder Scrolls Online/live/AddOns",
+                "appearance.activeThemeId": "nordic-runestone",
+                "warnEsoRunning": false,
+                "officialUploader": false
+            })
+            .to_string(),
+        )
+        .expect("seed settings");
         let settings = NativeSettings {
             auto_update: true,
             warn_eso_running: false,
@@ -5356,6 +5688,77 @@ mod tests {
         assert!(restored.official_uploader);
         assert!(restored.auto_open_analysis);
         assert_eq!(restored.conflict_policy, 2);
+
+        let value = serde_json::from_str::<serde_json::Value>(
+            &fs::read_to_string(&path).expect("read settings json"),
+        )
+        .expect("parse settings json");
+        let object = value.as_object().expect("settings object");
+        assert_eq!(
+            object.get("addonsPath").and_then(serde_json::Value::as_str),
+            Some("C:/Games/Elder Scrolls Online/live/AddOns")
+        );
+        assert_eq!(
+            object
+                .get("appearance.activeThemeId")
+                .and_then(serde_json::Value::as_str),
+            Some("nordic-runestone")
+        );
+        assert_eq!(
+            object
+                .get("suppressEsoRunningWarning")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            object
+                .get("manualUseOfficialUploader")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            object
+                .get("liveUseOfficialUploader")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            object
+                .get("conflictPolicy")
+                .and_then(serde_json::Value::as_str),
+            Some("take_update")
+        );
+        assert!(object.get("warnEsoRunning").is_none());
+        assert!(object.get("officialUploader").is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_settings_read_production_store_keys() {
+        let root = test_temp_dir("native-settings-production");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create temp settings directory");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "autoUpdate": true,
+                "suppressEsoRunningWarning": true,
+                "manualUseOfficialUploader": false,
+                "liveUseOfficialUploader": true,
+                "autoOpenAnalysis": true,
+                "conflictPolicy": "keep_mine"
+            })
+            .to_string(),
+        )
+        .expect("seed production settings");
+
+        let restored = read_native_settings_from_path(&path).expect("read settings");
+        assert!(restored.auto_update);
+        assert!(!restored.warn_eso_running);
+        assert!(restored.official_uploader);
+        assert!(restored.auto_open_analysis);
+        assert_eq!(restored.conflict_policy, 1);
 
         let _ = fs::remove_dir_all(root);
     }
