@@ -169,6 +169,22 @@ function New-StateEnvironment {
       $env.KALPA_PACK_HUB_OPEN = "1"
       $env.KALPA_PACK_HUB_VIEW = "install-detail"
     }
+    "uploader-manual" {
+      $env.KALPA_UPLOADER_OPEN = "1"
+      $env.KALPA_UPLOADER_VIEW = "manual"
+    }
+    "uploader-uploading" {
+      $env.KALPA_UPLOADER_OPEN = "1"
+      $env.KALPA_UPLOADER_VIEW = "uploading"
+    }
+    "uploader-live" {
+      $env.KALPA_UPLOADER_OPEN = "1"
+      $env.KALPA_UPLOADER_VIEW = "live"
+    }
+    "uploader-live-running" {
+      $env.KALPA_UPLOADER_OPEN = "1"
+      $env.KALPA_UPLOADER_VIEW = "live-running"
+    }
     "svm-overview" {
       $env.KALPA_SVM_OPEN = "1"
       $env.KALPA_SVM_VIEW = "overview"
@@ -345,7 +361,7 @@ function Capture-State {
     [KalpaCaptureNative]::SetWindowPos($window.Hwnd, [IntPtr](-2), 0, 0, 0, 0, $flags) | Out-Null
 
     $signature = Get-HeaderSignature -Path $path
-    $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-") -or $Name.StartsWith("svm-") -or $Name.StartsWith("backup-restore-")
+    $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-") -or $Name.StartsWith("uploader-") -or $Name.StartsWith("svm-") -or $Name.StartsWith("backup-restore-")
     [pscustomobject]@{
       State = $Name
       Path = $path
