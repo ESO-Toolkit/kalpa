@@ -167,4 +167,63 @@ describe("updateTreeNode", () => {
     const updated = updateTreeNode(tree, ["section", "enabled"], 42);
     expect(updated.children![0]!.children![0]!.value).toBe(42);
   });
+
+  it("updates a value at a NUL-safe path with a segment containing '/'", () => {
+    const slashTree: SvTreeNode = {
+      key: "root",
+      valueType: "table",
+      children: [
+        {
+          key: "a/b",
+          valueType: "table",
+          children: [{ key: "c\0d", valueType: "string", value: "orig" }],
+        },
+      ],
+    };
+    const updated = updateTreeNode(slashTree, ["a/b", "c\0d"], "changed");
+    expect(updated.children![0]!.children![0]!.value).toBe("changed");
+  });
+
+  it("retypes valueType when the value's JS type changes", () => {
+    // number → string
+    const toStr = updateTreeNode(tree, ["section", "count"], "hello");
+    expect(toStr.children![0]!.children![1]!.value).toBe("hello");
+    expect(toStr.children![0]!.children![1]!.valueType).toBe("string");
+
+    // boolean → number
+    const toNum = updateTreeNode(tree, ["section", "enabled"], 42);
+    expect(toNum.children![0]!.children![0]!.valueType).toBe("number");
+
+    // string → nil
+    const toNil = updateTreeNode(tree, ["other"], null);
+    expect(toNil.children![1]!.valueType).toBe("nil");
+
+    // number → boolean
+    const toBool = updateTreeNode(tree, ["section", "count"], false);
+    expect(toBool.children![0]!.children![1]!.valueType).toBe("boolean");
+  });
+
+  it("clears rawLuaValue on edit so the serializer uses the new value", () => {
+    const rawTree: SvTreeNode = {
+      key: "root",
+      valueType: "table",
+      children: [
+        { key: "weird", valueType: "string", value: "�", rawLuaValue: '"\\195"' },
+      ],
+    };
+    const updated = updateTreeNode(rawTree, ["weird"], "clean");
+    expect(updated.children![0]!.value).toBe("clean");
+    expect(updated.children![0]!.valueType).toBe("string");
+    expect(updated.children![0]!.rawLuaValue).toBeUndefined();
+  });
+
+  it("leaves sibling nodes untouched when retyping a leaf", () => {
+    const updated = updateTreeNode(tree, ["section", "count"], "now a string");
+    // sibling boolean is unchanged in both value and type
+    expect(updated.children![0]!.children![0]!.value).toBe(true);
+    expect(updated.children![0]!.children![0]!.valueType).toBe("boolean");
+    // sibling branch untouched
+    expect(updated.children![1]!.value).toBe("untouched");
+    expect(updated.children![1]!.valueType).toBe("string");
+  });
 });

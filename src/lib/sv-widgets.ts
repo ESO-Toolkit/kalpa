@@ -138,6 +138,7 @@ export function resolveEffectiveField(
 
   return {
     nodeId,
+    path: pathSegments,
     key: node.key,
     label,
     widget,

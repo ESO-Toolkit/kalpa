@@ -95,16 +95,15 @@ function formatBytes(bytes: number): string {
 
 function formatDate(iso: string): string {
   if (!iso) return "";
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return iso;
-  }
+  // `new Date(garbage)` doesn't throw — it yields an Invalid Date — so guard
+  // explicitly and fall back to the raw string rather than render "Invalid Date".
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 const SIZE_COLORS: Record<SizeCategory, string> = {
@@ -205,6 +204,7 @@ function OverviewTab({
         </div>
         <button
           onClick={orphaned.length > 0 ? onSwitchToCleanup : undefined}
+          disabled={orphaned.length === 0}
           className={`rounded-xl border p-2.5 text-center transition-all duration-200 ${
             orphaned.length > 0
               ? "border-amber-500/25 bg-amber-500/[0.06] hover:border-amber-500/35 hover:shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent)] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent),0_2px_8px_rgba(0,0,0,0.12)] cursor-pointer"
@@ -606,7 +606,8 @@ function NavTreeItem({
     currentPath.every((seg, i) => selectedPath[i] === seg);
 
   const context = classifyContext(node.key, structuralDepth, knownCharacters);
-  const matchesSearch = !searchQuery || node.key.toLowerCase().includes(searchQuery.toLowerCase());
+  const query = searchQuery.toLowerCase();
+  const matchesSearch = !searchQuery || node.key.toLowerCase().includes(query);
 
   // Detect context wrapper nodes that should be auto-expanded and rendered as chips.
   // These are structural containers (Default, @account, $AccountWide, server names)
@@ -623,13 +624,20 @@ function NavTreeItem({
   const hasMatchingDescendant = useMemo(() => {
     if (!searchQuery) return true;
     const check = (n: SvTreeNode): boolean => {
-      if (n.key.toLowerCase().includes(searchQuery.toLowerCase())) return true;
+      if (n.key.toLowerCase().includes(query)) return true;
       return (n.children ?? []).some(check);
     };
     return check(node);
-  }, [node, searchQuery]);
+  }, [node, searchQuery, query]);
 
   if (!matchesSearch && !hasMatchingDescendant) return null;
+
+  // While searching, auto-reveal nodes whose match lives in a descendant so
+  // deep matches aren't hidden behind collapsed rows. This is a render-time
+  // override only — manual expand state (expandedPaths) is left untouched, so
+  // clearing the search restores the user's previous expansion.
+  const effectiveExpanded =
+    isExpanded || (!!searchQuery && hasMatchingDescendant && !matchesSearch);
 
   // Context wrappers: render as a compact chip divider and auto-show children
   if (isContextWrapper) {
@@ -688,7 +696,7 @@ function NavTreeItem({
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
         {tableChildren.length > 0 ? (
-          isExpanded ? (
+          effectiveExpanded ? (
             <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
           ) : (
             <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" />
@@ -709,7 +717,7 @@ function NavTreeItem({
           </InfoPill>
         )}
       </button>
-      {isExpanded &&
+      {effectiveExpanded &&
         tableChildren.map((child) => (
           <NavTreeItem
             key={child.key}
@@ -944,17 +952,15 @@ function FieldRow({
 }) {
   if (field.hidden) return null;
 
-  const pathSegments = field.nodeId.split("/");
-
   const handleChange = (val: string | number | boolean | null) => {
-    onEdit(pathSegments, val);
+    onEdit(field.path, val);
   };
 
   const handleColorChange = (r: number, g: number, b: number, a?: number) => {
-    onEdit([...pathSegments, "r"], r);
-    onEdit([...pathSegments, "g"], g);
-    onEdit([...pathSegments, "b"], b);
-    if (a !== undefined) onEdit([...pathSegments, "a"], a);
+    onEdit([...field.path, "r"], r);
+    onEdit([...field.path, "g"], g);
+    onEdit([...field.path, "b"], b);
+    if (a !== undefined) onEdit([...field.path, "a"], a);
   };
 
   const renderWidget = () => {
@@ -995,21 +1001,21 @@ function FieldRow({
         </div>
       </div>
       <div className="shrink-0">{renderWidget()}</div>
-      {field.confidence !== "certain" && (
-        <Popover>
-          <PopoverTrigger className="opacity-0 group-hover:opacity-100 transition-opacity">
-            <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-accent-sky" />
-          </PopoverTrigger>
-          <PopoverContent align="end" className="w-72">
-            <WidgetCustomizer
-              field={field}
-              overlay={overlay}
-              addonName={addonName}
-              onSave={onOverlayChange}
-            />
-          </PopoverContent>
-        </Popover>
-      )}
+      {/* Always render the gear (opacity-0 until row hover) so users can edit or
+          reset their own overrides and customize confidently-inferred widgets too. */}
+      <Popover>
+        <PopoverTrigger className="opacity-0 group-hover:opacity-100 transition-opacity">
+          <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-accent-sky" />
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-72">
+          <WidgetCustomizer
+            field={field}
+            overlay={overlay}
+            addonName={addonName}
+            onSave={onOverlayChange}
+          />
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }
@@ -1305,6 +1311,13 @@ function EditorTab({
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+
+  // On unmount (e.g. tab switch destroys this component), clear the parent's
+  // dirty ref so it can never go stale and trigger a bogus prompt later after
+  // the edit state is already gone. Runs cleanup only — onDirtyChange is stable.
+  useEffect(() => {
+    return () => onDirtyChange(false);
+  }, [onDirtyChange]);
 
   // Sync when parent changes the initial file
   useEffect(() => {
@@ -2135,7 +2148,14 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   }, [loadFiles, addonsPath]);
 
   useEffect(() => {
-    invokeOrThrow<boolean>("is_eso_running").then(setEsoRunning).catch(console.error);
+    // Refresh periodically while the dialog is open so the editor's "ESO is
+    // running" warning stays truthful if the game is launched or exited.
+    const check = () => {
+      invokeOrThrow<boolean>("is_eso_running").then(setEsoRunning).catch(console.error);
+    };
+    check();
+    const id = setInterval(check, 30000);
+    return () => clearInterval(id);
   }, []);
 
   const handleSelectFile = useCallback((f: SavedVariableFile) => {
@@ -2146,6 +2166,27 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   const handleDirtyChange = useCallback((d: boolean) => {
     editorDirtyRef.current = d;
   }, []);
+
+  const handleTabChange = useCallback(
+    (value: string) => {
+      // Leaving the editor with unsaved edits would silently unmount EditorTab
+      // and destroy them — confirm first, and reset the dirty ref on discard.
+      if (activeTab === "editor" && value !== "editor" && editorDirtyRef.current) {
+        setConfirmState({
+          title: "Unsaved changes",
+          description: "You have unsaved changes. Discard them?",
+          confirmLabel: "Discard",
+          onConfirm: () => {
+            editorDirtyRef.current = false;
+            setActiveTab(value);
+          },
+        });
+        return;
+      }
+      setActiveTab(value);
+    },
+    [activeTab]
+  );
 
   const handleClose = useCallback(() => {
     if (editorDirtyRef.current) {
@@ -2169,7 +2210,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
 
         <Tabs
           value={activeTab}
-          onValueChange={setActiveTab}
+          onValueChange={handleTabChange}
           className="flex-1 min-h-0 flex flex-col"
         >
           <TabsList variant="line" className="shrink-0">
