@@ -5,6 +5,8 @@
 //! omit, then passes a small versioned JSON payload to ESO Log Aggregator.
 
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::uploader::types::{
@@ -166,83 +168,114 @@ pub(crate) fn extract_from_file(
     path: impl AsRef<Path>,
     report_code: Option<String>,
 ) -> Result<KalpaBuildEvidence, String> {
-    let text = std::fs::read_to_string(path.as_ref())
-        .map_err(|e| format!("Read build evidence failed: {e}"))?;
-    let lines = text.lines().collect::<Vec<_>>();
-    Ok(extract_from_lines(&lines, report_code))
+    extract_from_file_from(path, 0, report_code)
 }
 
-pub(crate) fn extract_from_lines(
-    lines: &[&str],
+pub(crate) fn extract_from_file_from(
+    path: impl AsRef<Path>,
+    start_offset: u64,
     report_code: Option<String>,
-) -> KalpaBuildEvidence {
-    let mut players = PlayerAccumulator::default();
-    let mut ability_infos = BTreeMap::<u32, AbilityEvidenceInfo>::new();
+) -> Result<KalpaBuildEvidence, String> {
+    let mut file =
+        File::open(path.as_ref()).map_err(|e| format!("Read build evidence failed: {e}"))?;
+    file.seek(SeekFrom::Start(start_offset))
+        .map_err(|e| format!("Read build evidence failed: {e}"))?;
 
+    let reader = BufReader::new(file);
+    let mut accumulator = BuildEvidenceAccumulator::default();
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("Read build evidence failed: {e}"))?;
+        accumulator.ingest_line(&line);
+    }
+
+    Ok(accumulator.finish(report_code))
+}
+
+#[cfg(test)]
+fn extract_from_lines(lines: &[&str], report_code: Option<String>) -> KalpaBuildEvidence {
+    let mut accumulator = BuildEvidenceAccumulator::default();
     for line in lines {
+        accumulator.ingest_line(line);
+    }
+
+    accumulator.finish(report_code)
+}
+
+#[derive(Debug, Default)]
+struct BuildEvidenceAccumulator {
+    players: PlayerAccumulator,
+    ability_infos: BTreeMap<u32, AbilityEvidenceInfo>,
+}
+
+impl BuildEvidenceAccumulator {
+    fn ingest_line(&mut self, line: &str) {
         let fields = split_csv_quoted_pub(line);
         match fields.get(1).map(|s| s.trim()) {
-            Some("ABILITY_INFO") => ingest_ability_info(&mut ability_infos, &fields),
-            Some("UNIT_ADDED") => ingest_unit_added(&mut players, &fields),
-            Some("PLAYER_INFO") => ingest_player_info(&mut players, &fields, line),
+            Some("ABILITY_INFO") => ingest_ability_info(&mut self.ability_infos, &fields),
+            Some("UNIT_ADDED") => ingest_unit_added(&mut self.players, &fields),
+            Some("PLAYER_INFO") => ingest_player_info(&mut self.players, &fields, line),
             _ => {}
         }
     }
 
-    let players = players
-        .into_players()
-        .into_values()
-        .filter(|p| {
-            p.saw_player_info
-                || p.class_id.is_some()
-                || p.character_name.is_some()
-                || p.account_name.is_some()
-                || !p.class_mastery_passives.is_empty()
-                || !p.champion_point_passives.is_empty()
-                || resolve_food(&p.passive_ability_ids, &ability_infos).is_some()
-                || p.slotted_skill_ids.iter().any(|ability_id| {
-                    ability_infos
-                        .get(ability_id)
-                        .and_then(|info| info.icon.as_deref())
-                        .is_some_and(is_grimoire_icon_slug)
-                })
-        })
-        .map(|p| {
-            let class_name = p.class_name_from_mastery.or(p.class_name_from_unit);
-            let evidence = if p.saw_player_info {
-                "raw-player-info"
-            } else {
-                "raw-unit-added"
-            };
-            let food = resolve_food(&p.passive_ability_ids, &ability_infos);
-            let scribed_skills = resolve_scribed_skills(&p.slotted_skill_ids, &ability_infos);
-            KalpaPlayerBuildEvidence {
-                unit_id: p.unit_id,
-                unit_occurrence_id: Some(p.unit_occurrence_id),
-                character_name: p.character_name,
-                account_name: p.account_name,
-                character_id: p.character_id,
-                class_id: p.class_id,
-                race_id: p.race_id,
-                level: p.level,
-                champion_points: p.champion_points,
-                class_name,
-                class_mastery_passives: p.class_mastery_passives,
-                champion_point_passives: p.champion_point_passives,
-                food,
-                scribed_skills,
-                evidence: evidence.to_string(),
-                confidence: "exact".to_string(),
-            }
-        })
-        .collect();
+    fn finish(self, report_code: Option<String>) -> KalpaBuildEvidence {
+        let ability_infos = self.ability_infos;
+        let players = self
+            .players
+            .into_players()
+            .into_values()
+            .filter(|p| {
+                p.saw_player_info
+                    || p.class_id.is_some()
+                    || p.character_name.is_some()
+                    || p.account_name.is_some()
+                    || !p.class_mastery_passives.is_empty()
+                    || !p.champion_point_passives.is_empty()
+                    || resolve_food(&p.passive_ability_ids, &ability_infos).is_some()
+                    || p.slotted_skill_ids.iter().any(|ability_id| {
+                        ability_infos
+                            .get(ability_id)
+                            .and_then(|info| info.icon.as_deref())
+                            .is_some_and(is_grimoire_icon_slug)
+                    })
+            })
+            .map(|p| {
+                let class_name = p.class_name_from_mastery.or(p.class_name_from_unit);
+                let evidence = if p.saw_player_info {
+                    "raw-player-info"
+                } else {
+                    "raw-unit-added"
+                };
+                let food = resolve_food(&p.passive_ability_ids, &ability_infos);
+                let scribed_skills = resolve_scribed_skills(&p.slotted_skill_ids, &ability_infos);
+                KalpaPlayerBuildEvidence {
+                    unit_id: p.unit_id,
+                    unit_occurrence_id: Some(p.unit_occurrence_id),
+                    character_name: p.character_name,
+                    account_name: p.account_name,
+                    character_id: p.character_id,
+                    class_id: p.class_id,
+                    race_id: p.race_id,
+                    level: p.level,
+                    champion_points: p.champion_points,
+                    class_name,
+                    class_mastery_passives: p.class_mastery_passives,
+                    champion_point_passives: p.champion_point_passives,
+                    food,
+                    scribed_skills,
+                    evidence: evidence.to_string(),
+                    confidence: "exact".to_string(),
+                }
+            })
+            .collect();
 
-    KalpaBuildEvidence {
-        schema_version: SCHEMA_VERSION,
-        extractor_version: Some(EXTRACTOR_VERSION),
-        source: SOURCE.to_string(),
-        report_code,
-        players,
+        KalpaBuildEvidence {
+            schema_version: SCHEMA_VERSION,
+            extractor_version: Some(EXTRACTOR_VERSION),
+            source: SOURCE.to_string(),
+            report_code,
+            players,
+        }
     }
 }
 
@@ -682,6 +715,51 @@ fn class_name_from_class_mastery_passive(ability_id: u32) -> Option<&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_from_file_from_offset_skips_previous_sessions() {
+        let old_session = "0,BEGIN_LOG,1700000000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             1,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Old Arc\",\"@old\",111,50,1700,0,PLAYER_ALLY,T\n\
+             2,PLAYER_INFO,1,[263870,142210,84731],[1,1,1],[],[],[]\n\
+             3,END_LOG\n";
+        let new_session =
+            "0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"eso.live\"\n\
+             1,UNIT_ADDED,2,PLAYER,T,2,0,F,6,5,\"New Beam\",\"@new\",222,50,2100,0,PLAYER_ALLY,T\n\
+             2,ABILITY_INFO,89958,\"Increase Stamina\",\"/esoui/art/icons/store_magickafood_001.dds\",T,T\n\
+             3,PLAYER_INFO,2,[263585,263586,156017,142092,89958],[1,1,1,1,1],[],[],[]\n";
+        let content = format!("{old_session}{new_session}");
+        let start_offset = old_session.len() as u64;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("Encounter.log");
+        std::fs::write(&path, content).expect("write fixture");
+
+        let evidence =
+            extract_from_file_from(&path, start_offset, Some("report123".into())).unwrap();
+
+        assert_eq!(evidence.report_code.as_deref(), Some("report123"));
+        assert_eq!(evidence.players.len(), 1);
+        assert_eq!(
+            evidence.players[0].character_name.as_deref(),
+            Some("New Beam")
+        );
+        assert_eq!(evidence.players[0].account_name.as_deref(), Some("@new"));
+        assert_eq!(evidence.players[0].class_name.as_deref(), Some("Templar"));
+        assert_eq!(
+            evidence.players[0].class_mastery_passives,
+            vec![263585, 263586]
+        );
+        assert_eq!(
+            evidence.players[0].champion_point_passives,
+            vec![156017, 142092]
+        );
+        assert_eq!(
+            evidence.players[0]
+                .food
+                .as_ref()
+                .map(|food| food.ability_id),
+            Some(89958)
+        );
+    }
 
     #[test]
     fn extracts_class_mastery_from_player_info() {

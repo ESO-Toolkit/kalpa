@@ -1317,6 +1317,7 @@ struct NativeBuildEvidenceSidecarJob {
     app: tauri::AppHandle,
     record_id: String,
     source_path: String,
+    start_offset: u64,
     report_code: String,
     visibility: Visibility,
     latest_generation: Arc<AtomicU64>,
@@ -1330,8 +1331,9 @@ fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) 
             return;
         }
 
-        let evidence = match super::native::build_evidence::extract_from_file(
+        let evidence = match super::native::build_evidence::extract_from_file_from(
             &job.source_path,
+            job.start_offset,
             Some(job.report_code.clone()),
         ) {
             Ok(evidence) if !evidence.players.is_empty() => evidence,
@@ -1988,6 +1990,9 @@ async fn start_native_live_branch(
         let sidecar_generation = Arc::new(AtomicU64::new(0));
         let sidecar_generation_for_open = Arc::clone(&sidecar_generation);
         let sidecar_generation_for_first_fight = Arc::clone(&sidecar_generation);
+        let sidecar_start_offset = Arc::new(AtomicU64::new(0));
+        let sidecar_start_offset_for_open = Arc::clone(&sidecar_start_offset);
+        let sidecar_start_offset_for_first_fight = Arc::clone(&sidecar_start_offset);
         let sidecar_app_for_open = app_for_thread.clone();
         let sidecar_app_for_first_fight = app_for_thread.clone();
         let sidecar_path_for_open = safe_owned.clone();
@@ -2014,6 +2019,7 @@ async fn start_native_live_branch(
                     app: sidecar_app_for_open.clone(),
                     record_id: sidecar_record_for_open.clone(),
                     source_path: sidecar_path_for_open.clone(),
+                    start_offset: sidecar_start_offset_for_open.load(Ordering::SeqCst),
                     report_code: code.to_string(),
                     visibility: sidecar_visibility,
                     latest_generation: Arc::clone(&sidecar_generation_for_open),
@@ -2037,6 +2043,8 @@ async fn start_native_live_branch(
                             app: sidecar_app_for_first_fight.clone(),
                             record_id: sidecar_record_for_first_fight.clone(),
                             source_path: sidecar_path_for_first_fight.clone(),
+                            start_offset: sidecar_start_offset_for_first_fight
+                                .load(Ordering::SeqCst),
                             report_code,
                             visibility: sidecar_visibility,
                             latest_generation: Arc::clone(&sidecar_generation_for_first_fight),
@@ -2137,6 +2145,10 @@ async fn start_native_live_branch(
             }
             _ => None,
         };
+        let evidence_start_offset = warmup
+            .as_ref()
+            .map_or(tail_start, |warmup| warmup.begin_log_offset);
+        sidecar_start_offset.store(evidence_start_offset, Ordering::SeqCst);
 
         // When we warmed up from a prefix, the tail starts INSIDE an already-open session
         // (its BEGIN_LOG was in the replayed prefix), so the tail's line assembler must
@@ -2186,6 +2198,7 @@ async fn start_native_live_branch(
                         app: app_for_thread.clone(),
                         record_id: record_id_for_thread.clone(),
                         source_path: safe_owned.clone(),
+                        start_offset: evidence_start_offset,
                         report_code: report_code.clone(),
                         visibility: opts_owned.visibility,
                         latest_generation: Arc::clone(&sidecar_generation),
