@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::Channel;
@@ -1313,6 +1313,85 @@ fn native_live_upload_error_is_clean_stop(error: &super::native::client::UploadE
     matches!(error, super::native::client::UploadError::Cancelled)
 }
 
+struct NativeBuildEvidenceSidecarJob {
+    app: tauri::AppHandle,
+    record_id: String,
+    source_path: String,
+    report_code: String,
+    visibility: Visibility,
+    latest_generation: Arc<AtomicU64>,
+    generation: u64,
+    reason: &'static str,
+}
+
+fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) {
+    std::thread::spawn(move || {
+        if job.latest_generation.load(Ordering::SeqCst) != job.generation {
+            return;
+        }
+
+        let evidence = match super::native::build_evidence::extract_from_file(
+            &job.source_path,
+            Some(job.report_code.clone()),
+        ) {
+            Ok(evidence) if !evidence.players.is_empty() => evidence,
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!(
+                    "[uploader] native live build evidence unavailable ({}): {e}",
+                    job.reason
+                );
+                return;
+            }
+        };
+
+        if job.latest_generation.load(Ordering::SeqCst) != job.generation {
+            return;
+        }
+
+        if let Err(e) =
+            super::history::attach_build_evidence(&job.app, &job.record_id, evidence.clone())
+        {
+            eprintln!(
+                "[uploader] native live build evidence history skipped ({}): {e}",
+                job.reason
+            );
+        }
+
+        if !super::sidecar::should_publish_build_evidence(job.visibility) {
+            return;
+        }
+
+        match job.app.state::<AuthState>().get_valid_token() {
+            Ok(Some(token)) => {
+                if let Err(e) = super::sidecar::publish_build_evidence(
+                    &job.report_code,
+                    &evidence,
+                    job.visibility,
+                    &token,
+                ) {
+                    eprintln!(
+                        "[uploader] native live build evidence sidecar skipped ({}): {e}",
+                        job.reason
+                    );
+                }
+            }
+            Ok(None) => {
+                eprintln!(
+                    "[uploader] native live build evidence sidecar skipped ({}): no ESO Logs OAuth token available",
+                    job.reason
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[uploader] native live build evidence sidecar skipped ({}): auth unavailable: {e}",
+                    job.reason
+                );
+            }
+        }
+    });
+}
+
 /// Pre-routing gate for a MID-SESSION native live start: can native faithfully encode
 /// the session already on disk? Returns false ⇒ DON'T route native — fall through to the
 /// official handoff (which can pick up an in-progress log), matching the finished-log
@@ -1901,8 +1980,26 @@ async fn start_native_live_branch(
         let record_id_for_reauth = record_id_for_thread.clone();
         let app_for_resolved = app_for_thread.clone();
         let record_id_for_resolved = record_id_for_thread.clone();
+        let live_report_code = Arc::new(Mutex::new(None::<String>));
+        let report_code_for_open = Arc::clone(&live_report_code);
+        let report_code_for_first_fight = Arc::clone(&live_report_code);
+        let first_fight_sidecar_scheduled = Arc::new(AtomicBool::new(false));
+        let first_fight_sidecar_for_event = Arc::clone(&first_fight_sidecar_scheduled);
+        let sidecar_generation = Arc::new(AtomicU64::new(0));
+        let sidecar_generation_for_open = Arc::clone(&sidecar_generation);
+        let sidecar_generation_for_first_fight = Arc::clone(&sidecar_generation);
+        let sidecar_app_for_open = app_for_thread.clone();
+        let sidecar_app_for_first_fight = app_for_thread.clone();
+        let sidecar_path_for_open = safe_owned.clone();
+        let sidecar_path_for_first_fight = safe_owned.clone();
+        let sidecar_record_for_open = record_id_for_thread.clone();
+        let sidecar_record_for_first_fight = record_id_for_thread.clone();
+        let sidecar_visibility = opts_owned.visibility;
         let events = LiveEventSink {
             on_report_open: Box::new(move |code: &str| {
+                if let Ok(mut guard) = report_code_for_open.lock() {
+                    *guard = Some(code.to_string());
+                }
                 // The report exists on ESO Logs the instant create-report returns;
                 // the OrphanSink already persisted the crash-recovery breadcrumb +
                 // history link. Surface it to the UI only after warm-up commits so the
@@ -1912,11 +2009,42 @@ async fn start_native_live_branch(
                     code: code.to_string(),
                     url,
                 });
+                let generation = sidecar_generation_for_open.fetch_add(1, Ordering::SeqCst) + 1;
+                spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                    app: sidecar_app_for_open.clone(),
+                    record_id: sidecar_record_for_open.clone(),
+                    source_path: sidecar_path_for_open.clone(),
+                    report_code: code.to_string(),
+                    visibility: sidecar_visibility,
+                    latest_generation: Arc::clone(&sidecar_generation_for_open),
+                    generation,
+                    reason: "report-open",
+                });
             }),
             on_session_anchored: Box::new(move || {
                 let _ = ch_anchored.send(LiveEvent::SessionAnchored);
             }),
             on_fight_posted: Box::new(move |index, duration_ms| {
+                if !first_fight_sidecar_for_event.swap(true, Ordering::SeqCst) {
+                    let report_code = report_code_for_first_fight
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.clone());
+                    if let Some(report_code) = report_code {
+                        let generation =
+                            sidecar_generation_for_first_fight.fetch_add(1, Ordering::SeqCst) + 1;
+                        spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                            app: sidecar_app_for_first_fight.clone(),
+                            record_id: sidecar_record_for_first_fight.clone(),
+                            source_path: sidecar_path_for_first_fight.clone(),
+                            report_code,
+                            visibility: sidecar_visibility,
+                            latest_generation: Arc::clone(&sidecar_generation_for_first_fight),
+                            generation,
+                            reason: "first-fight",
+                        });
+                    }
+                }
                 // Native fights drive the same per-fight UI timeline as the official
                 // watcher. Duration comes from the segment's report-absolute wall window
                 // (end-start). Zone/boss naming still isn't cheaply available at the
@@ -2043,7 +2171,8 @@ async fn start_native_live_branch(
         // stop / end as settled; a failure carries the reason.
         match result {
             Ok((code, ended)) => {
-                let url = super::watcher::report_url(&code.0);
+                let report_code = code.0.clone();
+                let url = super::watcher::report_url(&report_code);
                 let (succeeded, error) = native_live_terminal_status(&ended.reason);
                 let _ = channel_for_thread.send(LiveEvent::Stopped {
                     reason: error
@@ -2051,11 +2180,24 @@ async fn start_native_live_branch(
                         .unwrap_or_else(|| format!("Live upload finished ({:?}).", ended.reason)),
                     clean: succeeded,
                 });
+                if succeeded || ended.fights_posted > 0 {
+                    let generation = sidecar_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                    spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                        app: app_for_thread.clone(),
+                        record_id: record_id_for_thread.clone(),
+                        source_path: safe_owned.clone(),
+                        report_code: report_code.clone(),
+                        visibility: opts_owned.visibility,
+                        latest_generation: Arc::clone(&sidecar_generation),
+                        generation,
+                        reason: "finished",
+                    });
+                }
                 let _ = super::history::settle_native_live(
                     &app_for_thread,
                     &record_id_for_thread,
                     ended.fights_posted,
-                    Some((url, code.0)),
+                    Some((url, report_code)),
                     succeeded,
                     error,
                 );
