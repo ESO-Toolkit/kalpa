@@ -131,12 +131,6 @@ pub struct UploaderState {
 }
 
 impl UploaderState {
-    /// Signal every live session to stop, best-effort, WITHOUT joining. Called from the
-    /// app's exit handler: a native driver's terminate-on-exit + abandoned POSTs then
-    /// settle faster, and the OS reaps the threads. We deliberately do NOT join here
-    /// (the join could block process exit on a wedged network up to the terminate
-    /// watchdog); correctness on a hard exit is covered by the L2 orphan breadcrumb +
-    /// next-launch recovery. Setting the flag is enough to start a prompt close.
     /// True while any live-logging session is tracked (starting / official
     /// `Running` / `NativeRunning`). The webview may be deep-suspended when the
     /// window is hidden ONLY if this is false — an active session needs its feed
@@ -149,6 +143,12 @@ impl UploaderState {
             .unwrap_or(true)
     }
 
+    /// Signal every live session to stop, best-effort, WITHOUT joining. Called from the
+    /// app's exit handler: a native driver's terminate-on-exit + abandoned POSTs then
+    /// settle faster, and the OS reaps the threads. We deliberately do NOT join here
+    /// (the join could block process exit on a wedged network up to the terminate
+    /// watchdog); correctness on a hard exit is covered by the L2 orphan breadcrumb +
+    /// next-launch recovery. Setting the flag is enough to start a prompt close.
     pub fn signal_all_live_stop(&self) {
         if let Ok(sessions) = self.live_sessions.lock() {
             for slot in sessions.values() {
