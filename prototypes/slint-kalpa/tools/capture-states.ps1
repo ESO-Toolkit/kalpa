@@ -104,7 +104,7 @@ function New-StateEnvironment {
     KALPA_REDUCED_MOTION = "1"
   }
 
-  foreach ($key in @("KALPA_NATIVE_STATE_DIR", "KALPA_THEME_FILE", "KALPA_THEME_JSON")) {
+  foreach ($key in @("KALPA_ADDONS_PATH", "KALPA_NATIVE_STATE_DIR", "KALPA_THEME_FILE", "KALPA_THEME_JSON")) {
     $value = [System.Environment]::GetEnvironmentVariable($key)
     if (-not [string]::IsNullOrWhiteSpace($value)) {
       $env[$key] = $value

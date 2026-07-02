@@ -5957,6 +5957,37 @@ mod tests {
     }
 
     #[test]
+    fn real_file_editor_reads_writes_nested_text_files() {
+        let root = test_temp_dir("real-file-editor");
+        let addon_dir = root.join("EditableAddon");
+        fs::create_dir_all(addon_dir.join("lang")).expect("create addon folders");
+        fs::write(
+            addon_dir.join("EditableAddon.txt"),
+            "## Title: Editable Addon\n## Author: Tester\n## Version: 1.0\n",
+        )
+        .expect("write addon manifest");
+        fs::write(addon_dir.join("lang/en.lua"), "local value = 1\n").expect("write lua file");
+
+        let files = real_file_entries(root, "EditableAddon").expect("load real file tree");
+        assert!(files
+            .iter()
+            .any(|entry| !entry.folder && entry.relative_path.as_str() == "lang/en.lua"));
+
+        let original = read_text_file(root, "EditableAddon", "lang/en.lua").expect("read lua file");
+        assert_eq!(original, "local value = 1\n");
+
+        write_text_file(root, "EditableAddon", "lang/en.lua", "local value = 2\n")
+            .expect("write lua file");
+        assert_eq!(
+            fs::read_to_string(addon_dir.join("lang/en.lua")).expect("read saved lua file"),
+            "local value = 2\n"
+        );
+        assert!(write_text_file(root, "EditableAddon", "../escape.lua", "bad").is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn edit_backup_entries_flatten_manifest_files_and_restore() {
         let root = test_temp_dir("edit-backups");
         let addon_dir = root.join("BackupAddon");
