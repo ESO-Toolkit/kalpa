@@ -224,8 +224,15 @@ Current backdrop status:
 - Capture and compare after each component family.
 - Defer release memory measurements until the active surface is visually and
   functionally acceptable.
-- Test renderer tradeoffs explicitly. `winit-software` is the low-memory track;
-  Skia is the visual-fidelity track.
+- Test renderer tradeoffs explicitly. `KALPA_RENDER_PRESET=low-memory` maps to
+  `winit-software`; `KALPA_RENDER_PRESET=standard` maps to `winit-femtovg` in
+  this prototype unless `KALPA_SLINT_BACKEND` overrides it for a manual renderer
+  check. Use `winit-skia` only when the active Slint build exposes it.
+- Treat glass/border work as one native material system: pre-blurred assets,
+  generated nine-slice/backplate assets, low-alpha fills, and carefully limited
+  highlights. Do not keep chasing CSS `backdrop-filter` with per-component hacks.
+- OS window blur/mica/acrylic remains a follow-up via the Slint winit-window
+  access path; do not fake it inside component code.
 - Historical renderer memory notes from July 1, 2026, for later re-check after
   visual/feature parity:
   `winit-software` ~39.5-43.4 MB working set / 21.1-23.5 MB private after
@@ -238,7 +245,9 @@ Current backdrop status:
   low-memory path.
   `winit-femtovg`
   ~84 MB / 132 MB, `winit-skia` ~86 MB / 132 MB.
-- Keep timers state-gated; idle UI must not run animation timers.
+- Keep timers state-gated; idle UI must not run animation timers. The low-memory
+  preset disables ambient backdrop motion by default, while the standard preset
+  enables it unless `KALPA_AMBIENT_MOTION=0`.
 - Launch with `KALPA_REDUCED_MOTION=1` to inspect the native reduced-motion token.
 - Launch with `KALPA_ADDONS_PATH=<AddOns path>` to inspect a specific local addon
   folder. Without the env var, the Windows default live AddOns path is used when
@@ -247,7 +256,9 @@ Current backdrop status:
 - Launch with `KALPA_VIEW=discover` and optional
   `KALPA_DISCOVER_TAB=popular|categories|url`, `KALPA_DISCOVER_QUERY=<query>`,
   or `KALPA_DISCOVER_URL=<url-or-id>` to inspect Discover scaffolds.
-- Launch with `KALPA_SLINT_BACKEND=winit-skia` only for visual-fidelity checks.
+- Launch with `KALPA_RENDER_PRESET=standard` for visual-fidelity checks, or
+  `KALPA_SLINT_BACKEND=winit-skia` / `winit-femtovg` for direct backend checks
+  on Slint builds that support those renderer names.
 - Launch with `KALPA_THEME=<theme-id>` to inspect supported native seed themes.
   The prototype launches with `eso-gold` when no theme env var is set so the
   saved main-screen reference and native demo start from the same clean palette.

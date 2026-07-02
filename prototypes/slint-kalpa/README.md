@@ -7,9 +7,23 @@ It is intentionally mock-data only. The goal is to port the current UI
 component by component, compare against WebView screenshots, and measure native
 UI memory before porting application behavior.
 
-The prototype selects Slint's `winit-software` backend by default. On this
-machine that is materially smaller than the GPU-backed default renderer and is a
-better match for Kalpa's mostly static, dense desktop UI.
+The prototype selects the `low-memory` render preset by default, which maps to
+Slint's `winit-software` backend. On this machine that is materially smaller
+than the GPU-backed renderers and is a better match for Kalpa's mostly static,
+dense desktop UI while visual parity is still being built.
+
+Render presets:
+
+- `KALPA_RENDER_PRESET=low-memory`: uses `winit-software`, simplified native
+  glass, pre-blurred/static assets, and ambient motion disabled unless explicitly
+  enabled.
+- `KALPA_RENDER_PRESET=standard`: uses `winit-femtovg` by default for this
+  prototype, enables ambient motion by default, and is the track for richer
+  glass/motion fidelity checks. Use `KALPA_SLINT_BACKEND=winit-skia` only on a
+  Slint build that exposes that renderer.
+
+`KALPA_SLINT_BACKEND` or `SLINT_BACKEND` still override the backend directly for
+manual renderer checks.
 
 Current measured renderer memory on June 30, 2026:
 
@@ -38,7 +52,7 @@ Useful launch options:
 
 ```powershell
 $env:KALPA_THEME = "daedric-crimson"
-$env:KALPA_SLINT_BACKEND = "winit-software"
+$env:KALPA_RENDER_PRESET = "low-memory"
 $env:KALPA_REDUCED_MOTION = "1"
 cargo run --release
 ```

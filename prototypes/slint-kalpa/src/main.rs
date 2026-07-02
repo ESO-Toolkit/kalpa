@@ -104,6 +104,18 @@ struct NativeContrastCheck {
     level: ContrastLevel,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeRenderPreset {
+    LowMemory,
+    Standard,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeRenderConfig {
+    backend: String,
+    preset: NativeRenderPreset,
+}
+
 impl ThemeSelection {
     fn colors_only(seed: ThemeSeed) -> Self {
         Self { seed, skin_kind: 0 }
@@ -167,12 +179,10 @@ struct BackupManifestDraft {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
-    let backend = std::env::var("KALPA_SLINT_BACKEND")
-        .or_else(|_| std::env::var("SLINT_BACKEND"))
-        .unwrap_or_else(|_| "winit-software".to_string());
+    let render_config = native_render_config();
 
     slint::BackendSelector::new()
-        .backend_name(backend.into())
+        .backend_name(render_config.backend.clone().into())
         .select()?;
 
     let ui = KalpaWindow::new()?;
@@ -185,7 +195,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_active_theme_id(active_theme_id.into());
     seed_initial_theme_draft(&ui, &custom_themes.borrow());
     apply_initial_native_settings(&ui);
-    apply_runtime_flags(&ui);
+    apply_runtime_flags(&ui, render_config.preset);
     apply_addon_view(&ui, &addon_models);
     let discover_installed_ids = Rc::new(RefCell::new(installed_discover_ids(
         &addon_models.all.borrow(),
@@ -209,6 +219,59 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_theme_actions(&ui, custom_themes);
     wire_settings_actions(&ui);
     ui.run()
+}
+
+fn native_render_config() -> NativeRenderConfig {
+    render_config_from_inputs(
+        std::env::var("KALPA_RENDER_PRESET").ok().as_deref(),
+        std::env::var("KALPA_SLINT_BACKEND").ok().as_deref(),
+        std::env::var("SLINT_BACKEND").ok().as_deref(),
+    )
+}
+
+fn render_config_from_inputs(
+    preset_env: Option<&str>,
+    backend_env: Option<&str>,
+    slint_backend_env: Option<&str>,
+) -> NativeRenderConfig {
+    let explicit_preset = preset_env.and_then(parse_render_preset);
+    let backend = backend_env
+        .or(slint_backend_env)
+        .map(str::to_string)
+        .unwrap_or_else(|| default_backend_for_preset(explicit_preset.unwrap_or_default()).into());
+    let preset = explicit_preset.unwrap_or_else(|| render_preset_for_backend(&backend));
+
+    NativeRenderConfig { backend, preset }
+}
+
+impl Default for NativeRenderPreset {
+    fn default() -> Self {
+        Self::LowMemory
+    }
+}
+
+fn parse_render_preset(value: &str) -> Option<NativeRenderPreset> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "low" | "low-memory" | "low_memory" | "memory" | "software" => {
+            Some(NativeRenderPreset::LowMemory)
+        }
+        "standard" | "fidelity" | "quality" | "skia" | "femtovg" => Some(NativeRenderPreset::Standard),
+        _ => None,
+    }
+}
+
+fn default_backend_for_preset(preset: NativeRenderPreset) -> &'static str {
+    match preset {
+        NativeRenderPreset::LowMemory => "winit-software",
+        NativeRenderPreset::Standard => "winit-femtovg",
+    }
+}
+
+fn render_preset_for_backend(backend: &str) -> NativeRenderPreset {
+    match backend.to_ascii_lowercase().as_str() {
+        "winit-skia" | "skia" | "winit-femtovg" | "femtovg" => NativeRenderPreset::Standard,
+        _ => NativeRenderPreset::LowMemory,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3061,6 +3124,9 @@ fn wire_file_browser(ui: &KalpaWindow) {
     let selected_ui = ui.as_weak();
     ui.on_addon_selected(move |_| {
         if let Some(ui) = selected_ui.upgrade() {
+            if guard_unsaved_editor(&ui) {
+                return;
+            }
             refresh_file_browser(&ui);
         }
     });
@@ -3068,6 +3134,9 @@ fn wire_file_browser(ui: &KalpaWindow) {
     let file_ui = ui.as_weak();
     ui.on_file_selected(move |relative_path| {
         if let Some(ui) = file_ui.upgrade() {
+            if guard_unsaved_editor(&ui) {
+                return;
+            }
             let folder_name = selected_addon_folder(&ui);
             open_file_in_editor(&ui, &folder_name, relative_path.as_str());
         }
@@ -3076,6 +3145,9 @@ fn wire_file_browser(ui: &KalpaWindow) {
     let folder_toggle_ui = ui.as_weak();
     ui.on_folder_toggled(move |relative_path| {
         if let Some(ui) = folder_toggle_ui.upgrade() {
+            if guard_unsaved_editor(&ui) {
+                return;
+            }
             let folder_name = selected_addon_folder(&ui);
             toggle_collapsed_file_folder(&folder_name, relative_path.as_str());
             refresh_file_browser(&ui);
@@ -3099,6 +3171,9 @@ fn wire_file_browser(ui: &KalpaWindow) {
     let rescan_ui = ui.as_weak();
     ui.on_rescan_files(move || {
         if let Some(ui) = rescan_ui.upgrade() {
+            if guard_unsaved_editor(&ui) {
+                return;
+            }
             refresh_file_browser(&ui);
         }
     });
@@ -3395,12 +3470,18 @@ fn open_file_in_editor(ui: &KalpaWindow, folder_name: &str, relative_path: &str)
 
 fn save_file_from_editor(ui: &KalpaWindow, relative_path: &str, content: &str) {
     let folder_name = selected_addon_folder(ui);
-    if let Some(addons_root) = addons_source_root() {
-        if let Err(error) = write_text_file(&addons_root, &folder_name, relative_path, content) {
-            ui.set_editor_error(true);
-            ui.set_editor_message(format!("Failed to save: {error}").into());
-            return;
-        }
+    let Some(addons_root) = addons_source_root() else {
+        ui.set_editor_error(true);
+        ui.set_editor_message(
+            "Cannot save demo file. Launch with KALPA_ADDONS_PATH to edit real addon files.".into(),
+        );
+        return;
+    };
+
+    if let Err(error) = write_text_file(&addons_root, &folder_name, relative_path, content) {
+        ui.set_editor_error(true);
+        ui.set_editor_message(format!("Failed to save: {error}").into());
+        return;
     }
 
     ui.set_selected_original_content(content.into());
@@ -3410,6 +3491,22 @@ fn save_file_from_editor(ui: &KalpaWindow, relative_path: &str, content: &str) {
     ui.set_editor_editable(true);
     ui.set_editor_message(format!("Saved {}", file_name_from_path(relative_path)).into());
     mark_file_modified(ui, relative_path);
+}
+
+fn editor_has_unsaved_changes(ui: &KalpaWindow) -> bool {
+    ui.get_editor_open()
+        && !ui.get_editor_binary()
+        && !ui.get_editor_error()
+        && ui.get_selected_file_content() != ui.get_selected_original_content()
+}
+
+fn guard_unsaved_editor(ui: &KalpaWindow) -> bool {
+    if !editor_has_unsaved_changes(ui) {
+        return false;
+    }
+
+    ui.set_editor_message("Save or revert this file before switching away.".into());
+    true
 }
 
 fn clear_editor(ui: &KalpaWindow) {
@@ -3927,14 +4024,18 @@ fn open_url(url: &str) {
     }
 }
 
-fn apply_runtime_flags(ui: &KalpaWindow) {
+fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     let reduced_motion = std::env::var("KALPA_REDUCED_MOTION")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
 
-    ui.global::<Tokens>().set_reduced_motion(reduced_motion);
-    ui.global::<Tokens>()
-        .set_ambient_motion(env_flag("KALPA_AMBIENT_MOTION"));
+    let tokens = ui.global::<Tokens>();
+    tokens.set_low_memory_preset(render_preset == NativeRenderPreset::LowMemory);
+    tokens.set_reduced_motion(reduced_motion);
+    tokens.set_ambient_motion(env_flag_with_default(
+        "KALPA_AMBIENT_MOTION",
+        render_preset == NativeRenderPreset::Standard,
+    ));
 
     let detail_files_active = std::env::var("KALPA_DETAIL_TAB")
         .map(|value| value.eq_ignore_ascii_case("files"))
@@ -3991,9 +4092,13 @@ fn apply_runtime_flags(ui: &KalpaWindow) {
 }
 
 fn env_flag(name: &str) -> bool {
+    env_flag_with_default(name, false)
+}
+
+fn env_flag_with_default(name: &str, default: bool) -> bool {
     std::env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+        .unwrap_or(default)
 }
 
 fn env_i32(name: &str) -> i32 {
@@ -4971,6 +5076,47 @@ mod tests {
                 work_top: 0,
                 primary: false,
             })
+        );
+    }
+
+    #[test]
+    fn render_config_defaults_to_low_memory_software_preset() {
+        assert_eq!(
+            render_config_from_inputs(None, None, None),
+            NativeRenderConfig {
+                backend: "winit-software".to_string(),
+                preset: NativeRenderPreset::LowMemory,
+            }
+        );
+    }
+
+    #[test]
+    fn render_config_standard_preset_selects_femtovg_unless_backend_is_explicit() {
+        assert_eq!(
+            render_config_from_inputs(Some("standard"), None, None),
+            NativeRenderConfig {
+                backend: "winit-femtovg".to_string(),
+                preset: NativeRenderPreset::Standard,
+            }
+        );
+        assert_eq!(
+            render_config_from_inputs(Some("standard"), Some("winit-femtovg"), None),
+            NativeRenderConfig {
+                backend: "winit-femtovg".to_string(),
+                preset: NativeRenderPreset::Standard,
+            }
+        );
+    }
+
+    #[test]
+    fn render_config_derives_preset_from_backend_without_explicit_preset() {
+        assert_eq!(
+            render_config_from_inputs(None, Some("winit-skia"), None).preset,
+            NativeRenderPreset::Standard
+        );
+        assert_eq!(
+            render_config_from_inputs(None, Some("winit-software"), None).preset,
+            NativeRenderPreset::LowMemory
         );
     }
 

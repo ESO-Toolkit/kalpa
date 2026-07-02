@@ -116,6 +116,7 @@ export struct AddonEntry {
 
 export global Tokens {
     in-out property <int> skin-kind: 0;
+    in-out property <bool> low-memory-preset: true;
     in-out property <bool> reduced-motion: false;
     in-out property <bool> ambient-motion: false;
     in-out property <color> bg-base: #060c18;
@@ -315,8 +316,8 @@ component AppBackdrop inherits Rectangle {
     Image {
         x: -root.width * 0.10 + (root.drift-one ? 30px : 0px);
         y: -root.height * 0.15 + (root.drift-one ? -20px : 0px);
-        width: 600px;
-        height: 600px;
+        width: Tokens.low-memory-preset ? 560px : 640px;
+        height: Tokens.low-memory-preset ? 560px : 640px;
         source: BackdropSkins.orb-one;
         image-fit: ImageFit.fill;
         image-rendering: smooth;
@@ -326,8 +327,8 @@ component AppBackdrop inherits Rectangle {
     Image {
         x: root.width * 1.10 - 500px + (root.drift-two ? -20px : 0px);
         y: root.height * 1.20 - 500px + (root.drift-two ? 15px : 0px);
-        width: 500px;
-        height: 500px;
+        width: Tokens.low-memory-preset ? 470px : 540px;
+        height: Tokens.low-memory-preset ? 470px : 540px;
         source: BackdropSkins.orb-two;
         image-fit: ImageFit.fill;
         image-rendering: smooth;
@@ -337,8 +338,8 @@ component AppBackdrop inherits Rectangle {
     Image {
         x: root.width * 0.40 + (root.drift-three ? 30px : 0px);
         y: root.height * 0.30 + (root.drift-three ? -20px : 0px);
-        width: 400px;
-        height: 400px;
+        width: Tokens.low-memory-preset ? 360px : 440px;
+        height: Tokens.low-memory-preset ? 360px : 440px;
         source: BackdropSkins.orb-three;
         image-fit: ImageFit.fill;
         image-rendering: smooth;
@@ -396,23 +397,26 @@ component Pill inherits Rectangle {
     in property <color> tone: Palette.muted;
     in property <color> fill: Palette.white-02;
     in property <color> line: Palette.white-10;
-    width: label-text.preferred-width + 17px;
+    in property <length> pill-max-width: 220px;
+    width: min(label-text.preferred-width + 17px, root.pill-max-width);
     preferred-width: self.width;
     horizontal-stretch: 0;
     height: 22px;
-    border-radius: 8px;
+    border-radius: 11px;
     border-width: 0px;
     background: root.fill;
 
     label-text := Text {
         x: 8px;
         y: 0px;
+        width: root.width - 16px;
         height: root.height;
         text: root.label;
         color: root.tone;
         font-size: 12px;
         font-weight: 650;
         vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -639,7 +643,8 @@ component TagChip inherits Rectangle {
     callback clicked;
     private property <color> active-tone: kind == 0 ? Palette.gold : (kind == 1 ? Palette.amber : (kind == 2 ? Palette.red : (kind == 3 ? Palette.emerald : (kind == 4 ? Palette.violet : Palette.sky))));
     private property <color> active-fill: kind == 0 ? Palette.gold-10 : (kind == 1 ? Palette.amber-04 : (kind == 2 ? Palette.red-04 : (kind == 3 ? Palette.emerald-04 : (kind == 4 ? Palette.violet-04 : Palette.sky-10))));
-    width: label-text.preferred-width + 20px;
+    in property <length> chip-max-width: 132px;
+    width: min(label-text.preferred-width + 20px, root.chip-max-width);
     preferred-width: self.width;
     horizontal-stretch: 0;
     height: 22px;
@@ -649,12 +654,14 @@ component TagChip inherits Rectangle {
 
     label-text := Text {
         x: 10px;
+        width: root.width - 20px;
         height: root.height;
         text: root.label;
         color: active ? root.active-tone : (touch.has-hover ? Palette.muted : Palette.muted-half);
         font-size: 12px;
         font-weight: 500;
         vertical-alignment: center;
+        overflow: elide;
 
         animate color { duration: 150ms; easing: ease-in-out; }
     }
@@ -755,6 +762,9 @@ component TagInput inherits Rectangle {
 component SmallAction inherits Rectangle {
     in property <string> label;
     in property <color> tone: Palette.sky;
+    in property <color> fill: Palette.sky-10;
+    in property <color> fill-hover: Palette.sky-16;
+    in property <color> fill-pressed: Palette.sky-22;
     callback clicked;
     width: label-text.preferred-width + 16px;
     preferred-width: self.width;
@@ -762,7 +772,7 @@ component SmallAction inherits Rectangle {
     height: 24px;
     border-radius: 4px;
     border-width: 0px;
-    background: touch.pressed ? Palette.sky-22 : (touch.has-hover ? Palette.sky-16 : Palette.sky-10);
+    background: touch.pressed ? root.fill-pressed : (touch.has-hover ? root.fill-hover : root.fill);
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
@@ -881,14 +891,6 @@ component DetailToggleAction inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: root.line;
-    }
-
     Image {
         x: 10px;
         y: 8px + (touch.pressed ? 1px : 0px);
@@ -928,14 +930,6 @@ component DetailRemoveAction inherits Rectangle {
     background: touch.pressed ? Palette.red-15 : (touch.has-hover ? Palette.red-15 : Palette.red-04);
 
     animate background { duration: 150ms; easing: ease-in-out; }
-
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: Palette.red-20;
-    }
 
     label-text := Text {
         x: 10px;
@@ -993,7 +987,7 @@ component Checkbox inherits Rectangle {
     height: 16px;
     border-radius: 5px;
     border-width: 0px;
-    background: checked ? Palette.gold-20 : (touch.has-hover ? Palette.white-06 : Palette.white-03);
+    background: checked ? Palette.gold-25 : (touch.has-hover ? Palette.white-10 : Palette.white-08);
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
@@ -1001,8 +995,20 @@ component Checkbox inherits Rectangle {
         x: 1px;
         y: 1px;
         width: parent.width - 2px;
-        height: 2px;
-        background: checked ? Palette.gold-30 : Palette.white-06;
+        height: parent.height - 2px;
+        border-radius: 4px;
+        background: root.checked ? Palette.gold-15 : Tokens.surface-66;
+    }
+
+    Image {
+        visible: root.checked;
+        x: 3px;
+        y: 3px;
+        width: 10px;
+        height: 10px;
+        source: @image-url("../assets/icons/check.svg");
+        image-fit: contain;
+        colorize: Palette.gold;
     }
 
     touch := TouchArea {
@@ -1017,20 +1023,11 @@ component RowBadge inherits Rectangle {
     in property <int> kind: 0;
     private property <color> tone: kind == 1 ? Palette.amber : (kind == 2 ? Palette.red : (kind == 3 ? Palette.violet : (kind == 4 ? Palette.gold : (kind == 5 ? #a1a1aa : Palette.muted-strong))));
     private property <color> fill: kind == 1 ? Palette.amber-04 : (kind == 2 ? Palette.red-04 : (kind == 3 ? Palette.violet-04 : (kind == 4 ? Palette.gold-04 : (kind == 5 ? #a1a1aa0a : Palette.white-03))));
-    private property <color> line: kind == 1 ? Palette.amber-20 : (kind == 2 ? Palette.red-20 : (kind == 3 ? Palette.violet-20 : (kind == 4 ? Palette.gold-20 : (kind == 5 ? #a1a1aa33 : Palette.white-08))));
     width: label-text.preferred-width + 16px;
     height: 20px;
     border-radius: 10px;
     border-width: 0px;
     background: root.fill;
-
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: root.line;
-    }
 
     label-text := Text {
         x: 8px;
@@ -1108,14 +1105,14 @@ component AddonRow inherits Rectangle {
 
         Rectangle {
             width: parent.width;
-            height: 2px;
+            height: 1px;
             background: Palette.gold-10;
         }
 
         Rectangle {
-            y: parent.height - 2px;
+            y: parent.height - 1px;
             width: parent.width;
-            height: 2px;
+            height: 1px;
             background: Palette.gold-10;
         }
     }
@@ -1124,7 +1121,7 @@ component AddonRow inherits Rectangle {
         x: 18px;
         y: 17px;
         checked: root.selected;
-        opacity: root.rail-open ? 1.0 : 0.0;
+        opacity: root.rail-open ? 1.0 : 0.42;
         animate opacity { duration: 160ms; easing: ease-in-out; }
         clicked => { root.selected-toggled(); }
     }
@@ -1239,14 +1236,6 @@ component AddonRow inherits Rectangle {
             drop-shadow-color: #00000099;
             clip: true;
 
-            Rectangle {
-                x: 1px;
-                y: 1px;
-                width: parent.width - 2px;
-                height: 2px;
-                background: #ffffff0d;
-            }
-
             ContextMenuRow {
                 y: 8px;
                 width: parent.width;
@@ -1267,7 +1256,7 @@ component AddonRow inherits Rectangle {
                 }
             }
 
-            Rectangle { x: 8px; y: 70px; width: parent.width - 16px; height: 2px; background: Palette.white-03; }
+            Rectangle { x: 8px; y: 70px; width: parent.width - 16px; height: 1px; background: Palette.white-03; }
 
             ContextMenuRow {
                 y: 78px;
@@ -1299,7 +1288,7 @@ component AddonRow inherits Rectangle {
                 }
             }
 
-            Rectangle { x: 8px; y: 168px; width: parent.width - 16px; height: 2px; background: Palette.white-03; }
+            Rectangle { x: 8px; y: 168px; width: parent.width - 16px; height: 1px; background: Palette.white-03; }
 
             ContextMenuRow {
                 y: 176px;
@@ -1331,14 +1320,6 @@ component DiscoverEmptyState inherits Rectangle {
         background: Palette.white-03;
         drop-shadow-blur: 24px;
         drop-shadow-color: Palette.gold-04;
-
-        Rectangle {
-            x: 2px;
-            y: 2px;
-            width: parent.width - 4px;
-            height: 2px;
-            background: Palette.white-06;
-        }
 
         Image {
             x: 15px;
@@ -1416,14 +1397,14 @@ component DiscoverResultRow inherits Rectangle {
 
         Rectangle {
             width: parent.width;
-            height: 2px;
+            height: 1px;
             background: Palette.gold-10;
         }
 
         Rectangle {
-            y: parent.height - 2px;
+            y: parent.height - 1px;
             width: parent.width;
-            height: 2px;
+            height: 1px;
             background: Palette.gold-10;
         }
     }
@@ -1437,14 +1418,6 @@ component DiscoverResultRow inherits Rectangle {
         border-radius: 6px;
         border-width: 0px;
         background: root.rank <= 3 ? Palette.gold-10 : Palette.white-03;
-
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: 2px;
-            background: root.rank <= 3 ? Palette.gold-20 : Palette.white-06;
-        }
 
         Text {
             width: parent.width;
@@ -1532,6 +1505,9 @@ component DiscoverResultRow inherits Rectangle {
         y: root.show-extra-meta ? 26px : 18px;
         label: root.installed ? "Installed" : "Install";
         tone: root.installed ? Palette.emerald : Palette.gold;
+        fill: root.installed ? Palette.emerald-04 : Palette.gold-10;
+        fill-hover: root.installed ? Palette.emerald-15 : Palette.gold-15;
+        fill-pressed: root.installed ? Palette.emerald-20 : Palette.gold-20;
         clicked => { root.install-clicked(); }
     }
 }
@@ -1748,19 +1724,23 @@ component DependencyRow inherits Rectangle {
     Text {
         x: 40px;
         y: 5px;
+        width: root.width - 40px - (root.install ? 98px : 46px);
         text: root.name;
         color: root.optional-missing ? Palette.muted-strong : Palette.foreground;
         font-size: 14px;
         font-weight: 500;
+        overflow: elide;
     }
 
     Text {
         x: 40px;
         y: 25px;
+        width: root.width - 40px - (root.install ? 98px : 46px);
         text: root.version;
         color: outdated ? Palette.amber : Palette.muted-half;
         font-size: 11px;
         font-weight: 500;
+        overflow: elide;
     }
 
     SmallAction {
@@ -1769,6 +1749,9 @@ component DependencyRow inherits Rectangle {
         visible: install;
         label: "Install";
         tone: Palette.sky;
+        fill: Palette.sky-10;
+        fill-hover: Palette.sky-16;
+        fill-pressed: Palette.sky-22;
         clicked => { root.install-clicked(); }
     }
 
@@ -1815,14 +1798,6 @@ component DetailInfoPanel inherits Rectangle {
     drop-shadow-offset-y: 0px;
     drop-shadow-color: #00000000;
 
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: #ffffff08;
-    }
-
     LabelValue { x: 12px; y: 12px; width: parent.width - 24px; label: "AUTHOR"; value: root.addon.author; }
     LabelValue { x: 12px; y: 42px; width: parent.width - 24px; label: "VERSION"; value: root.addon.version; }
     LabelValue { x: 12px; y: 72px; width: parent.width - 24px; label: "API VERSION"; value: root.addon.api-version; }
@@ -1866,8 +1841,8 @@ component DetailInfoPanel inherits Rectangle {
         x: 12px;
         y: root.divider-y;
         width: parent.width - 24px;
-        height: 2px;
-        opacity: 0.55;
+        height: 1px;
+        opacity: 0.5;
     }
 
     LinkAction {
@@ -1933,14 +1908,6 @@ component DetailDescriptionSection inherits Rectangle {
         drop-shadow-offset-y: 0px;
         drop-shadow-color: #00000000;
 
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: 2px;
-            background: #ffffff08;
-        }
-
         Text {
             x: 16px;
             y: 17px;
@@ -1994,14 +1961,6 @@ component FileToolbarAction inherits Rectangle {
 
     animate background, opacity { duration: 150ms; easing: ease-in-out; }
 
-    if (!root.ghost) : Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: root.primary ? Palette.gold-25 : Palette.white-08;
-    }
-
     Image {
         x: 10px;
         y: 7px + (touch.pressed ? 1px : 0px);
@@ -2043,7 +2002,6 @@ component FileKindPill inherits Rectangle {
     in property <int> kind: 0;
     private property <color> tone: kind == 1 ? Palette.amber : (kind == 2 ? Palette.emerald : Palette.sky);
     private property <color> fill: kind == 1 ? Palette.amber-04 : (kind == 2 ? Palette.emerald-04 : Palette.sky-04);
-    private property <color> line: kind == 1 ? Palette.amber-20 : (kind == 2 ? Palette.emerald-20 : Palette.sky-20);
     width: label-text.preferred-width + 13px;
     preferred-width: self.width;
     horizontal-stretch: 0;
@@ -2051,14 +2009,6 @@ component FileKindPill inherits Rectangle {
     border-radius: 8px;
     border-width: 0px;
     background: root.fill;
-
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: root.line;
-    }
 
     label-text := Text {
         x: 6px;
@@ -2211,14 +2161,6 @@ component DetailFilesPanelLegacy inherits Rectangle {
         border-width: 0px;
         background: @linear-gradient(180deg, Palette.white-04 0%, Palette.white-02 100%);
 
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: 2px;
-            background: #ffffff08;
-        }
-
         FileTreeRow { x: 8px; y: 8px; width: parent.width - 16px; folder: true; expanded: true; name: root.addon.folder-name; }
         FileTreeRow { x: 8px; y: 38px; width: parent.width - 16px; indent: 18px; name: root.addon.folder-name + ".lua"; extension: "LUA"; extension-kind: 0; size: "22.4 KB"; selected: root.selected-lua; modified: true; clicked => { root.selected-lua = true; } }
         FileTreeRow { x: 8px; y: 68px; width: parent.width - 16px; indent: 18px; name: root.addon.folder-name + ".xml"; extension: "XML"; extension-kind: 1; size: "4.8 KB"; selected: !root.selected-lua; clicked => { root.selected-lua = false; } }
@@ -2279,10 +2221,10 @@ component DetailFilesPanel inherits Rectangle {
     callback load-backups;
     callback restore-backup(int);
     private property <bool> editor-dirty: root.editor-open && root.selected-file-content != root.selected-original-content;
-    private property <length> tree-height: root.editor-open ? 224px : 314px;
-    private property <length> editor-y: 40px + root.tree-height + 42px;
+    private property <length> tree-height: root.editor-open ? 132px : 314px;
+    private property <length> editor-y: 40px + root.tree-height + 28px;
     private property <length> backup-panel-height: root.backups.length == 0 ? 86px : 58px + root.backups.length * 38px;
-    height: root.editor-open ? (root.show-backups ? 720px + root.backup-panel-height : 700px) : (root.show-backups ? 410px + root.backup-panel-height : 390px);
+    height: root.editor-open ? (root.show-backups ? 520px + root.backup-panel-height : 500px) : (root.show-backups ? 410px + root.backup-panel-height : 390px);
     background: #00000000;
 
     HorizontalLayout {
@@ -2321,7 +2263,7 @@ component DetailFilesPanel inherits Rectangle {
             x: 1px;
             y: 1px;
             width: parent.width - 2px;
-            height: 2px;
+            height: 1px;
             background: #ffffff08;
         }
 
@@ -2411,7 +2353,7 @@ component DetailFilesPanel inherits Rectangle {
         x: 0px;
         y: root.editor-y;
         width: root.panel-width;
-        height: 380px;
+        height: 256px;
         background: #00000000;
 
         Text {
@@ -2476,7 +2418,13 @@ component DetailFilesPanel inherits Rectangle {
             label: "";
             icon: @image-url("../assets/icons/x.svg");
             ghost: true;
-            clicked => { root.editor-open = false; }
+            clicked => {
+                if (root.editor-dirty) {
+                    root.editor-message = "Save or revert this file before closing.";
+                } else {
+                    root.editor-open = false;
+                }
+            }
         }
 
         if (!root.editor-editable && !root.editor-binary && !root.editor-error) : Rectangle {
@@ -2515,7 +2463,7 @@ component DetailFilesPanel inherits Rectangle {
                 x: 1px;
                 y: 1px;
                 width: parent.width - 2px;
-                height: 2px;
+                height: 1px;
                 background: #ffffff08;
             }
 
@@ -2622,7 +2570,7 @@ component DetailFilesPanel inherits Rectangle {
 
     if (root.show-backups) : Rectangle {
         x: 0px;
-        y: root.editor-open ? root.editor-y + 398px : 40px + root.tree-height + 42px;
+        y: root.editor-open ? root.editor-y + 272px : 40px + root.tree-height + 42px;
         width: parent.width;
         height: root.backup-panel-height;
         border-radius: 10px;
@@ -2708,8 +2656,8 @@ component DetailActionFooter inherits Rectangle {
     Hairline {
         y: 0px;
         width: parent.width;
-        height: 2px;
-        opacity: 0.55;
+        height: 1px;
+        opacity: 0.5;
     }
 
     DetailToggleAction {
@@ -2753,7 +2701,7 @@ component StatusBanner inherits Rectangle {
     Rectangle {
         y: root.height - 1px;
         width: root.width;
-        height: 2px;
+        height: 1px;
         background: root.line;
     }
 
@@ -2786,6 +2734,9 @@ component StatusBanner inherits Rectangle {
         y: 6px;
         label: root.action-label;
         tone: root.accent;
+        fill: root.tone == 2 ? Palette.red-04 : (root.tone == 1 ? Palette.amber-04 : (root.tone == 3 ? Palette.gold-10 : Palette.white-04));
+        fill-hover: root.tone == 2 ? Palette.red-15 : (root.tone == 1 ? Palette.amber-15 : (root.tone == 3 ? Palette.gold-15 : Palette.white-06));
+        fill-pressed: root.tone == 2 ? Palette.red-20 : (root.tone == 1 ? Palette.amber-20 : (root.tone == 3 ? Palette.gold-20 : Palette.white-08));
         clicked => { root.action-clicked(); }
     }
 }
@@ -2868,14 +2819,6 @@ component SettingsTabButton inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    if (root.active) : Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: Palette.white-08;
-    }
-
     Image {
         x: root.width / 2 - label-text.preferred-width / 2 - 18px;
         y: 7px;
@@ -2916,14 +2859,6 @@ component SettingsActionButton inherits Rectangle {
     background: touch.pressed ? (root.primary ? Palette.gold-20 : Palette.white-08) : (touch.has-hover ? (root.primary ? Palette.gold-15 : Palette.white-06) : (root.primary ? Palette.gold-10 : Palette.white-03));
 
     animate background { duration: 150ms; easing: ease-in-out; }
-
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: root.primary ? Palette.gold-25 : Palette.white-08;
-    }
 
     Image {
         x: 12px;
@@ -2966,29 +2901,13 @@ component SettingsToggleRow inherits Rectangle {
     animate background { duration: 150ms; easing: ease-in-out; }
 
     Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: Palette.white-06;
-    }
-
-    Rectangle {
         x: 12px;
         y: 20px;
         width: 18px;
         height: 18px;
         border-radius: 5px;
         border-width: 0px;
-        background: root.checked ? Palette.gold-20 : Palette.white-04;
-
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: 2px;
-            background: root.checked ? Palette.gold-30 : Palette.white-08;
-        }
+        background: root.checked ? Palette.gold-25 : Palette.white-08;
 
         Image {
             visible: root.checked;
@@ -3091,14 +3010,6 @@ component SettingsToolRow inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: touch.has-hover ? Palette.white-10 : Palette.white-06;
-    }
-
     Image {
         x: 13px;
         y: 18px;
@@ -3169,15 +3080,6 @@ component ThemeSwatchPreview inherits Rectangle {
         border-color: root.active ? root.theme.primary : root.theme.border;
         background: root.theme.surface;
 
-        Rectangle {
-            x: 2px;
-            y: 2px;
-            width: parent.width - 4px;
-            height: 2px;
-            background: root.active ? root.theme.primary : root.theme.border;
-            opacity: 0.8;
-        }
-
         Rectangle { x: 8px; y: 9px; width: 7px; height: 7px; border-radius: 4px; background: root.theme.primary; }
         Rectangle { x: 20px; y: 10px; width: 58px; height: 5px; border-radius: 3px; background: root.theme.foreground; opacity: 0.86; }
         Rectangle { x: 8px; y: 25px; width: 92px; height: 4px; border-radius: 2px; background: root.theme.muted-foreground; opacity: 0.70; }
@@ -3204,14 +3106,6 @@ component ThemeChoiceCard inherits Rectangle {
     clip: true;
 
     animate background, border-color, y { duration: 150ms; easing: ease-in-out; }
-
-    Rectangle {
-        x: 2px;
-        y: 2px;
-        width: parent.width - 4px;
-        height: 2px;
-        background: root.active ? Palette.gold-25 : (touch.has-hover ? Palette.white-10 : Palette.white-06);
-    }
 
     ThemeSwatchPreview {
         x: 7px;
@@ -3266,8 +3160,8 @@ component ThemeChoiceCard inherits Rectangle {
         x: parent.width - 62px;
         y: 13px;
         width: 22px;
-        height: 22px;
-        border-radius: 6px;
+    height: 22px;
+    border-radius: 11px;
         border-width: 0px;
         background: #00000066;
 
@@ -3284,8 +3178,8 @@ component ThemeChoiceCard inherits Rectangle {
         x: root.theme.category == "Custom" ? parent.width - 34px : parent.width - 36px;
         y: 13px;
         width: 22px;
-        height: 22px;
-        border-radius: 6px;
+    height: 22px;
+    border-radius: 11px;
         border-width: 0px;
         background: #00000066;
 
@@ -3309,14 +3203,6 @@ component ThemeEditorColorTile inherits Rectangle {
     border-radius: 8px;
     border-width: 0px;
     background: Palette.white-02;
-
-    Rectangle {
-        x: 2px;
-        y: 2px;
-        width: parent.width - 4px;
-        height: 2px;
-        background: Palette.white-06;
-    }
 
     Text {
         x: 10px;
@@ -3431,7 +3317,7 @@ component AppearanceOverlay inherits Rectangle {
     callback theme-editor-cancelled;
     callback settings-changed;
     visible: root.open;
-    background: #00000099;
+    background: #000000dd;
 
     TouchArea {
         width: root.width;
@@ -3451,7 +3337,7 @@ component AppearanceOverlay inherits Rectangle {
         y: (root.height - self.height) / 2;
         border-radius: 16px;
         border-width: 0px;
-        background: Tokens.surface-84;
+        background: Tokens.surface;
         drop-shadow-blur: 30px;
         drop-shadow-offset-y: 12px;
         drop-shadow-color: #00000099;
@@ -3461,14 +3347,6 @@ component AppearanceOverlay inherits Rectangle {
             width: parent.width;
             height: parent.height;
             clicked => { }
-        }
-
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: 2px;
-            background: #ffffff10;
         }
 
         Image {
@@ -3512,14 +3390,6 @@ component AppearanceOverlay inherits Rectangle {
             border-width: 0px;
             background: Palette.white-03;
 
-            Rectangle {
-                x: 2px;
-                y: 2px;
-                width: parent.width - 4px;
-                height: 2px;
-                background: Palette.white-06;
-            }
-
             SettingsTabButton { x: 4px; y: 4px; icon: @image-url("../assets/icons/folder-open.svg"); label: "General"; active: root.active-tab == 0; clicked => { root.active-tab = 0; root.editor-open = false; } }
             SettingsTabButton { x: 150px; y: 4px; icon: @image-url("../assets/icons/square.svg"); label: "Appearance"; active: root.active-tab == 1; clicked => { root.active-tab = 1; } }
             SettingsTabButton { x: 296px; y: 4px; icon: @image-url("../assets/icons/settings.svg"); label: "Tools"; active: root.active-tab == 2; clicked => { root.active-tab = 2; root.editor-open = false; } }
@@ -3541,14 +3411,16 @@ component AppearanceOverlay inherits Rectangle {
                 height: 560px;
                 border-radius: 12px;
                 border-width: 0px;
-                background: @linear-gradient(180deg, Palette.white-03 0%, Palette.white-02 100%);
+                background: #00000000;
 
                 Rectangle {
-                    x: 2px;
-                    y: 2px;
-                    width: parent.width - 4px;
-                    height: 2px;
-                    background: Palette.white-06;
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: 126px;
+                    border-radius: 12px;
+                    border-width: 0px;
+                    background: Palette.white-02;
                 }
 
                 DetailSectionTitle { x: 14px; y: 13px; width: parent.width - 28px; label: "ADDONS FOLDER"; }
@@ -3561,14 +3433,6 @@ component AppearanceOverlay inherits Rectangle {
                     border-radius: 9px;
                     border-width: 0px;
                     background: Palette.white-03;
-
-                    Rectangle {
-                        x: 2px;
-                        y: 2px;
-                        width: parent.width - 4px;
-                        height: 2px;
-                        background: Palette.white-08;
-                    }
 
                     Text {
                         x: 12px;
@@ -3587,27 +3451,19 @@ component AppearanceOverlay inherits Rectangle {
                 SettingsActionButton { x: 106px; y: 88px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Re-detect"; }
                 SettingsActionButton { x: parent.width - self.width - 14px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Apply"; primary: true; }
 
-                SettingsToggleRow { x: 0px; y: 140px; width: parent.width; label: "Auto-update on launch"; description: "Automatically update all addons when Kalpa starts"; checked <=> root.auto-update; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 212px; width: parent.width; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 284px; width: parent.width; label: "Use the official ESO Logs uploader"; description: "Off by default - Kalpa uploads directly and falls back when needed"; checked <=> root.official-uploader; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 356px; width: parent.width; label: "Open analysis after upload"; description: "Open finished reports in the ESO Log Aggregator"; checked <=> root.auto-open-analysis; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 140px; width: parent.width; height: 58px; label: "Auto-update on launch"; description: "Automatically update all addons when Kalpa starts"; checked <=> root.auto-update; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 210px; width: parent.width; height: 58px; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 280px; width: parent.width; height: 58px; label: "Use the official ESO Logs uploader"; description: "Off by default - Kalpa uploads directly and falls back when needed"; checked <=> root.official-uploader; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 350px; width: parent.width; height: 58px; label: "Open analysis after upload"; description: "Open finished reports in the ESO Log Aggregator"; checked <=> root.auto-open-analysis; changed(_) => { root.settings-changed(); } }
 
                 Rectangle {
                     x: 0px;
-                    y: 436px;
+                    y: 428px;
                     width: parent.width;
                     height: 118px;
                     border-radius: 11px;
                     border-width: 0px;
                     background: Palette.white-02;
-
-                    Rectangle {
-                        x: 2px;
-                        y: 2px;
-                        width: parent.width - 4px;
-                        height: 2px;
-                        background: Palette.white-06;
-                    }
 
                     DetailSectionTitle { x: 12px; y: 12px; width: parent.width - 24px; label: "WHEN YOUR EDITED FILES CONFLICT WITH AN UPDATE"; }
                     SettingsRadioRow { x: 8px; y: 36px; width: parent.width - 16px; label: "Ask me each time"; active: root.conflict-policy == 0; clicked => { root.conflict-policy = 0; root.settings-changed(); } }
@@ -3684,14 +3540,6 @@ component AppearanceOverlay inherits Rectangle {
                     background: Palette.white-03;
                     clip: true;
 
-                    Rectangle {
-                        x: 2px;
-                        y: 2px;
-                        width: parent.width - 4px;
-                        height: 2px;
-                        background: Palette.white-08;
-                    }
-
                     Text {
                         visible: root.draft-theme-name != "";
                         x: 12px;
@@ -3728,14 +3576,6 @@ component AppearanceOverlay inherits Rectangle {
                     border-radius: 12px;
                     border-width: 0px;
                     background: Palette.white-02;
-
-                    Rectangle {
-                        x: 2px;
-                        y: 2px;
-                        width: parent.width - 4px;
-                        height: 2px;
-                        background: Palette.white-06;
-                    }
 
                     ThemeSwatchPreview {
                         x: 14px;
@@ -3784,14 +3624,6 @@ component AppearanceOverlay inherits Rectangle {
                     border-radius: 12px;
                     border-width: 0px;
                     background: Palette.white-02;
-
-                    Rectangle {
-                        x: 2px;
-                        y: 2px;
-                        width: parent.width - 4px;
-                        height: 2px;
-                        background: Palette.white-06;
-                    }
 
                     DetailSectionTitle { x: 12px; y: 12px; width: parent.width - 24px; label: "READABILITY (WCAG)"; }
 
@@ -3868,14 +3700,6 @@ component AppearanceOverlay inherits Rectangle {
                         border-width: 0px;
                         background: Palette.amber-04;
 
-                        Rectangle {
-                            x: 2px;
-                            y: 2px;
-                            width: parent.width - 4px;
-                            height: 2px;
-                            background: Palette.amber-20;
-                        }
-
                         Image {
                             x: 9px;
                             y: 11px;
@@ -3947,14 +3771,6 @@ component AppearanceOverlay inherits Rectangle {
                 border-width: 0px;
                 background: Palette.white-02;
 
-                Rectangle {
-                    x: 2px;
-                    y: 2px;
-                    width: parent.width - 4px;
-                    height: 2px;
-                    background: Palette.white-06;
-                }
-
                 DetailSectionTitle { x: 14px; y: 14px; width: parent.width - 28px; label: "ADDON LIST BACKUP"; }
                 Text { x: 14px; y: 42px; width: parent.width - 28px; text: "Export your tracked addon list to clipboard, or import a previously exported list to restore on a new machine."; color: Palette.muted-half; font-size: 12px; font-weight: 500; wrap: word-wrap; }
                 SettingsActionButton { x: 14px; y: 92px; icon: @image-url("../assets/icons/files.svg"); label: "Export to Clipboard"; }
@@ -3968,14 +3784,6 @@ component AppearanceOverlay inherits Rectangle {
                 border-radius: 12px;
                 border-width: 0px;
                 background: Palette.red-04;
-
-                Rectangle {
-                    x: 2px;
-                    y: 2px;
-                    width: parent.width - 4px;
-                    height: 2px;
-                    background: Palette.red-20;
-                }
 
                 DetailSectionTitle { x: 14px; y: 14px; width: parent.width - 28px; label: "PACK HUB DATA"; }
                 Text { x: 14px; y: 42px; width: parent.width - 28px; text: "Permanently delete all Pack Hub data, including packs, votes, and share codes. This cannot be undone."; color: Palette.muted-strong; font-size: 12px; font-weight: 500; wrap: word-wrap; }
@@ -4013,17 +3821,17 @@ component Header inherits Rectangle {
 
     Rectangle {
         width: root.width;
-        height: 2px;
+        height: 1px;
         background: #ffffff0d;
     }
 
-    Hairline { y: root.height - 2px; width: root.width; height: 2px; opacity: 0.55; }
+    Hairline { y: root.height - 1px; width: root.width; height: 1px; opacity: 0.5; }
 
     Rectangle {
         x: 0px;
-        y: root.height - 2px;
+        y: root.height - 1px;
         width: root.width;
-        height: 2px;
+        height: 1px;
         background: @linear-gradient(90deg, #00000000 0%, Palette.gold-20 50%, #00000000 100%);
     }
 
@@ -4072,7 +3880,7 @@ component Header inherits Rectangle {
         font-weight: 900;
     }
 
-    Rectangle { x: 104px; y: 15px; width: 2px; height: 18px; background: Palette.white-06; }
+    Rectangle { x: 104px; y: 15px; width: 1px; height: 18px; background: Palette.white-06; }
 
     Rectangle {
         x: 114px;
@@ -4139,6 +3947,9 @@ component Header inherits Rectangle {
         y: 12px;
         label: "Update";
         tone: Palette.gold;
+        fill: Palette.gold-10;
+        fill-hover: Palette.gold-15;
+        fill-pressed: Palette.gold-20;
         clicked => { root.batch-update(); }
     }
 
@@ -4147,6 +3958,9 @@ component Header inherits Rectangle {
         y: 12px;
         label: "Disable";
         tone: Palette.amber;
+        fill: Palette.amber-04;
+        fill-hover: Palette.amber-15;
+        fill-pressed: Palette.amber-20;
         clicked => { root.batch-disable(); }
     }
 
@@ -4155,6 +3969,9 @@ component Header inherits Rectangle {
         y: 12px;
         label: "Tag";
         tone: Palette.sky;
+        fill: Palette.sky-10;
+        fill-hover: Palette.sky-16;
+        fill-pressed: Palette.sky-22;
         clicked => { root.batch-tag(); }
     }
 
@@ -4163,6 +3980,9 @@ component Header inherits Rectangle {
         y: 12px;
         label: "Remove";
         tone: Palette.red;
+        fill: Palette.red-04;
+        fill-hover: Palette.red-15;
+        fill-pressed: Palette.red-20;
         clicked => { root.batch-remove(); }
     }
 
@@ -4222,7 +4042,7 @@ component Sidebar inherits Rectangle {
     private property <string> sort-label: sort-mode == 1 ? "Author" : (sort-mode == 2 ? "Recently Updated" : (sort-mode == 3 ? "Recently Downloaded" : "Name"));
     background: @linear-gradient(180deg, Tokens.bg-base-85 0%, Tokens.background 52%, Tokens.bg-base-85 100%);
 
-    Hairline { x: root.width - 2px; width: 2px; height: root.height; opacity: 0.55; }
+    Hairline { x: root.width - 1px; width: 1px; height: root.height; opacity: 0.5; }
 
     Rectangle {
         x: 0px;
@@ -4708,7 +4528,7 @@ component Sidebar inherits Rectangle {
             background: root.discover-tab == 2 ? Palette.gold-15 : (categories-touch.has-hover ? Palette.white-04 : #00000000);
 
             Image { x: 11px; y: 6px; width: 12px; height: 12px; source: @image-url("../assets/icons/folder-open.svg"); image-fit: contain; colorize: root.discover-tab == 2 ? Palette.gold : (categories-touch.has-hover ? Palette.foreground : Palette.muted-strong); }
-            Text { x: 28px; width: parent.width - 36px; height: parent.height; text: "Categories"; color: root.discover-tab == 2 ? Palette.gold : (categories-touch.has-hover ? Palette.foreground : Palette.muted-strong); font-size: 11px; font-weight: 500; vertical-alignment: center; overflow: elide; }
+            Text { x: 28px; width: parent.width - 36px; height: parent.height; text: "Category"; color: root.discover-tab == 2 ? Palette.gold : (categories-touch.has-hover ? Palette.foreground : Palette.muted-strong); font-size: 11px; font-weight: 500; vertical-alignment: center; overflow: elide; }
         }
 
         Rectangle {
@@ -4763,7 +4583,7 @@ component Sidebar inherits Rectangle {
         }
     }
 
-    Hairline { y: 134px; width: root.width; height: 2px; opacity: 0.55; }
+    Hairline { y: 134px; width: root.width; height: 1px; opacity: 0.5; }
 
     Text {
         x: 12px;
@@ -4777,18 +4597,19 @@ component Sidebar inherits Rectangle {
 
     Rectangle {
         visible: !root.discover-active;
-        x: root.width - 82px;
+        x: root.width - self.width - 12px;
         y: 141px;
-        width: 70px;
+        width: min(158px, max(70px, sort-text.preferred-width + 32px));
         height: 24px;
         border-radius: 8px;
         background: sort-touch.has-hover ? Palette.white-04 : #00000000;
 
         animate background { duration: 150ms; easing: ease-in-out; }
 
-        Text {
+        sort-text := Text {
             x: 9px;
             y: 0px;
+            width: parent.width - 29px;
             height: parent.height;
             text: root.sort-label;
             color: sort-touch.has-hover ? Palette.muted : Palette.muted-half;
@@ -4796,6 +4617,7 @@ component Sidebar inherits Rectangle {
             font-size: 11px;
             font-weight: 700;
             vertical-alignment: center;
+            overflow: elide;
 
             animate color { duration: 150ms; easing: ease-in-out; }
         }
@@ -4821,7 +4643,7 @@ component Sidebar inherits Rectangle {
         }
     }
 
-    Hairline { y: 164px; width: root.width; height: 2px; opacity: 0.55; }
+    Hairline { y: 164px; width: root.width; height: 1px; opacity: 0.5; }
 
     list-key-focus := FocusScope {
         x: 0px;
@@ -4973,14 +4795,6 @@ component Sidebar inherits Rectangle {
         drop-shadow-color: #00000080;
         clip: true;
 
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: 2px;
-            background: #ffffff0d;
-        }
-
         sort-name := SortMenuRow {
             y: 8px;
             width: parent.width;
@@ -5042,14 +4856,6 @@ component ConflictChoiceButton inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: root.active ? root.tone : Palette.white-08;
-    }
-
     label-text := Text {
         x: 11px;
         height: root.height;
@@ -5075,14 +4881,6 @@ component ConflictFileRow inherits Rectangle {
     border-radius: 10px;
     border-width: 0px;
     background: Palette.white-02;
-
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: Palette.white-06;
-    }
 
     Text {
         x: 12px;
@@ -5158,14 +4956,6 @@ component DetailConflictPanel inherits Rectangle {
             border-width: 0px;
             background: Palette.amber-04;
 
-            Rectangle {
-                x: 2px;
-                y: 2px;
-                width: parent.width - 4px;
-                height: 2px;
-                background: Palette.amber-20;
-            }
-
             Text {
                 x: 14px;
                 y: 12px;
@@ -5221,19 +5011,11 @@ component DetailConflictPanel inherits Rectangle {
             border-width: 0px;
             background: Palette.white-02;
 
-            Rectangle {
-                x: 2px;
-                y: 2px;
-                width: parent.width - 4px;
-                height: 2px;
-                background: Palette.white-06;
-            }
-
             Text { x: 12px; y: 8px; width: parent.width / 2 - 18px; text: "Your version"; color: Palette.gold; font-size: 11px; font-weight: 700; }
             Text { x: parent.width / 2 + 8px; y: 8px; width: parent.width / 2 - 20px; text: "The update"; color: Palette.sky; font-size: 11px; font-weight: 700; }
             Text { x: 12px; y: 28px; width: parent.width / 2 - 18px; text: "- local edited line"; color: Palette.gold; font-family: "Space Grotesk Light"; font-size: 11px; overflow: elide; }
             Text { x: parent.width / 2 + 8px; y: 28px; width: parent.width / 2 - 20px; text: "+ upstream changed line"; color: Palette.sky; font-family: "Space Grotesk Light"; font-size: 11px; overflow: elide; }
-            Rectangle { x: parent.width / 2; y: 4px; width: 2px; height: parent.height - 8px; background: Palette.white-04; }
+            Rectangle { x: parent.width / 2; y: 4px; width: 1px; height: parent.height - 8px; background: Palette.white-04; }
         }
 
         Rectangle {
@@ -5316,7 +5098,7 @@ component DetailPane inherits Rectangle {
         width: root.width;
         height: root.height;
         viewport-width: root.width;
-        viewport-height: root.files-active ? 910px : (root.pending-conflict-count > 0 ? 1518px : root.height);
+        viewport-height: root.files-active ? 750px : (root.pending-conflict-count > 0 ? 1518px : root.height);
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
@@ -5324,7 +5106,7 @@ component DetailPane inherits Rectangle {
             x: 24px;
             y: 29px;
             width: root.width - 48px;
-            height: root.files-active ? 890px : (root.pending-conflict-count > 0 ? 1458px : root.height - 58px);
+            height: root.files-active ? 730px : (root.pending-conflict-count > 0 ? 1458px : root.height - 58px);
             spacing: 0px;
 
             GradientHeading {
@@ -5379,7 +5161,7 @@ component DetailPane inherits Rectangle {
 
             if (root.files-active) : DetailFilesPanel {
                 width: parent.width;
-                panel-width: 1034px;
+                panel-width: parent.width;
                 addon: root.addon;
                 files: root.files;
                 backups: root.edit-backups;
@@ -5521,20 +5303,11 @@ component DiscoverStatCard inherits Rectangle {
     in property <int> accent-kind: 0;
     in property <length> card-width: 120px;
     private property <color> tone: root.accent-kind == 1 ? Palette.emerald : (root.accent-kind == 2 ? Palette.gold : (root.accent-kind == 3 ? Palette.violet : Palette.sky));
-    private property <color> line: root.accent-kind == 1 ? Palette.emerald-15 : (root.accent-kind == 2 ? Palette.gold-15 : (root.accent-kind == 3 ? Palette.violet-15 : Palette.sky-15));
     width: root.card-width;
     height: 64px;
     border-radius: 12px;
     border-width: 0px;
     background: Palette.white-02;
-
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: 2px;
-        background: root.line;
-    }
 
     Image {
         x: 10px;
@@ -5576,6 +5349,7 @@ component DiscoverDetailPane inherits Rectangle {
     in property <length> pane-width: 1082px;
     callback install-clicked(int);
     callback open-esoui(string);
+    private property <bool> show-screenshots: false;
     background: #00000000;
     clip: true;
 
@@ -5616,7 +5390,7 @@ component DiscoverDetailPane inherits Rectangle {
                 author-line := Text {
                     x: 0px;
                     y: 62px;
-                    width: parent.width - 280px;
+                    width: parent.width - 340px;
                     text: root.entry.author == "" ? "" : "by " + root.entry.author;
                     color: Palette.muted-half;
                     font-size: 14px;
@@ -5626,7 +5400,7 @@ component DiscoverDetailPane inherits Rectangle {
 
                 Pill {
                     visible: root.entry.category != "";
-                    x: author-line.preferred-width + 14px;
+                    x: min(author-line.preferred-width + 14px, parent.width - self.width - 190px);
                     y: 58px;
                     label: root.entry.category;
                     tone: Palette.muted-strong;
@@ -5651,6 +5425,9 @@ component DiscoverDetailPane inherits Rectangle {
                     y: 0px;
                     label: root.entry.installed ? "Reinstall" : "Install";
                     tone: Palette.gold;
+                    fill: Palette.gold-10;
+                    fill-hover: Palette.gold-15;
+                    fill-pressed: Palette.gold-20;
                     clicked => { root.install-clicked(root.selected-index); }
                 }
 
@@ -5759,32 +5536,24 @@ component DiscoverDetailPane inherits Rectangle {
 
             Rectangle { height: 22px; background: #00000000; }
 
-            DetailSectionTitle {
+            if (root.show-screenshots) : DetailSectionTitle {
                 width: parent.width;
                 label: "SCREENSHOTS";
             }
 
-            Rectangle { height: 8px; background: #00000000; }
+            if (root.show-screenshots) : Rectangle { height: 8px; background: #00000000; }
 
-            Rectangle {
+            if (root.show-screenshots) : Rectangle {
                 width: parent.width;
-                height: 176px;
+                height: 132px;
                 border-radius: 12px;
                 border-width: 0px;
                 background: @linear-gradient(180deg, Palette.white-03 0%, Palette.white-02 100%);
                 clip: true;
 
-                Rectangle {
-                    x: 2px;
-                    y: 2px;
-                    width: parent.width - 4px;
-                    height: 2px;
-                    background: #ffffff08;
-                }
-
                 Image {
                     x: parent.width / 2 - 22px;
-                    y: 42px;
+                    y: 28px;
                     width: 44px;
                     height: 44px;
                     source: @image-url("../assets/icons/file-text.svg");
@@ -5795,9 +5564,9 @@ component DiscoverDetailPane inherits Rectangle {
 
                 Text {
                     x: parent.width / 2 - 124px;
-                    y: 104px;
+                    y: 84px;
                     width: 248px;
-                    text: "Screenshots";
+                    text: "No screenshots available";
                     color: Palette.muted-half;
                     font-size: 12px;
                     font-weight: 700;
@@ -5807,7 +5576,7 @@ component DiscoverDetailPane inherits Rectangle {
 
                 Text {
                     x: 24px;
-                    y: 126px;
+                    y: 106px;
                     width: parent.width - 48px;
                     text: root.entry.title;
                     color: Palette.muted-dim;
@@ -5818,7 +5587,7 @@ component DiscoverDetailPane inherits Rectangle {
                 }
             }
 
-            Rectangle { height: 24px; background: #00000000; }
+            if (root.show-screenshots) : Rectangle { height: 24px; background: #00000000; }
 
             DetailSectionTitle {
                 width: parent.width;
@@ -5833,14 +5602,6 @@ component DiscoverDetailPane inherits Rectangle {
                 border-radius: 12px;
                 border-width: 0px;
                 background: @linear-gradient(180deg, Palette.white-03 0%, Palette.white-02 100%);
-
-                Rectangle {
-                    x: 2px;
-                    y: 2px;
-                    width: parent.width - 4px;
-                    height: 2px;
-                    background: #ffffff08;
-                }
 
                 Text {
                     x: 16px;

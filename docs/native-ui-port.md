@@ -56,19 +56,37 @@ Primary implementation reference:
 
 Kalpa has two competing native-renderer goals:
 
-- Fidelity track: use Slint's Skia renderer. This gives the best chance of
-  matching shadows, antialiasing, SVG rendering, and richer visual effects.
-- Memory track: use Slint's `winit-software` renderer. This has measured much
-  lower memory, but it makes faithful shadows and glass harder.
+- Standard preset: use Slint's `winit-femtovg` by default in this prototype,
+  with `winit-skia` allowed when the active Slint build exposes it. This is the
+  fidelity track for richer glass, stronger shadows, more motion, and
+  renderer-specific antialiasing comparisons.
+- Low-memory preset: use Slint's `winit-software` renderer. This has measured
+  much lower memory, but it makes faithful shadows and glass harder. It uses
+  pre-blurred/static assets, translucency, and a stricter animation budget.
 
 Do not assume the low-memory software renderer is the final renderer for the
 native app. Do not keep measuring memory while a surface is still visibly or
 functionally wrong; first make the surface acceptable, then measure both fidelity
 and memory if the renderer choice affects the result.
 
-The prototype defaults to `winit-software` to protect the memory target. Launch
-with `KALPA_SLINT_BACKEND=winit-skia` or `KALPA_SLINT_BACKEND=winit-femtovg`
-only when checking visual gaps that the software renderer cannot represent.
+The prototype defaults to `KALPA_RENDER_PRESET=low-memory` to protect the memory
+target. Launch with `KALPA_RENDER_PRESET=standard` for the standard/fidelity
+track. `KALPA_SLINT_BACKEND=winit-femtovg`, `KALPA_SLINT_BACKEND=winit-skia`, or
+`KALPA_SLINT_BACKEND=winit-software` can still override the backend directly for
+manual renderer checks.
+
+Native glass must be implemented as a small design system instead of ad hoc
+per-component approximations. The accepted low-memory path is:
+
+- generated/pre-blurred backdrop and orb assets;
+- low-alpha surface fills and subtle image/backplate highlights instead of
+  software-rendered hairline borders on tiny rounded chips;
+- static/translucent panel materials where CSS `backdrop-filter` would otherwise
+  be too expensive or unavailable;
+- OS window blur/mica/acrylic only as an additive shell-level enhancement after
+  confirming the platform hook. The current Slint API exposes access to the
+  underlying winit window, but this prototype does not yet wire a stable native
+  blur implementation.
 
 Measured on July 1, 2026 for the current main-screen prototype:
 
@@ -185,6 +203,11 @@ Native equivalents must be built component by component:
   disabled, and expanded states.
 - Use `Timer` only for bounded or state-gated animations such as loading spinners;
   timers must not run while idle.
+- Enforce the low-memory preset as a hard animation budget: no ambient backdrop
+  drift by default, no always-running decorative timers, and only cheap property
+  animations on visible/interactive surfaces.
+- Use the standard preset for richer motion checks after the static visual
+  structure is acceptable.
 - Wire reduced-motion through a native token before accepting each animated
   surface. The prototype currently supports `KALPA_REDUCED_MOTION=1` for ambient
   backdrop drift and loading spinner timers.
