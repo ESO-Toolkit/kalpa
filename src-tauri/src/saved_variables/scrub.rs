@@ -1500,7 +1500,11 @@ mod tests {
         );
         let (out, _) = scrub(&tree, &ctx());
         let serialized = serialize_to_lua(&out);
-        assert!(serialized.contains("[\"enabled\"] = true"), "{}", serialized);
+        assert!(
+            serialized.contains("[\"enabled\"] = true"),
+            "{}",
+            serialized
+        );
         assert!(serialized.contains("[\"scale\"] = 1.25"), "{}", serialized);
         assert!(
             serialized.contains("[\"mode\"] = \"compact\""),

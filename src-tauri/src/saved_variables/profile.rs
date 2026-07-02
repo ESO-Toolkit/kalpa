@@ -184,9 +184,12 @@ pub fn copy_sv_profile_blocking(
         let after_dest = dest_start + dest_pattern.len();
         // A destination that exists but holds a scalar value must be an error,
         // not a mangled removal of the following entry's block.
-        let dest_brace_start = skip_ws_to_brace(content.as_bytes(), after_dest).ok_or_else(|| {
-            format!("Destination key \"{to_key}\" has a non-table value; refusing to overwrite.")
-        })?;
+        let dest_brace_start =
+            skip_ws_to_brace(content.as_bytes(), after_dest).ok_or_else(|| {
+                format!(
+                    "Destination key \"{to_key}\" has a non-table value; refusing to overwrite."
+                )
+            })?;
         let dest_brace_end = find_matching_brace(&content, dest_brace_start)
             .ok_or("Unbalanced braces in destination block.")?;
         let line_start = content[..dest_start]
@@ -196,9 +199,7 @@ pub fn copy_sv_profile_blocking(
         let mut remove_end = dest_brace_end + 1;
         let rest = content.as_bytes();
         while remove_end < rest.len()
-            && (rest[remove_end] == b','
-                || rest[remove_end] == b' '
-                || rest[remove_end] == b'\t')
+            && (rest[remove_end] == b',' || rest[remove_end] == b' ' || rest[remove_end] == b'\t')
         {
             remove_end += 1;
         }
@@ -520,10 +521,7 @@ mod tests {
         let (_tmp, addons, file) = setup(content);
         let before = fs::read_to_string(&file).unwrap();
         let err = copy_sv_profile_blocking(&addons, "Test.lua", "Alpha", "Beta").unwrap_err();
-        assert!(
-            err.contains("non-table value"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("non-table value"), "unexpected error: {err}");
         // Nothing was written; the scalar Beta is intact.
         assert_eq!(fs::read_to_string(&file).unwrap(), before);
     }
