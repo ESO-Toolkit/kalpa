@@ -98,6 +98,8 @@ interface UploaderWorkspaceProps {
 }
 
 type Mode = "manual" | "live";
+type WorkbenchGranularity = "session" | "fight";
+type WorkbenchScope = "full" | "latest";
 
 /** The phase the pinned header's single adaptive status pill reflects. Priority
  *  order (highest first): a running live session (armed→live), an in-flight manual
@@ -193,6 +195,7 @@ async function maybeAutoOpenAnalysis(
  *  produce hundreds of fights; we keep a rolling window of the most recent ones
  *  (full history lives on esologs.com) and report the true total separately. */
 const MAX_LIVE_FIGHTS = 150;
+const DEFER_FULL_PREFLIGHT_BYTES = 256 * 1024 * 1024;
 
 const VALID_REGIONS = new Set(REGION_OPTIONS.map((r) => r.id));
 const VALID_VISIBILITY = new Set<Visibility>(["public", "unlisted", "private"]);
@@ -241,14 +244,23 @@ export function UploaderWorkspace({
   const [preflight, setPreflight] = useState<LogPreflight | null>(null);
   const [fights, setFights] = useState<FightSummary[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [preflightDeferred, setPreflightDeferred] = useState(false);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
   // Monotonic token guarding against an out-of-order async scan result
   // overwriting the currently-selected log's fights.
   const selectTokenRef = useRef(0);
+  const latestActionTokenRef = useRef(0);
   const [options, setOptions] = useState<UploadOptions>(loadSavedOptions);
   const [transport, setTransport] = useState<TransportInfo | null>(null);
   const [history, setHistory] = useState<UploadRecord[]>([]);
   const [uploading, setUploading] = useState(false);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [workbenchPreflight, setWorkbenchPreflight] = useState<LogPreflight | null>(null);
+  const [workbenchInitialGranularity, setWorkbenchInitialGranularity] =
+    useState<WorkbenchGranularity>("session");
+  const [workbenchScope, setWorkbenchScope] = useState<WorkbenchScope>("full");
+  const [latestSplitting, setLatestSplitting] = useState(false);
+  const [latestFightsLoading, setLatestFightsLoading] = useState(false);
   // True while a file is dragged over the window — drives the picker drop-zone
   // visual. `importing` covers the copy-in of a dropped out-of-folder log.
   const [dragOver, setDragOver] = useState(false);
@@ -370,10 +382,16 @@ export function UploaderWorkspace({
 
   const clearSelection = useCallback(() => {
     selectTokenRef.current++; // drop any in-flight scan result
+    latestActionTokenRef.current++;
     setSelectedLog(null);
     setPreflight(null);
     setFights([]);
     setScanning(false);
+    setPreflightDeferred(false);
+    setPreflightError(null);
+    setWorkbenchOpen(false);
+    setWorkbenchPreflight(null);
+    setWorkbenchScope("full");
   }, []);
 
   // Persist options whenever they change.
@@ -686,39 +704,96 @@ export function UploaderWorkspace({
     }
   }, [deleteTarget, restoreLog, logsDir, loadLogs, clearSelection]);
 
-  const handleSelectLog = useCallback(async (path: string) => {
-    // Guard against a slow scan of a previously-selected log resolving after a
-    // newer selection and overwriting its results.
-    const token = ++selectTokenRef.current;
-    setSelectedLog(path);
-    setPreflight(null);
-    setFights([]);
-    setScanning(true);
-    try {
-      // A single preflight scan returns both the counts and (unless the log is
-      // huge) the fight list — no second scan needed.
-      const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
-      if (selectTokenRef.current !== token) return;
-      setPreflight(pre);
-      setFights(pre.fights);
-      // Keyboard continuity: a slow scan can blur the row (re-renders, the
-      // "Scanning" pill swap). Once this scan is still the current one, restore
-      // focus to the selected row so keyboard users aren't stranded. Deferred a
-      // tick so it runs after the post-setState re-render.
-      if (selectTokenRef.current === token) {
+  const handleSelectLog = useCallback(
+    async (path: string) => {
+      // Guard against a slow scan of a previously-selected log resolving after a
+      // newer selection and overwriting its results.
+      const token = ++selectTokenRef.current;
+      latestActionTokenRef.current++;
+      const log = logs.find((l) => l.path === path);
+      const deferFullScan = (log?.sizeBytes ?? 0) > DEFER_FULL_PREFLIGHT_BYTES;
+      setSelectedLog(path);
+      setPreflight(null);
+      setFights([]);
+      setScanning(!deferFullScan);
+      setPreflightDeferred(deferFullScan);
+      setPreflightError(null);
+      setWorkbenchOpen(false);
+      setWorkbenchPreflight(null);
+      setWorkbenchScope("full");
+      setLatestFightsLoading(false);
+      setLatestSplitting(false);
+      if (deferFullScan) {
         const sel = CSS.escape(path);
         setTimeout(() => {
           if (selectTokenRef.current !== token) return;
           document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
         }, 0);
+        return;
       }
+      try {
+        // A single preflight scan returns both the counts and (unless the log is
+        // huge) the fight list — no second scan needed.
+        const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
+        if (selectTokenRef.current !== token) return;
+        setPreflight(pre);
+        setFights(pre.fights);
+        setPreflightError(null);
+        // Keyboard continuity: a slow scan can blur the row (re-renders, the
+        // "Scanning" pill swap). Once this scan is still the current one, restore
+        // focus to the selected row so keyboard users aren't stranded. Deferred a
+        // tick so it runs after the post-setState re-render.
+        if (selectTokenRef.current === token) {
+          const sel = CSS.escape(path);
+          setTimeout(() => {
+            if (selectTokenRef.current !== token) return;
+            document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
+          }, 0);
+        }
+      } catch (e) {
+        if (selectTokenRef.current !== token) return;
+        const message = getTauriErrorMessage(e);
+        setPreflightError(message);
+        setPreflightDeferred(true);
+        toast.error(`Couldn't read that log: ${message}`);
+      } finally {
+        if (selectTokenRef.current === token) setScanning(false);
+      }
+    },
+    [logs]
+  );
+
+  const handleScanFullLog = useCallback(async () => {
+    if (!selectedLog) return;
+    const path = selectedLog;
+    const token = ++selectTokenRef.current;
+    latestActionTokenRef.current++;
+    setPreflight(null);
+    setFights([]);
+    setScanning(true);
+    setPreflightDeferred(false);
+    setPreflightError(null);
+    setWorkbenchOpen(false);
+    setWorkbenchPreflight(null);
+    setWorkbenchScope("full");
+    setLatestFightsLoading(false);
+    setLatestSplitting(false);
+    try {
+      const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
+      if (selectTokenRef.current !== token) return;
+      setPreflight(pre);
+      setFights(pre.fights);
+      setPreflightError(null);
     } catch (e) {
       if (selectTokenRef.current !== token) return;
-      toast.error(`Couldn't read that log: ${getTauriErrorMessage(e)}`);
+      const message = getTauriErrorMessage(e);
+      setPreflightError(message);
+      setPreflightDeferred(true);
+      toast.error(`Couldn't read that log: ${message}`);
     } finally {
       if (selectTokenRef.current === token) setScanning(false);
     }
-  }, []);
+  }, [selectedLog]);
 
   // Import a dropped .log: the backend copies it into the Logs folder (or uses it
   // in place if already there), then we refresh the list and select the result so
@@ -867,8 +942,79 @@ export function UploaderWorkspace({
   // preflight to be loaded so the workbench has sessions to show.
   const handleSplit = () => {
     if (!selectedLog || !preflight) return;
+    setWorkbenchPreflight(preflight);
+    setWorkbenchInitialGranularity("session");
+    setWorkbenchScope("full");
     setWorkbenchOpen(true);
   };
+
+  const handleWorkbenchOpenChange = useCallback((nextOpen: boolean) => {
+    setWorkbenchOpen(nextOpen);
+    if (!nextOpen) setWorkbenchPreflight(null);
+  }, []);
+
+  const handleSplitLatest = useCallback(async () => {
+    if (!selectedLog) return;
+    const path = selectedLog;
+    const actionToken = ++latestActionTokenRef.current;
+    setLatestSplitting(true);
+    try {
+      const written = await invokeOrThrow<string[]>("uploader_split_latest_session_to_disk", {
+        filePath: path,
+      });
+      if (latestActionTokenRef.current !== actionToken || selectedLogRef.current !== path) return;
+      toast.success(
+        `Latest session split into ${written.length} file${written.length === 1 ? "" : "s"}.`,
+        { duration: 6000 }
+      );
+      try {
+        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+        if (written[0]) await revealItemInDir(written[0]);
+      } catch {
+        /* reveal is best-effort */
+      }
+    } catch (e) {
+      if (latestActionTokenRef.current !== actionToken || selectedLogRef.current !== path) return;
+      toast.error(`Couldn't split latest session: ${getTauriErrorMessage(e)}`);
+    } finally {
+      if (latestActionTokenRef.current === actionToken) setLatestSplitting(false);
+    }
+  }, [selectedLog]);
+
+  const handleOpenLatestFights = useCallback(async () => {
+    if (!selectedLog) return;
+    const path = selectedLog;
+    const selectionToken = selectTokenRef.current;
+    const actionToken = ++latestActionTokenRef.current;
+    setLatestFightsLoading(true);
+    try {
+      const latest = await invokeOrThrow<LogPreflight>("uploader_preflight_latest_session", {
+        filePath: path,
+      });
+      if (
+        latestActionTokenRef.current !== actionToken ||
+        selectTokenRef.current !== selectionToken ||
+        selectedLogRef.current !== path
+      ) {
+        return;
+      }
+      setWorkbenchPreflight(latest);
+      setWorkbenchInitialGranularity(latest.fights.length > 0 ? "fight" : "session");
+      setWorkbenchScope("latest");
+      setWorkbenchOpen(true);
+    } catch (e) {
+      if (
+        latestActionTokenRef.current !== actionToken ||
+        selectTokenRef.current !== selectionToken ||
+        selectedLogRef.current !== path
+      ) {
+        return;
+      }
+      toast.error(`Couldn't scan latest session fights: ${getTauriErrorMessage(e)}`);
+    } finally {
+      if (latestActionTokenRef.current === actionToken) setLatestFightsLoading(false);
+    }
+  }, [selectedLog]);
 
   const handleStartLive = async (forceHandoffArg: boolean = false) => {
     // Harden against an event accidentally being passed (e.g. onClick={handleStartLive}
@@ -1566,8 +1712,15 @@ export function UploaderWorkspace({
                 <Preflight
                   preflight={preflight}
                   scanning={scanning}
+                  deferred={preflightDeferred}
+                  preflightError={preflightError}
                   scanningSizeBytes={logs.find((l) => l.path === selectedLog)?.sizeBytes ?? null}
                   onSplit={handleSplit}
+                  onSplitLatest={handleSplitLatest}
+                  onOpenLatestFights={handleOpenLatestFights}
+                  onScanFull={handleScanFullLog}
+                  latestSplitting={latestSplitting}
+                  latestFightsLoading={latestFightsLoading}
                 />
               )}
 
@@ -1578,7 +1731,15 @@ export function UploaderWorkspace({
                     <FightList
                       fights={rowsFromSummaries(fights)}
                       emptyHint={
-                        scanning ? "Scanning the log…" : "No fights found in this log yet."
+                        scanning
+                          ? "Scanning the log..."
+                          : preflightError
+                            ? "Full log scan failed."
+                            : preflightDeferred
+                              ? "Full log scan deferred."
+                              : preflight?.fightsOmitted
+                                ? "Fight list omitted for this log."
+                                : "No fights found in this log yet."
                       }
                     />
                   </div>
@@ -1703,12 +1864,16 @@ export function UploaderWorkspace({
         // resetting its per-session drafts (include/name) — otherwise a new log
         // with the same session indices would inherit the previous log's choices.
         <SplitWorkbench
-          key={selectedLog}
+          key={`${selectedLog}:${workbenchInitialGranularity}:${workbenchScope}:${
+            workbenchPreflight?.sessions.map((s) => s.startOffset).join("-") ?? "none"
+          }`}
           open={workbenchOpen}
-          onOpenChange={setWorkbenchOpen}
+          onOpenChange={handleWorkbenchOpenChange}
           filePath={selectedLog}
           fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
-          preflight={preflight}
+          preflight={workbenchPreflight}
+          initialGranularity={workbenchInitialGranularity}
+          scope={workbenchScope}
         />
       )}
 
@@ -3373,13 +3538,27 @@ function LogPicker({
 function Preflight({
   preflight,
   scanning,
+  deferred,
+  preflightError,
   scanningSizeBytes,
   onSplit,
+  onSplitLatest,
+  onOpenLatestFights,
+  onScanFull,
+  latestSplitting,
+  latestFightsLoading,
 }: {
   preflight: LogPreflight | null;
   scanning: boolean;
+  deferred: boolean;
+  preflightError: string | null;
   scanningSizeBytes: number | null;
   onSplit: () => void;
+  onSplitLatest: () => void;
+  onOpenLatestFights: () => void;
+  onScanFull: () => void;
+  latestSplitting: boolean;
+  latestFightsLoading: boolean;
 }) {
   if (scanning && !preflight) {
     // Surface the known file size so a long scan of a multi-GB log reads as
@@ -3389,14 +3568,112 @@ function Preflight({
     const big = (scanningSizeBytes ?? 0) > 256 * 1024 * 1024;
     return (
       <div className="space-y-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
-          Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+            Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
+          </div>
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onOpenLatestFights}
+              disabled={latestFightsLoading || latestSplitting}
+              className="min-w-0 flex-1 border-accent-sky/30 bg-accent-sky/[0.05] text-accent-sky hover:bg-accent-sky/[0.12] sm:flex-none"
+            >
+              {latestFightsLoading ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Swords className="size-3.5" aria-hidden />
+              )}
+              Latest fights
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onSplitLatest}
+              disabled={latestSplitting || latestFightsLoading}
+              className="min-w-0 flex-1 border-accent-sky/30 bg-accent-sky/[0.05] text-accent-sky hover:bg-accent-sky/[0.12] sm:flex-none"
+            >
+              {latestSplitting ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Scissors className="size-3.5" aria-hidden />
+              )}
+              Latest session
+            </Button>
+          </div>
         </div>
         <div className="flex gap-2" aria-hidden>
           <span className="h-5 w-16 animate-pulse rounded-lg bg-white/[0.05]" />
           <span className="h-5 w-20 animate-pulse rounded-lg bg-white/[0.05]" />
           <span className="h-5 w-20 animate-pulse rounded-lg bg-white/[0.05]" />
+        </div>
+      </div>
+    );
+  }
+  if (!preflight && (deferred || preflightError)) {
+    const sizeHint = scanningSizeBytes ? compactBytes(scanningSizeBytes) : null;
+    const hasError = Boolean(preflightError);
+    return (
+      <div className="rounded-xl border border-accent-sky/20 bg-accent-sky/[0.04] p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <span
+            className={cn(
+              "flex size-9 shrink-0 items-center justify-center rounded-lg",
+              hasError ? "bg-destructive/10 text-destructive" : "bg-accent-sky/12 text-accent-sky"
+            )}
+          >
+            {hasError ? (
+              <AlertCircle className="size-4" aria-hidden />
+            ) : (
+              <Search className="size-4" aria-hidden />
+            )}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-foreground/90">
+              {hasError ? "Full log scan failed" : "Large log selected"}
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {hasError
+                ? preflightError
+                : `Full scan is deferred${sizeHint ? ` for ${sizeHint}` : ""}. Latest-session actions stay fast.`}
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onOpenLatestFights}
+              disabled={latestFightsLoading || latestSplitting}
+              className="border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
+            >
+              {latestFightsLoading ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Swords className="size-3.5" aria-hidden />
+              )}
+              Latest fights
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onSplitLatest}
+              disabled={latestSplitting || latestFightsLoading}
+              className="border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
+            >
+              {latestSplitting ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Scissors className="size-3.5" aria-hidden />
+              )}
+              Latest session
+            </Button>
+            <Button variant="outline" size="sm" onClick={onScanFull}>
+              <Search className="size-3.5" aria-hidden />
+              Scan full log
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -3413,6 +3690,7 @@ function Preflight({
   // Per-fight split needs the parsed fight list, which the backend omits for very
   // large logs — so don't promise it in the card when the workbench can't offer it.
   const perFightAvailable = preflight.fights.length > 0;
+  const fightsOmitted = preflight.fightsOmitted;
   const counts =
     sessionCount > 0
       ? `${sessionCount} session${sessionCount === 1 ? "" : "s"}` +
@@ -3431,7 +3709,7 @@ function Preflight({
           : "border-accent-sky/20 border-l-accent-sky/70 bg-accent-sky/[0.04]"
       )}
     >
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <span
           className={cn(
             "flex size-9 shrink-0 items-center justify-center rounded-lg",
@@ -3447,24 +3725,66 @@ function Preflight({
           <div className="mt-0.5 text-xs text-muted-foreground">
             {perFightAvailable
               ? "Carve it into per-session or per-fight files — upload a single fight or a whole night on its own."
-              : "Carve it into per-session files so each uploads cleanly (per-fight split is available on smaller logs)."}
+              : fightsOmitted
+                ? "Fight rows were omitted to keep this log responsive. Split by session, or scan just the latest session for fights."
+                : "Carve it into per-session files so each uploads cleanly."}
             {counts && <span className="text-muted-foreground/70"> {counts}.</span>}
           </div>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onSplit}
-          className={cn(
-            "shrink-0",
-            urgent
-              ? "border-amber-400/40 bg-amber-400/[0.08] text-amber-200 hover:bg-amber-400/[0.16]"
-              : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
-          )}
-        >
-          <Scissors className="size-3.5" />
-          Split log…
-        </Button>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onOpenLatestFights}
+            disabled={latestFightsLoading || latestSplitting}
+            className={cn(
+              "shrink-0",
+              urgent
+                ? "border-amber-400/35 bg-amber-400/[0.06] text-amber-200 hover:bg-amber-400/[0.14]"
+                : "border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
+            )}
+          >
+            {latestFightsLoading ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Swords className="size-3.5" aria-hidden />
+            )}
+            Latest fights
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onSplitLatest}
+            disabled={latestSplitting || latestFightsLoading}
+            className={cn(
+              "shrink-0",
+              urgent
+                ? "border-amber-400/35 bg-amber-400/[0.06] text-amber-200 hover:bg-amber-400/[0.14]"
+                : "border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
+            )}
+          >
+            {latestSplitting ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Scissors className="size-3.5" aria-hidden />
+            )}
+            Latest session
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onSplit}
+            className={cn(
+              "shrink-0",
+              urgent
+                ? "border-amber-400/40 bg-amber-400/[0.08] text-amber-200 hover:bg-amber-400/[0.16]"
+                : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
+            )}
+          >
+            <Scissors className="size-3.5" aria-hidden />
+            Split log…
+          </Button>
+        </div>
       </div>
 
       {/* Fight peek — the first few fights with their durations, so the content is

@@ -125,6 +125,9 @@ pub struct LogPreflight {
     /// large logs (see `recommend_split`) to bound the IPC payload — the counts
     /// in `sessions`/`total_fights` still drive the UI in that case.
     pub fights: Vec<FightSummary>,
+    /// True when `fights` was intentionally omitted to bound IPC/DOM work. False
+    /// with an empty `fights` list means the scan really found no fights.
+    pub fights_omitted: bool,
     /// True if the file exceeds the size at which we recommend splitting.
     pub recommend_split: bool,
 }
