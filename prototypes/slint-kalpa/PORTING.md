@@ -183,6 +183,11 @@ Current detail status:
   URL currently resolve against prototype data; production Discover still needs
   network/search/detail payloads, screenshots, and backend install/remove command
   wiring before the right pane can be accepted.
+- The header Pack Hub action now opens a native Slint Pack Hub overlay covering
+  the reference Browse, Create details, Create addons, and install-detail flows.
+  The flow is still prototype-data backed; production needs real pack storage,
+  import/export, publish, voting, install, and account/session wiring before it
+  can replace the React Pack Hub implementation.
 - Detail dependency install/remove affordances now mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.
@@ -256,6 +261,9 @@ Current backdrop status:
 - Launch with `KALPA_VIEW=discover` and optional
   `KALPA_DISCOVER_TAB=popular|categories|url`, `KALPA_DISCOVER_QUERY=<query>`,
   or `KALPA_DISCOVER_URL=<url-or-id>` to inspect Discover scaffolds.
+- Launch with `KALPA_PACK_HUB_OPEN=1` and optional
+  `KALPA_PACK_HUB_VIEW=browse|create-details|create-addons|install-detail` to
+  inspect native Pack Hub scaffolds.
 - Launch with `KALPA_RENDER_PRESET=standard` for visual-fidelity checks, or
   `KALPA_SLINT_BACKEND=winit-skia` / `winit-femtovg` for direct backend checks
   on Slint builds that support those renderer names.
@@ -275,7 +283,7 @@ For repeatable full-window state captures on Windows, use the DPI-aware capture
 harness from `prototypes/slint-kalpa`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\capture-states.ps1 -Build -OutputDir .\captures\verify -State main,discover-popular,files,files-editing,settings-general,settings-theme-editor
+powershell -ExecutionPolicy Bypass -File .\tools\capture-states.ps1 -Build -OutputDir .\captures\verify -State main,discover-popular,files,files-editing,settings-general,settings-theme-editor,packhub-browse,packhub-create1,packhub-create2,packhub-install
 ```
 
 The harness launches a fresh prototype process per state, uses the low-memory
@@ -283,8 +291,9 @@ renderer preset by default, captures the largest visible Slint-owned window, and
 writes ignored PNGs under `captures/`. Supported states include `main`,
 `discover-popular`, `discover-search`, `discover-category`, `discover-url`,
 `files`, `files-editing`, `settings-general`, `settings-appearance`,
-`settings-theme-editor`, `settings-tools`, `settings-data`, `theme-crimson`,
-and `theme-frost`.
+`settings-theme-editor`, `settings-tools`, `settings-data`, `packhub-browse`,
+`packhub-create1`, `packhub-create2`, `packhub-install`, `theme-crimson`, and
+`theme-frost`.
 
 From `prototypes/slint-kalpa`, compare a captured native prototype PNG against
 the current WebView reference:

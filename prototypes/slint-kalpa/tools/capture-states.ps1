@@ -153,6 +153,22 @@ function New-StateEnvironment {
       $env.KALPA_SETTINGS_OPEN = "1"
       $env.KALPA_SETTINGS_TAB = "3"
     }
+    "packhub-browse" {
+      $env.KALPA_PACK_HUB_OPEN = "1"
+      $env.KALPA_PACK_HUB_VIEW = "browse"
+    }
+    "packhub-create1" {
+      $env.KALPA_PACK_HUB_OPEN = "1"
+      $env.KALPA_PACK_HUB_VIEW = "create-details"
+    }
+    "packhub-create2" {
+      $env.KALPA_PACK_HUB_OPEN = "1"
+      $env.KALPA_PACK_HUB_VIEW = "create-addons"
+    }
+    "packhub-install" {
+      $env.KALPA_PACK_HUB_OPEN = "1"
+      $env.KALPA_PACK_HUB_VIEW = "install-detail"
+    }
     "theme-crimson" {
       $env.KALPA_THEME = "daedric-crimson"
     }
@@ -301,7 +317,7 @@ function Capture-State {
     [KalpaCaptureNative]::SetWindowPos($window.Hwnd, [IntPtr](-2), 0, 0, 0, 0, $flags) | Out-Null
 
     $signature = Get-HeaderSignature -Path $path
-    $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-")
+    $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-")
     [pscustomobject]@{
       State = $Name
       Path = $path

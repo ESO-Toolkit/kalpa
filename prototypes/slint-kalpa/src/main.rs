@@ -4183,6 +4183,16 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     ui.set_detail_files_active(detail_files_active);
     ui.set_settings_open(env_flag("KALPA_SETTINGS_OPEN"));
     ui.set_settings_editor_open(env_flag("KALPA_SETTINGS_EDITOR"));
+    ui.set_pack_hub_open(env_flag("KALPA_PACK_HUB_OPEN"));
+    let pack_hub_view = std::env::var("KALPA_PACK_HUB_VIEW")
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "1" | "create" | "create-details" | "details" => 1,
+            "2" | "create-addons" | "addons" => 2,
+            "3" | "install" | "detail" | "install-detail" => 3,
+            _ => 0,
+        })
+        .unwrap_or(0);
+    ui.set_pack_hub_view(pack_hub_view);
     let settings_tab = std::env::var("KALPA_SETTINGS_TAB")
         .map(|value| match value.to_ascii_lowercase().as_str() {
             "1" | "appearance" | "theme" | "themes" => 1,
