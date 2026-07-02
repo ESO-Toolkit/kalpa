@@ -3315,6 +3315,7 @@ component AppearanceOverlay inherits Rectangle {
     in-out property <bool> official-uploader: false;
     in-out property <bool> auto-open-analysis: false;
     in-out property <int> conflict-policy: 0;
+    in-out property <string> addons-path;
     callback close;
     callback theme-selected(string);
     callback theme-create;
@@ -3452,7 +3453,7 @@ component AppearanceOverlay inherits Rectangle {
                         y: 0px;
                         width: parent.width - 24px;
                         height: parent.height;
-                        text: "C:\\Users\\...\\Elder Scrolls Online\\live\\AddOns";
+                        text: root.addons-path == "" ? "No AddOns folder configured" : root.addons-path;
                         color: Palette.muted-strong;
                         font-size: 12px;
                         font-weight: 600;
@@ -8354,6 +8355,7 @@ export component KalpaWindow inherits Window {
     in-out property <bool> settings-official-uploader: false;
     in-out property <bool> settings-auto-open-analysis: false;
     in-out property <int> settings-conflict-policy: 0;
+    in-out property <string> settings-addons-path;
     private property <length> error-banner-height: root.status-error-message != "" ? 36px : 0px;
     private property <length> offline-banner-height: root.offline-active ? 36px : 0px;
     private property <length> app-update-banner-height: root.app-update-message != "" ? 36px : 0px;
@@ -8682,6 +8684,7 @@ export component KalpaWindow inherits Window {
             official-uploader <=> root.settings-official-uploader;
             auto-open-analysis <=> root.settings-auto-open-analysis;
             conflict-policy <=> root.settings-conflict-policy;
+            addons-path <=> root.settings-addons-path;
             themes: root.themes;
             close => { root.settings-open = false; }
             theme-selected(id) => {

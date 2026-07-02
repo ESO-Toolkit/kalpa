@@ -112,6 +112,7 @@ enum NativeRenderPreset {
 }
 
 const STORE_KEY_ACTIVE_THEME: &str = "appearance.activeThemeId";
+const STORE_KEY_ADDONS_PATH: &str = "addonsPath";
 const STORE_KEY_CUSTOM_THEMES: &str = "appearance.customThemes";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2047,6 +2048,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
 
 fn apply_initial_native_settings(ui: &KalpaWindow) {
     apply_native_settings(ui, &read_native_settings());
+    ui.set_settings_addons_path(configured_addons_path_display().into());
 }
 
 fn apply_native_settings(ui: &KalpaWindow, settings: &NativeSettings) {
@@ -3801,7 +3803,52 @@ fn addons_source_root() -> Option<PathBuf> {
         return Some(path);
     }
 
+    if let Some(path) = read_persisted_addons_path().filter(|path| path.is_dir()) {
+        return Some(path);
+    }
+
     default_addons_root().filter(|path| path.is_dir())
+}
+
+fn configured_addons_path_display() -> String {
+    if let Some(path) = std::env::var_os("KALPA_ADDONS_PATH")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return path.to_string_lossy().into_owned();
+    }
+
+    if let Some(path) = read_persisted_addons_path() {
+        return path.to_string_lossy().into_owned();
+    }
+
+    default_addons_root()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn read_persisted_addons_path() -> Option<PathBuf> {
+    for path in native_settings_store_paths() {
+        match read_addons_path_from_settings_path(&path) {
+            Ok(Some(addons_path)) => return Some(addons_path),
+            Ok(None) => {}
+            Err(error) => eprintln!("Failed to read AddOns path from {path:?}: {error}"),
+        }
+    }
+
+    None
+}
+
+fn read_addons_path_from_settings_path(path: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(value) = read_settings_store_key_from_path(path, STORE_KEY_ADDONS_PATH)? else {
+        return Ok(None);
+    };
+
+    Ok(value
+        .as_str()
+        .map(str::trim)
+        .filter(|addons_path| !addons_path.is_empty())
+        .map(PathBuf::from))
 }
 
 fn default_addons_root() -> Option<PathBuf> {
@@ -4705,9 +4752,10 @@ fn read_custom_themes_from_path(path: &Path) -> Result<Vec<CatalogTheme>, String
         return Ok(Vec::new());
     }
 
-    serde_json::from_str::<NativeCustomThemeStore>(&contents)
+    let contents = json_without_bom(&contents);
+    serde_json::from_str::<NativeCustomThemeStore>(contents)
         .map(|store| store.themes)
-        .or_else(|_| serde_json::from_str::<Vec<CatalogTheme>>(&contents))
+        .or_else(|_| serde_json::from_str::<Vec<CatalogTheme>>(contents))
         .map(normalize_custom_themes)
         .map_err(|error| format!("Failed to parse custom themes: {error}"))
 }
@@ -4784,11 +4832,12 @@ fn read_settings_store_object_from_path(
         Err(error) => return Err(format!("Failed to read settings store: {error}")),
     };
 
+    let contents = json_without_bom(&contents);
     if contents.trim().is_empty() {
         return Ok(Default::default());
     }
 
-    serde_json::from_str::<serde_json::Value>(&contents)
+    serde_json::from_str::<serde_json::Value>(contents)
         .map_err(|error| format!("Failed to parse settings store: {error}"))
         .map(|value| value.as_object().cloned().unwrap_or_default())
 }
@@ -4822,13 +4871,18 @@ fn read_native_settings_from_path(path: &Path) -> Result<NativeSettings, String>
         Err(error) => return Err(format!("Failed to read native settings: {error}")),
     };
 
+    let contents = json_without_bom(&contents);
     if contents.trim().is_empty() {
         return Ok(NativeSettings::default());
     }
 
-    let value = serde_json::from_str::<serde_json::Value>(&contents)
+    let value = serde_json::from_str::<serde_json::Value>(contents)
         .map_err(|error| format!("Failed to parse native settings: {error}"))?;
     Ok(native_settings_from_store_value(&value))
+}
+
+fn json_without_bom(contents: &str) -> &str {
+    contents.strip_prefix('\u{feff}').unwrap_or(contents)
 }
 
 fn persist_native_settings(settings: &NativeSettings) {
@@ -5535,6 +5589,50 @@ mod tests {
             .get(STORE_KEY_CUSTOM_THEMES)
             .and_then(serde_json::Value::as_array)
             .is_some());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn addons_path_reads_production_settings_key() {
+        let root = test_temp_dir("addons-path-production");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings directory");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "addonsPath": "C:/Users/Example/Documents/Elder Scrolls Online/live/AddOns"
+            })
+            .to_string(),
+        )
+        .expect("seed settings store");
+
+        let addons_path = read_addons_path_from_settings_path(&path)
+            .expect("read addons path")
+            .expect("addons path exists");
+        assert_eq!(
+            addons_path.to_string_lossy(),
+            "C:/Users/Example/Documents/Elder Scrolls Online/live/AddOns"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_store_reader_accepts_utf8_bom() {
+        let root = test_temp_dir("settings-bom");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings directory");
+        fs::write(&path, "\u{feff}{\"addonsPath\":\"D:/ESO/live/AddOns\"}")
+            .expect("seed bom settings store");
+
+        assert_eq!(
+            read_addons_path_from_settings_path(&path)
+                .expect("read addons path")
+                .expect("addons path exists")
+                .to_string_lossy(),
+            "D:/ESO/live/AddOns"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
