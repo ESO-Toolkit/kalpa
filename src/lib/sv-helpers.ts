@@ -37,6 +37,13 @@ export function sizeCategory(bytes: number): SizeCategory {
   return "small";
 }
 
+function valueTypeOf(value: string | number | boolean | null): SvTreeNode["valueType"] {
+  if (value === null) return "nil";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "number") return "number";
+  return "string";
+}
+
 export function updateTreeNode(
   tree: SvTreeNode,
   path: string[],
@@ -53,7 +60,15 @@ export function updateTreeNode(
     children: tree.children.map((child) => {
       if (child.key !== targetKey) return child;
       if (isLeaf) {
-        return { ...child, value: value };
+        // The user replaced the value, so re-derive the leaf's valueType from
+        // the new value and drop any rawLuaValue (which would otherwise take
+        // precedence in the Rust serializer and silently discard the edit).
+        return {
+          ...child,
+          value: value,
+          valueType: valueTypeOf(value),
+          rawLuaValue: undefined,
+        };
       }
       return updateTreeNode(child, path, value, depth + 1);
     }),

@@ -54,12 +54,6 @@ export function NumberControl({
     setLocalValue(fieldVal);
   }
 
-  const commit = () => {
-    const num = Number(localValue);
-    if (!isNaN(num)) onChange(num);
-    else setLocalValue(String(field.value ?? 0));
-  };
-
   const step = field.props.step ?? 1;
   const { min, max } = field.props;
 
@@ -67,6 +61,27 @@ export function NumberControl({
     if (min !== undefined && v < min) return min;
     if (max !== undefined && v > max) return max;
     return v;
+  };
+
+  const commit = () => {
+    // Treat empty/whitespace input as invalid (Number("") === 0) and revert.
+    if (localValue.trim() === "") {
+      setLocalValue(fieldVal);
+      return;
+    }
+    const num = Number(localValue);
+    if (isNaN(num)) {
+      setLocalValue(fieldVal);
+      return;
+    }
+    // Clamp typed values to min/max, matching the ± buttons.
+    const clamped = clamp(num);
+    // Only commit when the value actually changed to avoid a spurious dirty flag.
+    if (clamped === Number(field.value ?? 0)) {
+      setLocalValue(fieldVal);
+      return;
+    }
+    onChange(clamped);
   };
 
   return (
@@ -195,7 +210,9 @@ export function TextControl({
     setLocalValue(fieldVal);
   }
 
-  const commit = () => onChange(localValue);
+  const commit = () => {
+    if (localValue !== fieldVal) onChange(localValue);
+  };
 
   if (field.props.multiline) {
     return (
@@ -228,14 +245,28 @@ export function DropdownControl({
   onChange,
 }: {
   field: EffectiveField;
-  onChange: (val: string) => void;
+  onChange: (val: string | number) => void;
 }) {
   const options = field.props.options ?? [];
   const currentVal = String(field.value ?? "");
   const allOptions = options.includes(currentVal) ? options : [currentVal, ...options];
 
+  const commit = (v: string | null) => {
+    if (!v) return;
+    // Preserve numeric type when the field is currently a number and the
+    // chosen option parses cleanly as a finite number.
+    if (typeof field.value === "number") {
+      const num = Number(v);
+      if (v.trim() !== "" && Number.isFinite(num)) {
+        onChange(num);
+        return;
+      }
+    }
+    onChange(v);
+  };
+
   return (
-    <Select value={currentVal} onValueChange={(v) => v && onChange(v)} disabled={field.readOnly}>
+    <Select value={currentVal} onValueChange={commit} disabled={field.readOnly}>
       <SelectTrigger className="h-7 w-40 text-xs">
         <SelectValue />
       </SelectTrigger>
@@ -279,7 +310,9 @@ export function RawControl({
       rows={2}
       value={localValue}
       onChange={(e) => setLocalValue(e.target.value)}
-      onBlur={() => onChange(localValue)}
+      onBlur={() => {
+        if (localValue !== fieldVal) onChange(localValue);
+      }}
       disabled={field.readOnly}
     />
   );

@@ -461,6 +461,25 @@ Var2 =
     }
 
     #[test]
+    fn identifier_safe_keys_serialize_bracket_quoted() {
+        // Even keys that are valid Lua identifiers must serialize as
+        // ["key"] = ... so the regex-based tools that scan these files
+        // (extract_character_keys, copy_sv_profile) keep matching them.
+        let input = r#"Var =
+{
+	enabled = true,
+	level = 10,
+}
+"#;
+        let tree = parser::parse_sv_file(input, "test.lua").unwrap();
+        let output = serialize_to_lua(&tree);
+        assert!(output.contains("[\"enabled\"] = true"));
+        assert!(output.contains("[\"level\"] = 10"));
+        assert!(!output.contains("enabled = true"));
+        assert!(!output.contains("level = 10"));
+    }
+
+    #[test]
     fn nested_identifier_key_serializes_bracketed() {
         // Even though "Baelthor" is a valid Lua identifier, a nested string key
         // must be emitted in ESO's `["Name"] =` game format so that
