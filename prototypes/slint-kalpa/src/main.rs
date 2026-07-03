@@ -7574,6 +7574,41 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_status_error_message(message);
     });
 
+    let review_ui = ui.as_weak();
+    let review_models = models.clone();
+    ui.on_review_conflicts(move || {
+        let Some(ui) = review_ui.upgrade() else {
+            return;
+        };
+
+        ui.set_discover_active(false);
+        ui.set_addon_search_query("".into());
+        ui.set_filter_mode(4);
+        apply_addon_view(&ui, &review_models);
+
+        let first_update = (0..review_models.visible.row_count())
+            .filter_map(|index| {
+                review_models
+                    .visible
+                    .row_data(index)
+                    .map(|addon| (index, addon))
+            })
+            .find(|(_, addon)| addon_has_update(addon))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+
+        if review_models.visible.row_count() > 0 {
+            ui.set_selected_index(first_update as i32);
+            refresh_file_browser(&ui);
+            ui.set_status_error_message(
+                "Selected addons that still need update conflict review.".into(),
+            );
+        } else {
+            ui.set_pending_conflict_count(0);
+            ui.set_status_error_message("No addon update conflicts are pending.".into());
+        }
+    });
+
     let toggle_ui = ui.as_weak();
     let toggle_models = models.clone();
     ui.on_addon_selection_toggled(move |index| {

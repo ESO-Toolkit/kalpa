@@ -117,8 +117,10 @@ Current row status:
   extraction and take-update writes edit backups before overwriting conflicts.
   Native AddOns-folder writes now also honor the saved "Warn when ESO is running"
   setting by reusing the production Windows process check and carrying the
-  `/reloadui` notice through install/update/remove status messages. The manual
-  native conflict-decision modal is still pending.
+  `/reloadui` notice through install/update/remove status messages. The conflict
+  banner's Review action now switches back to My Addons, filters to outdated
+  rows, and selects the first row that still needs attention. The manual native
+  conflict-decision modal is still pending.
 - Rows now expose a native right-click context menu with Open Folder, View on
   ESOUI, Favorite/Unfavorite, Enable/Disable, and Remove actions. Enable/disable
   and remove use the same real folder operations as the detail footer for
