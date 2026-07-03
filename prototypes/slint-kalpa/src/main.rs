@@ -288,6 +288,8 @@ struct NativeSettings {
     official_uploader: bool,
     auto_open_analysis: bool,
     conflict_policy: i32,
+    uploader_region: i32,
+    uploader_visibility: i32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -581,6 +583,8 @@ impl Default for NativeSettings {
             official_uploader: false,
             auto_open_analysis: false,
             conflict_policy: 0,
+            uploader_region: 1,
+            uploader_visibility: 2,
         }
     }
 }
@@ -5911,6 +5915,8 @@ fn apply_native_settings(ui: &KalpaWindow, settings: &NativeSettings) {
     ui.set_settings_official_uploader(settings.official_uploader);
     ui.set_settings_auto_open_analysis(settings.auto_open_analysis);
     ui.set_settings_conflict_policy(settings.conflict_policy.clamp(0, 2));
+    ui.set_uploader_region(settings.uploader_region.clamp(1, 2));
+    ui.set_uploader_visibility(settings.uploader_visibility.clamp(0, 2));
 }
 
 fn native_settings_from_ui(ui: &KalpaWindow) -> NativeSettings {
@@ -5921,6 +5927,8 @@ fn native_settings_from_ui(ui: &KalpaWindow) -> NativeSettings {
         official_uploader: ui.get_settings_official_uploader(),
         auto_open_analysis: ui.get_settings_auto_open_analysis(),
         conflict_policy: ui.get_settings_conflict_policy().clamp(0, 2),
+        uploader_region: ui.get_uploader_region().clamp(1, 2),
+        uploader_visibility: ui.get_uploader_visibility().clamp(0, 2),
     }
 }
 
@@ -6501,6 +6509,26 @@ const OFFICIAL_UPLOADER_PRODUCTS: [(&str, &str); 3] = [
     ("Archon", "Archon.exe"),
 ];
 
+#[derive(Clone, Copy)]
+struct UploaderLaunchOptions {
+    region: u8,
+    visibility: u8,
+}
+
+fn uploader_launch_options_from_ui(ui: &KalpaWindow) -> UploaderLaunchOptions {
+    UploaderLaunchOptions {
+        region: match ui.get_uploader_region() {
+            2 => 2,
+            _ => 1,
+        },
+        visibility: match ui.get_uploader_visibility() {
+            0 => 0,
+            1 => 1,
+            _ => 2,
+        },
+    }
+}
+
 fn official_uploader_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
@@ -6525,7 +6553,11 @@ fn find_official_uploader() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn launch_external_uploader(log_path: &Path, live: bool) -> Result<String, String> {
+fn launch_external_uploader(
+    log_path: &Path,
+    live: bool,
+    options: UploaderLaunchOptions,
+) -> Result<String, String> {
     if !log_path.is_file() {
         return Err("Selected log file was not found.".to_string());
     }
@@ -6542,11 +6574,11 @@ fn launch_external_uploader(log_path: &Path, live: bool) -> Result<String, Strin
                 .arg("--directory-path")
                 .arg(log_dir)
                 .arg("--region")
-                .arg("1")
+                .arg(options.region.to_string())
                 .arg("--guild")
                 .arg("null")
                 .arg("--report-visibility")
-                .arg("2")
+                .arg(options.visibility.to_string())
                 .arg("--enable-real-time-uploading");
         } else {
             command
@@ -6555,11 +6587,11 @@ fn launch_external_uploader(log_path: &Path, live: bool) -> Result<String, Strin
                 .arg("--file-path")
                 .arg(log_path)
                 .arg("--region")
-                .arg("1")
+                .arg(options.region.to_string())
                 .arg("--guild")
                 .arg("null")
                 .arg("--report-visibility")
-                .arg("2");
+                .arg(options.visibility.to_string());
         }
 
         command
@@ -6661,9 +6693,10 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
         ui.set_uploader_status_detail(
             "Launching the external ESO Logs uploader from the native Slint shell.".into(),
         );
+        let options = uploader_launch_options_from_ui(&ui);
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
-            let result = launch_external_uploader(Path::new(&path), false);
+            let result = launch_external_uploader(Path::new(&path), false, options);
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
@@ -6707,9 +6740,10 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
             "Launching the external ESO Logs live uploader without leaving the native shell."
                 .into(),
         );
+        let options = uploader_launch_options_from_ui(&ui);
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
-            let result = launch_external_uploader(Path::new(&path), true);
+            let result = launch_external_uploader(Path::new(&path), true, options);
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
@@ -6729,6 +6763,14 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
                 }
             });
         });
+    });
+
+    let options_ui = ui.as_weak();
+    ui.on_uploader_options_changed(move || {
+        let Some(ui) = options_ui.upgrade() else {
+            return;
+        };
+        persist_native_settings(&native_settings_from_ui(&ui));
     });
 }
 
@@ -15934,6 +15976,8 @@ fn persist_native_settings(settings: &NativeSettings) {
 fn persist_native_settings_to_path(path: &Path, settings: &NativeSettings) -> Result<(), String> {
     let mut settings = settings.clone();
     settings.conflict_policy = settings.conflict_policy.clamp(0, 2);
+    settings.uploader_region = settings.uploader_region.clamp(1, 2);
+    settings.uploader_visibility = settings.uploader_visibility.clamp(0, 2);
     let existing = fs::read_to_string(path)
         .ok()
         .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
@@ -16021,6 +16065,18 @@ fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings
             .and_then(conflict_policy_from_store_value)
             .unwrap_or(defaults.conflict_policy)
             .clamp(0, 2),
+        uploader_region: object
+            .get("uploaderRegion")
+            .and_then(serde_json::Value::as_i64)
+            .map(|value| value as i32)
+            .unwrap_or(defaults.uploader_region)
+            .clamp(1, 2),
+        uploader_visibility: object
+            .get("uploaderVisibility")
+            .and_then(serde_json::Value::as_i64)
+            .map(|value| value as i32)
+            .unwrap_or(defaults.uploader_visibility)
+            .clamp(0, 2),
     }
 }
 
@@ -16061,6 +16117,14 @@ fn native_settings_to_store_value(
     object.insert(
         "conflictPolicy".to_string(),
         conflict_policy_to_store_value(settings.conflict_policy),
+    );
+    object.insert(
+        "uploaderRegion".to_string(),
+        serde_json::Value::Number(settings.uploader_region.clamp(1, 2).into()),
+    );
+    object.insert(
+        "uploaderVisibility".to_string(),
+        serde_json::Value::Number(settings.uploader_visibility.clamp(0, 2).into()),
     );
 
     serde_json::Value::Object(object)
@@ -17104,6 +17168,8 @@ mod tests {
             official_uploader: true,
             auto_open_analysis: true,
             conflict_policy: 9,
+            uploader_region: 7,
+            uploader_visibility: -1,
         };
 
         persist_native_settings_to_path(&path, &settings).expect("persist settings");
@@ -17115,6 +17181,8 @@ mod tests {
         assert!(restored.official_uploader);
         assert!(restored.auto_open_analysis);
         assert_eq!(restored.conflict_policy, 2);
+        assert_eq!(restored.uploader_region, 2);
+        assert_eq!(restored.uploader_visibility, 0);
 
         let value = serde_json::from_str::<serde_json::Value>(
             &fs::read_to_string(&path).expect("read settings json"),
@@ -17161,6 +17229,18 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("take_update")
         );
+        assert_eq!(
+            object
+                .get("uploaderRegion")
+                .and_then(serde_json::Value::as_i64),
+            Some(2)
+        );
+        assert_eq!(
+            object
+                .get("uploaderVisibility")
+                .and_then(serde_json::Value::as_i64),
+            Some(0)
+        );
         assert!(object.get("warnEsoRunning").is_none());
         assert!(object.get("officialUploader").is_none());
 
@@ -17181,7 +17261,9 @@ mod tests {
                 "liveUseOfficialUploader": true,
                 "performanceMode": "native-slint",
                 "autoOpenAnalysis": true,
-                "conflictPolicy": "keep_mine"
+                "conflictPolicy": "keep_mine",
+                "uploaderRegion": 2,
+                "uploaderVisibility": 1
             })
             .to_string(),
         )
@@ -17194,6 +17276,8 @@ mod tests {
         assert!(restored.official_uploader);
         assert!(restored.auto_open_analysis);
         assert_eq!(restored.conflict_policy, 1);
+        assert_eq!(restored.uploader_region, 2);
+        assert_eq!(restored.uploader_visibility, 1);
 
         let _ = fs::remove_dir_all(root);
     }

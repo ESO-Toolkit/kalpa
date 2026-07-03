@@ -316,9 +316,11 @@ Current detail status:
   counts, and previews recent fights without loading the whole log into memory.
   Upload and Live Logging now launch the external Archon App / ESO Logs uploader
   directly from the native shell instead of reopening the WebView uploader flow.
+  Native region and report-visibility controls are now wired into the external
+  uploader CLI launch and persisted through the native settings store.
   Remaining gaps are direct in-app ESO Logs upload/session login, progress and
-  history reporting, rich upload options, split-workbench parity, and native
-  live-stream timeline events.
+  history reporting, report-name/guild options, split-workbench parity, and
+  native live-stream timeline events.
 - Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.

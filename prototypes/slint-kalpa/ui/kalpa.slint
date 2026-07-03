@@ -8300,6 +8300,55 @@ component UploaderModeButton inherits Rectangle {
     }
 }
 
+component UploaderOptionButton inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    callback clicked;
+    height: 34px;
+    border-radius: 10px;
+    border-width: 0px;
+    background: touch.has-hover ? Palette.white-06 : Palette.white-03;
+
+    Text {
+        x: 12px;
+        y: 5px;
+        width: parent.width - 24px;
+        text: root.label;
+        color: Palette.muted-dim;
+        font-family: "Space Grotesk Light";
+        font-size: 9px;
+        font-weight: 850;
+        overflow: elide;
+    }
+
+    Text {
+        x: 12px;
+        y: 17px;
+        width: parent.width - 34px;
+        text: root.value;
+        color: Palette.foreground;
+        font-size: 11px;
+        font-weight: 850;
+        overflow: elide;
+    }
+
+    Image {
+        x: parent.width - 22px;
+        y: 12px;
+        width: 10px;
+        height: 10px;
+        source: @image-url("../assets/icons/chevron-down.svg");
+        image-fit: contain;
+        colorize: Palette.muted-half;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
+}
+
 component UploaderInfoCard inherits Rectangle {
     in property <image> icon;
     in property <string> label;
@@ -8502,10 +8551,13 @@ component UploaderOverlay inherits Rectangle {
     in property <string> live-log-label: "No Encounter.log";
     in property <string> live-fight-label: "Waiting";
     in property <string> live-detail: "Start live mode before the pull. Kalpa will wait for the next logging session and keep the report active.";
+    in-out property <int> region: 1;
+    in-out property <int> visibility-mode: 2;
     callback refresh;
     callback log-selected(int);
     callback upload-requested;
     callback live-toggle;
+    callback options-changed;
     visible: root.open;
     background: #000000c4;
     private property <bool> manual: root.view < 2;
@@ -8513,6 +8565,8 @@ component UploaderOverlay inherits Rectangle {
     private property <bool> live-running: root.view == 3;
     private property <length> modal-width: root.width < 850px ? root.width - 48px : 760px;
     private property <length> modal-height: root.height < 700px ? root.height - 48px : 650px;
+    private property <string> region-label: root.region == 2 ? "EU" : "NA";
+    private property <string> visibility-label: root.visibility-mode == 0 ? "Public" : (root.visibility-mode == 1 ? "Private" : "Unlisted");
 
     TouchArea {
         width: root.width;
@@ -8639,16 +8693,40 @@ component UploaderOverlay inherits Rectangle {
                 background: Palette.white-02;
 
                 Text { x: 18px; y: 16px; width: parent.width - 36px; text: root.status-title; color: Palette.foreground; font-size: 15px; font-weight: 900; overflow: elide; }
-                Text { x: 18px; y: 44px; width: parent.width - 36px; text: root.status-detail; color: Palette.muted-strong; font-size: 12px; font-weight: 600; wrap: word-wrap; }
+                Text { x: 18px; y: 44px; width: parent.width - 36px; height: 34px; text: root.status-detail; color: Palette.muted-strong; font-size: 12px; font-weight: 600; wrap: word-wrap; overflow: elide; }
+
+                if (!root.uploading) : UploaderOptionButton {
+                    x: 18px;
+                    y: 86px;
+                    width: (parent.width - 44px) / 2;
+                    label: "REGION";
+                    value: root.region-label;
+                    clicked => {
+                        root.region = root.region == 2 ? 1 : 2;
+                        root.options-changed();
+                    }
+                }
+
+                if (!root.uploading) : UploaderOptionButton {
+                    x: 26px + (parent.width - 44px) / 2;
+                    y: 86px;
+                    width: (parent.width - 44px) / 2;
+                    label: "VISIBILITY";
+                    value: root.visibility-label;
+                    clicked => {
+                        root.visibility-mode = root.visibility-mode == 2 ? 1 : (root.visibility-mode == 1 ? 0 : 2);
+                        root.options-changed();
+                    }
+                }
 
                 if (root.uploading) : UploaderProgressBar { x: 18px; y: 92px; width: parent.width - 36px; progress: 0.58; }
                 if (root.uploading) : Text { x: 18px; y: 112px; width: parent.width - 36px; text: "58% - packaging segment 2 of 2"; color: Palette.sky; font-size: 11px; font-weight: 800; }
 
-                DetailSectionTitle { x: 18px; y: root.uploading ? 146px : 94px; width: parent.width - 36px; label: "FIGHTS"; }
+                DetailSectionTitle { x: 18px; y: root.uploading ? 146px : 132px; width: parent.width - 36px; label: "FIGHTS"; }
 
                 if (root.fights.length == 0) : Text {
                     x: 18px;
-                    y: root.uploading ? 174px : 122px;
+                    y: root.uploading ? 174px : 160px;
                     width: parent.width - 36px;
                     height: 74px;
                     text: "No completed fights were detected in the selected log.";
@@ -8661,7 +8739,7 @@ component UploaderOverlay inherits Rectangle {
                 for fight[index] in root.fights : UploaderFightRow {
                     visible: index < 4;
                     x: 18px;
-                    y: (root.uploading ? 174px : 122px) + index * 42px;
+                    y: (root.uploading ? 174px : 160px) + index * 42px;
                     width: parent.width - 36px;
                     title: fight.title;
                     meta: fight.meta;
@@ -8695,6 +8773,30 @@ component UploaderOverlay inherits Rectangle {
                 Text { x: 20px; y: 18px; width: parent.width - 40px; text: root.live-running ? "Live report is armed" : "Ready for live logging"; color: Palette.foreground; font-size: 16px; font-weight: 900; overflow: elide; }
                 Text { x: 20px; y: 48px; width: parent.width - 40px; text: root.live-detail; color: Palette.muted-strong; font-size: 13px; font-weight: 600; wrap: word-wrap; }
 
+                if (!root.live-running) : UploaderOptionButton {
+                    x: 20px;
+                    y: 92px;
+                    width: (parent.width - 50px) / 2;
+                    label: "REGION";
+                    value: root.region-label;
+                    clicked => {
+                        root.region = root.region == 2 ? 1 : 2;
+                        root.options-changed();
+                    }
+                }
+
+                if (!root.live-running) : UploaderOptionButton {
+                    x: 30px + (parent.width - 50px) / 2;
+                    y: 92px;
+                    width: (parent.width - 50px) / 2;
+                    label: "VISIBILITY";
+                    value: root.visibility-label;
+                    clicked => {
+                        root.visibility-mode = root.visibility-mode == 2 ? 1 : (root.visibility-mode == 1 ? 0 : 2);
+                        root.options-changed();
+                    }
+                }
+
                 if (root.live-running) : Rectangle {
                     x: 20px;
                     y: 92px;
@@ -8709,10 +8811,10 @@ component UploaderOverlay inherits Rectangle {
                     Text { x: 42px; y: 12px; width: parent.width - 56px; text: "Live logging launched without reopening the WebView shell."; color: Palette.foreground; font-size: 12px; font-weight: 850; overflow: elide; }
                 }
 
-                DetailSectionTitle { x: 20px; y: root.live-running ? 164px : 112px; width: parent.width - 40px; label: root.live-running ? "LIVE FIGHTS" : "READINESS"; }
+                DetailSectionTitle { x: 20px; y: root.live-running ? 164px : 142px; width: parent.width - 40px; label: root.live-running ? "LIVE FIGHTS" : "READINESS"; }
 
-                if (!root.live-running) : UploaderFightRow { x: 20px; y: 142px; width: parent.width - 40px; title: "ESO Logs session"; meta: root.route-label; result: "CHECK"; live: true; }
-                if (!root.live-running) : UploaderFightRow { x: 20px; y: 184px; width: parent.width - 40px; title: "Combat log watcher"; meta: root.logs-summary; result: "READY"; live: true; }
+                if (!root.live-running) : UploaderFightRow { x: 20px; y: 172px; width: parent.width - 40px; title: "ESO Logs session"; meta: root.route-label; result: "CHECK"; live: true; }
+                if (!root.live-running) : UploaderFightRow { x: 20px; y: 214px; width: parent.width - 40px; title: "Combat log watcher"; meta: root.logs-summary; result: "READY"; live: true; }
 
                 if (root.live-running) : UploaderFightRow { x: 20px; y: 194px; width: parent.width - 40px; title: "ESO Logs uploader"; meta: root.live-detail; result: "RUNNING"; live: true; }
                 if (root.live-running) : UploaderFightRow { x: 20px; y: 236px; width: parent.width - 40px; title: "Current log"; meta: root.live-log-label; result: "WATCH"; live: true; }
@@ -11743,6 +11845,8 @@ export component KalpaWindow inherits Window {
     in-out property <string> uploader-live-log-label: "No Encounter.log";
     in-out property <string> uploader-live-fight-label: "Waiting";
     in-out property <string> uploader-live-detail: "Start live mode before the pull. Kalpa will wait for the next logging session and keep the report active.";
+    in-out property <int> uploader-region: 1;
+    in-out property <int> uploader-visibility: 2;
     in-out property <bool> svm-open: false;
     in-out property <int> svm-view: 0;
     in-out property <bool> backup-restore-open: false;
@@ -11959,6 +12063,7 @@ export component KalpaWindow inherits Window {
     callback uploader-select-log(int);
     callback uploader-upload;
     callback uploader-live-toggle;
+    callback uploader-options-changed;
     callback open-svm;
     callback svm-refresh;
     callback open-backup-restore;
@@ -12377,10 +12482,13 @@ export component KalpaWindow inherits Window {
             live-log-label: root.uploader-live-log-label;
             live-fight-label: root.uploader-live-fight-label;
             live-detail: root.uploader-live-detail;
+            region <=> root.uploader-region;
+            visibility-mode <=> root.uploader-visibility;
             refresh => { root.uploader-refresh(); }
             log-selected(index) => { root.uploader-select-log(index); }
             upload-requested => { root.uploader-upload(); }
             live-toggle => { root.uploader-live-toggle(); }
+            options-changed => { root.uploader-options-changed(); }
         }
 
         if (root.backup-restore-open) : BackupRestoreOverlay {
