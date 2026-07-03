@@ -60,6 +60,9 @@ jobs:
       - name: Rust format check
         run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
+      - name: Build native Slint sidecar
+        run: npm run build:native-slint
+
       - name: Rust clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
