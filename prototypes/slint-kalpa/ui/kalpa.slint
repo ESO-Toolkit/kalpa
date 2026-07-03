@@ -6267,10 +6267,14 @@ component SvmCleanupRow inherits Rectangle {
 
 component SvmSelectField inherits Rectangle {
     in property <string> label;
+    in property <bool> disabled: false;
+    callback clicked;
     height: 38px;
     border-radius: 10px;
     border-width: 0px;
-    background: Palette.white-03;
+    background: root.disabled ? Palette.white-02 : (touch.has-hover ? Palette.white-06 : Palette.white-03);
+
+    animate background { duration: 150ms; easing: ease-in-out; }
 
     Text {
         x: 12px;
@@ -6278,7 +6282,7 @@ component SvmSelectField inherits Rectangle {
         height: parent.height;
         width: parent.width - 46px;
         text: root.label;
-        color: Palette.foreground;
+        color: root.disabled ? Palette.muted-dim : Palette.foreground;
         font-size: 14px;
         font-weight: 850;
         vertical-alignment: center;
@@ -6292,7 +6296,17 @@ component SvmSelectField inherits Rectangle {
         height: 14px;
         source: @image-url("../assets/icons/chevron-down.svg");
         image-fit: contain;
-        colorize: Palette.muted-strong;
+        colorize: root.disabled ? Palette.muted-dim : Palette.muted-strong;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => {
+            if (!root.disabled) {
+                root.clicked();
+            }
+        }
     }
 }
 
@@ -6452,8 +6466,23 @@ component SavedVariablesOverlay inherits Rectangle {
     in property <string> large-count-label;
     in property <bool> has-orphans: false;
     in property <bool> has-files: false;
+    in property <string> copy-file-label: "No profile files";
+    in property <string> copy-source-label: "No source profile";
+    in property <string> copy-dest-label: "No destination profile";
+    in property <string> copy-source-name: "";
+    in property <string> copy-dest-name: "";
+    in property <string> copy-addon-name: "";
+    in property <string> copy-status-label: "";
+    in property <bool> copy-ready: false;
+    in property <bool> copy-has-file: false;
+    in property <bool> copy-has-source: false;
+    in property <bool> copy-has-dest: false;
     callback refresh;
     callback clean-orphans;
+    callback copy-select-file;
+    callback copy-select-source;
+    callback copy-select-dest;
+    callback copy-profile;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 980px ? root.width - 48px : 900px;
@@ -6666,15 +6695,49 @@ component SavedVariablesOverlay inherits Rectangle {
             Text { x: 0px; y: 0px; width: parent.width; text: "Copy addon settings from one character to another within the same SavedVariables file."; color: Palette.muted-strong; font-size: 15px; font-weight: 650; }
 
             Text { x: 0px; y: 46px; text: "1. Select SavedVariables file"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; }
-            SvmSelectField { x: 0px; y: 68px; width: parent.width; label: "Cooldowns.lua"; }
+            SvmSelectField {
+                x: 0px;
+                y: 68px;
+                width: parent.width;
+                label: root.copy-file-label;
+                disabled: !root.copy-has-file;
+                clicked => { root.copy-select-file(); }
+            }
 
             Text { x: 0px; y: 124px; text: "2. Source character"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; }
-            SvmSelectField { x: 0px; y: 146px; width: parent.width; label: "Spike'jo"; }
+            SvmSelectField {
+                x: 0px;
+                y: 146px;
+                width: parent.width;
+                label: root.copy-source-label;
+                disabled: !root.copy-has-source;
+                clicked => { root.copy-select-source(); }
+            }
 
             Text { x: 0px; y: 202px; text: "3. Destination character"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; }
-            SvmSelectField { x: 0px; y: 224px; width: parent.width; label: "Spike jona"; }
+            SvmSelectField {
+                x: 0px;
+                y: 224px;
+                width: parent.width;
+                label: root.copy-dest-label;
+                disabled: !root.copy-has-dest;
+                clicked => { root.copy-select-dest(); }
+            }
+
+            Text {
+                visible: root.copy-status-label != "";
+                x: 0px;
+                y: 272px;
+                width: parent.width;
+                text: root.copy-status-label;
+                color: Palette.muted-strong;
+                font-size: 12px;
+                font-weight: 700;
+                overflow: elide;
+            }
 
             Rectangle {
+                visible: root.copy-ready;
                 x: 0px;
                 y: 292px;
                 width: parent.width;
@@ -6685,11 +6748,11 @@ component SavedVariablesOverlay inherits Rectangle {
                 background: Palette.gold-04;
 
                 Text { x: 14px; y: 16px; text: "Copy "; color: Palette.foreground; font-size: 14px; font-weight: 850; }
-                Text { x: 52px; y: 16px; text: "Spike'jo"; color: Palette.gold; font-size: 14px; font-weight: 900; }
-                Text { x: 116px; y: 16px; text: "->"; color: Palette.foreground; font-size: 14px; font-weight: 850; }
-                Text { x: 140px; y: 16px; text: "Spike jona"; color: Palette.sky; font-size: 14px; font-weight: 900; }
-                Text { x: 216px; y: 16px; text: "in Cooldowns.lua"; color: Palette.foreground; font-size: 14px; font-weight: 850; }
-                PackHubButton { x: 14px; y: 48px; width: 132px; icon: @image-url("../assets/icons/copy.svg"); label: "Copy Profile"; primary: true; }
+                Text { x: 52px; y: 16px; width: 154px; text: root.copy-source-name; color: Palette.gold; font-size: 14px; font-weight: 900; overflow: elide; }
+                Text { x: 212px; y: 16px; text: "->"; color: Palette.foreground; font-size: 14px; font-weight: 850; }
+                Text { x: 236px; y: 16px; width: 154px; text: root.copy-dest-name; color: Palette.sky; font-size: 14px; font-weight: 900; overflow: elide; }
+                Text { x: 396px; y: 16px; width: parent.width - 410px; text: "in " + root.copy-addon-name; color: Palette.foreground; font-size: 14px; font-weight: 850; overflow: elide; }
+                PackHubButton { x: 14px; y: 48px; width: 132px; icon: @image-url("../assets/icons/copy.svg"); label: "Copy Profile"; primary: true; disabled: !root.copy-ready; clicked => { root.copy-profile(); } }
             }
         }
 
@@ -8844,6 +8907,17 @@ export component KalpaWindow inherits Window {
     in-out property <string> svm-large-count-label: "0";
     in-out property <bool> svm-has-orphans: false;
     in-out property <bool> svm-has-files: false;
+    in-out property <string> svm-copy-file-label: "No profile files";
+    in-out property <string> svm-copy-source-label: "No source profile";
+    in-out property <string> svm-copy-dest-label: "No destination profile";
+    in-out property <string> svm-copy-source-name: "";
+    in-out property <string> svm-copy-dest-name: "";
+    in-out property <string> svm-copy-addon-name: "";
+    in-out property <string> svm-copy-status-label: "";
+    in-out property <bool> svm-copy-ready: false;
+    in-out property <bool> svm-copy-has-file: false;
+    in-out property <bool> svm-copy-has-source: false;
+    in-out property <bool> svm-copy-has-dest: false;
     in-out property <string> backup-status-title: "No backup yet";
     in-out property <string> backup-status-subtitle: "Your addon settings aren't protected. Create your first backup below.";
     in-out property <int> backup-status-kind: 0;
@@ -8932,6 +9006,10 @@ export component KalpaWindow inherits Window {
     callback settings-addon-list-export;
     callback settings-addon-list-import;
     callback svm-clean-orphans;
+    callback svm-copy-select-file;
+    callback svm-copy-select-source;
+    callback svm-copy-select-dest;
+    callback svm-copy-profile;
     callback review-conflicts;
     no-frame: true;
     preferred-width: 1462px;
@@ -9162,8 +9240,23 @@ export component KalpaWindow inherits Window {
             large-count-label: root.svm-large-count-label;
             has-orphans: root.svm-has-orphans;
             has-files: root.svm-has-files;
+            copy-file-label: root.svm-copy-file-label;
+            copy-source-label: root.svm-copy-source-label;
+            copy-dest-label: root.svm-copy-dest-label;
+            copy-source-name: root.svm-copy-source-name;
+            copy-dest-name: root.svm-copy-dest-name;
+            copy-addon-name: root.svm-copy-addon-name;
+            copy-status-label: root.svm-copy-status-label;
+            copy-ready: root.svm-copy-ready;
+            copy-has-file: root.svm-copy-has-file;
+            copy-has-source: root.svm-copy-has-source;
+            copy-has-dest: root.svm-copy-has-dest;
             refresh => { root.svm-refresh(); }
             clean-orphans => { root.svm-clean-orphans(); }
+            copy-select-file => { root.svm-copy-select-file(); }
+            copy-select-source => { root.svm-copy-select-source(); }
+            copy-select-dest => { root.svm-copy-select-dest(); }
+            copy-profile => { root.svm-copy-profile(); }
         }
 
         if (root.uploader-open) : UploaderOverlay {

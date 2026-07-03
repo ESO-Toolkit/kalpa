@@ -308,6 +308,141 @@ struct AddonModels {
     view_key: Rc<RefCell<Option<AddonViewKey>>>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SvmProfileFile {
+    file_name: String,
+    addon_name: String,
+    profiles: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SvmCopySelection {
+    file_name: String,
+    addon_name: String,
+    source_key: String,
+    dest_key: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SvmCopyState {
+    files: Vec<SvmProfileFile>,
+    file_index: usize,
+    source_index: usize,
+    dest_index: usize,
+    status: String,
+}
+
+impl SvmCopyState {
+    fn replace_files(&mut self, files: Vec<SvmProfileFile>) {
+        self.files = files;
+        self.file_index = 0;
+        self.source_index = 0;
+        self.dest_index = 0;
+        self.status.clear();
+        self.normalize();
+    }
+
+    fn normalize(&mut self) {
+        if self.files.is_empty() {
+            self.file_index = 0;
+            self.source_index = 0;
+            self.dest_index = 0;
+            return;
+        }
+
+        self.file_index %= self.files.len();
+        let source_count = self
+            .selected_file()
+            .map(|file| file.profiles.len())
+            .unwrap_or_default();
+        if source_count == 0 {
+            self.source_index = 0;
+            self.dest_index = 0;
+            return;
+        }
+
+        self.source_index %= source_count;
+        let dest_count = self.destination_choices().len();
+        if dest_count == 0 {
+            self.dest_index = 0;
+        } else {
+            self.dest_index %= dest_count;
+        }
+    }
+
+    fn select_next_file(&mut self) {
+        if !self.files.is_empty() {
+            self.file_index = (self.file_index + 1) % self.files.len();
+        }
+        self.source_index = 0;
+        self.dest_index = 0;
+        self.status.clear();
+        self.normalize();
+    }
+
+    fn select_next_source(&mut self) {
+        let profile_count = self
+            .selected_file()
+            .map(|file| file.profiles.len())
+            .unwrap_or_default();
+        if profile_count > 0 {
+            self.source_index = (self.source_index + 1) % profile_count;
+        }
+        self.dest_index = 0;
+        self.status.clear();
+        self.normalize();
+    }
+
+    fn select_next_dest(&mut self) {
+        let dest_count = self.destination_choices().len();
+        if dest_count > 0 {
+            self.dest_index = (self.dest_index + 1) % dest_count;
+        }
+        self.status.clear();
+        self.normalize();
+    }
+
+    fn selected_file(&self) -> Option<&SvmProfileFile> {
+        self.files.get(self.file_index)
+    }
+
+    fn source_key(&self) -> Option<&str> {
+        self.selected_file()
+            .and_then(|file| file.profiles.get(self.source_index))
+            .map(String::as_str)
+    }
+
+    fn destination_choices(&self) -> Vec<String> {
+        let Some(source) = self.source_key() else {
+            return Vec::new();
+        };
+        self.files
+            .iter()
+            .flat_map(|file| file.profiles.iter())
+            .filter(|profile| profile.as_str() != source)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn dest_key(&self) -> Option<String> {
+        self.destination_choices().get(self.dest_index).cloned()
+    }
+
+    fn selection(&self) -> Option<SvmCopySelection> {
+        let file = self.selected_file()?;
+        let source_key = self.source_key()?.to_string();
+        let dest_key = self.dest_key()?;
+        Some(SvmCopySelection {
+            file_name: file.file_name.clone(),
+            addon_name: file.addon_name.clone(),
+            source_key,
+            dest_key,
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct AddonViewKey {
     query: String,
@@ -2409,26 +2544,31 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         });
     });
 
+    let svm_copy_state = Rc::new(RefCell::new(SvmCopyState::default()));
+
     let svm_open_ui = ui.as_weak();
     let svm_open_models = models.clone();
+    let svm_open_copy_state = svm_copy_state.clone();
     ui.on_open_svm(move || {
         let Some(ui) = svm_open_ui.upgrade() else {
             return;
         };
-        apply_saved_variables_model(&ui, &svm_open_models.all.borrow());
+        refresh_saved_variables_overlay_model(&ui, &svm_open_models, &svm_open_copy_state);
     });
 
     let svm_refresh_ui = ui.as_weak();
     let svm_refresh_models = models.clone();
+    let svm_refresh_copy_state = svm_copy_state.clone();
     ui.on_svm_refresh(move || {
         let Some(ui) = svm_refresh_ui.upgrade() else {
             return;
         };
-        apply_saved_variables_model(&ui, &svm_refresh_models.all.borrow());
+        refresh_saved_variables_overlay_model(&ui, &svm_refresh_models, &svm_refresh_copy_state);
     });
 
     let svm_clean_ui = ui.as_weak();
     let svm_clean_models = models.clone();
+    let svm_clean_copy_state = svm_copy_state.clone();
     ui.on_svm_clean_orphans(move || {
         let Some(ui) = svm_clean_ui.upgrade() else {
             return;
@@ -2451,7 +2591,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
 
         match clean_saved_variable_orphans(&addons_root, &orphaned) {
             Ok(deleted) => {
-                apply_saved_variables_model(&ui, &svm_clean_models.all.borrow());
+                refresh_saved_variables_overlay_model(&ui, &svm_clean_models, &svm_clean_copy_state);
                 ui.set_status_error_message(
                     format!(
                         "Deleted {deleted} orphaned SavedVariables file{} and created an automatic backup.",
@@ -2462,6 +2602,88 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             }
             Err(error) => {
                 ui.set_status_error_message(format!("SavedVariables cleanup failed: {error}").into())
+            }
+        }
+    });
+
+    let svm_copy_file_ui = ui.as_weak();
+    let svm_copy_file_state = svm_copy_state.clone();
+    ui.on_svm_copy_select_file(move || {
+        let Some(ui) = svm_copy_file_ui.upgrade() else {
+            return;
+        };
+        svm_copy_file_state.borrow_mut().select_next_file();
+        apply_svm_copy_state(&ui, &svm_copy_file_state.borrow());
+    });
+
+    let svm_copy_source_ui = ui.as_weak();
+    let svm_copy_source_state = svm_copy_state.clone();
+    ui.on_svm_copy_select_source(move || {
+        let Some(ui) = svm_copy_source_ui.upgrade() else {
+            return;
+        };
+        svm_copy_source_state.borrow_mut().select_next_source();
+        apply_svm_copy_state(&ui, &svm_copy_source_state.borrow());
+    });
+
+    let svm_copy_dest_ui = ui.as_weak();
+    let svm_copy_dest_state = svm_copy_state.clone();
+    ui.on_svm_copy_select_dest(move || {
+        let Some(ui) = svm_copy_dest_ui.upgrade() else {
+            return;
+        };
+        svm_copy_dest_state.borrow_mut().select_next_dest();
+        apply_svm_copy_state(&ui, &svm_copy_dest_state.borrow());
+    });
+
+    let svm_copy_action_ui = ui.as_weak();
+    let svm_copy_action_models = models.clone();
+    let svm_copy_action_state = svm_copy_state;
+    ui.on_svm_copy_profile(move || {
+        let Some(ui) = svm_copy_action_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before copying SavedVariables profiles.".into(),
+            );
+            return;
+        };
+        let Some(selection) = svm_copy_action_state.borrow().selection() else {
+            ui.set_status_error_message("Choose a source and destination profile first.".into());
+            return;
+        };
+
+        match copy_svm_profile_selection(&addons_root, &selection) {
+            Ok(()) => {
+                refresh_saved_variables_overlay_model(
+                    &ui,
+                    &svm_copy_action_models,
+                    &svm_copy_action_state,
+                );
+                {
+                    let mut state = svm_copy_action_state.borrow_mut();
+                    state.status = format!(
+                        "Copied {} to {} in {}.",
+                        selection.source_key, selection.dest_key, selection.addon_name
+                    );
+                }
+                apply_svm_copy_state(&ui, &svm_copy_action_state.borrow());
+                ui.set_status_error_message(
+                    format!(
+                        "Copied \"{}\" to \"{}\" in {}.",
+                        selection.source_key, selection.dest_key, selection.addon_name
+                    )
+                    .into(),
+                );
+            }
+            Err(error) => {
+                {
+                    let mut state = svm_copy_action_state.borrow_mut();
+                    state.status = format!("Copy failed: {error}");
+                }
+                apply_svm_copy_state(&ui, &svm_copy_action_state.borrow());
+                ui.set_status_error_message(format!("SavedVariables copy failed: {error}").into());
             }
         }
     });
@@ -6694,6 +6916,148 @@ fn apply_saved_variables_model(ui: &KalpaWindow, addons: &[AddonEntry]) {
     ui.set_svm_orphaned_files(Rc::new(VecModel::from(orphaned)).into());
 }
 
+fn refresh_saved_variables_overlay_model(
+    ui: &KalpaWindow,
+    models: &AddonModels,
+    copy_state: &Rc<RefCell<SvmCopyState>>,
+) {
+    let addons = models.all.borrow();
+    apply_saved_variables_model(ui, &addons);
+    refresh_svm_copy_state(ui, &addons, copy_state);
+}
+
+fn refresh_svm_copy_state(
+    ui: &KalpaWindow,
+    addons: &[AddonEntry],
+    copy_state: &Rc<RefCell<SvmCopyState>>,
+) {
+    let result = addons_source_root()
+        .map(|addons_root| saved_variable_profile_files(&addons_root, addons))
+        .unwrap_or_else(|| Ok(Vec::new()));
+
+    {
+        let mut state = copy_state.borrow_mut();
+        match result {
+            Ok(files) => state.replace_files(files),
+            Err(error) => {
+                state.replace_files(Vec::new());
+                state.status = error;
+            }
+        }
+    }
+
+    apply_svm_copy_state(ui, &copy_state.borrow());
+}
+
+fn apply_svm_copy_state(ui: &KalpaWindow, state: &SvmCopyState) {
+    let selected_file = state.selected_file();
+    let source = state.source_key().unwrap_or("");
+    let dest = state.dest_key().unwrap_or_default();
+    let file_label = selected_file
+        .map(|file| {
+            format!(
+                "{} ({} profile{})",
+                file.addon_name,
+                file.profiles.len(),
+                if file.profiles.len() == 1 { "" } else { "s" }
+            )
+        })
+        .unwrap_or_else(|| "No profile files".to_string());
+    let source_label = if source.is_empty() {
+        "No source profile".to_string()
+    } else {
+        source.to_string()
+    };
+    let dest_label = if dest.is_empty() {
+        "No destination profile".to_string()
+    } else {
+        dest.clone()
+    };
+    let status = if !state.status.is_empty() {
+        state.status.clone()
+    } else if state.files.is_empty() {
+        "No SavedVariables files with character profiles were found.".to_string()
+    } else if source.is_empty() {
+        "This file has no copyable character profiles.".to_string()
+    } else if dest.is_empty() {
+        "A second character profile is needed before copying.".to_string()
+    } else {
+        "Click a field to cycle through available choices.".to_string()
+    };
+    let ready = state.selection().is_some();
+    let addon_name = selected_file
+        .map(|file| format!("{}.lua", file.addon_name))
+        .unwrap_or_default();
+
+    ui.set_svm_copy_file_label(file_label.into());
+    ui.set_svm_copy_source_label(source_label.into());
+    ui.set_svm_copy_dest_label(dest_label.into());
+    ui.set_svm_copy_source_name(source.into());
+    ui.set_svm_copy_dest_name(dest.into());
+    ui.set_svm_copy_addon_name(addon_name.into());
+    ui.set_svm_copy_status_label(status.into());
+    ui.set_svm_copy_ready(ready);
+    ui.set_svm_copy_has_file(selected_file.is_some());
+    ui.set_svm_copy_has_source(!source.is_empty());
+    ui.set_svm_copy_has_dest(!state.destination_choices().is_empty());
+}
+
+fn saved_variable_profile_files(
+    addons_root: &Path,
+    addons: &[AddonEntry],
+) -> Result<Vec<SvmProfileFile>, String> {
+    let sv_dir = addons_root
+        .parent()
+        .unwrap_or(addons_root)
+        .join("SavedVariables");
+    let files = saved_variable_entries(addons_root, addons)?
+        .into_iter()
+        .filter_map(|entry| {
+            let file_name = entry.file_name.to_string();
+            let profiles = extract_saved_variable_profiles_from_path(&sv_dir.join(&file_name))
+                .into_iter()
+                .collect::<Vec<_>>();
+            if profiles.is_empty() {
+                return None;
+            }
+            Some(SvmProfileFile {
+                file_name,
+                addon_name: entry.addon_name.to_string(),
+                profiles,
+            })
+        })
+        .collect();
+
+    Ok(files)
+}
+
+fn validate_svm_profile_key(key: &str) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Err("Character profile keys cannot be empty.".to_string());
+    }
+    if key.contains('"') || key.contains('\'') || key.contains('\\') {
+        return Err("Character profile keys must not contain quotes or backslashes.".to_string());
+    }
+    if key.chars().any(|character| character.is_control()) {
+        return Err("Character profile keys must not contain control characters.".to_string());
+    }
+    Ok(())
+}
+
+fn copy_svm_profile_selection(
+    addons_root: &Path,
+    selection: &SvmCopySelection,
+) -> Result<(), String> {
+    validate_svm_profile_key(&selection.source_key)?;
+    validate_svm_profile_key(&selection.dest_key)?;
+    saved_variables::profile::copy_sv_profile_blocking(
+        addons_root,
+        &selection.file_name,
+        &selection.source_key,
+        &selection.dest_key,
+    )
+}
+
 fn clean_saved_variable_orphans(
     addons_root: &Path,
     orphaned: &[SavedVariableEntry],
@@ -6848,16 +7212,20 @@ fn classify_saved_variable(addon_name: &str, installed: &HashSet<String>) -> Sav
 }
 
 fn extract_saved_variable_profile_count(path: &Path) -> usize {
+    extract_saved_variable_profiles_from_path(path).len()
+}
+
+fn extract_saved_variable_profiles_from_path(path: &Path) -> BTreeSet<String> {
     let Ok(mut file) = fs::File::open(path) else {
-        return 0;
+        return BTreeSet::new();
     };
     let mut buffer = vec![0u8; 256 * 1024];
     let Ok(count) = std::io::Read::read(&mut file, &mut buffer) else {
-        return 0;
+        return BTreeSet::new();
     };
     buffer.truncate(count);
     let content = String::from_utf8_lossy(&buffer);
-    extract_saved_variable_profiles(&content).len()
+    extract_saved_variable_profiles(&content)
 }
 
 fn extract_saved_variable_profiles(content: &str) -> BTreeSet<String> {
@@ -9828,6 +10196,85 @@ CombatMetrics_SavedVariables = {
             .expect("orphaned entry exists");
         assert!(orphaned.orphaned);
         assert!(!orphaned.system);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_svm_copy_state_uses_profiles_across_files() {
+        let mut state = SvmCopyState::default();
+        state.replace_files(vec![
+            SvmProfileFile {
+                file_name: "One.lua".to_string(),
+                addon_name: "One".to_string(),
+                profiles: vec!["Main".to_string()],
+            },
+            SvmProfileFile {
+                file_name: "Two.lua".to_string(),
+                addon_name: "Two".to_string(),
+                profiles: vec!["Alt".to_string(), "Bank".to_string()],
+            },
+        ]);
+
+        assert_eq!(state.source_key(), Some("Main"));
+        assert_eq!(
+            state.destination_choices(),
+            vec!["Alt".to_string(), "Bank".to_string()]
+        );
+        assert_eq!(
+            state.selection().map(|selection| selection.dest_key),
+            Some("Alt".to_string())
+        );
+
+        state.select_next_dest();
+        assert_eq!(
+            state.selection().map(|selection| selection.dest_key),
+            Some("Bank".to_string())
+        );
+
+        state.select_next_file();
+        assert_eq!(state.source_key(), Some("Alt"));
+        assert_eq!(
+            state.destination_choices(),
+            vec!["Bank".to_string(), "Main".to_string()]
+        );
+    }
+
+    #[test]
+    fn native_svm_profile_copy_writes_destination_profile() {
+        let root = test_temp_dir("native-svm-profile-copy");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::write(
+            sv_dir.join("TestAddon.lua"),
+            r#"TestAddon_SavedVariables = {
+    ["Default"] = {
+        ["@Account"] = {
+            ["Main"] = {
+                ["enabled"] = true,
+            },
+        },
+    },
+}
+"#,
+        )
+        .expect("write saved variable");
+
+        let selection = SvmCopySelection {
+            file_name: "TestAddon.lua".to_string(),
+            addon_name: "TestAddon".to_string(),
+            source_key: "Main".to_string(),
+            dest_key: "Alt".to_string(),
+        };
+
+        copy_svm_profile_selection(&addons_root, &selection).expect("copy profile");
+        let updated =
+            fs::read_to_string(sv_dir.join("TestAddon.lua")).expect("read copied saved variable");
+        assert!(updated.contains("[\"Main\"]"));
+        assert!(updated.contains("[\"Alt\"]"));
+        assert!(sv_dir.join("TestAddon.lua.bak").is_file());
 
         let _ = fs::remove_dir_all(root);
     }
