@@ -243,10 +243,12 @@ Current detail status:
   records normal detail installs in the same local `installed_packs` settings
   key used by the WebView My Packs library and fires the Pack Hub install-count
   endpoint on a best-effort background request. It still lacks the React
-  batch-progress UI and transitive dependency pass. Pack detail Edit/Delete/Share
-  actions now hand off to the full WebView Pack Hub with the selected pack id
-  because those flows still require the React account/session surfaces. Shared
-  native icon+label buttons now center the icon/text group as one unit, fixing
+  batch-progress UI and transitive dependency pass. Pack detail Share now stays
+  in Slint by exporting the loaded pack detail as an importable `.esopack` file
+  and copying the exported path to the clipboard. Pack detail Edit/Delete still
+  hand off to the full WebView Pack Hub with the selected pack id because those
+  flows still require the React account/session surfaces. Shared native
+  icon+label buttons now center the icon/text group as one unit, fixing
   the visible drift in Pack Hub, file toolbar, and settings action buttons.
   Share-code import now resolves `/shares/{code}` natively, previews required
   and optional addons, and installs only required missing addons to match the
@@ -263,9 +265,9 @@ Current detail status:
   and remove-from-library actions; Created packs remain a full-Hub/account
   handoff. The native Create flow can now export the selected addon list as an
   importable `.esopack` file in the local Kalpa exports folder. An OS file
-  picker for `.esopack` import, native draft/publish, private share-code
-  creation, voting, and account/session wiring still need production parity
-  before this can replace the React Pack Hub implementation; the native
+  picker for `.esopack` import, native draft/publish, authenticated private
+  share-code creation, voting, and account/session wiring still need production
+  parity before this can replace the React Pack Hub implementation; the native
   draft/publish controls are disabled rather than appearing actionable.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and

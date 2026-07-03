@@ -6789,6 +6789,8 @@ component PackHubInstallView inherits Rectangle {
     in property <[PackHubAddonEntry]> addons;
     in property <bool> loading: false;
     in property <string> message: "";
+    in property <bool> sharing: false;
+    in property <string> share-status: "";
     callback back;
     callback edit-requested;
     callback delete-requested;
@@ -6813,7 +6815,31 @@ component PackHubInstallView inherits Rectangle {
     Text { x: 274px; y: 44px; width: 120px; text: root.pack.updated-label; color: Palette.muted-half; font-size: 10px; font-weight: 600; overflow: elide; }
     PackHubButton { x: parent.width - 322px; y: 36px; width: 94px; icon: @image-url("../assets/icons/pencil.svg"); label: "Edit"; clicked => { root.edit-requested(); } }
     PackHubButton { x: parent.width - 216px; y: 36px; width: 104px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; clicked => { root.delete-requested(); } }
-    PackHubButton { x: parent.width - 100px; y: 36px; width: 100px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Share"; clicked => { root.share-requested(); } }
+    PackHubButton { x: parent.width - 100px; y: 36px; width: 100px; icon: @image-url("../assets/icons/copy.svg"); label: root.sharing ? "Sharing" : "Share"; disabled: root.sharing || root.addons.length == 0; clicked => { root.share-requested(); } }
+
+    if (root.share-status != "") : Rectangle {
+        x: parent.width - 322px;
+        y: 72px;
+        width: 322px;
+        height: 28px;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Palette.gold-20;
+        background: Palette.gold-04;
+
+        Text {
+            x: 10px;
+            y: 0px;
+            width: parent.width - 20px;
+            height: parent.height;
+            text: root.share-status;
+            color: Palette.gold;
+            font-size: 11px;
+            font-weight: 750;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
 
     Rectangle {
         x: 0px;
@@ -7429,6 +7455,8 @@ component PackHubOverlay inherits Rectangle {
     in property <string> browse-message: "";
     in property <bool> detail-loading: false;
     in property <string> detail-message: "";
+    in property <bool> detail-sharing: false;
+    in property <string> detail-share-status: "";
     in property <string> install-label: "Install Addons";
     in property <bool> import-loading: false;
     in property <bool> import-has-settings: false;
@@ -7460,6 +7488,7 @@ component PackHubOverlay inherits Rectangle {
     callback detail-addon-selection-toggle(int);
     callback install-detail;
     callback manage-pack-detail;
+    callback share-pack-detail;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
@@ -7660,10 +7689,12 @@ component PackHubOverlay inherits Rectangle {
                 addons: root.detail-addons;
                 loading: root.detail-loading;
                 message: root.detail-message != "" ? root.detail-message : "No addons are listed for this pack.";
+                sharing: root.detail-sharing;
+                share-status: root.detail-share-status;
                 back => { root.view = 0; }
                 edit-requested => { root.manage-pack-detail(); }
                 delete-requested => { root.manage-pack-detail(); }
-                share-requested => { root.manage-pack-detail(); }
+                share-requested => { root.share-pack-detail(); }
                 addon-selection-toggle(index) => { root.detail-addon-selection-toggle(index); }
             }
 
@@ -11825,6 +11856,8 @@ export component KalpaWindow inherits Window {
     in-out property <string> pack-hub-browse-message;
     in-out property <bool> pack-hub-detail-loading: false;
     in-out property <string> pack-hub-detail-message;
+    in-out property <bool> pack-hub-detail-sharing: false;
+    in-out property <string> pack-hub-detail-share-status;
     in-out property <string> pack-hub-install-label: "Install Addons";
     in-out property <bool> pack-hub-import-loading: false;
     in-out property <bool> pack-hub-import-has-settings: false;
@@ -12058,6 +12091,7 @@ export component KalpaWindow inherits Window {
     callback pack-hub-detail-addon-selection-toggle(int);
     callback pack-hub-install-detail;
     callback pack-hub-manage-detail;
+    callback pack-hub-share-detail;
     callback open-uploader;
     callback uploader-refresh;
     callback uploader-select-log(int);
@@ -12386,6 +12420,8 @@ export component KalpaWindow inherits Window {
             browse-message: root.pack-hub-browse-message;
             detail-loading: root.pack-hub-detail-loading;
             detail-message: root.pack-hub-detail-message;
+            detail-sharing: root.pack-hub-detail-sharing;
+            detail-share-status: root.pack-hub-detail-share-status;
             install-label: root.pack-hub-install-label;
             import-loading: root.pack-hub-import-loading;
             import-has-settings: root.pack-hub-import-has-settings;
@@ -12417,6 +12453,7 @@ export component KalpaWindow inherits Window {
             detail-addon-selection-toggle(index) => { root.pack-hub-detail-addon-selection-toggle(index); }
             install-detail => { root.pack-hub-install-detail(); }
             manage-pack-detail => { root.pack-hub-manage-detail(); }
+            share-pack-detail => { root.pack-hub-share-detail(); }
         }
 
         if (root.svm-open) : SavedVariablesOverlay {

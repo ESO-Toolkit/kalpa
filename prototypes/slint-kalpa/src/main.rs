@@ -3883,6 +3883,8 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_pack_hub_selected_index(index as i32);
         ui.set_pack_hub_detail_loading(true);
         ui.set_pack_hub_detail_message("".into());
+        ui.set_pack_hub_detail_sharing(false);
+        ui.set_pack_hub_detail_share_status("".into());
         apply_pack_hub_detail_model(&ui, Vec::new());
 
         let Some(pack) = ui.get_pack_hub_packs().row_data(index) else {
@@ -3920,6 +3922,8 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_pack_hub_view(3);
         ui.set_pack_hub_detail_loading(true);
         ui.set_pack_hub_detail_message("".into());
+        ui.set_pack_hub_detail_sharing(false);
+        ui.set_pack_hub_detail_share_status("".into());
         apply_pack_hub_detail_model(&ui, Vec::new());
 
         let installed_ids = installed_discover_ids(&installed_pack_open_models.all.borrow());
@@ -4059,13 +4063,77 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             Err(error) => {
                 ui.set_pack_hub_detail_message(
                     format!(
-                        "Full Pack Hub is needed for edit, delete, and share actions. Failed to open WebView: {error}"
+                        "Full Pack Hub is needed for edit and delete actions. Failed to open WebView: {error}"
                     )
                     .into(),
                 );
                 ui.set_status_error_message(format!("Failed to open full Pack Hub: {error}").into());
             }
         }
+    });
+
+    let pack_share_ui = ui.as_weak();
+    ui.on_pack_hub_share_detail(move || {
+        let Some(ui) = pack_share_ui.upgrade() else {
+            return;
+        };
+
+        let Some(entry) = selected_pack_hub_entry(&ui) else {
+            ui.set_pack_hub_detail_share_status("Select a pack first.".into());
+            return;
+        };
+        let addons = pack_hub_detail_addons(&ui);
+        if addons.is_empty() {
+            ui.set_pack_hub_detail_share_status("Load pack addons before sharing.".into());
+            return;
+        }
+
+        ui.set_pack_hub_detail_sharing(true);
+        ui.set_pack_hub_detail_share_status("Preparing .esopack...".into());
+        ui.set_status_error_message("Exporting Pack Hub share file...".into());
+
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = export_pack_hub_detail_file(&entry, &addons, None).map(|path| {
+                let clipboard = write_clipboard_text(path.display().to_string());
+                (path, clipboard)
+            });
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                ui.set_pack_hub_detail_sharing(false);
+                match result {
+                    Ok((path, Ok(()))) => {
+                        ui.set_pack_hub_detail_share_status("Exported and copied path.".into());
+                        ui.set_status_error_message(
+                            format!(
+                                "Pack exported to {} and copied to clipboard.",
+                                path.display()
+                            )
+                            .into(),
+                        );
+                    }
+                    Ok((path, Err(error))) => {
+                        ui.set_pack_hub_detail_share_status("Exported. Clipboard failed.".into());
+                        ui.set_status_error_message(
+                            format!(
+                                "Pack exported to {}. Could not copy path: {error}",
+                                path.display()
+                            )
+                            .into(),
+                        );
+                    }
+                    Err(error) => {
+                        ui.set_pack_hub_detail_share_status("Share export failed.".into());
+                        ui.set_status_error_message(
+                            format!("Pack Hub share export failed: {error}").into(),
+                        );
+                    }
+                }
+            });
+        });
     });
 
     let create_filter_ui = ui.as_weak();
@@ -4152,11 +4220,11 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             None,
         ) {
             Ok(path) => {
-                ui.set_status_error_message(
-                    format!("Pack saved to {}.", path.display()).into(),
-                );
+                ui.set_status_error_message(format!("Pack saved to {}.", path.display()).into());
             }
-            Err(error) => ui.set_status_error_message(format!("Pack export failed: {error}").into()),
+            Err(error) => {
+                ui.set_status_error_message(format!("Pack export failed: {error}").into())
+            }
         }
     });
 
@@ -4816,7 +4884,9 @@ fn export_pack_hub_create_file(
         settings: HashMap::new(),
     };
 
-    let export_dir = export_dir.map(PathBuf::from).unwrap_or_else(default_pack_export_dir);
+    let export_dir = export_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(default_pack_export_dir);
     fs::create_dir_all(&export_dir)
         .map_err(|error| format!("Failed to create export folder: {error}"))?;
     let path = unique_export_path(&export_dir, safe_pack_file_stem(title));
@@ -4838,6 +4908,72 @@ fn pack_hub_create_export_addon(
         name: row.title.to_string(),
         required: row.required,
         note: None,
+    })
+}
+
+fn export_pack_hub_detail_file(
+    entry: &PackHubEntry,
+    addons: &[PackHubAddonEntry],
+    export_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let title = entry.title.as_str().trim();
+    if title.is_empty() {
+        return Err("Pack needs a title.".to_string());
+    }
+    if addons.is_empty() {
+        return Err("Pack has no addons to share.".to_string());
+    }
+
+    let pack_type = pack_type_key_from_kind(entry.type_kind).to_string();
+    let tag = entry.tag.as_str().trim();
+    let tags = if tag.is_empty() {
+        vec![fallback_pack_tag(&pack_type)]
+    } else {
+        vec![tag.to_string()]
+    };
+    let export_addons = addons
+        .iter()
+        .map(pack_hub_detail_export_addon)
+        .collect::<Result<Vec<_>, _>>()?;
+    let shared_by = entry.author.as_str().trim();
+    let pack = NativeEsoPackFile {
+        format: "esopack".to_string(),
+        version: 1,
+        pack: NativeSharedPackBody {
+            title: title.to_string(),
+            description: entry.description.as_str().trim().to_string(),
+            pack_type,
+            tags,
+            addons: export_addons,
+        },
+        shared_at: current_iso_utc(),
+        shared_by: if shared_by.is_empty() {
+            "Kalpa Native".to_string()
+        } else {
+            shared_by.to_string()
+        },
+        settings: HashMap::new(),
+    };
+
+    let export_dir = export_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(default_pack_export_dir);
+    fs::create_dir_all(&export_dir)
+        .map_err(|error| format!("Failed to create export folder: {error}"))?;
+    let path = unique_export_path(&export_dir, safe_pack_file_stem(title));
+    let json = serde_json::to_string_pretty(&pack)
+        .map_err(|error| format!("Failed to serialize pack: {error}"))?;
+    fs::write(&path, json).map_err(|error| format!("Failed to write pack file: {error}"))?;
+    Ok(path)
+}
+
+fn pack_hub_detail_export_addon(row: &PackHubAddonEntry) -> Result<NativePackAddonEntry, String> {
+    let note = row.note.as_str().trim().to_string();
+    Ok(NativePackAddonEntry {
+        esoui_id: pack_hub_row_esoui_id(row)?,
+        name: row.title.to_string(),
+        required: row.required,
+        note: (!note.is_empty()).then_some(note),
     })
 }
 
@@ -19592,6 +19728,62 @@ CombatMetrics_SavedVariables = {
         assert!(imported.detail.addons[0].required);
         assert!(!imported.detail.addons[1].required);
         assert!(imported.settings.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pack_hub_detail_export_round_trips_as_esopack() {
+        let root = test_temp_dir("pack-hub-detail-export");
+        let entry = PackHubEntry {
+            id: "pack-1".into(),
+            title: "Trial Essentials".into(),
+            description: "Core raid addons".into(),
+            tag: "trial".into(),
+            addon_count: "2 addons".into(),
+            vote_count: "7".into(),
+            author: "Spike'jo".into(),
+            pack_type_label: "Addon Pack".into(),
+            updated_label: "Updated Jan 2, 2026".into(),
+            monogram: "TE".into(),
+            author_initial: "S".into(),
+            identity_kind: 1,
+            type_kind: 0,
+            trial: true,
+        };
+        let addons = vec![
+            PackHubAddonEntry {
+                title: "Combat Metrics".into(),
+                esoui_id: "#1360".into(),
+                required: true,
+                installed: false,
+                selected: true,
+                note: "".into(),
+            },
+            PackHubAddonEntry {
+                title: "Optional Helper".into(),
+                esoui_id: "#2468".into(),
+                required: false,
+                installed: false,
+                selected: false,
+                note: "Optional profile helper".into(),
+            },
+        ];
+
+        let path =
+            export_pack_hub_detail_file(&entry, &addons, Some(root)).expect("export detail pack");
+        let imported = import_esopack_file_blocking(&path, &BTreeSet::new()).expect("import pack");
+
+        assert_eq!(imported.detail.entry.title.as_str(), "Trial Essentials");
+        assert_eq!(imported.detail.entry.author.as_str(), "Spike'jo");
+        assert_eq!(imported.detail.addons.len(), 2);
+        assert_eq!(imported.detail.addons[0].esoui_id.as_str(), "#1360");
+        assert!(imported.detail.addons[0].required);
+        assert!(!imported.detail.addons[1].required);
+        assert_eq!(
+            imported.detail.addons[1].note.as_str(),
+            "Optional profile helper"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
