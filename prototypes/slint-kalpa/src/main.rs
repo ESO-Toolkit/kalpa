@@ -5,6 +5,10 @@ slint::include_modules!();
 #[path = "native_char_backup.rs"]
 mod char_backup;
 
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/esoui.rs"]
+mod esoui;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint::{
@@ -17,6 +21,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -1948,6 +1956,30 @@ fn discover_entry(
     }
 }
 
+fn discover_entry_from_esoui_detail(
+    detail: esoui::EsouiAddonDetail,
+    installed: bool,
+    rank: i32,
+) -> DiscoverEntry {
+    DiscoverEntry {
+        esoui_id: detail.id.to_string().into(),
+        title: detail.title.into(),
+        author: detail.author.into(),
+        category: "".into(),
+        version: detail.version.into(),
+        downloads: detail.total_downloads.into(),
+        monthly_downloads: detail.monthly_downloads.into(),
+        favorites: detail.favorites.into(),
+        updated: detail.updated.into(),
+        created: detail.created.into(),
+        md5: detail.md5.into(),
+        compatibility: detail.compatibility.into(),
+        description: detail.description.into(),
+        installed,
+        rank,
+    }
+}
+
 fn dependency_model(dependencies: Vec<DependencyEntry>) -> ModelRc<DependencyEntry> {
     Rc::new(VecModel::from(dependencies)).into()
 }
@@ -3240,6 +3272,7 @@ fn wire_discover(
     let url_ui = ui.as_weak();
     let url_model = discover_model.clone();
     let url_installed_ids = installed_ids.clone();
+    let url_request_counter = Arc::new(AtomicU64::new(0));
     ui.on_discover_url_edited(move |_| {
         let Some(ui) = url_ui.upgrade() else {
             return;
@@ -3251,16 +3284,58 @@ fn wire_discover(
 
         let model = apply_discover_data(&ui, 3, &url_installed_ids.borrow());
         *url_model.borrow_mut() = model;
+
+        let input = ui.get_discover_url_input().to_string();
+        if input.trim().is_empty() {
+            ui.set_status_error_message("".into());
+            return;
+        }
+
+        let request_id = url_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let request_counter = url_request_counter.clone();
+        let installed_snapshot = url_installed_ids.borrow().clone();
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = esoui::parse_esoui_input(input.as_str())
+                .and_then(esoui::fetch_addon_detail)
+                .map(|detail| {
+                    let installed = installed_snapshot.contains(&detail.id.to_string());
+                    discover_entry_from_esoui_detail(detail, installed, 0)
+                });
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if request_counter.load(Ordering::SeqCst) != request_id {
+                    return;
+                }
+
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                match result {
+                    Ok(entry) => {
+                        let model = Rc::new(VecModel::from(vec![entry]));
+                        ui.set_selected_discover_index(0);
+                        ui.set_discover_results(model.into());
+                        ui.set_status_error_message("".into());
+                    }
+                    Err(error) => {
+                        ui.set_status_error_message(
+                            format!("Could not resolve ESOUI addon: {error}").into(),
+                        );
+                    }
+                }
+            });
+        });
     });
 
     let selected_ui = ui.as_weak();
-    let selected_model = discover_model.clone();
     ui.on_discover_selected(move |index| {
         let Some(ui) = selected_ui.upgrade() else {
             return;
         };
 
-        let row_count = selected_model.borrow().row_count();
+        let row_count = ui.get_discover_results().row_count();
         if row_count == 0 {
             ui.set_selected_discover_index(0);
             return;
@@ -3270,17 +3345,20 @@ fn wire_discover(
         ui.set_selected_discover_index(next_index as i32);
     });
 
-    let install_model = discover_model.clone();
+    let install_ui = ui.as_weak();
     let install_ids = installed_ids;
     ui.on_discover_install(move |index| {
-        let model = install_model.borrow();
+        let Some(ui) = install_ui.upgrade() else {
+            return;
+        };
+        let model = ui.get_discover_results();
         let Some(entry) = model.row_data(index.max(0) as usize) else {
             return;
         };
 
         let esoui_id = entry.esoui_id.to_string();
         install_ids.borrow_mut().insert(esoui_id.clone());
-        mark_discover_installed(&model, &esoui_id);
+        mark_discover_installed_model(&model, &esoui_id);
     });
 
     ui.on_discover_open_esoui(move |esoui_id| {
@@ -3293,7 +3371,21 @@ fn wire_discover(
     });
 }
 
+#[cfg(test)]
 fn mark_discover_installed(discover_model: &Rc<VecModel<DiscoverEntry>>, esoui_id: &str) {
+    for index in 0..discover_model.row_count() {
+        let Some(mut entry) = discover_model.row_data(index) else {
+            continue;
+        };
+
+        if entry.esoui_id.as_str() == esoui_id {
+            entry.installed = true;
+            discover_model.set_row_data(index, entry);
+        }
+    }
+}
+
+fn mark_discover_installed_model(discover_model: &ModelRc<DiscoverEntry>, esoui_id: &str) {
     for index in 0..discover_model.row_count() {
         let Some(mut entry) = discover_model.row_data(index) else {
             continue;
