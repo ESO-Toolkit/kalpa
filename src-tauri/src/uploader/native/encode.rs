@@ -1351,7 +1351,9 @@ pub(crate) fn split_csv_quoted_pub(s: &str) -> Vec<&str> {
 /// Lightweight: ESO uses simple `"..."` quoting without escaped inner quotes for
 /// these fields.
 fn split_csv_quoted(s: &str) -> impl Iterator<Item = &str> {
-    let mut out = Vec::new();
+    // Most ESO lines split into ~20-30 fields; pre-size to avoid the reallocation
+    // churn of growing from empty on every line (this runs on every raw line).
+    let mut out = Vec::with_capacity(32);
     let bytes = s.as_bytes();
     let mut start = 0;
     let mut in_q = false;
@@ -1841,7 +1843,9 @@ pub struct ActorTable {
     index_of: std::collections::HashMap<String, u32>,
     next_index: u32,
     /// Current runtime state per unit id: (master_index, owner_unit_id, reaction).
-    units: std::collections::HashMap<String, UnitRuntime>,
+    /// Lookup-only hot map (get/get_mut/insert per event, never iterated) →
+    /// `FxHashMap` for a faster non-cryptographic hash on the per-event path.
+    units: rustc_hash::FxHashMap<String, UnitRuntime>,
     /// monsterId → next 0-based instance ordinal (the subordinal `B`/`C` source).
     /// Player-side units always get ordinal 0; each distinct *hostile* unit of a
     /// given monsterId gets the next index (so multiple copies of one monster are
@@ -2013,8 +2017,8 @@ impl ActorTable {
     /// The master-table identity currently bound to a runtime unit id, if known.
     /// Lets the events encoder resolve a unit id to the same identity the master
     /// table indexes by (so the event's tuple `A` references resolve).
-    pub fn identity_of_unit(&self, unit_id: &str) -> Option<String> {
-        self.units.get(unit_id.trim()).map(|u| u.identity.clone())
+    pub fn identity_of_unit(&self, unit_id: &str) -> Option<&str> {
+        self.units.get(unit_id.trim()).map(|u| u.identity.as_str())
     }
 
     /// Apply a `UNIT_CHANGED` line (comma tail). Updates the unit's reaction (and
@@ -2176,14 +2180,19 @@ impl ActorTable {
     /// allocation counter — so this helper takes it as input. It is exercised and
     /// proven in isolation (feeding the golden `a`) so it is ready the moment `a`
     /// is solved; until then whole-line code-1 stays gated.
-    pub fn code1_subordinal(&self, a: &str, src_unit: &str, tgt_unit: &str) -> String {
+    pub fn code1_subordinal(&self, a: u32, src_unit: &str, tgt_unit: &str) -> String {
         let src_ord = self.ordinal(src_unit);
         let tgt_ord = self.ordinal(tgt_unit);
-        let mut comps = vec![a.to_string(), src_ord.to_string(), tgt_ord.to_string()];
-        while comps.len() > 1 && comps.last().map(|s| s == "0").unwrap_or(false) {
-            comps.pop();
+        // Trailing-zero rule (leading `A` always kept), formatted in ONE allocation
+        // instead of the old `vec![String; 3] + join`. A trailing-zero ordinal is
+        // dropped; a middle zero (src 0 with a non-zero tgt) is kept as `A.0.C`.
+        if tgt_ord != 0 {
+            format!("{a}.{src_ord}.{tgt_ord}")
+        } else if src_ord != 0 {
+            format!("{a}.{src_ord}")
+        } else {
+            format!("{a}")
         }
-        comps.join(".")
     }
 }
 
@@ -2968,19 +2977,19 @@ mod tests {
         assert_eq!(t.ordinal("32"), 0, "first 88331 → 0");
         assert_eq!(t.ordinal("25"), 0, "pet of a player-side unit → 0");
 
-        // Arity truth table (A fed as "7"):
+        // Arity truth table (A fed as 7):
         // both player-side → just "A"
-        assert_eq!(t.code1_subordinal("7", "1", "25"), "7");
+        assert_eq!(t.code1_subordinal(7, "1", "25"), "7");
         // src player-side, tgt = second bear (ord 1) → "A.0.C"
-        assert_eq!(t.code1_subordinal("7", "1", "31"), "7.0.1");
+        assert_eq!(t.code1_subordinal(7, "1", "31"), "7.0.1");
         // src player-side, tgt = first bear (ord 0) → "A"
-        assert_eq!(t.code1_subordinal("7", "1", "30"), "7");
+        assert_eq!(t.code1_subordinal(7, "1", "30"), "7");
         // src = second bear (ord 1), tgt player-side → "A.B"
-        assert_eq!(t.code1_subordinal("7", "31", "1"), "7.1");
+        assert_eq!(t.code1_subordinal(7, "31", "1"), "7.1");
         // src = second bear (ord 1), tgt = lion (ord 0) → "A.B" (trailing 0 stripped)
-        assert_eq!(t.code1_subordinal("7", "31", "32"), "7.1");
+        assert_eq!(t.code1_subordinal(7, "31", "32"), "7.1");
         // src = first bear (ord 0), tgt = second bear (ord 1) → "A.0.C"
-        assert_eq!(t.code1_subordinal("7", "30", "31"), "7.0.1");
+        assert_eq!(t.code1_subordinal(7, "30", "31"), "7.0.1");
     }
 
     // Real-data cross-check: replaying chunk1's UNIT_ADDED stream through ActorTable

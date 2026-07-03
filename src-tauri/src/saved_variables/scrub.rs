@@ -29,7 +29,7 @@
 
 #![cfg_attr(not(debug_assertions), allow(dead_code))]
 
-use super::serializer::serialize_to_lua;
+use super::serializer::serialized_len;
 use super::types::{SvTreeNode, SvValueType};
 use serde::{Deserialize, Serialize};
 
@@ -230,7 +230,7 @@ pub struct AddonOverride {
 /// real-file testing; an empty slice is equivalent to calling [`scrub`].
 #[allow(dead_code)]
 pub fn scrub_with_overrides(
-    tree: &SvTreeNode,
+    mut tree: SvTreeNode,
     ctx: &ScrubContext,
     overrides: &[AddonOverride],
 ) -> (SvTreeNode, ScrubReport) {
@@ -241,7 +241,10 @@ pub fn scrub_with_overrides(
     // the folder name directly, since the SV file can declare multiple vars.
     // For now the matching is best-effort: if any variable name starts with or
     // equals the addon name (case-insensitive), we apply the override.
-    let original_bytes = serialize_to_lua(tree).len();
+    //
+    // Consumes and mutates `tree` in place (retaining surviving top-level vars),
+    // matching `scrub`'s single-live-tree behaviour.
+    let original_bytes = serialized_len(&tree);
     let mut report = ScrubReport {
         original_bytes,
         ..ScrubReport::default()
@@ -249,86 +252,70 @@ pub fn scrub_with_overrides(
     let mut placeholders = PlaceholderTable::new(ctx);
     let mut path: Vec<String> = Vec::new();
 
-    let children = match &tree.children {
-        Some(c) => c,
-        None => {
-            return (
-                SvTreeNode {
-                    key: tree.key.clone(),
-                    value_type: SvValueType::Table,
-                    value: None,
-                    children: Some(Vec::new()),
-                    raw_lua_value: None,
-                },
-                report,
-            )
-        }
-    };
-
-    let mut new_children: Vec<SvTreeNode> = Vec::new();
-    for top_var in children {
-        let var_name = top_var.key.as_str();
-        let ov = overrides.iter().find(|o| {
-            var_name
-                .to_ascii_lowercase()
-                .starts_with(&o.addon.to_ascii_lowercase())
-        });
-
-        if let Some(ov) = ov {
-            if ov.disabled {
-                let removed = serialize_to_lua(top_var).len();
-                report.drops.push(DropEntry {
-                    path: vec![var_name.to_string()],
-                    reason: DropReason::OverrideDisabled,
-                    bytes_removed: removed,
+    match tree.children.as_mut() {
+        Some(children) => {
+            children.retain_mut(|top_var| {
+                let var_name = top_var.key.clone();
+                let ov = overrides.iter().find(|o| {
+                    var_name
+                        .to_ascii_lowercase()
+                        .starts_with(&o.addon.to_ascii_lowercase())
                 });
-                continue;
-            }
-            // Build allow/deny prefix sets for this variable.
-            let allow_set: Vec<Vec<String>> = ov
-                .allow_paths
-                .iter()
-                .map(|p| p.split('.').map(str::to_string).collect())
-                .collect();
-            let deny_set: Vec<Vec<String>> = ov
-                .deny_paths
-                .iter()
-                .map(|p| p.split('.').map(str::to_string).collect())
-                .collect();
 
-            path.push(var_name.to_string());
-            if let Some(scrubbed) = scrub_node_override(
-                top_var,
-                &mut path,
-                ctx,
-                &mut placeholders,
-                &mut report,
-                &allow_set,
-                &deny_set,
-            ) {
-                new_children.push(scrubbed);
-            }
-            path.pop();
-        } else {
-            path.push(var_name.to_string());
-            if let Some(scrubbed) =
-                scrub_node(top_var, &mut path, ctx, &mut placeholders, &mut report)
-            {
-                new_children.push(scrubbed);
-            }
-            path.pop();
+                if let Some(ov) = ov {
+                    if ov.disabled {
+                        report.drops.push(DropEntry {
+                            path: vec![var_name.clone()],
+                            reason: DropReason::OverrideDisabled,
+                            bytes_removed: serialized_len(top_var),
+                        });
+                        return false;
+                    }
+                    // Build allow/deny prefix sets for this variable.
+                    let allow_set: Vec<Vec<String>> = ov
+                        .allow_paths
+                        .iter()
+                        .map(|p| p.split('.').map(str::to_string).collect())
+                        .collect();
+                    let deny_set: Vec<Vec<String>> = ov
+                        .deny_paths
+                        .iter()
+                        .map(|p| p.split('.').map(str::to_string).collect())
+                        .collect();
+
+                    path.push(var_name);
+                    let keep = scrub_node_override_in_place(
+                        top_var,
+                        &mut path,
+                        ctx,
+                        &mut placeholders,
+                        &mut report,
+                        &allow_set,
+                        &deny_set,
+                    );
+                    path.pop();
+                    keep
+                } else {
+                    path.push(var_name);
+                    let keep = scrub_node_in_place(
+                        top_var,
+                        &mut path,
+                        ctx,
+                        &mut placeholders,
+                        &mut report,
+                    );
+                    path.pop();
+                    keep
+                }
+            });
+        }
+        None => {
+            tree.children = Some(Vec::new());
         }
     }
 
-    let scrubbed_root = SvTreeNode {
-        key: tree.key.clone(),
-        value_type: SvValueType::Table,
-        value: None,
-        children: Some(new_children),
-        raw_lua_value: None,
-    };
-    report.scrubbed_bytes = serialize_to_lua(&scrubbed_root).len();
-    (scrubbed_root, report)
+    report.scrubbed_bytes = serialized_len(&tree);
+    (tree, report)
 }
 
 /// Replace identity placeholders in a Lua string with the importer's real values.
@@ -376,17 +363,56 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
     // Sort by token length descending so longer tokens match first.
     pairs.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
 
-    let mut result = lua.to_string();
-    for (token, replacement) in &pairs {
-        result = result.replace(token.as_str(), replacement.as_str());
+    // Single left-to-right pass. At each `${` we take the FIRST token in `pairs`
+    // that matches — and since `pairs` is sorted longest-first, that is the
+    // longest matching token, exactly the preference the previous
+    // sequential-`replace` loop encoded. A `${` that matches no token is copied
+    // through verbatim.
+    //
+    // This differs from the old sequential replace ONLY when a replacement value
+    // itself contains a `${TOKEN}` (the old loop would re-substitute tokens
+    // introduced by an earlier pass; this single pass never re-scans emitted
+    // text). That cannot happen here: replacements are ESO identities — account
+    // handles (`@` + word chars), character names (letters/space/hyphen/
+    // apostrophe), numeric character IDs, and world names — none of which can
+    // contain `$`, `{`, or `}`. So the two are equivalent on every real input.
+    let mut result = String::with_capacity(lua.len());
+    let mut rest = lua;
+    while let Some(dollar) = rest.find('$') {
+        result.push_str(&rest[..dollar]);
+        let after = &rest[dollar..]; // starts with '$'
+        if let Some(after_brace) = after.strip_prefix("${") {
+            match pairs.iter().find(|(t, _)| after.starts_with(t.as_str())) {
+                Some((token, replacement)) => {
+                    result.push_str(replacement);
+                    rest = &after[token.len()..];
+                }
+                None => {
+                    // No token matched: emit the literal `${` and resume scanning
+                    // after it. No token starts at the `{`, so skipping two bytes
+                    // cannot step over a match.
+                    result.push_str("${");
+                    rest = after_brace;
+                }
+            }
+        } else {
+            // A lone `$` not followed by `{`.
+            result.push('$');
+            rest = &after[1..];
+        }
     }
+    result.push_str(rest);
     result
 }
 
 /// Run the scrubber. Returns the cleaned tree alongside a report describing
 /// every drop and template substitution.
-pub fn scrub(tree: &SvTreeNode, ctx: &ScrubContext) -> (SvTreeNode, ScrubReport) {
-    let original_bytes = serialize_to_lua(tree).len();
+///
+/// Consumes `tree` and mutates it in place (dropping subtrees, assigning
+/// placeholder keys) rather than rebuilding a deep copy, so only one tree is
+/// live at a time — important on the multi-MB files the export path handles.
+pub fn scrub(mut tree: SvTreeNode, ctx: &ScrubContext) -> (SvTreeNode, ScrubReport) {
+    let original_bytes = serialized_len(&tree);
 
     let mut report = ScrubReport {
         original_bytes,
@@ -397,20 +423,15 @@ pub fn scrub(tree: &SvTreeNode, ctx: &ScrubContext) -> (SvTreeNode, ScrubReport)
     let mut placeholders = PlaceholderTable::new(ctx);
 
     let mut path: Vec<String> = Vec::new();
-    let scrubbed = scrub_node(tree, &mut path, ctx, &mut placeholders, &mut report)
-        // `scrub_node` only returns `None` when the *root* itself is dropped,
-        // which can't happen because we never apply key-based rules to the
-        // synthetic root. Defensive fallback returns an empty tree.
-        .unwrap_or_else(|| SvTreeNode {
-            key: tree.key.clone(),
-            value_type: SvValueType::Table,
-            value: None,
-            children: Some(Vec::new()),
-            raw_lua_value: None,
-        });
+    // `scrub_node_in_place` only returns `false` when the node itself is dropped,
+    // which can't happen for the synthetic root (no key rules apply at path len
+    // 0). Defensive fallback empties the tree if it ever did.
+    if !scrub_node_in_place(&mut tree, &mut path, ctx, &mut placeholders, &mut report) {
+        tree.children = Some(Vec::new());
+    }
 
-    report.scrubbed_bytes = serialize_to_lua(&scrubbed).len();
-    (scrubbed, report)
+    report.scrubbed_bytes = serialized_len(&tree);
+    (tree, report)
 }
 
 // ── internals ────────────────────────────────────────────────────────────
@@ -926,20 +947,21 @@ fn roster_chars_under_account(
     }
 }
 
-/// Recursive worker. Returns `Some(node)` if the node survives, `None` if it
-/// (and its key in the parent) should be dropped.
+/// Recursive worker. Mutates `node` in place and returns `true` if it survives,
+/// `false` if it (and its key in the parent) should be dropped — the caller
+/// removes dropped children via `retain_mut`.
 ///
 /// `path` tracks the current key path from the root (empty = synthetic root,
 /// length 1 = addon variable name, length 2+ = data inside the addon).
-fn scrub_node(
-    node: &SvTreeNode,
+fn scrub_node_in_place(
+    node: &mut SvTreeNode,
     path: &mut Vec<String>,
     ctx: &ScrubContext,
     placeholders: &mut PlaceholderTable,
     report: &mut ScrubReport,
-) -> Option<SvTreeNode> {
+) -> bool {
     if path.len() > 512 {
-        return Some(node.clone());
+        return true; // keep unchanged
     }
 
     // Block subtrees whose key name suggests sensitive data.
@@ -955,17 +977,17 @@ fn scrub_node(
     let is_heuristic_blocked = path.len() >= 2 && is_table && key_is_heuristic_blocked(&node.key);
 
     if is_always_dropped || is_heuristic_blocked {
-        let removed = serialize_to_lua(node).len();
+        // Measure the subtree BEFORE any mutation so `bytes_removed` matches the
+        // original node's serialized size.
         report.drops.push(DropEntry {
             path: path.clone(),
             reason: drop_reason_for_key(&node.key),
-            bytes_removed: removed,
+            bytes_removed: serialized_len(node),
         });
-        return None;
+        return false;
     }
 
     // Apply identity templating to the key itself.
-    let mut new_key = node.key.clone();
     if !path.is_empty() {
         if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key, ctx) {
             report.templated_keys.push(TemplateEntry {
@@ -974,30 +996,21 @@ fn scrub_node(
                 original: node.key.clone(),
                 placeholder: placeholder.clone(),
             });
-            new_key = placeholder;
+            node.key = placeholder;
         }
     }
 
     match node.value_type {
         SvValueType::Table => {
-            let mut new_children: Vec<SvTreeNode> = Vec::new();
-            if let Some(children) = &node.children {
-                for child in children {
+            if let Some(children) = node.children.as_mut() {
+                children.retain_mut(|child| {
                     path.push(child.key.clone());
-                    if let Some(scrubbed_child) = scrub_node(child, path, ctx, placeholders, report)
-                    {
-                        new_children.push(scrubbed_child);
-                    }
+                    let keep = scrub_node_in_place(child, path, ctx, placeholders, report);
                     path.pop();
-                }
+                    keep
+                });
             }
-            Some(SvTreeNode {
-                key: new_key,
-                value_type: SvValueType::Table,
-                value: None,
-                children: Some(new_children),
-                raw_lua_value: None,
-            })
+            true
         }
         SvValueType::String => {
             let s = node.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
@@ -1010,7 +1023,7 @@ fn scrub_node(
                     reason: DropReason::StringValueContainsIdentity,
                     bytes_removed: s.len(),
                 });
-                return None;
+                return false;
             }
             if looks_like_account_handle(s) {
                 report.drops.push(DropEntry {
@@ -1018,40 +1031,29 @@ fn scrub_node(
                     reason: DropReason::StringValueLooksLikeAccount,
                     bytes_removed: s.len(),
                 });
-                return None;
+                return false;
             }
-            Some(SvTreeNode {
-                key: new_key,
-                value_type: SvValueType::String,
-                value: node.value.clone(),
-                children: None,
-                raw_lua_value: node.raw_lua_value.clone(),
-            })
+            true
         }
-        // Numbers, booleans, nil — pass through untouched.
-        _ => Some(SvTreeNode {
-            key: new_key,
-            value_type: node.value_type,
-            value: node.value.clone(),
-            children: None,
-            raw_lua_value: node.raw_lua_value.clone(),
-        }),
+        // Numbers, booleans, nil — pass through untouched (key already templated).
+        _ => true,
     }
 }
 
-/// Like `scrub_node` but also checks per-addon allow/deny path lists.
+/// Like `scrub_node_in_place` but also checks per-addon allow/deny path lists.
+/// Mutates `node` in place and returns `true` if it survives.
 #[allow(dead_code)]
-fn scrub_node_override(
-    node: &SvTreeNode,
+fn scrub_node_override_in_place(
+    node: &mut SvTreeNode,
     path: &mut Vec<String>,
     ctx: &ScrubContext,
     placeholders: &mut PlaceholderTable,
     report: &mut ScrubReport,
     allow_set: &[Vec<String>],
     deny_set: &[Vec<String>],
-) -> Option<SvTreeNode> {
+) -> bool {
     if path.len() > 512 {
-        return Some(node.clone());
+        return true; // keep unchanged
     }
 
     // Check deny paths first — explicit deny wins.
@@ -1059,13 +1061,12 @@ fn scrub_node_override(
         .iter()
         .any(|deny| path.starts_with(deny.as_slice()))
     {
-        let removed = serialize_to_lua(node).len();
         report.drops.push(DropEntry {
             path: path.clone(),
             reason: DropReason::OverrideDenyPath,
-            bytes_removed: removed,
+            bytes_removed: serialized_len(node),
         });
-        return None;
+        return false;
     }
 
     // Check if path is explicitly allowed — skip all heuristics if so.
@@ -1075,7 +1076,6 @@ fn scrub_node_override(
 
     if explicitly_allowed {
         // Pass through with identity templating only (no heuristic drops).
-        let mut new_key = node.key.clone();
         if !path.is_empty() {
             if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key, ctx) {
                 report.templated_keys.push(TemplateEntry {
@@ -1084,45 +1084,28 @@ fn scrub_node_override(
                     original: node.key.clone(),
                     placeholder: placeholder.clone(),
                 });
-                new_key = placeholder;
+                node.key = placeholder;
             }
         }
-        return match node.value_type {
-            SvValueType::Table => {
-                let mut new_children = Vec::new();
-                if let Some(children) = &node.children {
-                    for child in children {
-                        path.push(child.key.clone());
-                        if let Some(c) = scrub_node_override(
-                            child,
-                            path,
-                            ctx,
-                            placeholders,
-                            report,
-                            allow_set,
-                            deny_set,
-                        ) {
-                            new_children.push(c);
-                        }
-                        path.pop();
-                    }
-                }
-                Some(SvTreeNode {
-                    key: new_key,
-                    value_type: SvValueType::Table,
-                    value: None,
-                    children: Some(new_children),
-                    raw_lua_value: None,
-                })
+        if matches!(node.value_type, SvValueType::Table) {
+            if let Some(children) = node.children.as_mut() {
+                children.retain_mut(|child| {
+                    path.push(child.key.clone());
+                    let keep = scrub_node_override_in_place(
+                        child,
+                        path,
+                        ctx,
+                        placeholders,
+                        report,
+                        allow_set,
+                        deny_set,
+                    );
+                    path.pop();
+                    keep
+                });
             }
-            _ => Some(SvTreeNode {
-                key: new_key,
-                value_type: node.value_type,
-                value: node.value.clone(),
-                children: None,
-                raw_lua_value: node.raw_lua_value.clone(),
-            }),
-        };
+        }
+        return true;
     }
 
     // Not in allow or deny — fall back to normal scrub, but propagate
@@ -1132,16 +1115,14 @@ fn scrub_node_override(
     let is_heuristic_blocked = path.len() >= 2 && is_table && key_is_heuristic_blocked(&node.key);
 
     if is_always_dropped || is_heuristic_blocked {
-        let removed = serialize_to_lua(node).len();
         report.drops.push(DropEntry {
             path: path.clone(),
             reason: drop_reason_for_key(&node.key),
-            bytes_removed: removed,
+            bytes_removed: serialized_len(node),
         });
-        return None;
+        return false;
     }
 
-    let mut new_key = node.key.clone();
     if !path.is_empty() {
         if let Some((placeholder, kind)) = placeholders.template_for_key(&node.key, ctx) {
             report.templated_keys.push(TemplateEntry {
@@ -1150,17 +1131,16 @@ fn scrub_node_override(
                 original: node.key.clone(),
                 placeholder: placeholder.clone(),
             });
-            new_key = placeholder;
+            node.key = placeholder;
         }
     }
 
     match node.value_type {
         SvValueType::Table => {
-            let mut new_children = Vec::new();
-            if let Some(children) = &node.children {
-                for child in children {
+            if let Some(children) = node.children.as_mut() {
+                children.retain_mut(|child| {
                     path.push(child.key.clone());
-                    if let Some(c) = scrub_node_override(
+                    let keep = scrub_node_override_in_place(
                         child,
                         path,
                         ctx,
@@ -1168,19 +1148,12 @@ fn scrub_node_override(
                         report,
                         allow_set,
                         deny_set,
-                    ) {
-                        new_children.push(c);
-                    }
+                    );
                     path.pop();
-                }
+                    keep
+                });
             }
-            Some(SvTreeNode {
-                key: new_key,
-                value_type: SvValueType::Table,
-                value: None,
-                children: Some(new_children),
-                raw_lua_value: None,
-            })
+            true
         }
         SvValueType::String => {
             let s = node.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
@@ -1190,7 +1163,7 @@ fn scrub_node_override(
                     reason: DropReason::StringValueContainsIdentity,
                     bytes_removed: s.len(),
                 });
-                return None;
+                return false;
             }
             if looks_like_account_handle(s) {
                 report.drops.push(DropEntry {
@@ -1198,23 +1171,11 @@ fn scrub_node_override(
                     reason: DropReason::StringValueLooksLikeAccount,
                     bytes_removed: s.len(),
                 });
-                return None;
+                return false;
             }
-            Some(SvTreeNode {
-                key: new_key,
-                value_type: SvValueType::String,
-                value: node.value.clone(),
-                children: None,
-                raw_lua_value: node.raw_lua_value.clone(),
-            })
+            true
         }
-        _ => Some(SvTreeNode {
-            key: new_key,
-            value_type: node.value_type,
-            value: node.value.clone(),
-            children: None,
-            raw_lua_value: node.raw_lua_value.clone(),
-        }),
+        _ => true,
     }
 }
 
@@ -1227,129 +1188,59 @@ fn scrub_node_override(
 /// Must be called **after** [`scrub`] because account keys will already be
 /// templated to `${ACCOUNT}` / `${ACCOUNT:N}` and world keys to `${WORLD}`.
 /// The checks here recognise both raw (`@Author`) and templated forms.
-pub fn strip_per_character_data(tree: &SvTreeNode) -> SvTreeNode {
-    fn filter_account_node(node: &SvTreeNode) -> SvTreeNode {
-        let new_children = node
-            .children
-            .as_ref()
-            .map(|children| {
-                children
-                    .iter()
-                    .filter(|child| {
-                        !child.key.starts_with("${CHAR") && !child.key.starts_with("${CHAR_ID")
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        SvTreeNode {
-            key: node.key.clone(),
-            value_type: SvValueType::Table,
-            value: None,
-            children: Some(new_children),
-            raw_lua_value: None,
+pub fn strip_per_character_data(mut tree: SvTreeNode) -> SvTreeNode {
+    // Drop the per-character subtrees under an account handle, keeping
+    // `$AccountWide`, addon root keys, scalars, etc.
+    fn filter_account_node(node: &mut SvTreeNode) {
+        node.children.get_or_insert_with(Vec::new).retain(|child| {
+            !child.key.starts_with("${CHAR") && !child.key.starts_with("${CHAR_ID")
+        });
+    }
+
+    // A world layer sitting under `Default`: keep only its account children and
+    // strip per-character data from each.
+    fn filter_world_under_default(node: &mut SvTreeNode) {
+        let accounts = node.children.get_or_insert_with(Vec::new);
+        accounts.retain(|a| a.key.starts_with('@') || a.key.starts_with("${ACCOUNT"));
+        for a in accounts.iter_mut() {
+            filter_account_node(a);
         }
     }
 
-    fn filter_top_var(node: &SvTreeNode) -> SvTreeNode {
-        let new_children = node
-            .children
-            .as_ref()
-            .map(|children| {
-                children
-                    .iter()
-                    .map(|child| {
-                        if child.key == "Default"
-                            || child.key.contains(' ')
-                            || child.key == "${WORLD}"
-                        {
-                            // Default or world layer — recurse one more level
-                            let inner = child
-                                .children
-                                .as_ref()
-                                .map(|gc| {
-                                    gc.iter()
-                                        .map(|gchild| {
-                                            if gchild.key.starts_with('@')
-                                                || gchild.key.starts_with("${ACCOUNT")
-                                            {
-                                                filter_account_node(gchild)
-                                            } else if gchild.key.contains(' ')
-                                                || gchild.key == "${WORLD}"
-                                            {
-                                                // world under Default — recurse
-                                                let accounts = gchild
-                                                    .children
-                                                    .as_ref()
-                                                    .map(|ac| {
-                                                        ac.iter()
-                                                            .filter(|a| {
-                                                                a.key.starts_with('@')
-                                                                    || a.key
-                                                                        .starts_with("${ACCOUNT")
-                                                            })
-                                                            .map(filter_account_node)
-                                                            .collect::<Vec<_>>()
-                                                    })
-                                                    .unwrap_or_default();
-                                                SvTreeNode {
-                                                    key: gchild.key.clone(),
-                                                    value_type: SvValueType::Table,
-                                                    value: None,
-                                                    children: Some(accounts),
-                                                    raw_lua_value: None,
-                                                }
-                                            } else {
-                                                gchild.clone()
-                                            }
-                                        })
-                                        .collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default();
-                            SvTreeNode {
-                                key: child.key.clone(),
-                                value_type: SvValueType::Table,
-                                value: None,
-                                children: Some(inner),
-                                raw_lua_value: None,
-                            }
-                        } else if child.key.starts_with('@') || child.key.starts_with("${ACCOUNT") {
-                            // Account key directly under top var (no Default wrapper)
-                            filter_account_node(child)
-                        } else {
-                            child.clone()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        SvTreeNode {
-            key: node.key.clone(),
-            value_type: SvValueType::Table,
-            value: None,
-            children: Some(new_children),
-            raw_lua_value: None,
+    fn filter_top_var(node: &mut SvTreeNode) {
+        for child in node.children.get_or_insert_with(Vec::new).iter_mut() {
+            if child.key == "Default" || child.key.contains(' ') || child.key == "${WORLD}" {
+                // Default or world layer — recurse one more level.
+                for gchild in child.children.get_or_insert_with(Vec::new).iter_mut() {
+                    if gchild.key.starts_with('@') || gchild.key.starts_with("${ACCOUNT") {
+                        filter_account_node(gchild);
+                    } else if gchild.key.contains(' ') || gchild.key == "${WORLD}" {
+                        // world under Default — recurse
+                        filter_world_under_default(gchild);
+                    } else {
+                        // keep as-is
+                    }
+                }
+            } else if child.key.starts_with('@') || child.key.starts_with("${ACCOUNT") {
+                // Account key directly under top var (no Default wrapper)
+                filter_account_node(child);
+            } else {
+                // keep as-is
+            }
         }
     }
 
-    let new_children = tree
-        .children
-        .as_ref()
-        .map(|children| children.iter().map(filter_top_var).collect::<Vec<_>>())
-        .unwrap_or_default();
-    SvTreeNode {
-        key: tree.key.clone(),
-        value_type: SvValueType::Table,
-        value: None,
-        children: Some(new_children),
-        raw_lua_value: None,
+    for top in tree.children.get_or_insert_with(Vec::new).iter_mut() {
+        filter_top_var(top);
     }
+    tree
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::saved_variables::parser::parse_sv_file;
+    use crate::saved_variables::serializer::serialize_to_lua;
 
     fn parse(s: &str) -> SvTreeNode {
         parse_sv_file(s, "test.lua").expect("parse")
@@ -1377,7 +1268,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, report) = scrub(&tree, &ctx());
+        let (out, report) = scrub(tree, &ctx());
 
         // The `@Author` key should now be `${ACCOUNT}`.
         let serialized = serialize_to_lua(&out);
@@ -1407,7 +1298,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, _) = scrub(&tree, &ctx());
+        let (out, _) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(serialized.contains("${CHAR:0}"));
         assert!(serialized.contains("${CHAR:1}"));
@@ -1426,7 +1317,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, _) = scrub(&tree, &ctx());
+        let (out, _) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(serialized.contains("${WORLD}"));
         assert!(!serialized.contains("NA Megaserver"));
@@ -1441,7 +1332,7 @@ mod tests {
                 ["mailQueue"] = { ["1"] = "more" },
             }"#,
         );
-        let (out, report) = scrub(&tree, &ctx());
+        let (out, report) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(serialized.contains("settings"));
         assert!(!serialized.contains("SalesHistory"));
@@ -1465,7 +1356,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, report) = scrub(&tree, &ctx());
+        let (out, report) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(
             !serialized.contains("@Author"),
@@ -1498,7 +1389,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, _) = scrub(&tree, &ctx());
+        let (out, _) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("[\"enabled\"] = true"),
@@ -1526,7 +1417,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, report) = scrub(&tree, &ctx());
+        let (out, report) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(!serialized.contains("$LastCharacterName"));
         assert!(report
@@ -1546,7 +1437,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, _) = scrub(&tree, &ctx());
+        let (out, _) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(serialized.contains("${CHAR_ID:0}"));
         assert!(!serialized.contains("123456789012345"));
@@ -1567,7 +1458,7 @@ mod tests {
                 },
             }"#,
         );
-        let (_, report) = scrub(&tree, &ctx());
+        let (_, report) = scrub(tree, &ctx());
         assert!(report.scrubbed_bytes < report.original_bytes);
         assert!(report.drops.iter().any(|d| d.bytes_removed > 0));
     }
@@ -1580,7 +1471,7 @@ mod tests {
             }"#,
         );
         let empty_ctx = ScrubContext::default();
-        let (out, report) = scrub(&tree, &empty_ctx);
+        let (out, report) = scrub(tree, &empty_ctx);
         let serialized = serialize_to_lua(&out);
         assert!(!serialized.contains("@SomeRandomPlayer"));
         assert!(report
@@ -1610,7 +1501,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, _) = scrub(&tree, &ctx());
+        let (out, _) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("ignoredAbilities"),
@@ -1632,7 +1523,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, _) = scrub(&tree, &ScrubContext::default());
+        let (out, _) = scrub(tree, &ScrubContext::default());
         let serialized = serialize_to_lua(&out);
         assert!(!serialized.contains("@SomeJerk"));
         assert!(!serialized.contains("@AnotherOne"));
@@ -1871,7 +1762,7 @@ mod tests {
             }"#,
         );
         let detected = detect_identities_from_tree(&tree);
-        let (out, _) = scrub(&tree, &detected);
+        let (out, _) = scrub(tree, &detected);
         let serialized = serialize_to_lua(&out);
         assert!(!serialized.contains("@Author"));
         assert!(!serialized.contains("Mainchar"));
@@ -1894,7 +1785,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, report) = scrub(&tree, &ctx());
+        let (out, report) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(
             !serialized.contains("Mainchar"),
@@ -1923,7 +1814,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, report) = scrub(&tree, &ctx());
+        let (out, report) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("showTooltip"),
@@ -1954,7 +1845,7 @@ mod tests {
                 },
             }"#,
         );
-        let (out, report) = scrub(&tree, &ctx());
+        let (out, report) = scrub(tree, &ctx());
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("maxSavedFights"),
@@ -2042,7 +1933,7 @@ mod tests {
             disabled: true,
             ..AddonOverride::default()
         };
-        let (out, report) = scrub_with_overrides(&tree, &ctx(), &[ov]);
+        let (out, report) = scrub_with_overrides(tree, &ctx(), &[ov]);
         let serialized = serialize_to_lua(&out);
         // The disabled addon's variable should not appear in output.
         assert!(
@@ -2083,7 +1974,7 @@ mod tests {
             deny_paths: vec!["MyAddon_SV.Default.@Author.$AccountWide.sensitiveTable".to_string()],
             ..AddonOverride::default()
         };
-        let (out, report) = scrub_with_overrides(&tree, &ctx(), &[ov_literal]);
+        let (out, report) = scrub_with_overrides(tree, &ctx(), &[ov_literal]);
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("keepConfig"),
@@ -2112,8 +2003,8 @@ mod tests {
                 },
             }"#,
         );
-        let (plain_out, _) = scrub(&tree, &ctx());
-        let (override_out, _) = scrub_with_overrides(&tree, &ctx(), &[]);
+        let (plain_out, _) = scrub(tree.clone(), &ctx());
+        let (override_out, _) = scrub_with_overrides(tree, &ctx(), &[]);
         assert_eq!(
             serialize_to_lua(&plain_out),
             serialize_to_lua(&override_out)
@@ -2157,6 +2048,84 @@ mod tests {
             result.contains("NA Megaserver"),
             "world not substituted: {result}"
         );
+    }
+
+    /// Reference implementation of the OLD sequential-replace behaviour, used to
+    /// prove the new single-pass `substitute_placeholders` is equivalent on
+    /// inputs where no replacement value contains a `${...}` token (the only case
+    /// where the two could diverge — impossible for real ESO identities).
+    fn substitute_sequential(lua: &str, ctx: &ScrubContext, world_names: &[&str]) -> String {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (i, account) in ctx.accounts.iter().enumerate() {
+            let token = if i == 0 {
+                "${ACCOUNT}".to_string()
+            } else {
+                format!("${{ACCOUNT:{i}}}")
+            };
+            pairs.push((token, account.clone()));
+            let bare = account.trim_start_matches('@').to_string();
+            if !bare.is_empty() {
+                let name_token = if i == 0 {
+                    "${ACCOUNT_NAME}".to_string()
+                } else {
+                    format!("${{ACCOUNT_NAME:{i}}}")
+                };
+                pairs.push((name_token, bare));
+            }
+        }
+        for (i, character) in ctx.characters.iter().enumerate() {
+            pairs.push((format!("${{CHAR:{i}}}"), character.clone()));
+        }
+        for (i, id) in ctx.character_ids.iter().enumerate() {
+            pairs.push((format!("${{CHAR_ID:{i}}}"), id.clone()));
+        }
+        let world = ctx
+            .extra_worlds
+            .first()
+            .map(|s| s.as_str())
+            .or_else(|| world_names.first().copied())
+            .unwrap_or("NA Megaserver");
+        pairs.push(("${WORLD}".to_string(), world.to_string()));
+        pairs.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
+        let mut result = lua.to_string();
+        for (token, replacement) in &pairs {
+            result = result.replace(token.as_str(), replacement.as_str());
+        }
+        result
+    }
+
+    #[test]
+    fn substitute_placeholders_matches_sequential_on_tricky_inputs() {
+        let ctx = ScrubContext {
+            accounts: vec!["@Real".to_string(), "@Alt".to_string()],
+            characters: vec!["MyChar".to_string(), "AltChar".to_string()],
+            character_ids: vec!["123456789012345".to_string()],
+            extra_worlds: vec![],
+        };
+        let cases = [
+            // Overlapping tokens: ${ACCOUNT} is a prefix of ${ACCOUNT:1} and
+            // ${ACCOUNT_NAME}; longest must win.
+            "${ACCOUNT} ${ACCOUNT:1} ${ACCOUNT_NAME} ${ACCOUNT_NAME:1}",
+            // Adjacent tokens with no separators.
+            "${CHAR:0}${CHAR:1}${CHAR_ID:0}${WORLD}",
+            // Token-like text that is NOT a real token (unknown index / name).
+            "${CHAR:9} ${UNKNOWN} ${ACCOUNT:99} ${}",
+            // Bare and lone dollars, and `${` that matches nothing.
+            "cost is $5 and $${ACCOUNT} plus ${ ${",
+            // A value that merely resembles a token boundary.
+            "a${b${ACCOUNT}c}d $ $$ ${CHAR:0}",
+            // No tokens at all.
+            "plain lua text with no placeholders",
+            // Trailing lone dollar.
+            "ends with a dollar $",
+        ];
+        for case in cases {
+            assert_eq!(
+                substitute_placeholders(case, &ctx, WELL_KNOWN_WORLDS),
+                substitute_sequential(case, &ctx, WELL_KNOWN_WORLDS),
+                "single-pass diverged from sequential replace on: {case:?}"
+            );
+        }
     }
 
     // ── strip_per_character_data tests ────────────────────────────────────
@@ -2207,7 +2176,7 @@ mod tests {
         let addon_var = make_table("MyAddonVars", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = strip_per_character_data(&root);
+        let filtered = strip_per_character_data(root);
 
         // Drill down: root → MyAddonVars → Default → ${ACCOUNT}
         let addon = &filtered.children.as_ref().unwrap()[0];
@@ -2238,7 +2207,7 @@ mod tests {
         let addon_var = make_table("MyAddonVars", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = strip_per_character_data(&root);
+        let filtered = strip_per_character_data(root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let default = &addon.children.as_ref().unwrap()[0];
@@ -2262,7 +2231,7 @@ mod tests {
         let addon_var = make_table("IIfA_Data", vec![account_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = strip_per_character_data(&root);
+        let filtered = strip_per_character_data(root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let account = &addon.children.as_ref().unwrap()[0];
@@ -2287,7 +2256,7 @@ mod tests {
         let addon_var = make_table("pChatSavedVars", vec![world_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = strip_per_character_data(&root);
+        let filtered = strip_per_character_data(root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         assert_eq!(addon.children.as_ref().unwrap()[0].key, "${WORLD}");
@@ -2311,7 +2280,7 @@ mod tests {
         let addon_var = make_table("SomeVar", vec![world_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = strip_per_character_data(&root);
+        let filtered = strip_per_character_data(root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let world = &addon.children.as_ref().unwrap()[0];
@@ -2335,7 +2304,7 @@ mod tests {
         let addon_var = make_table("MyVar", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = strip_per_character_data(&root);
+        let filtered = strip_per_character_data(root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let default = &addon.children.as_ref().unwrap()[0];
@@ -2361,7 +2330,7 @@ mod tests {
         let addon_var = make_table("HarvestMapSavedVars", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = strip_per_character_data(&root);
+        let filtered = strip_per_character_data(root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let default = &addon.children.as_ref().unwrap()[0];
@@ -2399,8 +2368,8 @@ mod tests {
             vec![make_table("Default", vec![account_node])],
         )]);
 
-        let (scrubbed, _report) = scrub(&tree, &ctx);
-        let filtered = strip_per_character_data(&scrubbed);
+        let (scrubbed, _report) = scrub(tree, &ctx);
+        let filtered = strip_per_character_data(scrubbed);
 
         // Drill to account level
         let my_var = &filtered.children.as_ref().unwrap()[0];
@@ -2434,7 +2403,7 @@ mod tests {
         let addon_var = make_table("SomeAddonVars", vec![default_node]);
         let root = make_root(vec![addon_var]);
 
-        let filtered = strip_per_character_data(&root);
+        let filtered = strip_per_character_data(root);
 
         let addon = &filtered.children.as_ref().unwrap()[0];
         let default = &addon.children.as_ref().unwrap()[0];
@@ -2469,7 +2438,7 @@ mod tests {
             character_ids: vec![],
             extra_worlds: vec![],
         };
-        let (out, report) = scrub(&tree, &ctx);
+        let (out, report) = scrub(tree, &ctx);
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("${ACCOUNT_NAME}"),
@@ -2540,7 +2509,7 @@ mod tests {
             "account not detected: {:?}",
             detected.accounts
         );
-        let (out, report) = scrub(&tree, &detected);
+        let (out, report) = scrub(tree, &detected);
         let serialized = serialize_to_lua(&out);
         assert!(
             !serialized.contains(r#"["Author"]"#),
@@ -2582,7 +2551,7 @@ mod tests {
             character_ids: vec![],
             extra_worlds: vec![],
         };
-        let (out, report) = scrub(&tree, &ctx);
+        let (out, report) = scrub(tree, &ctx);
         let serialized = serialize_to_lua(&out);
         assert!(
             serialized.contains("${CHAR:0}"),
@@ -2759,7 +2728,7 @@ mod tests {
     fn run_one(name: &str, lua: String, ctx: &ScrubContext) -> (usize, usize, usize, usize) {
         let tree = parse_sv_file(&lua, &format!("{name}.lua")).expect("parse");
         let original_bytes = lua.len();
-        let (_scrubbed, report) = scrub(&tree, ctx);
+        let (_scrubbed, report) = scrub(tree, ctx);
 
         // Count drops by reason.
         let mut by_block = 0usize;
@@ -2934,7 +2903,7 @@ mod tests {
         println!("  character_ids   : {:?}", detected.character_ids);
         println!("  extra_worlds    : {:?}", detected.extra_worlds);
 
-        let (scrubbed, report) = scrub(&tree, &detected);
+        let (scrubbed, report) = scrub(tree, &detected);
         let scrubbed_lua = serialize_to_lua(&scrubbed);
 
         println!("\n── Scrub report ────────────────────────────────────────────");

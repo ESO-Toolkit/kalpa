@@ -42,6 +42,10 @@ tauri-plugin-process = "2"
 tauri-plugin-opener = "2.5.3"
 tauri-plugin-notification = "2"
 rayon = "1.12"
+# Fast non-cryptographic hasher (FxHashMap) for the uploader's per-event hot maps.
+# Already present transitively in the lock file, so this adds no new compilation.
+rustc-hash = "2"
+typed-path = "0.12"
 sha2 = "0.11"
 md-5 = "0.11"
 # "bundled" statically compiles SQLite (~1-2MB binary size increase) to avoid

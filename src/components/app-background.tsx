@@ -1,6 +1,25 @@
+import { useEffect } from "react";
+
 export function AppBackground() {
+  // Pause the ambient orb/shimmer animations while the window is hidden (e.g.
+  // minimized to the tray). Toggling a root class lets CSS set
+  // animation-play-state: paused, so the compositor stops spending frames on the
+  // three large blurred orbs. Animations resume exactly where they left off when
+  // the window is shown again — the visible appearance is unchanged.
+  useEffect(() => {
+    const sync = () => {
+      document.documentElement.classList.toggle("app-hidden", document.hidden);
+    };
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      document.removeEventListener("visibilitychange", sync);
+      document.documentElement.classList.remove("app-hidden");
+    };
+  }, []);
+
   return (
-    <div className="fixed inset-0 -z-10 overflow-hidden bg-bg-base">
+    <div data-slot="app-background" className="fixed inset-0 -z-10 overflow-hidden bg-bg-base">
       {/* Material texture (art themes only; "none" by default) */}
       <div
         className="absolute inset-0"

@@ -373,6 +373,17 @@
   }
 }
 
+/* Pause the ambient orb layer and the dialog shimmer while the window is hidden
+ * (tray/minimized). The root .app-hidden class is toggled from AppBackground on
+ * document visibilitychange. animation-play-state freezes the animations in place
+ * so they resume identically — no visible change while the window is shown. */
+:root.app-hidden [data-slot="app-background"] * {
+  animation-play-state: paused !important;
+}
+:root.app-hidden [data-slot="dialog-header"]::before {
+  animation-play-state: paused !important;
+}
+
 /* === Noise Texture Overlay === */
 #root::after {
   content: "";

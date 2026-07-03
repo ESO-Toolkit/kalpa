@@ -278,7 +278,20 @@ fn parse_lua_number(chars: &[u8], pos: &mut usize) -> Result<SvTreeNode, String>
             *pos += 1;
         }
     }
-    let num_str = String::from_utf8_lossy(&chars[start..*pos]).to_string();
+    // The number's bytes are all ASCII (digits, sign, `.`, `eE`, `xX`, hex
+    // digits) by construction above, so `from_utf8` borrows the slice directly
+    // without allocating a temporary `String`. The lossy path is kept only for
+    // the (unreachable) non-UTF8 error case.
+    let num_slice = &chars[start..*pos];
+    let num_str = match std::str::from_utf8(num_slice) {
+        Ok(s) => s,
+        Err(_) => {
+            return Err(format!(
+                "Invalid number: {}",
+                String::from_utf8_lossy(num_slice)
+            ))
+        }
+    };
     let value = if num_str.contains('x') || num_str.contains('X') {
         let (negative, hex_part) = if num_str.starts_with('-') {
             (true, &num_str[3..]) // skip -0x
@@ -383,7 +396,7 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
                 *pos = saved;
                 return Ok(None);
             }
-            let k = String::from_utf8_lossy(&chars[start..*pos]).to_string();
+            let k = String::from_utf8_lossy(&chars[start..*pos]).into_owned();
             *pos += 1; // skip "
             k
         } else if chars[*pos].is_ascii_digit() || chars[*pos] == b'-' {
@@ -394,7 +407,7 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
             while *pos < chars.len() && chars[*pos].is_ascii_digit() {
                 *pos += 1;
             }
-            String::from_utf8_lossy(&chars[start..*pos]).to_string()
+            String::from_utf8_lossy(&chars[start..*pos]).into_owned()
         } else {
             *pos = saved;
             return Ok(None);
@@ -424,7 +437,7 @@ fn parse_table_key(chars: &[u8], pos: &mut usize) -> Result<Option<String>, Stri
         while *pos < chars.len() && (chars[*pos].is_ascii_alphanumeric() || chars[*pos] == b'_') {
             *pos += 1;
         }
-        let ident = String::from_utf8_lossy(&chars[start..*pos]).to_string();
+        let ident = String::from_utf8_lossy(&chars[start..*pos]).into_owned();
         skip_whitespace_and_comments(chars, pos);
         if *pos < chars.len() && chars[*pos] == b'=' {
             *pos += 1;
@@ -456,7 +469,7 @@ pub fn parse_sv_file(content: &str, file_name: &str) -> Result<SvTreeNode, Strin
             while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
                 pos += 1;
             }
-            let var_name = String::from_utf8_lossy(&bytes[start..pos]).to_string();
+            let var_name = String::from_utf8_lossy(&bytes[start..pos]).into_owned();
 
             skip_whitespace_and_comments(bytes, &mut pos);
             if pos < bytes.len() && bytes[pos] == b'=' {

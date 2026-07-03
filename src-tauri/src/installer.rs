@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use typed_path::{Utf8WindowsComponent, Utf8WindowsPath};
 
 /// Maximum total extracted size (500 MB) to guard against ZIP bombs.
 const MAX_EXTRACT_SIZE: u64 = 500 * 1024 * 1024;
@@ -128,17 +129,15 @@ fn extract_with_rollback(
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
 
     // Snapshot which top-level addon folders already exist so we only clean up
-    // genuinely new directories on failure (or cancel).
+    // genuinely new directories on failure (or cancel). Names come from the
+    // central directory (`file_names`) so this pass doesn't pay a local-header
+    // read per entry, and each unique top-level folder is stat'd only once.
     let mut pre_existing: HashSet<String> = HashSet::new();
-    for i in 0..archive.len() {
-        if let Ok(entry) = archive.by_index(i) {
-            if let Some(p) = entry.enclosed_name() {
-                if let Some(first) = p.components().next() {
-                    let folder = first.as_os_str().to_string_lossy().to_string();
-                    if addons_dir.join(&folder).is_dir() {
-                        pre_existing.insert(folder);
-                    }
-                }
+    let mut stated: HashSet<String> = HashSet::new();
+    for name in archive.file_names() {
+        if let Some(folder) = enclosed_top_component(name) {
+            if stated.insert(folder.clone()) && addons_dir.join(&folder).is_dir() {
+                pre_existing.insert(folder);
             }
         }
     }
@@ -148,16 +147,15 @@ fn extract_with_rollback(
     if let Err(ref err_msg) = result {
         // Remove only folders that were newly created (not pre-existing) so a
         // failed or cancelled update never destroys the user's existing addon.
-        if let Ok(created) = collect_zip_top_folders(&mut archive) {
-            for folder in &created {
-                if !pre_existing.contains(folder) {
-                    let folder_path = addons_dir.join(folder);
-                    if folder_path.is_dir() {
-                        eprintln!(
-                            "Cleaning up partially extracted folder {folder:?} after error: {err_msg}"
-                        );
-                        let _ = fs::remove_dir_all(&folder_path);
-                    }
+        let created = collect_zip_top_folders(&archive);
+        for folder in &created {
+            if !pre_existing.contains(folder) {
+                let folder_path = addons_dir.join(folder);
+                if folder_path.is_dir() {
+                    eprintln!(
+                        "Cleaning up partially extracted folder {folder:?} after error: {err_msg}"
+                    );
+                    let _ = fs::remove_dir_all(&folder_path);
                 }
             }
         }
@@ -166,22 +164,55 @@ fn extract_with_rollback(
     result
 }
 
-/// Collect top-level folder names from a ZIP archive.
-fn collect_zip_top_folders(
-    archive: &mut zip::ZipArchive<fs::File>,
-) -> Result<HashSet<String>, String> {
-    let mut folders = HashSet::new();
-    for i in 0..archive.len() {
-        let entry = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to read ZIP entry: {e}"))?;
-        if let Some(p) = entry.enclosed_name() {
-            if let Some(first) = p.components().next() {
-                folders.insert(first.as_os_str().to_string_lossy().to_string());
+/// The first path component of a ZIP entry name, or `None` when the name is
+/// unsafe. Replicates `ZipFile::enclosed_name` exactly — including its
+/// `Utf8WindowsPath` parsing, which on every platform splits on `\` as well as
+/// `/`, strips a *leading* drive prefix or root, and rejects the whole name on
+/// NUL bytes, a mid-path prefix/root, or `..` traversal that escapes the
+/// archive root — then takes the first component of the simplified path. The
+/// extraction loop derives its created-folder names from `enclosed_name`, so
+/// any divergence here could make rollback miss (or mistarget) a folder the
+/// extractor actually created.
+///
+/// Used by the rollback passes, which only need top-level folder names and can
+/// therefore read them straight from the central directory (`file_names`)
+/// instead of paying a per-entry local-header read via `by_index`.
+fn enclosed_top_component(name: &str) -> Option<String> {
+    if name.contains('\0') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut components: Vec<&str> = Vec::new();
+    for component in Utf8WindowsPath::new(name).components() {
+        match component {
+            Utf8WindowsComponent::Prefix(_) | Utf8WindowsComponent::RootDir => {
+                if depth > 0 {
+                    return None;
+                }
             }
+            Utf8WindowsComponent::ParentDir => {
+                depth = depth.checked_sub(1)?;
+                components.pop();
+            }
+            Utf8WindowsComponent::Normal(s) => {
+                depth += 1;
+                components.push(s);
+            }
+            Utf8WindowsComponent::CurDir => (),
         }
     }
-    Ok(folders)
+    components.first().map(|s| (*s).to_string())
+}
+
+/// Collect top-level folder names from a ZIP archive's central directory.
+fn collect_zip_top_folders(archive: &zip::ZipArchive<fs::File>) -> HashSet<String> {
+    let mut folders = HashSet::new();
+    for name in archive.file_names() {
+        if let Some(folder) = enclosed_top_component(name) {
+            folders.insert(folder);
+        }
+    }
+    folders
 }
 
 /// Inner extraction loop, separated so [`extract_with_rollback`] can clean up on
@@ -322,6 +353,53 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;
+
+    /// The rollback passes derive top-level names from central-directory
+    /// strings via `enclosed_top_component`, while the extraction loop derives
+    /// them from `entry.enclosed_name()`. This proves the two agree for every
+    /// shape of entry name, including hostile ones (absolute paths, Windows
+    /// drive prefixes, backslash separators, `..` traversal).
+    #[test]
+    fn enclosed_top_component_matches_enclosed_name_first_component() {
+        let names = [
+            "MyAddon/file.lua",
+            "MyAddon/sub/deep/file.lua",
+            "toplevel.lua",
+            "MyAddon\\file.lua",
+            "C:\\MyAddon\\file.lua",
+            "C:/MyAddon/file.lua",
+            "/abs/file.lua",
+            "../escape.lua",
+            "foo/../bar.lua",
+            "foo/../../escape.lua",
+            "./MyAddon/file.lua",
+            "MyAddon/./file.lua",
+        ];
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let options = zip::write::SimpleFileOptions::default();
+            for n in &names {
+                w.start_file(*n, options).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf)).unwrap();
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).unwrap();
+            let name = entry.name().to_string();
+            let expected = entry.enclosed_name().and_then(|p| {
+                p.components()
+                    .next()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+            });
+            assert_eq!(
+                enclosed_top_component(&name),
+                expected,
+                "rollback and extraction disagree on top-level name for {name:?}"
+            );
+        }
+    }
 
     #[test]
     fn permission_denied_mentions_controlled_folder_access() {
