@@ -187,9 +187,12 @@ Current detail status:
   popular, category, and URL/ID flows now load ESOUI data, hydrate details in the
   background, and install addons through the shared download/extract/hash/metadata
   path. Popular and category browse chips drive native ESOUI requests for
-  downloads/newest/category/sort choices. Remaining Discover gaps are
-  pagination/load-more, category picker polish, loading/error polish,
-  screenshots/gallery parity, and remove/update flows.
+  downloads/newest/category/sort choices. Popular and category browse modes now
+  track loading, page state, and load-more pagination, and the native result rows
+  use clearer card-style selection/rank/meta hierarchy to avoid the previous
+  stripe-like selected state and cramped metadata. Remaining Discover gaps are
+  category picker polish, richer skeleton/error states, screenshots/gallery
+  parity, and remove/update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
   the reference Browse, Create details, Create addons, and install-detail flows.
   Browse now loads published packs from the public Pack Hub `/packs` endpoint

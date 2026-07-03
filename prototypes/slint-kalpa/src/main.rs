@@ -645,9 +645,13 @@ struct AddonFilterCounts {
 #[derive(Clone, Debug, Default)]
 struct DiscoverBrowseState {
     popular_sort: i32,
+    popular_page: u32,
+    popular_has_more: bool,
     categories: Vec<esoui::EsouiCategory>,
     selected_category_index: usize,
     category_sort: i32,
+    category_page: u32,
+    category_has_more: bool,
 }
 
 impl DiscoverBrowseState {
@@ -659,6 +663,32 @@ impl DiscoverBrowseState {
         } else {
             self.selected_category_index %= self.categories.len();
         }
+    }
+
+    fn reset_popular_page(&mut self) {
+        self.popular_page = 0;
+        self.popular_has_more = false;
+        self.normalize();
+    }
+
+    fn reset_category_page(&mut self) {
+        self.category_page = 0;
+        self.category_has_more = false;
+        self.normalize();
+    }
+
+    fn next_popular_page_snapshot(&self) -> Self {
+        let mut next = self.clone();
+        next.popular_page = next.popular_page.saturating_add(1);
+        next.normalize();
+        next
+    }
+
+    fn next_category_page_snapshot(&self) -> Self {
+        let mut next = self.clone();
+        next.category_page = next.category_page.saturating_add(1);
+        next.normalize();
+        next
     }
 
     fn selected_category(&self) -> Option<&esoui::EsouiCategory> {
@@ -690,11 +720,13 @@ impl DiscoverBrowseState {
             self.selected_category_index =
                 (self.selected_category_index + 1) % self.categories.len();
         }
+        self.reset_category_page();
         self.normalize();
     }
 
     fn select_next_category_sort(&mut self) {
         self.category_sort = (self.category_sort + 1) % 3;
+        self.reset_category_page();
         self.normalize();
     }
 }
@@ -2026,6 +2058,14 @@ fn apply_discover_data(
     model
 }
 
+fn append_discover_results(ui: &KalpaWindow, entries: Vec<DiscoverEntry>) {
+    let mut rows = (0..ui.get_discover_results().row_count())
+        .filter_map(|index| ui.get_discover_results().row_data(index))
+        .collect::<Vec<_>>();
+    rows.extend(entries);
+    ui.set_discover_results(Rc::new(VecModel::from(rows)).into());
+}
+
 fn discover_entries_for_tab(
     tab: i32,
     installed_ids: &BTreeSet<String>,
@@ -2078,12 +2118,37 @@ fn apply_discover_browse_state(ui: &KalpaWindow, state: &DiscoverBrowseState) {
     ui.set_discover_popular_sort(state.popular_sort);
     ui.set_discover_category_label(discover_category_label(state).into());
     ui.set_discover_category_sort_label(discover_category_sort_label(state.category_sort).into());
+    let tab = ui.get_discover_tab();
+    ui.set_discover_browse_has_more(match tab {
+        1 => state.popular_has_more,
+        2 => state.category_has_more,
+        _ => false,
+    });
+}
+
+fn load_discover_popular_page(
+    mut state: DiscoverBrowseState,
+    installed_ids: &BTreeSet<String>,
+) -> Result<(DiscoverBrowseState, Vec<DiscoverEntry>, bool), String> {
+    state.normalize();
+    let page = esoui::browse_popular(
+        state.popular_page,
+        discover_popular_sort_key(state.popular_sort),
+    )?;
+    let entries = discover_entries_from_search_results_with_offset(
+        page.results,
+        installed_ids,
+        state.popular_page as usize * 25,
+    );
+    state.popular_has_more = page.has_more;
+    Ok((state, entries, page.has_more))
 }
 
 fn load_discover_category_page(
     mut state: DiscoverBrowseState,
     installed_ids: &BTreeSet<String>,
-) -> Result<(DiscoverBrowseState, Vec<DiscoverEntry>), String> {
+) -> Result<(DiscoverBrowseState, Vec<DiscoverEntry>, bool), String> {
+    const CATEGORY_PAGE_SIZE: usize = 20;
     if state.categories.is_empty() {
         state.replace_categories(esoui::fetch_categories()?);
     } else {
@@ -2100,11 +2165,17 @@ fn load_discover_category_page(
         .ok_or_else(|| "ESOUI did not return any addon categories.".to_string())?;
     let results = esoui::browse_category(
         category_id,
-        0,
+        state.category_page,
         discover_category_sort_key(state.category_sort),
     )?;
-    let entries = discover_entries_from_search_results(results, installed_ids);
-    Ok((state, entries))
+    let has_more = results.len() >= CATEGORY_PAGE_SIZE;
+    let entries = discover_entries_from_search_results_with_offset(
+        results,
+        installed_ids,
+        state.category_page as usize * CATEGORY_PAGE_SIZE,
+    );
+    state.category_has_more = has_more;
+    Ok((state, entries, has_more))
 }
 
 fn filter_discover_entries(entries: Vec<DiscoverEntry>, query: &str) -> Vec<DiscoverEntry> {
@@ -2620,11 +2691,23 @@ fn discover_entries_from_search_results(
     results: Vec<esoui::EsouiSearchResult>,
     installed_ids: &BTreeSet<String>,
 ) -> Vec<DiscoverEntry> {
+    discover_entries_from_search_results_with_offset(results, installed_ids, 0)
+}
+
+fn discover_entries_from_search_results_with_offset(
+    results: Vec<esoui::EsouiSearchResult>,
+    installed_ids: &BTreeSet<String>,
+    rank_offset: usize,
+) -> Vec<DiscoverEntry> {
     results
         .into_iter()
         .enumerate()
         .map(|(index, result)| {
-            discover_entry_from_search_result(result, installed_ids, index as i32 + 1)
+            discover_entry_from_search_result(
+                result,
+                installed_ids,
+                (rank_offset + index + 1) as i32,
+            )
         })
         .collect()
 }
@@ -6306,27 +6389,33 @@ fn wire_discover(
             return;
         };
 
+        let normalized_tab = normalize_discover_tab(tab);
         let model = apply_discover_data(&ui, tab, &discover_installed_snapshot(&tab_installed_ids));
         *tab_model.borrow_mut() = model;
         if let Ok(mut state) = tab_browse_state.lock() {
             state.normalize();
             apply_discover_browse_state(&ui, &state);
         }
+        if normalized_tab != 1 && normalized_tab != 2 {
+            ui.set_discover_browse_loading(false);
+            ui.set_discover_browse_has_more(false);
+        }
 
-        if normalize_discover_tab(tab) == 1 {
+        if normalized_tab == 1 {
             let request_id = tab_popular_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
             let request_counter = tab_popular_request_counter.clone();
             let installed_snapshot = discover_installed_snapshot(&tab_installed_ids);
-            let popular_sort = tab_browse_state
-                .lock()
-                .map(|state| state.popular_sort)
-                .unwrap_or(0);
+            let state_snapshot = {
+                let mut state = tab_browse_state.lock().unwrap_or_else(|e| e.into_inner());
+                state.reset_popular_page();
+                apply_discover_browse_state(&ui, &state);
+                state.clone()
+            };
+            ui.set_discover_browse_loading(true);
+            let browse_state = tab_browse_state.clone();
             let ui_weak = ui.as_weak();
             std::thread::spawn(move || {
-                let result =
-                    esoui::browse_popular(0, discover_popular_sort_key(popular_sort)).map(|page| {
-                        discover_entries_from_search_results(page.results, &installed_snapshot)
-                    });
+                let result = load_discover_popular_page(state_snapshot, &installed_snapshot);
 
                 let _ = slint::invoke_from_event_loop(move || {
                     if request_counter.load(Ordering::SeqCst) != request_id {
@@ -6341,15 +6430,30 @@ fn wire_discover(
                         return;
                     }
 
+                    ui.set_discover_browse_loading(false);
                     match result {
-                        Ok(entries) if !entries.is_empty() => {
+                        Ok((next_state, entries, has_more)) if !entries.is_empty() => {
+                            if let Ok(mut state) = browse_state.lock() {
+                                *state = next_state;
+                                state.normalize();
+                                apply_discover_browse_state(&ui, &state);
+                            }
+                            ui.set_discover_browse_has_more(has_more);
                             let model = Rc::new(VecModel::from(entries));
                             ui.set_selected_discover_index(0);
                             ui.set_discover_results(model.into());
                             ui.set_status_error_message("".into());
                         }
-                        Ok(_) => {}
+                        Ok((next_state, _, has_more)) => {
+                            if let Ok(mut state) = browse_state.lock() {
+                                *state = next_state;
+                                state.normalize();
+                                apply_discover_browse_state(&ui, &state);
+                            }
+                            ui.set_discover_browse_has_more(has_more);
+                        }
                         Err(error) => {
+                            ui.set_discover_browse_has_more(false);
                             ui.set_status_error_message(
                                 format!("Could not load popular ESOUI addons: {error}").into(),
                             );
@@ -6359,15 +6463,18 @@ fn wire_discover(
             });
         }
 
-        if normalize_discover_tab(tab) == 2 {
+        if normalized_tab == 2 {
             let request_id = tab_category_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
             let request_counter = tab_category_request_counter.clone();
             let installed_snapshot = discover_installed_snapshot(&tab_installed_ids);
             let browse_state = tab_browse_state.clone();
-            let state_snapshot = browse_state
-                .lock()
-                .map(|state| state.clone())
-                .unwrap_or_default();
+            let state_snapshot = {
+                let mut state = browse_state.lock().unwrap_or_else(|e| e.into_inner());
+                state.reset_category_page();
+                apply_discover_browse_state(&ui, &state);
+                state.clone()
+            };
+            ui.set_discover_browse_loading(true);
             let ui_weak = ui.as_weak();
             std::thread::spawn(move || {
                 let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -6385,20 +6492,30 @@ fn wire_discover(
                         return;
                     }
 
+                    ui.set_discover_browse_loading(false);
                     match result {
-                        Ok((next_state, entries)) if !entries.is_empty() => {
+                        Ok((next_state, entries, has_more)) if !entries.is_empty() => {
                             if let Ok(mut state) = browse_state.lock() {
                                 *state = next_state;
                                 state.normalize();
                                 apply_discover_browse_state(&ui, &state);
                             }
+                            ui.set_discover_browse_has_more(has_more);
                             let model = Rc::new(VecModel::from(entries));
                             ui.set_selected_discover_index(0);
                             ui.set_discover_results(model.into());
                             ui.set_status_error_message("".into());
                         }
-                        Ok(_) => {}
+                        Ok((next_state, _, has_more)) => {
+                            if let Ok(mut state) = browse_state.lock() {
+                                *state = next_state;
+                                state.normalize();
+                                apply_discover_browse_state(&ui, &state);
+                            }
+                            ui.set_discover_browse_has_more(has_more);
+                        }
                         Err(error) => {
+                            ui.set_discover_browse_has_more(false);
                             ui.set_status_error_message(
                                 format!("Could not load ESOUI category addons: {error}").into(),
                             );
@@ -6420,7 +6537,7 @@ fn wire_discover(
         {
             let mut state = popular_sort_state.lock().unwrap_or_else(|e| e.into_inner());
             state.popular_sort = sort.clamp(0, 1);
-            state.normalize();
+            state.reset_popular_page();
             apply_discover_browse_state(&ui, &state);
         }
         if ui.get_discover_tab() != 1 {
@@ -6430,16 +6547,15 @@ fn wire_discover(
         let request_id = popular_sort_counter.fetch_add(1, Ordering::SeqCst) + 1;
         let request_counter = popular_sort_counter.clone();
         let installed_snapshot = discover_installed_snapshot(&popular_sort_installed_ids);
-        let popular_sort = popular_sort_state
+        let state_snapshot = popular_sort_state
             .lock()
-            .map(|state| state.popular_sort)
-            .unwrap_or(0);
+            .map(|state| state.clone())
+            .unwrap_or_default();
+        ui.set_discover_browse_loading(true);
+        let browse_state = popular_sort_state.clone();
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
-            let result =
-                esoui::browse_popular(0, discover_popular_sort_key(popular_sort)).map(|page| {
-                    discover_entries_from_search_results(page.results, &installed_snapshot)
-                });
+            let result = load_discover_popular_page(state_snapshot, &installed_snapshot);
 
             let _ = slint::invoke_from_event_loop(move || {
                 if request_counter.load(Ordering::SeqCst) != request_id {
@@ -6451,15 +6567,30 @@ fn wire_discover(
                 if ui.get_discover_tab() != 1 {
                     return;
                 }
+                ui.set_discover_browse_loading(false);
                 match result {
-                    Ok(entries) if !entries.is_empty() => {
+                    Ok((next_state, entries, has_more)) if !entries.is_empty() => {
+                        if let Ok(mut state) = browse_state.lock() {
+                            *state = next_state;
+                            state.normalize();
+                            apply_discover_browse_state(&ui, &state);
+                        }
+                        ui.set_discover_browse_has_more(has_more);
                         let model = Rc::new(VecModel::from(entries));
                         ui.set_selected_discover_index(0);
                         ui.set_discover_results(model.into());
                         ui.set_status_error_message("".into());
                     }
-                    Ok(_) => {}
+                    Ok((next_state, _, has_more)) => {
+                        if let Ok(mut state) = browse_state.lock() {
+                            *state = next_state;
+                            state.normalize();
+                            apply_discover_browse_state(&ui, &state);
+                        }
+                        ui.set_discover_browse_has_more(has_more);
+                    }
                     Err(error) => {
+                        ui.set_discover_browse_has_more(false);
                         ui.set_status_error_message(
                             format!("Could not load popular ESOUI addons: {error}").into(),
                         );
@@ -6496,6 +6627,7 @@ fn wire_discover(
             .unwrap_or_default();
         let installed_snapshot = discover_installed_snapshot(&category_next_installed_ids);
         let browse_state = category_next_state.clone();
+        ui.set_discover_browse_loading(true);
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -6510,20 +6642,30 @@ fn wire_discover(
                 if ui.get_discover_tab() != 2 {
                     return;
                 }
+                ui.set_discover_browse_loading(false);
                 match result {
-                    Ok((next_state, entries)) if !entries.is_empty() => {
+                    Ok((next_state, entries, has_more)) if !entries.is_empty() => {
                         if let Ok(mut state) = browse_state.lock() {
                             *state = next_state;
                             state.normalize();
                             apply_discover_browse_state(&ui, &state);
                         }
+                        ui.set_discover_browse_has_more(has_more);
                         let model = Rc::new(VecModel::from(entries));
                         ui.set_selected_discover_index(0);
                         ui.set_discover_results(model.into());
                         ui.set_status_error_message("".into());
                     }
-                    Ok(_) => {}
+                    Ok((next_state, _, has_more)) => {
+                        if let Ok(mut state) = browse_state.lock() {
+                            *state = next_state;
+                            state.normalize();
+                            apply_discover_browse_state(&ui, &state);
+                        }
+                        ui.set_discover_browse_has_more(has_more);
+                    }
                     Err(error) => {
+                        ui.set_discover_browse_has_more(false);
                         ui.set_status_error_message(
                             format!("Could not load ESOUI category addons: {error}").into(),
                         );
@@ -6560,6 +6702,7 @@ fn wire_discover(
             .unwrap_or_default();
         let installed_snapshot = discover_installed_snapshot(&category_sort_installed_ids);
         let browse_state = category_sort_state.clone();
+        ui.set_discover_browse_loading(true);
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -6574,20 +6717,30 @@ fn wire_discover(
                 if ui.get_discover_tab() != 2 {
                     return;
                 }
+                ui.set_discover_browse_loading(false);
                 match result {
-                    Ok((next_state, entries)) if !entries.is_empty() => {
+                    Ok((next_state, entries, has_more)) if !entries.is_empty() => {
                         if let Ok(mut state) = browse_state.lock() {
                             *state = next_state;
                             state.normalize();
                             apply_discover_browse_state(&ui, &state);
                         }
+                        ui.set_discover_browse_has_more(has_more);
                         let model = Rc::new(VecModel::from(entries));
                         ui.set_selected_discover_index(0);
                         ui.set_discover_results(model.into());
                         ui.set_status_error_message("".into());
                     }
-                    Ok(_) => {}
+                    Ok((next_state, _, has_more)) => {
+                        if let Ok(mut state) = browse_state.lock() {
+                            *state = next_state;
+                            state.normalize();
+                            apply_discover_browse_state(&ui, &state);
+                        }
+                        ui.set_discover_browse_has_more(has_more);
+                    }
                     Err(error) => {
+                        ui.set_discover_browse_has_more(false);
                         ui.set_status_error_message(
                             format!("Could not load ESOUI category addons: {error}").into(),
                         );
@@ -6595,6 +6748,130 @@ fn wire_discover(
                 }
             });
         });
+    });
+
+    let load_more_ui = ui.as_weak();
+    let load_more_state = browse_state.clone();
+    let load_more_installed_ids = installed_ids.clone();
+    let load_more_popular_counter = popular_request_counter.clone();
+    let load_more_category_counter = category_request_counter.clone();
+    ui.on_discover_load_more(move || {
+        let Some(ui) = load_more_ui.upgrade() else {
+            return;
+        };
+        if ui.get_discover_browse_loading() || !ui.get_discover_browse_has_more() {
+            return;
+        }
+
+        match ui.get_discover_tab() {
+            1 => {
+                let request_id = load_more_popular_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let request_counter = load_more_popular_counter.clone();
+                let state_snapshot = load_more_state
+                    .lock()
+                    .map(|state| state.next_popular_page_snapshot())
+                    .unwrap_or_default();
+                let installed_snapshot = discover_installed_snapshot(&load_more_installed_ids);
+                let browse_state = load_more_state.clone();
+                ui.set_discover_browse_loading(true);
+                let ui_weak = ui.as_weak();
+                std::thread::spawn(move || {
+                    let result = load_discover_popular_page(state_snapshot, &installed_snapshot);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if request_counter.load(Ordering::SeqCst) != request_id {
+                            return;
+                        }
+                        let Some(ui) = ui_weak.upgrade() else {
+                            return;
+                        };
+                        if ui.get_discover_tab() != 1 {
+                            return;
+                        }
+
+                        ui.set_discover_browse_loading(false);
+                        match result {
+                            Ok((next_state, entries, has_more)) => {
+                                if let Ok(mut state) = browse_state.lock() {
+                                    *state = next_state;
+                                    state.normalize();
+                                    apply_discover_browse_state(&ui, &state);
+                                }
+                                ui.set_discover_browse_has_more(has_more);
+                                if entries.is_empty() {
+                                    ui.set_status_error_message(
+                                        "No more popular ESOUI addons to load.".into(),
+                                    );
+                                } else {
+                                    append_discover_results(&ui, entries);
+                                    ui.set_status_error_message("".into());
+                                }
+                            }
+                            Err(error) => {
+                                ui.set_discover_browse_has_more(false);
+                                ui.set_status_error_message(
+                                    format!("Could not load more popular ESOUI addons: {error}")
+                                        .into(),
+                                );
+                            }
+                        }
+                    });
+                });
+            }
+            2 => {
+                let request_id = load_more_category_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let request_counter = load_more_category_counter.clone();
+                let state_snapshot = load_more_state
+                    .lock()
+                    .map(|state| state.next_category_page_snapshot())
+                    .unwrap_or_default();
+                let installed_snapshot = discover_installed_snapshot(&load_more_installed_ids);
+                let browse_state = load_more_state.clone();
+                ui.set_discover_browse_loading(true);
+                let ui_weak = ui.as_weak();
+                std::thread::spawn(move || {
+                    let result = load_discover_category_page(state_snapshot, &installed_snapshot);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if request_counter.load(Ordering::SeqCst) != request_id {
+                            return;
+                        }
+                        let Some(ui) = ui_weak.upgrade() else {
+                            return;
+                        };
+                        if ui.get_discover_tab() != 2 {
+                            return;
+                        }
+
+                        ui.set_discover_browse_loading(false);
+                        match result {
+                            Ok((next_state, entries, has_more)) => {
+                                if let Ok(mut state) = browse_state.lock() {
+                                    *state = next_state;
+                                    state.normalize();
+                                    apply_discover_browse_state(&ui, &state);
+                                }
+                                ui.set_discover_browse_has_more(has_more);
+                                if entries.is_empty() {
+                                    ui.set_status_error_message(
+                                        "No more ESOUI category addons to load.".into(),
+                                    );
+                                } else {
+                                    append_discover_results(&ui, entries);
+                                    ui.set_status_error_message("".into());
+                                }
+                            }
+                            Err(error) => {
+                                ui.set_discover_browse_has_more(false);
+                                ui.set_status_error_message(
+                                    format!("Could not load more ESOUI category addons: {error}")
+                                        .into(),
+                                );
+                            }
+                        }
+                    });
+                });
+            }
+            _ => {}
+        }
     });
 
     let query_ui = ui.as_weak();
@@ -14455,6 +14732,43 @@ CombatMetrics_SavedVariables = {
                 "tab {tab} rows should carry ESOUI ids"
             );
         }
+    }
+
+    #[test]
+    fn discover_browse_state_tracks_pages_and_rank_offsets() {
+        let mut state = DiscoverBrowseState {
+            popular_has_more: true,
+            category_has_more: true,
+            category_page: 2,
+            categories: vec![esoui::EsouiCategory {
+                id: 1,
+                name: "Combat".to_string(),
+                depth: 0,
+            }],
+            ..Default::default()
+        };
+
+        state.popular_page = 2;
+        let next_popular = state.next_popular_page_snapshot();
+        assert_eq!(next_popular.popular_page, 3);
+
+        state.select_next_category_sort();
+        assert_eq!(state.category_page, 0);
+        assert!(!state.category_has_more);
+
+        let entries = discover_entries_from_search_results_with_offset(
+            vec![esoui::EsouiSearchResult {
+                id: 42,
+                title: "Combat Metrics".to_string(),
+                author: "Solinur".to_string(),
+                category: "Combat".to_string(),
+                downloads: "5.2M".to_string(),
+                updated: "04/01/26".to_string(),
+            }],
+            &BTreeSet::new(),
+            25,
+        );
+        assert_eq!(entries[0].rank, 26);
     }
 
     #[test]
