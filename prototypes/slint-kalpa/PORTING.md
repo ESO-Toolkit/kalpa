@@ -221,11 +221,12 @@ Current detail status:
   Popular/Categories no longer use search-input chrome for their browse headers.
   Active Discover loading now shows compact native row skeletons instead of a
   centered empty-state placeholder. Category/sort browse controls now use
-  neutral select-trigger styling with bordered fields and chevrons instead of
-  pill chips, though true dropdown menus are still pending. Failed Popular and
+  stacked native select triggers backed by ESOUI category and sort option
+  models, with overlay menus instead of cycling pill chips. Failed Popular and
   Categories first-page loads now render inline retry states inside the native
   Discover list instead of only using the global status line. Remaining Discover
-  gaps are richer detail/install/update error states and update flows.
+  gaps are the loaded-result filter field plus richer detail/install/update
+  error states and update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
   the reference Browse, share-code Import, Create details, Create addons, and
   install-detail flows.

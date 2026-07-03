@@ -207,6 +207,12 @@ export struct DiscoverScreenshotEntry {
     selected: bool,
 }
 
+export struct DiscoverSelectOption {
+    label: string,
+    depth: int,
+    selected: bool,
+}
+
 export struct ThemeEntry {
     id: string,
     name: string,
@@ -1849,6 +1855,50 @@ component DiscoverSelectChip inherits Rectangle {
     }
 }
 
+component DiscoverSelectMenuRow inherits Rectangle {
+    in property <string> label;
+    in property <int> depth: 0;
+    in property <bool> selected: false;
+    callback clicked;
+    height: 28px;
+    border-radius: 7px;
+    border-width: 0px;
+    background: root.selected ? Palette.gold-10 : (touch.has-hover ? Palette.white-06 : #00000000);
+
+    animate background { duration: 120ms; easing: ease-in-out; }
+
+    Image {
+        visible: root.selected;
+        x: 9px;
+        y: 8px;
+        width: 12px;
+        height: 12px;
+        source: @image-url("../assets/icons/check.svg");
+        image-fit: contain;
+        colorize: Palette.gold;
+    }
+
+    Text {
+        x: 12px + root.depth * 12px + (root.selected ? 15px : 0px);
+        width: parent.width - self.x - 10px;
+        height: root.height;
+        text: root.label;
+        color: root.selected ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
+        font-size: 11px;
+        font-weight: root.selected ? 750 : 600;
+        vertical-alignment: center;
+        overflow: elide;
+
+        animate color { duration: 120ms; easing: ease-in-out; }
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
+}
+
 component DiscoverSubTab inherits Rectangle {
     in property <image> icon;
     in property <string> label;
@@ -1905,6 +1955,8 @@ component DiscoverModePanel inherits Rectangle {
     in property <int> popular-sort: 0;
     in property <string> category-label: "Combat";
     in property <string> category-sort-label: "Downloads";
+    in property <[DiscoverSelectOption]> category-options;
+    in property <[DiscoverSelectOption]> category-sort-options;
     in property <bool> loading: false;
     in property <bool> has-more: false;
     in property <string> message: "";
@@ -1918,9 +1970,13 @@ component DiscoverModePanel inherits Rectangle {
     callback popular-sort-selected(int);
     callback category-next;
     callback category-sort-next;
+    callback category-selected(int);
+    callback category-sort-selected(int);
     callback load-more;
     callback retry;
-    private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? 42px : 0px);
+    private property <bool> category-menu-open: false;
+    private property <bool> category-sort-menu-open: false;
+    private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? 82px : 0px);
     private property <bool> footer-visible: (root.tab == 1 || root.tab == 2) && (root.loading || root.has-more);
     private property <length> footer-height: root.footer-visible ? 42px : 0px;
     background: #00000000;
@@ -1940,23 +1996,29 @@ component DiscoverModePanel inherits Rectangle {
         x: 12px;
         y: 0px;
         width: parent.width - 24px;
-        height: 32px;
+        height: 74px;
         background: #00000000;
 
         DiscoverSelectChip {
-            chip-width: (parent.width - 8px) / 2;
+            chip-width: parent.width;
             icon: @image-url("../assets/icons/folder-open.svg");
             label: root.category-label;
             active: true;
-            clicked => { root.category-next(); }
+            clicked => {
+                root.category-menu-open = !root.category-menu-open;
+                root.category-sort-menu-open = false;
+            }
         }
 
         DiscoverSelectChip {
-            x: (parent.width + 8px) / 2;
-            chip-width: (parent.width - 8px) / 2;
+            y: 40px;
+            chip-width: parent.width;
             icon: @image-url("../assets/icons/refresh-cw.svg");
             label: root.category-sort-label;
-            clicked => { root.category-sort-next(); }
+            clicked => {
+                root.category-sort-menu-open = !root.category-sort-menu-open;
+                root.category-menu-open = false;
+            }
         }
     }
 
@@ -2045,6 +2107,115 @@ component DiscoverModePanel inherits Rectangle {
                 root.result-selected(index);
             }
             install-clicked => { root.install-result(index); }
+        }
+    }
+
+    if (root.tab == 2 && root.category-menu-open) : Rectangle {
+        x: 12px;
+        y: 34px;
+        width: parent.width - 24px;
+        height: min(238px, max(42px, root.category-options.length * 28px + 8px));
+        border-radius: 10px;
+        border-width: 0px;
+        background: Palette.panel;
+        inner-shadow-offset-y: 1px;
+        inner-shadow-blur: 1px;
+        inner-shadow-color: Palette.white-06;
+        drop-shadow-blur: 18px;
+        drop-shadow-offset-y: 8px;
+        drop-shadow-color: #00000080;
+        clip: true;
+
+        if (root.category-options.length == 0) : Text {
+            x: 12px;
+            width: parent.width - 24px;
+            height: parent.height;
+            text: root.loading ? "Loading categories..." : "No categories loaded";
+            color: Palette.muted-half;
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+
+        if (root.category-options.length > 0) : ScrollView {
+            x: 4px;
+            y: 4px;
+            width: parent.width - 8px;
+            height: parent.height - 8px;
+            viewport-width: self.width;
+            viewport-height: root.category-options.length * 28px;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+            Rectangle {
+                width: parent.width;
+                height: root.category-options.length * 28px;
+                background: #00000000;
+
+                for option[index] in root.category-options : DiscoverSelectMenuRow {
+                    y: index * 28px;
+                    width: parent.width;
+                    label: option.label;
+                    depth: option.depth;
+                    selected: option.selected;
+                    clicked => {
+                        root.category-menu-open = false;
+                        root.category-selected(index);
+                    }
+                }
+            }
+        }
+    }
+
+    if (root.tab == 2 && root.category-sort-menu-open) : Rectangle {
+        x: 12px;
+        y: 74px;
+        width: parent.width - 24px;
+        height: max(42px, root.category-sort-options.length * 28px + 8px);
+        border-radius: 10px;
+        border-width: 0px;
+        background: Palette.panel;
+        inner-shadow-offset-y: 1px;
+        inner-shadow-blur: 1px;
+        inner-shadow-color: Palette.white-06;
+        drop-shadow-blur: 18px;
+        drop-shadow-offset-y: 8px;
+        drop-shadow-color: #00000080;
+        clip: true;
+
+        if (root.category-sort-options.length == 0) : Text {
+            x: 12px;
+            width: parent.width - 24px;
+            height: parent.height;
+            text: "No sort options";
+            color: Palette.muted-half;
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+
+        if (root.category-sort-options.length > 0) : Rectangle {
+            x: 4px;
+            y: 4px;
+            width: parent.width - 8px;
+            height: parent.height - 8px;
+            background: #00000000;
+
+            for option[index] in root.category-sort-options : DiscoverSelectMenuRow {
+                y: index * 28px;
+                width: parent.width;
+                label: option.label;
+                depth: option.depth;
+                selected: option.selected;
+                clicked => {
+                    root.category-sort-menu-open = false;
+                    root.category-sort-selected(index);
+                }
+            }
         }
     }
 
@@ -9561,6 +9732,8 @@ component Sidebar inherits Rectangle {
     in-out property <int> discover-popular-sort: 0;
     in-out property <string> discover-category-label: "Combat";
     in-out property <string> discover-category-sort-label: "Downloads";
+    in-out property <[DiscoverSelectOption]> discover-category-options;
+    in-out property <[DiscoverSelectOption]> discover-category-sort-options;
     in-out property <bool> discover-browse-loading: false;
     in-out property <bool> discover-browse-has-more: false;
     in-out property <string> discover-browse-message;
@@ -9593,6 +9766,8 @@ component Sidebar inherits Rectangle {
     callback discover-popular-sort-selected(int);
     callback discover-category-next;
     callback discover-category-sort-next;
+    callback discover-category-selected(int);
+    callback discover-category-sort-selected(int);
     callback discover-load-more;
     callback discover-browse-retry;
     private property <string> count-label: root.addons.length == 1 ? "1 ADDON" : root.addons.length + " ADDONS";
@@ -10303,6 +10478,8 @@ component Sidebar inherits Rectangle {
         popular-sort: root.discover-popular-sort;
         category-label: root.discover-category-label;
         category-sort-label: root.discover-category-sort-label;
+        category-options: root.discover-category-options;
+        category-sort-options: root.discover-category-sort-options;
         loading: root.discover-browse-loading;
         has-more: root.discover-browse-has-more;
         message: root.discover-browse-message;
@@ -10316,6 +10493,8 @@ component Sidebar inherits Rectangle {
         popular-sort-selected(sort) => { root.discover-popular-sort-selected(sort); }
         category-next => { root.discover-category-next(); }
         category-sort-next => { root.discover-category-sort-next(); }
+        category-selected(index) => { root.discover-category-selected(index); }
+        category-sort-selected(index) => { root.discover-category-sort-selected(index); }
         load-more => { root.discover-load-more(); }
         retry => { root.discover-browse-retry(); }
     }
@@ -11527,6 +11706,8 @@ export component KalpaWindow inherits Window {
     in-out property <int> discover-popular-sort: 0;
     in-out property <string> discover-category-label: "Combat";
     in-out property <string> discover-category-sort-label: "Downloads";
+    in-out property <[DiscoverSelectOption]> discover-category-options;
+    in-out property <[DiscoverSelectOption]> discover-category-sort-options;
     in-out property <bool> discover-browse-loading: false;
     in-out property <bool> discover-browse-has-more: false;
     in-out property <string> discover-browse-message;
@@ -11666,6 +11847,8 @@ export component KalpaWindow inherits Window {
     callback discover-popular-sort-selected(int);
     callback discover-category-next;
     callback discover-category-sort-next;
+    callback discover-category-selected(int);
+    callback discover-category-sort-selected(int);
     callback discover-load-more;
     callback discover-browse-retry;
     callback discover-screenshot-prev;
@@ -11865,6 +12048,8 @@ export component KalpaWindow inherits Window {
             discover-popular-sort <=> root.discover-popular-sort;
             discover-category-label <=> root.discover-category-label;
             discover-category-sort-label <=> root.discover-category-sort-label;
+            discover-category-options <=> root.discover-category-options;
+            discover-category-sort-options <=> root.discover-category-sort-options;
             discover-browse-loading <=> root.discover-browse-loading;
             discover-browse-has-more <=> root.discover-browse-has-more;
             discover-browse-message <=> root.discover-browse-message;
@@ -11886,6 +12071,8 @@ export component KalpaWindow inherits Window {
             discover-popular-sort-selected(sort) => { root.discover-popular-sort-selected(sort); }
             discover-category-next => { root.discover-category-next(); }
             discover-category-sort-next => { root.discover-category-sort-next(); }
+            discover-category-selected(index) => { root.discover-category-selected(index); }
+            discover-category-sort-selected(index) => { root.discover-category-sort-selected(index); }
             discover-load-more => { root.discover-load-more(); }
             discover-browse-retry => { root.discover-browse-retry(); }
         }

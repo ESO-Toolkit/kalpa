@@ -943,8 +943,22 @@ impl DiscoverBrowseState {
         self.normalize();
     }
 
+    fn select_category_index(&mut self, index: usize) {
+        if index < self.categories.len() {
+            self.selected_category_index = index;
+        }
+        self.reset_category_page();
+        self.normalize();
+    }
+
     fn select_next_category_sort(&mut self) {
         self.category_sort = (self.category_sort + 1) % 3;
+        self.reset_category_page();
+        self.normalize();
+    }
+
+    fn select_category_sort(&mut self, sort: i32) {
+        self.category_sort = sort.clamp(0, 2);
         self.reset_category_page();
         self.normalize();
     }
@@ -2512,9 +2526,9 @@ fn discover_category_sort_key(sort: i32) -> &'static str {
 
 fn discover_category_sort_label(sort: i32) -> &'static str {
     match sort {
-        1 => "Updated",
+        1 => "Recently Updated",
         2 => "Name",
-        _ => "Downloads",
+        _ => "Most Popular",
     }
 }
 
@@ -2525,10 +2539,39 @@ fn discover_category_label(state: &DiscoverBrowseState) -> String {
         .unwrap_or_else(|| "Combat".to_string())
 }
 
+fn discover_category_options(state: &DiscoverBrowseState) -> Vec<DiscoverSelectOption> {
+    state
+        .categories
+        .iter()
+        .enumerate()
+        .map(|(index, category)| DiscoverSelectOption {
+            label: category.name.clone().into(),
+            depth: category.depth.min(3) as i32,
+            selected: index == state.selected_category_index,
+        })
+        .collect()
+}
+
+fn discover_category_sort_options(state: &DiscoverBrowseState) -> Vec<DiscoverSelectOption> {
+    (0..3)
+        .map(|sort| DiscoverSelectOption {
+            label: discover_category_sort_label(sort).into(),
+            depth: 0,
+            selected: sort == state.category_sort,
+        })
+        .collect()
+}
+
 fn apply_discover_browse_state(ui: &KalpaWindow, state: &DiscoverBrowseState) {
     ui.set_discover_popular_sort(state.popular_sort);
     ui.set_discover_category_label(discover_category_label(state).into());
     ui.set_discover_category_sort_label(discover_category_sort_label(state.category_sort).into());
+    ui.set_discover_category_options(
+        Rc::new(VecModel::from(discover_category_options(state))).into(),
+    );
+    ui.set_discover_category_sort_options(
+        Rc::new(VecModel::from(discover_category_sort_options(state))).into(),
+    );
     let tab = ui.get_discover_tab();
     ui.set_discover_browse_has_more(match tab {
         1 => state.popular_has_more,
@@ -8764,6 +8807,84 @@ fn wire_discover(
         });
     });
 
+    let category_select_ui = ui.as_weak();
+    let category_select_state = browse_state.clone();
+    let category_select_installed_ids = installed_ids.clone();
+    let category_select_counter = category_request_counter.clone();
+    ui.on_discover_category_selected(move |index| {
+        let Some(ui) = category_select_ui.upgrade() else {
+            return;
+        };
+        {
+            let mut state = category_select_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.select_category_index(index.max(0) as usize);
+            apply_discover_browse_state(&ui, &state);
+        }
+        if ui.get_discover_tab() != 2 {
+            return;
+        }
+
+        let request_id = category_select_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let request_counter = category_select_counter.clone();
+        let state_snapshot = category_select_state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default();
+        let installed_snapshot = discover_installed_snapshot(&category_select_installed_ids);
+        let browse_state = category_select_state.clone();
+        ui.set_discover_browse_loading(true);
+        ui.set_discover_browse_message("".into());
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = load_discover_category_page(state_snapshot, &installed_snapshot);
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if request_counter.load(Ordering::SeqCst) != request_id {
+                    return;
+                }
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                if ui.get_discover_tab() != 2 {
+                    return;
+                }
+                ui.set_discover_browse_loading(false);
+                match result {
+                    Ok((next_state, entries, has_more)) if !entries.is_empty() => {
+                        if let Ok(mut state) = browse_state.lock() {
+                            *state = next_state;
+                            state.normalize();
+                            apply_discover_browse_state(&ui, &state);
+                        }
+                        ui.set_discover_browse_has_more(has_more);
+                        let model = Rc::new(VecModel::from(entries));
+                        ui.set_selected_discover_index(0);
+                        ui.set_discover_results(model.into());
+                        ui.set_discover_browse_message("".into());
+                        ui.set_status_error_message("".into());
+                    }
+                    Ok((next_state, _, has_more)) => {
+                        if let Ok(mut state) = browse_state.lock() {
+                            *state = next_state;
+                            state.normalize();
+                            apply_discover_browse_state(&ui, &state);
+                        }
+                        ui.set_discover_browse_has_more(has_more);
+                        ui.set_discover_browse_message("".into());
+                    }
+                    Err(error) => {
+                        ui.set_discover_browse_has_more(false);
+                        let message = format!("Could not load ESOUI category addons: {error}");
+                        ui.set_discover_browse_message(message.clone().into());
+                        ui.set_status_error_message(message.into());
+                    }
+                }
+            });
+        });
+    });
+
     let category_sort_ui = ui.as_weak();
     let category_sort_state = browse_state.clone();
     let category_sort_installed_ids = installed_ids.clone();
@@ -8791,6 +8912,84 @@ fn wire_discover(
             .unwrap_or_default();
         let installed_snapshot = discover_installed_snapshot(&category_sort_installed_ids);
         let browse_state = category_sort_state.clone();
+        ui.set_discover_browse_loading(true);
+        ui.set_discover_browse_message("".into());
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = load_discover_category_page(state_snapshot, &installed_snapshot);
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if request_counter.load(Ordering::SeqCst) != request_id {
+                    return;
+                }
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                if ui.get_discover_tab() != 2 {
+                    return;
+                }
+                ui.set_discover_browse_loading(false);
+                match result {
+                    Ok((next_state, entries, has_more)) if !entries.is_empty() => {
+                        if let Ok(mut state) = browse_state.lock() {
+                            *state = next_state;
+                            state.normalize();
+                            apply_discover_browse_state(&ui, &state);
+                        }
+                        ui.set_discover_browse_has_more(has_more);
+                        let model = Rc::new(VecModel::from(entries));
+                        ui.set_selected_discover_index(0);
+                        ui.set_discover_results(model.into());
+                        ui.set_discover_browse_message("".into());
+                        ui.set_status_error_message("".into());
+                    }
+                    Ok((next_state, _, has_more)) => {
+                        if let Ok(mut state) = browse_state.lock() {
+                            *state = next_state;
+                            state.normalize();
+                            apply_discover_browse_state(&ui, &state);
+                        }
+                        ui.set_discover_browse_has_more(has_more);
+                        ui.set_discover_browse_message("".into());
+                    }
+                    Err(error) => {
+                        ui.set_discover_browse_has_more(false);
+                        let message = format!("Could not load ESOUI category addons: {error}");
+                        ui.set_discover_browse_message(message.clone().into());
+                        ui.set_status_error_message(message.into());
+                    }
+                }
+            });
+        });
+    });
+
+    let category_sort_select_ui = ui.as_weak();
+    let category_sort_select_state = browse_state.clone();
+    let category_sort_select_installed_ids = installed_ids.clone();
+    let category_sort_select_counter = category_request_counter.clone();
+    ui.on_discover_category_sort_selected(move |sort| {
+        let Some(ui) = category_sort_select_ui.upgrade() else {
+            return;
+        };
+        {
+            let mut state = category_sort_select_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.select_category_sort(sort);
+            apply_discover_browse_state(&ui, &state);
+        }
+        if ui.get_discover_tab() != 2 {
+            return;
+        }
+
+        let request_id = category_sort_select_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let request_counter = category_sort_select_counter.clone();
+        let state_snapshot = category_sort_select_state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default();
+        let installed_snapshot = discover_installed_snapshot(&category_sort_select_installed_ids);
+        let browse_state = category_sort_select_state.clone();
         ui.set_discover_browse_loading(true);
         ui.set_discover_browse_message("".into());
         let ui_weak = ui.as_weak();
@@ -19174,11 +19373,14 @@ CombatMetrics_SavedVariables = {
         assert_eq!(discover_category_sort_key(state.category_sort), "downloads");
         assert_eq!(
             discover_category_sort_label(state.category_sort),
-            "Downloads"
+            "Most Popular"
         );
         state.select_next_category_sort();
         assert_eq!(discover_category_sort_key(state.category_sort), "newest");
-        assert_eq!(discover_category_sort_label(state.category_sort), "Updated");
+        assert_eq!(
+            discover_category_sort_label(state.category_sort),
+            "Recently Updated"
+        );
         state.select_next_category_sort();
         assert_eq!(discover_category_sort_key(state.category_sort), "name");
         assert_eq!(discover_category_sort_label(state.category_sort), "Name");
