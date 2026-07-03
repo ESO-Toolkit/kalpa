@@ -9290,24 +9290,14 @@ component SvmSettingRow inherits Rectangle {
     }
 
     if (root.kind == 2) : Rectangle {
-        x: parent.width - 190px;
+        x: parent.width - 210px;
         y: 4px;
-        width: 154px;
+        width: 176px;
         height: 30px;
-        background: #00000000;
+        border-radius: 9px;
+        background: Palette.white-03;
 
-        GhostIconButton { x: 0px; y: 1px; width: 28px; height: 28px; icon: @image-url("../assets/icons/minus.svg"); }
-        Rectangle {
-            x: 34px;
-            y: 0px;
-            width: 92px;
-            height: 30px;
-            border-radius: 9px;
-            background: Palette.white-03;
-
-            Text { width: parent.width; height: parent.height; text: root.value; color: Palette.foreground; font-size: 13px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
-        }
-        GhostIconButton { x: 132px; y: 1px; width: 28px; height: 28px; icon: @image-url("../assets/icons/plus.svg"); }
+        Text { x: 12px; width: parent.width - 24px; height: parent.height; text: root.value; color: Palette.foreground; font-size: 13px; font-weight: 800; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
     }
 
     touch := TouchArea {
@@ -9645,8 +9635,7 @@ component SavedVariablesOverlay inherits Rectangle {
             PackHubButton { x: 452px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Preview"; disabled: !root.editor-dirty; clicked => { root.editor-preview(); } }
             PackHubButton { x: 538px; y: 0px; width: 76px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: !root.editor-dirty; clicked => { root.editor-discard(); } }
             PackHubButton { x: 622px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; disabled: !root.editor-has-file; clicked => { root.editor-restore(); } }
-            PackHubButton { x: 714px; y: 0px; width: 78px; icon: @image-url("../assets/icons/settings.svg"); label: "Settings"; }
-            PackHubButton { x: 800px; y: 0px; width: 44px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; show-icon: false; disabled: !root.editor-has-file; clicked => { root.editor-copy-raw(); } }
+            PackHubButton { x: 714px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; disabled: !root.editor-has-file; clicked => { root.editor-copy-raw(); } }
 
             Rectangle {
                 x: 0px;

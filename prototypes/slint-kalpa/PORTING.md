@@ -281,9 +281,11 @@ Current detail status:
   now loads real files through the shared parser, renders native tree/settings
   rows, toggles boolean settings, previews diffs, saves through the shared write
   path, restores `.bak` files, and copies serialized raw Lua to the clipboard
-  for inspection. Remaining Editor gaps are full text/number editing, explicit
-  tree row selection, search/filter behavior, full raw text editing, schema
-  customization, ESO-running guards, and richer error states.
+  for inspection. Text and number values render read-only for the first
+  shippable native toggle instead of exposing inert edit controls. Remaining
+  Editor gaps are full text/number editing, explicit tree row selection,
+  search/filter behavior, full raw text editing, schema customization,
+  ESO-running guards, and richer error states.
 - The Settings > Tools Backup & Restore row now opens a native Slint backup
   overlay covering the main, custom-label, and restore-confirmation states. The
   overlay now lists real settings backups, creates manual backups, restores with
