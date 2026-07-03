@@ -202,8 +202,10 @@ Current detail status:
   metadata, and selecting a pack hydrates the native detail/install addon rows
   from `/packs/{id}`. Browse search, type filters, sort selection, and load-more
   pagination now drive native Pack Hub requests. The install footer now installs
-  missing pack addons through the native ESOUI download/extract/hash/metadata
-  path, but still lacks the React batch-progress UI, transitive dependency pass,
+  selected missing pack addons through the native ESOUI
+  download/extract/hash/metadata path, with required addons selected by default
+  and optional missing addons toggled directly in the native detail rows. It
+  still lacks the React batch-progress UI, transitive dependency pass,
   installed-pack library tracking, and install-count tracking. Pack detail
   Edit/Delete/Share actions now hand off to the full WebView Pack Hub with the
   selected pack id because those flows still require the React account/session

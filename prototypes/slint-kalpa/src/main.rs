@@ -3191,9 +3191,12 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         let rows = pack_hub_detail_addons(&ui);
-        let pending = rows.iter().filter(|row| !row.installed).count();
+        let pending = rows
+            .iter()
+            .filter(|row| !row.installed && row.selected)
+            .count();
         if pending == 0 {
-            ui.set_status_error_message("All addons in this pack are already installed.".into());
+            ui.set_status_error_message("Select at least one missing addon to install.".into());
             return;
         }
 
@@ -3318,6 +3321,24 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         let mut state = create_required_state.borrow_mut();
         toggle_pack_hub_create_required(&mut state, row);
         apply_pack_hub_create_state(&ui, &create_required_models, &state);
+    });
+
+    let detail_select_ui = ui.as_weak();
+    ui.on_pack_hub_detail_addon_selection_toggle(move |index| {
+        let Some(ui) = detail_select_ui.upgrade() else {
+            return;
+        };
+        let model = ui.get_pack_hub_detail_addons();
+        let index = index.max(0) as usize;
+        let Some(mut row) = model.row_data(index) else {
+            return;
+        };
+        if row.required || row.installed {
+            return;
+        }
+        row.selected = !row.selected;
+        model.set_row_data(index, row);
+        apply_pack_hub_detail_model(&ui, pack_hub_detail_addons(&ui));
     });
 
     let svm_copy_state = Rc::new(RefCell::new(SvmCopyState::default()));
@@ -4123,6 +4144,7 @@ fn pack_hub_addon_entry(
         esoui_id: format!("#{esoui_id}").into(),
         required: addon.required,
         installed: installed_ids.contains(&esoui_id),
+        selected: addon.required,
         note: addon.note.unwrap_or_default().into(),
     }
 }
@@ -4137,8 +4159,16 @@ fn native_pack_addons(addons: &serde_json::Value) -> Vec<NativePackAddonEntry> {
 
 fn pack_hub_install_label(addons: &[PackHubAddonEntry]) -> String {
     let missing = addons.iter().filter(|addon| !addon.installed).count();
-    match missing {
-        0 => "All Addons Installed".to_string(),
+    if missing == 0 {
+        return "All Addons Installed".to_string();
+    }
+
+    let selected_missing = addons
+        .iter()
+        .filter(|addon| !addon.installed && addon.selected)
+        .count();
+    match selected_missing {
+        0 => "Select Addons to Install".to_string(),
         1 => "Install 1 New Addon".to_string(),
         count => format!("Install {count} New Addons"),
     }
@@ -4241,7 +4271,7 @@ fn install_pack_hub_addons_blocking(
     };
 
     for mut row in rows {
-        if row.installed {
+        if row.installed || !row.selected {
             result.rows.push(row);
             continue;
         }
@@ -15146,6 +15176,7 @@ CombatMetrics_SavedVariables = {
             esoui_id: esoui_id.into(),
             required: true,
             installed,
+            selected: true,
             note: "".into(),
         }
     }
@@ -15285,8 +15316,16 @@ CombatMetrics_SavedVariables = {
         assert_eq!(detail.addons[1].note.as_str(), "Optional profile helper");
         assert!(!detail.addons[1].required);
         assert!(!detail.addons[1].installed);
+        assert!(!detail.addons[1].selected);
         assert_eq!(
             pack_hub_install_label(&detail.addons),
+            "Select Addons to Install"
+        );
+
+        let mut selected_addons = detail.addons.clone();
+        selected_addons[1].selected = true;
+        assert_eq!(
+            pack_hub_install_label(&selected_addons),
             "Install 1 New Addon"
         );
     }

@@ -88,6 +88,7 @@ export struct PackHubAddonEntry {
     esoui-id: string,
     required: bool,
     installed: bool,
+    selected: bool,
     note: string,
 }
 
@@ -5737,11 +5738,17 @@ component PackHubInstallRow inherits Rectangle {
     in property <string> esoui-id;
     in property <bool> required: true;
     in property <bool> installed: false;
+    in property <bool> selected: true;
+    callback selection-toggled;
+    private property <bool> selectable: !root.required && !root.installed;
+    private property <bool> active-selection: root.required || root.selected || root.installed;
     height: 47px;
     border-radius: 9px;
     border-width: 0px;
-    background: Palette.white-03;
+    background: touch.has-hover && root.selectable ? Palette.white-06 : Palette.white-03;
     clip: true;
+
+    animate background { duration: 150ms; easing: ease-in-out; }
 
     Rectangle {
         x: 0px;
@@ -5750,7 +5757,7 @@ component PackHubInstallRow inherits Rectangle {
         height: parent.height;
         border-radius: 2px;
         border-width: 0px;
-        background: Palette.gold;
+        background: root.installed ? Palette.emerald : (root.active-selection ? Palette.gold : Palette.muted-half);
     }
 
     Rectangle {
@@ -5760,16 +5767,16 @@ component PackHubInstallRow inherits Rectangle {
         height: 21px;
         border-radius: 6px;
         border-width: 0px;
-        background: Palette.gold-15;
+        background: root.installed ? Palette.emerald-15 : (root.active-selection ? Palette.gold-15 : Palette.white-04);
 
         Image {
             x: 5px;
             y: 5px;
             width: 11px;
             height: 11px;
-            source: @image-url("../assets/icons/check.svg");
+            source: root.active-selection ? @image-url("../assets/icons/check.svg") : @image-url("../assets/icons/package.svg");
             image-fit: contain;
-            colorize: Palette.gold;
+            colorize: root.installed ? Palette.emerald : (root.active-selection ? Palette.gold : Palette.muted-half);
         }
     }
 
@@ -5791,8 +5798,8 @@ component PackHubInstallRow inherits Rectangle {
         y: 0px;
         width: 70px;
         height: parent.height;
-        text: root.required ? "REQUIRED" : "OPTIONAL";
-        color: root.required ? Palette.gold : Palette.muted-half;
+        text: root.required ? "REQUIRED" : (root.selected ? "OPTIONAL" : "SKIPPED");
+        color: root.required || root.selected ? Palette.gold : Palette.muted-half;
         font-size: 9px;
         font-weight: 900;
         vertical-alignment: center;
@@ -5832,6 +5839,16 @@ component PackHubInstallRow inherits Rectangle {
         source: @image-url("../assets/icons/external-link.svg");
         image-fit: contain;
         colorize: Palette.muted-half;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => {
+            if (root.selectable) {
+                root.selection-toggled();
+            }
+        }
     }
 }
 
@@ -6167,6 +6184,7 @@ component PackHubInstallView inherits Rectangle {
     callback edit-requested;
     callback delete-requested;
     callback share-requested;
+    callback addon-selection-toggle(int);
     background: #00000000;
 
     Text {
@@ -6251,6 +6269,8 @@ component PackHubInstallView inherits Rectangle {
                 esoui-id: addon.esoui-id;
                 required: addon.required;
                 installed: addon.installed;
+                selected: addon.selected;
+                selection-toggled => { root.addon-selection-toggle(index); }
             }
         }
     }
@@ -6285,6 +6305,7 @@ component PackHubOverlay inherits Rectangle {
     callback create-addon-toggle(int);
     callback create-selected-remove(int);
     callback create-selected-required-toggle(int);
+    callback detail-addon-selection-toggle(int);
     callback install-detail;
     callback manage-pack-detail;
     visible: root.open;
@@ -6482,6 +6503,7 @@ component PackHubOverlay inherits Rectangle {
                 edit-requested => { root.manage-pack-detail(); }
                 delete-requested => { root.manage-pack-detail(); }
                 share-requested => { root.manage-pack-detail(); }
+                addon-selection-toggle(index) => { root.detail-addon-selection-toggle(index); }
             }
 
             Rectangle {
@@ -6492,7 +6514,7 @@ component PackHubOverlay inherits Rectangle {
                 background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 70%, #00000000 100%);
 
                 PackHubButton { x: parent.width - 302px; y: 18px; width: 74px; icon: @image-url("../assets/icons/arrow-left.svg"); label: "Back"; clicked => { root.view = 0; } }
-                PackHubButton { x: parent.width - 218px; y: 18px; width: 194px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: root.install-label; primary: true; disabled: root.detail-addons.length == 0 || root.install-label == "All Addons Installed"; clicked => { root.install-detail(); } }
+                PackHubButton { x: parent.width - 218px; y: 18px; width: 194px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: root.install-label; primary: true; disabled: root.detail-addons.length == 0 || root.install-label == "All Addons Installed" || root.install-label == "Select Addons to Install"; clicked => { root.install-detail(); } }
             }
         }
     }
@@ -10645,6 +10667,7 @@ export component KalpaWindow inherits Window {
     callback pack-hub-create-addon-toggle(int);
     callback pack-hub-create-selected-remove(int);
     callback pack-hub-create-selected-required-toggle(int);
+    callback pack-hub-detail-addon-selection-toggle(int);
     callback pack-hub-install-detail;
     callback pack-hub-manage-detail;
     callback open-uploader;
@@ -10955,6 +10978,7 @@ export component KalpaWindow inherits Window {
             create-addon-toggle(index) => { root.pack-hub-create-addon-toggle(index); }
             create-selected-remove(index) => { root.pack-hub-create-selected-remove(index); }
             create-selected-required-toggle(index) => { root.pack-hub-create-selected-required-toggle(index); }
+            detail-addon-selection-toggle(index) => { root.pack-hub-detail-addon-selection-toggle(index); }
             install-detail => { root.pack-hub-install-detail(); }
             manage-pack-detail => { root.pack-hub-manage-detail(); }
         }
