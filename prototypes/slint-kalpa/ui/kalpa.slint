@@ -3960,22 +3960,16 @@ component PackHubButton inherits Rectangle {
         width: root.width;
         height: root.height;
         spacing: root.icon-gap;
-
-        Rectangle {
-            width: 0px;
-            horizontal-stretch: 1;
-            background: #00000000;
-        }
+        alignment: center;
+        cross-axis-alignment: center;
 
         Rectangle {
             width: root.icon-size;
-            height: root.height;
-            horizontal-stretch: 0;
+            height: root.icon-size;
             background: #00000000;
 
             Image {
                 visible: root.show-icon;
-                y: (parent.height - root.icon-size) / 2;
                 width: root.icon-size;
                 height: root.icon-size;
                 source: root.icon;
@@ -3988,7 +3982,6 @@ component PackHubButton inherits Rectangle {
         label-wrap := Rectangle {
             width: min(label-text.preferred-width, root.width - root.icon-size - root.icon-gap - 18px);
             height: root.height;
-            horizontal-stretch: 0;
             background: #00000000;
 
             label-text := Text {
@@ -4002,12 +3995,6 @@ component PackHubButton inherits Rectangle {
                 horizontal-alignment: center;
                 overflow: elide;
             }
-        }
-
-        Rectangle {
-            width: 0px;
-            horizontal-stretch: 1;
-            background: #00000000;
         }
     }
 
