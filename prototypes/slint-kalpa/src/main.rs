@@ -100,6 +100,99 @@ mod commands {
     }
 }
 
+const ESO_RUNNING_ADDON_NOTICE: &str =
+    "ESO is running; these addon changes will load after /reloadui or relog.";
+
+fn addon_write_eso_running_warning_active(ui: &KalpaWindow) -> bool {
+    ui.get_settings_warn_eso_running() && is_eso_running_blocking().unwrap_or(false)
+}
+
+fn addon_write_status_message(message: impl AsRef<str>, eso_running: bool) -> String {
+    let message = message.as_ref();
+    if !eso_running {
+        return message.to_string();
+    }
+
+    if message.is_empty() {
+        ESO_RUNNING_ADDON_NOTICE.to_string()
+    } else {
+        format!("{ESO_RUNNING_ADDON_NOTICE} {message}")
+    }
+}
+
+fn is_eso_running_blocking() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        is_eso_running_windows()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_eso_running_windows() -> Result<bool, String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct ProcessEntry32W {
+        dwSize: u32,
+        cntUsage: u32,
+        th32ProcessID: u32,
+        th32DefaultHeapID: usize,
+        th32ModuleID: u32,
+        cntThreads: u32,
+        th32ParentProcessID: u32,
+        pcPriClassBase: i32,
+        dwFlags: u32,
+        szExeFile: [u16; 260],
+    }
+
+    const TH32CS_SNAPPROCESS: u32 = 0x00000002;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> isize;
+        fn Process32FirstW(hSnapshot: isize, lppe: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(hSnapshot: isize, lppe: *mut ProcessEntry32W) -> i32;
+        fn CloseHandle(hObject: isize) -> i32;
+    }
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return Err("Failed to create process snapshot".to_string());
+        }
+
+        let mut entry: ProcessEntry32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<ProcessEntry32W>() as u32;
+
+        let mut found = false;
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(260);
+                let name = OsString::from_wide(&entry.szExeFile[..len])
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
+                if name == "eso64.exe" || name == "eso.exe" {
+                    found = true;
+                    break;
+                }
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+
+        CloseHandle(snap);
+        Ok(found)
+    }
+}
+
 #[allow(dead_code)]
 #[path = "../../../src-tauri/src/safe_migration.rs"]
 mod safe_migration;
@@ -3609,6 +3702,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         let pack = ui.get_pack_hub_import_pack();
+        let eso_running = pending > 0 && addon_write_eso_running_warning_active(&ui);
         ui.set_pack_hub_import_loading(true);
         ui.set_pack_hub_import_install_label(
             if pending == 0 {
@@ -3618,14 +3712,12 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             }
             .into(),
         );
-        ui.set_status_error_message(
-            if pending == 0 {
-                "Applying shared pack settings...".to_string()
-            } else {
-                format!("Installing {pending} shared pack addon(s)...")
-            }
-            .into(),
-        );
+        let status = if pending == 0 {
+            "Applying shared pack settings...".to_string()
+        } else {
+            format!("Installing {pending} shared pack addon(s)...")
+        };
+        ui.set_status_error_message(addon_write_status_message(status, eso_running).into());
 
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
@@ -3659,7 +3751,9 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                     .as_ref()
                     .map(|settings| pack_hub_import_combined_summary(&summary, settings, pending))
                     .unwrap_or(summary);
-                ui.set_status_error_message(summary.into());
+                ui.set_status_error_message(
+                    addon_write_status_message(summary, eso_running).into(),
+                );
             });
         });
     });
@@ -3789,8 +3883,15 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             }
         };
 
+        let eso_running = addon_write_eso_running_warning_active(&ui);
         ui.set_pack_hub_install_label(format!("Installing {pending}...").into());
-        ui.set_status_error_message(format!("Installing {pending} Pack Hub addon(s)...").into());
+        ui.set_status_error_message(
+            addon_write_status_message(
+                format!("Installing {pending} Pack Hub addon(s)..."),
+                eso_running,
+            )
+            .into(),
+        );
 
         let installed_pack_entry = selected_pack_hub_entry(&ui);
         let ui_weak = ui.as_weak();
@@ -3822,7 +3923,9 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                     }
                 }
 
-                ui.set_status_error_message(summary.into());
+                ui.set_status_error_message(
+                    addon_write_status_message(summary, eso_running).into(),
+                );
             });
         });
     });
@@ -7513,6 +7616,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
 
             let mut changed = 0usize;
             let mut failed = Vec::new();
+            let eso_running = addon_write_eso_running_warning_active(&ui);
             for folder_name in selected_folders {
                 if let Some(addons_root) = disk_root_for_addon(&folder_name) {
                     match set_addon_disabled_on_disk(&addons_root, &folder_name, true) {
@@ -7533,18 +7637,16 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             }
 
             apply_addon_view(&ui, &disable_models);
-            if failed.is_empty() {
-                ui.set_status_error_message(format!("Disabled {changed} selected addons.").into());
+            let message = if failed.is_empty() {
+                format!("Disabled {changed} selected addons.")
             } else {
-                ui.set_status_error_message(
-                    format!(
-                        "Disabled {changed} selected addons; {} failed: {}",
-                        failed.len(),
-                        failed.join("; ")
-                    )
-                    .into(),
-                );
-            }
+                format!(
+                    "Disabled {changed} selected addons; {} failed: {}",
+                    failed.len(),
+                    failed.join("; ")
+                )
+            };
+            ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
         }
     });
 
@@ -7604,20 +7706,22 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
                 ui.set_status_error_message("Checking ESOUI for addon updates...".into());
                 start_native_addon_update_check(ui.as_weak(), addons_root);
             } else {
+                let eso_running = addon_write_eso_running_warning_active(&ui);
                 ui.set_checking_updates(true);
+                let message = format!(
+                    "Applying {} safe addon update{}...",
+                    targets.len(),
+                    if targets.len() == 1 { "" } else { "s" }
+                );
                 ui.set_status_error_message(
-                    format!(
-                        "Applying {} safe addon update{}...",
-                        targets.len(),
-                        if targets.len() == 1 { "" } else { "s" }
-                    )
-                    .into(),
+                    addon_write_status_message(message, eso_running).into(),
                 );
                 start_native_addon_update_apply(
                     ui.as_weak(),
                     addons_root,
                     targets,
                     ui.get_settings_conflict_policy().clamp(0, 2),
+                    eso_running,
                 );
             }
         }
@@ -7636,6 +7740,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
 
             let mut removed = 0usize;
             let mut failed = Vec::new();
+            let eso_running = addon_write_eso_running_warning_active(&ui);
             for folder_name in selected_folders {
                 if let Some(addons_root) = disk_root_for_addon(&folder_name) {
                     match remove_addon_from_disk(&addons_root, &folder_name) {
@@ -7652,18 +7757,16 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             }
 
             apply_addon_view(&ui, &models);
-            if failed.is_empty() {
-                ui.set_status_error_message(format!("Removed {removed} selected addons.").into());
+            let message = if failed.is_empty() {
+                format!("Removed {removed} selected addons.")
             } else {
-                ui.set_status_error_message(
-                    format!(
-                        "Removed {removed} selected addons; {} failed: {}",
-                        failed.len(),
-                        failed.join("; ")
-                    )
-                    .into(),
-                );
-            }
+                format!(
+                    "Removed {removed} selected addons; {} failed: {}",
+                    failed.len(),
+                    failed.join("; ")
+                )
+            };
+            ui.set_status_error_message(addon_write_status_message(message, eso_running).into());
         }
     });
 }
@@ -7732,6 +7835,7 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
         };
         let folder_name = addon.folder_name.to_string();
         let next_disabled = !addon.disabled;
+        let eso_running = addon_write_eso_running_warning_active(&ui);
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match set_addon_disabled_on_disk(&addons_root, &folder_name, next_disabled) {
                 Ok(()) => {}
@@ -7745,6 +7849,10 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
         mark_addon_disabled(&mut addon, next_disabled);
         update_master_addon(&disable_models, &folder_name, addon);
         apply_addon_view(&ui, &disable_models);
+        let action = if next_disabled { "Disabled" } else { "Enabled" };
+        ui.set_status_error_message(
+            addon_write_status_message(format!("{action} {folder_name}."), eso_running).into(),
+        );
     });
 
     let remove_ui = ui.as_weak();
@@ -7756,6 +7864,7 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         };
         let folder_name = addon.folder_name.to_string();
+        let eso_running = addon_write_eso_running_warning_active(&ui);
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match remove_addon_from_disk(&addons_root, &folder_name) {
                 Ok(()) => {}
@@ -7768,6 +7877,9 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
 
         remove_master_addon(&models, &folder_name);
         apply_addon_view(&ui, &models);
+        ui.set_status_error_message(
+            addon_write_status_message(format!("Removed {folder_name}."), eso_running).into(),
+        );
     });
 }
 
@@ -7915,6 +8027,7 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 
         let folder_name = addon.folder_name.to_string();
         let next_disabled = !addon.disabled;
+        let eso_running = addon_write_eso_running_warning_active(&ui);
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match set_addon_disabled_on_disk(&addons_root, &folder_name, next_disabled) {
                 Ok(()) => {}
@@ -7929,6 +8042,10 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         toggle_models.visible.set_row_data(index, addon.clone());
         update_master_addon(&toggle_models, &folder_name, addon);
         apply_addon_view(&ui, &toggle_models);
+        let action = if next_disabled { "Disabled" } else { "Enabled" };
+        ui.set_status_error_message(
+            addon_write_status_message(format!("{action} {folder_name}."), eso_running).into(),
+        );
     });
 
     let remove_ui = ui.as_weak();
@@ -7944,6 +8061,7 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         let folder_name = addon.folder_name.to_string();
+        let eso_running = addon_write_eso_running_warning_active(&ui);
         if let Some(addons_root) = disk_root_for_addon(&folder_name) {
             match remove_addon_from_disk(&addons_root, &folder_name) {
                 Ok(()) => {}
@@ -7956,6 +8074,9 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 
         remove_master_addon(&remove_models, &folder_name);
         apply_addon_view(&ui, &remove_models);
+        ui.set_status_error_message(
+            addon_write_status_message(format!("Removed {folder_name}."), eso_running).into(),
+        );
     });
 
     let install_ui = ui.as_weak();
@@ -8763,7 +8884,14 @@ fn wire_discover(
             }
         };
 
-        ui.set_status_error_message(format!("Installing {}...", entry.title.as_str()).into());
+        let eso_running = addon_write_eso_running_warning_active(&ui);
+        ui.set_status_error_message(
+            addon_write_status_message(
+                format!("Installing {}...", entry.title.as_str()),
+                eso_running,
+            )
+            .into(),
+        );
 
         let installed_ids = install_ids.clone();
         let ui_weak = ui.as_weak();
@@ -8788,17 +8916,17 @@ fn wire_discover(
                         }
                         mark_discover_installed_model(&ui.get_discover_results(), &esoui_id);
                         ui.invoke_refresh_requested();
+                        let message = format!(
+                            "{message} {} folder{} added.",
+                            installed_folders.len(),
+                            if installed_folders.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        );
                         ui.set_status_error_message(
-                            format!(
-                                "{message} {} folder{} added.",
-                                installed_folders.len(),
-                                if installed_folders.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                }
-                            )
-                            .into(),
+                            addon_write_status_message(message, eso_running).into(),
                         );
                     }
                     Err(error) => {
@@ -8822,6 +8950,7 @@ fn wire_discover(
             return;
         };
         let esoui_id = entry.esoui_id.to_string();
+        let eso_running = addon_write_eso_running_warning_active(&ui);
 
         match remove_addons_by_esoui_id(&remove_models, &esoui_id) {
             Ok(removed) => {
@@ -8830,14 +8959,14 @@ fn wire_discover(
                 }
                 mark_discover_uninstalled_model(&model, &esoui_id);
                 apply_addon_view(&ui, &remove_models);
+                let message = format!(
+                    "Removed {} addon folder{} for ESOUI {}.",
+                    removed.len(),
+                    if removed.len() == 1 { "" } else { "s" },
+                    esoui_id
+                );
                 ui.set_status_error_message(
-                    format!(
-                        "Removed {} addon folder{} for ESOUI {}.",
-                        removed.len(),
-                        if removed.len() == 1 { "" } else { "s" },
-                        esoui_id
-                    )
-                    .into(),
+                    addon_write_status_message(message, eso_running).into(),
                 );
             }
             Err(error) => {
@@ -9164,6 +9293,7 @@ fn start_native_addon_update_apply(
     addons_dir: PathBuf,
     targets: Vec<NativeAddonUpdateTarget>,
     conflict_policy: i32,
+    eso_running: bool,
 ) {
     std::thread::spawn(move || {
         let result = apply_native_addon_updates_blocking(&addons_dir, targets, conflict_policy);
@@ -9174,7 +9304,10 @@ fn start_native_addon_update_apply(
 
             match result {
                 Ok(result) => {
-                    let message = update_apply_status_message(&result);
+                    let message = addon_write_status_message(
+                        update_apply_status_message(&result),
+                        eso_running,
+                    );
                     let conflict_count = result.conflicts.len() as i32;
                     ui.invoke_addon_update_apply_finished(
                         slint_update_check_model(result.checks),
@@ -15554,6 +15687,22 @@ mod tests {
         assert!(!preflight.truncated);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn addon_write_status_message_adds_eso_reload_notice() {
+        assert_eq!(
+            addon_write_status_message("Updated 1 addon.", true),
+            format!("{ESO_RUNNING_ADDON_NOTICE} Updated 1 addon.")
+        );
+        assert_eq!(
+            addon_write_status_message("", true),
+            ESO_RUNNING_ADDON_NOTICE
+        );
+        assert_eq!(
+            addon_write_status_message("Updated 1 addon.", false),
+            "Updated 1 addon."
+        );
     }
 
     #[test]

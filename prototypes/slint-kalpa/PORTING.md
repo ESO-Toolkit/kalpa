@@ -115,7 +115,10 @@ Current row status:
   conflict rows marked for review when the policy is `ask`. The native path now
   honors the saved automatic conflict policies too: keep-mine applies selective
   extraction and take-update writes edit backups before overwriting conflicts.
-  The manual native conflict-decision modal is still pending.
+  Native AddOns-folder writes now also honor the saved "Warn when ESO is running"
+  setting by reusing the production Windows process check and carrying the
+  `/reloadui` notice through install/update/remove status messages. The manual
+  native conflict-decision modal is still pending.
 - Rows now expose a native right-click context menu with Open Folder, View on
   ESOUI, Favorite/Unfavorite, Enable/Disable, and Remove actions. Enable/disable
   and remove use the same real folder operations as the detail footer for
