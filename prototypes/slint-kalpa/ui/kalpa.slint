@@ -91,6 +91,14 @@ export struct PackHubAddonEntry {
     note: string,
 }
 
+export struct PackHubCreateAddonEntry {
+    title: string,
+    meta: string,
+    esoui-id: string,
+    selected: bool,
+    required: bool,
+}
+
 export struct SettingsBackupEntry {
     name: string,
     display-name: string,
@@ -4259,7 +4267,14 @@ component PackHubField inherits Rectangle {
     height: 36px;
     border-radius: 10px;
     border-width: 0px;
-    background: (root.focused || root.editable) ? Palette.sky-15 : Palette.white-06;
+    background: field-touch.has-hover || root.focused || root.editable ? Palette.sky-15 : Palette.white-06;
+
+    animate background { duration: 150ms; easing: ease-in-out; }
+
+    field-touch := TouchArea {
+        width: root.width;
+        height: root.height;
+    }
 
     Rectangle {
         x: 0px;
@@ -4268,7 +4283,7 @@ component PackHubField inherits Rectangle {
         height: parent.height / 2;
         border-radius: 10px;
         border-width: 0px;
-        background: (root.focused || root.editable) ? Palette.sky-06 : Palette.white-03;
+        background: field-touch.has-hover || root.focused || root.editable ? Palette.sky-06 : Palette.white-03;
     }
 
     Image {
@@ -4279,7 +4294,7 @@ component PackHubField inherits Rectangle {
         height: 14px;
         source: @image-url("../assets/icons/search.svg");
         image-fit: contain;
-        colorize: (root.focused || root.editable) ? Palette.sky : Palette.muted-half;
+        colorize: field-touch.has-hover || root.focused || root.editable ? Palette.sky : Palette.muted-half;
     }
 
     Text {
@@ -4299,10 +4314,9 @@ component PackHubField inherits Rectangle {
     TextEdit {
         visible: root.editable;
         x: root.search ? 36px : 14px;
-        y: 0px;
+        y: 2px;
         width: parent.width - (root.search ? 48px : 28px);
-        height: parent.height;
-        opacity: 0.01;
+        height: parent.height - 4px;
         text: root.value;
         font-size: 13px;
         font-family: "Geist";
@@ -4313,7 +4327,7 @@ component PackHubField inherits Rectangle {
     }
 
     Text {
-        visible: root.value != "";
+        visible: root.value != "" && !root.editable;
         x: root.search ? 36px : 14px;
         y: 0px;
         width: parent.width - (root.search ? 48px : 28px);
@@ -5523,10 +5537,13 @@ component PackHubTypeCard inherits Rectangle {
     in property <string> description;
     in property <color> tone: Palette.gold;
     in property <bool> active: false;
+    callback clicked;
     height: 58px;
     border-radius: 11px;
     border-width: 0px;
-    background: root.active ? Palette.gold-10 : Palette.white-03;
+    background: root.active ? Palette.gold-10 : (touch.has-hover ? Palette.white-06 : Palette.white-03);
+
+    animate background { duration: 150ms; easing: ease-in-out; }
 
     Rectangle {
         visible: root.active;
@@ -5570,16 +5587,25 @@ component PackHubTypeCard inherits Rectangle {
         image-fit: contain;
         colorize: Palette.gold;
     }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
 }
 
 component PackHubInstalledRow inherits Rectangle {
     in property <string> title;
     in property <string> meta;
     in property <bool> checked: true;
+    callback clicked;
     height: 50px;
     border-radius: 10px;
     border-width: 0px;
-    background: Palette.white-02;
+    background: touch.has-hover ? Palette.white-04 : Palette.white-02;
+
+    animate background { duration: 150ms; easing: ease-in-out; }
 
     Image {
         x: 12px;
@@ -5612,11 +5638,20 @@ component PackHubInstalledRow inherits Rectangle {
         font-weight: 600;
         overflow: elide;
     }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
 }
 
 component PackHubSelectedCard inherits Rectangle {
     in property <string> title;
     in property <bool> optional: false;
+    callback remove-clicked;
+    callback required-clicked;
+    callback optional-clicked;
     height: 58px;
     border-radius: 9px;
     border-width: 0px;
@@ -5631,6 +5666,15 @@ component PackHubSelectedCard inherits Rectangle {
         font-size: 12px;
         font-weight: 850;
         overflow: elide;
+    }
+
+    GhostIconButton {
+        x: parent.width - 28px;
+        y: 5px;
+        width: 22px;
+        height: 22px;
+        icon: @image-url("../assets/icons/x.svg");
+        clicked => { root.remove-clicked(); }
     }
 
     Rectangle {
@@ -5652,6 +5696,12 @@ component PackHubSelectedCard inherits Rectangle {
             horizontal-alignment: center;
             vertical-alignment: center;
         }
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { root.required-clicked(); }
+        }
     }
 
     Rectangle {
@@ -5672,6 +5722,12 @@ component PackHubSelectedCard inherits Rectangle {
             font-weight: 800;
             horizontal-alignment: center;
             vertical-alignment: center;
+        }
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { root.optional-clicked(); }
         }
     }
 }
@@ -5888,12 +5944,15 @@ component PackHubBrowseView inherits Rectangle {
 }
 
 component PackHubCreateDetailsView inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> description;
+    in-out property <int> pack-type: 0;
     callback next;
+    private property <bool> can-proceed: root.title != "";
     background: #00000000;
 
-    Text { x: 0px; y: 0px; text: "Creating as"; color: Palette.muted-half; font-size: 12px; font-weight: 600; }
-    Text { x: 70px; y: 0px; text: "Spike'jo"; color: Palette.gold; font-size: 12px; font-weight: 900; }
-    Text { x: parent.width - 54px; y: 0px; text: "Sign out"; color: Palette.muted-half; font-size: 12px; font-weight: 600; horizontal-alignment: right; }
+    Text { x: 0px; y: 0px; text: "Creating a pack"; color: Palette.muted-half; font-size: 12px; font-weight: 700; }
+    Text { x: parent.width - 260px; y: 0px; width: 260px; text: "Sign in in full Pack Hub to publish"; color: Palette.muted-half; font-size: 12px; font-weight: 600; horizontal-alignment: right; overflow: elide; }
 
     PackHubStep { x: 0px; y: 30px; number: "1"; label: "Details"; active: true; }
     Image { x: 82px; y: 36px; width: 12px; height: 12px; source: @image-url("../assets/icons/chevron-right.svg"); image-fit: contain; colorize: Palette.muted-half; }
@@ -5901,8 +5960,17 @@ component PackHubCreateDetailsView inherits Rectangle {
 
     Text { x: 0px; y: 64px; width: parent.width; text: "Create an addon pack - save it locally for personal use, or publish it to the community."; color: Palette.muted-strong; font-size: 14px; font-weight: 600; overflow: elide; }
     DetailSectionTitle { x: 0px; y: 96px; width: parent.width; label: "PACK NAME *"; }
-    PackHubField { x: 0px; y: 118px; width: parent.width; placeholder: "e.g. Trial Essentials, PvP Toolkit"; search: false; focused: true; }
-    Text { x: parent.width - 40px; y: 154px; width: 40px; text: "0/100"; color: Palette.muted-half; font-size: 10px; font-weight: 600; horizontal-alignment: right; }
+    PackHubField {
+        x: 0px;
+        y: 118px;
+        width: parent.width;
+        placeholder: "e.g. Trial Essentials, PvP Toolkit";
+        search: false;
+        focused: true;
+        editable: true;
+        value <=> root.title;
+    }
+    Text { x: parent.width - 74px; y: 154px; width: 74px; text: "max 100"; color: Palette.muted-half; font-size: 10px; font-weight: 600; horizontal-alignment: right; }
 
     DetailSectionTitle { x: 0px; y: 178px; width: parent.width; label: "DESCRIPTION"; }
     Rectangle {
@@ -5913,8 +5981,10 @@ component PackHubCreateDetailsView inherits Rectangle {
         border-radius: 10px;
         border-width: 0px;
         background: Palette.white-04;
+        clip: true;
 
         Text {
+            visible: root.description == "";
             x: 14px;
             y: 13px;
             width: parent.width - 28px;
@@ -5923,13 +5993,24 @@ component PackHubCreateDetailsView inherits Rectangle {
             font-size: 13px;
             font-weight: 600;
         }
+
+        TextEdit {
+            x: 14px;
+            y: 8px;
+            width: parent.width - 28px;
+            height: parent.height - 16px;
+            text: root.description;
+            font-size: 13px;
+            font-family: "Geist";
+            edited(content) => { root.description = content; }
+        }
     }
-    Text { x: parent.width - 40px; y: 282px; width: 40px; text: "0/500"; color: Palette.muted-half; font-size: 10px; font-weight: 600; horizontal-alignment: right; }
+    Text { x: parent.width - 74px; y: 282px; width: 74px; text: "max 500"; color: Palette.muted-half; font-size: 10px; font-weight: 600; horizontal-alignment: right; }
 
     DetailSectionTitle { x: 0px; y: 312px; width: parent.width; label: "PACK TYPE"; }
-    PackHubTypeCard { x: 0px; y: 338px; width: (parent.width - 16px) / 3; title: "Addon Pack"; description: "A collection of addons"; active: true; }
-    PackHubTypeCard { x: (parent.width - 16px) / 3 + 8px; y: 338px; width: (parent.width - 16px) / 3; title: "Build Pack"; description: "A skill build or loadout"; tone: Tokens.accent; }
-    PackHubTypeCard { x: ((parent.width - 16px) / 3 + 8px) * 2; y: 338px; width: (parent.width - 16px) / 3; title: "Roster Pack"; description: "A group or raid roster"; tone: Palette.violet; }
+    PackHubTypeCard { x: 0px; y: 338px; width: (parent.width - 16px) / 3; title: "Addon Pack"; description: "A collection of addons"; active: root.pack-type == 0; clicked => { root.pack-type = 0; } }
+    PackHubTypeCard { x: (parent.width - 16px) / 3 + 8px; y: 338px; width: (parent.width - 16px) / 3; title: "Build Pack"; description: "A skill build or loadout"; tone: Tokens.accent; active: root.pack-type == 1; clicked => { root.pack-type = 1; } }
+    PackHubTypeCard { x: ((parent.width - 16px) / 3 + 8px) * 2; y: 338px; width: (parent.width - 16px) / 3; title: "Roster Pack"; description: "A group or raid roster"; tone: Palette.violet; active: root.pack-type == 2; clicked => { root.pack-type = 2; } }
 
     DetailSectionTitle { x: 0px; y: 418px; width: parent.width; label: "TAGS"; }
     Text { x: parent.width - 22px; y: 418px; width: 22px; text: "0/5"; color: Palette.muted-half; font-size: 10px; font-weight: 600; horizontal-alignment: right; }
@@ -5948,22 +6029,30 @@ component PackHubCreateDetailsView inherits Rectangle {
         icon: @image-url("../assets/icons/chevron-right.svg");
         label: "Next: Add Addons";
         primary: true;
+        disabled: !root.can-proceed;
         clicked => { root.next(); }
     }
 }
 
 component PackHubCreateAddonsView inherits Rectangle {
+    in property <[PackHubCreateAddonEntry]> installed-addons;
+    in property <[PackHubCreateAddonEntry]> selected-addons;
+    in-out property <string> filter;
     callback back;
+    callback filter-edited(string);
+    callback addon-toggle(int);
+    callback selected-remove(int);
+    callback selected-required-toggle(int);
+    private property <string> selected-count-label: root.selected-addons.length == 1 ? "1 addon selected" : root.selected-addons.length + " addons selected";
     background: #00000000;
 
-    Text { x: 0px; y: 0px; text: "Creating as"; color: Palette.muted-half; font-size: 12px; font-weight: 600; }
-    Text { x: 70px; y: 0px; text: "Spike'jo"; color: Palette.gold; font-size: 12px; font-weight: 900; }
-    Text { x: parent.width - 54px; y: 0px; text: "Sign out"; color: Palette.muted-half; font-size: 12px; font-weight: 600; horizontal-alignment: right; }
+    Text { x: 0px; y: 0px; text: "Creating a pack"; color: Palette.muted-half; font-size: 12px; font-weight: 700; }
+    Text { x: parent.width - 260px; y: 0px; width: 260px; text: "Sign in in full Pack Hub to publish"; color: Palette.muted-half; font-size: 12px; font-weight: 600; horizontal-alignment: right; overflow: elide; }
 
     PackHubStep { x: 0px; y: 30px; number: "1"; label: "Details"; }
     Image { x: 82px; y: 36px; width: 12px; height: 12px; source: @image-url("../assets/icons/chevron-right.svg"); image-fit: contain; colorize: Palette.muted-half; }
     PackHubStep { x: 104px; y: 30px; number: "2"; label: "Addons"; active: true; }
-    Text { x: parent.width - 132px; y: 70px; width: 132px; text: "3 addons selected"; color: Palette.gold; font-size: 13px; font-weight: 900; horizontal-alignment: right; }
+    Text { x: parent.width - 170px; y: 70px; width: 170px; text: root.selected-count-label; color: root.selected-addons.length > 0 ? Palette.gold : Palette.muted-half; font-size: 13px; font-weight: 900; horizontal-alignment: right; }
 
     Image { x: 0px; y: 70px; width: 13px; height: 13px; source: @image-url("../assets/icons/arrow-left.svg"); image-fit: contain; colorize: Palette.muted-strong; }
     Text { x: 20px; y: 66px; width: 120px; text: "Back to details"; color: Palette.muted-strong; font-size: 12px; font-weight: 700; }
@@ -5982,7 +6071,15 @@ component PackHubCreateAddonsView inherits Rectangle {
         PackHubTabButton { x: 4px + (parent.width - 8px) / 2; y: 4px; width: (parent.width - 8px) / 2; label: "My Installed"; active: true; }
     }
 
-    PackHubField { x: 0px; y: 144px; width: parent.width; placeholder: "Filter installed addons..."; }
+    PackHubField {
+        x: 0px;
+        y: 144px;
+        width: parent.width;
+        placeholder: "Filter installed addons...";
+        editable: true;
+        value <=> root.filter;
+        edited(value) => { root.filter-edited(value); }
+    }
 
     Rectangle {
         x: 0px;
@@ -5994,10 +6091,27 @@ component PackHubCreateAddonsView inherits Rectangle {
         background: @linear-gradient(180deg, Palette.white-02 0%, #00000000 100%);
         clip: true;
 
-        PackHubInstalledRow { x: 0px; y: 0px; width: parent.width - 8px; title: "BSC's How To Kynes Aegis"; meta: "by BloodStainChild666 - v21.3"; }
-        PackHubInstalledRow { x: 0px; y: 54px; width: parent.width - 8px; title: "Caro's Skill Point Saver"; meta: "by Irniben - v6.0.0"; }
-        PackHubInstalledRow { x: 0px; y: 108px; width: parent.width - 8px; title: "Code's Combat Alerts"; meta: "by @code65536 - v2.4.10"; }
-        PackHubInstalledRow { x: 0px; y: 162px; width: parent.width - 8px; title: "Combat Metrics"; meta: "by Solinur - v1.7.4"; checked: false; }
+        if (root.installed-addons.length == 0) : Text {
+            x: 18px;
+            y: 30px;
+            width: parent.width - 36px;
+            text: root.filter == "" ? "No installed addons with ESOUI IDs were found." : "No installed addons match this filter.";
+            color: Palette.muted-half;
+            font-size: 12px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        for addon[index] in root.installed-addons : PackHubInstalledRow {
+            x: 0px;
+            y: index * 54px;
+            width: parent.width - 8px;
+            title: addon.title;
+            meta: addon.meta;
+            checked: addon.selected;
+            clicked => { root.addon-toggle(index); }
+        }
     }
 
     Rectangle {
@@ -6010,18 +6124,38 @@ component PackHubCreateAddonsView inherits Rectangle {
         background: Palette.white-02;
         clip: true;
 
-        DetailSectionTitle { x: 12px; y: 0px; width: parent.width - 24px; label: "SELECTED (3)"; }
-        PackHubSelectedCard { x: 12px; y: 30px; width: parent.width - 24px; title: "BSC's How To Kynes Aegis"; }
-        PackHubSelectedCard { x: 12px; y: 94px; width: parent.width - 24px; title: "Caro's Skill Point Saver"; optional: true; }
-        PackHubSelectedCard { x: 12px; y: 158px; width: parent.width - 24px; title: "Code's Combat Alerts"; }
+        DetailSectionTitle { x: 12px; y: 0px; width: parent.width - 24px; label: "SELECTED (" + root.selected-addons.length + ")"; }
+
+        if (root.selected-addons.length == 0) : Text {
+            x: 18px;
+            y: 44px;
+            width: parent.width - 36px;
+            text: "Pick installed addons from the left to build this pack.";
+            color: Palette.muted-half;
+            font-size: 11px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        for addon[index] in root.selected-addons : PackHubSelectedCard {
+            x: 12px;
+            y: 30px + index * 64px;
+            width: parent.width - 24px;
+            title: addon.title;
+            optional: !addon.required;
+            remove-clicked => { root.selected-remove(index); }
+            required-clicked => { root.selected-required-toggle(index); }
+            optional-clicked => { root.selected-required-toggle(index); }
+        }
     }
 
-    PackHubButton { x: 0px; y: 420px; width: parent.width; icon: @image-url("../assets/icons/save.svg"); label: "Save to File"; }
+    PackHubButton { x: 0px; y: 420px; width: parent.width; icon: @image-url("../assets/icons/save.svg"); label: "Save to File"; disabled: root.selected-addons.length == 0; }
     Hairline { x: 0px; y: 462px; width: parent.width; height: 1px; opacity: 0.35; }
     Checkbox { x: 0px; y: 484px; checked: false; }
     Text { x: 28px; y: 480px; width: parent.width - 28px; text: "Publish anonymously"; color: Palette.muted-half; font-size: 12px; font-weight: 600; }
-    PackHubButton { x: 0px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/save.svg"); label: "Save as Draft"; }
-    PackHubButton { x: (parent.width - 12px) / 2 + 12px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Publish"; primary: true; }
+    PackHubButton { x: 0px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/save.svg"); label: "Save as Draft"; disabled: root.selected-addons.length == 0; }
+    PackHubButton { x: (parent.width - 12px) / 2 + 12px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Publish"; primary: true; disabled: root.selected-addons.length == 0; }
 }
 
 component PackHubInstallView inherits Rectangle {
@@ -6127,7 +6261,13 @@ component PackHubOverlay inherits Rectangle {
     in-out property <int> view: 0;
     in property <[PackHubEntry]> packs;
     in property <[PackHubAddonEntry]> detail-addons;
+    in property <[PackHubCreateAddonEntry]> create-installed-addons;
+    in property <[PackHubCreateAddonEntry]> create-selected-addons;
     in-out property <string> browse-query;
+    in-out property <string> create-title;
+    in-out property <string> create-description;
+    in-out property <int> create-pack-type: 0;
+    in-out property <string> create-filter;
     in property <string> browse-type-label: "All";
     in property <string> browse-sort-label: "Votes";
     in property <bool> browse-loading: false;
@@ -6141,6 +6281,10 @@ component PackHubOverlay inherits Rectangle {
     callback browse-type-next;
     callback browse-sort-next;
     callback browse-load-more;
+    callback create-filter-edited(string);
+    callback create-addon-toggle(int);
+    callback create-selected-remove(int);
+    callback create-selected-required-toggle(int);
     callback install-detail;
     callback manage-pack-detail;
     visible: root.open;
@@ -6265,6 +6409,9 @@ component PackHubOverlay inherits Rectangle {
                 y: 126px;
                 width: parent.width - 48px;
                 height: parent.height - 214px;
+                title <=> root.create-title;
+                description <=> root.create-description;
+                pack-type <=> root.create-pack-type;
                 next => { root.view = 2; }
             }
 
@@ -6273,7 +6420,14 @@ component PackHubOverlay inherits Rectangle {
                 y: 126px;
                 width: parent.width - 48px;
                 height: parent.height - 214px;
+                installed-addons: root.create-installed-addons;
+                selected-addons: root.create-selected-addons;
+                filter <=> root.create-filter;
                 back => { root.view = 1; }
+                filter-edited(value) => { root.create-filter-edited(value); }
+                addon-toggle(index) => { root.create-addon-toggle(index); }
+                selected-remove(index) => { root.create-selected-remove(index); }
+                selected-required-toggle(index) => { root.create-selected-required-toggle(index); }
             }
 
             Rectangle {
@@ -10247,6 +10401,8 @@ export component KalpaWindow inherits Window {
     in property <[DiscoverScreenshotEntry]> discover-screenshots;
     in property <[PackHubEntry]> pack-hub-packs;
     in property <[PackHubAddonEntry]> pack-hub-detail-addons;
+    in property <[PackHubCreateAddonEntry]> pack-hub-create-addons;
+    in property <[PackHubCreateAddonEntry]> pack-hub-create-selected-addons;
     in property <[SavedVariableEntry]> svm-files;
     in property <[SavedVariableEntry]> svm-orphaned-files;
     in property <[SvmEditorTreeEntry]> svm-editor-tree;
@@ -10294,6 +10450,10 @@ export component KalpaWindow inherits Window {
     in-out property <int> pack-hub-view: 0;
     in-out property <int> pack-hub-selected-index: 0;
     in-out property <string> pack-hub-browse-query;
+    in-out property <string> pack-hub-create-title;
+    in-out property <string> pack-hub-create-description;
+    in-out property <int> pack-hub-create-pack-type: 0;
+    in-out property <string> pack-hub-create-filter;
     in-out property <string> pack-hub-browse-type-label: "All";
     in-out property <string> pack-hub-browse-sort-label: "Votes";
     in-out property <bool> pack-hub-browse-loading: false;
@@ -10481,6 +10641,10 @@ export component KalpaWindow inherits Window {
     callback pack-hub-browse-type-next;
     callback pack-hub-browse-sort-next;
     callback pack-hub-browse-load-more;
+    callback pack-hub-create-filter-edited(string);
+    callback pack-hub-create-addon-toggle(int);
+    callback pack-hub-create-selected-remove(int);
+    callback pack-hub-create-selected-required-toggle(int);
     callback pack-hub-install-detail;
     callback pack-hub-manage-detail;
     callback open-uploader;
@@ -10767,7 +10931,13 @@ export component KalpaWindow inherits Window {
             view <=> root.pack-hub-view;
             packs: root.pack-hub-packs;
             detail-addons: root.pack-hub-detail-addons;
+            create-installed-addons: root.pack-hub-create-addons;
+            create-selected-addons: root.pack-hub-create-selected-addons;
             browse-query <=> root.pack-hub-browse-query;
+            create-title <=> root.pack-hub-create-title;
+            create-description <=> root.pack-hub-create-description;
+            create-pack-type <=> root.pack-hub-create-pack-type;
+            create-filter <=> root.pack-hub-create-filter;
             browse-type-label: root.pack-hub-browse-type-label;
             browse-sort-label: root.pack-hub-browse-sort-label;
             browse-loading: root.pack-hub-browse-loading;
@@ -10781,6 +10951,10 @@ export component KalpaWindow inherits Window {
             browse-type-next => { root.pack-hub-browse-type-next(); }
             browse-sort-next => { root.pack-hub-browse-sort-next(); }
             browse-load-more => { root.pack-hub-browse-load-more(); }
+            create-filter-edited(value) => { root.pack-hub-create-filter-edited(value); }
+            create-addon-toggle(index) => { root.pack-hub-create-addon-toggle(index); }
+            create-selected-remove(index) => { root.pack-hub-create-selected-remove(index); }
+            create-selected-required-toggle(index) => { root.pack-hub-create-selected-required-toggle(index); }
             install-detail => { root.pack-hub-install-detail(); }
             manage-pack-detail => { root.pack-hub-manage-detail(); }
         }

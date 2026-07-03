@@ -771,6 +771,12 @@ impl PackHubBrowseState {
     }
 }
 
+#[derive(Default)]
+struct PackHubCreateState {
+    filter: String,
+    selected: Vec<PackHubCreateAddonEntry>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupManifestDraft {
@@ -2998,10 +3004,13 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
 
     let pack_hub_browse_state = Arc::new(Mutex::new(PackHubBrowseState::default()));
     let pack_hub_browse_counter = Arc::new(AtomicU64::new(0));
+    let pack_hub_create_state = Rc::new(RefCell::new(PackHubCreateState::default()));
 
     let pack_hub_ui = ui.as_weak();
     let pack_hub_state = pack_hub_browse_state.clone();
     let pack_hub_counter = pack_hub_browse_counter.clone();
+    let pack_hub_create_models = models.clone();
+    let pack_hub_create_state_open = pack_hub_create_state.clone();
     ui.on_open_pack_hub(move || {
         let Some(ui) = pack_hub_ui.upgrade() else {
             return;
@@ -3013,6 +3022,11 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             state.reset_page();
             apply_pack_hub_browse_state(&ui, &state);
         }
+        apply_pack_hub_create_state(
+            &ui,
+            &pack_hub_create_models,
+            &pack_hub_create_state_open.borrow(),
+        );
         request_pack_hub_browse_page(&ui, pack_hub_state.clone(), pack_hub_counter.clone(), false);
     });
 
@@ -3238,6 +3252,72 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 ui.set_status_error_message(format!("Failed to open full Pack Hub: {error}").into());
             }
         }
+    });
+
+    let create_filter_ui = ui.as_weak();
+    let create_filter_models = models.clone();
+    let create_filter_state = pack_hub_create_state.clone();
+    ui.on_pack_hub_create_filter_edited(move |filter| {
+        let Some(ui) = create_filter_ui.upgrade() else {
+            return;
+        };
+        let mut state = create_filter_state.borrow_mut();
+        state.filter = filter.to_string();
+        apply_pack_hub_create_state(&ui, &create_filter_models, &state);
+    });
+
+    let create_toggle_ui = ui.as_weak();
+    let create_toggle_models = models.clone();
+    let create_toggle_state = pack_hub_create_state.clone();
+    ui.on_pack_hub_create_addon_toggle(move |index| {
+        let Some(ui) = create_toggle_ui.upgrade() else {
+            return;
+        };
+        let Some(row) = ui
+            .get_pack_hub_create_addons()
+            .row_data(index.max(0) as usize)
+        else {
+            return;
+        };
+        let mut state = create_toggle_state.borrow_mut();
+        toggle_pack_hub_create_row(&mut state, row);
+        apply_pack_hub_create_state(&ui, &create_toggle_models, &state);
+    });
+
+    let create_remove_ui = ui.as_weak();
+    let create_remove_models = models.clone();
+    let create_remove_state = pack_hub_create_state.clone();
+    ui.on_pack_hub_create_selected_remove(move |index| {
+        let Some(ui) = create_remove_ui.upgrade() else {
+            return;
+        };
+        let Some(row) = ui
+            .get_pack_hub_create_selected_addons()
+            .row_data(index.max(0) as usize)
+        else {
+            return;
+        };
+        let mut state = create_remove_state.borrow_mut();
+        remove_pack_hub_create_selected(&mut state, row);
+        apply_pack_hub_create_state(&ui, &create_remove_models, &state);
+    });
+
+    let create_required_ui = ui.as_weak();
+    let create_required_models = models.clone();
+    let create_required_state = pack_hub_create_state;
+    ui.on_pack_hub_create_selected_required_toggle(move |index| {
+        let Some(ui) = create_required_ui.upgrade() else {
+            return;
+        };
+        let Some(row) = ui
+            .get_pack_hub_create_selected_addons()
+            .row_data(index.max(0) as usize)
+        else {
+            return;
+        };
+        let mut state = create_required_state.borrow_mut();
+        toggle_pack_hub_create_required(&mut state, row);
+        apply_pack_hub_create_state(&ui, &create_required_models, &state);
     });
 
     let svm_copy_state = Rc::new(RefCell::new(SvmCopyState::default()));
@@ -3632,6 +3712,130 @@ fn apply_pack_hub_browse_state(ui: &KalpaWindow, state: &PackHubBrowseState) {
 fn apply_pack_hub_detail_model(ui: &KalpaWindow, addons: Vec<PackHubAddonEntry>) {
     ui.set_pack_hub_install_label(pack_hub_install_label(&addons).into());
     ui.set_pack_hub_detail_addons(Rc::new(VecModel::from(addons)).into());
+}
+
+fn apply_pack_hub_create_state(ui: &KalpaWindow, models: &AddonModels, state: &PackHubCreateState) {
+    let filter = state.filter.trim().to_ascii_lowercase();
+    let rows = models
+        .all
+        .borrow()
+        .iter()
+        .filter(|addon| pack_hub_create_filter_matches(addon, &filter))
+        .filter_map(|addon| pack_hub_create_entry_from_addon(addon, state))
+        .take(80)
+        .collect::<Vec<_>>();
+
+    ui.set_pack_hub_create_filter(state.filter.clone().into());
+    ui.set_pack_hub_create_addons(Rc::new(VecModel::from(rows)).into());
+    ui.set_pack_hub_create_selected_addons(Rc::new(VecModel::from(state.selected.clone())).into());
+}
+
+fn pack_hub_create_filter_matches(addon: &AddonEntry, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let haystack = format!(
+        "{} {} {} {}",
+        addon.title.as_str(),
+        addon.folder_name.as_str(),
+        addon.author.as_str(),
+        addon.esoui_id.as_str()
+    )
+    .to_ascii_lowercase();
+    haystack.contains(filter)
+}
+
+fn pack_hub_create_entry_from_addon(
+    addon: &AddonEntry,
+    state: &PackHubCreateState,
+) -> Option<PackHubCreateAddonEntry> {
+    if addon.is_library {
+        return None;
+    }
+
+    let esoui_id = normalized_pack_hub_create_id(addon.esoui_id.as_str())?;
+    let title = if addon.title.as_str().trim().is_empty() {
+        addon.folder_name.as_str()
+    } else {
+        addon.title.as_str()
+    };
+    let meta = pack_hub_create_addon_meta(addon, &esoui_id);
+    let selected = state
+        .selected
+        .iter()
+        .find(|entry| pack_hub_create_row_id(entry).as_deref() == Some(esoui_id.as_str()));
+
+    Some(PackHubCreateAddonEntry {
+        title: title.into(),
+        meta: meta.into(),
+        esoui_id: format!("#{esoui_id}").into(),
+        selected: selected.is_some(),
+        required: selected.map(|entry| entry.required).unwrap_or(true),
+    })
+}
+
+fn pack_hub_create_addon_meta(addon: &AddonEntry, esoui_id: &str) -> String {
+    let mut parts = Vec::new();
+    if !addon.author.as_str().trim().is_empty() {
+        parts.push(format!("by {}", addon.author.as_str()));
+    }
+    if !addon.version.as_str().trim().is_empty() {
+        parts.push(format!("v{}", addon.version.as_str()));
+    }
+    parts.push(format!("#{esoui_id}"));
+    parts.join(" - ")
+}
+
+fn normalized_pack_hub_create_id(value: &str) -> Option<String> {
+    let id = value.trim().trim_start_matches('#').trim();
+    if id.is_empty() || id == "0" || !id.chars().all(|ch| ch.is_ascii_digit()) {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+fn pack_hub_create_row_id(row: &PackHubCreateAddonEntry) -> Option<String> {
+    normalized_pack_hub_create_id(row.esoui_id.as_str())
+}
+
+fn toggle_pack_hub_create_row(state: &mut PackHubCreateState, mut row: PackHubCreateAddonEntry) {
+    let Some(esoui_id) = pack_hub_create_row_id(&row) else {
+        return;
+    };
+    if let Some(index) = state
+        .selected
+        .iter()
+        .position(|entry| pack_hub_create_row_id(entry).as_deref() == Some(esoui_id.as_str()))
+    {
+        state.selected.remove(index);
+    } else {
+        row.selected = true;
+        row.required = true;
+        state.selected.push(row);
+    }
+}
+
+fn remove_pack_hub_create_selected(state: &mut PackHubCreateState, row: PackHubCreateAddonEntry) {
+    let Some(esoui_id) = pack_hub_create_row_id(&row) else {
+        return;
+    };
+    state
+        .selected
+        .retain(|entry| pack_hub_create_row_id(entry).as_deref() != Some(esoui_id.as_str()));
+}
+
+fn toggle_pack_hub_create_required(state: &mut PackHubCreateState, row: PackHubCreateAddonEntry) {
+    let Some(esoui_id) = pack_hub_create_row_id(&row) else {
+        return;
+    };
+    if let Some(entry) = state
+        .selected
+        .iter_mut()
+        .find(|entry| pack_hub_create_row_id(entry).as_deref() == Some(esoui_id.as_str()))
+    {
+        entry.required = !entry.required;
+    }
 }
 
 fn fallback_pack_hub_entries() -> Vec<PackHubEntry> {
@@ -15113,6 +15317,50 @@ CombatMetrics_SavedVariables = {
 
         assert!(summary.contains("Installed 1 Pack Hub addon, 1 failed."));
         assert!(summary.contains("Combat Metrics: download failed"));
+    }
+
+    #[test]
+    fn pack_hub_create_rows_filter_and_track_selection() {
+        let mut state = PackHubCreateState::default();
+        let mut addon = addon_entry(
+            "Combat Metrics",
+            "CombatMetrics",
+            "1360",
+            "Solinur",
+            "1.0",
+            "101048",
+            "Addon",
+            "3/1/2026",
+            "",
+            false,
+            false,
+            false,
+            0,
+            "",
+            0,
+            "",
+            0,
+            "",
+            0,
+        );
+
+        let row = pack_hub_create_entry_from_addon(&addon, &state).expect("create row");
+        assert_eq!(row.esoui_id.as_str(), "#1360");
+        assert!(!row.selected);
+        assert!(pack_hub_create_filter_matches(&addon, "combat"));
+        assert!(pack_hub_create_filter_matches(&addon, "1360"));
+        assert!(!pack_hub_create_filter_matches(&addon, "writ"));
+
+        toggle_pack_hub_create_row(&mut state, row);
+        let selected = pack_hub_create_entry_from_addon(&addon, &state).expect("selected row");
+        assert!(selected.selected);
+        assert!(selected.required);
+
+        toggle_pack_hub_create_required(&mut state, selected);
+        assert!(!state.selected[0].required);
+
+        addon.is_library = true;
+        assert!(pack_hub_create_entry_from_addon(&addon, &state).is_none());
     }
 
     #[test]
