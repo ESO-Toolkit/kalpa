@@ -50,6 +50,22 @@ export struct SavedVariableEntry {
     orphaned: bool,
 }
 
+export struct SvmEditorTreeEntry {
+    label: string,
+    count: string,
+    indent: int,
+    active: bool,
+    expanded: bool,
+}
+
+export struct SvmEditorSettingEntry {
+    label: string,
+    key-name: string,
+    kind: int,
+    value: string,
+    checked: bool,
+}
+
 export struct PackHubEntry {
     id: string,
     title: string,
@@ -6381,7 +6397,12 @@ component SvmSettingRow inherits Rectangle {
     in property <int> kind: 0;
     in property <string> value: "";
     in property <bool> checked: false;
+    callback clicked;
     height: 42px;
+    border-radius: 8px;
+    background: touch.has-hover ? Palette.white-03 : #00000000;
+
+    animate background { duration: 150ms; easing: ease-in-out; }
 
     Text {
         x: 12px;
@@ -6452,6 +6473,12 @@ component SvmSettingRow inherits Rectangle {
         }
         GhostIconButton { x: 132px; y: 1px; width: 28px; height: 28px; icon: @image-url("../assets/icons/plus.svg"); }
     }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
 }
 
 component SavedVariablesOverlay inherits Rectangle {
@@ -6459,6 +6486,8 @@ component SavedVariablesOverlay inherits Rectangle {
     in-out property <int> view: 0;
     in property <[SavedVariableEntry]> files;
     in property <[SavedVariableEntry]> orphaned-files;
+    in property <[SvmEditorTreeEntry]> editor-tree;
+    in property <[SvmEditorSettingEntry]> editor-settings;
     in property <string> file-count-label;
     in property <string> total-size-label;
     in property <string> orphan-count-label;
@@ -6477,12 +6506,23 @@ component SavedVariablesOverlay inherits Rectangle {
     in property <bool> copy-has-file: false;
     in property <bool> copy-has-source: false;
     in property <bool> copy-has-dest: false;
+    in property <string> editor-file-label: "No file selected";
+    in property <string> editor-path-label: "";
+    in property <string> editor-message-label: "";
+    in property <bool> editor-has-file: false;
+    in property <bool> editor-dirty: false;
     callback refresh;
     callback clean-orphans;
     callback copy-select-file;
     callback copy-select-source;
     callback copy-select-dest;
     callback copy-profile;
+    callback editor-select-file;
+    callback editor-save;
+    callback editor-preview;
+    callback editor-discard;
+    callback editor-restore;
+    callback editor-toggle-setting(int);
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 980px ? root.width - 48px : 900px;
@@ -6763,13 +6803,13 @@ component SavedVariablesOverlay inherits Rectangle {
             height: parent.height - 196px;
             background: #00000000;
 
-            SvmSelectField { x: 0px; y: 0px; width: 320px; label: "LuiExtended.lua"; }
-            PackHubButton { x: 328px; y: 0px; width: 116px; icon: @image-url("../assets/icons/save.svg"); label: "Save Changes"; primary: true; }
-            PackHubButton { x: 452px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Preview"; }
-            PackHubButton { x: 538px; y: 0px; width: 76px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: true; }
-            PackHubButton { x: 622px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; }
+            SvmSelectField { x: 0px; y: 0px; width: 320px; label: root.editor-file-label; disabled: !root.editor-has-file; clicked => { root.editor-select-file(); } }
+            PackHubButton { x: 328px; y: 0px; width: 116px; icon: @image-url("../assets/icons/save.svg"); label: "Save Changes"; primary: true; disabled: !root.editor-dirty; clicked => { root.editor-save(); } }
+            PackHubButton { x: 452px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Preview"; disabled: !root.editor-dirty; clicked => { root.editor-preview(); } }
+            PackHubButton { x: 538px; y: 0px; width: 76px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: !root.editor-dirty; clicked => { root.editor-discard(); } }
+            PackHubButton { x: 622px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; disabled: !root.editor-has-file; clicked => { root.editor-restore(); } }
             PackHubButton { x: 714px; y: 0px; width: 78px; icon: @image-url("../assets/icons/settings.svg"); label: "Settings"; }
-            PackHubButton { x: 800px; y: 0px; width: 44px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; show-icon: false; }
+            PackHubButton { x: 800px; y: 0px; width: 44px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; show-icon: false; disabled: true; }
 
             Rectangle {
                 x: 0px;
@@ -6790,20 +6830,32 @@ component SavedVariablesOverlay inherits Rectangle {
 
                     PackHubField { x: 10px; y: 10px; width: parent.width - 20px; placeholder: "Search..."; }
 
-                    Text { x: 34px; y: 58px; text: "LUIESV"; color: Palette.muted-strong; font-size: 12px; font-weight: 900; }
-                    Pill { x: 88px; y: 82px; label: "Default"; tone: Palette.muted-strong; fill: Palette.white-06; pill-height: 18px; label-font-size: 10px; }
-                    Pill { x: 84px; y: 108px; label: "@Spike'jo"; tone: Palette.sky; fill: Palette.sky-10; pill-height: 18px; label-font-size: 10px; }
+                    if (!root.editor-has-file) : Text { x: 16px; y: 74px; width: parent.width - 32px; text: "No SavedVariables files found."; color: Palette.muted-strong; font-size: 12px; font-weight: 800; horizontal-alignment: center; }
 
-                    SvmEditorTreeRow { x: 10px; y: 132px; width: parent.width - 20px; label: "$AccountWide"; count: "50"; active: true; expanded: true; }
-                    SvmEditorTreeRow { x: 10px; y: 160px; width: parent.width - 20px; label: "SpellCastBuffs"; count: "154"; indent: 1; }
-                    SvmEditorTreeRow { x: 10px; y: 188px; width: parent.width - 20px; label: "ZO_HUDEquipme..."; count: "2"; indent: 1; }
-                    SvmEditorTreeRow { x: 10px; y: 216px; width: parent.width - 20px; label: "ZO_ActiveComba..."; count: "2"; indent: 1; }
-                    SvmEditorTreeRow { x: 10px; y: 244px; width: parent.width - 20px; label: "InfoPanel"; count: "10"; indent: 1; }
-                    SvmEditorTreeRow { x: 10px; y: 272px; width: parent.width - 20px; label: "ActionBar"; count: "55"; indent: 1; }
-                    SvmEditorTreeRow { x: 10px; y: 300px; width: parent.width - 20px; label: "UnitFrames"; count: "203"; indent: 1; }
+                    if (root.editor-has-file) : ScrollView {
+                        x: 0px;
+                        y: 54px;
+                        width: parent.width;
+                        height: parent.height - 88px;
+                        viewport-width: self.width;
+                        viewport-height: max(root.editor-tree.length * 28px, self.height);
+                        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
-                    Rectangle { x: parent.width - 8px; y: 64px; width: 5px; height: 266px; border-radius: 3px; background: Palette.white-04; }
-                    Rectangle { x: parent.width - 8px; y: 78px; width: 5px; height: 142px; border-radius: 3px; background: Palette.sky; }
+                        for row[index] in root.editor-tree : SvmEditorTreeRow {
+                            x: 10px;
+                            y: index * 28px;
+                            width: parent.width - 20px;
+                            label: row.label;
+                            count: row.count;
+                            indent: row.indent;
+                            active: row.active;
+                            expanded: row.expanded;
+                        }
+                    }
+
+                    Rectangle { x: parent.width - 8px; y: 64px; width: 5px; height: 266px; border-radius: 3px; background: Palette.white-04; visible: root.editor-tree.length * 28px > parent.height - 88px; }
+                    Rectangle { x: parent.width - 8px; y: 78px; width: 5px; height: 142px; border-radius: 3px; background: Palette.sky; visible: root.editor-tree.length * 28px > parent.height - 88px; }
 
                     Hairline { x: 0px; y: parent.height - 34px; width: parent.width; height: 1px; opacity: 0.45; }
                     Text { x: 34px; y: parent.height - 24px; text: "Expand All"; color: Palette.muted-strong; font-size: 11px; font-weight: 800; }
@@ -6820,20 +6872,48 @@ component SavedVariablesOverlay inherits Rectangle {
                     border-radius: 9px;
                     background: Palette.white-03;
 
-                    Text { x: 12px; y: 0px; height: parent.height; text: "Root  >  LUIESV  >  Default  >  @Spike'jo  >  $AccountWide"; color: Palette.muted-strong; font-size: 12px; font-weight: 800; vertical-alignment: center; }
+                    Text { x: 12px; y: 0px; height: parent.height; width: parent.width - 24px; text: root.editor-path-label; color: Palette.muted-strong; font-size: 12px; font-weight: 800; vertical-alignment: center; overflow: elide; }
                 }
 
                 Text { x: 226px; y: 58px; text: "SETTINGS"; color: Palette.muted-strong; font-size: 11px; font-weight: 900; }
-                SvmSettingRow { x: 226px; y: 88px; width: parent.width - 246px; label: "Snap To Grid unit Frames"; key-name: "snapToGrid_unitFrames"; checked: true; }
-                SvmSettingRow { x: 226px; y: 130px; width: parent.width - 246px; label: "Welcome Version"; key-name: "WelcomeVersion"; kind: 1; value: "6.6.9"; }
-                SvmSettingRow { x: 226px; y: 172px; width: parent.width - 246px; label: "Snap To Grid Size default"; key-name: "snapToGridSize_default"; kind: 2; value: "15"; }
-                SvmSettingRow { x: 226px; y: 214px; width: parent.width - 246px; label: "Combat Text Enabled"; key-name: "CombatText_Enabled"; checked: false; }
-                SvmSettingRow { x: 226px; y: 256px; width: parent.width - 246px; label: "Snap To Grid Size buffs"; key-name: "snapToGridSize_buffs"; kind: 2; value: "15"; }
-                SvmSettingRow { x: 226px; y: 298px; width: parent.width - 246px; label: "Startup Info"; key-name: "StartupInfo"; checked: false; }
-                SvmSettingRow { x: 226px; y: 340px; width: parent.width - 246px; label: "Snap To Grid default"; key-name: "snapToGrid_default"; checked: false; }
 
-                Rectangle { x: parent.width - 14px; y: 64px; width: 5px; height: 286px; border-radius: 3px; background: Palette.white-04; }
-                Rectangle { x: parent.width - 14px; y: 80px; width: 5px; height: 72px; border-radius: 3px; background: Palette.sky; }
+                if (root.editor-settings.length == 0) : Text {
+                    x: 226px;
+                    y: 104px;
+                    width: parent.width - 246px;
+                    text: root.editor-message-label;
+                    color: Palette.muted-strong;
+                    font-size: 13px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                if (root.editor-settings.length > 0) : ScrollView {
+                    x: 226px;
+                    y: 84px;
+                    width: parent.width - 246px;
+                    height: 282px;
+                    viewport-width: self.width;
+                    viewport-height: max(root.editor-settings.length * 42px, self.height);
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                    for setting[index] in root.editor-settings : SvmSettingRow {
+                        x: 0px;
+                        y: index * 42px;
+                        width: parent.width;
+                        label: setting.label;
+                        key-name: setting.key-name;
+                        kind: setting.kind;
+                        value: setting.value;
+                        checked: setting.checked;
+                        clicked => { root.editor-toggle-setting(index); }
+                    }
+                }
+
+                Rectangle { x: parent.width - 14px; y: 64px; width: 5px; height: 286px; border-radius: 3px; background: Palette.white-04; visible: root.editor-settings.length * 42px > 282px; }
+                Rectangle { x: parent.width - 14px; y: 80px; width: 5px; height: 72px; border-radius: 3px; background: Palette.sky; visible: root.editor-settings.length * 42px > 282px; }
             }
         }
 
@@ -8811,6 +8891,8 @@ export component KalpaWindow inherits Window {
     in property <[PackHubAddonEntry]> pack-hub-detail-addons;
     in property <[SavedVariableEntry]> svm-files;
     in property <[SavedVariableEntry]> svm-orphaned-files;
+    in property <[SvmEditorTreeEntry]> svm-editor-tree;
+    in property <[SvmEditorSettingEntry]> svm-editor-settings;
     in property <[SettingsBackupEntry]> settings-backups;
     in property <[ThemeEntry]> themes;
     in property <int> total-addon-count: 0;
@@ -8918,6 +9000,11 @@ export component KalpaWindow inherits Window {
     in-out property <bool> svm-copy-has-file: false;
     in-out property <bool> svm-copy-has-source: false;
     in-out property <bool> svm-copy-has-dest: false;
+    in-out property <string> svm-editor-file-label: "No file selected";
+    in-out property <string> svm-editor-path-label: "";
+    in-out property <string> svm-editor-message-label: "";
+    in-out property <bool> svm-editor-has-file: false;
+    in-out property <bool> svm-editor-dirty: false;
     in-out property <string> backup-status-title: "No backup yet";
     in-out property <string> backup-status-subtitle: "Your addon settings aren't protected. Create your first backup below.";
     in-out property <int> backup-status-kind: 0;
@@ -9010,6 +9097,12 @@ export component KalpaWindow inherits Window {
     callback svm-copy-select-source;
     callback svm-copy-select-dest;
     callback svm-copy-profile;
+    callback svm-editor-select-file;
+    callback svm-editor-save;
+    callback svm-editor-preview;
+    callback svm-editor-discard;
+    callback svm-editor-restore;
+    callback svm-editor-toggle-setting(int);
     callback review-conflicts;
     no-frame: true;
     preferred-width: 1462px;
@@ -9233,6 +9326,8 @@ export component KalpaWindow inherits Window {
             view <=> root.svm-view;
             files: root.svm-files;
             orphaned-files: root.svm-orphaned-files;
+            editor-tree: root.svm-editor-tree;
+            editor-settings: root.svm-editor-settings;
             file-count-label: root.svm-file-count-label;
             total-size-label: root.svm-total-size-label;
             orphan-count-label: root.svm-orphan-count-label;
@@ -9251,12 +9346,23 @@ export component KalpaWindow inherits Window {
             copy-has-file: root.svm-copy-has-file;
             copy-has-source: root.svm-copy-has-source;
             copy-has-dest: root.svm-copy-has-dest;
+            editor-file-label: root.svm-editor-file-label;
+            editor-path-label: root.svm-editor-path-label;
+            editor-message-label: root.svm-editor-message-label;
+            editor-has-file: root.svm-editor-has-file;
+            editor-dirty: root.svm-editor-dirty;
             refresh => { root.svm-refresh(); }
             clean-orphans => { root.svm-clean-orphans(); }
             copy-select-file => { root.svm-copy-select-file(); }
             copy-select-source => { root.svm-copy-select-source(); }
             copy-select-dest => { root.svm-copy-select-dest(); }
             copy-profile => { root.svm-copy-profile(); }
+            editor-select-file => { root.svm-editor-select-file(); }
+            editor-save => { root.svm-editor-save(); }
+            editor-preview => { root.svm-editor-preview(); }
+            editor-discard => { root.svm-editor-discard(); }
+            editor-restore => { root.svm-editor-restore(); }
+            editor-toggle-setting(index) => { root.svm-editor-toggle-setting(index); }
         }
 
         if (root.uploader-open) : UploaderOverlay {

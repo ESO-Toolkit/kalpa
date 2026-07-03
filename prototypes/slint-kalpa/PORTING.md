@@ -202,9 +202,13 @@ Current detail status:
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,
   classify installed/orphaned/system data against the native addon model, show
   real size/profile counts, and delete orphaned files through the shared
-  auto-backup cleanup path. Copy Profile and Editor are still visual scaffolds;
-  they need the real profile copy command, parser-backed tree editor, write path,
-  preview/raw/settings states, and full error handling.
+  auto-backup cleanup path. Copy Profile now cycles real file/source/destination
+  profile choices and calls the shared raw-Lua profile copy command. The Editor
+  now loads real files through the shared parser, renders native tree/settings
+  rows, toggles boolean settings, previews diffs, saves through the shared write
+  path, and restores `.bak` files. Remaining Editor gaps are full text/number
+  editing, explicit tree row selection, search/filter behavior, raw mode,
+  schema customization, ESO-running guards, and richer error states.
 - The Settings > Tools Backup & Restore row now opens a native Slint backup
   overlay covering the main, custom-label, and restore-confirmation states. The
   current pass is static/prototype data for visual fidelity; production still

@@ -443,6 +443,56 @@ impl SvmCopyState {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SvmEditorFile {
+    file_name: String,
+    addon_name: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SvmEditorState {
+    files: Vec<SvmEditorFile>,
+    file_index: usize,
+    tree: Option<saved_variables::SvTreeNode>,
+    stamp: Option<saved_variables::SvFileStamp>,
+    selected_path: Vec<String>,
+    dirty: bool,
+    message: String,
+}
+
+impl SvmEditorState {
+    fn replace_files(&mut self, files: Vec<SvmEditorFile>) {
+        let previous_file = self.selected_file().map(|file| file.file_name.clone());
+        self.files = files;
+        self.file_index = previous_file
+            .and_then(|name| self.files.iter().position(|file| file.file_name == name))
+            .unwrap_or(0);
+        self.normalize_file_index();
+    }
+
+    fn normalize_file_index(&mut self) {
+        if self.files.is_empty() {
+            self.file_index = 0;
+        } else {
+            self.file_index %= self.files.len();
+        }
+    }
+
+    fn selected_file(&self) -> Option<&SvmEditorFile> {
+        self.files.get(self.file_index)
+    }
+
+    fn select_next_file(&mut self) {
+        if !self.files.is_empty() {
+            self.file_index = (self.file_index + 1) % self.files.len();
+        }
+    }
+
+    fn selected_file_name(&self) -> Option<String> {
+        self.selected_file().map(|file| file.file_name.clone())
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct AddonViewKey {
     query: String,
@@ -2545,30 +2595,44 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let svm_copy_state = Rc::new(RefCell::new(SvmCopyState::default()));
+    let svm_editor_state = Rc::new(RefCell::new(SvmEditorState::default()));
 
     let svm_open_ui = ui.as_weak();
     let svm_open_models = models.clone();
     let svm_open_copy_state = svm_copy_state.clone();
+    let svm_open_editor_state = svm_editor_state.clone();
     ui.on_open_svm(move || {
         let Some(ui) = svm_open_ui.upgrade() else {
             return;
         };
-        refresh_saved_variables_overlay_model(&ui, &svm_open_models, &svm_open_copy_state);
+        refresh_saved_variables_overlay_model(
+            &ui,
+            &svm_open_models,
+            &svm_open_copy_state,
+            &svm_open_editor_state,
+        );
     });
 
     let svm_refresh_ui = ui.as_weak();
     let svm_refresh_models = models.clone();
     let svm_refresh_copy_state = svm_copy_state.clone();
+    let svm_refresh_editor_state = svm_editor_state.clone();
     ui.on_svm_refresh(move || {
         let Some(ui) = svm_refresh_ui.upgrade() else {
             return;
         };
-        refresh_saved_variables_overlay_model(&ui, &svm_refresh_models, &svm_refresh_copy_state);
+        refresh_saved_variables_overlay_model(
+            &ui,
+            &svm_refresh_models,
+            &svm_refresh_copy_state,
+            &svm_refresh_editor_state,
+        );
     });
 
     let svm_clean_ui = ui.as_weak();
     let svm_clean_models = models.clone();
     let svm_clean_copy_state = svm_copy_state.clone();
+    let svm_clean_editor_state = svm_editor_state.clone();
     ui.on_svm_clean_orphans(move || {
         let Some(ui) = svm_clean_ui.upgrade() else {
             return;
@@ -2591,7 +2655,12 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
 
         match clean_saved_variable_orphans(&addons_root, &orphaned) {
             Ok(deleted) => {
-                refresh_saved_variables_overlay_model(&ui, &svm_clean_models, &svm_clean_copy_state);
+                refresh_saved_variables_overlay_model(
+                    &ui,
+                    &svm_clean_models,
+                    &svm_clean_copy_state,
+                    &svm_clean_editor_state,
+                );
                 ui.set_status_error_message(
                     format!(
                         "Deleted {deleted} orphaned SavedVariables file{} and created an automatic backup.",
@@ -2639,6 +2708,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
     let svm_copy_action_ui = ui.as_weak();
     let svm_copy_action_models = models.clone();
     let svm_copy_action_state = svm_copy_state;
+    let svm_copy_action_editor_state = svm_editor_state.clone();
     ui.on_svm_copy_profile(move || {
         let Some(ui) = svm_copy_action_ui.upgrade() else {
             return;
@@ -2660,6 +2730,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                     &ui,
                     &svm_copy_action_models,
                     &svm_copy_action_state,
+                    &svm_copy_action_editor_state,
                 );
                 {
                     let mut state = svm_copy_action_state.borrow_mut();
@@ -2684,6 +2755,172 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 }
                 apply_svm_copy_state(&ui, &svm_copy_action_state.borrow());
                 ui.set_status_error_message(format!("SavedVariables copy failed: {error}").into());
+            }
+        }
+    });
+
+    let svm_editor_select_ui = ui.as_weak();
+    let svm_editor_select_state = svm_editor_state.clone();
+    ui.on_svm_editor_select_file(move || {
+        let Some(ui) = svm_editor_select_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before editing SavedVariables.".into(),
+            );
+            return;
+        };
+        {
+            let mut state = svm_editor_select_state.borrow_mut();
+            state.select_next_file();
+            if let Err(error) = load_svm_editor_selected_file(&addons_root, &mut state) {
+                state.tree = None;
+                state.stamp = None;
+                state.selected_path.clear();
+                state.dirty = false;
+                state.message = error;
+            }
+        }
+        apply_svm_editor_state(&ui, &svm_editor_select_state.borrow());
+    });
+
+    let svm_editor_toggle_ui = ui.as_weak();
+    let svm_editor_toggle_state = svm_editor_state.clone();
+    ui.on_svm_editor_toggle_setting(move |index| {
+        let Some(ui) = svm_editor_toggle_ui.upgrade() else {
+            return;
+        };
+        let result = {
+            let mut state = svm_editor_toggle_state.borrow_mut();
+            toggle_svm_editor_setting(&mut state, index as usize)
+        };
+        match result {
+            Ok(()) => apply_svm_editor_state(&ui, &svm_editor_toggle_state.borrow()),
+            Err(error) => {
+                {
+                    let mut state = svm_editor_toggle_state.borrow_mut();
+                    state.message = error.clone();
+                }
+                apply_svm_editor_state(&ui, &svm_editor_toggle_state.borrow());
+                ui.set_status_error_message(error.into());
+            }
+        }
+    });
+
+    let svm_editor_save_ui = ui.as_weak();
+    let svm_editor_save_state = svm_editor_state.clone();
+    ui.on_svm_editor_save(move || {
+        let Some(ui) = svm_editor_save_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before saving SavedVariables.".into(),
+            );
+            return;
+        };
+        let result = {
+            let mut state = svm_editor_save_state.borrow_mut();
+            save_svm_editor_file(&addons_root, &mut state)
+        };
+        match result {
+            Ok(()) => {
+                apply_svm_editor_state(&ui, &svm_editor_save_state.borrow());
+                ui.set_status_error_message("Saved SavedVariables changes.".into());
+            }
+            Err(error) => {
+                {
+                    let mut state = svm_editor_save_state.borrow_mut();
+                    state.message = format!("Save failed: {error}");
+                }
+                apply_svm_editor_state(&ui, &svm_editor_save_state.borrow());
+                ui.set_status_error_message(format!("SavedVariables save failed: {error}").into());
+            }
+        }
+    });
+
+    let svm_editor_preview_ui = ui.as_weak();
+    let svm_editor_preview_state = svm_editor_state.clone();
+    ui.on_svm_editor_preview(move || {
+        let Some(ui) = svm_editor_preview_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before previewing SavedVariables.".into(),
+            );
+            return;
+        };
+        let result = {
+            let mut state = svm_editor_preview_state.borrow_mut();
+            preview_svm_editor_file(&addons_root, &mut state)
+        };
+        match result {
+            Ok(()) => apply_svm_editor_state(&ui, &svm_editor_preview_state.borrow()),
+            Err(error) => {
+                {
+                    let mut state = svm_editor_preview_state.borrow_mut();
+                    state.message = format!("Preview failed: {error}");
+                }
+                apply_svm_editor_state(&ui, &svm_editor_preview_state.borrow());
+                ui.set_status_error_message(
+                    format!("SavedVariables preview failed: {error}").into(),
+                );
+            }
+        }
+    });
+
+    let svm_editor_discard_ui = ui.as_weak();
+    let svm_editor_discard_state = svm_editor_state.clone();
+    ui.on_svm_editor_discard(move || {
+        let Some(ui) = svm_editor_discard_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            return;
+        };
+        {
+            let mut state = svm_editor_discard_state.borrow_mut();
+            if let Err(error) = load_svm_editor_selected_file(&addons_root, &mut state) {
+                state.message = format!("Discard failed: {error}");
+            } else {
+                state.message = "Discarded unsaved changes.".to_string();
+            }
+        }
+        apply_svm_editor_state(&ui, &svm_editor_discard_state.borrow());
+    });
+
+    let svm_editor_restore_ui = ui.as_weak();
+    let svm_editor_restore_state = svm_editor_state;
+    ui.on_svm_editor_restore(move || {
+        let Some(ui) = svm_editor_restore_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before restoring SavedVariables.".into(),
+            );
+            return;
+        };
+        let result = {
+            let mut state = svm_editor_restore_state.borrow_mut();
+            restore_svm_editor_backup(&addons_root, &mut state)
+        };
+        match result {
+            Ok(()) => {
+                apply_svm_editor_state(&ui, &svm_editor_restore_state.borrow());
+                ui.set_status_error_message("Restored SavedVariables backup.".into());
+            }
+            Err(error) => {
+                {
+                    let mut state = svm_editor_restore_state.borrow_mut();
+                    state.message = format!("Restore failed: {error}");
+                }
+                apply_svm_editor_state(&ui, &svm_editor_restore_state.borrow());
+                ui.set_status_error_message(
+                    format!("SavedVariables restore failed: {error}").into(),
+                );
             }
         }
     });
@@ -6920,10 +7157,12 @@ fn refresh_saved_variables_overlay_model(
     ui: &KalpaWindow,
     models: &AddonModels,
     copy_state: &Rc<RefCell<SvmCopyState>>,
+    editor_state: &Rc<RefCell<SvmEditorState>>,
 ) {
     let addons = models.all.borrow();
     apply_saved_variables_model(ui, &addons);
     refresh_svm_copy_state(ui, &addons, copy_state);
+    refresh_svm_editor_state(ui, &addons, editor_state);
 }
 
 fn refresh_svm_copy_state(
@@ -7056,6 +7295,446 @@ fn copy_svm_profile_selection(
         &selection.source_key,
         &selection.dest_key,
     )
+}
+
+fn refresh_svm_editor_state(
+    ui: &KalpaWindow,
+    addons: &[AddonEntry],
+    editor_state: &Rc<RefCell<SvmEditorState>>,
+) {
+    let result = addons_source_root().map(|addons_root| {
+        let files = saved_variable_editor_files(&addons_root, addons)?;
+        Ok((addons_root, files))
+    });
+
+    {
+        let mut state = editor_state.borrow_mut();
+        match result {
+            Some(Ok((addons_root, files))) => {
+                state.replace_files(files);
+                if let Err(error) = load_svm_editor_selected_file(&addons_root, &mut state) {
+                    state.tree = None;
+                    state.stamp = None;
+                    state.selected_path.clear();
+                    state.dirty = false;
+                    state.message = error;
+                }
+            }
+            Some(Err(error)) => {
+                state.replace_files(Vec::new());
+                state.tree = None;
+                state.stamp = None;
+                state.selected_path.clear();
+                state.dirty = false;
+                state.message = error;
+            }
+            None => {
+                state.replace_files(Vec::new());
+                state.tree = None;
+                state.stamp = None;
+                state.selected_path.clear();
+                state.dirty = false;
+                state.message =
+                    "Configure the ESO AddOns folder to edit SavedVariables.".to_string();
+            }
+        }
+    }
+
+    apply_svm_editor_state(ui, &editor_state.borrow());
+}
+
+fn saved_variable_editor_files(
+    addons_root: &Path,
+    addons: &[AddonEntry],
+) -> Result<Vec<SvmEditorFile>, String> {
+    Ok(saved_variable_entries(addons_root, addons)?
+        .into_iter()
+        .map(|entry| SvmEditorFile {
+            file_name: entry.file_name.to_string(),
+            addon_name: entry.addon_name.to_string(),
+        })
+        .collect())
+}
+
+fn load_svm_editor_selected_file(
+    addons_root: &Path,
+    state: &mut SvmEditorState,
+) -> Result<(), String> {
+    let Some(file_name) = state.selected_file_name() else {
+        state.tree = None;
+        state.stamp = None;
+        state.selected_path.clear();
+        state.dirty = false;
+        state.message = "No SavedVariables files found.".to_string();
+        return Ok(());
+    };
+
+    let response = saved_variables::io::read_saved_variable_blocking(addons_root, &file_name)?;
+    let selected_path = default_svm_editor_path(&response.tree).unwrap_or_default();
+    state.tree = Some(response.tree);
+    state.stamp = Some(response.stamp);
+    state.selected_path = selected_path;
+    state.dirty = false;
+    state.message.clear();
+    Ok(())
+}
+
+fn apply_svm_editor_state(ui: &KalpaWindow, state: &SvmEditorState) {
+    let file_label = state
+        .selected_file()
+        .map(|file| file.file_name.clone())
+        .unwrap_or_else(|| "No file selected".to_string());
+    let tree_entries = state
+        .tree
+        .as_ref()
+        .map(|tree| svm_editor_tree_entries(tree, &state.selected_path))
+        .unwrap_or_default();
+    let setting_entries = svm_editor_setting_entries(state);
+    let path_label = if state.selected_path.is_empty() {
+        "Root".to_string()
+    } else {
+        format!("Root  >  {}", state.selected_path.join("  >  "))
+    };
+    let message = if !state.message.is_empty() {
+        state.message.clone()
+    } else if state.tree.is_none() {
+        "No SavedVariables file loaded.".to_string()
+    } else if setting_entries.is_empty() {
+        "No editable leaf settings in the selected branch.".to_string()
+    } else {
+        String::new()
+    };
+
+    ui.set_svm_editor_file_label(file_label.into());
+    ui.set_svm_editor_path_label(path_label.into());
+    ui.set_svm_editor_message_label(message.into());
+    ui.set_svm_editor_has_file(state.selected_file().is_some());
+    ui.set_svm_editor_dirty(state.dirty);
+    ui.set_svm_editor_tree(Rc::new(VecModel::from(tree_entries)).into());
+    ui.set_svm_editor_settings(Rc::new(VecModel::from(setting_entries)).into());
+}
+
+fn default_svm_editor_path(tree: &saved_variables::SvTreeNode) -> Option<Vec<String>> {
+    fn walk(node: &saved_variables::SvTreeNode, path: &[String]) -> Option<Vec<String>> {
+        let children = node.children.as_ref()?;
+        for child in children {
+            let mut child_path = path.to_vec();
+            child_path.push(child.key.clone());
+            if matches!(child.value_type, saved_variables::types::SvValueType::Table)
+                && child
+                    .children
+                    .as_ref()
+                    .map(|inner| {
+                        inner.iter().any(|entry| {
+                            !matches!(entry.value_type, saved_variables::types::SvValueType::Table)
+                        })
+                    })
+                    .unwrap_or(false)
+            {
+                return Some(child_path);
+            }
+            if let Some(found) = walk(child, &child_path) {
+                return Some(found);
+            }
+        }
+        children.first().map(|child| {
+            let mut child_path = path.to_vec();
+            child_path.push(child.key.clone());
+            child_path
+        })
+    }
+
+    walk(tree, &[])
+}
+
+fn svm_editor_tree_entries(
+    tree: &saved_variables::SvTreeNode,
+    selected_path: &[String],
+) -> Vec<SvmEditorTreeEntry> {
+    fn collect(
+        node: &saved_variables::SvTreeNode,
+        depth: i32,
+        path: Vec<String>,
+        selected_path: &[String],
+        rows: &mut Vec<SvmEditorTreeEntry>,
+    ) {
+        if rows.len() >= 80 {
+            return;
+        }
+        let Some(children) = node.children.as_ref() else {
+            return;
+        };
+
+        for child in children {
+            if rows.len() >= 80 {
+                return;
+            }
+            let mut child_path = path.clone();
+            child_path.push(child.key.clone());
+            let child_count = child.children.as_ref().map(Vec::len).unwrap_or(0);
+            let expanded =
+                child_count > 0 && (depth == 0 || path_is_prefix(&child_path, selected_path));
+            rows.push(SvmEditorTreeEntry {
+                label: child.key.clone().into(),
+                count: if child_count == 0 {
+                    String::new().into()
+                } else {
+                    child_count.to_string().into()
+                },
+                indent: depth,
+                active: child_path == selected_path,
+                expanded,
+            });
+            if expanded {
+                collect(child, depth + 1, child_path, selected_path, rows);
+            }
+        }
+    }
+
+    let mut rows = Vec::new();
+    collect(tree, 0, Vec::new(), selected_path, &mut rows);
+    rows
+}
+
+fn path_is_prefix(path: &[String], selected_path: &[String]) -> bool {
+    path.len() <= selected_path.len()
+        && path
+            .iter()
+            .zip(selected_path.iter())
+            .all(|(left, right)| left == right)
+}
+
+fn svm_editor_setting_entries(state: &SvmEditorState) -> Vec<SvmEditorSettingEntry> {
+    let Some(tree) = state.tree.as_ref() else {
+        return Vec::new();
+    };
+    let Some(selected) = sv_node_at_path(tree, &state.selected_path) else {
+        return Vec::new();
+    };
+    selected
+        .children
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .filter(|child| !matches!(child.value_type, saved_variables::types::SvValueType::Table))
+        .map(|child| SvmEditorSettingEntry {
+            label: humanize_sv_key(&child.key).into(),
+            key_name: child.key.clone().into(),
+            kind: svm_setting_kind(child),
+            value: svm_value_label(child).into(),
+            checked: child
+                .value
+                .as_ref()
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        })
+        .collect()
+}
+
+fn svm_editor_setting_paths(state: &SvmEditorState) -> Vec<Vec<String>> {
+    let Some(tree) = state.tree.as_ref() else {
+        return Vec::new();
+    };
+    let Some(selected) = sv_node_at_path(tree, &state.selected_path) else {
+        return Vec::new();
+    };
+    selected
+        .children
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .filter(|child| !matches!(child.value_type, saved_variables::types::SvValueType::Table))
+        .map(|child| {
+            let mut path = state.selected_path.clone();
+            path.push(child.key.clone());
+            path
+        })
+        .collect()
+}
+
+fn sv_node_at_path<'a>(
+    tree: &'a saved_variables::SvTreeNode,
+    path: &[String],
+) -> Option<&'a saved_variables::SvTreeNode> {
+    let mut current = tree;
+    for segment in path {
+        current = current
+            .children
+            .as_ref()?
+            .iter()
+            .find(|child| child.key == *segment)?;
+    }
+    Some(current)
+}
+
+fn sv_node_at_path_mut<'a>(
+    tree: &'a mut saved_variables::SvTreeNode,
+    path: &[String],
+) -> Option<&'a mut saved_variables::SvTreeNode> {
+    let mut current = tree;
+    for segment in path {
+        current = current
+            .children
+            .as_mut()?
+            .iter_mut()
+            .find(|child| child.key == *segment)?;
+    }
+    Some(current)
+}
+
+fn svm_setting_kind(node: &saved_variables::SvTreeNode) -> i32 {
+    match node.value_type {
+        saved_variables::types::SvValueType::Boolean => 0,
+        saved_variables::types::SvValueType::Number => 2,
+        _ => 1,
+    }
+}
+
+fn svm_value_label(node: &saved_variables::SvTreeNode) -> String {
+    match node.value_type {
+        saved_variables::types::SvValueType::Boolean => node
+            .value
+            .as_ref()
+            .and_then(|value| value.as_bool())
+            .map(|value| if value { "true" } else { "false" }.to_string())
+            .unwrap_or_else(|| "false".to_string()),
+        saved_variables::types::SvValueType::Number => node
+            .value
+            .as_ref()
+            .map(|value| {
+                if let Some(number) = value.as_f64() {
+                    if number == (number as i64) as f64 {
+                        (number as i64).to_string()
+                    } else {
+                        number.to_string()
+                    }
+                } else {
+                    value.to_string()
+                }
+            })
+            .unwrap_or_else(|| "0".to_string()),
+        saved_variables::types::SvValueType::String => node
+            .value
+            .as_ref()
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string(),
+        saved_variables::types::SvValueType::Nil => "nil".to_string(),
+        saved_variables::types::SvValueType::Table => node
+            .children
+            .as_ref()
+            .map(|children| format!("{} entries", children.len()))
+            .unwrap_or_else(|| "0 entries".to_string()),
+    }
+}
+
+fn humanize_sv_key(key: &str) -> String {
+    let mut out = String::new();
+    let mut previous_lower = false;
+    for character in key.chars() {
+        if character == '_' || character == '-' {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            previous_lower = false;
+            continue;
+        }
+        if character.is_ascii_uppercase() && previous_lower && !out.ends_with(' ') {
+            out.push(' ');
+        }
+        out.push(character);
+        previous_lower = character.is_ascii_lowercase() || character.is_ascii_digit();
+    }
+    if out.is_empty() {
+        key.to_string()
+    } else {
+        let mut chars = out.chars();
+        match chars.next() {
+            Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+            None => key.to_string(),
+        }
+    }
+}
+
+fn toggle_svm_editor_setting(state: &mut SvmEditorState, index: usize) -> Result<(), String> {
+    let path = svm_editor_setting_paths(state)
+        .get(index)
+        .cloned()
+        .ok_or_else(|| "Setting row not found.".to_string())?;
+    let tree = state
+        .tree
+        .as_mut()
+        .ok_or_else(|| "No SavedVariables file loaded.".to_string())?;
+    let node =
+        sv_node_at_path_mut(tree, &path).ok_or_else(|| "Setting node not found.".to_string())?;
+    if !matches!(
+        node.value_type,
+        saved_variables::types::SvValueType::Boolean
+    ) {
+        return Err(
+            "Only boolean settings can be toggled in the native editor right now.".to_string(),
+        );
+    }
+    let current = node
+        .value
+        .as_ref()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    node.value = Some(serde_json::Value::Bool(!current));
+    state.dirty = true;
+    state.message = "Unsaved SavedVariables change.".to_string();
+    Ok(())
+}
+
+fn save_svm_editor_file(addons_root: &Path, state: &mut SvmEditorState) -> Result<(), String> {
+    let file_name = state
+        .selected_file_name()
+        .ok_or_else(|| "No SavedVariables file selected.".to_string())?;
+    let tree = state
+        .tree
+        .as_ref()
+        .ok_or_else(|| "No SavedVariables file loaded.".to_string())?;
+    let stamp = state
+        .stamp
+        .as_ref()
+        .ok_or_else(|| "No file stamp available. Reload the file before saving.".to_string())?;
+    let new_stamp =
+        saved_variables::io::write_saved_variable_blocking(addons_root, &file_name, tree, stamp)?;
+    state.stamp = Some(new_stamp);
+    state.dirty = false;
+    state.message = "Saved changes and wrote a .bak backup.".to_string();
+    Ok(())
+}
+
+fn preview_svm_editor_file(addons_root: &Path, state: &mut SvmEditorState) -> Result<(), String> {
+    let file_name = state
+        .selected_file_name()
+        .ok_or_else(|| "No SavedVariables file selected.".to_string())?;
+    let tree = state
+        .tree
+        .as_ref()
+        .ok_or_else(|| "No SavedVariables file loaded.".to_string())?;
+    let changes = saved_variables::io::preview_save(addons_root, &file_name, tree)?;
+    state.message = if changes.is_empty() {
+        "No changes detected.".to_string()
+    } else {
+        format!(
+            "{} pending change{}.",
+            changes.len(),
+            if changes.len() == 1 { "" } else { "s" }
+        )
+    };
+    Ok(())
+}
+
+fn restore_svm_editor_backup(addons_root: &Path, state: &mut SvmEditorState) -> Result<(), String> {
+    let file_name = state
+        .selected_file_name()
+        .ok_or_else(|| "No SavedVariables file selected.".to_string())?;
+    saved_variables::io::restore_backup_file(addons_root, &file_name)?;
+    load_svm_editor_selected_file(addons_root, state)?;
+    state.message = "Restored the latest .bak file.".to_string();
+    Ok(())
 }
 
 fn clean_saved_variable_orphans(
@@ -10274,6 +10953,80 @@ CombatMetrics_SavedVariables = {
             fs::read_to_string(sv_dir.join("TestAddon.lua")).expect("read copied saved variable");
         assert!(updated.contains("[\"Main\"]"));
         assert!(updated.contains("[\"Alt\"]"));
+        assert!(sv_dir.join("TestAddon.lua.bak").is_file());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_svm_editor_loads_toggles_previews_and_saves_boolean() {
+        let root = test_temp_dir("native-svm-editor");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::write(
+            sv_dir.join("TestAddon.lua"),
+            r#"TestAddon_SavedVariables = {
+    ["Default"] = {
+        ["@Account"] = {
+            ["Main"] = {
+                ["enabled"] = false,
+                ["size"] = 12,
+            },
+        },
+    },
+}
+"#,
+        )
+        .expect("write saved variable");
+
+        let mut state = SvmEditorState::default();
+        state.replace_files(vec![SvmEditorFile {
+            file_name: "TestAddon.lua".to_string(),
+            addon_name: "TestAddon".to_string(),
+        }]);
+        load_svm_editor_selected_file(&addons_root, &mut state).expect("load editor file");
+
+        assert_eq!(
+            state.selected_path,
+            vec![
+                "TestAddon_SavedVariables".to_string(),
+                "Default".to_string(),
+                "@Account".to_string(),
+                "Main".to_string()
+            ]
+        );
+        assert!(
+            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path)
+                .iter()
+                .any(|entry| entry.active && entry.label.as_str() == "Main")
+        );
+
+        let settings = svm_editor_setting_entries(&state);
+        assert!(settings
+            .iter()
+            .any(|entry| entry.key_name.as_str() == "enabled" && !entry.checked));
+        let enabled_index = settings
+            .iter()
+            .position(|entry| entry.key_name.as_str() == "enabled")
+            .expect("enabled setting exists");
+
+        toggle_svm_editor_setting(&mut state, enabled_index).expect("toggle enabled");
+        assert!(state.dirty);
+        let settings = svm_editor_setting_entries(&state);
+        assert!(settings
+            .iter()
+            .any(|entry| entry.key_name.as_str() == "enabled" && entry.checked));
+
+        preview_svm_editor_file(&addons_root, &mut state).expect("preview editor change");
+        assert!(state.message.contains("pending change"));
+
+        save_svm_editor_file(&addons_root, &mut state).expect("save editor change");
+        assert!(!state.dirty);
+        let updated =
+            fs::read_to_string(sv_dir.join("TestAddon.lua")).expect("read saved variable");
+        assert!(updated.contains("enabled = true") || updated.contains("[\"enabled\"] = true"));
         assert!(sv_dir.join("TestAddon.lua.bak").is_file());
 
         let _ = fs::remove_dir_all(root);
