@@ -174,7 +174,6 @@ struct NativeHubPack {
 struct NativePackListResponse {
     packs: Vec<NativeHubPack>,
     page: i64,
-    sort: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -186,6 +185,13 @@ struct NativePackSingleResponse {
 struct NativePackDetailData {
     entry: PackHubEntry,
     addons: Vec<PackHubAddonEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct NativePackPageData {
+    entries: Vec<PackHubEntry>,
+    page: i64,
+    has_more: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -571,6 +577,46 @@ impl DiscoverBrowseState {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct PackHubBrowseState {
+    query: String,
+    type_filter: i32,
+    sort: i32,
+    page: i64,
+}
+
+impl PackHubBrowseState {
+    fn normalize(&mut self) {
+        self.type_filter = self.type_filter.clamp(0, 3);
+        self.sort = self.sort.clamp(0, 2);
+        self.page = self.page.max(1);
+    }
+
+    fn next_type_filter(&mut self) {
+        self.type_filter = (self.type_filter + 1) % 4;
+        self.page = 1;
+        self.normalize();
+    }
+
+    fn next_sort(&mut self) {
+        self.sort = (self.sort + 1) % 3;
+        self.page = 1;
+        self.normalize();
+    }
+
+    fn reset_page(&mut self) {
+        self.page = 1;
+        self.normalize();
+    }
+
+    fn next_page_snapshot(&self) -> Self {
+        let mut next = self.clone();
+        next.page = next.page.saturating_add(1).max(1);
+        next.normalize();
+        next
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackupManifestDraft {
@@ -630,7 +676,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_settings_actions(&ui, settings_models);
     wire_backup_restore_actions(&ui);
     if ui.get_pack_hub_open() {
-        refresh_pack_hub_packs(&ui);
+        ui.invoke_open_pack_hub();
     }
     ui.run()
 }
@@ -2602,12 +2648,120 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         }
     });
 
+    let pack_hub_browse_state = Arc::new(Mutex::new(PackHubBrowseState::default()));
+    let pack_hub_browse_counter = Arc::new(AtomicU64::new(0));
+
     let pack_hub_ui = ui.as_weak();
+    let pack_hub_state = pack_hub_browse_state.clone();
+    let pack_hub_counter = pack_hub_browse_counter.clone();
     ui.on_open_pack_hub(move || {
         let Some(ui) = pack_hub_ui.upgrade() else {
             return;
         };
-        refresh_pack_hub_packs(&ui);
+        {
+            let mut state = pack_hub_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.reset_page();
+            apply_pack_hub_browse_state(&ui, &state);
+        }
+        request_pack_hub_browse_page(&ui, pack_hub_state.clone(), pack_hub_counter.clone(), false);
+    });
+
+    let pack_query_ui = ui.as_weak();
+    let pack_query_state = pack_hub_browse_state.clone();
+    let pack_query_counter = pack_hub_browse_counter.clone();
+    ui.on_pack_hub_browse_query_edited(move |query| {
+        let Some(ui) = pack_query_ui.upgrade() else {
+            return;
+        };
+        {
+            let mut state = pack_query_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.query = query.to_string();
+            state.reset_page();
+            apply_pack_hub_browse_state(&ui, &state);
+        }
+        request_pack_hub_browse_page(
+            &ui,
+            pack_query_state.clone(),
+            pack_query_counter.clone(),
+            false,
+        );
+    });
+
+    let pack_type_ui = ui.as_weak();
+    let pack_type_state = pack_hub_browse_state.clone();
+    let pack_type_counter = pack_hub_browse_counter.clone();
+    ui.on_pack_hub_browse_type_next(move || {
+        let Some(ui) = pack_type_ui.upgrade() else {
+            return;
+        };
+        {
+            let mut state = pack_type_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.next_type_filter();
+            apply_pack_hub_browse_state(&ui, &state);
+        }
+        request_pack_hub_browse_page(
+            &ui,
+            pack_type_state.clone(),
+            pack_type_counter.clone(),
+            false,
+        );
+    });
+
+    let pack_sort_ui = ui.as_weak();
+    let pack_sort_state = pack_hub_browse_state.clone();
+    let pack_sort_counter = pack_hub_browse_counter.clone();
+    ui.on_pack_hub_browse_sort_next(move || {
+        let Some(ui) = pack_sort_ui.upgrade() else {
+            return;
+        };
+        {
+            let mut state = pack_sort_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.next_sort();
+            apply_pack_hub_browse_state(&ui, &state);
+        }
+        request_pack_hub_browse_page(
+            &ui,
+            pack_sort_state.clone(),
+            pack_sort_counter.clone(),
+            false,
+        );
+    });
+
+    let pack_more_ui = ui.as_weak();
+    let pack_more_state = pack_hub_browse_state.clone();
+    let pack_more_counter = pack_hub_browse_counter.clone();
+    ui.on_pack_hub_browse_load_more(move || {
+        let Some(ui) = pack_more_ui.upgrade() else {
+            return;
+        };
+        if ui.get_pack_hub_browse_loading() || !ui.get_pack_hub_browse_has_more() {
+            return;
+        }
+        {
+            let next = pack_more_state
+                .lock()
+                .map(|state| state.next_page_snapshot())
+                .unwrap_or_default();
+            let mut state = pack_more_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *state = next;
+            apply_pack_hub_browse_state(&ui, &state);
+        }
+        request_pack_hub_browse_page(
+            &ui,
+            pack_more_state.clone(),
+            pack_more_counter.clone(),
+            true,
+        );
     });
 
     let pack_detail_ui = ui.as_weak();
@@ -3050,6 +3204,59 @@ fn apply_pack_hub_model(ui: &KalpaWindow, entries: Vec<PackHubEntry>) {
     ui.set_pack_hub_packs(Rc::new(VecModel::from(entries)).into());
 }
 
+fn pack_hub_entries_from_model(ui: &KalpaWindow) -> Vec<PackHubEntry> {
+    let model = ui.get_pack_hub_packs();
+    (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .collect()
+}
+
+fn append_pack_hub_model(ui: &KalpaWindow, entries: Vec<PackHubEntry>) {
+    let mut rows = pack_hub_entries_from_model(ui);
+    rows.extend(entries);
+    apply_pack_hub_model(ui, rows);
+}
+
+fn pack_hub_type_filter_key(filter: i32) -> Option<&'static str> {
+    match filter {
+        1 => Some("addon-pack"),
+        2 => Some("build-pack"),
+        3 => Some("roster-pack"),
+        _ => None,
+    }
+}
+
+fn pack_hub_type_filter_label(filter: i32) -> &'static str {
+    match filter {
+        1 => "Addon Pack",
+        2 => "Build Pack",
+        3 => "Roster Pack",
+        _ => "All",
+    }
+}
+
+fn pack_hub_sort_key(sort: i32) -> &'static str {
+    match sort {
+        1 => "newest",
+        2 => "updated",
+        _ => "votes",
+    }
+}
+
+fn pack_hub_sort_label(sort: i32) -> &'static str {
+    match sort {
+        1 => "Newest",
+        2 => "Updated",
+        _ => "Votes",
+    }
+}
+
+fn apply_pack_hub_browse_state(ui: &KalpaWindow, state: &PackHubBrowseState) {
+    ui.set_pack_hub_browse_query(state.query.clone().into());
+    ui.set_pack_hub_browse_type_label(pack_hub_type_filter_label(state.type_filter).into());
+    ui.set_pack_hub_browse_sort_label(pack_hub_sort_label(state.sort).into());
+}
+
 fn apply_pack_hub_detail_model(ui: &KalpaWindow, addons: Vec<PackHubAddonEntry>) {
     ui.set_pack_hub_install_label(pack_hub_install_label(&addons).into());
     ui.set_pack_hub_detail_addons(Rc::new(VecModel::from(addons)).into());
@@ -3084,25 +3291,76 @@ fn fallback_pack_hub_entries() -> Vec<PackHubEntry> {
     ]
 }
 
-fn refresh_pack_hub_packs(ui: &KalpaWindow) {
+fn request_pack_hub_browse_page(
+    ui: &KalpaWindow,
+    browse_state: Arc<Mutex<PackHubBrowseState>>,
+    request_counter: Arc<AtomicU64>,
+    append: bool,
+) {
+    let request_id = request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let state_snapshot = {
+        let mut state = browse_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.normalize();
+        apply_pack_hub_browse_state(ui, &state);
+        state.clone()
+    };
+
+    ui.set_pack_hub_browse_loading(true);
     ui.set_status_error_message("Loading Pack Hub packs...".into());
+
     let ui_weak = ui.as_weak();
     std::thread::spawn(move || {
-        let result = fetch_pack_hub_packs_blocking();
+        let result = fetch_pack_hub_packs_blocking(&state_snapshot);
         let _ = slint::invoke_from_event_loop(move || {
+            if request_counter.load(Ordering::SeqCst) != request_id {
+                return;
+            }
             let Some(ui) = ui_weak.upgrade() else {
                 return;
             };
 
+            ui.set_pack_hub_browse_loading(false);
             match result {
-                Ok(entries) if !entries.is_empty() => {
-                    apply_pack_hub_model(&ui, entries);
-                    ui.set_status_error_message("".into());
-                }
-                Ok(_) => {
-                    ui.set_status_error_message("Pack Hub returned no published packs.".into());
+                Ok(page) => {
+                    {
+                        let mut state = browse_state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        *state = state_snapshot;
+                        state.page = page.page.max(1);
+                        state.normalize();
+                        apply_pack_hub_browse_state(&ui, &state);
+                    }
+                    ui.set_pack_hub_browse_has_more(page.has_more);
+
+                    if append {
+                        if page.entries.is_empty() {
+                            ui.set_status_error_message("No more Pack Hub packs to load.".into());
+                        } else {
+                            append_pack_hub_model(&ui, page.entries);
+                            ui.set_status_error_message("".into());
+                        }
+                    } else {
+                        let empty = page.entries.is_empty();
+                        apply_pack_hub_model(&ui, page.entries);
+                        ui.set_pack_hub_selected_index(0);
+                        ui.set_status_error_message(
+                            if empty {
+                                "No Pack Hub packs match the current filters."
+                            } else {
+                                ""
+                            }
+                            .into(),
+                        );
+                    }
                 }
                 Err(error) => {
+                    ui.set_pack_hub_browse_has_more(false);
+                    if !append {
+                        apply_pack_hub_model(&ui, Vec::new());
+                    }
                     ui.set_status_error_message(
                         format!("Could not load Pack Hub packs: {error}").into(),
                     );
@@ -3131,10 +3389,23 @@ fn pack_hub_client() -> &'static reqwest::blocking::Client {
     })
 }
 
-fn fetch_pack_hub_packs_blocking() -> Result<Vec<PackHubEntry>, String> {
+fn fetch_pack_hub_packs_blocking(state: &PackHubBrowseState) -> Result<NativePackPageData, String> {
+    const PAGE_SIZE: usize = 10;
+    let mut query_params = vec![
+        ("sort", pack_hub_sort_key(state.sort).to_string()),
+        ("page", state.page.max(1).to_string()),
+    ];
+    if let Some(pack_type) = pack_hub_type_filter_key(state.type_filter) {
+        query_params.push(("type", pack_type.to_string()));
+    }
+    let query = state.query.trim();
+    if !query.is_empty() {
+        query_params.push(("q", query.to_string()));
+    }
+
     let response = pack_hub_client()
         .get(format!("{}/packs", pack_hub_url()))
-        .query(&[("sort", "votes"), ("page", "1")])
+        .query(&query_params)
         .send()
         .map_err(|error| {
             if error.is_connect() || error.is_timeout() {
@@ -3151,13 +3422,19 @@ fn fetch_pack_hub_packs_blocking() -> Result<Vec<PackHubEntry>, String> {
     let body: NativePackListResponse = response
         .json()
         .map_err(|error| format!("Failed to parse packs response: {error}"))?;
-    let _ = (body.page, body.sort.as_str());
-
-    Ok(body
-        .packs
+    let NativePackListResponse { packs, page } = body;
+    let has_more = packs.len() >= PAGE_SIZE;
+    let entries = packs
         .into_iter()
+        .filter(|pack| pack.status.as_deref() != Some("draft"))
         .map(pack_hub_entry_from_hub)
-        .collect())
+        .collect();
+
+    Ok(NativePackPageData {
+        entries,
+        page,
+        has_more,
+    })
 }
 
 fn fetch_pack_hub_detail_blocking(
@@ -11951,6 +12228,45 @@ CombatMetrics_SavedVariables = {
 
         assert!(summary.contains("Installed 1 Pack Hub addon, 1 failed."));
         assert!(summary.contains("Combat Metrics: download failed"));
+    }
+
+    #[test]
+    fn pack_hub_browse_state_cycles_filters_and_pages() {
+        let mut state = PackHubBrowseState::default();
+        assert_eq!(pack_hub_type_filter_label(state.type_filter), "All");
+        assert_eq!(pack_hub_type_filter_key(state.type_filter), None);
+        assert_eq!(pack_hub_sort_label(state.sort), "Votes");
+        assert_eq!(pack_hub_sort_key(state.sort), "votes");
+
+        state.next_type_filter();
+        assert_eq!(pack_hub_type_filter_label(state.type_filter), "Addon Pack");
+        assert_eq!(
+            pack_hub_type_filter_key(state.type_filter),
+            Some("addon-pack")
+        );
+        state.next_type_filter();
+        assert_eq!(
+            pack_hub_type_filter_key(state.type_filter),
+            Some("build-pack")
+        );
+        state.next_type_filter();
+        assert_eq!(
+            pack_hub_type_filter_key(state.type_filter),
+            Some("roster-pack")
+        );
+        state.next_type_filter();
+        assert_eq!(pack_hub_type_filter_key(state.type_filter), None);
+
+        state.next_sort();
+        assert_eq!(pack_hub_sort_label(state.sort), "Newest");
+        assert_eq!(pack_hub_sort_key(state.sort), "newest");
+        state.next_sort();
+        assert_eq!(pack_hub_sort_label(state.sort), "Updated");
+        assert_eq!(pack_hub_sort_key(state.sort), "updated");
+
+        let page_two = state.next_page_snapshot();
+        assert_eq!(state.page, 1);
+        assert_eq!(page_two.page, 2);
     }
 
     #[test]

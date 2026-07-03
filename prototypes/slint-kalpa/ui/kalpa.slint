@@ -4048,10 +4048,13 @@ component PackHubField inherits Rectangle {
     in property <string> placeholder;
     in property <bool> search: true;
     in property <bool> focused: false;
+    in property <bool> editable: false;
+    in-out property <string> value;
+    callback edited(string);
     height: 36px;
     border-radius: 10px;
     border-width: 0px;
-    background: root.focused ? Palette.sky-15 : Palette.white-06;
+    background: (root.focused || root.editable) ? Palette.sky-15 : Palette.white-06;
 
     Rectangle {
         x: 0px;
@@ -4060,7 +4063,7 @@ component PackHubField inherits Rectangle {
         height: parent.height / 2;
         border-radius: 10px;
         border-width: 0px;
-        background: root.focused ? Palette.sky-06 : Palette.white-03;
+        background: (root.focused || root.editable) ? Palette.sky-06 : Palette.white-03;
     }
 
     Image {
@@ -4071,10 +4074,11 @@ component PackHubField inherits Rectangle {
         height: 14px;
         source: @image-url("../assets/icons/search.svg");
         image-fit: contain;
-        colorize: root.focused ? Palette.sky : Palette.muted-half;
+        colorize: (root.focused || root.editable) ? Palette.sky : Palette.muted-half;
     }
 
     Text {
+        visible: root.value == "";
         x: root.search ? 36px : 14px;
         y: 0px;
         width: parent.width - (root.search ? 48px : 28px);
@@ -4086,23 +4090,54 @@ component PackHubField inherits Rectangle {
         vertical-alignment: center;
         overflow: elide;
     }
+
+    TextEdit {
+        visible: root.editable;
+        x: root.search ? 36px : 14px;
+        y: 0px;
+        width: parent.width - (root.search ? 48px : 28px);
+        height: parent.height;
+        opacity: 0.01;
+        text: root.value;
+        font-size: 13px;
+        font-family: "Geist";
+        edited(content) => {
+            root.value = content;
+            root.edited(content);
+        }
+    }
+
+    Text {
+        visible: root.value != "";
+        x: root.search ? 36px : 14px;
+        y: 0px;
+        width: parent.width - (root.search ? 48px : 28px);
+        height: parent.height;
+        text: root.value;
+        color: Palette.foreground;
+        font-size: 13px;
+        font-weight: 600;
+        vertical-alignment: center;
+        overflow: elide;
+    }
 }
 
 component PackHubSelectField inherits Rectangle {
     in property <string> label;
+    callback clicked;
     height: 36px;
     border-radius: 10px;
     border-width: 0px;
-    background: Palette.border;
+    background: touch.has-hover ? Palette.white-10 : Palette.white-06;
 
     Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: parent.height - 2px;
-        border-radius: 9px;
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height / 2;
+        border-radius: 10px;
         border-width: 0px;
-        background: Palette.white-02;
+        background: Palette.white-03;
     }
 
     Text {
@@ -4125,7 +4160,13 @@ component PackHubSelectField inherits Rectangle {
         height: 14px;
         source: @image-url("../assets/icons/chevron-down.svg");
         image-fit: contain;
-        colorize: Palette.muted-half;
+        colorize: touch.has-hover ? Palette.foreground : Palette.muted-half;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -4615,7 +4656,16 @@ component PackHubInstallRow inherits Rectangle {
 
 component PackHubBrowseView inherits Rectangle {
     in property <[PackHubEntry]> packs;
+    in-out property <string> query;
+    in property <string> type-label: "All";
+    in property <string> sort-label: "Votes";
+    in property <bool> loading: false;
+    in property <bool> has-more: false;
     callback open-detail(int);
+    callback query-edited(string);
+    callback type-next;
+    callback sort-next;
+    callback load-more;
     background: #00000000;
 
     PackHubButton {
@@ -4633,10 +4683,13 @@ component PackHubBrowseView inherits Rectangle {
         width: parent.width - 268px;
         placeholder: "Search packs...";
         focused: true;
+        editable: true;
+        value <=> root.query;
+        edited(value) => { root.query-edited(value); }
     }
 
-    PackHubSelectField { x: parent.width - 256px; y: 52px; width: 142px; label: "all"; }
-    PackHubSelectField { x: parent.width - 104px; y: 52px; width: 104px; label: "votes"; }
+    PackHubSelectField { x: parent.width - 256px; y: 52px; width: 142px; label: root.type-label; clicked => { root.type-next(); } }
+    PackHubSelectField { x: parent.width - 104px; y: 52px; width: 104px; label: root.sort-label; clicked => { root.sort-next(); } }
 
     if (root.packs.length == 0) : Rectangle {
         x: 0px;
@@ -4652,7 +4705,7 @@ component PackHubBrowseView inherits Rectangle {
             y: 0px;
             width: parent.width - 48px;
             height: parent.height;
-            text: "Loading Pack Hub packs...";
+            text: root.loading ? "Loading Pack Hub packs..." : "No packs match this browse filter.";
             color: Palette.muted-strong;
             font-size: 14px;
             font-weight: 800;
@@ -4665,7 +4718,7 @@ component PackHubBrowseView inherits Rectangle {
         x: 0px;
         y: 102px;
         width: parent.width;
-        height: parent.height - 102px;
+        height: parent.height - (root.has-more || root.loading ? 148px : 102px);
         viewport-width: self.width;
         viewport-height: root.packs.length * 108px;
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -4691,6 +4744,17 @@ component PackHubBrowseView inherits Rectangle {
                 open-detail => { root.open-detail(index); }
             }
         }
+    }
+
+    if (root.packs.length > 0) : PackHubButton {
+        x: 0px;
+        y: parent.height - 34px;
+        width: parent.width;
+        visible: root.has-more || root.loading;
+        icon: @image-url("../assets/icons/refresh-cw.svg");
+        label: root.loading ? "Loading..." : "Load More Packs";
+        disabled: root.loading;
+        clicked => { root.load-more(); }
     }
 }
 
@@ -4931,11 +4995,20 @@ component PackHubOverlay inherits Rectangle {
     in-out property <int> view: 0;
     in property <[PackHubEntry]> packs;
     in property <[PackHubAddonEntry]> detail-addons;
+    in-out property <string> browse-query;
+    in property <string> browse-type-label: "All";
+    in property <string> browse-sort-label: "Votes";
+    in property <bool> browse-loading: false;
+    in property <bool> browse-has-more: false;
     in property <bool> detail-loading: false;
     in property <string> detail-message: "";
     in property <string> install-label: "Install Addons";
     in-out property <int> selected-pack-index: 0;
     callback open-detail(int);
+    callback browse-query-edited(string);
+    callback browse-type-next;
+    callback browse-sort-next;
+    callback browse-load-more;
     callback install-detail;
     visible: root.open;
     background: #000000c4;
@@ -5008,11 +5081,20 @@ component PackHubOverlay inherits Rectangle {
                 width: parent.width - 48px;
                 height: parent.height - 212px;
                 packs: root.packs;
+                query <=> root.browse-query;
+                type-label: root.browse-type-label;
+                sort-label: root.browse-sort-label;
+                loading: root.browse-loading;
+                has-more: root.browse-has-more;
                 open-detail(index) => {
                     root.selected-pack-index = index;
                     root.view = 3;
                     root.open-detail(index);
                 }
+                query-edited(value) => { root.browse-query-edited(value); }
+                type-next => { root.browse-type-next(); }
+                sort-next => { root.browse-sort-next(); }
+                load-more => { root.browse-load-more(); }
             }
 
             if (root.view == 4) : Rectangle {
@@ -8939,6 +9021,11 @@ export component KalpaWindow inherits Window {
     in-out property <bool> pack-hub-open: false;
     in-out property <int> pack-hub-view: 0;
     in-out property <int> pack-hub-selected-index: 0;
+    in-out property <string> pack-hub-browse-query;
+    in-out property <string> pack-hub-browse-type-label: "All";
+    in-out property <string> pack-hub-browse-sort-label: "Votes";
+    in-out property <bool> pack-hub-browse-loading: false;
+    in-out property <bool> pack-hub-browse-has-more: false;
     in-out property <bool> pack-hub-detail-loading: false;
     in-out property <string> pack-hub-detail-message;
     in-out property <string> pack-hub-install-label: "Install Addons";
@@ -9079,6 +9166,10 @@ export component KalpaWindow inherits Window {
     callback discover-category-sort-next;
     callback open-pack-hub;
     callback pack-hub-open-detail(int);
+    callback pack-hub-browse-query-edited(string);
+    callback pack-hub-browse-type-next;
+    callback pack-hub-browse-sort-next;
+    callback pack-hub-browse-load-more;
     callback pack-hub-install-detail;
     callback open-uploader;
     callback open-svm;
@@ -9333,11 +9424,20 @@ export component KalpaWindow inherits Window {
             view <=> root.pack-hub-view;
             packs: root.pack-hub-packs;
             detail-addons: root.pack-hub-detail-addons;
+            browse-query <=> root.pack-hub-browse-query;
+            browse-type-label: root.pack-hub-browse-type-label;
+            browse-sort-label: root.pack-hub-browse-sort-label;
+            browse-loading: root.pack-hub-browse-loading;
+            browse-has-more: root.pack-hub-browse-has-more;
             detail-loading: root.pack-hub-detail-loading;
             detail-message: root.pack-hub-detail-message;
             install-label: root.pack-hub-install-label;
             selected-pack-index <=> root.pack-hub-selected-index;
             open-detail(index) => { root.pack-hub-open-detail(index); }
+            browse-query-edited(value) => { root.pack-hub-browse-query-edited(value); }
+            browse-type-next => { root.pack-hub-browse-type-next(); }
+            browse-sort-next => { root.pack-hub-browse-sort-next(); }
+            browse-load-more => { root.pack-hub-browse-load-more(); }
             install-detail => { root.pack-hub-install-detail(); }
         }
 
