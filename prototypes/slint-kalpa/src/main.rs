@@ -2063,6 +2063,15 @@ fn discover_entries_from_search_results(
         .collect()
 }
 
+fn default_discover_category_id(categories: &[esoui::EsouiCategory]) -> Option<u32> {
+    categories
+        .iter()
+        .find(|category| category.name.eq_ignore_ascii_case("Combat"))
+        .or_else(|| categories.iter().find(|category| category.depth == 0))
+        .or_else(|| categories.first())
+        .map(|category| category.id)
+}
+
 fn merge_discover_detail(
     mut entry: DiscoverEntry,
     detail: esoui::EsouiAddonDetail,
@@ -3449,6 +3458,8 @@ fn wire_discover(
     let tab_installed_ids = installed_ids.clone();
     let popular_request_counter = Arc::new(AtomicU64::new(0));
     let tab_popular_request_counter = popular_request_counter.clone();
+    let category_request_counter = Arc::new(AtomicU64::new(0));
+    let tab_category_request_counter = category_request_counter.clone();
     ui.on_discover_tab_selected(move |tab| {
         let Some(ui) = tab_ui.upgrade() else {
             return;
@@ -3491,6 +3502,53 @@ fn wire_discover(
                         Err(error) => {
                             ui.set_status_error_message(
                                 format!("Could not load popular ESOUI addons: {error}").into(),
+                            );
+                        }
+                    }
+                });
+            });
+        }
+
+        if normalize_discover_tab(tab) == 2 {
+            let request_id = tab_category_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let request_counter = tab_category_request_counter.clone();
+            let installed_snapshot = discover_installed_snapshot(&tab_installed_ids);
+            let ui_weak = ui.as_weak();
+            std::thread::spawn(move || {
+                let result = esoui::fetch_categories()
+                    .and_then(|categories| {
+                        default_discover_category_id(&categories)
+                            .ok_or_else(|| "ESOUI did not return any addon categories.".to_string())
+                    })
+                    .and_then(|category_id| esoui::browse_category(category_id, 0, "downloads"))
+                    .map(|results| {
+                        discover_entries_from_search_results(results, &installed_snapshot)
+                    });
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    if request_counter.load(Ordering::SeqCst) != request_id {
+                        return;
+                    }
+
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+
+                    if ui.get_discover_tab() != 2 {
+                        return;
+                    }
+
+                    match result {
+                        Ok(entries) if !entries.is_empty() => {
+                            let model = Rc::new(VecModel::from(entries));
+                            ui.set_selected_discover_index(0);
+                            ui.set_discover_results(model.into());
+                            ui.set_status_error_message("".into());
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            ui.set_status_error_message(
+                                format!("Could not load ESOUI category addons: {error}").into(),
                             );
                         }
                     }
@@ -9404,6 +9462,24 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entry.category.as_str(), "Combat");
         assert_eq!(entry.rank, 4);
         assert!(entry.installed);
+    }
+
+    #[test]
+    fn discover_category_default_prefers_combat() {
+        let categories = vec![
+            esoui::EsouiCategory {
+                id: 10,
+                name: "Libraries".to_string(),
+                depth: 0,
+            },
+            esoui::EsouiCategory {
+                id: 20,
+                name: "Combat".to_string(),
+                depth: 1,
+            },
+        ];
+
+        assert_eq!(default_discover_category_id(&categories), Some(20));
     }
 
     #[test]
