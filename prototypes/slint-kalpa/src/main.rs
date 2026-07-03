@@ -6,6 +6,7 @@ slint::include_modules!();
 mod char_backup;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
@@ -13,7 +14,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeSet, HashMap, HashSet},
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
@@ -77,6 +78,24 @@ struct NativeSettings {
     official_uploader: bool,
     auto_open_analysis: bool,
     conflict_policy: i32,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct NativeHashManifest {
+    addon_folder: String,
+    #[serde(default)]
+    esoui_ids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    esoui_id: u32,
+    recorded_at: String,
+    installed_version: String,
+    files: HashMap<String, String>,
+    #[serde(default)]
+    modified_files: Vec<String>,
 }
 
 impl Default for NativeSettings {
@@ -5289,7 +5308,124 @@ fn write_text_file(
     content: &str,
 ) -> Result<(), String> {
     let file_path = addon_file_path(addons_root, folder_name, relative_path)?;
-    fs::write(&file_path, content).map_err(|error| format!("Failed to write file: {error}"))
+    fs::write(&file_path, content).map_err(|error| format!("Failed to write file: {error}"))?;
+    update_hash_manifest_for_file(addons_root, folder_name, relative_path, &file_path)
+}
+
+fn update_hash_manifest_for_file(
+    addons_root: &Path,
+    folder_name: &str,
+    relative_path: &str,
+    file_path: &Path,
+) -> Result<(), String> {
+    let Some(mut manifest) = load_hash_manifest(addons_root, folder_name) else {
+        return Ok(());
+    };
+    let key = relative_path.replace('\\', "/");
+    let signature = file_signature(&key, file_path)?;
+    let is_modified = manifest
+        .files
+        .get(&key)
+        .map(|stored| !signatures_match(stored, &signature))
+        .unwrap_or(true);
+    if is_modified && !manifest.modified_files.contains(&key) {
+        manifest.modified_files.push(key);
+        manifest.modified_files.sort();
+    } else if !is_modified {
+        manifest.modified_files.retain(|file| file != &key);
+    }
+    save_hash_manifest(addons_root, &manifest)
+}
+
+fn hash_manifest_path(addons_root: &Path, folder_name: &str) -> PathBuf {
+    addons_root
+        .join(".kalpa-hashes")
+        .join(format!("{folder_name}.json"))
+}
+
+fn load_hash_manifest(addons_root: &Path, folder_name: &str) -> Option<NativeHashManifest> {
+    let path = hash_manifest_path(addons_root, folder_name);
+    if !path.exists() {
+        return None;
+    }
+    let contents = fs::read_to_string(&path).ok()?;
+    let mut manifest =
+        serde_json::from_str::<NativeHashManifest>(json_without_bom(&contents)).ok()?;
+    if manifest.esoui_ids.is_empty() && manifest.esoui_id != 0 {
+        manifest.esoui_ids = vec![manifest.esoui_id];
+    }
+    Some(manifest)
+}
+
+fn save_hash_manifest(addons_root: &Path, manifest: &NativeHashManifest) -> Result<(), String> {
+    let path = hash_manifest_path(addons_root, &manifest.addon_folder);
+    let json = serde_json::to_string_pretty(manifest)
+        .map_err(|error| format!("Failed to serialize hash manifest: {error}"))?;
+    write_string_atomic(&path, &json)
+        .map_err(|error| format!("Failed to save hash manifest: {error}"))
+}
+
+fn file_signature(key: &str, path: &Path) -> Result<String, String> {
+    if hashes_file_contents(key) {
+        hash_file_sha256(path)
+    } else {
+        let size = fs::metadata(path)
+            .map_err(|error| format!("Failed to read file metadata for signature: {error}"))?
+            .len();
+        Ok(format!("size:{size}"))
+    }
+}
+
+fn hash_file_sha256(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("Failed to open file for hashing: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("Failed to read file for hashing: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn hashes_file_contents(key: &str) -> bool {
+    let ext = key
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some(
+            "lua"
+                | "xml"
+                | "txt"
+                | "addon"
+                | "md"
+                | "json"
+                | "toc"
+                | "def"
+                | "lang"
+                | "csv"
+                | "cfg"
+                | "ini"
+                | "html"
+                | "htm"
+        )
+    )
+}
+
+fn signatures_match(stored: &str, current: &str) -> bool {
+    stored == current || (stored.starts_with("size:") != current.starts_with("size:"))
 }
 
 fn addon_file_path(
@@ -7763,6 +7899,21 @@ mod tests {
         )
         .expect("write addon manifest");
         fs::write(addon_dir.join("lang/en.lua"), "local value = 1\n").expect("write lua file");
+        let baseline_hash =
+            hash_file_sha256(&addon_dir.join("lang/en.lua")).expect("hash baseline file");
+        fs::create_dir_all(root.join(".kalpa-hashes")).expect("create hash dir");
+        fs::write(
+            hash_manifest_path(root, "EditableAddon"),
+            serde_json::to_string_pretty(&NativeHashManifest {
+                addon_folder: "EditableAddon".to_string(),
+                recorded_at: "2026-07-01".to_string(),
+                installed_version: "1.0".to_string(),
+                files: HashMap::from([("lang/en.lua".to_string(), baseline_hash)]),
+                ..Default::default()
+            })
+            .expect("serialize hash manifest"),
+        )
+        .expect("write hash manifest");
 
         let files = real_file_entries(root, "EditableAddon").expect("load real file tree");
         assert!(files
@@ -7778,6 +7929,13 @@ mod tests {
             fs::read_to_string(addon_dir.join("lang/en.lua")).expect("read saved lua file"),
             "local value = 2\n"
         );
+        let manifest = load_hash_manifest(root, "EditableAddon").expect("read hash manifest");
+        assert_eq!(manifest.modified_files, vec!["lang/en.lua".to_string()]);
+
+        write_text_file(root, "EditableAddon", "lang/en.lua", "local value = 1\n")
+            .expect("write original lua file");
+        let manifest = load_hash_manifest(root, "EditableAddon").expect("read hash manifest");
+        assert!(manifest.modified_files.is_empty());
         assert!(write_text_file(root, "EditableAddon", "../escape.lua", "bad").is_err());
 
         let _ = fs::remove_dir_all(root);

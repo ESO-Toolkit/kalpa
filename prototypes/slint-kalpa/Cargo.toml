@@ -8,6 +8,7 @@ build = "build.rs"
 arboard = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 slint = "1.16.0"
 
 [build-dependencies]
