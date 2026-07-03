@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
 import { toast } from "sonner";
 import type {
   AddonManifest,
@@ -573,7 +573,7 @@ const EMPTY_PATH: string[] = [];
 
 // ── Nav Tree Item ────────────────────────────────────────────
 
-function NavTreeItem({
+const NavTreeItem = memo(function NavTreeItem({
   node,
   depth,
   structuralDepth,
@@ -581,6 +581,7 @@ function NavTreeItem({
   selectedPath,
   onSelect,
   searchQuery,
+  searchVisible,
   knownCharacters,
   expandedPaths,
   toggleExpanded,
@@ -592,6 +593,11 @@ function NavTreeItem({
   selectedPath: string[];
   onSelect: (path: string[], node: SvTreeNode) => void;
   searchQuery: string;
+  // Precomputed set of pathKeys that either match the search or have a matching
+  // descendant (matched nodes + all their ancestors), built once per debounced
+  // query in EditorTab. null when no search is active. Replaces the previous
+  // per-node recursive subtree walk that ran on every mounted item per keystroke.
+  searchVisible: Set<string> | null;
   knownCharacters: Set<string>;
   expandedPaths: Set<string>;
   toggleExpanded: (pathKey: string) => void;
@@ -608,8 +614,7 @@ function NavTreeItem({
     currentPath.every((seg, i) => selectedPath[i] === seg);
 
   const context = classifyContext(node.key, structuralDepth, knownCharacters);
-  const query = searchQuery.toLowerCase();
-  const matchesSearch = !searchQuery || node.key.toLowerCase().includes(query);
+  const matchesSearch = !searchQuery || node.key.toLowerCase().includes(searchQuery.toLowerCase());
 
   // Detect context wrapper nodes that should be auto-expanded and rendered as chips.
   // These are structural containers (Default, @account, $AccountWide, server names)
@@ -622,15 +627,9 @@ function NavTreeItem({
       node.key === "$AccountWide" ||
       node.key.includes("Megaserver"));
 
-  // Also check if any descendant matches
-  const hasMatchingDescendant = useMemo(() => {
-    if (!searchQuery) return true;
-    const check = (n: SvTreeNode): boolean => {
-      if (n.key.toLowerCase().includes(query)) return true;
-      return (n.children ?? []).some(check);
-    };
-    return check(node);
-  }, [node, searchQuery, query]);
+  // Also check if any descendant matches — an O(1) lookup into the precomputed
+  // set (matched nodes + ancestors). null means no active search → always visible.
+  const hasMatchingDescendant = !searchVisible || searchVisible.has(pathKey);
 
   if (!matchesSearch && !hasMatchingDescendant) return null;
 
@@ -674,6 +673,7 @@ function NavTreeItem({
             selectedPath={selectedPath}
             onSelect={onSelect}
             searchQuery={searchQuery}
+            searchVisible={searchVisible}
             knownCharacters={knownCharacters}
             expandedPaths={expandedPaths}
             toggleExpanded={toggleExpanded}
@@ -730,6 +730,7 @@ function NavTreeItem({
             selectedPath={selectedPath}
             onSelect={onSelect}
             searchQuery={searchQuery}
+            searchVisible={searchVisible}
             knownCharacters={knownCharacters}
             expandedPaths={expandedPaths}
             toggleExpanded={toggleExpanded}
@@ -737,7 +738,7 @@ function NavTreeItem({
         ))}
     </div>
   );
-}
+});
 
 // ── Customization Popover ────────────────────────────────────
 
@@ -1326,6 +1327,38 @@ function EditorTab({
 
   const knownCharacters = useMemo(() => new Set(characters.map((c) => c.name)), [characters]);
 
+  // Debounce the value that drives the tree filter. The input itself stays bound
+  // to `searchQuery` (instantly responsive); the expensive per-node visibility set
+  // is only recomputed ~150ms after typing stops.
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedQuery(searchQuery), 150);
+    return () => clearTimeout(id);
+  }, [searchQuery]);
+
+  // One tree walk per debounced query builds the set of pathKeys that either match
+  // or have a matching descendant (matched nodes + all their ancestors). NavTreeItem
+  // then does O(1) lookups instead of re-walking its whole subtree per keystroke.
+  // Encoding matches NavTreeItem's pathKey / expandAll exactly.
+  const searchVisible = useMemo<Set<string> | null>(() => {
+    const q = debouncedQuery.toLowerCase();
+    if (!q) return null;
+    const visible = new Set<string>();
+    const encode = (path: string[]) => path.map((s) => s.replace(/\0/g, "\\0")).join("\0");
+    const walk = (node: SvTreeNode, parentPath: string[]): boolean => {
+      const currentPath = [...parentPath, node.key];
+      let anyMatch = node.key.toLowerCase().includes(q);
+      // Visit every child (no short-circuit) so all visible descendants are added.
+      for (const child of node.children ?? []) {
+        if (walk(child, currentPath)) anyMatch = true;
+      }
+      if (anyMatch) visible.add(encode(currentPath));
+      return anyMatch;
+    };
+    for (const child of tree?.children ?? []) walk(child, EMPTY_PATH);
+    return visible;
+  }, [tree, debouncedQuery]);
+
   // Load overlay from store
   useEffect(() => {
     void getSetting<SvSchemaOverlay>(OVERLAY_STORE_KEY, {}).then(setOverlay);
@@ -1692,7 +1725,8 @@ function EditorTab({
                     parentPath={EMPTY_PATH}
                     selectedPath={selectedPath}
                     onSelect={handleSelectPath}
-                    searchQuery={searchQuery}
+                    searchQuery={debouncedQuery}
+                    searchVisible={searchVisible}
                     knownCharacters={knownCharacters}
                     expandedPaths={expandedPaths}
                     toggleExpanded={toggleExpanded}

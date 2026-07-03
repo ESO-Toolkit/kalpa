@@ -131,6 +131,18 @@ pub struct UploaderState {
 }
 
 impl UploaderState {
+    /// True while any live-logging session is tracked (starting / official
+    /// `Running` / `NativeRunning`). The webview may be deep-suspended when the
+    /// window is hidden ONLY if this is false — an active session needs its feed
+    /// event handlers running, so it falls back to MemoryUsageTargetLevel=LOW
+    /// instead. Fails safe to `true` (no suspend) if the lock is poisoned.
+    pub fn has_active_live_session(&self) -> bool {
+        self.live_sessions
+            .lock()
+            .map(|s| !s.is_empty())
+            .unwrap_or(true)
+    }
+
     /// Signal every live session to stop, best-effort, WITHOUT joining. Called from the
     /// app's exit handler: a native driver's terminate-on-exit + abandoned POSTs then
     /// settle faster, and the OS reaps the threads. We deliberately do NOT join here
@@ -1513,7 +1525,7 @@ pub async fn uploader_start_live(
     let safe = match confine_log_path(&allowed, &file_path) {
         Ok(p) => p.to_string_lossy().into_owned(),
         Err(e) => {
-            remove_own_slot(&state, &session_id, &cancelled);
+            remove_own_slot(&app, &state, &session_id, &cancelled);
             return Err(e);
         }
     };
@@ -1571,7 +1583,7 @@ pub async fn uploader_start_live(
     // GUI-handoff fallback would just open a download page while Kalpa shows a
     // convincing-but-fake live timeline — so refuse rather than no-op.
     if transport::find_official_uploader().is_none() {
-        remove_own_slot(&state, &session_id, &cancelled);
+        remove_own_slot(&app, &state, &session_id, &cancelled);
         return Err(
             "Live logging needs the official ESO Logs uploader (the Archon App) \
                     installed. Install it, or use \"Upload a Log\" after your \
@@ -1617,7 +1629,7 @@ pub async fn uploader_start_live(
         // Fast path: already cancelled/superseded before we scheduled anything.
         // Remove only our own slot (a newer start may have replaced it; leave
         // that one alone) and return without launching the uploader or watcher.
-        remove_own_slot(&state, &session_id, &cancelled);
+        remove_own_slot(&app, &state, &session_id, &cancelled);
         return Err("Live logging was cancelled before it started.".into());
     }
 
@@ -1673,14 +1685,14 @@ pub async fn uploader_start_live(
     let outcome = match outcome {
         Ok(o) => o,
         Err(e) => {
-            remove_own_slot(&state, &session_id, &cancelled);
+            remove_own_slot(&app, &state, &session_id, &cancelled);
             return Err(e);
         }
     };
     // Pre-launch cancellation observed atomically inside the closure: nothing was
     // launched, so clean up our slot and report the cancellation (not a failure).
     if matches!(&outcome, Err(e) if e == LIVE_CANCELLED_BEFORE_LAUNCH) {
-        remove_own_slot(&state, &session_id, &cancelled);
+        remove_own_slot(&app, &state, &session_id, &cancelled);
         return Err("Live logging was cancelled before it started.".into());
     }
     let (report, handed_off, detail) = match outcome {
@@ -1694,7 +1706,7 @@ pub async fn uploader_start_live(
         ),
         Ok(transport::UploadOutcome::HandedOff { detail }) => (None, true, detail),
         Err(e) => {
-            remove_own_slot(&state, &session_id, &cancelled);
+            remove_own_slot(&app, &state, &session_id, &cancelled);
             return Err(e);
         }
     };
@@ -1747,7 +1759,7 @@ pub async fn uploader_start_live(
             // rotated/deleted, or the folder watch can fail, between the handoff
             // above and here). We have no watcher handle to track, so vacate our
             // own slot regardless.
-            remove_own_slot(&state, &session_id, &cancelled);
+            remove_own_slot(&app, &state, &session_id, &cancelled);
             if handed_off {
                 // The official uploader was ALREADY launched and is streaming —
                 // only Kalpa's in-app timeline is unavailable. Reporting this as a
@@ -1891,7 +1903,7 @@ async fn start_native_live_branch(
         }
     };
     if let Err(msg) = reserve {
-        remove_own_slot(state, session_id, cancelled);
+        remove_own_slot(app, state, session_id, cancelled);
         return Err(msg.into());
     }
 
@@ -2205,6 +2217,9 @@ async fn start_native_live_branch(
         // settle our just-written record by id.
         let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
         let _ = super::history::settle_started(app, &record_id);
+        // Lock released and driver stopped: if this teardown drained the last live
+        // session while the window is hidden, deep-suspend the renderer.
+        reevaluate_webview_power_after_live_change(app);
         return Err(if lost_to_peer {
             "A native live upload is already running for this log.".into()
         } else if finished_before_promotion {
@@ -2282,6 +2297,7 @@ async fn stop_handle_off_executor(handle: StoppedHandle) {
 /// Remove our own Starting slot on a failed start, but only if it's still ours
 /// (a newer start under the same id may have replaced it).
 fn remove_own_slot(
+    app: &tauri::AppHandle,
     state: &State<'_, UploaderState>,
     session_id: &str,
     cancelled: &Arc<AtomicBool>,
@@ -2295,6 +2311,10 @@ fn remove_own_slot(
             sessions.remove(session_id);
         }
     }
+    // A `Starting` slot counts as an active live session, so if the user hid the
+    // window mid-start it was dropped to LOW; a failed start that drains the last
+    // slot must re-evaluate power (after the lock is released) so it deep-suspends.
+    reevaluate_webview_power_after_live_change(app);
 }
 
 /// Remove a native slot whose driver has already returned. This must not call
@@ -2338,6 +2358,29 @@ fn remove_finished_native_slot(
     if let Ok(mut sessions) = state.live_sessions.lock() {
         let _ = remove_finished_native_slot_from_map(&mut sessions, session_id, cancelled);
     };
+    // Re-evaluate webview power AFTER the lock is released (the power path must
+    // never run while holding `live_sessions`). If this was the last live session
+    // and the window is hidden, the renderer deep-suspends now instead of staying
+    // stuck at LOW for the rest of the tray stint.
+    reevaluate_webview_power_after_live_change(app);
+}
+
+/// A live session may have been removed from `live_sessions`. If NONE remains and
+/// the main window is currently hidden/minimized, deep-suspend the renderer: at
+/// hide time an active live session had only dropped it to `MemoryUsageTargetLevel
+/// = LOW` (to keep the feed's event handlers running), and nothing else re-runs
+/// that idle-vs-live decision when the session ends in the tray.
+///
+/// MUST be called AFTER the `live_sessions` lock is released. This itself briefly
+/// re-locks (via `has_active_live_session`) and then touches the window through
+/// `webview_power`; neither holds the lock across a thread join, so it keeps the
+/// same off-lock discipline as every other post-removal side effect here. No-op
+/// unless the map is now empty; no-op on non-Windows.
+fn reevaluate_webview_power_after_live_change(app: &tauri::AppHandle) {
+    let state = app.state::<UploaderState>();
+    if !state.has_active_live_session() {
+        crate::webview_power::on_live_session_ended(app);
+    }
 }
 
 /// Stop a running (or starting) live watch (the official uploader keeps its own
@@ -2387,6 +2430,9 @@ pub async fn uploader_stop_live(
         // waiting for the next-launch reconcile. Best-effort: a missing record is fine.
         let _ = super::history::settle_live(&app, &session_id, fight_count.unwrap_or(0));
     }
+    // The lock is released and any handle joined; if this stop drained the last
+    // live session while the window sits in the tray, deep-suspend the renderer.
+    reevaluate_webview_power_after_live_change(&app);
     Ok(())
 }
 

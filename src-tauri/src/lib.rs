@@ -87,7 +87,11 @@ pub struct PendingUpdate {
     /// archive a second time. Empty only for entries created before this field
     /// existed or via paths that didn't compute it; the apply step falls back to
     /// hashing the ZIP in that case.
-    pub zip_hashes: HashMap<String, String>,
+    ///
+    /// Wrapped in `Arc` so cloning a `PendingUpdate` out of the pending map (and
+    /// the apply step's reuse of this map) is a refcount bump rather than a deep
+    /// copy of a many-entry hash map.
+    pub zip_hashes: Arc<HashMap<String, String>>,
 }
 
 pub struct PendingUpdates(pub Arc<Mutex<HashMap<String, PendingUpdate>>>);
@@ -135,6 +139,7 @@ fn parse_deep_link(url: &str) -> Option<DeepLinkAction> {
 /// Focus the main window and emit the appropriate deep-link event.
 fn emit_deep_link(app: &tauri::AppHandle, action: &DeepLinkAction) {
     if let Some(window) = app.get_webview_window("main") {
+        webview_power::on_shown(app); // resume before showing (flash-free)
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -211,6 +216,161 @@ fn cleanup_orphaned_pending_zips() {
     }
 }
 
+/// Windows-only WebView2 power management: shrink the renderer's memory while
+/// Kalpa's main window is out of view, per Microsoft's guidance (two tiers that
+/// compose exactly as documented):
+///   - hidden + IDLE (no live-upload session running): `TrySuspend` the renderer
+///     — pauses scripts/timers and lets the engine reclaim the most memory (the
+///     renderer process can be parked). Resumed on show.
+///   - hidden + LIVE (a live-upload session is streaming): only
+///     `MemoryUsageTargetLevel = LOW` (evicts caches, nudges GC) so the webview
+///     stays alive and the live feed keeps updating in the tray — TrySuspend
+///     would freeze those event handlers.
+///
+/// `on_shown` resumes + restores NORMAL and is idempotent, so every path that
+/// makes the window visible (tray, deep link, focus) can call it safely — this
+/// guards against a dead/blank window on restore. It is also cheap when nothing
+/// was saved: a `POWER_SAVED` flag short-circuits it to a no-op (no with_webview
+/// / COM) unless a hide path actually reduced the webview first. TrySuspend requires the
+/// controller be marked invisible first, which `window.hide()`/minimize does
+/// NOT do for us, so it is set explicitly. All no-ops on non-Windows and on
+/// WebView2 runtimes without the required interfaces (older than ~2022).
+#[cfg(windows)]
+mod webview_power {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tauri::{AppHandle, Manager, WebviewWindow};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, ICoreWebView2_3, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use webview2_com::TrySuspendCompletedHandler;
+    use windows::core::Interface; // brings `.cast()` into scope
+
+    static SUSPENDED: AtomicBool = AtomicBool::new(false);
+    // True whenever a hide path has actually reduced the webview (LOW or suspend)
+    // and it has not yet been restored. Lets `on_shown` short-circuit to a cheap
+    // no-op — skipping `with_webview` + COM entirely — when nothing was saved.
+    static POWER_SAVED: AtomicBool = AtomicBool::new(false);
+
+    fn set_memory_target(window: &WebviewWindow, low: bool) {
+        let level = if low {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+        } else {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+        };
+        let _ = window.with_webview(move |webview| unsafe {
+            if let Ok(core) = webview.controller().CoreWebView2() {
+                if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
+                    let _ = core19.SetMemoryUsageTargetLevel(level);
+                }
+            }
+        });
+    }
+
+    /// The main window was hidden (tray) or minimized. `live` = a live-upload
+    /// session is active. COM calls run on the WebView2 UI thread via with_webview.
+    pub fn on_hidden(app: &AppHandle, live: bool) {
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        if live {
+            // Mark saved before touching webview state so `on_shown` will restore.
+            POWER_SAVED.store(true, Ordering::SeqCst);
+            set_memory_target(&window, true); // LOW: keep feed warm, trim caches
+            return;
+        }
+        // Mark saved before the SUSPENDED early-return / SetIsVisible below.
+        POWER_SAVED.store(true, Ordering::SeqCst);
+        if SUSPENDED.swap(true, Ordering::SeqCst) {
+            return; // already suspended
+        }
+        let _ = window.with_webview(|webview| {
+            // SAFETY: runs on the WebView2 UI thread.
+            unsafe {
+                let controller = webview.controller();
+                // TrySuspend requires IsVisible=false first, else ERROR_INVALID_STATE.
+                if controller.SetIsVisible(false).is_err() {
+                    return;
+                }
+                let Ok(core) = controller.CoreWebView2() else {
+                    return;
+                };
+                if let Ok(core3) = core.cast::<ICoreWebView2_3>() {
+                    let handler = TrySuspendCompletedHandler::create(Box::new(|_hr, _ok| Ok(())));
+                    let _ = core3.TrySuspend(&handler); // best-effort, fire-and-forget
+                }
+            }
+        });
+    }
+
+    /// A live-upload session just ended. At hide time a live session had only
+    /// dropped the renderer to `MemoryUsageTargetLevel = LOW` (to keep its feed
+    /// event handlers running in the tray) rather than deep-suspending it — and
+    /// nothing re-runs that decision when the session ends while the window is
+    /// still out of view. So if the main window is currently hidden (tray) or
+    /// minimized, run the idle-hide path now to deep-suspend and reclaim the large
+    /// idle-memory win. If the window is on-screen, do nothing: a later hide will
+    /// suspend correctly. `on_hidden(_, false)` sets `SUSPENDED`, so a subsequent
+    /// `on_shown` still resumes + restores NORMAL exactly as after a normal idle
+    /// hide. No-op on non-Windows.
+    pub fn on_live_session_ended(app: &AppHandle) {
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        // Only act when the window is genuinely out of view. Hidden-to-tray shows
+        // up as `is_visible() == false`; a minimized window reports `is_visible()
+        // == true` but `is_minimized() == true`. Both queries fail safe to
+        // "on-screen" (do nothing) so a query error never suspends a live window.
+        let hidden = !window.is_visible().unwrap_or(true);
+        let minimized = window.is_minimized().unwrap_or(false);
+        if hidden || minimized {
+            on_hidden(app, false);
+        }
+    }
+
+    /// The main window is being shown/focused. Resume if suspended and restore
+    /// NORMAL. Idempotent — safe (and intended) to call from every show path.
+    pub fn on_shown(app: &AppHandle) {
+        // Nothing was ever reduced -> nothing to restore. Skip with_webview + COM.
+        if !POWER_SAVED.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let Some(window) = app.get_webview_window("main") else {
+            return;
+        };
+        let was_suspended = SUSPENDED.swap(false, Ordering::SeqCst);
+        let _ = window.with_webview(move |webview| {
+            // SAFETY: runs on the WebView2 UI thread.
+            unsafe {
+                let controller = webview.controller();
+                let Ok(core) = controller.CoreWebView2() else {
+                    return;
+                };
+                if was_suspended {
+                    if let Ok(core3) = core.cast::<ICoreWebView2_3>() {
+                        let _ = core3.Resume();
+                    }
+                    let _ = controller.SetIsVisible(true);
+                }
+                // Restore NORMAL (Resume already does this when suspended; this
+                // also covers the LIVE/LOW-only path that never suspended).
+                if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
+                    let _ = core19
+                        .SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL);
+                }
+            }
+        });
+    }
+}
+
+#[cfg(not(windows))]
+mod webview_power {
+    use tauri::AppHandle;
+    pub fn on_hidden(_app: &AppHandle, _live: bool) {}
+    pub fn on_shown(_app: &AppHandle) {}
+    pub fn on_live_session_ended(_app: &AppHandle) {}
+}
+
 pub fn run() {
     // Enable Chrome DevTools Protocol in debug builds only
     #[cfg(debug_assertions)]
@@ -245,6 +405,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance is launched
             if let Some(window) = app.get_webview_window("main") {
+                webview_power::on_shown(app); // resume before showing (flash-free)
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -296,6 +457,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
+                            webview_power::on_shown(app); // resume before showing
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -314,6 +476,7 @@ pub fn run() {
                     {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
+                            webview_power::on_shown(app); // resume before showing
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -355,18 +518,57 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Hide-to-tray applies ONLY to the main app window. Auxiliary
-                // windows (e.g. the "esologs-login" sign-in webview) must close
-                // normally — intercepting their close would leave them hidden but
-                // alive, breaking flows that create a window, wait for the user to
-                // finish, then close it (the login flow detects a user cancel by
-                // the window disappearing, and closes the window itself on
-                // success). Only "main" hides to tray; everything else closes.
-                if window.label() == "main" {
+            // Only the main window hides-to-tray + power-manages. Auxiliary
+            // windows (e.g. the "esologs-login" sign-in webview) use default
+            // behaviour — intercepting their close would leave them hidden but
+            // alive, breaking flows that create a window, wait for the user, then
+            // close it (the login flow detects cancel by the window disappearing).
+            if window.label() != "main" {
+                return;
+            }
+            let app = window.app_handle();
+            let is_live = || {
+                app.state::<uploader::commands::UploaderState>()
+                    .has_active_live_session()
+            };
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
                     let _ = window.hide();
                     api.prevent_close();
+                    // Backgrounded to tray. Idle -> deep-suspend the renderer;
+                    // live-logging -> LOW so the feed keeps updating in the tray.
+                    webview_power::on_hidden(app, is_live());
                 }
+                // Power-manage only when the window is genuinely out of view —
+                // MINIMIZED — not merely unfocused. A multi-monitor player keeps
+                // Kalpa visible on a second screen with the game focused and
+                // watches the live feed there; that window must stay resumed at
+                // NORMAL. Regaining focus resumes + restores NORMAL (also covers
+                // restore-from-tray, which calls set_focus).
+                tauri::WindowEvent::Focused(focused) => {
+                    if *focused {
+                        webview_power::on_shown(app);
+                    } else if window.is_minimized().unwrap_or(false) {
+                        webview_power::on_hidden(app, is_live());
+                    }
+                }
+                // Closes the already-unfocused-minimize gap: if the window is
+                // already unfocused (user clicked elsewhere) and is then minimized
+                // from the taskbar, no `Focused` event fires, so the arm above
+                // never runs. tao emits `Resized` on minimize/restore on Windows,
+                // so we power-manage off the minimized state here. A visible
+                // resize hits the `else` branch, and `on_shown` is a gated no-op
+                // (see POWER_SAVED) when nothing was saved — so interactive
+                // resizes of a visible window are effectively free and, per the
+                // multi-monitor note above, correctly leave it resumed at NORMAL.
+                tauri::WindowEvent::Resized(_) => {
+                    if window.is_minimized().unwrap_or(false) {
+                        webview_power::on_hidden(app, is_live());
+                    } else {
+                        webview_power::on_shown(app); // also covers restore-without-focus
+                    }
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![

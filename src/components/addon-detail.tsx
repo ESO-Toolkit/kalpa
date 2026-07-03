@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, lazy, Suspense } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -27,7 +27,13 @@ import { ExternalLink, Trash2, Check, Power, Files, FileText } from "lucide-reac
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { AnimatedCheckmark } from "@/components/ui/animated-checkmark";
 import { AddonFileBrowser } from "@/components/addon-file-browser";
-import { UpdateConflictPanel } from "@/components/update-conflict-panel";
+
+// Conflict resolution pulls in the `diff` package (structuredPatch + DiffViewer).
+// It only renders on the rare update-conflict path, so lazy-load it to keep `diff`
+// out of the always-mounted AddonDetail's eager bundle.
+const UpdateConflictPanel = lazy(() =>
+  import("@/components/update-conflict-panel").then((m) => ({ default: m.UpdateConflictPanel }))
+);
 
 function relativeDate(ts: number): string {
   const diff = Date.now() - ts;
@@ -448,71 +454,75 @@ export function AddonDetail({
 
       {conflictReport && (
         <div className="mb-4">
-          <UpdateConflictPanel
-            folderName={conflictReport.folderName}
-            currentVersion={updateResult?.currentVersion ?? ""}
-            updateVersion={conflictReport.updateVersion}
-            conflicts={conflictReport.conflicts}
-            autoKeptFiles={conflictReport.autoKeptFiles}
-            safeFileCount={conflictReport.safeFiles.length}
-            sessionId={conflictReport.sessionId}
-            addonsPath={addonsPath}
-            onResolve={handleConflictResolve}
-            onSkip={handleConflictSkip}
-          />
+          <Suspense fallback={null}>
+            <UpdateConflictPanel
+              folderName={conflictReport.folderName}
+              currentVersion={updateResult?.currentVersion ?? ""}
+              updateVersion={conflictReport.updateVersion}
+              conflicts={conflictReport.conflicts}
+              autoKeptFiles={conflictReport.autoKeptFiles}
+              safeFileCount={conflictReport.safeFiles.length}
+              sessionId={conflictReport.sessionId}
+              addonsPath={addonsPath}
+              onResolve={handleConflictResolve}
+              onSkip={handleConflictSkip}
+            />
+          </Suspense>
         </div>
       )}
 
       {!conflictReport && pendingConflict && !pendingConflictDismissed && (
         <div className="mb-4">
-          <UpdateConflictPanel
-            folderName={pendingConflict.folderName}
-            currentVersion={updateResult?.currentVersion ?? addon.version}
-            updateVersion={pendingConflict.updateVersion}
-            conflicts={pendingConflict.conflicts}
-            autoKeptFiles={pendingConflict.autoKeptFiles}
-            safeFileCount={0}
-            sessionId={pendingConflict.sessionId}
-            addonsPath={addonsPath}
-            onResolve={async (decisions) => {
-              if (updating) return;
-              setUpdating(true);
-              setUpdateError(null);
-              if (!(await ensureEsoNotBlocking())) {
-                setUpdating(false);
-                return;
-              }
-              try {
-                await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
-                  addonsPath,
-                  sessionId: pendingConflict.sessionId,
-                  decisions,
-                  operationId: beginOperation(),
-                });
-                toast.success(`Updated ${addon.title}`);
-                onConflictResolved?.(addon.folderName);
-                if (updateResult) onAddonUpdated(updateResult.esouiId);
-              } catch (e) {
-                if (isCancellation(e)) {
-                  setPendingConflictDismissed(true);
-                  if (onConflictResolved) {
-                    onConflictResolved(addon.folderName);
-                  } else if (updateResult) {
-                    onAddonUpdated(updateResult.esouiId);
-                  }
-                  toast.info(`Stopped updating ${addon.title}`, {
-                    description: "It may be partially updated — run the update again to finish.",
-                  });
-                } else {
-                  setUpdateError(getTauriErrorMessage(e));
+          <Suspense fallback={null}>
+            <UpdateConflictPanel
+              folderName={pendingConflict.folderName}
+              currentVersion={updateResult?.currentVersion ?? addon.version}
+              updateVersion={pendingConflict.updateVersion}
+              conflicts={pendingConflict.conflicts}
+              autoKeptFiles={pendingConflict.autoKeptFiles}
+              safeFileCount={0}
+              sessionId={pendingConflict.sessionId}
+              addonsPath={addonsPath}
+              onResolve={async (decisions) => {
+                if (updating) return;
+                setUpdating(true);
+                setUpdateError(null);
+                if (!(await ensureEsoNotBlocking())) {
+                  setUpdating(false);
+                  return;
                 }
-              } finally {
-                endOperation();
-                setUpdating(false);
-              }
-            }}
-            onSkip={() => setPendingConflictDismissed(true)}
-          />
+                try {
+                  await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
+                    addonsPath,
+                    sessionId: pendingConflict.sessionId,
+                    decisions,
+                    operationId: beginOperation(),
+                  });
+                  toast.success(`Updated ${addon.title}`);
+                  onConflictResolved?.(addon.folderName);
+                  if (updateResult) onAddonUpdated(updateResult.esouiId);
+                } catch (e) {
+                  if (isCancellation(e)) {
+                    setPendingConflictDismissed(true);
+                    if (onConflictResolved) {
+                      onConflictResolved(addon.folderName);
+                    } else if (updateResult) {
+                      onAddonUpdated(updateResult.esouiId);
+                    }
+                    toast.info(`Stopped updating ${addon.title}`, {
+                      description: "It may be partially updated — run the update again to finish.",
+                    });
+                  } else {
+                    setUpdateError(getTauriErrorMessage(e));
+                  }
+                } finally {
+                  endOperation();
+                  setUpdating(false);
+                }
+              }}
+              onSkip={() => setPendingConflictDismissed(true)}
+            />
+          </Suspense>
         </div>
       )}
 

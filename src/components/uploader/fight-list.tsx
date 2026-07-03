@@ -3,7 +3,7 @@
 // both the manual preflight (static fight list) and the live dashboard (fights
 // appear as the selected live path streams them).
 
-import { memo } from "react";
+import { memo, useMemo } from "react";
 import { Radio, Swords } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
@@ -33,6 +33,14 @@ export const FightList = memo(function FightList({
   emptyHint?: string;
   newestFirst?: boolean;
 }) {
+  const ordered = useMemo(
+    () => (newestFirst ? [...fights].reverse() : fights),
+    [fights, newestFirst]
+  );
+  // Announce streamed fights to assistive tech only in live mode (polite, so it
+  // doesn't interrupt). The static preflight list isn't a live region.
+  const live = ordered.some((f) => f.live);
+
   if (fights.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-white/[0.08] p-6 text-center text-sm text-muted-foreground">
@@ -40,11 +48,6 @@ export const FightList = memo(function FightList({
       </div>
     );
   }
-
-  const ordered = newestFirst ? [...fights].reverse() : fights;
-  // Announce streamed fights to assistive tech only in live mode (polite, so it
-  // doesn't interrupt). The static preflight list isn't a live region.
-  const live = ordered.some((f) => f.live);
 
   return (
     // Cap the height and scroll: a dense progression night can produce hundreds

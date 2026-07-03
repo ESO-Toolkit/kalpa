@@ -163,6 +163,18 @@ fn char_key_cache() -> &'static Mutex<HashMap<String, CharKeyCacheEntry>> {
     CHAR_KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Single-entry cache of the most recently parsed original tree for `preview_save`.
+/// The SV editor previews one file at a time, and each keystroke-driven preview
+/// otherwise re-reads and re-parses the same unchanged on-disk file. Keyed by
+/// `(path, SvFileStamp)`; a differing size or mtime invalidates the entry so a
+/// file changed on disk is always re-read.
+type PreviewCacheEntry = (std::path::PathBuf, SvFileStamp, SvTreeNode);
+static PREVIEW_ORIGINAL_CACHE: OnceLock<Mutex<Option<PreviewCacheEntry>>> = OnceLock::new();
+
+fn preview_original_cache() -> &'static Mutex<Option<PreviewCacheEntry>> {
+    PREVIEW_ORIGINAL_CACHE.get_or_init(|| Mutex::new(None))
+}
+
 /// List all SavedVariables .lua files with metadata.
 /// Uses an in-memory cache for character key extraction so unchanged files
 /// don't need to be re-read on subsequent calls.
@@ -355,6 +367,11 @@ pub fn write_saved_variable_blocking(
     }
 
     // Validation pass: re-parse the serialized output to ensure it's valid
+    // before touching the user's file. This is intentionally kept unconditional:
+    // the serialized `content` was just bounded by `MAX_WRITE_SIZE` (50 MB) above,
+    // so the transient parse tree is bounded too, and this is the last safety net
+    // that prevents a serializer bug from overwriting a good file with invalid
+    // Lua. The cost is paid only on an explicit user save of an editor-sized file.
     parser::parse_sv_file(&content, file_name)
         .map_err(|e| format!("Serialization validation failed: {e}. Save aborted."))?;
 
@@ -497,17 +514,42 @@ pub fn preview_save(
     let sv_dir = saved_variables_dir(addons_dir);
     let file_path = sv_dir.join(file_name);
 
-    let original_content = if file_path.is_file() {
-        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?
-    } else {
+    if !file_path.is_file() {
         return Ok(Vec::new());
-    };
+    }
 
-    let original_tree = parser::parse_sv_file(&original_content, file_name)?;
+    // Cache the parsed on-disk tree keyed by (path, size+mtime). Repeated previews
+    // of the same unchanged file (the common case while editing) then skip both
+    // the read and the parse. The stamp is captured first so a file modified on
+    // disk since the last preview is detected and re-read, keeping behaviour —
+    // including the read/parse error paths — identical to the uncached version.
+    let stamp = file_stamp(&file_path)?;
+    let cache = preview_original_cache();
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+
+    let hit = matches!(
+        guard.as_ref(),
+        Some((p, s, _))
+            if p == &file_path
+                && s.size == stamp.size
+                && s.modified_epoch_ms == stamp.modified_epoch_ms
+    );
+
+    if !hit {
+        let original_content =
+            fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+        let original_tree = parser::parse_sv_file(&original_content, file_name)?;
+        *guard = Some((file_path.clone(), stamp, original_tree));
+    }
+
+    // `guard` now holds a valid entry for this (path, stamp); diff against it
+    // while holding the lock (previews are one-file-at-a-time and the diff is
+    // cheap, so serializing them is fine and avoids cloning the cached tree).
+    let original_tree = &guard.as_ref().expect("cache populated above").2;
 
     let mut changes = Vec::new();
     let mut path = Vec::new();
-    diff_trees(&original_tree, tree, &mut path, &mut changes);
+    diff_trees(original_tree, tree, &mut path, &mut changes);
 
     Ok(changes)
 }
