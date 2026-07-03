@@ -59,7 +59,16 @@ export struct PackHubEntry {
     vote-count: string,
     author: string,
     pack-type-label: string,
+    updated-label: string,
     trial: bool,
+}
+
+export struct PackHubAddonEntry {
+    title: string,
+    esoui-id: string,
+    required: bool,
+    installed: bool,
+    note: string,
 }
 
 export struct SettingsBackupEntry {
@@ -4490,6 +4499,7 @@ component PackHubSelectedCard inherits Rectangle {
 component PackHubInstallRow inherits Rectangle {
     in property <string> title;
     in property <string> esoui-id;
+    in property <bool> required: true;
     in property <bool> installed: false;
     height: 47px;
     border-radius: 9px;
@@ -4545,8 +4555,8 @@ component PackHubInstallRow inherits Rectangle {
         y: 0px;
         width: 70px;
         height: parent.height;
-        text: "REQUIRED";
-        color: Palette.gold;
+        text: root.required ? "REQUIRED" : "OPTIONAL";
+        color: root.required ? Palette.gold : Palette.muted-half;
         font-size: 9px;
         font-weight: 900;
         vertical-alignment: center;
@@ -4591,7 +4601,7 @@ component PackHubInstallRow inherits Rectangle {
 
 component PackHubBrowseView inherits Rectangle {
     in property <[PackHubEntry]> packs;
-    callback open-detail;
+    callback open-detail(int);
     background: #00000000;
 
     PackHubButton {
@@ -4664,7 +4674,7 @@ component PackHubBrowseView inherits Rectangle {
                 author: pack.author;
                 pack-type-label: pack.pack-type-label;
                 trial: pack.trial;
-                open-detail => { root.open-detail(); }
+                open-detail => { root.open-detail(index); }
             }
         }
     }
@@ -4808,6 +4818,10 @@ component PackHubCreateAddonsView inherits Rectangle {
 }
 
 component PackHubInstallView inherits Rectangle {
+    in property <PackHubEntry> pack;
+    in property <[PackHubAddonEntry]> addons;
+    in property <bool> loading: false;
+    in property <string> message: "";
     callback back;
     background: #00000000;
 
@@ -4815,17 +4829,17 @@ component PackHubInstallView inherits Rectangle {
         x: 0px;
         y: 0px;
         width: parent.width - 300px;
-        text: "just some addons I always use, i really like Caro's!!";
+        text: root.pack.description;
         color: Palette.muted-strong;
         font-size: 14px;
         font-weight: 600;
         overflow: elide;
     }
 
-    Pill { x: 0px; y: 40px; label: "Addon Pack"; tone: Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
-    Pill { x: 102px; y: 40px; label: "utility"; tone: Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
-    Text { x: 190px; y: 44px; text: "by Spike'jo"; color: Palette.muted-half; font-size: 11px; font-weight: 600; }
-    Text { x: 265px; y: 44px; text: "Updated 7 days ago"; color: Palette.muted-half; font-size: 10px; font-weight: 600; }
+    Pill { x: 0px; y: 40px; label: root.pack.pack-type-label; tone: Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
+    Pill { x: 108px; y: 40px; label: root.pack.tag; tone: root.pack.trial ? Palette.red : Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
+    Text { x: 190px; y: 44px; width: 78px; text: "by " + root.pack.author; color: Palette.muted-half; font-size: 11px; font-weight: 600; overflow: elide; }
+    Text { x: 274px; y: 44px; width: 120px; text: root.pack.updated-label; color: Palette.muted-half; font-size: 10px; font-weight: 600; overflow: elide; }
     PackHubButton { x: parent.width - 322px; y: 36px; width: 94px; icon: @image-url("../assets/icons/pencil.svg"); label: "Edit"; }
     PackHubButton { x: parent.width - 216px; y: 36px; width: 104px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; }
     PackHubButton { x: parent.width - 100px; y: 36px; width: 100px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Share"; }
@@ -4840,24 +4854,74 @@ component PackHubInstallView inherits Rectangle {
         background: Palette.white-03;
 
         Image { x: 13px; y: 10px; width: 13px; height: 13px; source: @image-url("../assets/icons/arrow-left.svg"); transform-rotation: 90deg; image-fit: contain; colorize: Palette.muted-half; }
-        Text { x: 31px; y: 9px; text: "1"; color: Palette.muted-half; font-size: 13px; font-weight: 800; }
+        Text { x: 31px; y: 9px; text: root.pack.vote-count; color: Palette.muted-half; font-size: 13px; font-weight: 800; }
     }
 
-    DetailSectionTitle { x: 0px; y: 112px; width: parent.width; label: "REQUIRED"; }
-    Text { x: parent.width - 106px; y: 112px; width: 106px; text: "Always included"; color: Palette.gold; font-size: 10px; font-weight: 800; horizontal-alignment: right; }
+    DetailSectionTitle { x: 0px; y: 112px; width: parent.width; label: "ADDONS"; }
+    Text { x: parent.width - 176px; y: 112px; width: 176px; text: root.pack.addon-count; color: Palette.gold; font-size: 10px; font-weight: 800; horizontal-alignment: right; }
 
-    PackHubInstallRow { x: 0px; y: 142px; width: parent.width; title: "[AIF] Ability Icons Framework"; esoui-id: "#4061"; }
-    PackHubInstallRow { x: 0px; y: 190px; width: parent.width; title: "Addon Selector"; esoui-id: "#1161"; }
-    PackHubInstallRow { x: 0px; y: 238px; width: parent.width; title: "Asquart's Authentic Icons"; esoui-id: "#4195"; }
-    PackHubInstallRow { x: 0px; y: 286px; width: parent.width; title: "AutoCategory"; esoui-id: "#1798"; }
-    PackHubInstallRow { x: 0px; y: 334px; width: parent.width; title: "BeamMeUp - Teleporter"; esoui-id: "#2143"; }
-    PackHubInstallRow { x: 0px; y: 382px; width: parent.width; title: "Caro's Skill Point Saver"; esoui-id: "#2901"; installed: true; }
+    if (root.addons.length == 0) : Rectangle {
+        x: 0px;
+        y: 142px;
+        width: parent.width;
+        height: 188px;
+        border-radius: 12px;
+        border-width: 0px;
+        background: Palette.white-02;
+
+        Text {
+            x: 24px;
+            y: 0px;
+            width: parent.width - 48px;
+            height: parent.height;
+            text: root.loading ? "Loading pack details..." : root.message;
+            color: Palette.muted-strong;
+            font-size: 13px;
+            font-weight: 800;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+
+    if (root.addons.length > 0) : ScrollView {
+        x: 0px;
+        y: 142px;
+        width: parent.width;
+        height: parent.height - 142px;
+        viewport-width: self.width;
+        viewport-height: root.addons.length * 48px;
+        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+        Rectangle {
+            width: parent.width;
+            height: root.addons.length * 48px;
+            background: #00000000;
+
+            for addon[index] in root.addons : PackHubInstallRow {
+                x: 0px;
+                y: index * 48px;
+                width: parent.width;
+                title: addon.title;
+                esoui-id: addon.esoui-id;
+                required: addon.required;
+                installed: addon.installed;
+            }
+        }
+    }
 }
 
 component PackHubOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
     in property <[PackHubEntry]> packs;
+    in property <[PackHubAddonEntry]> detail-addons;
+    in property <bool> detail-loading: false;
+    in property <string> detail-message: "";
+    in property <string> install-label: "Install Addons";
+    in-out property <int> selected-pack-index: 0;
+    callback open-detail(int);
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
@@ -4917,7 +4981,7 @@ component PackHubOverlay inherits Rectangle {
                 background: Palette.white-03;
 
                 PackHubTabButton { x: 4px; y: 4px; width: (parent.width - 8px) / 3; label: "Browse"; active: root.view == 0; clicked => { root.view = 0; } }
-                PackHubTabButton { x: 4px + (parent.width - 8px) / 3; y: 4px; width: (parent.width - 8px) / 3; label: "My Packs"; clicked => { root.view = 0; } }
+                PackHubTabButton { x: 4px + (parent.width - 8px) / 3; y: 4px; width: (parent.width - 8px) / 3; label: "My Packs"; active: root.view == 4; clicked => { root.view = 4; } }
                 PackHubTabButton { x: 4px + ((parent.width - 8px) / 3) * 2; y: 4px; width: (parent.width - 8px) / 3; label: "Create"; active: root.view == 1 || root.view == 2; clicked => { root.view = 1; } }
             }
 
@@ -4929,7 +4993,41 @@ component PackHubOverlay inherits Rectangle {
                 width: parent.width - 48px;
                 height: parent.height - 212px;
                 packs: root.packs;
-                open-detail => { root.view = 3; }
+                open-detail(index) => {
+                    root.selected-pack-index = index;
+                    root.view = 3;
+                    root.open-detail(index);
+                }
+            }
+
+            if (root.view == 4) : Rectangle {
+                x: 24px;
+                y: 142px;
+                width: parent.width - 48px;
+                height: parent.height - 212px;
+                background: #00000000;
+
+                Rectangle {
+                    width: parent.width;
+                    height: 218px;
+                    border-radius: 12px;
+                    border-width: 0px;
+                    background: Palette.white-02;
+
+                    Text {
+                        x: 24px;
+                        y: 0px;
+                        width: parent.width - 48px;
+                        height: parent.height;
+                        text: "Sign in to manage created and installed packs.";
+                        color: Palette.muted-strong;
+                        font-size: 14px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
             }
 
             if (root.view == 1) : PackHubCreateDetailsView {
@@ -4976,7 +5074,7 @@ component PackHubOverlay inherits Rectangle {
 
             GhostIconButton { x: 24px; y: 16px; icon: @image-url("../assets/icons/arrow-left.svg"); clicked => { root.view = 0; } }
             Image { x: 62px; y: 22px; width: 16px; height: 16px; source: @image-url("../assets/icons/package.svg"); image-fit: contain; colorize: Palette.gold; }
-            Text { x: 88px; y: 18px; width: parent.width - 148px; text: "Spike's Utilities"; color: Palette.gold; font-size: 16px; font-weight: 900; overflow: elide; }
+            Text { x: 88px; y: 18px; width: parent.width - 148px; text: root.packs[root.selected-pack-index].title; color: Palette.gold; font-size: 16px; font-weight: 900; overflow: elide; }
             GhostIconButton {
                 x: parent.width - 44px;
                 y: 14px;
@@ -4992,6 +5090,10 @@ component PackHubOverlay inherits Rectangle {
                 y: 88px;
                 width: parent.width - 48px;
                 height: parent.height - 164px;
+                pack: root.packs[root.selected-pack-index];
+                addons: root.detail-addons;
+                loading: root.detail-loading;
+                message: root.detail-message != "" ? root.detail-message : "No addons are listed for this pack.";
                 back => { root.view = 0; }
             }
 
@@ -5002,8 +5104,8 @@ component PackHubOverlay inherits Rectangle {
                 height: 64px;
                 background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 70%, #00000000 100%);
 
-                PackHubButton { x: parent.width - 278px; y: 18px; width: 74px; icon: @image-url("../assets/icons/arrow-left.svg"); label: "Back"; clicked => { root.view = 0; } }
-                PackHubButton { x: parent.width - 194px; y: 18px; width: 170px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Install 5 New Addons"; primary: true; }
+                PackHubButton { x: parent.width - 302px; y: 18px; width: 74px; icon: @image-url("../assets/icons/arrow-left.svg"); label: "Back"; clicked => { root.view = 0; } }
+                PackHubButton { x: parent.width - 218px; y: 18px; width: 194px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: root.install-label; primary: true; disabled: root.detail-addons.length == 0; }
             }
         }
     }
@@ -8642,6 +8744,7 @@ export component KalpaWindow inherits Window {
     in property <[BackupEntry]> edit-backups;
     in property <[DiscoverEntry]> discover-results;
     in property <[PackHubEntry]> pack-hub-packs;
+    in property <[PackHubAddonEntry]> pack-hub-detail-addons;
     in property <[SavedVariableEntry]> svm-files;
     in property <[SavedVariableEntry]> svm-orphaned-files;
     in property <[SettingsBackupEntry]> settings-backups;
@@ -8679,6 +8782,10 @@ export component KalpaWindow inherits Window {
     in-out property <bool> settings-editor-open: false;
     in-out property <bool> pack-hub-open: false;
     in-out property <int> pack-hub-view: 0;
+    in-out property <int> pack-hub-selected-index: 0;
+    in-out property <bool> pack-hub-detail-loading: false;
+    in-out property <string> pack-hub-detail-message;
+    in-out property <string> pack-hub-install-label: "Install Addons";
     in-out property <bool> uploader-open: false;
     in-out property <int> uploader-view: 0;
     in-out property <bool> svm-open: false;
@@ -8793,6 +8900,7 @@ export component KalpaWindow inherits Window {
     callback discover-query-edited(string);
     callback discover-url-edited(string);
     callback open-pack-hub;
+    callback pack-hub-open-detail(int);
     callback open-uploader;
     callback open-svm;
     callback svm-refresh;
@@ -9029,6 +9137,12 @@ export component KalpaWindow inherits Window {
             open <=> root.pack-hub-open;
             view <=> root.pack-hub-view;
             packs: root.pack-hub-packs;
+            detail-addons: root.pack-hub-detail-addons;
+            detail-loading: root.pack-hub-detail-loading;
+            detail-message: root.pack-hub-detail-message;
+            install-label: root.pack-hub-install-label;
+            selected-pack-index <=> root.pack-hub-selected-index;
+            open-detail(index) => { root.pack-hub-open-detail(index); }
         }
 
         if (root.svm-open) : SavedVariablesOverlay {

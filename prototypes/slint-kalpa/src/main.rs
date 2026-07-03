@@ -177,6 +177,17 @@ struct NativePackListResponse {
     sort: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct NativePackSingleResponse {
+    pack: NativeHubPack,
+}
+
+#[derive(Debug, Clone)]
+struct NativePackDetailData {
+    entry: PackHubEntry,
+    addons: Vec<PackHubAddonEntry>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct NativeImportResult {
     installed: Vec<String>,
@@ -2285,6 +2296,64 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         refresh_pack_hub_packs(&ui);
     });
 
+    let pack_detail_ui = ui.as_weak();
+    let pack_detail_models = models.clone();
+    ui.on_pack_hub_open_detail(move |index| {
+        let Some(ui) = pack_detail_ui.upgrade() else {
+            return;
+        };
+
+        let index = index.max(0) as usize;
+        ui.set_pack_hub_selected_index(index as i32);
+        ui.set_pack_hub_detail_loading(true);
+        ui.set_pack_hub_detail_message("".into());
+        apply_pack_hub_detail_model(&ui, Vec::new());
+
+        let Some(pack) = ui.get_pack_hub_packs().row_data(index) else {
+            ui.set_pack_hub_detail_loading(false);
+            ui.set_pack_hub_detail_message("Select a pack to view its addons.".into());
+            return;
+        };
+
+        let pack_id = pack.id.to_string();
+        let installed_ids = installed_discover_ids(&pack_detail_models.all.borrow());
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = fetch_pack_hub_detail_blocking(&pack_id, &installed_ids);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                ui.set_pack_hub_detail_loading(false);
+                match result {
+                    Ok(detail) => {
+                        let packs = ui.get_pack_hub_packs();
+                        if index < packs.row_count() {
+                            packs.set_row_data(index, detail.entry);
+                        }
+                        let empty = detail.addons.is_empty();
+                        apply_pack_hub_detail_model(&ui, detail.addons);
+                        ui.set_pack_hub_detail_message(
+                            if empty {
+                                "No addons are listed for this pack."
+                            } else {
+                                ""
+                            }
+                            .into(),
+                        );
+                    }
+                    Err(error) => {
+                        apply_pack_hub_detail_model(&ui, Vec::new());
+                        ui.set_pack_hub_detail_message(
+                            format!("Could not load pack details: {error}").into(),
+                        );
+                    }
+                }
+            });
+        });
+    });
+
     let svm_open_ui = ui.as_weak();
     let svm_open_models = models.clone();
     ui.on_open_svm(move || {
@@ -2347,6 +2416,11 @@ fn apply_pack_hub_model(ui: &KalpaWindow, entries: Vec<PackHubEntry>) {
     ui.set_pack_hub_packs(Rc::new(VecModel::from(entries)).into());
 }
 
+fn apply_pack_hub_detail_model(ui: &KalpaWindow, addons: Vec<PackHubAddonEntry>) {
+    ui.set_pack_hub_install_label(pack_hub_install_label(&addons).into());
+    ui.set_pack_hub_detail_addons(Rc::new(VecModel::from(addons)).into());
+}
+
 fn fallback_pack_hub_entries() -> Vec<PackHubEntry> {
     vec![
         PackHubEntry {
@@ -2358,6 +2432,7 @@ fn fallback_pack_hub_entries() -> Vec<PackHubEntry> {
             vote_count: "1".into(),
             author: "Spike'jo".into(),
             pack_type_label: "Addon Pack".into(),
+            updated_label: "Updated recently".into(),
             trial: false,
         },
         PackHubEntry {
@@ -2369,6 +2444,7 @@ fn fallback_pack_hub_entries() -> Vec<PackHubEntry> {
             vote_count: "1".into(),
             author: "Spike'jo".into(),
             pack_type_label: "Addon Pack".into(),
+            updated_label: "Updated recently".into(),
             trial: true,
         },
     ]
@@ -2450,9 +2526,57 @@ fn fetch_pack_hub_packs_blocking() -> Result<Vec<PackHubEntry>, String> {
         .collect())
 }
 
+fn fetch_pack_hub_detail_blocking(
+    pack_id: &str,
+    installed_ids: &BTreeSet<String>,
+) -> Result<NativePackDetailData, String> {
+    let response = pack_hub_client()
+        .get(format!("{}/packs/{}", pack_hub_url(), pack_id))
+        .send()
+        .map_err(|error| {
+            if error.is_connect() || error.is_timeout() {
+                "Could not connect to Pack Hub. Check your internet connection.".to_string()
+            } else {
+                format!("Network error: {error}")
+            }
+        })?;
+
+    match response.status().as_u16() {
+        200 => {}
+        404 => return Err(format!("Pack \"{pack_id}\" was not found.")),
+        status => return Err(format!("Pack Hub returned HTTP {status}")),
+    }
+
+    let body: NativePackSingleResponse = response
+        .json()
+        .map_err(|error| format!("Failed to parse pack detail response: {error}"))?;
+
+    Ok(pack_hub_detail_from_hub(body.pack, installed_ids))
+}
+
+fn pack_hub_detail_from_hub(
+    hub: NativeHubPack,
+    installed_ids: &BTreeSet<String>,
+) -> NativePackDetailData {
+    let addons = native_pack_addons(&hub.addons);
+    let entry = pack_hub_entry_from_hub_with_count(&hub, addons.len());
+    let addon_rows = addons
+        .into_iter()
+        .map(|addon| pack_hub_addon_entry(addon, installed_ids))
+        .collect();
+
+    NativePackDetailData {
+        entry,
+        addons: addon_rows,
+    }
+}
+
 fn pack_hub_entry_from_hub(hub: NativeHubPack) -> PackHubEntry {
     let addons = native_pack_addons(&hub.addons);
-    let addon_count = addons.len();
+    pack_hub_entry_from_hub_with_count(&hub, addons.len())
+}
+
+fn pack_hub_entry_from_hub_with_count(hub: &NativeHubPack, addon_count: usize) -> PackHubEntry {
     let tag = hub
         .tags
         .first()
@@ -2463,19 +2587,34 @@ fn pack_hub_entry_from_hub(hub: NativeHubPack) -> PackHubEntry {
         || hub.pack_type.eq_ignore_ascii_case("trial");
 
     PackHubEntry {
-        id: hub.id.into(),
-        title: hub.title.into(),
-        description: hub.description.into(),
+        id: hub.id.as_str().into(),
+        title: hub.title.as_str().into(),
+        description: hub.description.as_str().into(),
         tag: tag.into(),
         addon_count: addon_count_label(addon_count).into(),
         vote_count: hub.vote_count.max(0).to_string().into(),
         author: if hub.is_anonymous {
             "Anonymous".into()
         } else {
-            hub.author_name.into()
+            hub.author_name.clone().into()
         },
         pack_type_label: pack_type_label(&hub.pack_type).into(),
+        updated_label: pack_updated_label(&hub.created_at, &hub.updated_at).into(),
         trial,
+    }
+}
+
+fn pack_hub_addon_entry(
+    addon: NativePackAddonEntry,
+    installed_ids: &BTreeSet<String>,
+) -> PackHubAddonEntry {
+    let esoui_id = addon.esoui_id.to_string();
+    PackHubAddonEntry {
+        title: addon.name.into(),
+        esoui_id: format!("#{esoui_id}").into(),
+        required: addon.required,
+        installed: installed_ids.contains(&esoui_id),
+        note: addon.note.unwrap_or_default().into(),
     }
 }
 
@@ -2487,14 +2626,23 @@ fn native_pack_addons(addons: &serde_json::Value) -> Vec<NativePackAddonEntry> {
     }
 }
 
+fn pack_hub_install_label(addons: &[PackHubAddonEntry]) -> String {
+    let missing = addons.iter().filter(|addon| !addon.installed).count();
+    match missing {
+        0 => "All Addons Installed".to_string(),
+        1 => "Install 1 New Addon".to_string(),
+        count => format!("Install {count} New Addons"),
+    }
+}
+
 fn addon_count_label(count: usize) -> String {
     format!("{count} addon{}", if count == 1 { "" } else { "s" })
 }
 
 fn pack_type_label(pack_type: &str) -> String {
     match pack_type {
-        "build" => "Build Pack",
-        "roster" => "Roster Pack",
+        "build" | "build-pack" => "Build Pack",
+        "roster" | "roster-pack" => "Roster Pack",
         _ => "Addon Pack",
     }
     .to_string()
@@ -2502,11 +2650,37 @@ fn pack_type_label(pack_type: &str) -> String {
 
 fn fallback_pack_tag(pack_type: &str) -> String {
     match pack_type {
-        "build" => "build",
-        "roster" => "roster",
+        "build" | "build-pack" => "build",
+        "roster" | "roster-pack" => "roster",
         _ => "addon",
     }
     .to_string()
+}
+
+fn pack_updated_label(created_at: &str, updated_at: &str) -> String {
+    let (prefix, source) = if !updated_at.trim().is_empty() && updated_at != created_at {
+        ("Updated", updated_at)
+    } else {
+        ("Created", created_at)
+    };
+
+    pack_iso_date_label(source)
+        .map(|date| format!("{prefix} {date}"))
+        .unwrap_or_default()
+}
+
+fn pack_iso_date_label(value: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let date = value.get(0..10)?;
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<usize>().ok()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    let month_name = MONTHS.get(month.saturating_sub(1))?;
+    Some(format!("{month_name} {day}, {year}"))
 }
 
 fn apply_initial_native_settings(ui: &KalpaWindow) {
@@ -10028,6 +10202,7 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entry.tag.as_str(), "trial");
         assert_eq!(entry.author.as_str(), "Spike'jo");
         assert_eq!(entry.pack_type_label.as_str(), "Addon Pack");
+        assert_eq!(entry.updated_label.as_str(), "Updated Jan 2, 2026");
         assert!(entry.trial);
     }
 
@@ -10049,6 +10224,31 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entry.author.as_str(), "Anonymous");
         assert_eq!(entry.pack_type_label.as_str(), "Build Pack");
         assert_eq!(entry.tag.as_str(), "build");
+    }
+
+    #[test]
+    fn pack_hub_detail_maps_addons_and_install_label() {
+        let pack = sample_native_hub_pack(serde_json::Value::String(
+            r#"[{"esouiId":4061,"name":"Ability Icons Framework","required":true},{"esouiId":1161,"name":"Addon Selector","required":false,"note":"Optional profile helper"}]"#
+                .to_string(),
+        ));
+        let installed_ids = BTreeSet::from(["4061".to_string()]);
+
+        let detail = pack_hub_detail_from_hub(pack, &installed_ids);
+
+        assert_eq!(detail.entry.addon_count.as_str(), "2 addons");
+        assert_eq!(detail.addons.len(), 2);
+        assert_eq!(detail.addons[0].title.as_str(), "Ability Icons Framework");
+        assert_eq!(detail.addons[0].esoui_id.as_str(), "#4061");
+        assert!(detail.addons[0].required);
+        assert!(detail.addons[0].installed);
+        assert_eq!(detail.addons[1].note.as_str(), "Optional profile helper");
+        assert!(!detail.addons[1].required);
+        assert!(!detail.addons[1].installed);
+        assert_eq!(
+            pack_hub_install_label(&detail.addons),
+            "Install 1 New Addon"
+        );
     }
 
     #[test]
