@@ -114,7 +114,7 @@ use std::{
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -310,6 +310,30 @@ struct NativeApiCompatInfo {
     game_api_version: u32,
     outdated_addons: Vec<String>,
     up_to_date_addons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeUploaderLog {
+    path: PathBuf,
+    file_name: String,
+    size_bytes: u64,
+    modified_epoch: u64,
+    active: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeUploaderPreflight {
+    sessions: usize,
+    fights: Vec<NativeUploaderFight>,
+    total_fights: usize,
+    truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeUploaderFight {
+    index: usize,
+    start_ms: u64,
+    end_ms: u64,
 }
 
 fn default_true() -> bool {
@@ -774,6 +798,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_discover(&ui, discover_model, discover_installed_ids);
     wire_theme_actions(&ui, custom_themes);
     wire_settings_actions(&ui, settings_models);
+    wire_uploader_actions(&ui);
     wire_backup_restore_actions(&ui);
     wire_character_actions(&ui);
     wire_safety_actions(&ui, safety_models);
@@ -4032,6 +4057,457 @@ fn start_native_app_update_check(ui_weak: slint::Weak<KalpaWindow>, silent: bool
     });
 }
 
+const UPLOADER_ACTIVE_WINDOW_SECS: u64 = 90;
+const UPLOADER_FIGHT_PREVIEW_LIMIT: usize = 4;
+
+fn native_uploader_logs_dir() -> (Option<PathBuf>, String) {
+    let addons_root = configured_addons_path().or_else(default_addons_root);
+    if let Some(addons_root) = addons_root {
+        if let Some(parent) = addons_root.parent() {
+            let logs = parent.join("Logs");
+            if logs.is_dir() {
+                return (
+                    Some(logs),
+                    "Log directory found next to the configured AddOns folder.".to_string(),
+                );
+            }
+            return (
+                Some(logs),
+                "Expected the ESO Logs folder next to AddOns, but it does not exist yet. Enable /encounterlog in-game to create it.".to_string(),
+            );
+        }
+    }
+
+    (
+        None,
+        "Configure the ESO AddOns folder so Kalpa can find the sibling Logs folder.".to_string(),
+    )
+}
+
+fn list_native_uploader_logs(logs_dir: &Path) -> Result<Vec<NativeUploaderLog>, String> {
+    if !logs_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let mut logs = Vec::new();
+    for entry in fs::read_dir(logs_dir).map_err(|error| format!("Failed to read Logs: {error}"))? {
+        let entry = entry.map_err(|error| format!("Failed to enumerate Logs: {error}"))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_log = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.eq_ignore_ascii_case("log"))
+            .unwrap_or(false);
+        if !is_log || is_noncombat_log_name(&path) {
+            continue;
+        }
+
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let modified_epoch = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let active = modified_epoch > 0
+            && modified_epoch <= now
+            && now.saturating_sub(modified_epoch) <= UPLOADER_ACTIVE_WINDOW_SECS;
+
+        logs.push(NativeUploaderLog {
+            file_name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Encounter.log")
+                .to_string(),
+            path,
+            size_bytes: metadata.len(),
+            modified_epoch,
+            active,
+        });
+    }
+
+    logs.sort_by(|left, right| {
+        right
+            .modified_epoch
+            .cmp(&left.modified_epoch)
+            .then_with(|| left.file_name.cmp(&right.file_name))
+    });
+    Ok(logs)
+}
+
+fn is_noncombat_log_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.eq_ignore_ascii_case("Interface.log") || name.eq_ignore_ascii_case("client.log")
+        })
+        .unwrap_or(false)
+}
+
+fn selected_uploader_path(ui: &KalpaWindow) -> Option<String> {
+    (0..ui.get_uploader_logs().row_count())
+        .filter_map(|index| ui.get_uploader_logs().row_data(index))
+        .find(|entry| entry.selected)
+        .map(|entry| entry.path.to_string())
+}
+
+fn uploader_log_entry(log: &NativeUploaderLog, selected_path: Option<&Path>) -> UploaderLogEntry {
+    let selected = selected_path
+        .map(|selected| selected == log.path.as_path())
+        .unwrap_or(false);
+    UploaderLogEntry {
+        title: log.file_name.clone().into(),
+        meta: uploader_log_meta(log).into(),
+        path: log.path.to_string_lossy().into_owned().into(),
+        selected,
+        active: log.active,
+    }
+}
+
+fn uploader_log_meta(log: &NativeUploaderLog) -> String {
+    let date = if log.modified_epoch == 0 {
+        "Unknown date".to_string()
+    } else {
+        format_short_date(log.modified_epoch)
+    };
+    let active = if log.active { " - active" } else { "" };
+    format!("{} - {}{}", date, format_size(log.size_bytes), active)
+}
+
+fn apply_uploader_log_model(
+    ui: &KalpaWindow,
+    logs: Vec<NativeUploaderLog>,
+    logs_summary: String,
+    selected_path: Option<PathBuf>,
+) {
+    let selected_path = selected_path.or_else(|| logs.first().map(|log| log.path.clone()));
+    let entries = logs
+        .iter()
+        .map(|log| uploader_log_entry(log, selected_path.as_deref()))
+        .collect::<Vec<_>>();
+    ui.set_uploader_logs(Rc::new(VecModel::from(entries)).into());
+    ui.set_uploader_logs_summary(logs_summary.into());
+
+    if let Some(selected) = logs
+        .iter()
+        .find(|log| Some(log.path.as_path()) == selected_path.as_deref())
+    {
+        ui.set_uploader_selected_log_label(format_size(selected.size_bytes).into());
+        ui.set_uploader_live_log_label(selected.file_name.clone().into());
+        ui.set_uploader_status_title("Scanning selected log...".into());
+        ui.set_uploader_status_detail(
+            "Reading combat boundaries without loading the whole file.".into(),
+        );
+        ui.set_uploader_fight_count_label("Scanning".into());
+        ui.set_uploader_fights(Rc::new(VecModel::from(Vec::<UploaderFightEntry>::new())).into());
+    } else {
+        ui.set_uploader_selected_log_label("No log selected".into());
+        ui.set_uploader_live_log_label("No Encounter.log".into());
+        ui.set_uploader_status_title("No log selected".into());
+        ui.set_uploader_status_detail(
+            "Select a log file to inspect fights before uploading.".into(),
+        );
+        ui.set_uploader_fight_count_label("0 ready".into());
+        ui.set_uploader_fights(Rc::new(VecModel::from(Vec::<UploaderFightEntry>::new())).into());
+    }
+}
+
+fn refresh_native_uploader(ui: &KalpaWindow, preflight_counter: Arc<AtomicU64>) {
+    let selected = selected_uploader_path(ui).map(PathBuf::from);
+    let (logs_dir, message) = native_uploader_logs_dir();
+    let logs = logs_dir
+        .as_deref()
+        .map(list_native_uploader_logs)
+        .unwrap_or_else(|| Ok(Vec::new()));
+    match logs {
+        Ok(logs) => {
+            let summary = if logs.is_empty() {
+                message
+            } else {
+                format!(
+                    "{} log file{} found.",
+                    logs.len(),
+                    if logs.len() == 1 { "" } else { "s" }
+                )
+            };
+            apply_uploader_log_model(ui, logs, summary, selected);
+            request_native_uploader_preflight(ui, preflight_counter);
+        }
+        Err(error) => {
+            ui.set_uploader_logs(Rc::new(VecModel::from(Vec::<UploaderLogEntry>::new())).into());
+            ui.set_uploader_fights(
+                Rc::new(VecModel::from(Vec::<UploaderFightEntry>::new())).into(),
+            );
+            ui.set_uploader_logs_summary(error.clone().into());
+            ui.set_uploader_status_title("Could not read Logs".into());
+            ui.set_uploader_status_detail(error.into());
+            ui.set_uploader_selected_log_label("No log selected".into());
+            ui.set_uploader_fight_count_label("0 ready".into());
+        }
+    }
+}
+
+fn request_native_uploader_preflight(ui: &KalpaWindow, preflight_counter: Arc<AtomicU64>) {
+    let Some(path) = selected_uploader_path(ui) else {
+        return;
+    };
+    let sequence = preflight_counter.fetch_add(1, Ordering::Relaxed) + 1;
+    let ui_weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let result = scan_native_uploader_log(Path::new(&path));
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            if preflight_counter.load(Ordering::Relaxed) != sequence {
+                return;
+            }
+            if selected_uploader_path(&ui).as_deref() != Some(path.as_str()) {
+                return;
+            }
+            apply_native_uploader_preflight(&ui, result);
+        });
+    });
+}
+
+fn scan_native_uploader_log(path: &Path) -> Result<NativeUploaderPreflight, String> {
+    let file = fs::File::open(path).map_err(|error| format!("Failed to open log: {error}"))?;
+    let reader = BufReader::new(file);
+    let mut preflight = NativeUploaderPreflight::default();
+    let mut in_fight: Option<(usize, u64)> = None;
+
+    for line in reader.lines() {
+        let line = line.map_err(|error| format!("Failed to read log: {error}"))?;
+        match uploader_line_type(&line) {
+            "BEGIN_LOG" => preflight.sessions += 1,
+            "BEGIN_COMBAT" => {
+                if in_fight.is_none() {
+                    in_fight = Some((preflight.total_fights, uploader_line_ms(&line)));
+                }
+            }
+            "END_COMBAT" => {
+                if let Some((index, start_ms)) = in_fight.take() {
+                    let end_ms = uploader_line_ms(&line).max(start_ms);
+                    preflight.total_fights += 1;
+                    if preflight.fights.len() < UPLOADER_FIGHT_PREVIEW_LIMIT {
+                        preflight.fights.push(NativeUploaderFight {
+                            index,
+                            start_ms,
+                            end_ms,
+                        });
+                    } else {
+                        preflight.truncated = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(preflight)
+}
+
+fn uploader_line_type(line: &str) -> &str {
+    line.split(',').nth(1).map(str::trim).unwrap_or("")
+}
+
+fn uploader_line_ms(line: &str) -> u64 {
+    line.split(',')
+        .next()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn apply_native_uploader_preflight(
+    ui: &KalpaWindow,
+    result: Result<NativeUploaderPreflight, String>,
+) {
+    match result {
+        Ok(preflight) => {
+            let fights = preflight
+                .fights
+                .iter()
+                .map(uploader_fight_entry)
+                .collect::<Vec<_>>();
+            let fight_label = match preflight.total_fights {
+                0 => "0 ready".to_string(),
+                1 => "1 ready".to_string(),
+                count => format!("{count} ready"),
+            };
+            let session_label = match preflight.sessions {
+                0 => "no logging sessions".to_string(),
+                1 => "1 logging session".to_string(),
+                count => format!("{count} logging sessions"),
+            };
+            let detail = if preflight.total_fights == 0 {
+                format!(
+                    "No completed fights found in {session_label}. Live mode can still watch for new fights."
+                )
+            } else {
+                format!(
+                    "{} completed fight{} across {session_label}. Upload transport hands off to the full signed WebView uploader until the native transport is ported.",
+                    preflight.total_fights,
+                    if preflight.total_fights == 1 { "" } else { "s" }
+                )
+            };
+            ui.set_uploader_fights(Rc::new(VecModel::from(fights)).into());
+            ui.set_uploader_fight_count_label(fight_label.clone().into());
+            ui.set_uploader_live_fight_label(fight_label.into());
+            ui.set_uploader_status_title(
+                if preflight.total_fights == 0 {
+                    "No completed fights detected"
+                } else {
+                    "Ready to upload"
+                }
+                .into(),
+            );
+            ui.set_uploader_status_detail(detail.into());
+        }
+        Err(error) => {
+            ui.set_uploader_fights(
+                Rc::new(VecModel::from(Vec::<UploaderFightEntry>::new())).into(),
+            );
+            ui.set_uploader_fight_count_label("0 ready".into());
+            ui.set_uploader_status_title("Could not scan log".into());
+            ui.set_uploader_status_detail(error.into());
+        }
+    }
+}
+
+fn uploader_fight_entry(fight: &NativeUploaderFight) -> UploaderFightEntry {
+    UploaderFightEntry {
+        title: format!("Fight {}", fight.index + 1).into(),
+        meta: format!(
+            "{} start - {}",
+            format_relative_ms(fight.start_ms),
+            format_duration_ms(fight.end_ms.saturating_sub(fight.start_ms))
+        )
+        .into(),
+        result: "READY".into(),
+        live: false,
+    }
+}
+
+fn format_relative_ms(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    let seconds = ms / 1000;
+    if seconds >= 60 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn wire_uploader_actions(ui: &KalpaWindow) {
+    let preflight_counter = Arc::new(AtomicU64::new(0));
+
+    let open_ui = ui.as_weak();
+    let open_counter = preflight_counter.clone();
+    ui.on_open_uploader(move || {
+        let Some(ui) = open_ui.upgrade() else {
+            return;
+        };
+        ui.set_uploader_route_label(
+            if ui.get_settings_official_uploader() {
+                "Official ESO Logs uploader"
+            } else {
+                "Full uploader handoff"
+            }
+            .into(),
+        );
+        ui.set_uploader_live_status_label("Ready".into());
+        ui.set_uploader_live_detail(
+            "Native Slint can inspect logs here; Upload and Go Live open the full signed uploader flow until transport parity is complete."
+                .into(),
+        );
+        refresh_native_uploader(&ui, open_counter.clone());
+    });
+
+    let refresh_ui = ui.as_weak();
+    let refresh_counter = preflight_counter.clone();
+    ui.on_uploader_refresh(move || {
+        if let Some(ui) = refresh_ui.upgrade() {
+            refresh_native_uploader(&ui, refresh_counter.clone());
+        }
+    });
+
+    let select_ui = ui.as_weak();
+    let select_counter = preflight_counter.clone();
+    ui.on_uploader_select_log(move |index| {
+        let Some(ui) = select_ui.upgrade() else {
+            return;
+        };
+        let index = index.max(0) as usize;
+        let rows = (0..ui.get_uploader_logs().row_count())
+            .filter_map(|row| ui.get_uploader_logs().row_data(row))
+            .enumerate()
+            .map(|(row, mut entry)| {
+                entry.selected = row == index;
+                entry
+            })
+            .collect::<Vec<_>>();
+        ui.set_uploader_logs(Rc::new(VecModel::from(rows)).into());
+        ui.set_uploader_status_title("Scanning selected log...".into());
+        ui.set_uploader_status_detail(
+            "Reading combat boundaries without loading the whole file.".into(),
+        );
+        ui.set_uploader_fight_count_label("Scanning".into());
+        request_native_uploader_preflight(&ui, select_counter.clone());
+    });
+
+    let upload_ui = ui.as_weak();
+    ui.on_uploader_upload(move || {
+        let Some(ui) = upload_ui.upgrade() else {
+            return;
+        };
+        match return_to_webview_shell(false, true) {
+            Ok(()) => {
+                ui.set_uploader_status_title("Opening full uploader...".into());
+                let _ = slint::quit_event_loop();
+            }
+            Err(error) => ui.set_status_error_message(
+                format!("Failed to open the full uploader flow: {error}").into(),
+            ),
+        }
+    });
+
+    let live_ui = ui.as_weak();
+    ui.on_uploader_live_toggle(move || {
+        let Some(ui) = live_ui.upgrade() else {
+            return;
+        };
+        if ui.get_uploader_view() == 3 {
+            ui.set_uploader_view(2);
+            ui.set_uploader_live_status_label("Ready".into());
+            return;
+        }
+        match return_to_webview_shell(false, true) {
+            Ok(()) => {
+                ui.set_uploader_view(3);
+                ui.set_uploader_live_status_label("Opening full uploader".into());
+                let _ = slint::quit_event_loop();
+            }
+            Err(error) => ui.set_status_error_message(
+                format!("Failed to open the full live uploader flow: {error}").into(),
+            ),
+        }
+    });
+}
+
 fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
     let settings_ui = ui.as_weak();
     ui.on_settings_changed(move || {
@@ -4051,7 +4527,7 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         }
 
-        match return_to_webview_shell(false) {
+        match return_to_webview_shell(false, false) {
             Ok(()) => {
                 let _ = slint::quit_event_loop();
             }
@@ -4170,7 +4646,7 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         match ui.get_app_update_action_kind() {
-            1 => match return_to_webview_shell(true) {
+            1 => match return_to_webview_shell(true, false) {
                 Ok(()) => {
                     set_app_update_banner(&ui, "Opening the signed updater...", "", 0);
                     let _ = slint::quit_event_loop();
@@ -10354,7 +10830,7 @@ fn open_path(path: &Path) {
     }
 }
 
-fn return_to_webview_shell(start_app_update: bool) -> Result<(), String> {
+fn return_to_webview_shell(start_app_update: bool, start_log_uploader: bool) -> Result<(), String> {
     let exe = std::env::var_os("KALPA_WEBVIEW_EXE")
         .map(PathBuf::from)
         .ok_or_else(|| "webview launcher path was not provided".to_string())?;
@@ -10369,6 +10845,9 @@ fn return_to_webview_shell(start_app_update: bool) -> Result<(), String> {
     command.env("KALPA_FORCE_WEBVIEW", "1");
     if start_app_update {
         command.env("KALPA_START_APP_UPDATE", "1");
+    }
+    if start_log_uploader {
+        command.env("KALPA_START_LOG_UPLOADER", "1");
     }
 
     command
@@ -12048,6 +12527,53 @@ mod tests {
             platforms: HashMap::new(),
         };
         assert!(native_app_update_info_from_manifest(same_version, "0.1.0-beta.9").is_none());
+    }
+
+    #[test]
+    fn native_uploader_log_list_skips_noncombat_logs() {
+        let root = test_temp_dir("uploader-logs");
+        let logs_dir = root.join("Logs");
+        fs::create_dir_all(&logs_dir).expect("create logs dir");
+        fs::write(logs_dir.join("Encounter.log"), "0,BEGIN_LOG,1,15\n")
+            .expect("write encounter log");
+        fs::write(logs_dir.join("client.log"), "diagnostics").expect("write client log");
+        fs::write(logs_dir.join("Interface.log"), "lua errors").expect("write interface log");
+
+        let logs = list_native_uploader_logs(&logs_dir).expect("list logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].file_name, "Encounter.log");
+        assert!(logs[0].active);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_uploader_preflight_counts_sessions_and_fights() {
+        let root = test_temp_dir("uploader-preflight");
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("Encounter.log");
+        fs::write(
+            &path,
+            concat!(
+                "0,BEGIN_LOG,1780641553946,15,\"NA Megaserver\"\n",
+                "1000,BEGIN_COMBAT\n",
+                "62000,END_COMBAT\n",
+                "70000,BEGIN_LOG,1780641623946,15,\"NA Megaserver\"\n",
+                "72000,BEGIN_COMBAT\n",
+                "76000,END_COMBAT\n",
+            ),
+        )
+        .expect("write log");
+
+        let preflight = scan_native_uploader_log(&path).expect("scan log");
+        assert_eq!(preflight.sessions, 2);
+        assert_eq!(preflight.total_fights, 2);
+        assert_eq!(preflight.fights.len(), 2);
+        assert_eq!(preflight.fights[0].start_ms, 1000);
+        assert_eq!(preflight.fights[0].end_ms, 62000);
+        assert!(!preflight.truncated);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

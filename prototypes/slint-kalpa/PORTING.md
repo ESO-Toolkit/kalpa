@@ -245,6 +245,13 @@ Current detail status:
   preserves Tauri's signature verification while avoiding a dead placeholder in
   native mode. Remaining gap is a fully Slint-hosted signed updater, if we decide
   to reimplement signature verification outside Tauri.
+- The header Log Uploader action now opens a native Slint uploader shell backed
+  by real ESO log discovery. Manual mode lists recent combat logs from the
+  production Logs folder, streams the selected file for bounded-memory preflight
+  counts, and previews recent fights without loading the whole log into memory.
+  Upload and Live Logging still hand off to the signed WebView uploader flow
+  until the report/session transport is ported natively; the native surface is
+  intentionally honest about that route instead of showing fake progress.
 - Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.
@@ -332,6 +339,8 @@ Current backdrop status:
 - Launch with `KALPA_SAFETY_OPEN=1` to inspect the native Safety Center overlay.
 - Launch with `KALPA_MIGRATION_OPEN=1` to inspect the native Minion Migration
   overlay.
+- Launch with `KALPA_UPLOADER_OPEN=1` and optional
+  `KALPA_UPLOADER_VIEW=manual|live` to inspect the native Log Uploader overlay.
 - Launch with `KALPA_RENDER_PRESET=standard` for visual-fidelity checks, or
   `KALPA_SLINT_BACKEND=winit-skia` / `winit-femtovg` for direct backend checks
   on Slint builds that support those renderer names.

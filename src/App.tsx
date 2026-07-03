@@ -59,6 +59,7 @@ interface PendingDeepLinkPayload {
   shareCode: string | null;
   installPackId: string | null;
   appUpdate: boolean;
+  logUpload: boolean;
 }
 
 function App() {
@@ -247,6 +248,9 @@ function App() {
         if (disposed) return;
         if (payload.appUpdate) {
           void checkForAppUpdate(false);
+        }
+        if (payload.logUpload) {
+          setActiveDialog("log-upload");
         }
         if (payload.installPackId) {
           setRosterPackInstallId(payload.installPackId);

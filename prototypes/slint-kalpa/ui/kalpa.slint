@@ -139,6 +139,21 @@ export struct MigrationPreviewEntry {
     kind: int,
 }
 
+export struct UploaderLogEntry {
+    title: string,
+    meta: string,
+    path: string,
+    selected: bool,
+    active: bool,
+}
+
+export struct UploaderFightEntry {
+    title: string,
+    meta: string,
+    result: string,
+    live: bool,
+}
+
 export struct DiscoverEntry {
     esoui-id: string,
     title: string,
@@ -6785,11 +6800,13 @@ component UploaderLogRow inherits Rectangle {
     in property <string> title;
     in property <string> meta;
     in property <bool> selected: false;
+    in property <bool> active: false;
+    callback clicked;
     height: 56px;
     border-radius: 10px;
     border-width: 1px;
     border-color: root.selected ? Palette.gold-20 : Palette.border;
-    background: root.selected ? Palette.gold-04 : Palette.white-02;
+    background: root.selected ? Palette.gold-04 : (touch.has-hover ? Palette.white-04 : Palette.white-02);
 
     Image {
         x: 14px;
@@ -6798,7 +6815,7 @@ component UploaderLogRow inherits Rectangle {
         height: 16px;
         source: @image-url("../assets/icons/file-text.svg");
         image-fit: contain;
-        colorize: root.selected ? Palette.gold : Palette.muted-half;
+        colorize: root.active ? Palette.emerald : (root.selected ? Palette.gold : Palette.muted-half);
     }
 
     Text {
@@ -6815,12 +6832,30 @@ component UploaderLogRow inherits Rectangle {
     Text {
         x: 40px;
         y: 32px;
-        width: parent.width - 54px;
+        width: parent.width - (root.active ? 114px : 54px);
         text: root.meta;
         color: Palette.muted-half;
         font-size: 11px;
         font-weight: 600;
         overflow: elide;
+    }
+
+    if (root.active) : Text {
+        x: parent.width - 72px;
+        y: 32px;
+        width: 58px;
+        text: "ACTIVE";
+        color: Palette.emerald;
+        font-size: 10px;
+        font-weight: 850;
+        horizontal-alignment: right;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -6907,6 +6942,22 @@ component UploaderProgressBar inherits Rectangle {
 component UploaderOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
+    in property <[UploaderLogEntry]> logs;
+    in property <[UploaderFightEntry]> fights;
+    in property <string> logs-summary: "No log folder detected";
+    in property <string> selected-log-label: "No log selected";
+    in property <string> fight-count-label: "0 ready";
+    in property <string> route-label: "Direct from Kalpa";
+    in property <string> status-title: "No log selected";
+    in property <string> status-detail: "Select a log file to inspect fights before uploading.";
+    in property <string> live-status-label: "Ready";
+    in property <string> live-log-label: "No Encounter.log";
+    in property <string> live-fight-label: "Waiting";
+    in property <string> live-detail: "Start live mode before the pull. Kalpa will wait for the next logging session and keep the report active.";
+    callback refresh;
+    callback log-selected(int);
+    callback upload-requested;
+    callback live-toggle;
     visible: root.open;
     background: #000000c4;
     private property <bool> manual: root.view < 2;
@@ -6972,9 +7023,9 @@ component UploaderOverlay inherits Rectangle {
             height: parent.height - 254px;
             background: #00000000;
 
-            UploaderInfoCard { x: 0px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/file-text.svg"); label: "SELECTED LOG"; value: "Today - 42.8 MB"; tone: Palette.gold; }
-            UploaderInfoCard { x: (parent.width - 18px) / 3 + 9px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/check.svg"); label: "FIGHTS"; value: root.uploading ? "2 uploading" : "2 ready"; tone: Palette.emerald; }
-            UploaderInfoCard { x: ((parent.width - 18px) / 3 + 9px) * 2; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "ROUTE"; value: "Direct from Kalpa"; tone: Palette.sky; }
+            UploaderInfoCard { x: 0px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/file-text.svg"); label: "SELECTED LOG"; value: root.selected-log-label; tone: Palette.gold; }
+            UploaderInfoCard { x: (parent.width - 18px) / 3 + 9px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/check.svg"); label: "FIGHTS"; value: root.fight-count-label; tone: Palette.emerald; }
+            UploaderInfoCard { x: ((parent.width - 18px) / 3 + 9px) * 2; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "ROUTE"; value: root.route-label; tone: Palette.sky; }
 
             Rectangle {
                 x: 0px;
@@ -6987,9 +7038,46 @@ component UploaderOverlay inherits Rectangle {
                 background: Palette.white-02;
 
                 DetailSectionTitle { x: 18px; y: 16px; width: parent.width - 36px; label: "LOG FILES"; }
-                UploaderLogRow { x: 18px; y: 46px; width: parent.width - 36px; title: "EncounterLog_20260702.txt"; meta: "Today - 42.8 MB - 2 fights"; selected: true; }
-                UploaderLogRow { x: 18px; y: 110px; width: parent.width - 36px; title: "EncounterLog_20260701.txt"; meta: "Yesterday - 19.4 MB - 1 fight"; }
-                UploaderLogRow { x: 18px; y: 174px; width: parent.width - 36px; title: "EncounterLog_20260629.txt"; meta: "Jun 29 - 77.2 MB - 5 fights"; }
+
+                if (root.logs.length == 0) : Text {
+                    x: 18px;
+                    y: 52px;
+                    width: parent.width - 36px;
+                    height: 92px;
+                    text: root.logs-summary;
+                    color: Palette.muted-strong;
+                    font-size: 12px;
+                    font-weight: 650;
+                    wrap: word-wrap;
+                }
+
+                if (root.logs.length > 0) : ScrollView {
+                    x: 18px;
+                    y: 46px;
+                    width: parent.width - 36px;
+                    height: 194px;
+                    viewport-width: self.width;
+                    viewport-height: root.logs.length * 64px;
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                    Rectangle {
+                        width: parent.width;
+                        height: root.logs.length * 64px;
+                        background: #00000000;
+
+                        for log[index] in root.logs : UploaderLogRow {
+                            x: 0px;
+                            y: index * 64px;
+                            width: parent.width;
+                            title: log.title;
+                            meta: log.meta;
+                            selected: log.selected;
+                            active: log.active;
+                            clicked => { root.log-selected(index); }
+                        }
+                    }
+                }
             }
 
             Rectangle {
@@ -7002,15 +7090,36 @@ component UploaderOverlay inherits Rectangle {
                 border-color: Palette.border;
                 background: Palette.white-02;
 
-                Text { x: 18px; y: 16px; width: parent.width - 36px; text: root.uploading ? "Uploading selected fights" : "Ready to upload"; color: Palette.foreground; font-size: 15px; font-weight: 900; overflow: elide; }
-                Text { x: 18px; y: 44px; width: parent.width - 36px; text: root.uploading ? "Sending via the native transport. Kalpa keeps the report in-app when possible." : "Two fights passed preflight. Visibility is unlisted and auto-open analysis is off."; color: Palette.muted-strong; font-size: 12px; font-weight: 600; wrap: word-wrap; }
+                Text { x: 18px; y: 16px; width: parent.width - 36px; text: root.status-title; color: Palette.foreground; font-size: 15px; font-weight: 900; overflow: elide; }
+                Text { x: 18px; y: 44px; width: parent.width - 36px; text: root.status-detail; color: Palette.muted-strong; font-size: 12px; font-weight: 600; wrap: word-wrap; }
 
                 if (root.uploading) : UploaderProgressBar { x: 18px; y: 92px; width: parent.width - 36px; progress: 0.58; }
                 if (root.uploading) : Text { x: 18px; y: 112px; width: parent.width - 36px; text: "58% - packaging segment 2 of 2"; color: Palette.sky; font-size: 11px; font-weight: 800; }
 
                 DetailSectionTitle { x: 18px; y: root.uploading ? 146px : 94px; width: parent.width - 36px; label: "FIGHTS"; }
-                UploaderFightRow { x: 18px; y: root.uploading ? 174px : 122px; width: parent.width - 36px; title: "Lucent Citadel - Orphic Shattered Shard"; meta: "11:28 - 4m 16s"; result: root.uploading ? "UPLOADING" : "READY"; }
-                UploaderFightRow { x: 18px; y: root.uploading ? 216px : 164px; width: parent.width - 36px; title: "Lucent Citadel - Arcane Knot"; meta: "11:36 - 7m 44s"; result: root.uploading ? "QUEUED" : "READY"; }
+
+                if (root.fights.length == 0) : Text {
+                    x: 18px;
+                    y: root.uploading ? 174px : 122px;
+                    width: parent.width - 36px;
+                    height: 74px;
+                    text: "No completed fights were detected in the selected log.";
+                    color: Palette.muted-half;
+                    font-size: 12px;
+                    font-weight: 650;
+                    wrap: word-wrap;
+                }
+
+                for fight[index] in root.fights : UploaderFightRow {
+                    visible: index < 4;
+                    x: 18px;
+                    y: (root.uploading ? 174px : 122px) + index * 42px;
+                    width: parent.width - 36px;
+                    title: fight.title;
+                    meta: fight.meta;
+                    result: fight.result;
+                    live: fight.live;
+                }
             }
         }
 
@@ -7021,9 +7130,9 @@ component UploaderOverlay inherits Rectangle {
             height: parent.height - 254px;
             background: #00000000;
 
-            UploaderInfoCard { x: 0px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/power.svg"); label: "STATUS"; value: root.live-running ? "Streaming" : "Ready"; tone: root.live-running ? Palette.emerald : Palette.gold; }
-            UploaderInfoCard { x: (parent.width - 18px) / 3 + 9px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/file-text.svg"); label: "CURRENT LOG"; value: "CombatMetrics.log"; tone: Palette.sky; }
-            UploaderInfoCard { x: ((parent.width - 18px) / 3 + 9px) * 2; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/check.svg"); label: "FIGHTS"; value: root.live-running ? "2 detected" : "Waiting"; tone: Palette.emerald; }
+            UploaderInfoCard { x: 0px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/power.svg"); label: "STATUS"; value: root.live-status-label; tone: root.live-running ? Palette.emerald : Palette.gold; }
+            UploaderInfoCard { x: (parent.width - 18px) / 3 + 9px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/file-text.svg"); label: "CURRENT LOG"; value: root.live-log-label; tone: Palette.sky; }
+            UploaderInfoCard { x: ((parent.width - 18px) / 3 + 9px) * 2; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/check.svg"); label: "FIGHTS"; value: root.live-fight-label; tone: Palette.emerald; }
 
             Rectangle {
                 x: 0px;
@@ -7035,8 +7144,8 @@ component UploaderOverlay inherits Rectangle {
                 border-color: Palette.border;
                 background: Palette.white-02;
 
-                Text { x: 20px; y: 18px; width: parent.width - 40px; text: root.live-running ? "Live report is open" : "Ready for live logging"; color: Palette.foreground; font-size: 16px; font-weight: 900; overflow: elide; }
-                Text { x: 20px; y: 48px; width: parent.width - 40px; text: root.live-running ? "Kalpa is watching the current log and posting fights as they close." : "Start live mode before the pull. Kalpa will wait for the next logging session and keep the report active."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; wrap: word-wrap; }
+                Text { x: 20px; y: 18px; width: parent.width - 40px; text: root.live-running ? "Live report is armed" : "Ready for live logging"; color: Palette.foreground; font-size: 16px; font-weight: 900; overflow: elide; }
+                Text { x: 20px; y: 48px; width: parent.width - 40px; text: root.live-detail; color: Palette.muted-strong; font-size: 13px; font-weight: 600; wrap: word-wrap; }
 
                 if (root.live-running) : Rectangle {
                     x: 20px;
@@ -7049,16 +7158,16 @@ component UploaderOverlay inherits Rectangle {
                     background: Palette.emerald-04;
 
                     Image { x: 14px; y: 15px; width: 16px; height: 16px; source: @image-url("../assets/icons/check.svg"); image-fit: contain; colorize: Palette.emerald; }
-                    Text { x: 42px; y: 12px; width: parent.width - 56px; text: "Report 1ZG23pzRcvMT8V46 - fight=last"; color: Palette.foreground; font-size: 12px; font-weight: 850; overflow: elide; }
+                    Text { x: 42px; y: 12px; width: parent.width - 56px; text: "Native live transport is not fully wired in this shell yet."; color: Palette.foreground; font-size: 12px; font-weight: 850; overflow: elide; }
                 }
 
                 DetailSectionTitle { x: 20px; y: root.live-running ? 164px : 112px; width: parent.width - 40px; label: root.live-running ? "LIVE FIGHTS" : "READINESS"; }
 
-                if (!root.live-running) : UploaderFightRow { x: 20px; y: 142px; width: parent.width - 40px; title: "ESO Logs session"; meta: "Signed in and ready for native upload"; result: "READY"; live: true; }
-                if (!root.live-running) : UploaderFightRow { x: 20px; y: 184px; width: parent.width - 40px; title: "Combat log watcher"; meta: "Waiting for BEGIN_LOG"; result: "ARMED"; live: true; }
+                if (!root.live-running) : UploaderFightRow { x: 20px; y: 142px; width: parent.width - 40px; title: "ESO Logs session"; meta: root.route-label; result: "CHECK"; live: true; }
+                if (!root.live-running) : UploaderFightRow { x: 20px; y: 184px; width: parent.width - 40px; title: "Combat log watcher"; meta: root.logs-summary; result: "READY"; live: true; }
 
-                if (root.live-running) : UploaderFightRow { x: 20px; y: 194px; width: parent.width - 40px; title: "Dreadsail Reef - Tideborn Taleria"; meta: "Live - 6m 02s"; result: "POSTED"; live: true; }
-                if (root.live-running) : UploaderFightRow { x: 20px; y: 236px; width: parent.width - 40px; title: "Dreadsail Reef - Reef Guardian"; meta: "Live - 4m 48s"; result: "POSTED"; live: true; }
+                if (root.live-running) : UploaderFightRow { x: 20px; y: 194px; width: parent.width - 40px; title: "Native uploader"; meta: "Transport and session streaming still need Tauri backend wiring."; result: "PENDING"; live: true; }
+                if (root.live-running) : UploaderFightRow { x: 20px; y: 236px; width: parent.width - 40px; title: "Current log"; meta: root.live-log-label; result: "WATCH"; live: true; }
             }
         }
 
@@ -7069,9 +7178,9 @@ component UploaderOverlay inherits Rectangle {
             height: 76px;
             background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 75%, #00000000 100%);
 
-            PackHubButton { x: 28px; y: 22px; width: 116px; icon: @image-url("../assets/icons/settings.svg"); label: "Options"; }
-            PackHubButton { x: parent.width - 284px; y: 22px; width: 116px; icon: @image-url("../assets/icons/x.svg"); label: root.live-running ? "Stop" : "Cancel"; danger: root.live-running; clicked => { if (root.live-running) { root.view = 2; } else { root.open = false; } } }
-            PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? (root.uploading ? "Uploading" : "Upload") : (root.live-running ? "View Report" : "Go Live"); primary: true; clicked => { if (root.view == 0) { root.view = 1; } else if (root.view == 2) { root.view = 3; } } }
+            PackHubButton { x: 28px; y: 22px; width: 116px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; clicked => { root.refresh(); } }
+            PackHubButton { x: parent.width - 284px; y: 22px; width: 116px; icon: @image-url("../assets/icons/x.svg"); label: root.live-running ? "Stop" : "Cancel"; danger: root.live-running; clicked => { if (root.live-running) { root.live-toggle(); } else { root.open = false; } } }
+            PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? "Upload" : (root.live-running ? "Running" : "Go Live"); primary: true; disabled: root.manual ? root.logs.length == 0 : false; clicked => { if (root.manual) { root.upload-requested(); } else { root.live-toggle(); } } }
         }
     }
 }
@@ -9947,6 +10056,18 @@ export component KalpaWindow inherits Window {
     in-out property <string> pack-hub-install-label: "Install Addons";
     in-out property <bool> uploader-open: false;
     in-out property <int> uploader-view: 0;
+    in property <[UploaderLogEntry]> uploader-logs;
+    in property <[UploaderFightEntry]> uploader-fights;
+    in-out property <string> uploader-logs-summary: "No log folder detected";
+    in-out property <string> uploader-selected-log-label: "No log selected";
+    in-out property <string> uploader-fight-count-label: "0 ready";
+    in-out property <string> uploader-route-label: "Direct from Kalpa";
+    in-out property <string> uploader-status-title: "No log selected";
+    in-out property <string> uploader-status-detail: "Select a log file to inspect fights before uploading.";
+    in-out property <string> uploader-live-status-label: "Ready";
+    in-out property <string> uploader-live-log-label: "No Encounter.log";
+    in-out property <string> uploader-live-fight-label: "Waiting";
+    in-out property <string> uploader-live-detail: "Start live mode before the pull. Kalpa will wait for the next logging session and keep the report active.";
     in-out property <bool> svm-open: false;
     in-out property <int> svm-view: 0;
     in-out property <bool> backup-restore-open: false;
@@ -10108,6 +10229,10 @@ export component KalpaWindow inherits Window {
     callback pack-hub-browse-load-more;
     callback pack-hub-install-detail;
     callback open-uploader;
+    callback uploader-refresh;
+    callback uploader-select-log(int);
+    callback uploader-upload;
+    callback uploader-live-toggle;
     callback open-svm;
     callback svm-refresh;
     callback open-backup-restore;
@@ -10447,6 +10572,22 @@ export component KalpaWindow inherits Window {
             height: root.height;
             open <=> root.uploader-open;
             view <=> root.uploader-view;
+            logs: root.uploader-logs;
+            fights: root.uploader-fights;
+            logs-summary: root.uploader-logs-summary;
+            selected-log-label: root.uploader-selected-log-label;
+            fight-count-label: root.uploader-fight-count-label;
+            route-label: root.uploader-route-label;
+            status-title: root.uploader-status-title;
+            status-detail: root.uploader-status-detail;
+            live-status-label: root.uploader-live-status-label;
+            live-log-label: root.uploader-live-log-label;
+            live-fight-label: root.uploader-live-fight-label;
+            live-detail: root.uploader-live-detail;
+            refresh => { root.uploader-refresh(); }
+            log-selected(index) => { root.uploader-select-log(index); }
+            upload-requested => { root.uploader-upload(); }
+            live-toggle => { root.uploader-live-toggle(); }
         }
 
         if (root.backup-restore-open) : BackupRestoreOverlay {
