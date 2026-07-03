@@ -2355,6 +2355,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "rustc-hash",
  "scraper",
  "serde",
  "serde_json",

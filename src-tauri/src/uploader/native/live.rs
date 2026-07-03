@@ -42,6 +42,7 @@ use std::sync::Arc;
 use super::client::{
     LivePoster, LiveSender, MasterTableBytes, ReportCode, Segment, UploadError, LIVE_CANCEL_POLL,
 };
+use super::encode::split_csv_quoted_pub;
 use super::events::EventEmitter;
 use super::incremental::{IncrementalIndexState, IncrementalMasterState};
 use super::session::SessionProvider;
@@ -69,6 +70,13 @@ pub struct LiveSegmenter {
     /// tuple-allocating line so the live `A` numbering stays identical to the one-shot
     /// path, and they are the PIN passed to the master renderer each cut.
     index_state: IncrementalIndexState,
+    /// The [`IncrementalIndexState::version`] last pushed into the emitter by
+    /// [`Self::refresh_maps`]. `feed` skips the two full-map clones of a refresh on the
+    /// ~92% of lines that leave the maps untouched (the L7 hot-path fix): the emitter
+    /// already holds the current maps whenever the version is unchanged, so re-cloning
+    /// them would be pure waste. Only a real map mutation bumps the version, forcing the
+    /// next tuple-allocating line to re-push.
+    last_pushed_version: u64,
     /// The incremental master-table record state (Step 2b). Maintains the header,
     /// captured actor records, first-write-wins ability signals + appearance order,
     /// and pet candidates per line, so each cut's cumulative master is RENDERED from
@@ -120,6 +128,7 @@ impl LiveSegmenter {
         Self {
             emitter,
             index_state: IncrementalIndexState::default(),
+            last_pushed_version: 0,
             master_state: IncrementalMasterState::default(),
             next_segment_id: 1,
             segments_built: 0,
@@ -143,12 +152,16 @@ impl LiveSegmenter {
         // emitter, below, allocates this line's tuple). `update` no-ops on lines that
         // can't change the maps, so calling it unconditionally is cheap and keeps its
         // internal state (live bindings cleared on UNIT_REMOVED, splice flag) correct.
-        self.index_state.update(line);
+        // Split the line ONCE (quote-aware) and thread the fields to every consumer —
+        // the index state, the master state, and the emitter — instead of each of them
+        // re-splitting the same line (three quote-aware CSV passes per line before this).
+        let f = split_csv_quoted_pub(line);
+        self.index_state.update_with_fields(line, &f);
         // Fold this line into the incremental MASTER record state too (header,
         // captured actors, ability signals + appearance order, pet candidates), so the
         // cumulative master can be rendered each cut WITHOUT an `all_lines` re-walk.
         // Like the index state it no-ops on irrelevant lines.
-        self.master_state.update(line);
+        self.master_state.update_with_fields(line, &f);
         // The emitter allocates a tuple's `A` from its `identity_to_actor` /
         // `ability_to_index` maps AT FEED TIME, so those maps must be current BEFORE
         // the emitter sees a line that allocates a tuple. Push the (now-updated)
@@ -158,22 +171,31 @@ impl LiveSegmenter {
         // amortized per line instead of re-walking `all_lines` (the L7 perf fix). The
         // pushed maps are content-identical to the prior re-walk (proven by the
         // `super::incremental` differential tests).
-        if matches!(
-            kind_of(line),
-            Some("UNIT_ADDED")
-                | Some("ABILITY_INFO")
-                | Some("EFFECT_INFO")
-                | Some("BEGIN_LOG")
-                | Some("COMBAT_EVENT")
-                | Some("EFFECT_CHANGED")
-                | Some("BEGIN_CAST")
-        ) {
+        //
+        // The maps only actually change at a real assign/splice, which bumps
+        // `index_state.version()`. When the version is unchanged the emitter already
+        // holds these exact maps, so the two full-map clones are skipped — the maps are
+        // byte-identical to a per-line clone, only the redundant clone is elided (L7).
+        let version = self.index_state.version();
+        if version != self.last_pushed_version
+            && matches!(
+                kind_of(line),
+                Some("UNIT_ADDED")
+                    | Some("ABILITY_INFO")
+                    | Some("EFFECT_INFO")
+                    | Some("BEGIN_LOG")
+                    | Some("COMBAT_EVENT")
+                    | Some("EFFECT_CHANGED")
+                    | Some("BEGIN_CAST")
+            )
+        {
             self.refresh_maps();
+            self.last_pushed_version = version;
         }
         let kind = kind_of(line);
         let emitted_count = self
             .emitter
-            .feed(line)
+            .feed_with_fields(line, &f)
             .map(|events| events.lines().count() as u64)
             .unwrap_or(0);
         let raw_ms = line
@@ -283,8 +305,11 @@ impl LiveSegmenter {
         // clone is also wrong (would re-allocate tuples). The correct, proven
         // approach: the emitter assembles the whole report; for live we frame ONLY
         // this segment's emitted lines. Track them via the emitter's per-segment
-        // emit log (see `drain_segment_events`).
-        let body = self.emitter.drain_segment_events();
+        // emit log (see `drain_segment_events`). Take (move) the body instead of
+        // cloning it — a successful build resets the buffer via `open_segment` below,
+        // and a failed build returns `Err` and terminates the session, so the moved-out
+        // buffer is never read again either way (see `take_segment_events`).
+        let body = self.emitter.take_segment_events();
         if body.event_count == 0 {
             // Nothing emitted in this window (e.g. a BEGIN_LOG with no fights yet).
             self.emitter.open_segment();
@@ -1658,10 +1683,15 @@ impl LiveTail for NotifyTail {
             st.consumed = read_end;
             st.last_growth = std::time::Instant::now();
 
-            // Assemble complete lines from the chunk (copy out to drop the borrow on
-            // `st.read_buf` before mutating `st.assembler`).
-            let chunk = st.read_buf[..n].to_vec();
-            let (lines, saw_end_log) = match st.assembler.push_chunk(&chunk) {
+            // Assemble complete lines from the chunk. Move the read buffer out (leaving
+            // an empty Vec) so `st.assembler` can be borrowed mutably while we read the
+            // bytes, then move it back — this appeases the borrow checker WITHOUT the
+            // per-chunk `to_vec()` copy the old code made purely for that reason. The
+            // buffer's capacity is preserved across the swap for the next read.
+            let buf = std::mem::take(&mut st.read_buf);
+            let push_result = st.assembler.push_chunk(&buf[..n]);
+            st.read_buf = buf;
+            let (lines, saw_end_log) = match push_result {
                 Ok(r) => r,
                 Err(e) => return TailOutcome::Error(e),
             };

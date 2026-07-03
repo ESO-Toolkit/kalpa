@@ -38,6 +38,9 @@
 //! research prototypes; no third-party code.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
+
+use rustc_hash::FxHashMap;
 
 use super::encode::{
     combat_noncode1_crit_flag, encode_map_changed, encode_state_block, encode_zone_changed,
@@ -145,13 +148,14 @@ struct ClassifyRel {
 pub struct EventEmitter {
     actors: ActorTable,
     /// Raw unit id → current championPoints (from `UNIT_ADDED`/`UNIT_CHANGED`).
-    champion_points: HashMap<String, String>,
+    /// Lookup-only hot map → `FxHashMap` (never iterated order-sensitively).
+    champion_points: FxHashMap<String, String>,
     /// abilityId → effectType (`BUFF`/`DEBUFF`) from `EFFECT_INFO`.
     effect_type: HashMap<String, String>,
     /// Per effect instance `(srcUnit, abilityId, tgtUnit)` → its last stack count.
     /// An `EFFECT_CHANGED UPDATED` emits (codes 6/8/11) only when the stack count
     /// *changes* from this value; a re-application with the same stack is dropped.
-    last_stack: HashMap<(String, String, String), String>,
+    last_stack: FxHashMap<(String, String, String), String>,
     /// `identity → 1-based actor master index` and `abilityId → 1-based ability
     /// index`, supplied from the master-table build. The event subordinal `A` is
     /// the index of the event's `(srcActorIndex, tgtActorIndex, abilityIndex)`
@@ -164,12 +168,12 @@ pub struct EventEmitter {
     /// the master's tuples section. Same `(src,tgt,ability)` → same index → same A,
     /// which is what makes a uploaded report *render* (events resolve to real
     /// effects).
-    tuple_to_index: HashMap<(u32, u32, u32), u32>,
+    tuple_to_index: FxHashMap<(u32, u32, u32), u32>,
     tuple_order: Vec<(u32, u32, u32)>,
     /// `castTrackId → the tuple A of the BEGIN_CAST that opened it`. An effect
     /// event applied by a tracked cast emits a trailing `A{castA}` linking the buff
     /// to its cast. Set when a cast emits.
-    cast_track_to_a: HashMap<String, u32>,
+    cast_track_to_a: FxHashMap<String, u32>,
     /// `castTrackId → (tupleA, src_unit, tgt_unit)` for TIMED casts (those that
     /// emitted a code-15 CastWithCastTime). A later `END_CAST COMPLETED` for that id
     /// emits a thin code-16 `Cast` line reusing the original cast's tuple A + units.
@@ -181,7 +185,7 @@ pub struct EventEmitter {
     /// `target_shield` are the new values iff they differ from what was stored,
     /// else 0. The display then emits the trailing iff one is non-zero AND they
     /// differ from each other.
-    shield_values: HashMap<String, u32>,
+    shield_values: FxHashMap<String, u32>,
     /// Whether we are inside a BEGIN_COMBAT/END_COMBAT window. A damage-class
     /// COMBAT_EVENT outside combat allocates NO tuple (the only pre-allocation skip
     /// the parser applies); every other combat event allocates its tuple regardless
@@ -408,7 +412,7 @@ impl EventEmitter {
         // Resolve via the live actor table → identity → master index.
         self.actors
             .identity_of_unit(u)
-            .and_then(|id| self.identity_to_actor.get(&id).copied())
+            .and_then(|id| self.identity_to_actor.get(id).copied())
             .unwrap_or(0)
     }
 
@@ -433,11 +437,11 @@ impl EventEmitter {
 
     /// The current championPoints for a unit id (`"0"` if unknown — the state-block
     /// encoder still produces a well-formed block).
-    fn cp_of(&self, unit_id: &str) -> String {
+    fn cp_of(&self, unit_id: &str) -> &str {
         self.champion_points
             .get(unit_id.trim())
-            .cloned()
-            .unwrap_or_else(|| "0".to_string())
+            .map(String::as_str)
+            .unwrap_or("0")
     }
 
     /// Assemble the whole log's events into one [`EventsOutput`] (the single-fight
@@ -501,6 +505,15 @@ impl EventEmitter {
     /// one at a time across segment cuts; the one-shot path uses [`Self::build`].
     pub(crate) fn feed(&mut self, line: &str) -> Option<String> {
         let f = split_csv_quoted_pub(line);
+        self.feed_with_fields(line, &f)
+    }
+
+    /// [`Self::feed`] with the quote-aware CSV split already performed by the caller.
+    /// The live driver splits each line ONCE in [`super::live::LiveSegmenter::feed`]
+    /// and threads the fields here (and to the incremental index/master states) instead
+    /// of re-splitting the same line three times per line. `f` must be exactly
+    /// `split_csv_quoted_pub(line)`.
+    pub(crate) fn feed_with_fields(&mut self, line: &str, f: &[&str]) -> Option<String> {
         let kind = f.get(1).map(|s| s.trim())?;
         let raw_ts: i64 = f.first().and_then(|s| s.trim().parse().ok())?;
         let emitted = match kind {
@@ -819,6 +832,21 @@ impl EventEmitter {
         }
     }
 
+    /// Like [`Self::drain_segment_events`] but MOVES the segment body out (via
+    /// `mem::take`) instead of cloning it, leaving an empty buffer — for the live
+    /// driver's build path, which is about to reframe the body and then reset it with
+    /// [`Self::open_segment`] anyway. This avoids cloning the whole segment string at
+    /// every cut. Safe because the only build outcomes are: a successful build (which
+    /// resets the buffer regardless) or an `Err` that terminates the session (so the
+    /// emptied buffer is never read again). Tests that peek the body without consuming
+    /// it keep using the borrowing [`Self::drain_segment_events`].
+    pub fn take_segment_events(&mut self) -> EventsOutput {
+        EventsOutput {
+            events_string: std::mem::take(&mut self.segment_events),
+            event_count: std::mem::take(&mut self.segment_event_count),
+        }
+    }
+
     /// Flush any `DAMAGE_SHIELDED` lines still buffered at end-of-stream (no following
     /// real damage event arrived to back-patch them) into the CURRENT segment, with
     /// `f10 = 0` — mirroring what one-shot [`Self::build`] does at the end of the file.
@@ -1034,7 +1062,7 @@ impl EventEmitter {
         // State: the 9 fields after the unit id (raw f[4..=12] → absolute 4..=12).
         let state: Vec<&str> = f.get(4..13)?.iter().map(|s| s.trim()).collect();
         let cp = self.cp_of(&unit_id);
-        let block = encode_state_block(&state, &cp)?;
+        let block = encode_state_block(&state, cp)?;
         // HEALTH_REGEN has no abilityId of its own — the parser models it as the
         // synthetic HEALTH_RECOVERY buff (id 61322, spliced into the master ability
         // table). Its tuple is (unit, unit, indexOf(61322)), NOT (unit,unit,0). Using
@@ -1044,7 +1072,7 @@ impl EventEmitter {
         let (src_mask, tgt_mask) = self.masks(&unit_id, &unit_id);
         let sub = self
             .actors
-            .code1_subordinal(&a.to_string(), &unit_id, &unit_id);
+            .code1_subordinal(a, &unit_id, &unit_id);
         Some(format!(
             "{ts}|4|{sub}|{src_mask}|{tgt_mask}|S{block}|T{block}|1|{effective_regen}",
             ts = self.seg_ts(raw_ts),
@@ -1186,7 +1214,7 @@ impl EventEmitter {
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
-            .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
+            .code1_subordinal(a, &src_unit, &tgt_unit);
         let ts = self.seg_ts(raw_ts);
 
         // Shield history. On GAINED/FADED both unit pools are reconciled against the
@@ -1299,7 +1327,7 @@ impl EventEmitter {
             let a28 = self.alloc_for(&tgt_unit, "16565", &tgt_unit);
             let sub28 = self
                 .actors
-                .code1_subordinal(&a28.to_string(), &tgt_unit, &tgt_unit);
+                .code1_subordinal(a28, &tgt_unit, &tgt_unit);
             // Own-side masks derived from the broke-free unit (16 friendly / 64
             // hostile) rather than hardcoded — players give 16|16 as in the captures,
             // but a hostile breaker would correctly be 64|64.
@@ -1406,10 +1434,10 @@ impl EventEmitter {
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
-            .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
+            .code1_subordinal(a, &src_unit, &tgt_unit);
 
         let src_cp = self.cp_of(&src_unit);
-        let s_block = encode_state_block(&src_state, &src_cp)?;
+        let s_block = encode_state_block(&src_state, src_cp)?;
         let mut line = format!(
             "{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|C{cast_track_id}|S{s_block}",
             ts = self.seg_ts(raw_ts),
@@ -1417,8 +1445,8 @@ impl EventEmitter {
         // T block present iff the target side is not absent (mask 32 omits it).
         if tgt_mask != "32" {
             let tgt_cp = self.cp_of(&tgt_unit);
-            let t_block = encode_state_block(&tgt_state, &tgt_cp)?;
-            line.push_str(&format!("|T{t_block}"));
+            let t_block = encode_state_block(&tgt_state, tgt_cp)?;
+            write!(line, "|T{t_block}").ok();
         }
         Some(line)
     }
@@ -1445,7 +1473,7 @@ impl EventEmitter {
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
         let sub = self
             .actors
-            .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
+            .code1_subordinal(a, &src_unit, &tgt_unit);
         Some(format!(
             "{ts}|16|{sub}|{src_mask}|{tgt_mask}",
             ts = self.seg_ts(raw_ts),
@@ -1511,7 +1539,7 @@ impl EventEmitter {
         let (src_mask, tgt_mask) = self.masks(interrupting_unit, &caster);
         let sub = self
             .actors
-            .code1_subordinal(&a.to_string(), interrupting_unit, &caster);
+            .code1_subordinal(a, interrupting_unit, &caster);
         let interrupted_idx = self.ability_index(interrupted_ability);
         Some(format!(
             "{ts}|27|{sub}|{src_mask}|{tgt_mask}|{interrupted_idx}",
@@ -1815,7 +1843,7 @@ impl EventEmitter {
         };
         let sub = self
             .actors
-            .code1_subordinal(&a.to_string(), &src_unit, &tgt_unit);
+            .code1_subordinal(a, &src_unit, &tgt_unit);
 
         let mut line = format!(
             "{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|C{cast_track_id}",
@@ -1823,18 +1851,18 @@ impl EventEmitter {
         );
         // S block present iff src side present (mask != 32); same for T.
         if src_mask != "32" {
-            let s_block = match encode_state_block(&src_state, &self.cp_of(&src_unit)) {
+            let s_block = match encode_state_block(&src_state, self.cp_of(&src_unit)) {
                 Some(b) => b,
                 None => return prepend(None),
             };
-            line.push_str(&format!("|S{s_block}"));
+            write!(line, "|S{s_block}").ok();
         }
         if tgt_mask != "32" {
-            let t_block = match encode_state_block(&tgt_state, &self.cp_of(&tgt_unit)) {
+            let t_block = match encode_state_block(&tgt_state, self.cp_of(&tgt_unit)) {
                 Some(b) => b,
                 None => return prepend(None),
             };
-            line.push_str(&format!("|T{t_block}"));
+            write!(line, "|T{t_block}").ok();
         }
         // Code 19 (death) is the combat prefix + S + T with NO trailing tail (the
         // target's state already shows 0 health) — emit it as-is.
@@ -1939,12 +1967,12 @@ impl EventEmitter {
             ts = self.seg_ts(raw_ts)
         );
         if src_mask != "32" {
-            let s_block = encode_state_block(src_state, &self.cp_of(src_unit))?;
-            line.push_str(&format!("|S{s_block}"));
+            let s_block = encode_state_block(src_state, self.cp_of(src_unit))?;
+            write!(line, "|S{s_block}").ok();
         }
         if tgt_mask != "32" {
-            let t_block = encode_state_block(tgt_state, &self.cp_of(tgt_unit))?;
-            line.push_str(&format!("|T{t_block}"));
+            let t_block = encode_state_block(tgt_state, self.cp_of(tgt_unit))?;
+            write!(line, "|T{t_block}").ok();
         }
         Some(line)
     }
@@ -2007,18 +2035,18 @@ impl EventEmitter {
             ts = self.seg_ts(raw_ts),
         );
         if src_mask != "32" {
-            let s_block = match encode_state_block(src_state, &self.cp_of(src_unit)) {
+            let s_block = match encode_state_block(src_state, self.cp_of(src_unit)) {
                 Some(b) => b,
                 None => return prepend(None),
             };
-            line.push_str(&format!("|S{s_block}"));
+            write!(line, "|S{s_block}").ok();
         }
         if tgt_mask != "32" {
-            let t_block = match encode_state_block(tgt_state, &self.cp_of(tgt_unit)) {
+            let t_block = match encode_state_block(tgt_state, self.cp_of(tgt_unit)) {
                 Some(b) => b,
                 None => return prepend(None),
             };
-            line.push_str(&format!("|T{t_block}"));
+            write!(line, "|T{t_block}").ok();
         }
         // Trailing: the actual reflected ability's master index, then the shared
         // code-1 crit/final tail.
@@ -2058,7 +2086,7 @@ impl EventEmitter {
             Some(t) => t,
             None => return prepend(None),
         };
-        line.push_str(&format!("|{dmg_idx}|{tail}"));
+        write!(line, "|{dmg_idx}|{tail}").ok();
         prepend(Some(line))
     }
 
@@ -2128,12 +2156,12 @@ impl EventEmitter {
             Some(caster) => {
                 let a = self.alloc_for(&caster, shield_ability, tgt_unit);
                 self.actors
-                    .code1_subordinal(&a.to_string(), &caster, tgt_unit)
+                    .code1_subordinal(a, &caster, tgt_unit)
             }
             None => {
                 let a = self.alloc_for(tgt_unit, shield_ability, tgt_unit);
                 self.actors
-                    .code1_subordinal(&a.to_string(), tgt_unit, tgt_unit)
+                    .code1_subordinal(a, tgt_unit, tgt_unit)
             }
         };
         let shield_mask = self.own_side(tgt_unit); // f4 == f5 (shield owner)
@@ -2232,7 +2260,7 @@ impl EventEmitter {
             "3" | "4" => match combat_noncode1_crit_flag(action_result) {
                 Some(crit) => {
                     if overflow == "0" {
-                        line.push_str(&format!("|{crit}|{hit_value}"));
+                        write!(line, "|{crit}|{hit_value}").ok();
                     } else {
                         // Overheal: the effective heal (hit + overflow) then the
                         // overflow amount.
@@ -2242,7 +2270,7 @@ impl EventEmitter {
                             .zip(overflow.parse::<i64>().ok())
                             .map(|(h, o)| (h + o).to_string())
                             .unwrap_or_else(|| hit_value.to_string());
-                        line.push_str(&format!("|{crit}|{effective}|{overflow}"));
+                        write!(line, "|{crit}|{effective}|{overflow}").ok();
                     }
                     true
                 }
@@ -2252,7 +2280,7 @@ impl EventEmitter {
                 // `{hit}|{overflow}|{resourceIdx}|{poolMax}` — the resource index +
                 // target pool max are resolved by the caller (target state in scope).
                 Some(pt) => {
-                    line.push_str(&format!("|{hit_value}|{overflow}|{pt}"));
+                    write!(line, "|{hit_value}|{overflow}|{pt}").ok();
                     true
                 }
                 None => false,
