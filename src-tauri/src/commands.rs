@@ -8183,7 +8183,12 @@ fn push_native_shell_candidates(out: &mut Vec<PathBuf>, root: &Path) {
         out.push(root.join(name));
         out.push(root.join("bin").join(name));
         out.push(root.join("sidecars").join(name));
+        out.push(root.join("binaries").join(name));
     }
+    push_target_suffixed_native_shell_candidates(out, root);
+    push_target_suffixed_native_shell_candidates(out, &root.join("bin"));
+    push_target_suffixed_native_shell_candidates(out, &root.join("sidecars"));
+    push_target_suffixed_native_shell_candidates(out, &root.join("binaries"));
     out.push(
         root.join("prototypes")
             .join("slint-kalpa")
@@ -8198,6 +8203,27 @@ fn push_native_shell_candidates(out: &mut Vec<PathBuf>, root: &Path) {
             .join("release")
             .join(native_shell_names()[2]),
     );
+}
+
+fn push_target_suffixed_native_shell_candidates(out: &mut Vec<PathBuf>, dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        #[cfg(windows)]
+        let matches_name = name.starts_with("kalpa-slint-") && name.ends_with(".exe");
+        #[cfg(not(windows))]
+        let matches_name = name.starts_with("kalpa-slint-");
+
+        if matches_name {
+            out.push(path);
+        }
+    }
 }
 
 fn resolve_native_shell_executable_from(
@@ -9353,5 +9379,25 @@ mod tests {
         );
 
         assert!(resolved.is_err());
+    }
+
+    #[test]
+    fn native_shell_resolver_finds_packaged_target_suffixed_binary() {
+        let root = tempfile::tempdir().unwrap();
+        let binaries = root.path().join("binaries");
+        fs::create_dir_all(&binaries).unwrap();
+
+        #[cfg(windows)]
+        let sidecar = binaries.join("kalpa-slint-x86_64-pc-windows-msvc.exe");
+        #[cfg(not(windows))]
+        let sidecar = binaries.join("kalpa-slint-x86_64-unknown-linux-gnu");
+
+        fs::write(&sidecar, b"native").unwrap();
+
+        let resolved =
+            resolve_native_shell_executable_from(None, None, Some(root.path().to_path_buf()), None)
+                .unwrap();
+
+        assert_eq!(resolved, sidecar);
     }
 }

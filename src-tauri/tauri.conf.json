@@ -4,7 +4,7 @@
   "identifier": "com.kalpa.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:release-assets",
     "devUrl": "http://127.0.0.1:1430",
     "frontendDist": "../dist"
   },
@@ -46,15 +46,14 @@
     },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQwREQwQURDNkNGRjA1RkEKUldUNkJmOXMzQXJkUUVZa2FUb29oRVNOK29McUdra2VVbGR6TE9LelliVDc2NTM3QmZYcVRuSlgK",
-      "endpoints": [
-        "https://github.com/ESO-Toolkit/kalpa/releases/latest/download/latest.json"
-      ]
+      "endpoints": ["https://github.com/ESO-Toolkit/kalpa/releases/latest/download/latest.json"]
     }
   },
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": ["nsis"],
+    "externalBin": ["binaries/kalpa-slint"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
     "windows": {
       "certificateThumbprint": null,

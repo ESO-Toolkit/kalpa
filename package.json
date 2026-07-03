@@ -24,6 +24,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:native-slint": "node scripts/build-native-slint-sidecar.mjs",
+    "build:release-assets": "npm run build && npm run build:native-slint",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint src/",
