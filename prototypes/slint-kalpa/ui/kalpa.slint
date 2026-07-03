@@ -1527,6 +1527,80 @@ component DiscoverEmptyState inherits Rectangle {
     }
 }
 
+component DiscoverResultSkeletonRow inherits Rectangle {
+    in property <int> index: 0;
+    in property <bool> ranked: false;
+    private property <length> body-x: root.ranked ? 54px : 16px;
+    private property <length> title-width: root.index == 1 ? 148px : (root.index == 2 ? 214px : (root.index == 3 ? 132px : 188px));
+    private property <length> meta-width: root.index == 1 ? 74px : (root.index == 2 ? 112px : (root.index == 3 ? 86px : 98px));
+    height: 62px;
+    background: #00000000;
+
+    Rectangle {
+        visible: root.ranked;
+        x: 16px;
+        y: 14px;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        border-width: 0px;
+        background: Palette.white-04;
+    }
+
+    Rectangle {
+        x: root.body-x;
+        y: 15px;
+        width: min(root.title-width, parent.width - root.body-x - 116px);
+        height: 13px;
+        border-radius: 4px;
+        border-width: 0px;
+        background: Palette.white-08;
+    }
+
+    Rectangle {
+        x: parent.width - 82px;
+        y: 19px;
+        width: 66px;
+        height: 18px;
+        border-radius: 5px;
+        border-width: 0px;
+        background: Palette.white-04;
+    }
+
+    Rectangle {
+        x: root.body-x;
+        y: 39px;
+        width: root.meta-width;
+        height: 10px;
+        border-radius: 4px;
+        border-width: 0px;
+        background: Palette.white-04;
+    }
+
+    Rectangle {
+        x: root.body-x + root.meta-width + 8px;
+        y: 35px;
+        width: 52px;
+        height: 18px;
+        border-radius: 9px;
+        border-width: 0px;
+        background: Palette.white-03;
+    }
+}
+
+component DiscoverResultSkeletonList inherits Rectangle {
+    in property <bool> ranked: false;
+    background: #00000000;
+
+    DiscoverResultSkeletonRow { y: 0px; width: parent.width; index: 0; ranked: root.ranked; }
+    DiscoverResultSkeletonRow { y: 62px; width: parent.width; index: 1; ranked: root.ranked; }
+    DiscoverResultSkeletonRow { y: 124px; width: parent.width; index: 2; ranked: root.ranked; }
+    DiscoverResultSkeletonRow { y: 186px; width: parent.width; index: 3; ranked: root.ranked; }
+    DiscoverResultSkeletonRow { y: 248px; width: parent.width; index: 4; ranked: root.ranked; }
+    DiscoverResultSkeletonRow { y: 310px; width: parent.width; index: 5; ranked: root.ranked; }
+    DiscoverResultSkeletonRow { y: 372px; width: parent.width; index: 6; ranked: root.ranked; }
+}
+
 component DiscoverResultRow inherits Rectangle {
     in property <string> title;
     in property <string> meta;
@@ -1840,16 +1914,24 @@ component DiscoverModePanel inherits Rectangle {
         }
     }
 
-    if (root.entries.length == 0) : DiscoverEmptyState {
+    if (root.loading && root.entries.length == 0) : DiscoverResultSkeletonList {
+        y: root.list-y;
+        width: parent.width;
+        height: parent.height - root.list-y;
+        ranked: root.tab == 1;
+    }
+
+    if (!root.loading && root.entries.length == 0) : DiscoverEmptyState {
         y: root.list-y;
         width: parent.width;
         height: parent.height - root.list-y;
         icon: @image-url("../assets/icons/search.svg");
-        title: root.loading ? "Loading ESOUI" : (root.tab == 3 ? "URL / ID Install" : "Search ESOUI");
-        subtitle: root.loading ? "Fetching addon results..." : (root.tab == 3 ? "Paste an ESOUI link or addon ID to install directly." : "Search ESOUI or choose a category to find addons.");
+        title: root.tab == 3 ? "URL / ID Install" : "Search ESOUI";
+        subtitle: root.tab == 3 ? "Paste an ESOUI link or addon ID to install directly." : "Search ESOUI or choose a category to find addons.";
     }
 
     ListView {
+        visible: root.entries.length > 0;
         y: root.list-y;
         width: parent.width;
         height: parent.height - root.list-y - root.footer-height;

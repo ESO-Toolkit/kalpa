@@ -214,8 +214,9 @@ Current detail status:
   dynamic screenshot counts. Installed Discover detail rows now expose a native
   uninstall action that removes matching ESOUI addon folders and metadata, and
   Popular/Categories no longer use search-input chrome for their browse headers.
-  Remaining Discover gaps are category picker polish, richer skeleton/error
-  states, and update flows.
+  Active Discover loading now shows compact native row skeletons instead of a
+  centered empty-state placeholder. Remaining Discover gaps are category picker
+  polish, richer error states, and update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
   the reference Browse, share-code Import, Create details, Create addons, and
   install-detail flows.
