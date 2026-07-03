@@ -378,6 +378,27 @@ struct NativeAddonUpdateCheck {
     remote_last_update: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeAddonUpdateTarget {
+    folder_name: String,
+    esoui_id: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeAddonUpdateApplyResult {
+    checks: Vec<NativeAddonUpdateCheck>,
+    completed: Vec<String>,
+    conflicts: Vec<String>,
+    failed: Vec<String>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeConflictReport {
+    auto_kept_files: Vec<String>,
+    conflicts: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct NativeImportResult {
     installed: Vec<String>,
@@ -2121,6 +2142,58 @@ fn apply_addon_update_check_results(
     }
 
     available
+}
+
+fn native_update_targets(models: &AddonModels) -> Vec<NativeAddonUpdateTarget> {
+    let all = models.all.borrow();
+    let selected_count = all.iter().filter(|addon| addon.selected).count();
+    all.iter()
+        .filter(|addon| addon_has_update(addon))
+        .filter(|addon| selected_count == 0 || addon.selected)
+        .filter_map(|addon| {
+            let esoui_id = addon.esoui_id.parse::<u32>().ok()?;
+            Some(NativeAddonUpdateTarget {
+                folder_name: addon.folder_name.to_string(),
+                esoui_id,
+            })
+        })
+        .collect()
+}
+
+fn update_apply_status_message(result: &NativeAddonUpdateApplyResult) -> String {
+    let completed = result.completed.len();
+    let conflicts = result.conflicts.len();
+    let failed = result.failed.len();
+
+    let mut parts = Vec::new();
+    if completed > 0 {
+        parts.push(format!(
+            "Updated {completed} addon{}",
+            if completed == 1 { "" } else { "s" }
+        ));
+    }
+    if conflicts > 0 {
+        parts.push(format!(
+            "{conflicts} need{} conflict review",
+            if conflicts == 1 { "s" } else { "" }
+        ));
+    }
+    if failed > 0 {
+        parts.push(format!(
+            "{failed} failed{}",
+            result
+                .errors
+                .first()
+                .map(|error| format!(" ({error})"))
+                .unwrap_or_default()
+        ));
+    }
+
+    if parts.is_empty() {
+        "No safe addon updates were applied.".to_string()
+    } else {
+        format!("{}.", parts.join("; "))
+    }
 }
 
 fn addon_has_required_dependency_issue(addon: &AddonEntry) -> bool {
@@ -7379,6 +7452,21 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_status_error_message(message);
     });
 
+    let apply_finished_ui = ui.as_weak();
+    let apply_finished_models = models.clone();
+    ui.on_addon_update_apply_finished(move |updates, message, conflict_count| {
+        let Some(ui) = apply_finished_ui.upgrade() else {
+            return;
+        };
+        let update_rows = addon_update_entries_from_model(&updates);
+        let available = apply_addon_update_check_results(&apply_finished_models, &update_rows);
+        ui.set_checking_updates(false);
+        ui.set_pending_conflict_count(conflict_count);
+        ui.set_update_available_count(available as i32);
+        apply_addon_view(&ui, &apply_finished_models);
+        ui.set_status_error_message(message);
+    });
+
     let toggle_ui = ui.as_weak();
     let toggle_models = models.clone();
     ui.on_addon_selection_toggled(move |index| {
@@ -7491,8 +7579,13 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let update_ui = ui.as_weak();
+    let update_models = models.clone();
     ui.on_batch_update(move || {
         if let Some(ui) = update_ui.upgrade() {
+            if ui.get_checking_updates() {
+                return;
+            }
+
             let Some(addons_root) = addons_source_root() else {
                 ui.set_status_error_message(
                     "AddOns folder was not found. Set it before checking for updates.".into(),
@@ -7500,9 +7593,24 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
                 return;
             };
 
-            ui.set_checking_updates(true);
-            ui.set_status_error_message("Checking ESOUI for addon updates...".into());
-            start_native_addon_update_check(ui.as_weak(), addons_root);
+            let targets = native_update_targets(&update_models);
+            if targets.is_empty() {
+                ui.set_checking_updates(true);
+                ui.set_pending_conflict_count(0);
+                ui.set_status_error_message("Checking ESOUI for addon updates...".into());
+                start_native_addon_update_check(ui.as_weak(), addons_root);
+            } else {
+                ui.set_checking_updates(true);
+                ui.set_status_error_message(
+                    format!(
+                        "Applying {} safe addon update{}...",
+                        targets.len(),
+                        if targets.len() == 1 { "" } else { "s" }
+                    )
+                    .into(),
+                );
+                start_native_addon_update_apply(ui.as_weak(), addons_root, targets);
+            }
         }
     });
 
@@ -9005,6 +9113,18 @@ fn slint_update_check_entry(result: NativeAddonUpdateCheck) -> AddonUpdateCheckE
     }
 }
 
+fn slint_update_check_model(
+    results: Vec<NativeAddonUpdateCheck>,
+) -> ModelRc<AddonUpdateCheckEntry> {
+    Rc::new(VecModel::from(
+        results
+            .into_iter()
+            .map(slint_update_check_entry)
+            .collect::<Vec<_>>(),
+    ))
+    .into()
+}
+
 fn start_native_addon_update_check(ui_weak: slint::Weak<KalpaWindow>, addons_dir: PathBuf) {
     std::thread::spawn(move || {
         let result = check_native_addon_updates_blocking(&addons_dir);
@@ -9016,12 +9136,8 @@ fn start_native_addon_update_check(ui_weak: slint::Weak<KalpaWindow>, addons_dir
             match result {
                 Ok(results) => {
                     let message = update_check_status_message(&results);
-                    let entries = results
-                        .into_iter()
-                        .map(slint_update_check_entry)
-                        .collect::<Vec<_>>();
                     ui.invoke_addon_update_check_finished(
-                        Rc::new(VecModel::from(entries)).into(),
+                        slint_update_check_model(results),
                         message.into(),
                     );
                 }
@@ -9032,6 +9148,417 @@ fn start_native_addon_update_check(ui_weak: slint::Weak<KalpaWindow>, addons_dir
             }
         });
     });
+}
+
+fn start_native_addon_update_apply(
+    ui_weak: slint::Weak<KalpaWindow>,
+    addons_dir: PathBuf,
+    targets: Vec<NativeAddonUpdateTarget>,
+) {
+    std::thread::spawn(move || {
+        let result = apply_native_addon_updates_blocking(&addons_dir, targets);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+
+            match result {
+                Ok(result) => {
+                    let message = update_apply_status_message(&result);
+                    let conflict_count = result.conflicts.len() as i32;
+                    ui.invoke_addon_update_apply_finished(
+                        slint_update_check_model(result.checks),
+                        message.into(),
+                        conflict_count,
+                    );
+                }
+                Err(error) => {
+                    ui.set_checking_updates(false);
+                    ui.set_status_error_message(format!("Update failed: {error}").into());
+                }
+            }
+        });
+    });
+}
+
+fn apply_native_addon_updates_blocking(
+    addons_dir: &Path,
+    targets: Vec<NativeAddonUpdateTarget>,
+) -> Result<NativeAddonUpdateApplyResult, String> {
+    let initial_checks = check_native_addon_updates_blocking(addons_dir)?;
+    let target_folders = targets
+        .iter()
+        .map(|target| target.folder_name.as_str())
+        .collect::<HashSet<_>>();
+    let remote_versions = initial_checks
+        .iter()
+        .filter(|check| check.has_update && target_folders.contains(check.folder_name.as_str()))
+        .map(|check| (check.folder_name.clone(), check.remote_version.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let mut result = NativeAddonUpdateApplyResult::default();
+    let mut completed_set = HashSet::new();
+
+    for target in targets {
+        let Some(remote_version) = remote_versions.get(&target.folder_name) else {
+            continue;
+        };
+
+        match apply_native_single_addon_update(addons_dir, &target, remote_version) {
+            Ok(true) => {
+                completed_set.insert(target.folder_name.clone());
+                result.completed.push(target.folder_name);
+            }
+            Ok(false) => result.conflicts.push(target.folder_name),
+            Err(error) => {
+                result.failed.push(target.folder_name.clone());
+                result
+                    .errors
+                    .push(format!("{}: {error}", target.folder_name));
+            }
+        }
+    }
+
+    let mut fallback_checks = initial_checks;
+    for check in &mut fallback_checks {
+        if completed_set.contains(&check.folder_name) {
+            check.has_update = false;
+        }
+    }
+    result.checks = check_native_addon_updates_blocking(addons_dir).unwrap_or(fallback_checks);
+    Ok(result)
+}
+
+fn apply_native_single_addon_update(
+    addons_dir: &Path,
+    target: &NativeAddonUpdateTarget,
+    remote_version: &str,
+) -> Result<bool, String> {
+    let (zip, info) = native_fetch_and_download_with_retry(target.esoui_id)?;
+    let (report, zip_hashes) =
+        build_native_conflict_report(addons_dir, &target.folder_name, zip.path())?;
+
+    if !report.conflicts.is_empty() {
+        return Ok(false);
+    }
+
+    let kept_files = report.auto_kept_files;
+    let skip_files = kept_files
+        .iter()
+        .map(|path| format!("{}/{}", target.folder_name, path))
+        .collect::<HashSet<_>>();
+
+    let installed_folders = if skip_files.is_empty() {
+        installer::extract_addon_zip(zip.path(), addons_dir)?
+    } else {
+        installer::extract_addon_zip_selective(zip.path(), addons_dir, &skip_files)?
+    };
+
+    let hash_overrides = native_hash_overrides(&kept_files, &zip_hashes);
+    file_hashes::record_hashes_with_zip_baseline(
+        addons_dir,
+        zip.path(),
+        &installed_folders,
+        &target.folder_name,
+        &zip_hashes,
+        target.esoui_id,
+        remote_version,
+        hash_overrides.as_ref(),
+    )?;
+
+    let mut store = metadata::load_metadata(addons_dir);
+    remove_stale_native_metadata(&mut store, target.esoui_id, &installed_folders);
+    record_native_installed_folders(
+        &mut store,
+        addons_dir,
+        &installed_folders,
+        target.esoui_id,
+        remote_version,
+        &info.title,
+        &info.download_url,
+    );
+    let _ = native_resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
+    metadata::save_metadata(addons_dir, &store)?;
+
+    Ok(true)
+}
+
+fn native_hash_overrides(
+    kept_files: &[String],
+    zip_hashes: &HashMap<String, String>,
+) -> Option<HashMap<String, String>> {
+    let overrides = kept_files
+        .iter()
+        .filter_map(|path| {
+            zip_hashes
+                .get(path)
+                .map(|hash| (path.clone(), hash.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    (!overrides.is_empty()).then_some(overrides)
+}
+
+fn remove_stale_native_metadata(
+    store: &mut metadata::MetadataStore,
+    esoui_id: u32,
+    installed_folders: &[String],
+) {
+    let old_folders = store
+        .addons
+        .iter()
+        .filter(|(_, meta)| meta.esoui_id == esoui_id)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    for old in old_folders {
+        if !installed_folders.contains(&old) {
+            metadata::remove_entry(store, &old);
+        }
+    }
+}
+
+fn build_native_conflict_report(
+    addons_dir: &Path,
+    folder_name: &str,
+    zip_path: &Path,
+) -> Result<(NativeConflictReport, HashMap<String, String>), String> {
+    let stored = file_hashes::load_hash_manifest(addons_dir, folder_name);
+    let addon_path = addons_dir.join(folder_name);
+    let disk_hashes = if stored.is_some() && addon_path.is_dir() {
+        file_hashes::compute_addon_hashes(&addon_path)?
+    } else {
+        HashMap::new()
+    };
+    let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
+    let stored_files = stored.as_ref().map(|manifest| &manifest.files);
+
+    let mut auto_kept_files = Vec::new();
+    let mut conflicts = Vec::new();
+
+    for (relative_path, zip_hash) in &zip_hashes {
+        let stored_hash = stored_files.and_then(|files| files.get(relative_path));
+        let disk_hash = disk_hashes.get(relative_path);
+        let user_modified = match (stored_hash, disk_hash) {
+            (Some(stored), Some(disk)) => !file_hashes::signatures_match(stored, disk),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        let upstream_changed = match stored_hash {
+            Some(stored) => stored != zip_hash,
+            None => true,
+        };
+
+        match (user_modified, upstream_changed) {
+            (true, false) => auto_kept_files.push(relative_path.clone()),
+            (true, true) => conflicts.push(relative_path.clone()),
+            _ => {}
+        }
+    }
+
+    auto_kept_files.sort();
+    conflicts.sort();
+
+    Ok((
+        NativeConflictReport {
+            auto_kept_files,
+            conflicts,
+        },
+        zip_hashes,
+    ))
+}
+
+fn native_is_rate_limited(error: &str) -> bool {
+    error.contains("Too many requests") || error.contains("HTTP 429")
+}
+
+fn native_fetch_and_download_with_retry(
+    esoui_id: u32,
+) -> Result<(tempfile::NamedTempFile, esoui::EsouiAddonInfo), String> {
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(1_000 * (1 << (attempt - 1))));
+        }
+
+        let info = match esoui::fetch_addon_info(esoui_id) {
+            Ok(info) => info,
+            Err(error) => {
+                last_error = error.clone();
+                if native_is_rate_limited(&error) {
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+
+        match esoui::download_addon(&info.download_url, None) {
+            Ok(zip) => return Ok((zip, info)),
+            Err(error) => {
+                last_error = error.clone();
+                if native_is_rate_limited(&error) {
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    Err(last_error)
+}
+
+fn native_normalize_addon_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+fn native_find_manifest_in(dir: &Path, base_name: &str) -> Option<PathBuf> {
+    let txt = dir.join(format!("{base_name}.txt"));
+    if txt.exists() {
+        return Some(txt);
+    }
+    let addon = dir.join(format!("{base_name}.addon"));
+    if addon.exists() {
+        return Some(addon);
+    }
+    None
+}
+
+fn native_record_installed_name(dir: &Path, name: &str, installed: &mut HashSet<String>) {
+    if native_find_manifest_in(dir, name).is_some() {
+        installed.insert(native_normalize_addon_name(name));
+    }
+}
+
+fn native_collect_subfolder_names(folder_path: &Path, installed: &mut HashSet<String>, depth: u8) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(folder_path) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+            native_record_installed_name(&path, name, installed);
+            native_collect_subfolder_names(&path, installed, depth - 1);
+        }
+    }
+}
+
+fn native_build_installed_set(addons_dir: &Path) -> HashSet<String> {
+    let mut installed = HashSet::new();
+    let Ok(entries) = fs::read_dir(addons_dir) else {
+        return installed;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".disabled") {
+            continue;
+        }
+        native_record_installed_name(&path, name, &mut installed);
+        native_collect_subfolder_names(&path, &mut installed, 2);
+    }
+
+    installed
+}
+
+fn native_resolve_transitive_deps(
+    addons_dir: &Path,
+    installed_folders: &[String],
+    store: &mut metadata::MetadataStore,
+) -> NativeImportResult {
+    let mut all_installed = native_build_installed_set(addons_dir);
+    let mut result = NativeImportResult::default();
+    let mut folders_to_scan = installed_folders.to_vec();
+    let mut seen = HashSet::new();
+
+    while !folders_to_scan.is_empty() {
+        let mut missing_deps = Vec::new();
+        for folder in &folders_to_scan {
+            let addon = find_manifest(addons_dir, folder)
+                .and_then(|path| manifest::parse_manifest(folder, &path));
+            if let Some(addon) = addon {
+                for dep in &addon.depends_on {
+                    let key = native_normalize_addon_name(&dep.name);
+                    if !all_installed.contains(&key) && seen.insert(key) {
+                        missing_deps.push(dep.name.clone());
+                    }
+                }
+            }
+        }
+
+        if missing_deps.is_empty() {
+            break;
+        }
+
+        let mut newly_installed = Vec::new();
+        for (index, dep_name) in missing_deps.iter().enumerate() {
+            if index > 0 {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            match native_try_install_dep(dep_name, addons_dir, store) {
+                Ok(dep_folders) => {
+                    for folder in &dep_folders {
+                        if find_manifest(addons_dir, folder).is_some() {
+                            all_installed.insert(native_normalize_addon_name(folder));
+                        }
+                        native_collect_subfolder_names(
+                            &addons_dir.join(folder),
+                            &mut all_installed,
+                            2,
+                        );
+                        newly_installed.push(folder.clone());
+                    }
+                    result.installed.push(dep_name.clone());
+                }
+                Err("not_found") => result.skipped.push(dep_name.clone()),
+                Err(_) => result.failed.push(dep_name.clone()),
+            }
+        }
+
+        folders_to_scan = newly_installed;
+    }
+
+    result
+}
+
+fn native_try_install_dep(
+    dep_name: &str,
+    addons_dir: &Path,
+    store: &mut metadata::MetadataStore,
+) -> Result<Vec<String>, &'static str> {
+    let dep_id = if let Some(meta) = store.addons.get(dep_name) {
+        meta.esoui_id
+    } else {
+        match esoui::search_addon_by_name(dep_name) {
+            Ok(Some(id)) => id,
+            Ok(None) => return Err("not_found"),
+            Err(_) => return Err("search_failed"),
+        }
+    };
+    let dep_info = esoui::fetch_addon_info(dep_id).map_err(|_| "fetch_failed")?;
+    let dep_zip =
+        esoui::download_addon(&dep_info.download_url, None).map_err(|_| "download_failed")?;
+    let dep_folders =
+        installer::extract_addon_zip(dep_zip.path(), addons_dir).map_err(|_| "extract_failed")?;
+    file_hashes::record_hashes_for_folders(addons_dir, &dep_folders, dep_id, &dep_info.version)
+        .map_err(|_| "hash_record_failed")?;
+
+    for folder in &dep_folders {
+        let version = read_local_version(addons_dir, folder);
+        metadata::record_install(store, folder, dep_id, &version, &dep_info.download_url);
+    }
+
+    Ok(dep_folders)
 }
 
 fn find_manifest(addons_dir: &Path, folder_name: &str) -> Option<PathBuf> {
@@ -16737,6 +17264,62 @@ CombatMetrics_SavedVariables = {
         assert_eq!(addons[1].last_updated.as_str(), "Jul 2, 2026");
     }
 
+    #[test]
+    fn native_conflict_report_flags_user_and_upstream_edits() {
+        let root = test_temp_dir("native-conflict-report");
+        let folder = "ConflictAddon";
+        let addon_dir = root.join(folder);
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        fs::write(
+            addon_dir.join(format!("{folder}.txt")),
+            "## Title: Conflict Addon\n## Version: 1.0\n",
+        )
+        .expect("write manifest");
+        fs::write(addon_dir.join("main.lua"), "d('old upstream')\n").expect("write baseline");
+        file_hashes::record_hashes_for_folders(root, &[folder.to_string()], 42, "1.0")
+            .expect("record baseline");
+        fs::write(addon_dir.join("main.lua"), "d('user edit')\n").expect("write user edit");
+
+        let zip_path = root.join("update.zip");
+        write_test_addon_zip_with_lua(&zip_path, folder, "2.0", "d('new upstream')\n");
+
+        let (report, _) =
+            build_native_conflict_report(root, folder, &zip_path).expect("build report");
+
+        assert_eq!(report.conflicts, vec!["main.lua".to_string()]);
+        assert!(report.auto_kept_files.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_conflict_report_auto_keeps_user_only_edits() {
+        let root = test_temp_dir("native-auto-keep-report");
+        let folder = "AutoKeepAddon";
+        let addon_dir = root.join(folder);
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        fs::write(
+            addon_dir.join(format!("{folder}.txt")),
+            "## Title: Auto Keep Addon\n## Version: 1.0\n",
+        )
+        .expect("write manifest");
+        fs::write(addon_dir.join("main.lua"), "d('old upstream')\n").expect("write baseline");
+        file_hashes::record_hashes_for_folders(root, &[folder.to_string()], 42, "1.0")
+            .expect("record baseline");
+        fs::write(addon_dir.join("main.lua"), "d('user edit')\n").expect("write user edit");
+
+        let zip_path = root.join("update.zip");
+        write_test_addon_zip_with_lua(&zip_path, folder, "2.0", "d('old upstream')\n");
+
+        let (report, _) =
+            build_native_conflict_report(root, folder, &zip_path).expect("build report");
+
+        assert!(report.conflicts.is_empty());
+        assert_eq!(report.auto_kept_files, vec!["main.lua".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn test_temp_dir(name: &str) -> &'static Path {
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -16783,6 +17366,10 @@ CombatMetrics_SavedVariables = {
     }
 
     fn write_test_addon_zip(path: &Path, folder: &str, version: &str) {
+        write_test_addon_zip_with_lua(path, folder, version, "d('installed')\n");
+    }
+
+    fn write_test_addon_zip_with_lua(path: &Path, folder: &str, version: &str, lua: &str) {
         let file = fs::File::create(path).expect("create test zip");
         let mut archive = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
@@ -16800,9 +17387,7 @@ CombatMetrics_SavedVariables = {
         archive
             .start_file(format!("{folder}/main.lua"), options)
             .expect("start lua file");
-        archive
-            .write_all(b"d('installed')\n")
-            .expect("write lua file");
+        archive.write_all(lua.as_bytes()).expect("write lua file");
         archive.finish().expect("finish test zip");
     }
 

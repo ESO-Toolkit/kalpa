@@ -11368,6 +11368,7 @@ export component KalpaWindow inherits Window {
     callback sort-selected(int);
     callback batch-update;
     callback addon-update-check-finished([AddonUpdateCheckEntry], string);
+    callback addon-update-apply-finished([AddonUpdateCheckEntry], string, int);
     callback batch-disable;
     callback batch-tag;
     callback batch-remove;
