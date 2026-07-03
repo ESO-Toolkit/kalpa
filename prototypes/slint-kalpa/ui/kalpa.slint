@@ -1879,6 +1879,7 @@ component DiscoverModePanel inherits Rectangle {
     in property <string> category-sort-label: "Downloads";
     in property <bool> loading: false;
     in property <bool> has-more: false;
+    in property <string> message: "";
     in-out property <int> selected-index: 0;
     in-out property <string> query;
     in-out property <string> url-input;
@@ -1890,6 +1891,7 @@ component DiscoverModePanel inherits Rectangle {
     callback category-next;
     callback category-sort-next;
     callback load-more;
+    callback retry;
     private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? 42px : 0px);
     private property <bool> footer-visible: (root.tab == 1 || root.tab == 2) && (root.loading || root.has-more);
     private property <length> footer-height: root.footer-visible ? 42px : 0px;
@@ -1937,13 +1939,58 @@ component DiscoverModePanel inherits Rectangle {
         ranked: root.tab == 1;
     }
 
-    if (!root.loading && root.entries.length == 0) : DiscoverEmptyState {
+    if (!root.loading && root.entries.length == 0 && root.message == "") : DiscoverEmptyState {
         y: root.list-y;
         width: parent.width;
         height: parent.height - root.list-y;
         icon: @image-url("../assets/icons/search.svg");
         title: root.tab == 3 ? "URL / ID Install" : "Search ESOUI";
         subtitle: root.tab == 3 ? "Paste an ESOUI link or addon ID to install directly." : "Search ESOUI or choose a category to find addons.";
+    }
+
+    if (!root.loading && root.entries.length == 0 && root.message != "") : Rectangle {
+        y: root.list-y;
+        width: parent.width;
+        height: parent.height - root.list-y;
+        border-radius: 12px;
+        border-width: 0px;
+        background: Palette.white-02;
+
+        Text {
+            x: 24px;
+            y: 64px;
+            width: parent.width - 48px;
+            text: "Could not load addons";
+            color: Palette.red;
+            font-size: 14px;
+            font-weight: 900;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            x: 32px;
+            y: 96px;
+            width: parent.width - 64px;
+            height: 44px;
+            text: root.message;
+            color: Palette.muted-strong;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        SmallAction {
+            x: (parent.width - self.width) / 2;
+            y: 154px;
+            label: "Retry";
+            tone: Palette.red;
+            fill: Palette.red-04;
+            fill-hover: Palette.red-15;
+            fill-pressed: Palette.red-20;
+            clicked => { root.retry(); }
+        }
     }
 
     ListView {
@@ -9494,6 +9541,7 @@ component Sidebar inherits Rectangle {
     in-out property <string> discover-category-sort-label: "Downloads";
     in-out property <bool> discover-browse-loading: false;
     in-out property <bool> discover-browse-has-more: false;
+    in-out property <string> discover-browse-message;
     in property <int> total-addon-count: 0;
     in property <int> addon-kind-count: 0;
     in property <int> library-kind-count: 0;
@@ -9524,6 +9572,7 @@ component Sidebar inherits Rectangle {
     callback discover-category-next;
     callback discover-category-sort-next;
     callback discover-load-more;
+    callback discover-browse-retry;
     private property <string> count-label: root.addons.length == 1 ? "1 ADDON" : root.addons.length + " ADDONS";
     private property <string> sort-label: sort-mode == 1 ? "Author" : (sort-mode == 2 ? "Recently Updated" : (sort-mode == 3 ? "Recently Downloaded" : "Name"));
     private property <bool> compact-discover-chrome: root.discover-active && (root.discover-tab == 1 || root.discover-tab == 2);
@@ -10284,6 +10333,7 @@ component Sidebar inherits Rectangle {
         category-sort-label: root.discover-category-sort-label;
         loading: root.discover-browse-loading;
         has-more: root.discover-browse-has-more;
+        message: root.discover-browse-message;
         selected-index <=> root.selected-discover-index;
         query <=> root.discover-query;
         url-input <=> root.discover-url-input;
@@ -10295,6 +10345,7 @@ component Sidebar inherits Rectangle {
         category-next => { root.discover-category-next(); }
         category-sort-next => { root.discover-category-sort-next(); }
         load-more => { root.discover-load-more(); }
+        retry => { root.discover-browse-retry(); }
     }
 
     Rectangle {
@@ -11506,6 +11557,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> discover-category-sort-label: "Downloads";
     in-out property <bool> discover-browse-loading: false;
     in-out property <bool> discover-browse-has-more: false;
+    in-out property <string> discover-browse-message;
     in-out property <string> status-error-message;
     in-out property <bool> offline-active: false;
     in-out property <string> app-update-message;
@@ -11643,6 +11695,7 @@ export component KalpaWindow inherits Window {
     callback discover-category-next;
     callback discover-category-sort-next;
     callback discover-load-more;
+    callback discover-browse-retry;
     callback discover-screenshot-prev;
     callback discover-screenshot-next;
     callback discover-screenshot-select(int);
@@ -11842,6 +11895,7 @@ export component KalpaWindow inherits Window {
             discover-category-sort-label <=> root.discover-category-sort-label;
             discover-browse-loading <=> root.discover-browse-loading;
             discover-browse-has-more <=> root.discover-browse-has-more;
+            discover-browse-message <=> root.discover-browse-message;
             addon-selected(index) => { root.addon-selected(index); }
             addon-selection-toggled(index) => { root.addon-selection-toggled(index); }
             addon-context-open-folder(index) => { root.addon-context-open-folder(index); }
@@ -11861,6 +11915,7 @@ export component KalpaWindow inherits Window {
             discover-category-next => { root.discover-category-next(); }
             discover-category-sort-next => { root.discover-category-sort-next(); }
             discover-load-more => { root.discover-load-more(); }
+            discover-browse-retry => { root.discover-browse-retry(); }
         }
 
         if (!side.discover-active && root.addons.length > 0) : DetailPane {
