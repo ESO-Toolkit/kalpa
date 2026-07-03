@@ -70,6 +70,7 @@ struct NativeCustomThemeStore {
 struct NativeSettings {
     auto_update: bool,
     warn_eso_running: bool,
+    native_performance_mode: bool,
     official_uploader: bool,
     auto_open_analysis: bool,
     conflict_policy: i32,
@@ -80,6 +81,7 @@ impl Default for NativeSettings {
         Self {
             auto_update: false,
             warn_eso_running: true,
+            native_performance_mode: true,
             official_uploader: false,
             auto_open_analysis: false,
             conflict_policy: 0,
@@ -114,6 +116,7 @@ enum NativeRenderPreset {
 const STORE_KEY_ACTIVE_THEME: &str = "appearance.activeThemeId";
 const STORE_KEY_ADDONS_PATH: &str = "addonsPath";
 const STORE_KEY_CUSTOM_THEMES: &str = "appearance.customThemes";
+const STORE_KEY_PERFORMANCE_MODE: &str = "performanceMode";
 
 #[derive(Debug, PartialEq, Eq)]
 struct NativeRenderConfig {
@@ -2054,6 +2057,7 @@ fn apply_initial_native_settings(ui: &KalpaWindow) {
 fn apply_native_settings(ui: &KalpaWindow, settings: &NativeSettings) {
     ui.set_settings_auto_update(settings.auto_update);
     ui.set_settings_warn_eso_running(settings.warn_eso_running);
+    ui.set_settings_native_performance_mode(settings.native_performance_mode);
     ui.set_settings_official_uploader(settings.official_uploader);
     ui.set_settings_auto_open_analysis(settings.auto_open_analysis);
     ui.set_settings_conflict_policy(settings.conflict_policy.clamp(0, 2));
@@ -2063,6 +2067,7 @@ fn native_settings_from_ui(ui: &KalpaWindow) -> NativeSettings {
     NativeSettings {
         auto_update: ui.get_settings_auto_update(),
         warn_eso_running: ui.get_settings_warn_eso_running(),
+        native_performance_mode: ui.get_settings_native_performance_mode(),
         official_uploader: ui.get_settings_official_uploader(),
         auto_open_analysis: ui.get_settings_auto_open_analysis(),
         conflict_policy: ui.get_settings_conflict_policy().clamp(0, 2),
@@ -2076,6 +2081,28 @@ fn wire_settings_actions(ui: &KalpaWindow) {
             return;
         };
         persist_native_settings(&native_settings_from_ui(&ui));
+    });
+
+    let performance_ui = ui.as_weak();
+    ui.on_settings_performance_mode_changed(move |native_mode| {
+        let Some(ui) = performance_ui.upgrade() else {
+            return;
+        };
+        persist_native_settings(&native_settings_from_ui(&ui));
+        if native_mode {
+            return;
+        }
+
+        match return_to_webview_shell() {
+            Ok(()) => {
+                let _ = slint::quit_event_loop();
+            }
+            Err(error) => {
+                ui.set_settings_native_performance_mode(true);
+                persist_native_settings(&native_settings_from_ui(&ui));
+                ui.set_status_error_message(format!("Failed to return to WebView: {error}").into());
+            }
+        }
     });
 
     let open_addons_path_ui = ui.as_weak();
@@ -4279,6 +4306,24 @@ fn open_path(path: &Path) {
     }
 }
 
+fn return_to_webview_shell() -> Result<(), String> {
+    let exe = std::env::var_os("KALPA_WEBVIEW_EXE")
+        .map(PathBuf::from)
+        .ok_or_else(|| "webview launcher path was not provided".to_string())?;
+    if !exe.is_file() {
+        return Err(format!(
+            "webview launcher was not found at {}",
+            exe.display()
+        ));
+    }
+
+    std::process::Command::new(&exe)
+        .env("KALPA_FORCE_WEBVIEW", "1")
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch webview shell: {error}"))
+}
+
 fn open_url(url: &str) {
     #[cfg(target_os = "windows")]
     {
@@ -5013,6 +5058,18 @@ fn conflict_policy_to_store_value(index: i32) -> serde_json::Value {
     )
 }
 
+fn native_performance_mode_from_store_value(value: &serde_json::Value) -> Option<bool> {
+    match value.as_str()? {
+        "native-slint" | "slint" | "native" | "low-memory" => Some(true),
+        "webview" | "web" | "standard" => Some(false),
+        _ => None,
+    }
+}
+
+fn native_performance_mode_to_store_value(enabled: bool) -> serde_json::Value {
+    serde_json::Value::String(if enabled { "native-slint" } else { "webview" }.to_string())
+}
+
 fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings {
     let Some(object) = value.as_object() else {
         return NativeSettings::default();
@@ -5029,6 +5086,10 @@ fn native_settings_from_store_value(value: &serde_json::Value) -> NativeSettings
                 bool_from_store_object(object, "suppressEsoRunningWarning").map(|value| !value)
             })
             .unwrap_or(defaults.warn_eso_running),
+        native_performance_mode: object
+            .get(STORE_KEY_PERFORMANCE_MODE)
+            .and_then(native_performance_mode_from_store_value)
+            .unwrap_or(defaults.native_performance_mode),
         official_uploader: bool_from_store_object(object, "officialUploader")
             .or_else(|| {
                 manual_official
@@ -5063,6 +5124,10 @@ fn native_settings_to_store_value(
     object.insert(
         "suppressEsoRunningWarning".to_string(),
         serde_json::Value::Bool(!settings.warn_eso_running),
+    );
+    object.insert(
+        STORE_KEY_PERFORMANCE_MODE.to_string(),
+        native_performance_mode_to_store_value(settings.native_performance_mode),
     );
     object.insert(
         "manualUseOfficialUploader".to_string(),
@@ -5881,6 +5946,7 @@ mod tests {
         let settings = NativeSettings {
             auto_update: true,
             warn_eso_running: false,
+            native_performance_mode: false,
             official_uploader: true,
             auto_open_analysis: true,
             conflict_policy: 9,
@@ -5891,6 +5957,7 @@ mod tests {
 
         assert!(restored.auto_update);
         assert!(!restored.warn_eso_running);
+        assert!(!restored.native_performance_mode);
         assert!(restored.official_uploader);
         assert!(restored.auto_open_analysis);
         assert_eq!(restored.conflict_policy, 2);
@@ -5915,6 +5982,12 @@ mod tests {
                 .get("suppressEsoRunningWarning")
                 .and_then(serde_json::Value::as_bool),
             Some(true)
+        );
+        assert_eq!(
+            object
+                .get("performanceMode")
+                .and_then(serde_json::Value::as_str),
+            Some("webview")
         );
         assert_eq!(
             object
@@ -5952,6 +6025,7 @@ mod tests {
                 "suppressEsoRunningWarning": true,
                 "manualUseOfficialUploader": false,
                 "liveUseOfficialUploader": true,
+                "performanceMode": "native-slint",
                 "autoOpenAnalysis": true,
                 "conflictPolicy": "keep_mine"
             })
@@ -5962,6 +6036,7 @@ mod tests {
         let restored = read_native_settings_from_path(&path).expect("read settings");
         assert!(restored.auto_update);
         assert!(!restored.warn_eso_running);
+        assert!(restored.native_performance_mode);
         assert!(restored.official_uploader);
         assert!(restored.auto_open_analysis);
         assert_eq!(restored.conflict_policy, 1);

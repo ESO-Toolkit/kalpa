@@ -268,6 +268,17 @@ pub fn run() {
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
 
+            match commands::try_launch_native_performance_mode_on_startup(app.handle()) {
+                Ok(Some(_)) => {
+                    app.handle().exit(0);
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Failed to start native performance UI: {error}");
+                }
+            }
+
             if let Some(action) = std::env::args().find_map(|arg| parse_deep_link(&arg)) {
                 if let Ok(mut pending) = app.state::<PendingDeepLink>().0.lock() {
                     *pending = pending_deep_link_payload(&action);
@@ -491,6 +502,7 @@ pub fn run() {
             uploader::commands::uploader_run_native_live_spike,
             commands::flush_settings,
             commands::settings_tainted,
+            commands::launch_native_performance_mode,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])

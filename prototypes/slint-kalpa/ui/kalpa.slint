@@ -3312,6 +3312,7 @@ component AppearanceOverlay inherits Rectangle {
     in-out property <bool> editor-open: false;
     in-out property <bool> auto-update: false;
     in-out property <bool> warn-eso-running: true;
+    in-out property <bool> native-performance-mode: true;
     in-out property <bool> official-uploader: false;
     in-out property <bool> auto-open-analysis: false;
     in-out property <int> conflict-policy: 0;
@@ -3330,6 +3331,7 @@ component AppearanceOverlay inherits Rectangle {
     callback theme-draft-updated;
     callback theme-editor-cancelled;
     callback settings-changed;
+    callback performance-mode-changed(bool);
     callback addons-path-opened;
     callback addons-path-redetected;
     callback addons-path-applied(string);
@@ -3350,7 +3352,7 @@ component AppearanceOverlay inherits Rectangle {
 
     panel := Rectangle {
         width: root.width < 700px ? root.width - 44px : 620px;
-        height: root.height < 740px ? root.height - 44px : 650px;
+        height: root.height < 790px ? root.height - 44px : 720px;
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2;
         border-radius: 16px;
@@ -3421,13 +3423,13 @@ component AppearanceOverlay inherits Rectangle {
             width: parent.width - 44px;
             height: parent.height - 134px;
             viewport-width: self.width;
-            viewport-height: 538px;
+            viewport-height: 602px;
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
             Rectangle {
                 width: parent.width;
-                height: 538px;
+                height: 602px;
                 border-radius: 12px;
                 border-width: 0px;
                 background: #00000000;
@@ -3472,13 +3474,14 @@ component AppearanceOverlay inherits Rectangle {
                 SettingsActionButton { x: parent.width - self.width - 14px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Apply"; primary: true; clicked => { root.addons-path-applied(root.addons-path); } }
 
                 SettingsToggleRow { x: 0px; y: 144px; width: parent.width; height: 58px; label: "Auto-update on launch"; description: "Automatically update all addons when Kalpa starts"; checked <=> root.auto-update; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 208px; width: parent.width; height: 52px; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 268px; width: parent.width; height: 52px; label: "Use the official ESO Logs uploader"; description: "Off by default - Kalpa uploads directly and falls back when needed"; checked <=> root.official-uploader; changed(_) => { root.settings-changed(); } }
-                SettingsToggleRow { x: 0px; y: 328px; width: parent.width; height: 52px; label: "Open analysis after upload"; description: "Open finished reports in the ESO Log Aggregator"; checked <=> root.auto-open-analysis; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 208px; width: parent.width; height: 58px; label: "Low-memory native UI"; description: "Use the Slint shell instead of the WebView shell"; checked <=> root.native-performance-mode; changed(value) => { root.performance-mode-changed(value); } }
+                SettingsToggleRow { x: 0px; y: 272px; width: parent.width; height: 52px; label: "Warn when ESO is running"; description: "Remind me to /reloadui after changing addons while the game is open"; checked <=> root.warn-eso-running; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 332px; width: parent.width; height: 52px; label: "Use the official ESO Logs uploader"; description: "Off by default - Kalpa uploads directly and falls back when needed"; checked <=> root.official-uploader; changed(_) => { root.settings-changed(); } }
+                SettingsToggleRow { x: 0px; y: 392px; width: parent.width; height: 52px; label: "Open analysis after upload"; description: "Open finished reports in the ESO Log Aggregator"; checked <=> root.auto-open-analysis; changed(_) => { root.settings-changed(); } }
 
                 Rectangle {
                     x: 0px;
-                    y: 408px;
+                    y: 472px;
                     width: parent.width;
                     height: 112px;
                     border-radius: 11px;
@@ -8358,6 +8361,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> draft-contrast-warning;
     in-out property <bool> settings-auto-update: false;
     in-out property <bool> settings-warn-eso-running: true;
+    in-out property <bool> settings-native-performance-mode: true;
     in-out property <bool> settings-official-uploader: false;
     in-out property <bool> settings-auto-open-analysis: false;
     in-out property <int> settings-conflict-policy: 0;
@@ -8432,6 +8436,7 @@ export component KalpaWindow inherits Window {
     callback theme-draft-updated;
     callback theme-editor-cancelled;
     callback settings-changed;
+    callback settings-performance-mode-changed(bool);
     callback settings-addons-path-opened;
     callback settings-addons-path-redetected;
     callback settings-addons-path-applied(string);
@@ -8692,6 +8697,7 @@ export component KalpaWindow inherits Window {
             draft-contrast-warning <=> root.draft-contrast-warning;
             auto-update <=> root.settings-auto-update;
             warn-eso-running <=> root.settings-warn-eso-running;
+            native-performance-mode <=> root.settings-native-performance-mode;
             official-uploader <=> root.settings-official-uploader;
             auto-open-analysis <=> root.settings-auto-open-analysis;
             conflict-policy <=> root.settings-conflict-policy;
@@ -8714,6 +8720,7 @@ export component KalpaWindow inherits Window {
             theme-draft-updated => { root.theme-draft-updated(); }
             theme-editor-cancelled => { root.theme-editor-cancelled(); }
             settings-changed => { root.settings-changed(); }
+            performance-mode-changed(value) => { root.settings-performance-mode-changed(value); }
             addons-path-opened => { root.settings-addons-path-opened(); }
             addons-path-redetected => { root.settings-addons-path-redetected(); }
             addons-path-applied(path) => { root.settings-addons-path-applied(path); }

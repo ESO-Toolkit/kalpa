@@ -28,6 +28,7 @@ import {
   ClipboardPaste,
   ChevronRight,
   Monitor,
+  Gauge,
   Shield,
   Sparkles,
   Trash2,
@@ -36,6 +37,7 @@ import {
 import { AppearanceSettings } from "./appearance-settings";
 
 type SettingsTab = "general" | "appearance" | "tools" | "data";
+type PerformanceMode = "webview" | "native-slint";
 
 interface SettingsProps {
   addonsPath: string;
@@ -83,6 +85,8 @@ export function Settings({
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [autoUpdate, setAutoUpdate] = useState(false);
   const [warnEsoRunning, setWarnEsoRunning] = useState(true);
+  const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("webview");
+  const [switchingPerformanceMode, setSwitchingPerformanceMode] = useState(false);
   const [minionDetected, setMinionDetected] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
   const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
@@ -98,6 +102,9 @@ export function Settings({
   useEffect(() => {
     void getSetting<boolean>("autoUpdate", false).then(setAutoUpdate);
     void getSetting<boolean>("suppressEsoRunningWarning", false).then((s) => setWarnEsoRunning(!s));
+    void getSetting<string>("performanceMode", "webview").then((mode) =>
+      setPerformanceMode(mode === "native-slint" ? "native-slint" : "webview")
+    );
     // The toggle WRITES both opt-out keys, so its checked state must REFLECT both: a
     // pre-existing user who opted out of LIVE direct upload (liveUseOfficialUploader)
     // before this unified control existed must see it as on, or the toggle would claim
@@ -221,6 +228,38 @@ export function Settings({
       toast.error(`Failed to delete account data: ${getTauriErrorMessage(e)}`);
     } finally {
       setDeletingAccount(false);
+    }
+  };
+
+  const handlePerformanceModeChange = async (checked: boolean) => {
+    if (switchingPerformanceMode) return;
+
+    const next: PerformanceMode = checked ? "native-slint" : "webview";
+    const previous = performanceMode;
+    setPerformanceMode(next);
+    setSwitchingPerformanceMode(true);
+
+    const saved = await setSetting("performanceMode", next);
+    if (!saved) {
+      setPerformanceMode(previous);
+      setSwitchingPerformanceMode(false);
+      toast.error("Couldn't save performance mode.");
+      return;
+    }
+
+    if (!checked) {
+      setSwitchingPerformanceMode(false);
+      return;
+    }
+
+    try {
+      await invokeOrThrow<{ exePath: string }>("launch_native_performance_mode");
+      toast.success("Switching to native performance mode...");
+    } catch (e) {
+      setPerformanceMode(previous);
+      void setSetting("performanceMode", previous);
+      toast.error(`Native performance mode is not available: ${getTauriErrorMessage(e)}`);
+      setSwitchingPerformanceMode(false);
     }
   };
 
@@ -395,6 +434,29 @@ export function Settings({
                         <p className="text-sm font-medium text-white/90">Auto-update on launch</p>
                         <p className="text-xs text-muted-foreground">
                           Automatically update all addons when Kalpa starts
+                        </p>
+                      </div>
+                    </label>
+                  </GlassPanel>
+
+                  <GlassPanel variant="subtle" className="p-3">
+                    <label
+                      className={`flex items-center gap-3 ${
+                        switchingPerformanceMode ? "cursor-wait opacity-70" : "cursor-pointer"
+                      }`}
+                    >
+                      <Checkbox
+                        checked={performanceMode === "native-slint"}
+                        disabled={switchingPerformanceMode}
+                        onCheckedChange={(checked) => {
+                          void handlePerformanceModeChange(checked === true);
+                        }}
+                      />
+                      <Gauge className="size-4 shrink-0 text-[#c4a44a]" />
+                      <div>
+                        <p className="text-sm font-medium text-white/90">Low-memory native UI</p>
+                        <p className="text-xs text-muted-foreground">
+                          Switch Kalpa to the Slint shell and close the WebView process.
                         </p>
                       </div>
                     </label>
