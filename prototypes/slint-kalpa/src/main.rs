@@ -5692,7 +5692,7 @@ fn custom_theme_draft_from_base(base: &CatalogTheme, suffix: &str) -> CatalogThe
             base.description.clone()
         },
         colors: base.colors.clone(),
-        skin_id: normalize_skin_id(base.skin_id.clone()),
+        skin_id: None,
     }
 }
 
@@ -5969,10 +5969,31 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         ui.set_settings_editor_open(false);
     });
 
+    let export_ui = ui.as_weak();
     let export_custom_themes = custom_themes.clone();
+    let export_draft = current_draft.clone();
     ui.on_theme_export(move |theme_id| {
-        let theme_id = theme_id.to_string();
-        let Some(theme) = theme_by_id(&theme_id, &export_custom_themes.borrow()) else {
+        let theme = if let Some(ui) = export_ui.upgrade() {
+            if ui.get_settings_editor_open() {
+                let mut draft = export_draft.borrow().clone();
+                let normalized_name = ui.get_draft_theme_name().trim().to_string();
+                if !normalized_name.is_empty() {
+                    draft.name = normalized_name;
+                }
+                draft.description = ui.get_draft_theme_description().to_string();
+                draft.category = "Custom".to_string();
+                draft.colors = draft_colors_from_ui(&ui, &draft.colors);
+                draft.skin_id = normalize_skin_id(draft.skin_id);
+                Some(draft)
+            } else {
+                let theme_id = theme_id.to_string();
+                theme_by_id(&theme_id, &export_custom_themes.borrow())
+            }
+        } else {
+            return;
+        };
+
+        let Some(theme) = theme else {
             return;
         };
         let Ok(json) = serde_json::to_string_pretty(&theme) else {
@@ -12972,6 +12993,17 @@ mod tests {
                     && entry.category_heading.as_str() == "ESO"),
             "built-in categories should follow custom themes"
         );
+    }
+
+    #[test]
+    fn custom_theme_drafts_are_color_only() {
+        let base = sample_custom_theme("skinned-base", "Skinned Base");
+        let draft = custom_theme_draft_from_base(&base, "Copy");
+
+        assert_eq!(draft.category, "Custom");
+        assert_eq!(draft.colors.primary, base.colors.primary);
+        assert_eq!(draft.colors.background, base.colors.background);
+        assert_eq!(draft.skin_id, None);
     }
 
     #[test]

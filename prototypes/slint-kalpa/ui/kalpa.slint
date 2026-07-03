@@ -3099,6 +3099,7 @@ component SettingsActionButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
     in property <bool> primary: false;
+    in property <bool> danger: false;
     callback clicked;
     private property <length> icon-size: 14px;
     private property <length> icon-gap: 7px;
@@ -3109,7 +3110,7 @@ component SettingsActionButton inherits Rectangle {
     height: 28px;
     border-radius: 7px;
     border-width: 0px;
-    background: touch.pressed ? (root.primary ? Palette.gold-20 : Palette.white-08) : (touch.has-hover ? (root.primary ? Palette.gold-15 : Palette.white-06) : (root.primary ? Palette.gold-10 : Palette.white-03));
+    background: touch.pressed ? (root.primary ? Palette.gold-20 : (root.danger ? Palette.red-15 : Palette.white-08)) : (touch.has-hover ? (root.primary ? Palette.gold-15 : (root.danger ? Palette.red-15 : Palette.white-06)) : (root.primary ? Palette.gold-10 : (root.danger ? Palette.red-04 : Palette.white-03)));
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
@@ -3120,7 +3121,7 @@ component SettingsActionButton inherits Rectangle {
         height: root.icon-size;
         source: root.icon;
         image-fit: contain;
-        colorize: root.primary ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
+        colorize: root.primary ? Palette.gold : (root.danger ? Palette.red : (touch.has-hover ? Palette.foreground : Palette.muted-strong));
     }
 
     label-text := Text {
@@ -3129,7 +3130,7 @@ component SettingsActionButton inherits Rectangle {
         width: label-text.preferred-width;
         height: root.height;
         text: root.label;
-        color: root.primary ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
+        color: root.primary ? Palette.gold : (root.danger ? Palette.red : (touch.has-hover ? Palette.foreground : Palette.muted-strong));
         font-size: 12px;
         font-weight: 700;
         vertical-alignment: center;
@@ -3455,26 +3456,53 @@ component ThemeEditorColorTile inherits Rectangle {
     in-out property <string> value-text;
     callback edited;
     width: 174px;
-    height: 60px;
+    height: 62px;
     border-radius: 8px;
-    border-width: 0px;
-    background: Palette.white-02;
+    border-width: 1px;
+    border-color: field-touch.has-hover ? Palette.white-10 : Palette.white-06;
+    background: field-touch.has-hover ? Palette.white-04 : Palette.white-02;
+
+    animate background, border-color { duration: 150ms; easing: ease-in-out; }
+
+    field-touch := TouchArea {
+        width: root.width;
+        height: root.height;
+    }
+
+    Rectangle {
+        x: 10px;
+        y: 14px;
+        width: 34px;
+        height: 34px;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: Palette.white-10;
+        background: root.value;
+
+        Rectangle {
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: 1px;
+            background: #ffffff24;
+        }
+    }
 
     Text {
-        x: 10px;
+        x: 54px;
         y: 7px;
-        width: parent.width - 54px;
+        width: parent.width - 64px;
         text: root.label;
-        color: Palette.muted-half;
-        font-size: 10px;
+        color: Palette.foreground;
+        font-size: 11px;
         font-weight: 700;
         overflow: elide;
     }
 
     Text {
-        x: 10px;
-        y: 25px;
-        width: parent.width - 62px;
+        x: 54px;
+        y: 22px;
+        width: parent.width - 64px;
         text: root.hint;
         color: Palette.muted-soft;
         font-size: 9px;
@@ -3483,50 +3511,29 @@ component ThemeEditorColorTile inherits Rectangle {
     }
 
     Rectangle {
-        x: 10px;
-        y: 39px;
+        x: 54px;
+        y: 37px;
         width: parent.width - 64px;
-        height: 16px;
+        height: 20px;
         border-radius: 5px;
-        background: #00000024;
+        border-width: 1px;
+        border-color: field-touch.has-hover ? Palette.white-10 : Palette.white-06;
+        background: field-touch.has-hover ? #ffffff08 : #00000024;
         clip: true;
-
-        Text {
-            x: 5px;
-            width: parent.width - 10px;
-            height: parent.height;
-            text: root.value-text;
-            color: Palette.foreground;
-            font-size: 9px;
-            font-family: "Consolas";
-            vertical-alignment: center;
-            overflow: elide;
-        }
 
         TextEdit {
             x: 5px;
-            y: 0px;
+            y: 1px;
             width: parent.width - 10px;
             height: parent.height;
-            opacity: 0.01;
             text: root.value-text;
-            font-size: 9px;
+            font-size: 10px;
             font-family: "Consolas";
             edited(content) => {
                 root.value-text = content;
                 root.edited();
             }
         }
-    }
-
-    Rectangle {
-        x: parent.width - 44px;
-        y: 15px;
-        width: 30px;
-        height: 30px;
-        border-radius: 7px;
-        border-width: 0px;
-        background: root.value;
     }
 }
 
@@ -3555,6 +3562,7 @@ component AppearanceOverlay inherits Rectangle {
     in-out property <string> draft-contrast-warning;
     in-out property <int> active-tab: 0;
     in-out property <bool> editor-open: false;
+    in-out property <bool> theme-delete-confirming: false;
     in-out property <bool> auto-update: false;
     in-out property <bool> warn-eso-running: true;
     in-out property <bool> native-performance-mode: true;
@@ -3598,6 +3606,7 @@ component AppearanceOverlay inherits Rectangle {
             if (root.editor-open) {
                 root.theme-editor-cancelled();
             }
+            root.theme-delete-confirming = false;
             root.close();
         }
     }
@@ -3650,6 +3659,7 @@ component AppearanceOverlay inherits Rectangle {
                 if (root.editor-open) {
                     root.theme-editor-cancelled();
                 }
+                root.theme-delete-confirming = false;
                 root.close();
             }
         }
@@ -3663,10 +3673,52 @@ component AppearanceOverlay inherits Rectangle {
             border-width: 0px;
             background: Palette.white-03;
 
-            SettingsTabButton { x: 4px; y: 4px; icon: @image-url("../assets/icons/folder-open.svg"); label: "General"; active: root.active-tab == 0; clicked => { root.active-tab = 0; root.editor-open = false; } }
+            SettingsTabButton {
+                x: 4px;
+                y: 4px;
+                icon: @image-url("../assets/icons/folder-open.svg");
+                label: "General";
+                active: root.active-tab == 0;
+                clicked => {
+                    if (root.editor-open) {
+                        root.theme-editor-cancelled();
+                    }
+                    root.active-tab = 0;
+                    root.editor-open = false;
+                    root.theme-delete-confirming = false;
+                }
+            }
             SettingsTabButton { x: 150px; y: 4px; icon: @image-url("../assets/icons/square.svg"); label: "Appearance"; active: root.active-tab == 1; clicked => { root.active-tab = 1; } }
-            SettingsTabButton { x: 296px; y: 4px; icon: @image-url("../assets/icons/settings.svg"); label: "Tools"; active: root.active-tab == 2; clicked => { root.active-tab = 2; root.editor-open = false; } }
-            SettingsTabButton { x: 442px; y: 4px; icon: @image-url("../assets/icons/files.svg"); label: "Data"; active: root.active-tab == 3; clicked => { root.active-tab = 3; root.editor-open = false; } }
+            SettingsTabButton {
+                x: 296px;
+                y: 4px;
+                icon: @image-url("../assets/icons/settings.svg");
+                label: "Tools";
+                active: root.active-tab == 2;
+                clicked => {
+                    if (root.editor-open) {
+                        root.theme-editor-cancelled();
+                    }
+                    root.active-tab = 2;
+                    root.editor-open = false;
+                    root.theme-delete-confirming = false;
+                }
+            }
+            SettingsTabButton {
+                x: 442px;
+                y: 4px;
+                icon: @image-url("../assets/icons/files.svg");
+                label: "Data";
+                active: root.active-tab == 3;
+                clicked => {
+                    if (root.editor-open) {
+                        root.theme-editor-cancelled();
+                    }
+                    root.active-tab = 3;
+                    root.editor-open = false;
+                    root.theme-delete-confirming = false;
+                }
+            }
         }
 
         if (root.active-tab == 0) : ScrollView {
@@ -3764,8 +3816,8 @@ component AppearanceOverlay inherits Rectangle {
                 background: #00000000;
                 private property <length> card-w: (self.width - 20px) / 3;
 
-                SettingsActionButton { x: 0px; y: 0px; icon: @image-url("../assets/icons/plus.svg"); label: "Create theme"; primary: true; clicked => { root.theme-create(); } }
-                SettingsActionButton { x: 128px; y: 0px; icon: @image-url("../assets/icons/clipboard-paste.svg"); label: "Import"; clicked => { root.theme-import(); } }
+                SettingsActionButton { x: 0px; y: 0px; icon: @image-url("../assets/icons/plus.svg"); label: "Create theme"; primary: true; clicked => { root.theme-delete-confirming = false; root.theme-create(); } }
+                SettingsActionButton { x: 128px; y: 0px; icon: @image-url("../assets/icons/clipboard-paste.svg"); label: "Import"; clicked => { root.theme-delete-confirming = false; root.theme-import(); } }
 
                 for theme[index] in root.themes : DetailSectionTitle {
                     visible: theme.category-heading != "";
@@ -3781,9 +3833,9 @@ component AppearanceOverlay inherits Rectangle {
                     card-width: parent.card-w;
                     theme: theme;
                     active: root.active-theme-id == theme.id;
-                    selected(id) => { root.theme-selected(id); }
-                    edited(id) => { root.theme-edit(id); }
-                    forked(id) => { root.theme-fork(id); }
+                    selected(id) => { root.theme-delete-confirming = false; root.theme-selected(id); }
+                    edited(id) => { root.theme-delete-confirming = false; root.theme-edit(id); }
+                    forked(id) => { root.theme-delete-confirming = false; root.theme-fork(id); }
                 }
             }
         }
@@ -3803,7 +3855,7 @@ component AppearanceOverlay inherits Rectangle {
                 height: 928px;
                 background: #00000000;
 
-                GhostIconButton { x: 0px; y: 0px; icon: @image-url("../assets/icons/arrow-left.svg"); clicked => { root.theme-editor-cancelled(); } }
+                GhostIconButton { x: 0px; y: 0px; icon: @image-url("../assets/icons/arrow-left.svg"); clicked => { root.theme-delete-confirming = false; root.theme-editor-cancelled(); } }
 
                 Rectangle {
                     x: 40px;
@@ -4009,9 +4061,50 @@ component AppearanceOverlay inherits Rectangle {
             height: 50px;
             background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 78%, #00000000 100%);
 
-            SettingsActionButton { x: 4px; y: 14px; icon: @image-url("../assets/icons/save.svg"); label: root.draft-theme-new ? "Save theme" : "Save changes"; primary: true; clicked => { root.theme-save(root.draft-theme-name); } }
-            SettingsActionButton { x: 132px; y: 14px; icon: @image-url("../assets/icons/x.svg"); label: "Cancel"; clicked => { root.theme-editor-cancelled(); } }
-            SettingsActionButton { visible: !root.draft-theme-new; x: parent.width - self.width - 4px; y: 14px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; clicked => { root.theme-delete(root.draft-theme-id); } }
+            SettingsActionButton { x: 4px; y: 14px; icon: @image-url("../assets/icons/save.svg"); label: root.draft-theme-new ? "Save theme" : "Save changes"; primary: true; clicked => { root.theme-delete-confirming = false; root.theme-save(root.draft-theme-name); } }
+            SettingsActionButton { x: 132px; y: 14px; icon: @image-url("../assets/icons/x.svg"); label: "Cancel"; clicked => { root.theme-delete-confirming = false; root.theme-editor-cancelled(); } }
+
+            if (!root.draft-theme-new && !root.theme-delete-confirming) : SettingsActionButton {
+                x: parent.width - self.width - 4px;
+                y: 14px;
+                icon: @image-url("../assets/icons/trash-2.svg");
+                label: "Delete";
+                danger: true;
+                clicked => { root.theme-delete-confirming = true; }
+            }
+
+            if (!root.draft-theme-new && root.theme-delete-confirming) : Text {
+                x: parent.width - 198px;
+                y: 14px;
+                width: 62px;
+                height: 28px;
+                text: "Delete?";
+                color: Palette.muted-half;
+                font-size: 11px;
+                font-weight: 700;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+
+            if (!root.draft-theme-new && root.theme-delete-confirming) : SettingsActionButton {
+                x: parent.width - 128px;
+                y: 14px;
+                icon: @image-url("../assets/icons/trash-2.svg");
+                label: "Yes";
+                danger: true;
+                clicked => {
+                    root.theme-delete-confirming = false;
+                    root.theme-delete(root.draft-theme-id);
+                }
+            }
+
+            if (!root.draft-theme-new && root.theme-delete-confirming) : SettingsActionButton {
+                x: parent.width - 60px;
+                y: 14px;
+                icon: @image-url("../assets/icons/x.svg");
+                label: "No";
+                clicked => { root.theme-delete-confirming = false; }
+            }
         }
 
         if (root.active-tab == 2) : Rectangle {
