@@ -3161,15 +3161,48 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
     let disable_models = models.clone();
     ui.on_batch_disable(move || {
         if let Some(ui) = disable_ui.upgrade() {
-            for addon in disable_models
+            let selected_folders = disable_models
                 .all
-                .borrow_mut()
-                .iter_mut()
+                .borrow()
+                .iter()
                 .filter(|addon| addon.selected)
-            {
-                addon.disabled = true;
+                .map(|addon| addon.folder_name.to_string())
+                .collect::<Vec<_>>();
+
+            let mut changed = 0usize;
+            let mut failed = Vec::new();
+            for folder_name in selected_folders {
+                if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+                    match set_addon_disabled_on_disk(&addons_root, &folder_name, true) {
+                        Ok(()) => {
+                            with_master_addon_mut(&disable_models, &folder_name, |addon| {
+                                mark_addon_disabled(addon, true);
+                            });
+                            changed += 1;
+                        }
+                        Err(error) => failed.push(format!("{folder_name}: {error}")),
+                    }
+                } else {
+                    with_master_addon_mut(&disable_models, &folder_name, |addon| {
+                        mark_addon_disabled(addon, true);
+                    });
+                    changed += 1;
+                }
             }
+
             apply_addon_view(&ui, &disable_models);
+            if failed.is_empty() {
+                ui.set_status_error_message(format!("Disabled {changed} selected addons.").into());
+            } else {
+                ui.set_status_error_message(
+                    format!(
+                        "Disabled {changed} selected addons; {} failed: {}",
+                        failed.len(),
+                        failed.join("; ")
+                    )
+                    .into(),
+                );
+            }
         }
     });
 
@@ -3210,8 +3243,44 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
     let remove_ui = ui.as_weak();
     ui.on_batch_remove(move || {
         if let Some(ui) = remove_ui.upgrade() {
-            models.all.borrow_mut().retain(|addon| !addon.selected);
+            let selected_folders = models
+                .all
+                .borrow()
+                .iter()
+                .filter(|addon| addon.selected)
+                .map(|addon| addon.folder_name.to_string())
+                .collect::<Vec<_>>();
+
+            let mut removed = 0usize;
+            let mut failed = Vec::new();
+            for folder_name in selected_folders {
+                if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+                    match remove_addon_from_disk(&addons_root, &folder_name) {
+                        Ok(()) => {
+                            remove_master_addon(&models, &folder_name);
+                            removed += 1;
+                        }
+                        Err(error) => failed.push(format!("{folder_name}: {error}")),
+                    }
+                } else {
+                    remove_master_addon(&models, &folder_name);
+                    removed += 1;
+                }
+            }
+
             apply_addon_view(&ui, &models);
+            if failed.is_empty() {
+                ui.set_status_error_message(format!("Removed {removed} selected addons.").into());
+            } else {
+                ui.set_status_error_message(
+                    format!(
+                        "Removed {removed} selected addons; {} failed: {}",
+                        failed.len(),
+                        failed.join("; ")
+                    )
+                    .into(),
+                );
+            }
         }
     });
 }
@@ -3271,7 +3340,18 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         };
         let folder_name = addon.folder_name.to_string();
-        addon.disabled = !addon.disabled;
+        let next_disabled = !addon.disabled;
+        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+            match set_addon_disabled_on_disk(&addons_root, &folder_name, next_disabled) {
+                Ok(()) => {}
+                Err(error) => {
+                    ui.set_status_error_message(error.into());
+                    return;
+                }
+            }
+        }
+
+        mark_addon_disabled(&mut addon, next_disabled);
         update_master_addon(&disable_models, &folder_name, addon);
         apply_addon_view(&ui, &disable_models);
     });
@@ -3285,6 +3365,16 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         };
         let folder_name = addon.folder_name.to_string();
+        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+            match remove_addon_from_disk(&addons_root, &folder_name) {
+                Ok(()) => {}
+                Err(error) => {
+                    ui.set_status_error_message(error.into());
+                    return;
+                }
+            }
+        }
+
         remove_master_addon(&models, &folder_name);
         apply_addon_view(&ui, &models);
     });
@@ -3408,8 +3498,19 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         };
 
-        addon.disabled = !addon.disabled;
         let folder_name = addon.folder_name.to_string();
+        let next_disabled = !addon.disabled;
+        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+            match set_addon_disabled_on_disk(&addons_root, &folder_name, next_disabled) {
+                Ok(()) => {}
+                Err(error) => {
+                    ui.set_status_error_message(error.into());
+                    return;
+                }
+            }
+        }
+
+        mark_addon_disabled(&mut addon, next_disabled);
         toggle_models.visible.set_row_data(index, addon.clone());
         update_master_addon(&toggle_models, &folder_name, addon);
         apply_addon_view(&ui, &toggle_models);
@@ -3428,6 +3529,16 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         let folder_name = addon.folder_name.to_string();
+        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+            match remove_addon_from_disk(&addons_root, &folder_name) {
+                Ok(()) => {}
+                Err(error) => {
+                    ui.set_status_error_message(error.into());
+                    return;
+                }
+            }
+        }
+
         remove_master_addon(&remove_models, &folder_name);
         apply_addon_view(&ui, &remove_models);
     });
@@ -4202,6 +4313,83 @@ fn remove_master_addon(models: &AddonModels, folder_name: &str) {
         .all
         .borrow_mut()
         .retain(|addon| addon.folder_name.as_str() != folder_name);
+}
+
+fn validate_addon_folder_name(folder_name: &str) -> Result<(), String> {
+    if folder_name.is_empty()
+        || folder_name.contains("..")
+        || folder_name.contains('/')
+        || folder_name.contains('\\')
+    {
+        return Err("Invalid addon folder name.".to_string());
+    }
+    Ok(())
+}
+
+fn set_addon_disabled_on_disk(
+    addons_root: &Path,
+    folder_name: &str,
+    disabled: bool,
+) -> Result<(), String> {
+    validate_addon_folder_name(folder_name)?;
+    if disabled {
+        let src = addons_root.join(folder_name);
+        if !src.is_dir() {
+            return Err(format!("Addon folder not found: {folder_name}"));
+        }
+        let dst = addons_root.join(format!("{folder_name}.disabled"));
+        if dst.exists() {
+            return Err(format!("{folder_name} is already disabled."));
+        }
+        fs::rename(&src, &dst).map_err(|error| format!("Failed to disable {folder_name}: {error}"))
+    } else {
+        let src = addons_root.join(format!("{folder_name}.disabled"));
+        if !src.is_dir() {
+            return Err(format!("Disabled addon folder not found: {folder_name}"));
+        }
+        let dst = addons_root.join(folder_name);
+        if dst.exists() {
+            return Err(format!("A folder named {folder_name} already exists."));
+        }
+        fs::rename(&src, &dst).map_err(|error| format!("Failed to enable {folder_name}: {error}"))
+    }
+}
+
+fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), String> {
+    validate_addon_folder_name(folder_name)?;
+
+    let enabled_exists = addons_root.join(folder_name).is_dir();
+    let disabled_name = format!("{folder_name}.disabled");
+    let disabled_exists = addons_root.join(&disabled_name).is_dir();
+
+    if enabled_exists {
+        installer::remove_addon(addons_root, folder_name)?;
+    }
+    if disabled_exists {
+        installer::remove_addon(addons_root, &disabled_name)?;
+    }
+    if !enabled_exists && !disabled_exists {
+        return Err(format!("Addon folder not found: {folder_name}"));
+    }
+
+    let mut store = metadata::load_metadata(addons_root);
+    metadata::remove_entry(&mut store, folder_name);
+    metadata::save_metadata(addons_root, &store)
+}
+
+fn disk_root_for_addon(folder_name: &str) -> Option<PathBuf> {
+    configured_addons_path().filter(|root| resolve_addon_disk_path(root, folder_name).is_some())
+}
+
+fn mark_addon_disabled(entry: &mut AddonEntry, disabled: bool) {
+    entry.disabled = disabled;
+    if disabled {
+        entry.badge3 = "Disabled".into();
+        entry.badge3_kind = 5;
+    } else if entry.badge3.as_str() == "Disabled" {
+        entry.badge3 = "".into();
+        entry.badge3_kind = 0;
+    }
 }
 
 fn updated_dependency_model(
@@ -8785,6 +8973,58 @@ mod tests {
         assert!(addon_file_path(&root, "DisabledAddon", "DisabledAddon.lua")
             .expect("resolve disabled addon file")
             .ends_with("DisabledAddon.lua"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_disable_enable_renames_real_addon_folder() {
+        let root = test_temp_dir("native-disable-enable");
+        let addon_dir = root.join("ToggleAddon");
+        fs::create_dir_all(&addon_dir).expect("create addon folder");
+        fs::write(addon_dir.join("ToggleAddon.txt"), "## Title: Toggle Addon\n")
+            .expect("write manifest");
+
+        set_addon_disabled_on_disk(root, "ToggleAddon", true).expect("disable addon");
+        assert!(!root.join("ToggleAddon").exists());
+        assert!(root.join("ToggleAddon.disabled").is_dir());
+
+        set_addon_disabled_on_disk(root, "ToggleAddon", false).expect("enable addon");
+        assert!(root.join("ToggleAddon").is_dir());
+        assert!(!root.join("ToggleAddon.disabled").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_disable_enable_rejects_invalid_folder_names() {
+        let root = test_temp_dir("native-disable-invalid");
+        fs::create_dir_all(root).expect("create root");
+
+        assert!(set_addon_disabled_on_disk(root, "../Bad", true).is_err());
+        assert!(set_addon_disabled_on_disk(root, "Bad/Name", true).is_err());
+        assert!(remove_addon_from_disk(root, "Bad\\Name").is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_remove_deletes_enabled_and_disabled_copies_and_metadata() {
+        let root = test_temp_dir("native-remove-addon");
+        fs::create_dir_all(root.join("DuplicateAddon")).expect("create enabled addon");
+        fs::create_dir_all(root.join("DuplicateAddon.disabled")).expect("create disabled addon");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install(&mut store, "DuplicateAddon", 1360, "1.0", "https://example.test");
+        metadata::save_metadata(root, &store).expect("save metadata");
+
+        remove_addon_from_disk(root, "DuplicateAddon").expect("remove addon");
+
+        assert!(!root.join("DuplicateAddon").exists());
+        assert!(!root.join("DuplicateAddon.disabled").exists());
+        assert!(!metadata::load_metadata(root)
+            .addons
+            .contains_key("DuplicateAddon"));
 
         let _ = fs::remove_dir_all(root);
     }

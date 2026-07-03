@@ -102,13 +102,15 @@ Current row status:
   show native empty states instead of indexing a missing detail row.
 - Row selection checkboxes now mutate `AddonEntry.selected` state, preserve that
   state through search/filter/sort rebuilds, and switch the native header into a
-  batch action strip. Batch update/disable/tag/remove/clear are in-memory model
-  actions only; production still needs the real backend command and confirmation
-  paths.
+  batch action strip. Batch disable and remove now use the real AddOns folder
+  rename/delete paths when a row is backed by disk, then fall back to in-memory
+  prototype behavior for mock rows. Batch update/tag/clear remain native model
+  actions pending the production update and tag persistence paths.
 - Rows now expose a native right-click context menu with Open Folder, View on
-  ESOUI, Favorite/Unfavorite, Enable/Disable, and Remove actions. The actions are
-  wired to the prototype model/open helpers; the menu is currently Slint/native
-  menu styled, not the custom React glass context-menu surface.
+  ESOUI, Favorite/Unfavorite, Enable/Disable, and Remove actions. Enable/disable
+  and remove use the same real folder operations as the detail footer for
+  disk-backed rows. The menu is currently Slint/native menu styled, not the
+  custom React glass context-menu surface.
 - The installed list now has a native `FocusScope` for ArrowUp/ArrowDown,
   Home/End, and Space-to-toggle-selection keyboard handling. Auto-scrolling the
   selected row into view and full ARIA/focus-ring parity remain open.
@@ -170,19 +172,20 @@ Current detail status:
   can read/write real files when launched with `KALPA_ADDONS_PATH=<AddOns path>`;
   production still needs shared backend command wiring and CodeMirror-level
   syntax highlighting parity.
-- The detail action footer now has the React divider and native model actions:
-  enable/disable toggles the selected addon's model state, and remove deletes the
-  selected mock row in memory only. Production remove still needs the backend
-  command/confirmation flow.
+- The detail action footer now has the React divider and native actions:
+  enable/disable renames disk-backed addon folders to and from `.disabled`, and
+  remove deletes enabled/disabled copies plus Kalpa metadata. Mock rows still
+  use in-memory behavior so the prototype works without a local ESO folder.
 - `View on ESOUI` now opens the selected addon's ESOUI URL from the native
   prototype.
 - The sidebar `My Addons / Discover` switch is now stateful. Discover mode has
   native search/popular/category/url sub-tabs backed by a `DiscoverEntry` model,
   editable native search and URL inputs, clickable result rows, selected-row
-  detail state, install/reinstall state, and `View on ESOUI` actions. Search and
-  URL currently resolve against prototype data; production Discover still needs
-  network/search/detail payloads, screenshots, and backend install/remove command
-  wiring before the right pane can be accepted.
+  detail state, install/reinstall state, and `View on ESOUI` actions. Search,
+  popular, category, and URL/ID flows now load ESOUI data, hydrate details in the
+  background, and install addons through the shared download/extract/hash/metadata
+  path. Remaining Discover gaps are category selection controls, sort/pagination,
+  loading/error polish, screenshots/gallery parity, and remove/update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
   the reference Browse, Create details, Create addons, and install-detail flows.
   The flow is still prototype-data backed; production needs real pack storage,
@@ -198,7 +201,7 @@ Current detail status:
   current pass is static/prototype data for visual fidelity; production still
   needs real backup discovery, create/restore/delete/show-folder command wiring,
   ESO-running guards, and failure states.
-- Detail dependency install/remove affordances now mutate the selected addon's
+- Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.
 - Detail body still needs conflict/update banners, production-store wiring,
