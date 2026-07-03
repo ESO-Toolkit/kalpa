@@ -314,9 +314,11 @@ Current detail status:
   by real ESO log discovery. Manual mode lists recent combat logs from the
   production Logs folder, streams the selected file for bounded-memory preflight
   counts, and previews recent fights without loading the whole log into memory.
-  Upload and Live Logging still hand off to the signed WebView uploader flow
-  until the report/session transport is ported natively; the native surface is
-  intentionally honest about that route instead of showing fake progress.
+  Upload and Live Logging now launch the external Archon App / ESO Logs uploader
+  directly from the native shell instead of reopening the WebView uploader flow.
+  Remaining gaps are direct in-app ESO Logs upload/session login, progress and
+  history reporting, rich upload options, split-workbench parity, and native
+  live-stream timeline events.
 - Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.

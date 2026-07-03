@@ -8706,7 +8706,7 @@ component UploaderOverlay inherits Rectangle {
                     background: Palette.emerald-04;
 
                     Image { x: 14px; y: 15px; width: 16px; height: 16px; source: @image-url("../assets/icons/check.svg"); image-fit: contain; colorize: Palette.emerald; }
-                    Text { x: 42px; y: 12px; width: parent.width - 56px; text: "Native live transport is not fully wired in this shell yet."; color: Palette.foreground; font-size: 12px; font-weight: 850; overflow: elide; }
+                    Text { x: 42px; y: 12px; width: parent.width - 56px; text: "Live logging launched without reopening the WebView shell."; color: Palette.foreground; font-size: 12px; font-weight: 850; overflow: elide; }
                 }
 
                 DetailSectionTitle { x: 20px; y: root.live-running ? 164px : 112px; width: parent.width - 40px; label: root.live-running ? "LIVE FIGHTS" : "READINESS"; }
@@ -8714,7 +8714,7 @@ component UploaderOverlay inherits Rectangle {
                 if (!root.live-running) : UploaderFightRow { x: 20px; y: 142px; width: parent.width - 40px; title: "ESO Logs session"; meta: root.route-label; result: "CHECK"; live: true; }
                 if (!root.live-running) : UploaderFightRow { x: 20px; y: 184px; width: parent.width - 40px; title: "Combat log watcher"; meta: root.logs-summary; result: "READY"; live: true; }
 
-                if (root.live-running) : UploaderFightRow { x: 20px; y: 194px; width: parent.width - 40px; title: "Native uploader"; meta: "Transport and session streaming still need Tauri backend wiring."; result: "PENDING"; live: true; }
+                if (root.live-running) : UploaderFightRow { x: 20px; y: 194px; width: parent.width - 40px; title: "ESO Logs uploader"; meta: root.live-detail; result: "RUNNING"; live: true; }
                 if (root.live-running) : UploaderFightRow { x: 20px; y: 236px; width: parent.width - 40px; title: "Current log"; meta: root.live-log-label; result: "WATCH"; live: true; }
             }
         }

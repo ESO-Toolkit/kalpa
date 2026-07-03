@@ -6438,7 +6438,7 @@ fn apply_native_uploader_preflight(
                 )
             } else {
                 format!(
-                    "{} completed fight{} across {session_label}. Upload transport hands off to the full signed WebView uploader until the native transport is ported.",
+                    "{} completed fight{} across {session_label}. Upload launches the external ESO Logs uploader from the native Slint shell, so Kalpa does not reopen the WebView for this flow.",
                     preflight.total_fights,
                     if preflight.total_fights == 1 { "" } else { "s" }
                 )
@@ -6495,6 +6495,101 @@ fn format_duration_ms(ms: u64) -> String {
     }
 }
 
+const OFFICIAL_UPLOADER_PRODUCTS: [(&str, &str); 3] = [
+    ("Archon App", "Archon App.exe"),
+    ("ESO Logs Uploader", "ESO Logs Uploader.exe"),
+    ("Archon", "Archon.exe"),
+];
+
+fn official_uploader_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+        if let Some(base) = std::env::var_os(var).map(PathBuf::from) {
+            roots.push(base.join("Programs"));
+            roots.push(base);
+        }
+    }
+    roots
+}
+
+fn official_uploader_candidates_from_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    OFFICIAL_UPLOADER_PRODUCTS
+        .iter()
+        .flat_map(|(dir, exe)| roots.iter().map(move |root| root.join(dir).join(exe)))
+        .collect()
+}
+
+fn find_official_uploader() -> Option<PathBuf> {
+    official_uploader_candidates_from_roots(&official_uploader_roots())
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn launch_external_uploader(log_path: &Path, live: bool) -> Result<String, String> {
+    if !log_path.is_file() {
+        return Err("Selected log file was not found.".to_string());
+    }
+
+    if let Some(exe) = find_official_uploader() {
+        let mut command = std::process::Command::new(&exe);
+        if live {
+            let Some(log_dir) = log_path.parent() else {
+                return Err("Could not resolve the log folder for live logging.".to_string());
+            };
+            command
+                .arg("--operation-name")
+                .arg("liveLog")
+                .arg("--directory-path")
+                .arg(log_dir)
+                .arg("--region")
+                .arg("1")
+                .arg("--guild")
+                .arg("null")
+                .arg("--report-visibility")
+                .arg("2")
+                .arg("--enable-real-time-uploading");
+        } else {
+            command
+                .arg("--operation-name")
+                .arg("uploadALog")
+                .arg("--file-path")
+                .arg(log_path)
+                .arg("--region")
+                .arg("1")
+                .arg("--guild")
+                .arg("null")
+                .arg("--report-visibility")
+                .arg("2");
+        }
+
+        command
+            .spawn()
+            .map_err(|error| format!("Failed to launch the external ESO Logs uploader: {error}"))?;
+        return Ok(if live {
+            "Live logging started in the external ESO Logs uploader. Kalpa stayed in the native Slint shell.".to_string()
+        } else {
+            "Opened the external ESO Logs uploader with the selected log. Kalpa stayed in the native Slint shell.".to_string()
+        });
+    }
+
+    if live {
+        open_url("https://www.esologs.com/client/download");
+        Err(
+            "The Archon App / ESO Logs uploader is not installed, so live logging cannot start yet. Opened the download page."
+                .to_string(),
+        )
+    } else {
+        if let Some(parent) = log_path.parent() {
+            open_path(parent);
+        }
+        open_url("https://www.esologs.com/client/download");
+        Ok(
+            "The Archon App / ESO Logs uploader is not installed. Opened the download page and the Logs folder."
+                .to_string(),
+        )
+    }
+}
+
 fn wire_uploader_actions(ui: &KalpaWindow) {
     let preflight_counter = Arc::new(AtomicU64::new(0));
 
@@ -6505,16 +6600,16 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
             return;
         };
         ui.set_uploader_route_label(
-            if ui.get_settings_official_uploader() {
-                "Official ESO Logs uploader"
+            if find_official_uploader().is_some() {
+                "Archon App handoff"
             } else {
-                "Full uploader handoff"
+                "Install uploader"
             }
             .into(),
         );
         ui.set_uploader_live_status_label("Ready".into());
         ui.set_uploader_live_detail(
-            "Native Slint can inspect logs here; Upload and Go Live open the full signed uploader flow until transport parity is complete."
+            "Upload and Go Live launch the external ESO Logs uploader directly, without reopening the WebView shell."
                 .into(),
         );
         refresh_native_uploader(&ui, open_counter.clone());
@@ -6557,15 +6652,36 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
         let Some(ui) = upload_ui.upgrade() else {
             return;
         };
-        match return_to_webview_shell(false, true, false, None) {
-            Ok(()) => {
-                ui.set_uploader_status_title("Opening full uploader...".into());
-                let _ = slint::quit_event_loop();
-            }
-            Err(error) => ui.set_status_error_message(
-                format!("Failed to open the full uploader flow: {error}").into(),
-            ),
-        }
+        let Some(path) = selected_uploader_path(&ui) else {
+            ui.set_status_error_message("Select a log before uploading.".into());
+            return;
+        };
+        ui.set_uploader_view(1);
+        ui.set_uploader_status_title("Opening uploader...".into());
+        ui.set_uploader_status_detail(
+            "Launching the external ESO Logs uploader from the native Slint shell.".into(),
+        );
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = launch_external_uploader(Path::new(&path), false);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                ui.set_uploader_view(0);
+                match result {
+                    Ok(detail) => {
+                        ui.set_uploader_status_title("Uploader opened".into());
+                        ui.set_uploader_status_detail(detail.into());
+                    }
+                    Err(error) => {
+                        ui.set_uploader_status_title("Upload could not start".into());
+                        ui.set_uploader_status_detail(error.clone().into());
+                        ui.set_status_error_message(error.into());
+                    }
+                }
+            });
+        });
     });
 
     let live_ui = ui.as_weak();
@@ -6576,18 +6692,43 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
         if ui.get_uploader_view() == 3 {
             ui.set_uploader_view(2);
             ui.set_uploader_live_status_label("Ready".into());
+            ui.set_uploader_live_detail("Live handoff stopped in Kalpa. If the external uploader is still streaming, stop it there too.".into());
             return;
         }
-        match return_to_webview_shell(false, true, false, None) {
-            Ok(()) => {
-                ui.set_uploader_view(3);
-                ui.set_uploader_live_status_label("Opening full uploader".into());
-                let _ = slint::quit_event_loop();
-            }
-            Err(error) => ui.set_status_error_message(
-                format!("Failed to open the full live uploader flow: {error}").into(),
-            ),
-        }
+        let Some(path) = selected_uploader_path(&ui) else {
+            ui.set_status_error_message(
+                "Select Encounter.log or refresh after enabling /encounterlog.".into(),
+            );
+            return;
+        };
+        ui.set_uploader_view(3);
+        ui.set_uploader_live_status_label("Starting".into());
+        ui.set_uploader_live_detail(
+            "Launching the external ESO Logs live uploader without leaving the native shell."
+                .into(),
+        );
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = launch_external_uploader(Path::new(&path), true);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(detail) => {
+                        ui.set_uploader_view(3);
+                        ui.set_uploader_live_status_label("Live handoff".into());
+                        ui.set_uploader_live_detail(detail.into());
+                    }
+                    Err(error) => {
+                        ui.set_uploader_view(2);
+                        ui.set_uploader_live_status_label("Ready".into());
+                        ui.set_uploader_live_detail(error.clone().into());
+                        ui.set_status_error_message(error.into());
+                    }
+                }
+            });
+        });
     });
 }
 
@@ -16896,6 +17037,32 @@ mod tests {
         assert!(!preflight.truncated);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn official_uploader_candidates_prefer_archon_app() {
+        let roots = [
+            PathBuf::from("C:/Program Files"),
+            PathBuf::from("C:/Users/me/AppData/Local/Programs"),
+        ];
+        let candidates = official_uploader_candidates_from_roots(&roots)
+            .into_iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>();
+
+        let archon = candidates
+            .iter()
+            .position(|path| path.ends_with("Archon App/Archon App.exe"))
+            .expect("Archon App candidate is present");
+        let legacy = candidates
+            .iter()
+            .position(|path| path.ends_with("ESO Logs Uploader/ESO Logs Uploader.exe"))
+            .expect("legacy uploader candidate is present");
+
+        assert!(
+            archon < legacy,
+            "Archon App should be preferred: {candidates:?}"
+        );
     }
 
     #[test]
