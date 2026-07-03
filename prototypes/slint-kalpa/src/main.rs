@@ -63,6 +63,15 @@ struct CatalogTheme {
     skin_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedCustomTheme {
+    name: Option<String>,
+    description: Option<String>,
+    colors: ThemeSeed,
+    skin_id: Option<String>,
+}
+
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeCustomThemeStore {
@@ -2588,23 +2597,26 @@ fn upsert_custom_theme(custom_themes: &mut Vec<CatalogTheme>, mut theme: Catalog
 }
 
 fn parse_imported_custom_theme(json: &str) -> Option<CatalogTheme> {
-    serde_json::from_str::<CatalogTheme>(json)
-        .ok()
-        .and_then(|mut theme| {
-            theme.colors = normalize_theme_seed(&theme.colors)?;
-            if theme.id.trim().is_empty() {
-                theme.id = new_custom_theme_id();
-            }
-            if theme.name.trim().is_empty() {
-                theme.name = "Imported Theme".to_string();
-            }
-            if theme.description.trim().is_empty() {
-                theme.description = "Imported custom theme.".to_string();
-            }
-            theme.category = "Custom".to_string();
-            theme.skin_id = normalize_skin_id(theme.skin_id);
-            Some(theme)
-        })
+    let imported = serde_json::from_str::<ImportedCustomTheme>(json).ok()?;
+    let colors = normalize_theme_seed(&imported.colors)?;
+    let name = imported
+        .name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Imported Theme".to_string());
+    let description = imported
+        .description
+        .map(|description| description.trim().to_string())
+        .filter(|description| !description.is_empty())
+        .unwrap_or_else(|| "Imported custom theme.".to_string());
+    Some(CatalogTheme {
+        id: new_custom_theme_id(),
+        name,
+        category: "Custom".to_string(),
+        description,
+        colors,
+        skin_id: normalize_skin_id(imported.skin_id),
+    })
 }
 
 fn restore_active_theme_preview(ui: &KalpaWindow, custom_themes: &[CatalogTheme]) {
@@ -7092,9 +7104,16 @@ mod tests {
         let json = serde_json::to_string(&theme).expect("serialize sample theme");
         let imported = parse_imported_custom_theme(&json).expect("parse imported theme");
 
+        assert_ne!(imported.id, "imported-one");
+        assert_eq!(imported.name, "Imported One");
         assert_eq!(imported.colors.accent, "#AABBCC");
         assert_eq!(imported.category, "Custom");
         assert_eq!(imported.skin_id.as_deref(), Some("nordic-runestone"));
+
+        let colors_only = serde_json::json!({ "colors": theme.colors.clone() }).to_string();
+        let imported = parse_imported_custom_theme(&colors_only).expect("parse colors-only theme");
+        assert_eq!(imported.name, "Imported Theme");
+        assert_eq!(imported.description, "Imported custom theme.");
 
         let mut invalid = theme;
         invalid.colors.primary = "not-a-color".to_string();
