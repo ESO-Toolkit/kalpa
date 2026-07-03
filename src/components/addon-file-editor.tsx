@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { StreamLanguage } from "@codemirror/language";
 import { lua } from "@codemirror/legacy-modes/mode/lua";
@@ -26,11 +26,29 @@ function getExtension(path: string): string {
   return dot >= 0 ? path.slice(dot + 1).toLowerCase() : "";
 }
 
+// Hoist language instances to module scope so they keep a stable identity across
+// renders. Recreating them per render made @uiw/react-codemirror dispatch a full
+// StateEffect.reconfigure (and re-tokenize the whole document) on every keystroke.
+const LUA_LANG = StreamLanguage.define(lua);
+const XML_LANG = xml();
+
 function getLanguageExtension(ext: string) {
-  if (ext === "lua") return StreamLanguage.define(lua);
-  if (ext === "xml") return xml();
+  if (ext === "lua") return LUA_LANG;
+  if (ext === "xml") return XML_LANG;
   return undefined;
 }
+
+// Stable basicSetup identity — an inline object literal would also force a
+// reconfigure each render.
+const BASIC_SETUP = {
+  lineNumbers: true,
+  bracketMatching: true,
+  closeBrackets: true,
+  searchKeymap: true,
+  foldGutter: true,
+  highlightActiveLineGutter: true,
+  highlightActiveLine: true,
+} as const;
 
 export function AddonFileEditor({
   addonsPath,
@@ -102,6 +120,9 @@ export function AddonFileEditor({
   }, [originalContent]);
 
   const langExt = getLanguageExtension(ext);
+  // Stable extensions array identity per language so keystrokes don't reconfigure
+  // the editor.
+  const extensions = useMemo(() => (langExt ? [langExt] : []), [langExt]);
 
   if (loadState === "loading") {
     return (
@@ -186,17 +207,9 @@ export function AddonFileEditor({
           value={content ?? ""}
           onChange={editable ? setContent : undefined}
           theme={kalpaTheme}
-          extensions={langExt ? [langExt] : []}
+          extensions={extensions}
           readOnly={!editable}
-          basicSetup={{
-            lineNumbers: true,
-            bracketMatching: true,
-            closeBrackets: true,
-            searchKeymap: true,
-            foldGutter: true,
-            highlightActiveLineGutter: true,
-            highlightActiveLine: true,
-          }}
+          basicSetup={BASIC_SETUP}
           height="400px"
           className="text-xs"
         />

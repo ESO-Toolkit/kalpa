@@ -36,7 +36,18 @@ export function AppBackground() {
   // react-hooks/set-state-in-effect lint stays green.
   const [running, setRunning] = useState(isVisibleAndFocused);
   useEffect(() => {
-    const update = () => setRunning(isVisibleAndFocused());
+    // Drive the root `.app-hidden` class, which CSS uses to pause every
+    // animation under the background AND the dialog-header shimmer while the
+    // window is hidden (tray/minimized). That class tracks visibility only —
+    // not focus — so a visible-but-unfocused window keeps the shimmer alive;
+    // the orbs still pause via the focus-aware inline state below.
+    const syncHidden = () =>
+      document.documentElement.classList.toggle("app-hidden", document.hidden);
+    const update = () => {
+      setRunning(isVisibleAndFocused());
+      syncHidden();
+    };
+    syncHidden(); // set the class from the current state without a mount setState
     window.addEventListener("focus", update);
     window.addEventListener("blur", update);
     document.addEventListener("visibilitychange", update);
@@ -44,6 +55,7 @@ export function AppBackground() {
       window.removeEventListener("focus", update);
       window.removeEventListener("blur", update);
       document.removeEventListener("visibilitychange", update);
+      document.documentElement.classList.remove("app-hidden");
     };
   }, []);
   const animationPlayState = running ? "running" : "paused";
@@ -53,7 +65,7 @@ export function AppBackground() {
   const willChange = running ? "transform" : "auto";
 
   return (
-    <div className="fixed inset-0 -z-10 overflow-hidden bg-bg-base">
+    <div data-slot="app-background" className="fixed inset-0 -z-10 overflow-hidden bg-bg-base">
       {/* Material texture (art themes only; "none" by default) */}
       <div
         className="absolute inset-0"

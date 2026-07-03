@@ -217,6 +217,20 @@ describe("resolveEffectiveField — metadata", () => {
     expect(field.nodeId).toBe("MyAddon\0section\0setting");
   });
 
+  it("exposes raw (unescaped) path segments equal to the input", () => {
+    const path = ["MyAddon", "section", "setting"];
+    const field = resolve({ key: "setting", valueType: "string", value: "val" }, { path });
+    expect(field.path).toEqual(path);
+  });
+
+  it("keeps path unescaped even for keys containing '/' and NUL", () => {
+    const path = ["MyAddon", "a/b", "seg\0ment"];
+    const field = resolve({ key: "seg\0ment", valueType: "string", value: "val" }, { path });
+    // path is the raw segments (not split on "/" or escaped like nodeId)
+    expect(field.path).toEqual(path);
+    expect(field.nodeId).toBe("MyAddon\0a/b\0seg\\0ment");
+  });
+
   it("humanizes key for label when no overlay", () => {
     const field = resolve({ key: "showTooltip", valueType: "boolean", value: true });
     expect(field.label).toBe("Show Tooltip");

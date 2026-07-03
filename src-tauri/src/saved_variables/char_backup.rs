@@ -580,9 +580,21 @@ fn validate_merge(buf: &[u8], block: &CharBlock) -> Result<(), String> {
     if !round_trips {
         return Err("merge did not round-trip the character subtree".to_string());
     }
-    if let Ok(s) = std::str::from_utf8(buf) {
-        super::parser::parse_sv_file(s, "merged.lua")
-            .map_err(|e| format!("merge produced invalid Lua: {e}"))?;
+    // Full re-parse as a final structural confirmation — but only up to the
+    // editor's 20 MB cap. `parse_sv_file` builds a complete `SvTreeNode` tree
+    // (roughly 10x the source size), so on a large merged buffer (e.g. splicing
+    // into a 200 MB live SavedVariables file) that transient allocation would
+    // dwarf the merge itself, once per merged block. Above the cap we rely on the
+    // two structural validators already run above — balanced braces plus a
+    // byte-exact round-trip extraction of the spliced subtree — which together
+    // catch a malformed splice. The full parse is a belt-and-braces check that
+    // only pays for itself on files small enough to open in the editor anyway.
+    const MAX_PARSE_VALIDATE_BYTES: usize = 20 * 1024 * 1024; // matches io.rs editor cap
+    if buf.len() <= MAX_PARSE_VALIDATE_BYTES {
+        if let Ok(s) = std::str::from_utf8(buf) {
+            super::parser::parse_sv_file(s, "merged.lua")
+                .map_err(|e| format!("merge produced invalid Lua: {e}"))?;
+        }
     }
     Ok(())
 }

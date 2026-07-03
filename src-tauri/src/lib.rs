@@ -87,7 +87,11 @@ pub struct PendingUpdate {
     /// archive a second time. Empty only for entries created before this field
     /// existed or via paths that didn't compute it; the apply step falls back to
     /// hashing the ZIP in that case.
-    pub zip_hashes: HashMap<String, String>,
+    ///
+    /// Wrapped in `Arc` so cloning a `PendingUpdate` out of the pending map (and
+    /// the apply step's reuse of this map) is a refcount bump rather than a deep
+    /// copy of a many-entry hash map.
+    pub zip_hashes: Arc<HashMap<String, String>>,
 }
 
 pub struct PendingUpdates(pub Arc<Mutex<HashMap<String, PendingUpdate>>>);
