@@ -191,9 +191,12 @@ Current detail status:
   Browse now loads published packs from the public Pack Hub `/packs` endpoint
   into native cards with live title, author, type, tag, vote, and addon-count
   metadata, and selecting a pack hydrates the native detail/install addon rows
-  from `/packs/{id}`. My Packs, Create/Edit, share/import links, voting, actual
-  install execution, and account/session wiring still need production parity
-  before this can replace the React Pack Hub implementation.
+  from `/packs/{id}`. The install footer now installs missing pack addons
+  through the native ESOUI download/extract/hash/metadata path, but still lacks
+  the React batch-progress UI, transitive dependency pass, installed-pack
+  library tracking, and install-count tracking. My Packs, Create/Edit,
+  share/import links, voting, and account/session wiring still need production
+  parity before this can replace the React Pack Hub implementation.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,

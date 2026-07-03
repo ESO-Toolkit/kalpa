@@ -4922,6 +4922,7 @@ component PackHubOverlay inherits Rectangle {
     in property <string> install-label: "Install Addons";
     in-out property <int> selected-pack-index: 0;
     callback open-detail(int);
+    callback install-detail;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
@@ -5105,7 +5106,7 @@ component PackHubOverlay inherits Rectangle {
                 background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 70%, #00000000 100%);
 
                 PackHubButton { x: parent.width - 302px; y: 18px; width: 74px; icon: @image-url("../assets/icons/arrow-left.svg"); label: "Back"; clicked => { root.view = 0; } }
-                PackHubButton { x: parent.width - 218px; y: 18px; width: 194px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: root.install-label; primary: true; disabled: root.detail-addons.length == 0; }
+                PackHubButton { x: parent.width - 218px; y: 18px; width: 194px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: root.install-label; primary: true; disabled: root.detail-addons.length == 0 || root.install-label == "All Addons Installed"; clicked => { root.install-detail(); } }
             }
         }
     }
@@ -8901,6 +8902,7 @@ export component KalpaWindow inherits Window {
     callback discover-url-edited(string);
     callback open-pack-hub;
     callback pack-hub-open-detail(int);
+    callback pack-hub-install-detail;
     callback open-uploader;
     callback open-svm;
     callback svm-refresh;
@@ -9143,6 +9145,7 @@ export component KalpaWindow inherits Window {
             install-label: root.pack-hub-install-label;
             selected-pack-index <=> root.pack-hub-selected-index;
             open-detail(index) => { root.pack-hub-open-detail(index); }
+            install-detail => { root.pack-hub-install-detail(); }
         }
 
         if (root.svm-open) : SavedVariablesOverlay {

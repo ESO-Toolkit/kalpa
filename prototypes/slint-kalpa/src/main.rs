@@ -188,6 +188,15 @@ struct NativePackDetailData {
     addons: Vec<PackHubAddonEntry>,
 }
 
+#[derive(Debug, Clone)]
+struct NativePackInstallResult {
+    rows: Vec<PackHubAddonEntry>,
+    installed: usize,
+    failed: usize,
+    folders: usize,
+    errors: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct NativeImportResult {
     installed: Vec<String>,
@@ -2354,6 +2363,52 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         });
     });
 
+    let pack_install_ui = ui.as_weak();
+    ui.on_pack_hub_install_detail(move || {
+        let Some(ui) = pack_install_ui.upgrade() else {
+            return;
+        };
+
+        let rows = pack_hub_detail_addons(&ui);
+        let pending = rows.iter().filter(|row| !row.installed).count();
+        if pending == 0 {
+            ui.set_status_error_message("All addons in this pack are already installed.".into());
+            return;
+        }
+
+        let addons_dir = match configured_addons_path() {
+            Some(path) => path,
+            None => {
+                ui.set_status_error_message(
+                    "Configure the ESO AddOns folder before installing from Pack Hub.".into(),
+                );
+                return;
+            }
+        };
+
+        ui.set_pack_hub_install_label(format!("Installing {pending}...").into());
+        ui.set_status_error_message(format!("Installing {pending} Pack Hub addon(s)...").into());
+
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = install_pack_hub_addons_blocking(&addons_dir, rows);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                let summary = pack_hub_install_summary(&result);
+                let installed = result.installed;
+                apply_pack_hub_detail_model(&ui, result.rows);
+                if installed > 0 {
+                    ui.invoke_refresh_requested();
+                }
+
+                ui.set_status_error_message(summary.into());
+            });
+        });
+    });
+
     let svm_open_ui = ui.as_weak();
     let svm_open_models = models.clone();
     ui.on_open_svm(move || {
@@ -2633,6 +2688,90 @@ fn pack_hub_install_label(addons: &[PackHubAddonEntry]) -> String {
         1 => "Install 1 New Addon".to_string(),
         count => format!("Install {count} New Addons"),
     }
+}
+
+fn pack_hub_detail_addons(ui: &KalpaWindow) -> Vec<PackHubAddonEntry> {
+    let model = ui.get_pack_hub_detail_addons();
+    (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .collect()
+}
+
+fn install_pack_hub_addons_blocking(
+    addons_dir: &Path,
+    rows: Vec<PackHubAddonEntry>,
+) -> NativePackInstallResult {
+    let mut result = NativePackInstallResult {
+        rows: Vec::with_capacity(rows.len()),
+        installed: 0,
+        failed: 0,
+        folders: 0,
+        errors: Vec::new(),
+    };
+
+    for mut row in rows {
+        if row.installed {
+            result.rows.push(row);
+            continue;
+        }
+
+        match pack_hub_row_esoui_id(&row)
+            .and_then(|esoui_id| install_pack_hub_addon_blocking(addons_dir, esoui_id))
+        {
+            Ok(folders) => {
+                row.installed = true;
+                result.installed += 1;
+                result.folders += folders.len();
+            }
+            Err(error) => {
+                result.failed += 1;
+                result
+                    .errors
+                    .push(format!("{}: {error}", row.title.as_str()));
+            }
+        }
+
+        result.rows.push(row);
+    }
+
+    result
+}
+
+fn pack_hub_row_esoui_id(row: &PackHubAddonEntry) -> Result<u32, String> {
+    let id = row.esoui_id.as_str().trim().trim_start_matches('#').trim();
+    id.parse::<u32>()
+        .map_err(|_| format!("Invalid ESOUI id {}", row.esoui_id.as_str()))
+}
+
+fn install_pack_hub_addon_blocking(
+    addons_dir: &Path,
+    esoui_id: u32,
+) -> Result<Vec<String>, String> {
+    let detail = esoui::fetch_addon_detail(esoui_id)?;
+    let expected_md5 = (!detail.md5.trim().is_empty()).then_some(detail.md5.as_str());
+    let tmp_file = esoui::download_addon(&detail.download_url, expected_md5)?;
+    install_discover_download_blocking(addons_dir, tmp_file.path(), &detail)
+}
+
+fn pack_hub_install_summary(result: &NativePackInstallResult) -> String {
+    if result.failed == 0 {
+        return format!(
+            "Installed {} Pack Hub addon{} ({} folder{} added).",
+            result.installed,
+            if result.installed == 1 { "" } else { "s" },
+            result.folders,
+            if result.folders == 1 { "" } else { "s" },
+        );
+    }
+
+    let first_error = result.errors.first().cloned().unwrap_or_default();
+    format!(
+        "Installed {} Pack Hub addon{}, {} failed. {}",
+        result.installed,
+        if result.installed == 1 { "" } else { "s" },
+        result.failed,
+        first_error
+    )
 }
 
 fn addon_count_label(count: usize) -> String {
@@ -10168,6 +10307,20 @@ CombatMetrics_SavedVariables = {
         }
     }
 
+    fn sample_pack_hub_addon_row(
+        title: &str,
+        esoui_id: &str,
+        installed: bool,
+    ) -> PackHubAddonEntry {
+        PackHubAddonEntry {
+            title: title.into(),
+            esoui_id: esoui_id.into(),
+            required: true,
+            installed,
+            note: "".into(),
+        }
+    }
+
     #[test]
     fn discover_tabs_have_model_backed_rows() {
         let installed = BTreeSet::new();
@@ -10249,6 +10402,34 @@ CombatMetrics_SavedVariables = {
             pack_hub_install_label(&detail.addons),
             "Install 1 New Addon"
         );
+    }
+
+    #[test]
+    fn pack_hub_install_helpers_parse_ids_and_summarize_results() {
+        let installed = sample_pack_hub_addon_row("Addon Selector", "#1161", true);
+        let missing = sample_pack_hub_addon_row("Combat Metrics", "1360", false);
+
+        assert_eq!(pack_hub_row_esoui_id(&installed).unwrap(), 1161);
+        assert_eq!(pack_hub_row_esoui_id(&missing).unwrap(), 1360);
+        assert_eq!(
+            pack_hub_install_label(&[installed.clone(), missing.clone()]),
+            "Install 1 New Addon"
+        );
+        assert_eq!(
+            pack_hub_install_label(&[installed.clone()]),
+            "All Addons Installed"
+        );
+
+        let summary = pack_hub_install_summary(&NativePackInstallResult {
+            rows: vec![installed, missing],
+            installed: 1,
+            failed: 1,
+            folders: 2,
+            errors: vec!["Combat Metrics: download failed".to_string()],
+        });
+
+        assert!(summary.contains("Installed 1 Pack Hub addon, 1 failed."));
+        assert!(summary.contains("Combat Metrics: download failed"));
     }
 
     #[test]
