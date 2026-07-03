@@ -5739,8 +5739,9 @@ component PackHubInstallRow inherits Rectangle {
     in property <bool> required: true;
     in property <bool> installed: false;
     in property <bool> selected: true;
+    in property <bool> selection-enabled: true;
     callback selection-toggled;
-    private property <bool> selectable: !root.required && !root.installed;
+    private property <bool> selectable: root.selection-enabled && !root.required && !root.installed;
     private property <bool> active-selection: root.required || root.selected || root.installed;
     height: 47px;
     border-radius: 9px;
@@ -5798,7 +5799,7 @@ component PackHubInstallRow inherits Rectangle {
         y: 0px;
         width: 70px;
         height: parent.height;
-        text: root.required ? "REQUIRED" : (root.selected ? "OPTIONAL" : "SKIPPED");
+        text: root.required ? "REQUIRED" : (root.selection-enabled ? (root.selected ? "OPTIONAL" : "SKIPPED") : "OPTIONAL");
         color: root.required || root.selected ? Palette.gold : Palette.muted-half;
         font-size: 9px;
         font-weight: 900;
@@ -5859,6 +5860,7 @@ component PackHubBrowseView inherits Rectangle {
     in property <string> sort-label: "Votes";
     in property <bool> loading: false;
     in property <bool> has-more: false;
+    callback import-clicked;
     callback open-detail(int);
     callback query-edited(string);
     callback type-next;
@@ -5872,7 +5874,7 @@ component PackHubBrowseView inherits Rectangle {
         width: 82px;
         icon: @image-url("../assets/icons/clipboard-paste.svg");
         label: "Import";
-        disabled: true;
+        clicked => { root.import-clicked(); }
     }
 
     PackHubField {
@@ -6276,14 +6278,250 @@ component PackHubInstallView inherits Rectangle {
     }
 }
 
+component PackHubImportView inherits Rectangle {
+    in-out property <string> share-code;
+    in property <PackHubEntry> pack;
+    in property <[PackHubAddonEntry]> addons;
+    in property <bool> loading: false;
+    in property <string> message: "";
+    in property <string> install-label: "Install Addons";
+    callback back;
+    callback share-code-edited(string);
+    callback resolve-share-code;
+    callback clear-import;
+    callback install-import;
+    callback addon-selection-toggle(int);
+    background: #00000000;
+
+    if (root.addons.length == 0) : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000000;
+
+        Rectangle {
+            x: (parent.width - 54px) / 2;
+            y: 8px;
+            width: 54px;
+            height: 54px;
+            border-radius: 14px;
+            border-width: 0px;
+            background: Palette.white-04;
+
+            Image {
+                x: 16px;
+                y: 16px;
+                width: 22px;
+                height: 22px;
+                source: @image-url("../assets/icons/clipboard-paste.svg");
+                image-fit: contain;
+                colorize: Palette.gold;
+            }
+        }
+
+        Text {
+            x: 48px;
+            y: 78px;
+            width: parent.width - 96px;
+            text: "Import a shared pack";
+            color: Palette.foreground;
+            font-size: 16px;
+            font-weight: 900;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            x: 62px;
+            y: 104px;
+            width: parent.width - 124px;
+            text: "Enter a six-character Kalpa share code to preview and install the required addons.";
+            color: Palette.muted-half;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        Rectangle {
+            x: 42px;
+            y: 162px;
+            width: parent.width - 84px;
+            height: 74px;
+            border-radius: 12px;
+            border-width: 0px;
+            background: Palette.white-02;
+
+            PackHubField {
+                x: 14px;
+                y: 19px;
+                width: parent.width - 112px;
+                placeholder: "HK7M3P";
+                search: false;
+                focused: true;
+                editable: true;
+                value <=> root.share-code;
+                edited(value) => { root.share-code-edited(value); }
+            }
+
+            PackHubButton {
+                x: parent.width - 88px;
+                y: 21px;
+                width: 74px;
+                icon: @image-url("../assets/icons/search.svg");
+                label: root.loading ? "Wait" : "Find";
+                disabled: root.loading || root.share-code == "";
+                clicked => { root.resolve-share-code(); }
+            }
+        }
+
+        if (root.message != "") : Rectangle {
+            x: 42px;
+            y: 254px;
+            width: parent.width - 84px;
+            height: 76px;
+            border-radius: 12px;
+            border-width: 0px;
+            background: root.loading ? Palette.gold-04 : Palette.red-04;
+
+            Image {
+                x: 16px;
+                y: 29px;
+                width: 16px;
+                height: 16px;
+                source: root.loading ? @image-url("../assets/icons/refresh-cw.svg") : @image-url("../assets/icons/triangle-alert.svg");
+                image-fit: contain;
+                colorize: root.loading ? Palette.gold : Palette.red;
+            }
+
+            Text {
+                x: 44px;
+                y: 0px;
+                width: parent.width - 60px;
+                height: parent.height;
+                text: root.message;
+                color: root.loading ? Palette.gold : Palette.red;
+                font-size: 12px;
+                font-weight: 700;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+        }
+
+        PackHubButton {
+            x: 42px;
+            y: parent.height - 44px;
+            width: 78px;
+            icon: @image-url("../assets/icons/arrow-left.svg");
+            label: "Back";
+            clicked => { root.back(); }
+        }
+    }
+
+    if (root.addons.length > 0) : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000000;
+
+        Text {
+            x: 0px;
+            y: 0px;
+            width: parent.width - 96px;
+            text: root.pack.title;
+            color: Palette.foreground;
+            font-size: 15px;
+            font-weight: 900;
+            overflow: elide;
+        }
+
+        PackHubButton {
+            x: parent.width - 78px;
+            y: -4px;
+            width: 78px;
+            icon: @image-url("../assets/icons/x.svg");
+            label: "Clear";
+            clicked => { root.clear-import(); }
+        }
+
+        Text {
+            x: 0px;
+            y: 28px;
+            width: parent.width;
+            text: root.pack.description;
+            color: Palette.muted-strong;
+            font-size: 13px;
+            font-weight: 600;
+            overflow: elide;
+        }
+
+        Pill { x: 0px; y: 62px; label: root.pack.pack-type-label; tone: Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
+        Pill { x: 108px; y: 62px; label: root.pack.tag; tone: root.pack.trial ? Palette.red : Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
+        Text { x: 190px; y: 66px; width: parent.width - 190px; text: "shared by " + root.pack.author + " - " + root.pack.updated-label; color: Palette.muted-half; font-size: 11px; font-weight: 600; overflow: elide; }
+
+        DetailSectionTitle { x: 0px; y: 106px; width: parent.width; label: "ADDONS"; }
+        Text { x: parent.width - 176px; y: 106px; width: 176px; text: root.pack.addon-count; color: Palette.gold; font-size: 10px; font-weight: 800; horizontal-alignment: right; }
+
+        ScrollView {
+            x: 0px;
+            y: 136px;
+            width: parent.width;
+            height: parent.height - 194px;
+            viewport-width: self.width;
+            viewport-height: root.addons.length * 48px;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+            Rectangle {
+                width: parent.width;
+                height: root.addons.length * 48px;
+                background: #00000000;
+
+                for addon[index] in root.addons : PackHubInstallRow {
+                    x: 0px;
+                    y: index * 48px;
+                    width: parent.width;
+                    title: addon.title;
+                    esoui-id: addon.esoui-id;
+                    required: addon.required;
+                    installed: addon.installed;
+                    selected: addon.selected;
+                    selection-enabled: false;
+                    selection-toggled => { root.addon-selection-toggle(index); }
+                }
+            }
+        }
+
+        PackHubButton {
+            x: 0px;
+            y: parent.height - 38px;
+            width: 78px;
+            icon: @image-url("../assets/icons/arrow-left.svg");
+            label: "Back";
+            clicked => { root.back(); }
+        }
+
+        PackHubButton {
+            x: parent.width - 208px;
+            y: parent.height - 38px;
+            width: 208px;
+            icon: @image-url("../assets/icons/cloud-upload.svg");
+            label: root.install-label;
+            primary: true;
+            disabled: root.loading || root.install-label == "All Addons Installed" || root.install-label == "Select Addons to Install";
+            clicked => { root.install-import(); }
+        }
+    }
+}
+
 component PackHubOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
     in property <[PackHubEntry]> packs;
     in property <[PackHubAddonEntry]> detail-addons;
+    in property <PackHubEntry> import-pack;
+    in property <[PackHubAddonEntry]> import-addons;
     in property <[PackHubCreateAddonEntry]> create-installed-addons;
     in property <[PackHubCreateAddonEntry]> create-selected-addons;
     in-out property <string> browse-query;
+    in-out property <string> import-share-code;
     in-out property <string> create-title;
     in-out property <string> create-description;
     in-out property <int> create-pack-type: 0;
@@ -6295,12 +6533,20 @@ component PackHubOverlay inherits Rectangle {
     in property <bool> detail-loading: false;
     in property <string> detail-message: "";
     in property <string> install-label: "Install Addons";
+    in property <bool> import-loading: false;
+    in property <string> import-message: "";
+    in property <string> import-install-label: "Install Addons";
     in-out property <int> selected-pack-index: 0;
     callback open-detail(int);
     callback browse-query-edited(string);
     callback browse-type-next;
     callback browse-sort-next;
     callback browse-load-more;
+    callback import-share-code-edited(string);
+    callback import-resolve-share-code;
+    callback import-clear;
+    callback import-addon-selection-toggle(int);
+    callback import-install;
     callback create-filter-edited(string);
     callback create-addon-toggle(int);
     callback create-selected-remove(int);
@@ -6311,7 +6557,7 @@ component PackHubOverlay inherits Rectangle {
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
-    private property <length> modal-height: root.view == 0 ? 536px : (root.view == 3 ? 560px : min(root.height - 48px, 724px));
+    private property <length> modal-height: root.view == 0 ? 536px : (root.view == 3 ? 560px : (root.view == 5 ? 584px : min(root.height - 48px, 724px)));
 
     TouchArea {
         width: root.width;
@@ -6366,7 +6612,7 @@ component PackHubOverlay inherits Rectangle {
                 border-width: 0px;
                 background: Palette.white-03;
 
-                PackHubTabButton { x: 4px; y: 4px; width: (parent.width - 8px) / 3; label: "Browse"; active: root.view == 0; clicked => { root.view = 0; } }
+                PackHubTabButton { x: 4px; y: 4px; width: (parent.width - 8px) / 3; label: "Browse"; active: root.view == 0 || root.view == 5; clicked => { root.view = 0; } }
                 PackHubTabButton { x: 4px + (parent.width - 8px) / 3; y: 4px; width: (parent.width - 8px) / 3; label: "My Packs"; active: root.view == 4; clicked => { root.view = 4; } }
                 PackHubTabButton { x: 4px + ((parent.width - 8px) / 3) * 2; y: 4px; width: (parent.width - 8px) / 3; label: "Create"; active: root.view == 1 || root.view == 2; clicked => { root.view = 1; } }
             }
@@ -6384,6 +6630,7 @@ component PackHubOverlay inherits Rectangle {
                 sort-label: root.browse-sort-label;
                 loading: root.browse-loading;
                 has-more: root.browse-has-more;
+                import-clicked => { root.view = 5; }
                 open-detail(index) => {
                     root.selected-pack-index = index;
                     root.view = 3;
@@ -6393,6 +6640,25 @@ component PackHubOverlay inherits Rectangle {
                 type-next => { root.browse-type-next(); }
                 sort-next => { root.browse-sort-next(); }
                 load-more => { root.browse-load-more(); }
+            }
+
+            if (root.view == 5) : PackHubImportView {
+                x: 24px;
+                y: 142px;
+                width: parent.width - 48px;
+                height: parent.height - 166px;
+                share-code <=> root.import-share-code;
+                pack: root.import-pack;
+                addons: root.import-addons;
+                loading: root.import-loading;
+                message: root.import-message;
+                install-label: root.import-install-label;
+                back => { root.view = 0; }
+                share-code-edited(value) => { root.import-share-code-edited(value); }
+                resolve-share-code => { root.import-resolve-share-code(); }
+                clear-import => { root.import-clear(); }
+                addon-selection-toggle(index) => { root.import-addon-selection-toggle(index); }
+                install-import => { root.import-install(); }
             }
 
             if (root.view == 4) : Rectangle {
@@ -10423,6 +10689,8 @@ export component KalpaWindow inherits Window {
     in property <[DiscoverScreenshotEntry]> discover-screenshots;
     in property <[PackHubEntry]> pack-hub-packs;
     in property <[PackHubAddonEntry]> pack-hub-detail-addons;
+    in property <PackHubEntry> pack-hub-import-pack;
+    in property <[PackHubAddonEntry]> pack-hub-import-addons;
     in property <[PackHubCreateAddonEntry]> pack-hub-create-addons;
     in property <[PackHubCreateAddonEntry]> pack-hub-create-selected-addons;
     in property <[SavedVariableEntry]> svm-files;
@@ -10472,6 +10740,7 @@ export component KalpaWindow inherits Window {
     in-out property <int> pack-hub-view: 0;
     in-out property <int> pack-hub-selected-index: 0;
     in-out property <string> pack-hub-browse-query;
+    in-out property <string> pack-hub-import-share-code;
     in-out property <string> pack-hub-create-title;
     in-out property <string> pack-hub-create-description;
     in-out property <int> pack-hub-create-pack-type: 0;
@@ -10483,6 +10752,9 @@ export component KalpaWindow inherits Window {
     in-out property <bool> pack-hub-detail-loading: false;
     in-out property <string> pack-hub-detail-message;
     in-out property <string> pack-hub-install-label: "Install Addons";
+    in-out property <bool> pack-hub-import-loading: false;
+    in-out property <string> pack-hub-import-message;
+    in-out property <string> pack-hub-import-install-label: "Install Addons";
     in-out property <bool> uploader-open: false;
     in-out property <int> uploader-view: 0;
     in property <[UploaderLogEntry]> uploader-logs;
@@ -10663,6 +10935,11 @@ export component KalpaWindow inherits Window {
     callback pack-hub-browse-type-next;
     callback pack-hub-browse-sort-next;
     callback pack-hub-browse-load-more;
+    callback pack-hub-import-share-code-edited(string);
+    callback pack-hub-import-resolve-share-code;
+    callback pack-hub-import-clear;
+    callback pack-hub-import-addon-selection-toggle(int);
+    callback pack-hub-import-install;
     callback pack-hub-create-filter-edited(string);
     callback pack-hub-create-addon-toggle(int);
     callback pack-hub-create-selected-remove(int);
@@ -10954,9 +11231,12 @@ export component KalpaWindow inherits Window {
             view <=> root.pack-hub-view;
             packs: root.pack-hub-packs;
             detail-addons: root.pack-hub-detail-addons;
+            import-pack: root.pack-hub-import-pack;
+            import-addons: root.pack-hub-import-addons;
             create-installed-addons: root.pack-hub-create-addons;
             create-selected-addons: root.pack-hub-create-selected-addons;
             browse-query <=> root.pack-hub-browse-query;
+            import-share-code <=> root.pack-hub-import-share-code;
             create-title <=> root.pack-hub-create-title;
             create-description <=> root.pack-hub-create-description;
             create-pack-type <=> root.pack-hub-create-pack-type;
@@ -10968,12 +11248,20 @@ export component KalpaWindow inherits Window {
             detail-loading: root.pack-hub-detail-loading;
             detail-message: root.pack-hub-detail-message;
             install-label: root.pack-hub-install-label;
+            import-loading: root.pack-hub-import-loading;
+            import-message: root.pack-hub-import-message;
+            import-install-label: root.pack-hub-import-install-label;
             selected-pack-index <=> root.pack-hub-selected-index;
             open-detail(index) => { root.pack-hub-open-detail(index); }
             browse-query-edited(value) => { root.pack-hub-browse-query-edited(value); }
             browse-type-next => { root.pack-hub-browse-type-next(); }
             browse-sort-next => { root.pack-hub-browse-sort-next(); }
             browse-load-more => { root.pack-hub-browse-load-more(); }
+            import-share-code-edited(value) => { root.pack-hub-import-share-code-edited(value); }
+            import-resolve-share-code => { root.pack-hub-import-resolve-share-code(); }
+            import-clear => { root.pack-hub-import-clear(); }
+            import-addon-selection-toggle(index) => { root.pack-hub-import-addon-selection-toggle(index); }
+            import-install => { root.pack-hub-import-install(); }
             create-filter-edited(value) => { root.pack-hub-create-filter-edited(value); }
             create-addon-toggle(index) => { root.pack-hub-create-addon-toggle(index); }
             create-selected-remove(index) => { root.pack-hub-create-selected-remove(index); }

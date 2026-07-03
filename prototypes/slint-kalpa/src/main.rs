@@ -257,6 +257,26 @@ struct NativePackSingleResponse {
     pack: NativeHubPack,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeSharedPackResponse {
+    pack: NativeSharedPackBody,
+    shared_by: String,
+    shared_at: String,
+    #[serde(rename = "expiresAt")]
+    _expires_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeSharedPackBody {
+    title: String,
+    description: String,
+    pack_type: String,
+    tags: Vec<String>,
+    addons: Vec<NativePackAddonEntry>,
+}
+
 #[derive(Debug, Clone)]
 struct NativePackDetailData {
     entry: PackHubEntry,
@@ -812,6 +832,7 @@ fn main() -> Result<(), slint::PlatformError> {
     apply_runtime_flags(&ui, render_config.preset);
     apply_backup_restore_model(&ui);
     apply_pack_hub_model(&ui, fallback_pack_hub_entries());
+    clear_pack_hub_import_model(&ui);
     apply_addon_view(&ui, &addon_models);
     let discover_installed_ids = Arc::new(Mutex::new(installed_discover_ids(
         &addon_models.all.borrow(),
@@ -3126,6 +3147,137 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         );
     });
 
+    let import_code_ui = ui.as_weak();
+    ui.on_pack_hub_import_share_code_edited(move |code| {
+        let Some(ui) = import_code_ui.upgrade() else {
+            return;
+        };
+        let normalized = normalize_share_code(code.as_str());
+        if normalized != code.as_str() {
+            ui.set_pack_hub_import_share_code(normalized.into());
+        }
+        ui.set_pack_hub_import_message("".into());
+    });
+
+    let import_clear_ui = ui.as_weak();
+    ui.on_pack_hub_import_clear(move || {
+        let Some(ui) = import_clear_ui.upgrade() else {
+            return;
+        };
+        ui.set_pack_hub_import_loading(false);
+        ui.set_pack_hub_import_share_code("".into());
+        clear_pack_hub_import_model(&ui);
+    });
+
+    let import_resolve_ui = ui.as_weak();
+    let import_resolve_models = models.clone();
+    ui.on_pack_hub_import_resolve_share_code(move || {
+        let Some(ui) = import_resolve_ui.upgrade() else {
+            return;
+        };
+        if ui.get_pack_hub_import_loading() {
+            return;
+        }
+
+        let code = match validate_share_code(ui.get_pack_hub_import_share_code().as_str()) {
+            Ok(code) => code,
+            Err(error) => {
+                ui.set_pack_hub_import_message(error.into());
+                return;
+            }
+        };
+        ui.set_pack_hub_import_share_code(code.as_str().into());
+        ui.set_pack_hub_import_loading(true);
+        ui.set_pack_hub_import_message("Resolving share code...".into());
+        apply_pack_hub_import_model(&ui, empty_pack_hub_entry(), Vec::new());
+
+        let installed_ids = installed_discover_ids(&import_resolve_models.all.borrow());
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = fetch_shared_pack_blocking(&code, &installed_ids);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                ui.set_pack_hub_import_loading(false);
+                match result {
+                    Ok(detail) => {
+                        apply_pack_hub_import_model(&ui, detail.entry, detail.addons);
+                        ui.set_pack_hub_import_message("".into());
+                    }
+                    Err(error) => {
+                        apply_pack_hub_import_model(&ui, empty_pack_hub_entry(), Vec::new());
+                        ui.set_pack_hub_import_message(error.into());
+                    }
+                }
+            });
+        });
+    });
+
+    let import_select_ui = ui.as_weak();
+    ui.on_pack_hub_import_addon_selection_toggle(move |_| {
+        let Some(ui) = import_select_ui.upgrade() else {
+            return;
+        };
+        ui.set_pack_hub_import_message("Shared pack import installs required addons only.".into());
+    });
+
+    let import_install_ui = ui.as_weak();
+    ui.on_pack_hub_import_install(move || {
+        let Some(ui) = import_install_ui.upgrade() else {
+            return;
+        };
+        if ui.get_pack_hub_import_loading() {
+            return;
+        }
+
+        let rows = pack_hub_import_addons(&ui);
+        let pending = rows
+            .iter()
+            .filter(|row| !row.installed && row.selected)
+            .count();
+        if pending == 0 {
+            ui.set_status_error_message(
+                "All required addons in this shared pack are already installed.".into(),
+            );
+            return;
+        }
+
+        let addons_dir = match configured_addons_path() {
+            Some(path) => path,
+            None => {
+                ui.set_status_error_message(
+                    "Configure the ESO AddOns folder before installing from Pack Hub.".into(),
+                );
+                return;
+            }
+        };
+
+        let pack = ui.get_pack_hub_import_pack();
+        ui.set_pack_hub_import_loading(true);
+        ui.set_pack_hub_import_install_label(format!("Installing {pending}...").into());
+        ui.set_status_error_message(format!("Installing {pending} shared pack addon(s)...").into());
+
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = install_pack_hub_addons_blocking(&addons_dir, rows);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                let summary = pack_hub_install_summary(&result);
+                let installed = result.installed;
+                ui.set_pack_hub_import_loading(false);
+                apply_pack_hub_import_model(&ui, pack, result.rows);
+                if installed > 0 {
+                    ui.invoke_refresh_requested();
+                }
+                ui.set_status_error_message(summary.into());
+            });
+        });
+    });
+
     let pack_detail_ui = ui.as_weak();
     let pack_detail_models = models.clone();
     ui.on_pack_hub_open_detail(move |index| {
@@ -3735,6 +3887,21 @@ fn apply_pack_hub_detail_model(ui: &KalpaWindow, addons: Vec<PackHubAddonEntry>)
     ui.set_pack_hub_detail_addons(Rc::new(VecModel::from(addons)).into());
 }
 
+fn apply_pack_hub_import_model(
+    ui: &KalpaWindow,
+    entry: PackHubEntry,
+    addons: Vec<PackHubAddonEntry>,
+) {
+    ui.set_pack_hub_import_install_label(pack_hub_import_install_label(&addons).into());
+    ui.set_pack_hub_import_pack(entry);
+    ui.set_pack_hub_import_addons(Rc::new(VecModel::from(addons)).into());
+}
+
+fn clear_pack_hub_import_model(ui: &KalpaWindow) {
+    ui.set_pack_hub_import_message("".into());
+    apply_pack_hub_import_model(ui, empty_pack_hub_entry(), Vec::new());
+}
+
 fn apply_pack_hub_create_state(ui: &KalpaWindow, models: &AddonModels, state: &PackHubCreateState) {
     let filter = state.filter.trim().to_ascii_lowercase();
     let rows = models
@@ -3856,6 +4023,25 @@ fn toggle_pack_hub_create_required(state: &mut PackHubCreateState, row: PackHubC
         .find(|entry| pack_hub_create_row_id(entry).as_deref() == Some(esoui_id.as_str()))
     {
         entry.required = !entry.required;
+    }
+}
+
+fn empty_pack_hub_entry() -> PackHubEntry {
+    PackHubEntry {
+        id: "".into(),
+        title: "".into(),
+        description: "".into(),
+        tag: "".into(),
+        addon_count: "0 addons".into(),
+        vote_count: "0".into(),
+        author: "".into(),
+        pack_type_label: "Addon Pack".into(),
+        updated_label: "".into(),
+        monogram: "?".into(),
+        author_initial: "?".into(),
+        identity_kind: 0,
+        type_kind: 0,
+        trial: false,
     }
 }
 
@@ -4002,6 +4188,37 @@ fn pack_hub_client() -> &'static reqwest::blocking::Client {
     })
 }
 
+fn share_worker_url() -> &'static str {
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        std::env::var("SHARE_WORKER_URL")
+            .or_else(|_| std::env::var("PACK_HUB_API_URL"))
+            .unwrap_or_else(|_| "https://kalpa-pack-hub.eso-toolkit.workers.dev".to_string())
+    })
+}
+
+fn normalize_share_code(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .take(6)
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+fn validate_share_code(value: &str) -> Result<String, String> {
+    let code = normalize_share_code(value);
+    let valid = code.len() == 6
+        && code
+            .chars()
+            .all(|ch| matches!(ch, '2'..='9' | 'A'..='H' | 'J'..='N' | 'P'..='Z'));
+    if valid {
+        Ok(code)
+    } else {
+        Err("Invalid share code format.".to_string())
+    }
+}
+
 fn fetch_pack_hub_packs_blocking(state: &PackHubBrowseState) -> Result<NativePackPageData, String> {
     const PAGE_SIZE: usize = 10;
     let mut query_params = vec![
@@ -4078,6 +4295,36 @@ fn fetch_pack_hub_detail_blocking(
     Ok(pack_hub_detail_from_hub(body.pack, installed_ids))
 }
 
+fn fetch_shared_pack_blocking(
+    code: &str,
+    installed_ids: &BTreeSet<String>,
+) -> Result<NativePackDetailData, String> {
+    let code = validate_share_code(code)?;
+    let response = pack_hub_client()
+        .get(format!("{}/shares/{}", share_worker_url(), code))
+        .send()
+        .map_err(|error| {
+            if error.is_connect() || error.is_timeout() {
+                "Could not connect to share service. Check your internet connection.".to_string()
+            } else {
+                format!("Network error: {error}")
+            }
+        })?;
+
+    match response.status().as_u16() {
+        200 => {}
+        400 => return Err("Invalid share code format.".to_string()),
+        404 => return Err("Share code not found or expired.".to_string()),
+        status => return Err(format!("Share service returned HTTP {status}")),
+    }
+
+    let body: NativeSharedPackResponse = response
+        .json()
+        .map_err(|error| format!("Failed to parse share response: {error}"))?;
+
+    Ok(pack_hub_detail_from_shared_pack(&code, body, installed_ids))
+}
+
 fn pack_hub_detail_from_hub(
     hub: NativeHubPack,
     installed_ids: &BTreeSet<String>,
@@ -4093,6 +4340,63 @@ fn pack_hub_detail_from_hub(
         entry,
         addons: addon_rows,
     }
+}
+
+fn pack_hub_detail_from_shared_pack(
+    code: &str,
+    shared: NativeSharedPackResponse,
+    installed_ids: &BTreeSet<String>,
+) -> NativePackDetailData {
+    let NativeSharedPackResponse {
+        pack,
+        shared_by,
+        shared_at,
+        _expires_at: _,
+    } = shared;
+    let addon_count = pack.addons.len();
+    let tag = pack
+        .tags
+        .first()
+        .cloned()
+        .filter(|tag| !tag.trim().is_empty())
+        .unwrap_or_else(|| fallback_pack_tag(&pack.pack_type));
+    let trial = pack
+        .tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case("trial"))
+        || pack.pack_type.eq_ignore_ascii_case("trial");
+    let author = if shared_by.trim().is_empty() {
+        "Friend".to_string()
+    } else {
+        shared_by
+    };
+    let updated_label = pack_iso_date_label(&shared_at)
+        .map(|date| format!("Shared {date}"))
+        .unwrap_or_else(|| "Shared pack".to_string());
+
+    let entry = PackHubEntry {
+        id: format!("share:{code}").into(),
+        title: pack.title.as_str().into(),
+        description: pack.description.as_str().into(),
+        tag: tag.into(),
+        addon_count: addon_count_label(addon_count).into(),
+        vote_count: "0".into(),
+        author: author.as_str().into(),
+        pack_type_label: pack_type_label(&pack.pack_type).into(),
+        updated_label: updated_label.into(),
+        monogram: pack_monogram(&pack.title).into(),
+        author_initial: author_initial(&author).into(),
+        identity_kind: pack_identity_kind(code, &pack.title, &pack.pack_type),
+        type_kind: pack_type_kind(&pack.pack_type),
+        trial,
+    };
+    let addons = pack
+        .addons
+        .into_iter()
+        .map(|addon| pack_hub_addon_entry(addon, installed_ids))
+        .collect();
+
+    NativePackDetailData { entry, addons }
 }
 
 fn pack_hub_entry_from_hub(hub: NativeHubPack) -> PackHubEntry {
@@ -4174,6 +4478,18 @@ fn pack_hub_install_label(addons: &[PackHubAddonEntry]) -> String {
     }
 }
 
+fn pack_hub_import_install_label(addons: &[PackHubAddonEntry]) -> String {
+    match addons
+        .iter()
+        .filter(|addon| !addon.installed && addon.selected)
+        .count()
+    {
+        0 => "All Addons Installed".to_string(),
+        1 => "Install 1 New Addon".to_string(),
+        count => format!("Install {count} New Addons"),
+    }
+}
+
 fn hash_pack_id(input: &str) -> u32 {
     input.bytes().fold(0x811c9dc5, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
@@ -4245,6 +4561,13 @@ fn pack_identity_kind(pack_id: &str, title: &str, pack_type: &str) -> i32 {
 
 fn pack_hub_detail_addons(ui: &KalpaWindow) -> Vec<PackHubAddonEntry> {
     let model = ui.get_pack_hub_detail_addons();
+    (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .collect()
+}
+
+fn pack_hub_import_addons(ui: &KalpaWindow) -> Vec<PackHubAddonEntry> {
+    let model = ui.get_pack_hub_import_addons();
     (0..model.row_count())
         .filter_map(|index| model.row_data(index))
         .collect()
@@ -11774,6 +12097,7 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
             "1" | "create" | "create-details" | "details" => 1,
             "2" | "create-addons" | "addons" => 2,
             "3" | "install" | "detail" | "install-detail" => 3,
+            "5" | "import" | "share" | "share-code" => 5,
             _ => 0,
         })
         .unwrap_or(0);
@@ -15326,6 +15650,65 @@ CombatMetrics_SavedVariables = {
         selected_addons[1].selected = true;
         assert_eq!(
             pack_hub_install_label(&selected_addons),
+            "Install 1 New Addon"
+        );
+    }
+
+    #[test]
+    fn pack_hub_share_code_normalizes_and_validates() {
+        assert_eq!(normalize_share_code(" hk7m3p "), "HK7M3P");
+        assert_eq!(validate_share_code("hk7m3p").unwrap(), "HK7M3P");
+        assert!(validate_share_code("HK7M3").is_err());
+        assert!(validate_share_code("HK7M1P").is_err());
+        assert!(validate_share_code("HK7MOP").is_err());
+    }
+
+    #[test]
+    fn pack_hub_shared_pack_maps_required_only_import_label() {
+        let shared = NativeSharedPackResponse {
+            pack: NativeSharedPackBody {
+                title: "Shared Trial Pack".to_string(),
+                description: "Required addon plus optional helper".to_string(),
+                pack_type: "addon-pack".to_string(),
+                tags: vec!["trial".to_string()],
+                addons: vec![
+                    NativePackAddonEntry {
+                        esoui_id: 4061,
+                        name: "Ability Icons Framework".to_string(),
+                        required: true,
+                        note: None,
+                    },
+                    NativePackAddonEntry {
+                        esoui_id: 1161,
+                        name: "Addon Selector".to_string(),
+                        required: false,
+                        note: Some("Optional profile helper".to_string()),
+                    },
+                ],
+            },
+            shared_by: "Spike'jo".to_string(),
+            shared_at: "2026-01-03T00:00:00Z".to_string(),
+            _expires_at: "2026-01-10T00:00:00Z".to_string(),
+        };
+
+        let installed_required = BTreeSet::from(["4061".to_string()]);
+        let detail =
+            pack_hub_detail_from_shared_pack("HK7M3P", shared.clone(), &installed_required);
+        assert_eq!(detail.entry.title.as_str(), "Shared Trial Pack");
+        assert_eq!(detail.entry.author.as_str(), "Spike'jo");
+        assert_eq!(detail.entry.updated_label.as_str(), "Shared Jan 3, 2026");
+        assert!(detail.addons[0].selected);
+        assert!(detail.addons[0].installed);
+        assert!(!detail.addons[1].required);
+        assert!(!detail.addons[1].selected);
+        assert_eq!(
+            pack_hub_import_install_label(&detail.addons),
+            "All Addons Installed"
+        );
+
+        let missing_required = pack_hub_detail_from_shared_pack("HK7M3P", shared, &BTreeSet::new());
+        assert_eq!(
+            pack_hub_import_install_label(&missing_required.addons),
             "Install 1 New Addon"
         );
     }

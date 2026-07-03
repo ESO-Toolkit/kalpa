@@ -196,7 +196,8 @@ Current detail status:
   dynamic screenshot counts. Remaining Discover gaps are category picker polish,
   richer skeleton/error states, and remove/update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
-  the reference Browse, Create details, Create addons, and install-detail flows.
+  the reference Browse, share-code Import, Create details, Create addons, and
+  install-detail flows.
   Browse now loads published packs from the public Pack Hub `/packs` endpoint
   into native cards with live title, author, type, tag, vote, and addon-count
   metadata, and selecting a pack hydrates the native detail/install addon rows
@@ -209,15 +210,17 @@ Current detail status:
   installed-pack library tracking, and install-count tracking. Pack detail
   Edit/Delete/Share actions now hand off to the full WebView Pack Hub with the
   selected pack id because those flows still require the React account/session
-  and share-code surfaces. Pack browse cards now use the React-style
+  surfaces. Share-code import now resolves `/shares/{code}` natively, previews
+  required and optional addons, and installs only required missing addons to
+  match the React import behavior. Pack browse cards now use the React-style
   deterministic identity model: type accent, hash-derived monogram tile, dynamic
   author initial, and a denser title/type/description/meta hierarchy. The native
   Create flow now has editable title/description/type state and the Addons step
   is backed by real installed addons with ESOUI ids, filter text, selected-addon
-  rows, remove actions, and required/optional toggles. My Packs, native
-  create/save/publish/export, share/import links, voting, and account/session
-  wiring still need production parity before this can replace the React Pack Hub
-  implementation.
+  rows, remove actions, and required/optional toggles. My Packs, `.esopack`
+  import with v2 settings apply, native create/save/publish/export, private
+  share-code creation, voting, and account/session wiring still need production
+  parity before this can replace the React Pack Hub implementation.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,
@@ -342,8 +345,8 @@ Current backdrop status:
   `KALPA_DISCOVER_TAB=popular|categories|url`, `KALPA_DISCOVER_QUERY=<query>`,
   or `KALPA_DISCOVER_URL=<url-or-id>` to inspect Discover scaffolds.
 - Launch with `KALPA_PACK_HUB_OPEN=1` and optional
-  `KALPA_PACK_HUB_VIEW=browse|create-details|create-addons|install-detail` to
-  inspect native Pack Hub scaffolds.
+  `KALPA_PACK_HUB_VIEW=browse|import|create-details|create-addons|install-detail`
+  to inspect native Pack Hub scaffolds.
 - Launch with `KALPA_SVM_OPEN=1` and optional
   `KALPA_SVM_VIEW=overview|cleanup|copy-profile|editor` to inspect native
   SavedVariables Manager scaffolds.
