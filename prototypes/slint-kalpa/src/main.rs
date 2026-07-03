@@ -4656,9 +4656,27 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
                 .iter_mut()
                 .filter(|addon| addon.selected)
             {
-                addon.tags = set_tag_active(&addon.tags, "testing", true);
+                let next_tags = set_tag_active(&addon.tags, "testing", true);
+                if let Some(addons_root) = disk_root_for_addon(addon.folder_name.as_str()) {
+                    if let Err(error) = persist_addon_tag_model(
+                        &addons_root,
+                        addon.folder_name.as_str(),
+                        &next_tags,
+                    ) {
+                        ui.set_status_error_message(
+                            format!(
+                                "Failed to save tags for {}: {error}",
+                                addon.folder_name.as_str()
+                            )
+                            .into(),
+                        );
+                        return;
+                    }
+                }
+                addon.tags = next_tags;
             }
             apply_addon_view(&ui, &tag_models);
+            ui.set_status_error_message("Tagged selected addons as testing.".into());
         }
     });
 
@@ -4766,6 +4784,14 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
         let next_favorite = !addon.favorite;
         addon.favorite = next_favorite;
         addon.tags = set_tag_active(&addon.tags, "favorite", next_favorite);
+        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+            if let Err(error) = persist_addon_tag_model(&addons_root, &folder_name, &addon.tags) {
+                ui.set_status_error_message(
+                    format!("Failed to save tags for {folder_name}: {error}").into(),
+                );
+                return;
+            }
+        }
         update_master_addon(&favorite_models, &folder_name, addon);
         apply_addon_view(&ui, &favorite_models);
     });
@@ -4863,6 +4889,14 @@ fn wire_tag_editor(ui: &KalpaWindow, models: AddonModels) {
         addon.favorite = tag_is_active(&next_tags, "favorite");
         addon.tags = tag_model_from_entries(next_tags);
         let folder_name = addon.folder_name.to_string();
+        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+            if let Err(error) = persist_addon_tag_model(&addons_root, &folder_name, &addon.tags) {
+                ui.set_status_error_message(
+                    format!("Failed to save tags for {folder_name}: {error}").into(),
+                );
+                return;
+            }
+        }
         tag_models.visible.set_row_data(index, addon.clone());
         update_master_addon(&tag_models, &folder_name, addon);
         apply_addon_view(&ui, &tag_models);
@@ -4886,6 +4920,14 @@ fn wire_tag_editor(ui: &KalpaWindow, models: AddonModels) {
         addon.favorite = tag_model_has_active(&next_tags, "favorite");
         addon.tags = next_tags;
         let folder_name = addon.folder_name.to_string();
+        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+            if let Err(error) = persist_addon_tag_model(&addons_root, &folder_name, &addon.tags) {
+                ui.set_status_error_message(
+                    format!("Failed to save tags for {folder_name}: {error}").into(),
+                );
+                return;
+            }
+        }
         add_models.visible.set_row_data(index, addon.clone());
         update_master_addon(&add_models, &folder_name, addon);
         apply_addon_view(&ui, &add_models);
@@ -4909,6 +4951,14 @@ fn wire_tag_editor(ui: &KalpaWindow, models: AddonModels) {
         addon.favorite = tag_model_has_active(&next_tags, "favorite");
         addon.tags = next_tags;
         let folder_name = addon.folder_name.to_string();
+        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
+            if let Err(error) = persist_addon_tag_model(&addons_root, &folder_name, &addon.tags) {
+                ui.set_status_error_message(
+                    format!("Failed to save tags for {folder_name}: {error}").into(),
+                );
+                return;
+            }
+        }
         custom_models.visible.set_row_data(index, addon.clone());
         update_master_addon(&custom_models, &folder_name, addon);
         ui.set_custom_tag_draft("".into());
@@ -6016,6 +6066,48 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
     let mut store = metadata::load_metadata(addons_root);
     metadata::remove_entry(&mut store, folder_name);
     metadata::save_metadata(addons_root, &store)
+}
+
+fn active_tag_ids(tags: &ModelRc<TagEntry>) -> Vec<String> {
+    (0..tags.row_count())
+        .filter_map(|index| tags.row_data(index))
+        .filter(|tag| tag.active)
+        .map(|tag| tag.id.to_string())
+        .collect()
+}
+
+fn persist_addon_tags(
+    addons_root: &Path,
+    folder_name: &str,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    validate_addon_folder_name(folder_name)?;
+    let mut store = metadata::load_metadata(addons_root);
+    match store.addons.get_mut(folder_name) {
+        Some(meta) => meta.tags = tags,
+        None => {
+            store.addons.insert(
+                folder_name.to_string(),
+                metadata::AddonMetadata {
+                    esoui_id: 0,
+                    installed_version: String::new(),
+                    download_url: String::new(),
+                    installed_at: String::new(),
+                    tags,
+                    esoui_last_update: 0,
+                },
+            );
+        }
+    }
+    metadata::save_metadata(addons_root, &store)
+}
+
+fn persist_addon_tag_model(
+    addons_root: &Path,
+    folder_name: &str,
+    tags: &ModelRc<TagEntry>,
+) -> Result<(), String> {
+    persist_addon_tags(addons_root, folder_name, active_tag_ids(tags))
 }
 
 fn disk_root_for_addon(folder_name: &str) -> Option<PathBuf> {
@@ -10914,6 +11006,31 @@ mod tests {
         let tags = add_custom_tag(&tags, "trial").expect("custom tag added");
         assert_eq!(tags.row_count(), first_count + 1);
         assert!(add_custom_tag(&tags, "trial").is_none());
+    }
+
+    #[test]
+    fn native_tag_persistence_writes_metadata_tags() {
+        let root = test_temp_dir("native-tags");
+        fs::create_dir_all(root).expect("create addons root");
+
+        let tags = tag_model(vec!["favorite"]);
+        let tags = add_custom_tag(&tags, "PvP Build").expect("add custom tag");
+        let active = active_tag_ids(&tags);
+        assert_eq!(
+            active,
+            vec!["favorite".to_string(), "pvp-build".to_string()]
+        );
+
+        persist_addon_tag_model(root, "TaggedAddon", &tags).expect("persist tags");
+        let store = metadata::load_metadata(root);
+        let meta = store.addons.get("TaggedAddon").expect("metadata entry");
+        assert_eq!(meta.tags, active);
+
+        let cleared = tag_model(vec![]);
+        persist_addon_tag_model(root, "TaggedAddon", &cleared).expect("clear tags");
+        let store = metadata::load_metadata(root);
+        let meta = store.addons.get("TaggedAddon").expect("metadata entry");
+        assert!(meta.tags.is_empty());
     }
 
     #[test]

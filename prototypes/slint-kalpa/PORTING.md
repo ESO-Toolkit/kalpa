@@ -104,8 +104,9 @@ Current row status:
   state through search/filter/sort rebuilds, and switch the native header into a
   batch action strip. Batch disable and remove now use the real AddOns folder
   rename/delete paths when a row is backed by disk, then fall back to in-memory
-  prototype behavior for mock rows. Batch update/tag/clear remain native model
-  actions pending the production update and tag persistence paths.
+  prototype behavior for mock rows. Batch tag now persists the active tag model
+  for disk-backed rows, but still needs the React tag menu/custom choice. Batch
+  update remains a native model action pending the production update path.
 - Rows now expose a native right-click context menu with Open Folder, View on
   ESOUI, Favorite/Unfavorite, Enable/Disable, and Remove actions. Enable/disable
   and remove use the same real folder operations as the detail footer for
@@ -138,8 +139,9 @@ Current detail status:
 - Tag chips now have per-tag active colors and the selected-addon mock has been
   quieted back to the inactive chip state used by the main reference.
 - Tag chips now render from `AddonEntry` tag models, and native clicks update the
-  selected addon's model state plus the favorite row flag. Production tag
-  persistence still needs backend/store wiring.
+  selected addon's model state plus the favorite row flag. Disk-backed rows now
+  persist tag changes to Kalpa metadata using the production store shape; mock
+  rows still use in-memory prototype behavior.
 - Tag chips now include the React-style active glow/inset highlight while keeping
   the inactive main-reference chip state quiet.
 - Small chips/pills now avoid 1px stroked outlines in the software renderer.
