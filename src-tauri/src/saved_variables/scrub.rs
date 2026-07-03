@@ -381,7 +381,7 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
     while let Some(dollar) = rest.find('$') {
         result.push_str(&rest[..dollar]);
         let after = &rest[dollar..]; // starts with '$'
-        if after.starts_with("${") {
+        if let Some(after_brace) = after.strip_prefix("${") {
             match pairs.iter().find(|(t, _)| after.starts_with(t.as_str())) {
                 Some((token, replacement)) => {
                     result.push_str(replacement);
@@ -392,7 +392,7 @@ pub fn substitute_placeholders(lua: &str, ctx: &ScrubContext, world_names: &[&st
                     // after it. No token starts at the `{`, so skipping two bytes
                     // cannot step over a match.
                     result.push_str("${");
-                    rest = &after[2..];
+                    rest = after_brace;
                 }
             }
         } else {

@@ -577,10 +577,8 @@ Var2 =
         assert!(!lua.contains("Baelthor ="));
 
         // And extraction sees it: place Baelthor at character-key depth (3).
-        let wrapped = format!(
-            "MyAddon_SV =\n{{\n\t[\"Default\"] =\n\t{{\n\t\t[\"@Acct\"] =\n\t\t{{\n\t\t\t[\"Baelthor\"] =\n\t\t\t{{\n\t\t\t\t[\"level\"] = 50,\n\t\t\t}},\n\t\t}},\n\t}},\n}}\n"
-        );
-        let keys = super::super::io::extract_character_keys(&wrapped);
+        let wrapped = "MyAddon_SV =\n{\n\t[\"Default\"] =\n\t{\n\t\t[\"@Acct\"] =\n\t\t{\n\t\t\t[\"Baelthor\"] =\n\t\t\t{\n\t\t\t\t[\"level\"] = 50,\n\t\t\t},\n\t\t},\n\t},\n}\n";
+        let keys = super::super::io::extract_character_keys(wrapped);
         assert!(keys.contains(&"Baelthor".to_string()));
     }
 

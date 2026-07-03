@@ -518,15 +518,15 @@ impl EventEmitter {
         let raw_ts: i64 = f.first().and_then(|s| s.trim().parse().ok())?;
         let emitted = match kind {
             "BEGIN_LOG" => {
-                self.on_begin_log(&f);
+                self.on_begin_log(f);
                 None
             }
             "UNIT_ADDED" => {
-                self.on_unit_added(&f, line);
+                self.on_unit_added(f, line);
                 None
             }
             "UNIT_CHANGED" => {
-                self.on_unit_changed(&f, line);
+                self.on_unit_changed(f, line);
                 None
             }
             "UNIT_REMOVED" => {
@@ -551,12 +551,12 @@ impl EventEmitter {
             }
             "ZONE_CHANGED" => encode_zone_changed(self.seg_ts(raw_ts), tail(line)),
             "MAP_CHANGED" => encode_map_changed(self.seg_ts(raw_ts), tail(line)),
-            "PLAYER_INFO" => self.emit_player_info(raw_ts, &f, line),
-            "HEALTH_REGEN" => self.emit_health_regen(raw_ts, &f),
-            "EFFECT_CHANGED" => self.emit_effect_changed(raw_ts, &f),
-            "BEGIN_CAST" => self.emit_begin_cast(raw_ts, &f),
-            "END_CAST" => self.emit_end_cast(raw_ts, &f),
-            "COMBAT_EVENT" => self.emit_combat_event(raw_ts, &f),
+            "PLAYER_INFO" => self.emit_player_info(raw_ts, f, line),
+            "HEALTH_REGEN" => self.emit_health_regen(raw_ts, f),
+            "EFFECT_CHANGED" => self.emit_effect_changed(raw_ts, f),
+            "BEGIN_CAST" => self.emit_begin_cast(raw_ts, f),
+            "END_CAST" => self.emit_end_cast(raw_ts, f),
+            "COMBAT_EVENT" => self.emit_combat_event(raw_ts, f),
             // Combat boundaries: codes 52/53 are a bare `{segTs}|52|` / `{segTs}|53|`
             // (a single trailing empty field). Verified 1:1 with BEGIN/END_COMBAT
             // counts in the capture. No subordinal/mask/state — pure markers.
@@ -570,7 +570,7 @@ impl EventEmitter {
             }
             // END_TRIAL → code 55: `{segTs}|55|{trialId}|{duration}|{success}|{score}`.
             // Raw layout: `ts,END_TRIAL,id,duration,success(T/F),finalScore`.
-            "END_TRIAL" => self.emit_end_trial(raw_ts, &f),
+            "END_TRIAL" => self.emit_end_trial(raw_ts, f),
             // BEGIN_TRIAL / TRIAL_INIT carry no segment event (the capture has none
             // for them) — they only need to be *covered* so a trial log routes native
             // instead of falling back.
