@@ -4063,6 +4063,7 @@ component AppearanceOverlay inherits Rectangle {
     callback safety-center-clicked;
     callback addon-list-exported;
     callback addon-list-imported;
+    callback pack-hub-account-data-clicked;
     visible: root.open;
     background: #000000c8;
 
@@ -4623,12 +4624,13 @@ component AppearanceOverlay inherits Rectangle {
                 width: parent.width;
                 height: 132px;
                 border-radius: 12px;
-                border-width: 0px;
+                border-width: 1px;
+                border-color: Palette.red-20;
                 background: Palette.red-04;
 
                 DetailSectionTitle { x: 14px; y: 14px; width: parent.width - 28px; label: "PACK HUB DATA"; }
-                Text { x: 14px; y: 42px; width: parent.width - 28px; height: 34px; text: "Permanently delete all Pack Hub data, including packs, votes, and share codes. This cannot be undone."; color: Palette.muted-strong; font-size: 12px; font-weight: 500; wrap: word-wrap; }
-                SettingsActionButton { x: 14px; y: 86px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete Pack Hub Data"; }
+                Text { x: 14px; y: 42px; width: parent.width - 28px; height: 34px; text: "Account deletion requires the signed-in Pack Hub session. Open the full Hub to delete packs, votes, and share codes."; color: Palette.muted-strong; font-size: 12px; font-weight: 500; wrap: word-wrap; }
+                SettingsActionButton { x: 14px; y: 86px; icon: @image-url("../assets/icons/external-link.svg"); label: "Open Full Hub"; danger: true; clicked => { root.pack-hub-account-data-clicked(); } }
             }
         }
     }
@@ -12727,6 +12729,10 @@ export component KalpaWindow inherits Window {
             }
             addon-list-exported => { root.settings-addon-list-export(); }
             addon-list-imported => { root.settings-addon-list-import(); }
+            pack-hub-account-data-clicked => {
+                root.settings-open = false;
+                root.pack-hub-open-full-hub();
+            }
             backup-restore-clicked => {
                 root.settings-open = false;
                 root.backup-restore-open = true;
