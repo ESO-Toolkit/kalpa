@@ -3006,6 +3006,30 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         });
     });
 
+    let pack_manage_ui = ui.as_weak();
+    ui.on_pack_hub_manage_detail(move || {
+        let Some(ui) = pack_manage_ui.upgrade() else {
+            return;
+        };
+
+        let pack_id = selected_pack_hub_id(&ui);
+        match return_to_webview_shell(false, false, true, pack_id.as_deref()) {
+            Ok(()) => {
+                ui.set_status_error_message("Opening full Pack Hub...".into());
+                let _ = slint::quit_event_loop();
+            }
+            Err(error) => {
+                ui.set_pack_hub_detail_message(
+                    format!(
+                        "Full Pack Hub is needed for edit, delete, and share actions. Failed to open WebView: {error}"
+                    )
+                    .into(),
+                );
+                ui.set_status_error_message(format!("Failed to open full Pack Hub: {error}").into());
+            }
+        }
+    });
+
     let svm_copy_state = Rc::new(RefCell::new(SvmCopyState::default()));
     let svm_editor_state = Rc::new(RefCell::new(SvmEditorState::default()));
 
@@ -3689,6 +3713,14 @@ fn pack_hub_detail_addons(ui: &KalpaWindow) -> Vec<PackHubAddonEntry> {
     (0..model.row_count())
         .filter_map(|index| model.row_data(index))
         .collect()
+}
+
+fn selected_pack_hub_id(ui: &KalpaWindow) -> Option<String> {
+    let index = ui.get_pack_hub_selected_index().max(0) as usize;
+    ui.get_pack_hub_packs()
+        .row_data(index)
+        .map(|pack| pack.id.to_string())
+        .filter(|id| !id.trim().is_empty())
 }
 
 fn install_pack_hub_addons_blocking(
@@ -4474,7 +4506,7 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
         let Some(ui) = upload_ui.upgrade() else {
             return;
         };
-        match return_to_webview_shell(false, true) {
+        match return_to_webview_shell(false, true, false, None) {
             Ok(()) => {
                 ui.set_uploader_status_title("Opening full uploader...".into());
                 let _ = slint::quit_event_loop();
@@ -4495,7 +4527,7 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
             ui.set_uploader_live_status_label("Ready".into());
             return;
         }
-        match return_to_webview_shell(false, true) {
+        match return_to_webview_shell(false, true, false, None) {
             Ok(()) => {
                 ui.set_uploader_view(3);
                 ui.set_uploader_live_status_label("Opening full uploader".into());
@@ -4527,7 +4559,7 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         }
 
-        match return_to_webview_shell(false, false) {
+        match return_to_webview_shell(false, false, false, None) {
             Ok(()) => {
                 let _ = slint::quit_event_loop();
             }
@@ -4646,7 +4678,7 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
         };
 
         match ui.get_app_update_action_kind() {
-            1 => match return_to_webview_shell(true, false) {
+            1 => match return_to_webview_shell(true, false, false, None) {
                 Ok(()) => {
                     set_app_update_banner(&ui, "Opening the signed updater...", "", 0);
                     let _ = slint::quit_event_loop();
@@ -10830,7 +10862,12 @@ fn open_path(path: &Path) {
     }
 }
 
-fn return_to_webview_shell(start_app_update: bool, start_log_uploader: bool) -> Result<(), String> {
+fn return_to_webview_shell(
+    start_app_update: bool,
+    start_log_uploader: bool,
+    start_pack_hub: bool,
+    pack_hub_pack_id: Option<&str>,
+) -> Result<(), String> {
     let exe = std::env::var_os("KALPA_WEBVIEW_EXE")
         .map(PathBuf::from)
         .ok_or_else(|| "webview launcher path was not provided".to_string())?;
@@ -10848,6 +10885,12 @@ fn return_to_webview_shell(start_app_update: bool, start_log_uploader: bool) -> 
     }
     if start_log_uploader {
         command.env("KALPA_START_LOG_UPLOADER", "1");
+    }
+    if start_pack_hub {
+        command.env("KALPA_START_PACK_HUB", "1");
+    }
+    if let Some(pack_id) = pack_hub_pack_id.filter(|value| !value.trim().is_empty()) {
+        command.env("KALPA_START_PACK_HUB_ID", pack_id);
     }
 
     command

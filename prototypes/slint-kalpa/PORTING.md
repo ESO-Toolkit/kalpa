@@ -199,9 +199,12 @@ Current detail status:
   pagination now drive native Pack Hub requests. The install footer now installs
   missing pack addons through the native ESOUI download/extract/hash/metadata
   path, but still lacks the React batch-progress UI, transitive dependency pass,
-  installed-pack library tracking, and install-count tracking. My Packs,
-  Create/Edit, share/import links, voting, and account/session wiring still need
-  production parity before this can replace the React Pack Hub implementation.
+  installed-pack library tracking, and install-count tracking. Pack detail
+  Edit/Delete/Share actions now hand off to the full WebView Pack Hub with the
+  selected pack id because those flows still require the React account/session
+  and share-code surfaces. My Packs, Create/Edit, share/import links, voting,
+  and account/session wiring still need production parity before this can
+  replace the React Pack Hub implementation.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,

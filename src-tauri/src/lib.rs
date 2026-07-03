@@ -73,6 +73,7 @@ pub struct PendingDeepLinkPayload {
     pub install_pack_id: Option<String>,
     pub app_update: bool,
     pub log_upload: bool,
+    pub pack_hub: bool,
 }
 
 pub struct PendingDeepLink(pub Mutex<PendingDeepLinkPayload>);
@@ -306,6 +307,23 @@ pub fn run() {
             {
                 if let Ok(mut pending) = app.state::<PendingDeepLink>().0.lock() {
                     pending.log_upload = true;
+                }
+            }
+            if std::env::var("KALPA_START_PACK_HUB")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                .unwrap_or(false)
+            {
+                if let Ok(mut pending) = app.state::<PendingDeepLink>().0.lock() {
+                    pending.pack_hub = true;
+                }
+            }
+            if let Ok(pack_id) = std::env::var("KALPA_START_PACK_HUB_ID") {
+                let pack_id = pack_id.trim();
+                if !pack_id.is_empty() {
+                    if let Ok(mut pending) = app.state::<PendingDeepLink>().0.lock() {
+                        pending.pack_hub = true;
+                        pending.pack_id = Some(pack_id.to_string());
+                    }
                 }
             }
 

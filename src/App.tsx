@@ -60,6 +60,7 @@ interface PendingDeepLinkPayload {
   installPackId: string | null;
   appUpdate: boolean;
   logUpload: boolean;
+  packHub: boolean;
 }
 
 function App() {
@@ -251,6 +252,9 @@ function App() {
         }
         if (payload.logUpload) {
           setActiveDialog("log-upload");
+        }
+        if (payload.packHub) {
+          setActiveDialog("packs");
         }
         if (payload.installPackId) {
           setRosterPackInstallId(payload.installPackId);

@@ -930,6 +930,10 @@ component LinkAction inherits Rectangle {
     in property <string> label;
     in property <color> tone: Palette.sky;
     callback clicked;
+    private property <length> icon-size: 12px;
+    private property <length> icon-gap: 6px;
+    private property <length> content-width: root.icon-size + root.icon-gap + label-text.preferred-width;
+    private property <length> content-x: max(0px, (root.width - root.content-width) / 2);
     width: label-text.preferred-width + 38px;
     preferred-width: self.width;
     horizontal-stretch: 0;
@@ -941,17 +945,17 @@ component LinkAction inherits Rectangle {
     animate background { duration: 150ms; easing: ease-in-out; }
 
     Image {
-        x: 11px;
-        y: (root.height - 12px) / 2 + (touch.pressed ? 1px : 0px);
-        width: 12px;
-        height: 12px;
+        x: root.content-x;
+        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
+        width: root.icon-size;
+        height: root.icon-size;
         source: @image-url("../assets/icons/external-link.svg");
         image-fit: contain;
         colorize: root.tone;
     }
 
     label-text := Text {
-        x: 28px;
+        x: root.content-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
         width: label-text.preferred-width;
         height: root.height;
@@ -1017,6 +1021,10 @@ component DetailToggleAction inherits Rectangle {
     private property <color> tone: enabled-tone ? Palette.emerald : Palette.amber;
     private property <color> line: enabled-tone ? Palette.emerald-25 : Palette.amber-25;
     private property <color> hover-fill: enabled-tone ? Palette.emerald-04 : Palette.amber-04;
+    private property <length> icon-size: 16px;
+    private property <length> icon-gap: 6px;
+    private property <length> content-width: root.icon-size + root.icon-gap + label-text.preferred-width;
+    private property <length> content-x: max(0px, (root.width - root.content-width) / 2);
     width: label-text.preferred-width + 44px;
     preferred-width: self.width;
     horizontal-stretch: 0;
@@ -1028,17 +1036,17 @@ component DetailToggleAction inherits Rectangle {
     animate background { duration: 150ms; easing: ease-in-out; }
 
     Image {
-        x: 10px;
-        y: (root.height - 16px) / 2 + (touch.pressed ? 1px : 0px);
-        width: 16px;
-        height: 16px;
+        x: root.content-x;
+        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
+        width: root.icon-size;
+        height: root.icon-size;
         source: @image-url("../assets/icons/power.svg");
         image-fit: contain;
         colorize: root.tone;
     }
 
     label-text := Text {
-        x: 32px;
+        x: root.content-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
         width: label-text.preferred-width;
         height: root.height;
@@ -2147,6 +2155,10 @@ component FileToolbarAction inherits Rectangle {
     in property <bool> primary: false;
     in property <bool> enabled: true;
     callback clicked;
+    private property <length> icon-size: 14px;
+    private property <length> icon-gap: 7px;
+    private property <length> content-width: root.icon-size + root.icon-gap + label-text.preferred-width;
+    private property <length> content-x: max(0px, (root.width - root.content-width) / 2);
     width: label-text.preferred-width + 42px;
     preferred-width: self.width;
     horizontal-stretch: 0;
@@ -2159,10 +2171,10 @@ component FileToolbarAction inherits Rectangle {
     animate background, opacity { duration: 150ms; easing: ease-in-out; }
 
     Image {
-        x: 10px;
-        y: (root.height - 14px) / 2 + (touch.pressed ? 1px : 0px);
-        width: 14px;
-        height: 14px;
+        x: root.content-x;
+        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
+        width: root.icon-size;
+        height: root.icon-size;
         source: root.icon;
         image-fit: contain;
         colorize: primary ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
@@ -2171,7 +2183,7 @@ component FileToolbarAction inherits Rectangle {
     }
 
     label-text := Text {
-        x: 31px;
+        x: root.content-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
         width: label-text.preferred-width;
         height: root.height;
@@ -3051,7 +3063,11 @@ component SettingsActionButton inherits Rectangle {
     in property <string> label;
     in property <bool> primary: false;
     callback clicked;
-    width: label-text.preferred-width + 38px;
+    private property <length> icon-size: 14px;
+    private property <length> icon-gap: 7px;
+    private property <length> content-width: root.icon-size + root.icon-gap + label-text.preferred-width;
+    private property <length> content-x: max(0px, (root.width - root.content-width) / 2);
+    width: label-text.preferred-width + 42px;
     preferred-width: self.width;
     height: 28px;
     border-radius: 7px;
@@ -3061,17 +3077,17 @@ component SettingsActionButton inherits Rectangle {
     animate background { duration: 150ms; easing: ease-in-out; }
 
     Image {
-        x: 12px;
-        y: (root.height - 14px) / 2 + (touch.pressed ? 1px : 0px);
-        width: 14px;
-        height: 14px;
+        x: root.content-x;
+        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
+        width: root.icon-size;
+        height: root.icon-size;
         source: root.icon;
         image-fit: contain;
         colorize: root.primary ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
     }
 
     label-text := Text {
-        x: 31px;
+        x: root.content-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
         width: label-text.preferred-width;
         height: root.height;
@@ -5826,6 +5842,9 @@ component PackHubInstallView inherits Rectangle {
     in property <bool> loading: false;
     in property <string> message: "";
     callback back;
+    callback edit-requested;
+    callback delete-requested;
+    callback share-requested;
     background: #00000000;
 
     Text {
@@ -5843,9 +5862,9 @@ component PackHubInstallView inherits Rectangle {
     Pill { x: 108px; y: 40px; label: root.pack.tag; tone: root.pack.trial ? Palette.red : Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
     Text { x: 190px; y: 44px; width: 78px; text: "by " + root.pack.author; color: Palette.muted-half; font-size: 11px; font-weight: 600; overflow: elide; }
     Text { x: 274px; y: 44px; width: 120px; text: root.pack.updated-label; color: Palette.muted-half; font-size: 10px; font-weight: 600; overflow: elide; }
-    PackHubButton { x: parent.width - 322px; y: 36px; width: 94px; icon: @image-url("../assets/icons/pencil.svg"); label: "Edit"; }
-    PackHubButton { x: parent.width - 216px; y: 36px; width: 104px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; }
-    PackHubButton { x: parent.width - 100px; y: 36px; width: 100px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Share"; }
+    PackHubButton { x: parent.width - 322px; y: 36px; width: 94px; icon: @image-url("../assets/icons/pencil.svg"); label: "Edit"; clicked => { root.edit-requested(); } }
+    PackHubButton { x: parent.width - 216px; y: 36px; width: 104px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; clicked => { root.delete-requested(); } }
+    PackHubButton { x: parent.width - 100px; y: 36px; width: 100px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Share"; clicked => { root.share-requested(); } }
 
     Rectangle {
         x: 0px;
@@ -5935,6 +5954,7 @@ component PackHubOverlay inherits Rectangle {
     callback browse-sort-next;
     callback browse-load-more;
     callback install-detail;
+    callback manage-pack-detail;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
@@ -6117,6 +6137,9 @@ component PackHubOverlay inherits Rectangle {
                 loading: root.detail-loading;
                 message: root.detail-message != "" ? root.detail-message : "No addons are listed for this pack.";
                 back => { root.view = 0; }
+                edit-requested => { root.manage-pack-detail(); }
+                delete-requested => { root.manage-pack-detail(); }
+                share-requested => { root.manage-pack-detail(); }
             }
 
             Rectangle {
@@ -10228,6 +10251,7 @@ export component KalpaWindow inherits Window {
     callback pack-hub-browse-sort-next;
     callback pack-hub-browse-load-more;
     callback pack-hub-install-detail;
+    callback pack-hub-manage-detail;
     callback open-uploader;
     callback uploader-refresh;
     callback uploader-select-log(int);
@@ -10519,6 +10543,7 @@ export component KalpaWindow inherits Window {
             browse-sort-next => { root.pack-hub-browse-sort-next(); }
             browse-load-more => { root.pack-hub-browse-load-more(); }
             install-detail => { root.pack-hub-install-detail(); }
+            manage-pack-detail => { root.pack-hub-manage-detail(); }
         }
 
         if (root.svm-open) : SavedVariablesOverlay {
