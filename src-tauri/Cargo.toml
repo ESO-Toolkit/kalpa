@@ -63,6 +63,13 @@ dunce = "1"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 keyring = { version = "3", features = ["windows-native"] }
+# WebView2 COM interop for MemoryUsageTargetLevel (trim webview RAM when Kalpa is
+# backgrounded to the tray). Caret ranges MUST unify with the copies tauri/wry
+# pull transitively (currently webview2-com 0.38.2 / windows 0.61.x) — a
+# duplicate windows-core would make `.controller()`/`.cast()` type-mismatch. If a
+# tauri/wry bump moves webview2-com to a new minor, bump these two in lockstep.
+webview2-com = "0.38"
+windows = "0.61"
 
 [profile.dev]
 # Reduced debug info: the full dependency graph (reqwest/rustls/aws-lc/tauri/…)
