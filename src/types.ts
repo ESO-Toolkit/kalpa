@@ -259,15 +259,7 @@ export interface SvDiffPreview {
 
 // ── SavedVariables Editor v2 types ──────────────────────────────────────
 export type WidgetType =
-  | "text"
-  | "number"
-  | "toggle"
-  | "slider"
-  | "color"
-  | "dropdown"
-  | "readonly"
-  | "group"
-  | "raw";
+  "text" | "number" | "toggle" | "slider" | "color" | "dropdown" | "readonly" | "group" | "raw";
 
 export type WidgetConfidence = "certain" | "inferred" | "ambiguous";
 export type NodeContext = "account-wide" | "per-character" | "setting";
@@ -315,13 +307,7 @@ export interface EffectiveField {
 // App-level UI state types
 export type SortMode = "name" | "author" | "updated" | "installed";
 export type FilterMode =
-  | "all"
-  | "addons"
-  | "libraries"
-  | "outdated"
-  | "missing-deps"
-  | "favorites"
-  | "disabled";
+  "all" | "addons" | "libraries" | "outdated" | "missing-deps" | "favorites" | "disabled";
 
 // Predefined tags users can apply to addons
 export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "raid"] as const;
