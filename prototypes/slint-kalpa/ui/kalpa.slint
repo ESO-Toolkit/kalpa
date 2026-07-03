@@ -3944,8 +3944,6 @@ component PackHubButton inherits Rectangle {
     callback clicked;
     private property <length> icon-size: root.show-icon ? 14px : 0px;
     private property <length> icon-gap: root.show-icon ? 6px : 0px;
-    private property <length> group-width: label-text.preferred-width + root.icon-size + root.icon-gap;
-    private property <length> group-x: (root.width - root.group-width) / 2;
     height: 32px;
     border-radius: 8px;
     border-width: 0px;
@@ -3953,29 +3951,60 @@ component PackHubButton inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    Image {
-        visible: root.show-icon;
-        x: root.group-x;
-        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
-        width: root.icon-size;
-        height: root.icon-size;
-        source: root.icon;
-        image-fit: contain;
-        colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
-        opacity: root.disabled ? 0.35 : 1.0;
-    }
-
-    label-text := Text {
-        x: root.group-x + root.icon-size + root.icon-gap;
+    HorizontalLayout {
         y: touch.pressed ? 1px : 0px;
-        width: label-text.preferred-width;
+        width: root.width;
         height: root.height;
-        text: root.label;
-        color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
-        font-size: 12px;
-        font-weight: root.primary ? 800 : 700;
-        vertical-alignment: center;
-        overflow: elide;
+        spacing: root.icon-gap;
+
+        Rectangle {
+            width: 0px;
+            horizontal-stretch: 1;
+            background: #00000000;
+        }
+
+        Rectangle {
+            width: root.icon-size;
+            height: root.height;
+            horizontal-stretch: 0;
+            background: #00000000;
+
+            Image {
+                visible: root.show-icon;
+                y: (parent.height - root.icon-size) / 2;
+                width: root.icon-size;
+                height: root.icon-size;
+                source: root.icon;
+                image-fit: contain;
+                colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
+                opacity: root.disabled ? 0.35 : 1.0;
+            }
+        }
+
+        label-wrap := Rectangle {
+            width: min(label-text.preferred-width, root.width - root.icon-size - root.icon-gap - 18px);
+            height: root.height;
+            horizontal-stretch: 0;
+            background: #00000000;
+
+            label-text := Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.label;
+                color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
+                font-size: 12px;
+                font-weight: root.primary ? 800 : 700;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        Rectangle {
+            width: 0px;
+            horizontal-stretch: 1;
+            background: #00000000;
+        }
     }
 
     touch := TouchArea {
