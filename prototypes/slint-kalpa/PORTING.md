@@ -260,7 +260,8 @@ Current detail status:
   importable `.esopack` file in the local Kalpa exports folder. An OS file
   picker for `.esopack` import, native draft/publish, private share-code
   creation, voting, and account/session wiring still need production parity
-  before this can replace the React Pack Hub implementation.
+  before this can replace the React Pack Hub implementation; the native
+  draft/publish controls are disabled rather than appearing actionable.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,

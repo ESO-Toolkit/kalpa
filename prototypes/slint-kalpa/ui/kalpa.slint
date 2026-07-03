@@ -6444,8 +6444,8 @@ component PackHubCreateAddonsView inherits Rectangle {
     Hairline { x: 0px; y: 462px; width: parent.width; height: 1px; opacity: 0.35; }
     Checkbox { x: 0px; y: 484px; checked: false; }
     Text { x: 28px; y: 480px; width: parent.width - 28px; text: "Publish anonymously"; color: Palette.muted-half; font-size: 12px; font-weight: 600; }
-    PackHubButton { x: 0px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/save.svg"); label: "Save as Draft"; disabled: root.selected-addons.length == 0; }
-    PackHubButton { x: (parent.width - 12px) / 2 + 12px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Publish"; primary: true; disabled: root.selected-addons.length == 0; }
+    PackHubButton { x: 0px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/save.svg"); label: "Save as Draft"; disabled: true; }
+    PackHubButton { x: (parent.width - 12px) / 2 + 12px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Publish"; primary: true; disabled: true; }
 }
 
 component PackHubInstallView inherits Rectangle {
