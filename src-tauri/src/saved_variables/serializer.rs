@@ -1,110 +1,154 @@
 use super::types::{SvTreeNode, SvValueType};
+use std::fmt::{self, Write};
 
 /// Serialize an `SvTreeNode` tree back to Lua source text.
 /// The root node represents the file; each child is a top-level assignment.
 pub fn serialize_to_lua(root: &SvTreeNode) -> String {
     let mut out = String::new();
-    if let Some(children) = &root.children {
-        for child in children {
-            out.push_str(&child.key);
-            out.push_str(" =\n");
-            serialize_value(&mut out, child, 0);
-            out.push('\n');
-        }
-    }
+    serialize_root(&mut out, root);
     out
 }
 
-fn serialize_value(out: &mut String, node: &SvTreeNode, depth: usize) {
+/// Byte length of what [`serialize_to_lua`] would produce for `root`, computed
+/// by running the exact same serialization logic into a counting sink instead
+/// of materializing the `String`.
+///
+/// This is byte-identical to `serialize_to_lua(root).len()` (both drive
+/// [`serialize_root`]) but never allocates the output — used by the scrubber's
+/// byte-accounting, where whole subtrees would otherwise be serialized to
+/// throwaway `String`s just to measure them.
+pub fn serialized_len(root: &SvTreeNode) -> usize {
+    let mut counter = ByteCounter::default();
+    serialize_root(&mut counter, root);
+    counter.0
+}
+
+/// A `fmt::Write` sink that discards its input and only tallies the byte length.
+/// `write_str` sums `s.len()`, and the default `write_char` routes a char
+/// through `write_str` after UTF-8 encoding, so the tally matches `String`'s
+/// own byte growth exactly (including `push(b as char)` for `0x80..=0xFF`,
+/// which `String` stores as two UTF-8 bytes).
+#[derive(Default)]
+struct ByteCounter(usize);
+
+impl fmt::Write for ByteCounter {
+    #[inline]
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0 += s.len();
+        Ok(())
+    }
+}
+
+/// Writes to `String` and to [`ByteCounter`] are both infallible; this helper
+/// keeps the serializer body free of `unwrap`/`?` noise while remaining generic
+/// over the sink.
+#[inline]
+fn w<W: Write>(out: &mut W, s: &str) {
+    let _ = out.write_str(s);
+}
+
+fn serialize_root<W: Write>(out: &mut W, root: &SvTreeNode) {
+    if let Some(children) = &root.children {
+        for child in children {
+            w(out, &child.key);
+            w(out, " =\n");
+            serialize_value(out, child, 0);
+            w(out, "\n");
+        }
+    }
+}
+
+fn serialize_value<W: Write>(out: &mut W, node: &SvTreeNode, depth: usize) {
     match node.value_type {
         SvValueType::Table => serialize_table(out, node, depth),
         SvValueType::String => {
             if let Some(raw) = &node.raw_lua_value {
                 // Pre-escaped content for non-UTF8 strings: write verbatim
-                out.push('"');
-                out.push_str(raw);
-                out.push('"');
+                w(out, "\"");
+                w(out, raw);
+                w(out, "\"");
             } else {
                 let s = node.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-                out.push('"');
+                w(out, "\"");
                 escape_lua_string(out, s);
-                out.push('"');
+                w(out, "\"");
             }
         }
         SvValueType::Number => {
             if let Some(v) = &node.value {
                 if let Some(n) = v.as_f64() {
                     if n.is_nan() || n.is_infinite() {
-                        out.push('0');
+                        w(out, "0");
                     } else if n.fract() == 0.0 && n.abs() < i64::MAX as f64 {
-                        out.push_str(&(n as i64).to_string());
+                        let _ = write!(out, "{}", n as i64);
                     } else {
-                        out.push_str(&format!("{n}"));
+                        let _ = write!(out, "{n}");
                     }
                 } else {
-                    out.push_str(&v.to_string());
+                    let _ = write!(out, "{v}");
                 }
             }
         }
         SvValueType::Boolean => {
             if let Some(v) = &node.value {
-                out.push_str(if v.as_bool().unwrap_or(false) {
-                    "true"
-                } else {
-                    "false"
-                });
+                w(
+                    out,
+                    if v.as_bool().unwrap_or(false) {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                );
             }
         }
-        SvValueType::Nil => out.push_str("nil"),
+        SvValueType::Nil => w(out, "nil"),
     }
 }
 
-fn serialize_table(out: &mut String, node: &SvTreeNode, depth: usize) {
+/// Push `depth` tab characters into `out`. Replaces the previous
+/// `"\t".repeat(depth)` temporaries (two per table node).
+#[inline]
+fn push_indent<W: Write>(out: &mut W, depth: usize) {
+    for _ in 0..depth {
+        w(out, "\t");
+    }
+}
+
+fn serialize_table<W: Write>(out: &mut W, node: &SvTreeNode, depth: usize) {
     if depth >= 512 {
-        out.push_str("{}");
+        w(out, "{}");
         return;
     }
-    let indent = "\t".repeat(depth);
-    let child_indent = "\t".repeat(depth + 1);
 
-    out.push_str("{\n");
+    w(out, "{\n");
 
     if let Some(children) = &node.children {
         for child in children {
-            out.push_str(&child_indent);
-            // Determine key format
+            push_indent(out, depth + 1);
+            // Determine key format. Numeric keys use the bare `[N] =` array
+            // form; all other (string) keys use the bracketed-quoted
+            // `["key"] =` form. ESO's own SavedVariables writer always emits
+            // the quoted form for string keys even when they are valid Lua
+            // identifiers, and kalpa features that scan the game format
+            // (character-key extraction in io.rs, copy-profile in profile.rs)
+            // depend on that. Emitting bare identifiers here would make
+            // identifier-like character names vanish from those features.
             if is_numeric_key(&child.key) {
-                out.push('[');
-                out.push_str(&child.key);
-                out.push_str("] = ");
-            } else if is_identifier(&child.key) {
-                out.push_str(&child.key);
-                out.push_str(" = ");
+                w(out, "[");
+                w(out, &child.key);
+                w(out, "] = ");
             } else {
-                out.push_str("[\"");
+                w(out, "[\"");
                 escape_lua_string(out, &child.key);
-                out.push_str("\"] = ");
+                w(out, "\"] = ");
             }
             serialize_value(out, child, depth + 1);
-            out.push_str(",\n");
+            w(out, ",\n");
         }
     }
 
-    out.push_str(&indent);
-    out.push('}');
-}
-
-/// Check if a key is a valid Lua identifier (no quoting needed).
-fn is_identifier(key: &str) -> bool {
-    if key.is_empty() {
-        return false;
-    }
-    let mut chars = key.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    push_indent(out, depth);
+    w(out, "}");
 }
 
 /// Check if a key is a numeric index (e.g. "1", "42", "-3").
@@ -117,24 +161,29 @@ fn is_numeric_key(key: &str) -> bool {
 }
 
 /// Escape a string for Lua double-quoted string literals.
-fn escape_lua_string(out: &mut String, s: &str) {
+fn escape_lua_string<W: Write>(out: &mut W, s: &str) {
     for b in s.bytes() {
         match b {
-            b'\\' => out.push_str("\\\\"),
-            b'"' => out.push_str("\\\""),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            b'\t' => out.push_str("\\t"),
-            b'\x07' => out.push_str("\\a"),
-            b'\x08' => out.push_str("\\b"),
-            b'\x0B' => out.push_str("\\v"),
-            b'\x0C' => out.push_str("\\f"),
+            b'\\' => w(out, "\\\\"),
+            b'"' => w(out, "\\\""),
+            b'\n' => w(out, "\\n"),
+            b'\r' => w(out, "\\r"),
+            b'\t' => w(out, "\\t"),
+            b'\x07' => w(out, "\\a"),
+            b'\x08' => w(out, "\\b"),
+            b'\x0B' => w(out, "\\v"),
+            b'\x0C' => w(out, "\\f"),
             0x00..=0x1F => {
                 // Other control characters: use zero-padded decimal escape
                 // to avoid ambiguity when the next character is also a digit
-                out.push_str(&format!("\\{b:03}"));
+                let _ = write!(out, "\\{b:03}");
             }
-            _ => out.push(b as char),
+            // Bytes >= 0x20: `b as char` matches the original `String::push`,
+            // which stores 0x80..=0xFF as two UTF-8 bytes — the counting sink
+            // tallies the same length via `write_char`.
+            _ => {
+                let _ = out.write_char(b as char);
+            }
         }
     }
 }
@@ -183,10 +232,12 @@ mod tests {
         };
 
         let lua = serialize_to_lua(&root);
+        // Top-level variable names stay bare identifiers.
         assert!(lua.contains("MyVar ="));
-        assert!(lua.contains("enabled = true"));
-        assert!(lua.contains("count = 42"));
-        assert!(lua.contains("name = \"hello\""));
+        // Nested string keys use the bracketed-quoted game format.
+        assert!(lua.contains("[\"enabled\"] = true"));
+        assert!(lua.contains("[\"count\"] = 42"));
+        assert!(lua.contains("[\"name\"] = \"hello\""));
     }
 
     #[test]
@@ -239,7 +290,7 @@ mod tests {
             }]),
         };
         let lua = serialize_to_lua(&node);
-        assert!(lua.contains("nothing = nil"));
+        assert!(lua.contains("[\"nothing\"] = nil"));
     }
 
     #[test]
@@ -468,14 +519,116 @@ Var2 =
     }
 
     #[test]
-    fn is_identifier_tests() {
-        assert!(is_identifier("enabled"));
-        assert!(is_identifier("_private"));
-        assert!(is_identifier("myVar123"));
-        assert!(!is_identifier("123abc"));
-        assert!(!is_identifier(""));
-        assert!(!is_identifier("my-var"));
-        assert!(!is_identifier("my var"));
+    fn identifier_safe_keys_serialize_bracket_quoted() {
+        // Even keys that are valid Lua identifiers must serialize as
+        // ["key"] = ... so the regex-based tools that scan these files
+        // (extract_character_keys, copy_sv_profile) keep matching them.
+        let input = r#"Var =
+{
+	enabled = true,
+	level = 10,
+}
+"#;
+        let tree = parser::parse_sv_file(input, "test.lua").unwrap();
+        let output = serialize_to_lua(&tree);
+        assert!(output.contains("[\"enabled\"] = true"));
+        assert!(output.contains("[\"level\"] = 10"));
+        assert!(!output.contains("enabled = true"));
+        assert!(!output.contains("level = 10"));
+    }
+
+    #[test]
+    fn nested_identifier_key_serializes_bracketed() {
+        // Even though "Baelthor" is a valid Lua identifier, a nested string key
+        // must be emitted in ESO's `["Name"] =` game format so that
+        // character-key extraction (io.rs) and copy-profile (profile.rs), which
+        // scan for that format, keep working after a save through the SV editor.
+        let root = SvTreeNode {
+            key: "test.lua".into(),
+            value_type: SvValueType::Table,
+            value: None,
+            raw_lua_value: None,
+            children: Some(vec![SvTreeNode {
+                key: "MyAddon_SV".into(),
+                value_type: SvValueType::Table,
+                value: None,
+                raw_lua_value: None,
+                children: Some(vec![SvTreeNode {
+                    key: "Baelthor".into(),
+                    value_type: SvValueType::Table,
+                    value: None,
+                    raw_lua_value: None,
+                    children: Some(vec![SvTreeNode {
+                        key: "level".into(),
+                        value_type: SvValueType::Number,
+                        value: Some(serde_json::json!(50.0)),
+                        children: None,
+                        raw_lua_value: None,
+                    }]),
+                }]),
+            }]),
+        };
+
+        let lua = serialize_to_lua(&root);
+        // Top-level variable name stays a bare identifier.
+        assert!(lua.contains("MyAddon_SV ="));
+        // Identifier-like nested key round-trips in bracketed-quoted form.
+        assert!(lua.contains("[\"Baelthor\"] ="));
+        assert!(!lua.contains("Baelthor ="));
+
+        // And extraction sees it: place Baelthor at character-key depth (3).
+        let wrapped = "MyAddon_SV =\n{\n\t[\"Default\"] =\n\t{\n\t\t[\"@Acct\"] =\n\t\t{\n\t\t\t[\"Baelthor\"] =\n\t\t\t{\n\t\t\t\t[\"level\"] = 50,\n\t\t\t},\n\t\t},\n\t},\n}\n";
+        let keys = super::super::io::extract_character_keys(wrapped);
+        assert!(keys.contains(&"Baelthor".to_string()));
+    }
+
+    #[test]
+    fn serialized_len_matches_serialize_to_lua_len() {
+        // A nontrivial tree: nested tables, string escapes, numbers (int, float,
+        // negative), booleans, nil, numeric array keys, a control-char escape,
+        // and a high byte (0xE9) that String stores as two UTF-8 bytes.
+        let input = concat!(
+            "Complex_SV =\n{\n",
+            "\t[\"Default\"] =\n\t{\n",
+            "\t\t[\"@Acct\"] =\n\t\t{\n",
+            "\t\t\t[\"Char\"] =\n\t\t\t{\n",
+            "\t\t\t\t[\"enabled\"] = true,\n",
+            "\t\t\t\t[\"disabled\"] = false,\n",
+            "\t\t\t\t[\"nothing\"] = nil,\n",
+            "\t\t\t\t[\"count\"] = 42,\n",
+            "\t\t\t\t[\"ratio\"] = 3.14,\n",
+            "\t\t\t\t[\"neg\"] = -7,\n",
+            "\t\t\t\t[\"msg\"] = \"line\\nbreak\\ttab\\\\slash\\\"quote\\001ctrl\",\n",
+            "\t\t\t\t[\"list\"] =\n\t\t\t\t{\n",
+            "\t\t\t\t\t[1] = \"first\",\n",
+            "\t\t\t\t\t[2] = \"second\",\n",
+            "\t\t\t\t\t[3] = 100,\n",
+            "\t\t\t\t},\n",
+            "\t\t\t\t[\"empty\"] =\n\t\t\t\t{\n\t\t\t\t},\n",
+            "\t\t\t},\n",
+            "\t\t},\n",
+            "\t},\n}\n",
+        );
+        let tree = parser::parse_sv_file(input, "complex.lua").unwrap();
+        // Inject a high byte value that String::push encodes as two UTF-8 bytes,
+        // exercising the escape_lua_string high-byte path in both sinks.
+        let mut tree = tree;
+        if let Some(top) = tree.children.as_mut().and_then(|c| c.get_mut(0)) {
+            top.children.as_mut().unwrap().push(SvTreeNode {
+                key: "high\u{00E9}key".into(),
+                value_type: SvValueType::String,
+                value: Some(serde_json::json!("v\u{00E9}alue")),
+                children: None,
+                raw_lua_value: None,
+            });
+        }
+
+        let serialized = serialize_to_lua(&tree);
+        assert_eq!(
+            serialized_len(&tree),
+            serialized.len(),
+            "serialized_len must be byte-identical to serialize_to_lua().len()"
+        );
     }
 
     #[test]

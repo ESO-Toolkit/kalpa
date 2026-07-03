@@ -297,6 +297,10 @@ export interface SvSchemaOverlay {
 
 export interface EffectiveField {
   nodeId: string;
+  /** Raw, unescaped path segments (including the addon name as the first
+   * element). Use this for tree edits — nodeId is NUL-joined/escaped and is
+   * only for overlay keying and React keys. */
+  path: string[];
   key: string;
   label: string;
   widget: WidgetType;

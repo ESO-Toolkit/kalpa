@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
 import { toast } from "sonner";
 import type {
   AddonManifest,
@@ -95,16 +95,15 @@ function formatBytes(bytes: number): string {
 
 function formatDate(iso: string): string {
   if (!iso) return "";
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return iso;
-  }
+  // `new Date(garbage)` doesn't throw — it yields an Invalid Date — so guard
+  // explicitly and fall back to the raw string rather than render "Invalid Date".
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 const SIZE_COLORS: Record<SizeCategory, string> = {
@@ -205,6 +204,7 @@ function OverviewTab({
         </div>
         <button
           onClick={orphaned.length > 0 ? onSwitchToCleanup : undefined}
+          disabled={orphaned.length === 0}
           className={`rounded-xl border p-2.5 text-center transition-all duration-200 ${
             orphaned.length > 0
               ? "border-amber-500/25 bg-amber-500/[0.06] hover:border-amber-500/35 hover:shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_10%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent)] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent),0_2px_8px_rgba(0,0,0,0.12)] cursor-pointer"
@@ -571,7 +571,7 @@ const EMPTY_PATH: string[] = [];
 
 // ── Nav Tree Item ────────────────────────────────────────────
 
-function NavTreeItem({
+const NavTreeItem = memo(function NavTreeItem({
   node,
   depth,
   structuralDepth,
@@ -579,6 +579,7 @@ function NavTreeItem({
   selectedPath,
   onSelect,
   searchQuery,
+  searchVisible,
   knownCharacters,
   expandedPaths,
   toggleExpanded,
@@ -590,6 +591,11 @@ function NavTreeItem({
   selectedPath: string[];
   onSelect: (path: string[], node: SvTreeNode) => void;
   searchQuery: string;
+  // Precomputed set of pathKeys that either match the search or have a matching
+  // descendant (matched nodes + all their ancestors), built once per debounced
+  // query in EditorTab. null when no search is active. Replaces the previous
+  // per-node recursive subtree walk that ran on every mounted item per keystroke.
+  searchVisible: Set<string> | null;
   knownCharacters: Set<string>;
   expandedPaths: Set<string>;
   toggleExpanded: (pathKey: string) => void;
@@ -619,17 +625,18 @@ function NavTreeItem({
       node.key === "$AccountWide" ||
       node.key.includes("Megaserver"));
 
-  // Also check if any descendant matches
-  const hasMatchingDescendant = useMemo(() => {
-    if (!searchQuery) return true;
-    const check = (n: SvTreeNode): boolean => {
-      if (n.key.toLowerCase().includes(searchQuery.toLowerCase())) return true;
-      return (n.children ?? []).some(check);
-    };
-    return check(node);
-  }, [node, searchQuery]);
+  // Also check if any descendant matches — an O(1) lookup into the precomputed
+  // set (matched nodes + ancestors). null means no active search → always visible.
+  const hasMatchingDescendant = !searchVisible || searchVisible.has(pathKey);
 
   if (!matchesSearch && !hasMatchingDescendant) return null;
+
+  // While searching, auto-reveal nodes whose match lives in a descendant so
+  // deep matches aren't hidden behind collapsed rows. This is a render-time
+  // override only — manual expand state (expandedPaths) is left untouched, so
+  // clearing the search restores the user's previous expansion.
+  const effectiveExpanded =
+    isExpanded || (!!searchQuery && hasMatchingDescendant && !matchesSearch);
 
   // Context wrappers: render as a compact chip divider and auto-show children
   if (isContextWrapper) {
@@ -664,6 +671,7 @@ function NavTreeItem({
             selectedPath={selectedPath}
             onSelect={onSelect}
             searchQuery={searchQuery}
+            searchVisible={searchVisible}
             knownCharacters={knownCharacters}
             expandedPaths={expandedPaths}
             toggleExpanded={toggleExpanded}
@@ -688,7 +696,7 @@ function NavTreeItem({
         style={{ paddingLeft: `${depth * 14 + 8}px` }}
       >
         {tableChildren.length > 0 ? (
-          isExpanded ? (
+          effectiveExpanded ? (
             <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
           ) : (
             <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" />
@@ -709,7 +717,7 @@ function NavTreeItem({
           </InfoPill>
         )}
       </button>
-      {isExpanded &&
+      {effectiveExpanded &&
         tableChildren.map((child) => (
           <NavTreeItem
             key={child.key}
@@ -720,6 +728,7 @@ function NavTreeItem({
             selectedPath={selectedPath}
             onSelect={onSelect}
             searchQuery={searchQuery}
+            searchVisible={searchVisible}
             knownCharacters={knownCharacters}
             expandedPaths={expandedPaths}
             toggleExpanded={toggleExpanded}
@@ -727,7 +736,7 @@ function NavTreeItem({
         ))}
     </div>
   );
-}
+});
 
 // ── Customization Popover ────────────────────────────────────
 
@@ -944,17 +953,15 @@ function FieldRow({
 }) {
   if (field.hidden) return null;
 
-  const pathSegments = field.nodeId.split("/");
-
   const handleChange = (val: string | number | boolean | null) => {
-    onEdit(pathSegments, val);
+    onEdit(field.path, val);
   };
 
   const handleColorChange = (r: number, g: number, b: number, a?: number) => {
-    onEdit([...pathSegments, "r"], r);
-    onEdit([...pathSegments, "g"], g);
-    onEdit([...pathSegments, "b"], b);
-    if (a !== undefined) onEdit([...pathSegments, "a"], a);
+    onEdit([...field.path, "r"], r);
+    onEdit([...field.path, "g"], g);
+    onEdit([...field.path, "b"], b);
+    if (a !== undefined) onEdit([...field.path, "a"], a);
   };
 
   const renderWidget = () => {
@@ -995,21 +1002,21 @@ function FieldRow({
         </div>
       </div>
       <div className="shrink-0">{renderWidget()}</div>
-      {field.confidence !== "certain" && (
-        <Popover>
-          <PopoverTrigger className="opacity-0 group-hover:opacity-100 transition-opacity">
-            <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-accent-sky" />
-          </PopoverTrigger>
-          <PopoverContent align="end" className="w-72">
-            <WidgetCustomizer
-              field={field}
-              overlay={overlay}
-              addonName={addonName}
-              onSave={onOverlayChange}
-            />
-          </PopoverContent>
-        </Popover>
-      )}
+      {/* Always render the gear (opacity-0 until row hover) so users can edit or
+          reset their own overrides and customize confidently-inferred widgets too. */}
+      <Popover>
+        <PopoverTrigger className="opacity-0 group-hover:opacity-100 transition-opacity">
+          <SettingsIcon className="size-3.5 text-muted-foreground/50 hover:text-accent-sky" />
+        </PopoverTrigger>
+        <PopoverContent align="end" className="w-72">
+          <WidgetCustomizer
+            field={field}
+            overlay={overlay}
+            addonName={addonName}
+            onSave={onOverlayChange}
+          />
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }
@@ -1291,6 +1298,38 @@ function EditorTab({
 
   const knownCharacters = useMemo(() => new Set(characters.map((c) => c.name)), [characters]);
 
+  // Debounce the value that drives the tree filter. The input itself stays bound
+  // to `searchQuery` (instantly responsive); the expensive per-node visibility set
+  // is only recomputed ~150ms after typing stops.
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedQuery(searchQuery), 150);
+    return () => clearTimeout(id);
+  }, [searchQuery]);
+
+  // One tree walk per debounced query builds the set of pathKeys that either match
+  // or have a matching descendant (matched nodes + all their ancestors). NavTreeItem
+  // then does O(1) lookups instead of re-walking its whole subtree per keystroke.
+  // Encoding matches NavTreeItem's pathKey / expandAll exactly.
+  const searchVisible = useMemo<Set<string> | null>(() => {
+    const q = debouncedQuery.toLowerCase();
+    if (!q) return null;
+    const visible = new Set<string>();
+    const encode = (path: string[]) => path.map((s) => s.replace(/\0/g, "\\0")).join("\0");
+    const walk = (node: SvTreeNode, parentPath: string[]): boolean => {
+      const currentPath = [...parentPath, node.key];
+      let anyMatch = node.key.toLowerCase().includes(q);
+      // Visit every child (no short-circuit) so all visible descendants are added.
+      for (const child of node.children ?? []) {
+        if (walk(child, currentPath)) anyMatch = true;
+      }
+      if (anyMatch) visible.add(encode(currentPath));
+      return anyMatch;
+    };
+    for (const child of tree?.children ?? []) walk(child, EMPTY_PATH);
+    return visible;
+  }, [tree, debouncedQuery]);
+
   // Load overlay from store
   useEffect(() => {
     void getSetting<SvSchemaOverlay>(OVERLAY_STORE_KEY, {}).then(setOverlay);
@@ -1305,6 +1344,13 @@ function EditorTab({
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+
+  // On unmount (e.g. tab switch destroys this component), clear the parent's
+  // dirty ref so it can never go stale and trigger a bogus prompt later after
+  // the edit state is already gone. Runs cleanup only — onDirtyChange is stable.
+  useEffect(() => {
+    return () => onDirtyChange(false);
+  }, [onDirtyChange]);
 
   // Sync when parent changes the initial file
   useEffect(() => {
@@ -1630,7 +1676,8 @@ function EditorTab({
                     parentPath={EMPTY_PATH}
                     selectedPath={selectedPath}
                     onSelect={handleSelectPath}
-                    searchQuery={searchQuery}
+                    searchQuery={debouncedQuery}
+                    searchVisible={searchVisible}
                     knownCharacters={knownCharacters}
                     expandedPaths={expandedPaths}
                     toggleExpanded={toggleExpanded}
@@ -1744,11 +1791,13 @@ function CopyProfileTab({
   files,
   characters,
   addonsPath,
+  esoRunning,
   onRefresh,
 }: {
   files: SavedVariableFile[];
   characters: CharacterInfo[];
   addonsPath: string;
+  esoRunning: boolean;
   onRefresh: () => void;
 }) {
   const [selectedFile, setSelectedFile] = useState<string>("");
@@ -1782,21 +1831,39 @@ function CopyProfileTab({
     [allCharNames, sourceKey, charKeys]
   );
 
-  const actualDest = destKey === "__custom__" ? customDest : destKey;
-  const trimmedDest = actualDest.trim();
+  const actualDest = destKey === "__custom__" ? customDest.trim() : destKey;
 
-  // Destination already holds data in this file — copying will silently overwrite it.
-  const isOverwrite = destInFile.includes(trimmedDest);
+  // Client-side validation for the custom destination key (mirrors backend checks).
+  const customError = useMemo(() => {
+    if (destKey !== "__custom__") return null;
+    const trimmed = customDest.trim();
+    if (!trimmed) return null;
+    if (/["'\\]/.test(trimmed) || /\p{Cc}/u.test(trimmed)) {
+      return "Key cannot contain quotes, backslashes, or control characters.";
+    }
+    if (trimmed === sourceKey) return "Source and destination are the same.";
+    if (trimmed === "$AccountWide") {
+      return "$AccountWide is the account-wide settings bucket, not a character.";
+    }
+    return null;
+  }, [destKey, customDest, sourceKey]);
+
+  // Whether the chosen destination already exists in the selected file (settings
+  // for this addon will be overwritten).
+  const destExists = useMemo(
+    () => !!actualDest && (currentFile?.characterKeys ?? []).includes(actualDest),
+    [actualDest, currentFile]
+  );
 
   const handleCopy = async () => {
-    if (!selectedFile || !sourceKey || !actualDest) return;
+    if (!selectedFile || !sourceKey || !actualDest || customError) return;
     setCopying(true);
     try {
       await invokeOrThrow("copy_sv_profile", {
         addonsPath,
         fileName: selectedFile,
         fromKey: sourceKey,
-        toKey: trimmedDest,
+        toKey: actualDest,
       });
       toast.success(`Copied "${sourceKey}" to "${actualDest}" in ${currentFile?.addonName}`);
       onRefresh();
@@ -1812,6 +1879,13 @@ function CopyProfileTab({
 
   return (
     <div className="space-y-4">
+      {esoRunning && (
+        <div className="flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-xs text-amber-400 shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent)]">
+          <AlertTriangleIcon className="size-4 shrink-0" />
+          ESO is running. Copied settings may be overwritten when you exit the game.
+        </div>
+      )}
+
       <p className="text-sm text-muted-foreground">
         Copy addon settings from one character to another within the same SavedVariables file.
       </p>
@@ -1896,12 +1970,15 @@ function CopyProfileTab({
             </SelectContent>
           </Select>
           {destKey === "__custom__" && (
-            <Input
-              className="mt-2"
-              placeholder='e.g. "CharName^NA"'
-              value={customDest}
-              onChange={(e) => setCustomDest(e.target.value)}
-            />
+            <>
+              <Input
+                className="mt-2"
+                placeholder="e.g. CharName^NA"
+                value={customDest}
+                onChange={(e) => setCustomDest(e.target.value)}
+              />
+              {customError && <p className="mt-1 text-xs text-red-400">{customError}</p>}
+            </>
           )}
         </div>
       )}
@@ -1916,21 +1993,17 @@ function CopyProfileTab({
             {" in "}
             <span className="font-medium">{currentFile?.addonName}.lua</span>
           </p>
-          {isOverwrite && (
-            <div className="mt-2 flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-xs text-amber-400 shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent)]">
-              <AlertTriangleIcon className="size-4 shrink-0" />
-              <span>
-                <span className="font-medium">{actualDest}</span> already has settings in this file
-                &mdash; copying will overwrite them. A .bak is kept and can be restored from the
-                Editor tab&apos;s Restore button.
-              </span>
-            </div>
+          {destExists && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-amber-400">
+              <AlertTriangleIcon className="size-3.5 shrink-0" />
+              {actualDest}&rsquo;s existing settings for this addon will be replaced.
+            </p>
           )}
           <Button
             className="mt-2"
             size="sm"
             onClick={() => {
-              if (isOverwrite) {
+              if (destExists) {
                 setConfirmState({
                   title: "Overwrite existing profile",
                   description: `"${actualDest}" already has settings in ${currentFile?.addonName}.lua. Copying "${sourceKey}" will overwrite them. A .bak is kept and can be restored from the Editor tab.`,
@@ -1941,7 +2014,7 @@ function CopyProfileTab({
                 void handleCopy();
               }
             }}
-            disabled={copying || !actualDest.trim()}
+            disabled={copying || !actualDest.trim() || !!customError}
           >
             <CopyIcon className="mr-1 size-3" />
             {copying ? "Copying..." : "Copy Profile"}
@@ -2163,7 +2236,14 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   }, [loadFiles, addonsPath]);
 
   useEffect(() => {
-    invokeOrThrow<boolean>("is_eso_running").then(setEsoRunning).catch(console.error);
+    // Refresh periodically while the dialog is open so the editor's "ESO is
+    // running" warning stays truthful if the game is launched or exited.
+    const check = () => {
+      invokeOrThrow<boolean>("is_eso_running").then(setEsoRunning).catch(console.error);
+    };
+    check();
+    const id = setInterval(check, 30000);
+    return () => clearInterval(id);
   }, []);
 
   const handleSelectFile = useCallback((f: SavedVariableFile) => {
@@ -2174,6 +2254,27 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   const handleDirtyChange = useCallback((d: boolean) => {
     editorDirtyRef.current = d;
   }, []);
+
+  const handleTabChange = useCallback(
+    (value: string) => {
+      // Leaving the editor with unsaved edits would silently unmount EditorTab
+      // and destroy them — confirm first, and reset the dirty ref on discard.
+      if (activeTab === "editor" && value !== "editor" && editorDirtyRef.current) {
+        setConfirmState({
+          title: "Unsaved changes",
+          description: "You have unsaved changes. Discard them?",
+          confirmLabel: "Discard",
+          onConfirm: () => {
+            editorDirtyRef.current = false;
+            setActiveTab(value);
+          },
+        });
+        return;
+      }
+      setActiveTab(value);
+    },
+    [activeTab]
+  );
 
   const handleClose = useCallback(() => {
     if (editorDirtyRef.current) {
@@ -2197,7 +2298,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
 
         <Tabs
           value={activeTab}
-          onValueChange={setActiveTab}
+          onValueChange={handleTabChange}
           className="flex-1 min-h-0 flex flex-col"
         >
           <TabsList variant="line" className="shrink-0">
@@ -2259,6 +2360,7 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
                     files={files}
                     characters={characters}
                     addonsPath={addonsPath}
+                    esoRunning={esoRunning}
                     onRefresh={() => void loadFiles()}
                   />
                 </motion.div>

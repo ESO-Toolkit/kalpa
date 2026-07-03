@@ -299,14 +299,14 @@ fn create_zip_snapshot(
                 let settings_file = parent.join(filename);
                 if settings_file.is_file() {
                     source_paths.push(filename.to_string());
-                    let data = fs::read(&settings_file)
+                    let mut reader = fs::File::open(&settings_file)
                         .map_err(|e| format!("Failed to read {filename}: {e}"))?;
                     zip.start_file(*filename, options)
                         .map_err(|e| format!("Failed to add {filename} to archive: {e}"))?;
-                    zip.write_all(&data)
+                    let written = std::io::copy(&mut reader, &mut zip)
                         .map_err(|e| format!("Failed to write {filename} to archive: {e}"))?;
                     file_count += 1;
-                    total_size += data.len() as u64;
+                    total_size += written;
                 }
             }
         }
@@ -396,16 +396,18 @@ fn add_dir_to_zip(
                 if path.read_link().is_ok() {
                     continue;
                 }
-                let data = match fs::read(&path) {
-                    Ok(d) => d,
+                // Stream the file into the archive instead of loading it fully
+                // into memory — SavedVariables can be hundreds of MB per file.
+                let mut reader = match fs::File::open(&path) {
+                    Ok(f) => f,
                     Err(_) => continue, // Skip unreadable files (e.g. locked by another process)
                 };
                 zip.start_file(&zip_path, *options)
                     .map_err(|e| format!("Failed to add '{zip_path}' to archive: {e}"))?;
-                zip.write_all(&data)
+                let written = std::io::copy(&mut reader, zip)
                     .map_err(|e| format!("Failed to write '{zip_path}' to archive: {e}"))?;
                 file_count += 1;
-                total_size += data.len() as u64;
+                total_size += written;
             }
         }
     }
@@ -427,11 +429,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(crate::file_hashes::to_hex(&hasher.finalize()))
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
