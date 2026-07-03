@@ -1980,6 +1980,63 @@ fn discover_entry_from_esoui_detail(
     }
 }
 
+fn discover_entry_from_search_result(
+    result: esoui::EsouiSearchResult,
+    installed_ids: &BTreeSet<String>,
+    rank: i32,
+) -> DiscoverEntry {
+    let esoui_id = result.id.to_string();
+    DiscoverEntry {
+        esoui_id: esoui_id.clone().into(),
+        title: result.title.into(),
+        author: result.author.into(),
+        category: result.category.into(),
+        version: "".into(),
+        downloads: result.downloads.into(),
+        monthly_downloads: "".into(),
+        favorites: "".into(),
+        updated: result.updated.into(),
+        created: "".into(),
+        md5: "".into(),
+        compatibility: "".into(),
+        description: "Select this addon to load its ESOUI description.".into(),
+        installed: installed_ids.contains(&esoui_id),
+        rank,
+    }
+}
+
+fn discover_entries_from_search_results(
+    results: Vec<esoui::EsouiSearchResult>,
+    installed_ids: &BTreeSet<String>,
+) -> Vec<DiscoverEntry> {
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            discover_entry_from_search_result(result, installed_ids, index as i32 + 1)
+        })
+        .collect()
+}
+
+fn merge_discover_detail(
+    mut entry: DiscoverEntry,
+    detail: esoui::EsouiAddonDetail,
+) -> DiscoverEntry {
+    entry.esoui_id = detail.id.to_string().into();
+    entry.title = detail.title.into();
+    entry.author = detail.author.into();
+    entry.version = detail.version.into();
+    entry.downloads = detail.total_downloads.into();
+    entry.monthly_downloads = detail.monthly_downloads.into();
+    entry.favorites = detail.favorites.into();
+    entry.updated = detail.updated.into();
+    entry.created = detail.created.into();
+    entry.md5 = detail.md5.into();
+    entry.compatibility = detail.compatibility.into();
+    entry.description = detail.description.into();
+    entry
+}
+
 fn dependency_model(dependencies: Vec<DependencyEntry>) -> ModelRc<DependencyEntry> {
     Rc::new(VecModel::from(dependencies)).into()
 }
@@ -2231,10 +2288,12 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
 
         match persist_addons_path(path) {
             Ok(()) => match reload_real_addon_models(&ui, &models) {
-                Ok(()) => ui.set_status_error_message("Saved AddOns folder and loaded addons.".into()),
-                Err(error) => ui.set_status_error_message(
-                    format!("Saved AddOns folder, but {error}").into(),
-                ),
+                Ok(()) => {
+                    ui.set_status_error_message("Saved AddOns folder and loaded addons.".into())
+                }
+                Err(error) => {
+                    ui.set_status_error_message(format!("Saved AddOns folder, but {error}").into())
+                }
             },
             Err(error) => {
                 ui.set_status_error_message(format!("Failed to save AddOns folder: {error}").into())
@@ -3244,6 +3303,8 @@ fn wire_discover(
     let tab_ui = ui.as_weak();
     let tab_model = discover_model.clone();
     let tab_installed_ids = installed_ids.clone();
+    let popular_request_counter = Arc::new(AtomicU64::new(0));
+    let tab_popular_request_counter = popular_request_counter.clone();
     ui.on_discover_tab_selected(move |tab| {
         let Some(ui) = tab_ui.upgrade() else {
             return;
@@ -3251,11 +3312,53 @@ fn wire_discover(
 
         let model = apply_discover_data(&ui, tab, &tab_installed_ids.borrow());
         *tab_model.borrow_mut() = model;
+
+        if normalize_discover_tab(tab) == 1 {
+            let request_id = tab_popular_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let request_counter = tab_popular_request_counter.clone();
+            let installed_snapshot = tab_installed_ids.borrow().clone();
+            let ui_weak = ui.as_weak();
+            std::thread::spawn(move || {
+                let result = esoui::browse_popular(0, "downloads").map(|page| {
+                    discover_entries_from_search_results(page.results, &installed_snapshot)
+                });
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    if request_counter.load(Ordering::SeqCst) != request_id {
+                        return;
+                    }
+
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+
+                    if ui.get_discover_tab() != 1 {
+                        return;
+                    }
+
+                    match result {
+                        Ok(entries) if !entries.is_empty() => {
+                            let model = Rc::new(VecModel::from(entries));
+                            ui.set_selected_discover_index(0);
+                            ui.set_discover_results(model.into());
+                            ui.set_status_error_message("".into());
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            ui.set_status_error_message(
+                                format!("Could not load popular ESOUI addons: {error}").into(),
+                            );
+                        }
+                    }
+                });
+            });
+        }
     });
 
     let query_ui = ui.as_weak();
     let query_model = discover_model.clone();
     let query_installed_ids = installed_ids.clone();
+    let query_request_counter = Arc::new(AtomicU64::new(0));
     ui.on_discover_query_edited(move |_| {
         let Some(ui) = query_ui.upgrade() else {
             return;
@@ -3267,6 +3370,56 @@ fn wire_discover(
 
         let model = apply_discover_data(&ui, 0, &query_installed_ids.borrow());
         *query_model.borrow_mut() = model;
+
+        let query = ui.get_discover_query().to_string();
+        if query.trim().is_empty() {
+            ui.set_status_error_message("".into());
+            return;
+        }
+
+        let request_id = query_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let request_counter = query_request_counter.clone();
+        let installed_snapshot = query_installed_ids.borrow().clone();
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = esoui::search_esoui(query.as_str())
+                .map(|results| discover_entries_from_search_results(results, &installed_snapshot));
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if request_counter.load(Ordering::SeqCst) != request_id {
+                    return;
+                }
+
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                if ui.get_discover_tab() != 0 {
+                    return;
+                }
+
+                match result {
+                    Ok(entries) => {
+                        let selected_index = if entries.is_empty() {
+                            0
+                        } else {
+                            ui.get_selected_discover_index()
+                                .max(0)
+                                .min(entries.len().saturating_sub(1) as i32)
+                        };
+                        let model = Rc::new(VecModel::from(entries));
+                        ui.set_selected_discover_index(selected_index);
+                        ui.set_discover_results(model.into());
+                        ui.set_status_error_message("".into());
+                    }
+                    Err(error) => {
+                        ui.set_status_error_message(
+                            format!("Could not search ESOUI addons: {error}").into(),
+                        );
+                    }
+                }
+            });
+        });
     });
 
     let url_ui = ui.as_weak();
@@ -3330,12 +3483,14 @@ fn wire_discover(
     });
 
     let selected_ui = ui.as_weak();
+    let detail_request_counter = Arc::new(AtomicU64::new(0));
     ui.on_discover_selected(move |index| {
         let Some(ui) = selected_ui.upgrade() else {
             return;
         };
 
-        let row_count = ui.get_discover_results().row_count();
+        let model = ui.get_discover_results();
+        let row_count = model.row_count();
         if row_count == 0 {
             ui.set_selected_discover_index(0);
             return;
@@ -3343,6 +3498,51 @@ fn wire_discover(
 
         let next_index = (index.max(0) as usize).min(row_count.saturating_sub(1));
         ui.set_selected_discover_index(next_index as i32);
+
+        let Some(entry) = model.row_data(next_index) else {
+            return;
+        };
+        let Ok(esoui_id) = entry.esoui_id.parse::<u32>() else {
+            return;
+        };
+        let request_id = detail_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let request_counter = detail_request_counter.clone();
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = esoui::fetch_addon_detail(esoui_id);
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if request_counter.load(Ordering::SeqCst) != request_id {
+                    return;
+                }
+
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                let model = ui.get_discover_results();
+                let selected_index = ui.get_selected_discover_index().max(0) as usize;
+                let Some(entry) = model.row_data(selected_index) else {
+                    return;
+                };
+
+                if entry.esoui_id.as_str() != esoui_id.to_string() {
+                    return;
+                }
+
+                match result {
+                    Ok(detail) => {
+                        model.set_row_data(selected_index, merge_discover_detail(entry, detail));
+                        ui.set_status_error_message("".into());
+                    }
+                    Err(error) => {
+                        ui.set_status_error_message(
+                            format!("Could not load ESOUI addon details: {error}").into(),
+                        );
+                    }
+                }
+            });
+        });
     });
 
     let install_ui = ui.as_weak();
@@ -8649,6 +8849,72 @@ CombatMetrics_SavedVariables = {
         let combat_metrics = model.row_data(1).expect("second discover row exists");
         assert_eq!(combat_metrics.esoui_id.as_str(), "1360");
         assert!(!combat_metrics.installed);
+    }
+
+    #[test]
+    fn discover_search_result_conversion_preserves_row_metadata() {
+        let installed = BTreeSet::from(["1360".to_string()]);
+        let entry = discover_entry_from_search_result(
+            esoui::EsouiSearchResult {
+                id: 1360,
+                title: "CombatMetrics".to_string(),
+                author: "Solinur".to_string(),
+                category: "Combat".to_string(),
+                downloads: "5.2M".to_string(),
+                updated: "3/3/2026".to_string(),
+            },
+            &installed,
+            4,
+        );
+
+        assert_eq!(entry.esoui_id.as_str(), "1360");
+        assert_eq!(entry.title.as_str(), "CombatMetrics");
+        assert_eq!(entry.category.as_str(), "Combat");
+        assert_eq!(entry.rank, 4);
+        assert!(entry.installed);
+    }
+
+    #[test]
+    fn discover_detail_merge_keeps_selection_state() {
+        let installed = BTreeSet::from(["1360".to_string()]);
+        let entry = discover_entry_from_search_result(
+            esoui::EsouiSearchResult {
+                id: 1360,
+                title: "CombatMetrics".to_string(),
+                author: "Solinur".to_string(),
+                category: "Combat".to_string(),
+                downloads: "5.2M".to_string(),
+                updated: "3/3/2026".to_string(),
+            },
+            &installed,
+            2,
+        );
+
+        let merged = merge_discover_detail(
+            entry,
+            esoui::EsouiAddonDetail {
+                id: 1360,
+                title: "CombatMetrics".to_string(),
+                version: "1.7.7".to_string(),
+                author: "Solinur".to_string(),
+                description: "Full detail".to_string(),
+                compatibility: "101048".to_string(),
+                md5: "abc123".to_string(),
+                total_downloads: "5,200,000".to_string(),
+                monthly_downloads: "213,000".to_string(),
+                favorites: "8,800".to_string(),
+                updated: "03/03/26".to_string(),
+                created: "08/05/14".to_string(),
+                screenshots: Vec::new(),
+                download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
+            },
+        );
+
+        assert_eq!(merged.category.as_str(), "Combat");
+        assert_eq!(merged.rank, 2);
+        assert!(merged.installed);
+        assert_eq!(merged.version.as_str(), "1.7.7");
+        assert_eq!(merged.description.as_str(), "Full detail");
     }
 
     #[test]
