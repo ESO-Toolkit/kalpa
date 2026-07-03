@@ -254,10 +254,11 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_tag_editor(&ui, addon_models.clone());
     wire_batch_actions(&ui, addon_models.clone());
     wire_context_actions(&ui, addon_models.clone());
+    let settings_models = addon_models.clone();
     wire_detail_actions(&ui, addon_models);
     wire_discover(&ui, discover_model, discover_installed_ids);
     wire_theme_actions(&ui, custom_themes);
-    wire_settings_actions(&ui);
+    wire_settings_actions(&ui, settings_models);
     wire_backup_restore_actions(&ui);
     ui.run()
 }
@@ -2067,26 +2068,12 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         let active_theme_id = apply_initial_theme(&ui);
         ui.set_active_theme_id(active_theme_id.into());
 
-        if let Some(addons_root) = addons_source_root() {
-            match real_addon_entries(&addons_root) {
-                Ok(addons) if !addons.is_empty() => {
-                    *refresh_models.all.borrow_mut() = addons;
-                    apply_addon_view(&ui, &refresh_models);
-                    apply_saved_variables_model(&ui, &refresh_models.all.borrow());
-                    ui.set_status_error_message("".into());
-                }
-                Ok(_) => {
-                    apply_saved_variables_model(&ui, &refresh_models.all.borrow());
-                    ui.set_status_error_message("No addons were found in the configured AddOns folder.".into());
-                }
-                Err(error) => {
-                    apply_saved_variables_model(&ui, &refresh_models.all.borrow());
-                    ui.set_status_error_message(error.into());
-                }
+        match reload_real_addon_models(&ui, &refresh_models) {
+            Ok(()) => ui.set_status_error_message("".into()),
+            Err(error) => {
+                apply_saved_variables_model(&ui, &refresh_models.all.borrow());
+                ui.set_status_error_message(error.into());
             }
-        } else {
-            apply_saved_variables_model(&ui, &refresh_models.all.borrow());
-            ui.set_status_error_message("AddOns folder was not found. Set KALPA_ADDONS_PATH or configure the ESO AddOns path.".into());
         }
     });
 
@@ -2133,7 +2120,7 @@ fn native_settings_from_ui(ui: &KalpaWindow) -> NativeSettings {
     }
 }
 
-fn wire_settings_actions(ui: &KalpaWindow) {
+fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
     let settings_ui = ui.as_weak();
     ui.on_settings_changed(move || {
         let Some(ui) = settings_ui.upgrade() else {
@@ -2211,12 +2198,34 @@ fn wire_settings_actions(ui: &KalpaWindow) {
         }
 
         match persist_addons_path(path) {
-            Ok(()) => ui.set_status_error_message("Saved AddOns folder.".into()),
+            Ok(()) => match reload_real_addon_models(&ui, &models) {
+                Ok(()) => ui.set_status_error_message("Saved AddOns folder and loaded addons.".into()),
+                Err(error) => ui.set_status_error_message(
+                    format!("Saved AddOns folder, but {error}").into(),
+                ),
+            },
             Err(error) => {
                 ui.set_status_error_message(format!("Failed to save AddOns folder: {error}").into())
             }
         }
     });
+}
+
+fn reload_real_addon_models(ui: &KalpaWindow, models: &AddonModels) -> Result<(), String> {
+    let addons_root = addons_source_root().ok_or_else(|| {
+        "AddOns folder was not found. Set KALPA_ADDONS_PATH or configure the ESO AddOns path."
+            .to_string()
+    })?;
+    let addons = real_addon_entries(&addons_root)?;
+    if addons.is_empty() {
+        return Err("No addons were found in the configured AddOns folder.".into());
+    }
+
+    *models.all.borrow_mut() = addons;
+    apply_addon_view(ui, models);
+    apply_saved_variables_model(ui, &models.all.borrow());
+    refresh_file_browser(ui);
+    Ok(())
 }
 
 fn wire_backup_restore_actions(ui: &KalpaWindow) {
@@ -3890,7 +3899,8 @@ fn save_file_from_editor(ui: &KalpaWindow, relative_path: &str, content: &str) {
     let Some(addons_root) = addons_source_root() else {
         ui.set_editor_error(true);
         ui.set_editor_message(
-            "Cannot save demo file. Launch with KALPA_ADDONS_PATH to edit real addon files.".into(),
+            "Cannot save demo file. Configure the ESO AddOns folder to edit real addon files."
+                .into(),
         );
         return;
     };
