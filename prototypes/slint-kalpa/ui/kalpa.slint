@@ -50,6 +50,19 @@ export struct SavedVariableEntry {
     orphaned: bool,
 }
 
+export struct SettingsBackupEntry {
+    name: string,
+    display-name: string,
+    kind-label: string,
+    kind: int,
+    meta: string,
+    detail: string,
+    file-count: int,
+    total-size-label: string,
+    latest: bool,
+    restorable: bool,
+}
+
 export struct DiscoverEntry {
     esoui-id: string,
     title: string,
@@ -4865,44 +4878,50 @@ component PackHubOverlay inherits Rectangle {
 }
 
 component BackupStatusCard inherits Rectangle {
-    height: 74px;
+    in property <string> title: "Your settings are protected";
+    in property <string> subtitle: "Last backup 3 days ago - 40 files - 13.2 MB";
+    in property <int> status-kind: 2;
+    private property <color> tone: root.status-kind == 0 ? Palette.amber : (root.status-kind == 1 ? Palette.gold : Palette.emerald);
+    private property <color> fill: root.status-kind == 0 ? Palette.amber-04 : (root.status-kind == 1 ? Palette.gold-04 : Palette.emerald-04);
+    private property <color> line: root.status-kind == 0 ? Palette.amber-25 : (root.status-kind == 1 ? Palette.gold-20 : Palette.emerald-20);
+    height: 66px;
     border-radius: 14px;
     border-width: 0px;
-    background: Tokens.accent-06;
+    background: root.fill;
 
     Rectangle {
         width: parent.width;
         height: parent.height;
         border-radius: parent.border-radius;
         border-width: 1px;
-        border-color: Palette.emerald-20;
+        border-color: root.line;
         background: #00000000;
     }
 
     Rectangle {
         x: 22px;
-        y: 24px;
+        y: 20px;
         width: 26px;
         height: 26px;
         border-radius: 8px;
-        background: Palette.emerald-15;
+        background: root.status-kind == 2 ? Palette.emerald-15 : (root.status-kind == 1 ? Palette.gold-15 : Palette.amber-04);
 
         Image {
             x: 6px;
             y: 6px;
             width: 14px;
             height: 14px;
-            source: @image-url("../assets/icons/check.svg");
+            source: root.status-kind == 0 ? @image-url("../assets/icons/triangle-alert.svg") : (root.status-kind == 1 ? @image-url("../assets/icons/refresh-cw.svg") : @image-url("../assets/icons/check.svg"));
             image-fit: contain;
-            colorize: Palette.emerald;
+            colorize: root.tone;
         }
     }
 
     Text {
         x: 64px;
-        y: 18px;
+        y: 14px;
         width: parent.width - 86px;
-        text: "Your settings are protected";
+        text: root.title;
         color: Palette.foreground;
         font-size: 17px;
         font-weight: 900;
@@ -4911,9 +4930,9 @@ component BackupStatusCard inherits Rectangle {
 
     Text {
         x: 64px;
-        y: 42px;
+        y: 38px;
         width: parent.width - 86px;
-        text: "Last backup 3 days ago - 40 files - 13.2 MB";
+        text: root.subtitle;
         color: Palette.muted-strong;
         font-size: 14px;
         font-weight: 600;
@@ -4924,12 +4943,19 @@ component BackupStatusCard inherits Rectangle {
 component BackupListRow inherits Rectangle {
     in property <string> title;
     in property <string> meta;
+    in property <string> kind-label: "Manual";
+    in property <int> kind: 0;
     in property <bool> latest: false;
+    in property <bool> restorable: true;
+    in property <bool> confirming-delete: false;
     callback restore-clicked;
+    callback delete-clicked;
+    callback delete-confirmed;
+    callback delete-cancelled;
     height: 76px;
     border-radius: 13px;
     border-width: 0px;
-    background: Palette.white-03;
+    background: root.kind == 1 ? Palette.violet-04 : Palette.white-03;
 
     title-text := Text {
         x: 16px;
@@ -4945,9 +4971,9 @@ component BackupListRow inherits Rectangle {
     Pill {
         x: 270px;
         y: 13px;
-        label: "Character";
-        tone: Tokens.accent;
-        fill: Tokens.accent-10;
+        label: root.kind-label;
+        tone: root.kind == 2 ? Palette.sky : (root.kind == 1 ? Palette.violet : Palette.muted-strong);
+        fill: root.kind == 2 ? Palette.sky-10 : (root.kind == 1 ? Palette.violet-04 : Palette.white-04);
         pill-height: 26px;
         label-font-size: 13px;
     }
@@ -4984,34 +5010,70 @@ component BackupListRow inherits Rectangle {
         overflow: elide;
     }
 
-    PackHubButton {
+    if (!root.confirming-delete) : PackHubButton {
         x: parent.width - 170px;
         y: 22px;
         width: 112px;
         icon: @image-url("../assets/icons/undo-2.svg");
         label: "Restore";
         primary: true;
+        disabled: !root.restorable;
         clicked => { root.restore-clicked(); }
     }
 
-    GhostIconButton {
+    if (!root.confirming-delete) : GhostIconButton {
         x: parent.width - 42px;
         y: 24px;
         icon: @image-url("../assets/icons/trash-2.svg");
+        clicked => { root.delete-clicked(); }
+    }
+
+    if (root.confirming-delete) : Text {
+        x: parent.width - 214px;
+        y: 0px;
+        height: parent.height;
+        text: "Delete?";
+        color: Palette.amber;
+        font-size: 12px;
+        font-weight: 900;
+        vertical-alignment: center;
+    }
+
+    if (root.confirming-delete) : PackHubButton {
+        x: parent.width - 152px;
+        y: 22px;
+        width: 58px;
+        icon: @image-url("../assets/icons/trash-2.svg");
+        label: "Yes";
+        primary: true;
+        clicked => { root.delete-confirmed(); }
+    }
+
+    if (root.confirming-delete) : PackHubButton {
+        x: parent.width - 84px;
+        y: 22px;
+        width: 58px;
+        icon: @image-url("../assets/icons/x.svg");
+        label: "No";
+        show-icon: false;
+        clicked => { root.delete-cancelled(); }
     }
 }
 
 component BackupCreateCard inherits Rectangle {
     in property <bool> label-open: false;
+    in-out property <string> label-draft;
     callback begin-label;
-    height: root.label-open ? 166px : 142px;
+    callback cancel-label;
+    callback create-backup(string);
+    height: root.label-open ? 156px : 130px;
     border-radius: 14px;
     border-width: 0px;
     background: Palette.white-03;
 
     Text {
         x: 18px;
-        y: 18px;
+        y: 16px;
         width: parent.width - 210px;
         text: "Create a new backup";
         color: Palette.foreground;
@@ -5022,7 +5084,7 @@ component BackupCreateCard inherits Rectangle {
 
     Text {
         x: 18px;
-        y: 48px;
+        y: 44px;
         width: parent.width - 260px;
         height: 42px;
         text: "Takes a snapshot of your current addon settings. Safe to do anytime.";
@@ -5034,17 +5096,17 @@ component BackupCreateCard inherits Rectangle {
 
     PackHubButton {
         x: parent.width - 172px;
-        y: 28px;
+        y: 26px;
         width: 148px;
         icon: @image-url("../assets/icons/plus.svg");
         label: "Back Up Now";
         primary: true;
-        clicked => { root.begin-label(); }
+        clicked => { root.create-backup(root.label-draft); }
     }
 
     if (!root.label-open) : Text {
         x: 18px;
-        y: 92px;
+        y: 86px;
         width: parent.width - 36px;
         text: "Add a custom label (optional)";
         color: Palette.muted-strong;
@@ -5052,27 +5114,47 @@ component BackupCreateCard inherits Rectangle {
         font-weight: 600;
     }
 
+    if (!root.label-open) : TouchArea {
+        x: 18px;
+        y: 82px;
+        width: 190px;
+        height: 28px;
+        clicked => { root.begin-label(); }
+    }
+
     if (root.label-open) : PackHubField {
         x: 18px;
-        y: 92px;
+        y: 86px;
         width: parent.width - 120px;
-        placeholder: "Manual backup May 5 2026 9-23-PM";
+        placeholder: root.label-draft == "" ? "Manual backup May 5 2026 9-23-PM" : "";
         search: false;
         focused: true;
     }
 
+    if (root.label-open) : TextEdit {
+        x: 32px;
+        y: 92px;
+        width: parent.width - 150px;
+        height: 28px;
+        text: root.label-draft;
+        font-size: 13px;
+        font-family: "Geist";
+        edited(content) => { root.label-draft = content; }
+    }
+
     if (root.label-open) : PackHubButton {
         x: parent.width - 92px;
-        y: 94px;
+        y: 88px;
         width: 68px;
         icon: @image-url("../assets/icons/x.svg");
         label: "Cancel";
         show-icon: false;
+        clicked => { root.cancel-label(); }
     }
 
     Rectangle {
         x: 18px;
-        y: root.label-open ? 136px : 114px;
+        y: root.label-open ? 130px : 108px;
         width: 18px;
         height: 18px;
         border-radius: 9px;
@@ -5092,7 +5174,7 @@ component BackupCreateCard inherits Rectangle {
 
     Text {
         x: 42px;
-        y: root.label-open ? 132px : 110px;
+        y: root.label-open ? 126px : 104px;
         width: parent.width - 86px;
         text: "What gets backed up?";
         color: Palette.muted-strong;
@@ -5102,7 +5184,7 @@ component BackupCreateCard inherits Rectangle {
 
     Image {
         x: 210px;
-        y: root.label-open ? 136px : 114px;
+        y: root.label-open ? 130px : 108px;
         width: 13px;
         height: 13px;
         source: @image-url("../assets/icons/chevron-down.svg");
@@ -5114,10 +5196,29 @@ component BackupCreateCard inherits Rectangle {
 component BackupRestoreOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
+    in property <[SettingsBackupEntry]> backups;
+    in property <string> status-title: "No backup yet";
+    in property <string> status-subtitle: "Your addon settings aren't protected. Create your first backup below.";
+    in property <int> status-kind: 0;
+    in property <string> backup-list-summary: "0 - 0 B total";
+    in-out property <string> backup-label-draft;
+    in-out property <int> pending-delete-index: -1;
+    in-out property <int> selected-backup-index: -1;
+    in-out property <string> selected-backup-title: "";
+    in-out property <string> selected-backup-meta: "";
+    callback refresh-backups;
+    callback create-backup(string);
+    callback restore-backup(int);
+    callback delete-backup(int);
+    callback reveal-backups-folder;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
-    private property <length> modal-height: root.height < 748px ? root.height - 48px : 700px;
+    private property <length> modal-height: root.height < 820px ? root.height - 32px : 780px;
+    private property <length> footer-height: 66px;
+    private property <length> list-title-y: root.view == 1 ? 384px : 356px;
+    private property <length> list-top: root.view == 1 ? 410px : 382px;
+    private property <length> list-height: max(132px, root.modal-height - root.footer-height - root.list-top - 10px);
 
     TouchArea {
         width: root.width;
@@ -5147,7 +5248,7 @@ component BackupRestoreOverlay inherits Rectangle {
 
         Text {
             x: 28px;
-            y: 28px;
+            y: 24px;
             width: parent.width - 92px;
             text: "Backup & Restore";
             color: Palette.gold;
@@ -5158,9 +5259,9 @@ component BackupRestoreOverlay inherits Rectangle {
 
         Text {
             x: 28px;
-            y: 62px;
+            y: 54px;
             width: parent.width - 92px;
-            height: 54px;
+            height: 48px;
             text: "Save a copy of your addon settings so you can recover them if something goes wrong, or move them to a new PC.";
             color: Palette.muted-strong;
             font-size: 14px;
@@ -5170,56 +5271,106 @@ component BackupRestoreOverlay inherits Rectangle {
 
         GhostIconButton {
             x: parent.width - 52px;
-            y: 24px;
+            y: 20px;
             width: 36px;
             height: 36px;
             icon: @image-url("../assets/icons/x.svg");
             clicked => { root.open = false; }
         }
 
-        Hairline { x: 0px; y: 132px; width: parent.width; height: 1px; opacity: 0.45; }
+        Hairline { x: 0px; y: 116px; width: parent.width; height: 1px; opacity: 0.45; }
 
         BackupStatusCard {
             x: 28px;
-            y: 152px;
+            y: 134px;
             width: parent.width - 56px;
+            title: root.status-title;
+            subtitle: root.status-subtitle;
+            status-kind: root.status-kind;
         }
 
         BackupCreateCard {
             x: 28px;
-            y: 246px;
+            y: 214px;
             width: parent.width - 56px;
             label-open: root.view == 1;
+            label-draft <=> root.backup-label-draft;
             begin-label => { root.view = 1; }
+            cancel-label => {
+                root.backup-label-draft = "";
+                root.view = 0;
+            }
+            create-backup(label) => { root.create-backup(label); }
         }
 
-        DetailSectionTitle { x: 28px; y: root.view == 1 ? 432px : 410px; width: 130px; label: "YOUR BACKUPS"; }
-        Text { x: 150px; y: root.view == 1 ? 430px : 408px; text: "2 - 29.2 MB total"; color: Palette.muted-half; font-size: 13px; font-weight: 800; }
+        DetailSectionTitle { x: 28px; y: root.list-title-y; width: 130px; label: "YOUR BACKUPS"; }
+        Text { x: 150px; y: root.list-title-y - 2px; text: root.backup-list-summary; color: Palette.muted-half; font-size: 13px; font-weight: 800; }
 
-        BackupListRow {
+        if (root.backups.length == 0) : Rectangle {
             x: 28px;
-            y: root.view == 1 ? 458px : 436px;
+            y: root.list-top;
             width: parent.width - 56px;
-            title: "Grappa'Ko'Laid-backup";
-            meta: "3 days ago - 40 files - 13.2 MB";
-            latest: true;
-            restore-clicked => { root.view = 2; }
+            height: min(128px, root.list-height);
+            border-radius: 13px;
+            border-width: 1px;
+            border-color: Palette.white-06;
+            background: Palette.white-03;
+
+            Image { x: (parent.width - 28px) / 2; y: 24px; width: 28px; height: 28px; source: @image-url("../assets/icons/folder-open.svg"); image-fit: contain; colorize: Palette.muted-half; }
+            Text { x: 24px; y: 62px; width: parent.width - 48px; text: "No backups yet"; color: Palette.foreground; font-size: 14px; font-weight: 900; horizontal-alignment: center; }
+            Text { x: 44px; y: 88px; width: parent.width - 88px; text: "Create your first backup so you can recover your settings if anything goes wrong."; color: Palette.muted-strong; font-size: 12px; font-weight: 600; horizontal-alignment: center; wrap: word-wrap; }
         }
 
-        BackupListRow {
+        if (root.backups.length > 0) : ScrollView {
             x: 28px;
-            y: root.view == 1 ? 544px : 522px;
+            y: root.list-top;
             width: parent.width - 56px;
-            title: "Spike'jo-backup";
-            meta: "Apr 5, 2026 - 89 files - 16.0 MB";
-            restore-clicked => { root.view = 2; }
+            height: root.list-height;
+            viewport-width: self.width;
+            viewport-height: root.backups.length * 86px;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+            Rectangle {
+                width: parent.width;
+                height: root.backups.length * 86px;
+                background: #00000000;
+
+                for backup[index] in root.backups : BackupListRow {
+                    x: 0px;
+                    y: index * 86px;
+                    width: parent.width;
+                    title: backup.display-name;
+                    meta: backup.meta;
+                    kind-label: backup.kind-label;
+                    kind: backup.kind;
+                    latest: backup.latest;
+                    restorable: backup.restorable;
+                    confirming-delete: root.pending-delete-index == index;
+                    restore-clicked => {
+                        root.selected-backup-index = index;
+                        root.selected-backup-title = backup.display-name;
+                        root.selected-backup-meta = backup.meta;
+                        root.view = 2;
+                    }
+                    delete-clicked => { root.pending-delete-index = index; }
+                    delete-cancelled => { root.pending-delete-index = -1; }
+                    delete-confirmed => {
+                        root.pending-delete-index = -1;
+                        root.delete-backup(index);
+                    }
+                }
+            }
+
+            Rectangle { x: parent.width - 8px; y: 8px; width: 5px; height: parent.height - 16px; border-radius: 3px; background: Palette.white-04; }
+            Rectangle { x: parent.width - 8px; y: 16px; width: 5px; height: 42px; border-radius: 3px; background: Palette.sky; }
         }
 
         Rectangle {
             x: 0px;
-            y: parent.height - 70px;
+            y: parent.height - root.footer-height;
             width: parent.width;
-            height: 70px;
+            height: root.footer-height;
             background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
 
             Image {
@@ -5243,7 +5394,7 @@ component BackupRestoreOverlay inherits Rectangle {
                 vertical-alignment: center;
             }
 
-            TouchArea { x: 24px; y: 18px; width: 144px; height: 36px; }
+            TouchArea { x: 24px; y: 18px; width: 144px; height: 36px; clicked => { root.reveal-backups-folder(); } }
             PackHubButton { x: parent.width - 96px; y: 20px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => { root.open = false; } }
         }
 
@@ -5283,8 +5434,8 @@ component BackupRestoreOverlay inherits Rectangle {
                 border-width: 0px;
                 background: Palette.white-03;
 
-                Text { x: 18px; y: 16px; width: parent.width - 36px; text: "Grappa'Ko'Laid-backup"; color: Palette.foreground; font-size: 15px; font-weight: 900; overflow: elide; }
-                Text { x: 18px; y: 42px; width: parent.width - 36px; text: "3 days ago - 40 files - 13.2 MB"; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
+                Text { x: 18px; y: 16px; width: parent.width - 36px; text: root.selected-backup-title != "" ? root.selected-backup-title : "Select a backup from the list"; color: Palette.foreground; font-size: 15px; font-weight: 900; overflow: elide; }
+                Text { x: 18px; y: 42px; width: parent.width - 36px; text: root.selected-backup-meta != "" ? root.selected-backup-meta : "No backup selected"; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
             }
 
             Rectangle {
@@ -5311,7 +5462,7 @@ component BackupRestoreOverlay inherits Rectangle {
                     background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 75%, #00000000 100%);
 
                     PackHubButton { x: parent.width - 254px; y: 18px; width: 86px; icon: @image-url("../assets/icons/x.svg"); label: "Cancel"; show-icon: false; clicked => { root.view = 0; } }
-                    PackHubButton { x: parent.width - 158px; y: 18px; width: 134px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Yes, Restore"; primary: true; }
+                    PackHubButton { x: parent.width - 158px; y: 18px; width: 134px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Yes, Restore"; primary: true; clicked => { root.restore-backup(root.selected-backup-index); } }
                 }
             }
         }
@@ -8360,6 +8511,7 @@ export component KalpaWindow inherits Window {
     in property <[DiscoverEntry]> discover-results;
     in property <[SavedVariableEntry]> svm-files;
     in property <[SavedVariableEntry]> svm-orphaned-files;
+    in property <[SettingsBackupEntry]> settings-backups;
     in property <[ThemeEntry]> themes;
     in property <int> total-addon-count: 0;
     in property <int> addon-kind-count: 0;
@@ -8400,6 +8552,7 @@ export component KalpaWindow inherits Window {
     in-out property <int> svm-view: 0;
     in-out property <bool> backup-restore-open: false;
     in-out property <int> backup-restore-view: 0;
+    in-out property <string> backup-label-draft;
     in-out property <int> selected-index: 5;
     in-out property <int> selected-discover-index: 0;
     in-out property <bool> detail-files-active: false;
@@ -8450,6 +8603,10 @@ export component KalpaWindow inherits Window {
     in-out property <string> svm-large-count-label: "0";
     in-out property <bool> svm-has-orphans: false;
     in-out property <bool> svm-has-files: false;
+    in-out property <string> backup-status-title: "No backup yet";
+    in-out property <string> backup-status-subtitle: "Your addon settings aren't protected. Create your first backup below.";
+    in-out property <int> backup-status-kind: 0;
+    in-out property <string> backup-list-summary: "0 - 0 B total";
     private property <length> error-banner-height: root.status-error-message != "" ? 36px : 0px;
     private property <length> offline-banner-height: root.offline-active ? 36px : 0px;
     private property <length> app-update-banner-height: root.app-update-message != "" ? 36px : 0px;
@@ -8507,6 +8664,11 @@ export component KalpaWindow inherits Window {
     callback open-svm;
     callback svm-refresh;
     callback open-backup-restore;
+    callback backup-restore-refresh;
+    callback backup-restore-create(string);
+    callback backup-restore-restore(int);
+    callback backup-restore-delete(int);
+    callback backup-restore-reveal-folder;
     callback open-settings;
     callback theme-selected(string);
     callback theme-create;
@@ -8760,6 +8922,17 @@ export component KalpaWindow inherits Window {
             height: root.height;
             open <=> root.backup-restore-open;
             view <=> root.backup-restore-view;
+            backups: root.settings-backups;
+            status-title: root.backup-status-title;
+            status-subtitle: root.backup-status-subtitle;
+            status-kind: root.backup-status-kind;
+            backup-list-summary: root.backup-list-summary;
+            backup-label-draft <=> root.backup-label-draft;
+            refresh-backups => { root.backup-restore-refresh(); }
+            create-backup(label) => { root.backup-restore-create(label); }
+            restore-backup(index) => { root.backup-restore-restore(index); }
+            delete-backup(index) => { root.backup-restore-delete(index); }
+            reveal-backups-folder => { root.backup-restore-reveal-folder(); }
         }
 
         AppearanceOverlay {

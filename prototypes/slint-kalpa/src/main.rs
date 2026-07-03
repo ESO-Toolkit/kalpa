@@ -2,6 +2,9 @@
 
 slint::include_modules!();
 
+#[path = "native_char_backup.rs"]
+mod char_backup;
+
 use serde::{Deserialize, Serialize};
 use slint::{
     Color, ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
@@ -204,6 +207,7 @@ fn main() -> Result<(), slint::PlatformError> {
     seed_initial_theme_draft(&ui, &custom_themes.borrow());
     apply_initial_native_settings(&ui);
     apply_runtime_flags(&ui, render_config.preset);
+    apply_backup_restore_model(&ui);
     apply_addon_view(&ui, &addon_models);
     let discover_installed_ids = Rc::new(RefCell::new(installed_discover_ids(
         &addon_models.all.borrow(),
@@ -226,6 +230,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_discover(&ui, discover_model, discover_installed_ids);
     wire_theme_actions(&ui, custom_themes);
     wire_settings_actions(&ui);
+    wire_backup_restore_actions(&ui);
     ui.run()
 }
 
@@ -2179,6 +2184,123 @@ fn wire_settings_actions(ui: &KalpaWindow) {
             Err(error) => {
                 ui.set_status_error_message(format!("Failed to save AddOns folder: {error}").into())
             }
+        }
+    });
+}
+
+fn wire_backup_restore_actions(ui: &KalpaWindow) {
+    let open_ui = ui.as_weak();
+    ui.on_open_backup_restore(move || {
+        let Some(ui) = open_ui.upgrade() else {
+            return;
+        };
+        apply_backup_restore_model(&ui);
+    });
+
+    let refresh_ui = ui.as_weak();
+    ui.on_backup_restore_refresh(move || {
+        let Some(ui) = refresh_ui.upgrade() else {
+            return;
+        };
+        apply_backup_restore_model(&ui);
+    });
+
+    let create_ui = ui.as_weak();
+    ui.on_backup_restore_create(move |label| {
+        let Some(ui) = create_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = addons_source_root() else {
+            ui.set_status_error_message(
+                "AddOns folder was not found. Configure it before creating a backup.".into(),
+            );
+            return;
+        };
+        match create_settings_backup(&addons_root, label.as_str()) {
+            Ok(summary) => {
+                ui.set_status_error_message(format!("Backup saved - {summary}.").into());
+                ui.set_backup_label_draft("".into());
+                ui.set_backup_restore_view(0);
+                apply_backup_restore_model(&ui);
+            }
+            Err(error) => ui.set_status_error_message(format!("Backup failed: {error}").into()),
+        }
+    });
+
+    let restore_ui = ui.as_weak();
+    ui.on_backup_restore_restore(move |index| {
+        let Some(ui) = restore_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = addons_source_root() else {
+            ui.set_status_error_message(
+                "AddOns folder was not found. Configure it before restoring a backup.".into(),
+            );
+            return;
+        };
+        let backups = ui.get_settings_backups();
+        let Some(backup) = backups.row_data(index.max(0) as usize) else {
+            ui.set_status_error_message("Choose a backup to restore.".into());
+            return;
+        };
+        match restore_settings_backup(&addons_root, backup.name.as_str()) {
+            Ok(summary) => {
+                ui.set_backup_restore_view(0);
+                ui.set_status_error_message(format!("Restored backup - {summary}.").into());
+                apply_backup_restore_model(&ui);
+                if let Some(addons_root) = addons_source_root() {
+                    if let Ok(addons) = real_addon_entries(&addons_root) {
+                        apply_saved_variables_model(&ui, &addons);
+                    }
+                }
+            }
+            Err(error) => ui.set_status_error_message(format!("Restore failed: {error}").into()),
+        }
+    });
+
+    let delete_ui = ui.as_weak();
+    ui.on_backup_restore_delete(move |index| {
+        let Some(ui) = delete_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = addons_source_root() else {
+            ui.set_status_error_message(
+                "AddOns folder was not found. Configure it before deleting a backup.".into(),
+            );
+            return;
+        };
+        let backups = ui.get_settings_backups();
+        let Some(backup) = backups.row_data(index.max(0) as usize) else {
+            ui.set_status_error_message("Choose a backup to delete.".into());
+            return;
+        };
+        match delete_settings_backup(&addons_root, backup.name.as_str()) {
+            Ok(()) => {
+                ui.set_status_error_message("Backup deleted.".into());
+                apply_backup_restore_model(&ui);
+            }
+            Err(error) => ui.set_status_error_message(format!("Delete failed: {error}").into()),
+        }
+    });
+
+    let reveal_ui = ui.as_weak();
+    ui.on_backup_restore_reveal_folder(move || {
+        let Some(ui) = reveal_ui.upgrade() else {
+            return;
+        };
+        if let Some(addons_root) = addons_source_root() {
+            let path = settings_backups_dir(&addons_root);
+            if let Err(error) = fs::create_dir_all(&path) {
+                ui.set_status_error_message(
+                    format!("Failed to create backups folder: {error}").into(),
+                );
+                return;
+            }
+            open_path(&path);
+        } else {
+            ui.set_status_error_message(
+                "AddOns folder was not found. Configure it before opening backups.".into(),
+            );
         }
     });
 }
@@ -4168,6 +4290,700 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+struct SettingsBackupSnapshot {
+    created_epoch: u64,
+    total_size: u64,
+    kind: i32,
+    entry: SettingsBackupEntry,
+}
+
+fn apply_backup_restore_model(ui: &KalpaWindow) {
+    let mut snapshots = addons_source_root()
+        .and_then(|addons_root| settings_backup_snapshots(&addons_root).ok())
+        .unwrap_or_default();
+    let total_size = snapshots
+        .iter()
+        .map(|snapshot| snapshot.total_size)
+        .sum::<u64>();
+    let latest_index = snapshots
+        .iter()
+        .position(|snapshot| snapshot.kind != BACKUP_KIND_SAFETY);
+    let now = unix_now_secs();
+
+    let (status_kind, status_title, status_subtitle) = match latest_index {
+        None => (
+            0,
+            "No backup yet".to_string(),
+            "Your addon settings aren't protected. Create your first backup below.".to_string(),
+        ),
+        Some(index) => {
+            snapshots[index].entry.latest = true;
+            let latest = &snapshots[index];
+            let age_secs = now.saturating_sub(latest.created_epoch);
+            if age_secs > 14 * 86_400 {
+                (
+                    1,
+                    "Last backup was a while ago".to_string(),
+                    format!(
+                        "Most recent: {}. Consider making a fresh one.",
+                        latest.entry.meta
+                    ),
+                )
+            } else {
+                (
+                    2,
+                    "Your settings are protected".to_string(),
+                    format!("Last backup {}", latest.entry.meta),
+                )
+            }
+        }
+    };
+
+    let count = snapshots.len();
+    let entries = snapshots
+        .into_iter()
+        .map(|snapshot| snapshot.entry)
+        .collect::<Vec<_>>();
+    ui.set_backup_status_kind(status_kind);
+    ui.set_backup_status_title(status_title.into());
+    ui.set_backup_status_subtitle(status_subtitle.into());
+    ui.set_backup_list_summary(format!("{count} - {} total", format_size(total_size)).into());
+    ui.set_settings_backups(Rc::new(VecModel::from(entries)).into());
+}
+
+const BACKUP_KIND_MANUAL: i32 = 0;
+const BACKUP_KIND_SAFETY: i32 = 1;
+const BACKUP_KIND_CHARACTER: i32 = 2;
+const CHAR_BACKUP_MARKER: &str = ".kalpa-char-backup";
+const CHAR_BACKUP_MARKER_V2_PREFIX: &[u8] = b"kalpa character backup v2";
+const CHAR_BACKUP_META: &str = ".kalpa-char-backup.json";
+const CHAR_BACKUP_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct CharBackupMeta {
+    version: u32,
+    character: String,
+    server: String,
+}
+
+enum CharRestoreMode {
+    Merge(CharBackupMeta),
+    WholeFile,
+    Refuse(String),
+}
+
+fn settings_backup_snapshots(addons_root: &Path) -> Result<Vec<SettingsBackupSnapshot>, String> {
+    let backups_dir = settings_backups_dir(addons_root);
+    if !backups_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    recover_orphaned_backups(&backups_dir);
+
+    let now = unix_now_secs();
+    let mut snapshots = fs::read_dir(&backups_dir)
+        .map_err(|error| format!("Failed to read backups folder: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| settings_backup_snapshot(&entry.path(), now))
+        .collect::<Vec<_>>();
+
+    snapshots.sort_by(|left, right| {
+        right
+            .created_epoch
+            .cmp(&left.created_epoch)
+            .then_with(|| left.entry.name.cmp(&right.entry.name))
+    });
+    Ok(snapshots)
+}
+
+fn settings_backup_snapshot(path: &Path, now: u64) -> Option<SettingsBackupSnapshot> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    if name.starts_with('.') {
+        return None;
+    }
+
+    let (file_count, total_size) = backup_file_count_and_size(path);
+    let created_epoch = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let kind = backup_kind(&name);
+    let display_name = backup_display_name(&name, kind);
+    let detail = backup_detail(file_count, total_size);
+    let restorable = !matches!(
+        classify_backup_for_restore(path),
+        CharRestoreMode::Refuse(_)
+    );
+
+    Some(SettingsBackupSnapshot {
+        created_epoch,
+        total_size,
+        kind,
+        entry: SettingsBackupEntry {
+            name: name.into(),
+            display_name: display_name.into(),
+            kind_label: backup_kind_label(kind).into(),
+            kind,
+            meta: format!(
+                "{} - {}",
+                format_backup_relative_time(created_epoch, now),
+                detail
+            )
+            .into(),
+            detail: detail.into(),
+            file_count: file_count.min(i32::MAX as u32) as i32,
+            total_size_label: format_size(total_size).into(),
+            latest: false,
+            restorable,
+        },
+    })
+}
+
+fn backup_kind(name: &str) -> i32 {
+    if name.starts_with("auto-before-restore-") {
+        BACKUP_KIND_SAFETY
+    } else if name.starts_with("char-") {
+        BACKUP_KIND_CHARACTER
+    } else {
+        BACKUP_KIND_MANUAL
+    }
+}
+
+fn backup_kind_label(kind: i32) -> &'static str {
+    match kind {
+        BACKUP_KIND_SAFETY => "Safety snapshot",
+        BACKUP_KIND_CHARACTER => "Character",
+        _ => "Manual",
+    }
+}
+
+fn backup_display_name(name: &str, kind: i32) -> String {
+    match kind {
+        BACKUP_KIND_SAFETY => "Auto-saved before restore".to_string(),
+        BACKUP_KIND_CHARACTER => name.strip_prefix("char-").unwrap_or(name).to_string(),
+        _ => name.to_string(),
+    }
+}
+
+fn backup_detail(file_count: u32, total_size: u64) -> String {
+    format!(
+        "{} file{} - {}",
+        file_count,
+        if file_count == 1 { "" } else { "s" },
+        format_size(total_size)
+    )
+}
+
+fn backup_file_count_and_size(path: &Path) -> (u32, u64) {
+    let mut file_count = 0u32;
+    let mut total_size = 0u64;
+    let Ok(entries) = fs::read_dir(path) else {
+        return (file_count, total_size);
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let dotfile = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with('.'))
+            .unwrap_or(false);
+        if dotfile {
+            continue;
+        }
+        file_count += 1;
+        total_size += fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+    }
+
+    (file_count, total_size)
+}
+
+fn settings_backups_dir(addons_root: &Path) -> PathBuf {
+    addons_root
+        .parent()
+        .unwrap_or(addons_root)
+        .join("kalpa-backups")
+}
+
+fn settings_saved_variables_dir(addons_root: &Path) -> PathBuf {
+    addons_root
+        .parent()
+        .unwrap_or(addons_root)
+        .join("SavedVariables")
+}
+
+fn create_settings_backup(addons_root: &Path, requested_name: &str) -> Result<String, String> {
+    let sv_dir = settings_saved_variables_dir(addons_root);
+    if !sv_dir.is_dir() {
+        return Err("SavedVariables folder not found.".to_string());
+    }
+
+    let backups_dir = settings_backups_dir(addons_root);
+    fs::create_dir_all(&backups_dir)
+        .map_err(|error| format!("Failed to create backups folder: {error}"))?;
+
+    let backup_name = requested_name.trim();
+    let backup_name = if backup_name.is_empty() {
+        next_available_backup_name(&backups_dir, &friendly_backup_name(unix_now_secs()))
+    } else {
+        validate_backup_name(backup_name)?;
+        backup_name.to_string()
+    };
+    validate_backup_name(&backup_name)?;
+    let backup_path = backups_dir.join(&backup_name);
+    if backup_path.exists() {
+        return Err(format!("Backup '{backup_name}' already exists."));
+    }
+
+    fs::create_dir_all(&backup_path)
+        .map_err(|error| format!("Failed to create backup: {error}"))?;
+    let (file_count, total_size) = copy_directory_files(&sv_dir, &backup_path, false)?;
+    Ok(backup_detail(file_count, total_size))
+}
+
+fn next_available_backup_name(backups_dir: &Path, base_name: &str) -> String {
+    let mut backup_name = base_name.to_string();
+    let mut suffix = 2;
+    while backups_dir.join(&backup_name).exists() {
+        backup_name = format!("{base_name} {suffix}");
+        suffix += 1;
+    }
+    backup_name
+}
+
+fn restore_settings_backup(addons_root: &Path, backup_name: &str) -> Result<String, String> {
+    validate_backup_name_for_lookup(backup_name)?;
+
+    let backup_path = settings_backups_dir(addons_root).join(backup_name);
+    if !backup_path.is_dir() {
+        return Err(format!("Backup '{backup_name}' not found."));
+    }
+    let restore_mode = classify_backup_for_restore(&backup_path);
+    if let CharRestoreMode::Refuse(reason) = &restore_mode {
+        return Err(reason.clone());
+    }
+
+    let sv_dir = settings_saved_variables_dir(addons_root);
+    if sv_dir.is_dir() && directory_has_files(&sv_dir) {
+        let snapshot_name = format!("auto-before-restore-{}", unix_now_secs());
+        let snapshot_path = settings_backups_dir(addons_root).join(snapshot_name);
+        fs::create_dir_all(&snapshot_path)
+            .map_err(|error| format!("Failed to create safety snapshot folder: {error}"))?;
+        copy_directory_files(&sv_dir, &snapshot_path, false).map_err(|error| {
+            format!(
+                "Failed to create safety snapshot. Restore aborted to prevent data loss: {error}"
+            )
+        })?;
+        prune_auto_snapshots(&settings_backups_dir(addons_root), 3);
+    }
+
+    fs::create_dir_all(&sv_dir)
+        .map_err(|error| format!("Failed to create SavedVariables folder: {error}"))?;
+    match restore_mode {
+        CharRestoreMode::Refuse(reason) => Err(reason),
+        CharRestoreMode::WholeFile => {
+            let (file_count, total_size) = copy_directory_files(&backup_path, &sv_dir, true)?;
+            Ok(backup_detail(file_count, total_size))
+        }
+        CharRestoreMode::Merge(meta) => {
+            let (file_count, failed) =
+                restore_character_subtrees_merge(&backup_path, &sv_dir, &meta);
+            if failed.is_empty() {
+                Ok(format!(
+                    "{} character file{}",
+                    file_count,
+                    if file_count == 1 { "" } else { "s" }
+                ))
+            } else {
+                Err(format!(
+                    "Restore incomplete - {} file(s) failed: {}",
+                    failed.len(),
+                    failed.join(", ")
+                ))
+            }
+        }
+    }
+}
+
+fn classify_backup_for_restore(backup_path: &Path) -> CharRestoreMode {
+    let refuse = |message: &str| CharRestoreMode::Refuse(message.to_string());
+    let marker_path = backup_path.join(CHAR_BACKUP_MARKER);
+    let meta_path = backup_path.join(CHAR_BACKUP_META);
+
+    let marker = match fs::read(&marker_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            return refuse(
+                "This character backup's marker is present but unreadable, so it can't be restored safely.",
+            )
+        }
+    };
+    let marker_is_v2 = marker
+        .as_ref()
+        .is_some_and(|content| content.starts_with(CHAR_BACKUP_MARKER_V2_PREFIX));
+
+    match fs::read(&meta_path) {
+        Ok(bytes) => match serde_json::from_slice::<CharBackupMeta>(&bytes) {
+            Ok(meta) if meta.version == CHAR_BACKUP_VERSION => CharRestoreMode::Merge(meta),
+            Ok(meta) => CharRestoreMode::Refuse(format!(
+                "This character backup uses an unsupported format (version {}). Update Kalpa before restoring it.",
+                meta.version
+            )),
+            Err(_) => CharRestoreMode::Refuse(
+                "This character backup's metadata is corrupt, so it can't be restored safely."
+                    .to_string(),
+            ),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if marker_is_v2 {
+                refuse(
+                    "This character backup is missing its metadata, so it can't be restored safely.",
+                )
+            } else {
+                CharRestoreMode::WholeFile
+            }
+        }
+        Err(_) => refuse(
+            "This character backup's metadata is present but unreadable, so it can't be restored safely.",
+        ),
+    }
+}
+
+fn restore_character_subtrees_merge(
+    backup_path: &Path,
+    sv_dir: &Path,
+    meta: &CharBackupMeta,
+) -> (u32, Vec<String>) {
+    let mut restored = 0u32;
+    let mut failed = Vec::new();
+    let base = char_backup::char_base(meta.character.as_bytes()).to_vec();
+    let world = if char_backup::WELL_KNOWN_WORLDS.contains(&meta.server.as_str()) {
+        Some(meta.server.as_str())
+    } else {
+        None
+    };
+
+    let entries = match fs::read_dir(backup_path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            failed.push(format!("backup: {error}"));
+            return (restored, failed);
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let name_string = name.to_string_lossy().to_string();
+        if name_string.starts_with('.')
+            || path.extension().and_then(|ext| ext.to_str()) != Some("lua")
+        {
+            continue;
+        }
+        let stored = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                failed.push(format!("{name_string}: {error}"));
+                continue;
+            }
+        };
+        let blocks = char_backup::extract_character_blocks(&stored, &base, world);
+        if blocks.is_empty() {
+            failed.push(format!(
+                "{name_string}: no character subtree found in backup"
+            ));
+            continue;
+        }
+
+        let live_path = sv_dir.join(&name_string);
+        let mut live = if live_path.is_file() {
+            match fs::read(&live_path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    failed.push(format!("{name_string}: {error}"));
+                    continue;
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mut ok = true;
+        for block in &blocks {
+            match char_backup::merge_character_block(&live, block) {
+                Ok(merged) => live = merged,
+                Err(error) => {
+                    failed.push(format!("{name_string}: {error}"));
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        match write_raw_backup_bytes(sv_dir, &name_string, &live) {
+            Ok(()) => restored += 1,
+            Err(error) => failed.push(format!("{name_string}: {error}")),
+        }
+    }
+
+    (restored, failed)
+}
+
+fn write_raw_backup_bytes(sv_dir: &Path, file_name: &str, content: &[u8]) -> Result<(), String> {
+    let file_path = sv_dir.join(file_name);
+    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
+    fs::write(&tmp_path, content).map_err(|error| format!("Failed to write temp file: {error}"))?;
+    fs::rename(&tmp_path, &file_path).map_err(|error| {
+        let _ = fs::remove_file(&tmp_path);
+        format!("Failed to finalize write: {error}")
+    })
+}
+
+fn prune_auto_snapshots(backups_dir: &Path, keep: usize) {
+    let prefix = "auto-before-restore-";
+    let Ok(entries) = fs::read_dir(backups_dir) else {
+        return;
+    };
+    let mut dirs = entries
+        .flatten()
+        .filter(|entry| {
+            entry.path().is_dir()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.starts_with(prefix))
+                    .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    if dirs.len() <= keep {
+        return;
+    }
+    dirs.sort_by_key(|entry| entry.file_name());
+    let remove_count = dirs.len() - keep;
+    for entry in dirs.into_iter().take(remove_count) {
+        let _ = fs::remove_dir_all(entry.path());
+    }
+}
+
+fn recover_orphaned_backups(backups_root: &Path) {
+    let Ok(entries) = fs::read_dir(backups_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(".old-char-") else {
+            continue;
+        };
+        let Some((base, seq)) = rest.rsplit_once('-') else {
+            continue;
+        };
+        if base.is_empty() {
+            continue;
+        }
+        let final_dir = backups_root.join(format!("char-{base}"));
+        let staging = backups_root.join(format!(".tmp-char-{base}-{seq}"));
+        if final_dir.exists() {
+            let _ = fs::remove_dir_all(&path);
+        } else if staging.exists() {
+            if fs::rename(&path, &final_dir).is_ok() {
+                let _ = fs::remove_dir_all(&staging);
+            }
+        } else {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
+fn delete_settings_backup(addons_root: &Path, backup_name: &str) -> Result<(), String> {
+    validate_backup_name_for_lookup(backup_name)?;
+    let backups_dir = settings_backups_dir(addons_root);
+    recover_orphaned_backups(&backups_dir);
+    let backup_path = backups_dir.join(backup_name);
+    if !backup_path.is_dir() {
+        return Err(format!("Backup '{backup_name}' not found."));
+    }
+    fs::remove_dir_all(&backup_path).map_err(|error| format!("Failed to delete backup: {error}"))
+}
+
+fn copy_directory_files(
+    source_dir: &Path,
+    destination_dir: &Path,
+    skip_dotfiles: bool,
+) -> Result<(u32, u64), String> {
+    let entries =
+        fs::read_dir(source_dir).map_err(|error| format!("Failed to read folder: {error}"))?;
+    let mut file_count = 0u32;
+    let mut total_size = 0u64;
+    let mut failed = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        if skip_dotfiles
+            && name
+                .to_str()
+                .map(|name| name.starts_with('.'))
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let destination = destination_dir.join(name);
+        match fs::copy(&path, &destination) {
+            Ok(_) => {
+                file_count += 1;
+                total_size += fs::metadata(&destination)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+            }
+            Err(error) => failed.push(format!("{}: {error}", name.to_string_lossy())),
+        }
+    }
+
+    if failed.is_empty() {
+        Ok((file_count, total_size))
+    } else {
+        Err(format!(
+            "{} file(s) failed to copy: {}",
+            failed.len(),
+            failed.join(", ")
+        ))
+    }
+}
+
+fn directory_has_files(path: &Path) -> bool {
+    fs::read_dir(path)
+        .map(|mut entries| {
+            entries.any(|entry| entry.map(|entry| entry.path().is_file()).unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
+fn friendly_backup_name(epoch_secs: u64) -> String {
+    let seconds = epoch_secs % 86_400;
+    let hour = seconds / 3600;
+    let minute = (seconds % 3600) / 60;
+    let second = seconds % 60;
+    let date = format_short_date(epoch_secs).replace(',', "");
+    format!("Manual backup {date} {hour:02}-{minute:02}-{second:02}")
+}
+
+fn validate_backup_name(name: &str) -> Result<(), String> {
+    validate_backup_name_for_lookup(name)?;
+    if name.starts_with('.')
+        || name.starts_with("char-")
+        || name.starts_with("auto-before-restore-")
+    {
+        return Err("Backup name uses a reserved prefix. Choose another name.".to_string());
+    }
+    Ok(())
+}
+
+fn validate_backup_name_for_lookup(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Name cannot be empty.".to_string());
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err("Name contains invalid characters.".to_string());
+    }
+    let forbidden: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+    if name.contains(forbidden) {
+        return Err("Name contains a forbidden character.".to_string());
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Err("Name must not end with a dot or space.".to_string());
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        return Err(format!(
+            "\"{stem}\" is a Windows reserved name and cannot be used."
+        ));
+    }
+    Ok(())
+}
+
+fn format_backup_relative_time(epoch_secs: u64, now_secs: u64) -> String {
+    if epoch_secs == 0 {
+        return "unknown time".to_string();
+    }
+    let diff = now_secs.saturating_sub(epoch_secs);
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        let minutes = diff / 60;
+        format!(
+            "{minutes} minute{} ago",
+            if minutes == 1 { "" } else { "s" }
+        )
+    } else if diff < 86_400 {
+        let hours = diff / 3600;
+        format!("{hours} hour{} ago", if hours == 1 { "" } else { "s" })
+    } else if diff < 86_400 * 2 {
+        "Yesterday".to_string()
+    } else if diff < 86_400 * 30 {
+        let days = diff / 86_400;
+        format!("{days} day{} ago", if days == 1 { "" } else { "s" })
+    } else {
+        format_short_date(epoch_secs)
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn apply_saved_variables_model(ui: &KalpaWindow, addons: &[AddonEntry]) {
@@ -7105,6 +7921,219 @@ CombatMetrics_SavedVariables = {
             .expect("orphaned entry exists");
         assert!(orphaned.orphaned);
         assert!(!orphaned.system);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_backup_snapshots_classify_sort_and_exclude_dotfiles() {
+        let root = test_temp_dir("settings-backup-list");
+        let addons_root = root.join("AddOns");
+        let backups_root = root.join("kalpa-backups");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(backups_root.join("Manual One")).expect("create manual backup");
+        fs::create_dir_all(backups_root.join("auto-before-restore-100"))
+            .expect("create safety backup");
+        fs::create_dir_all(backups_root.join("char-Alt-NA-backup"))
+            .expect("create character backup");
+        fs::write(backups_root.join("Manual One").join("A.lua"), "manual")
+            .expect("write manual file");
+        fs::write(
+            backups_root
+                .join("auto-before-restore-100")
+                .join("Safety.lua"),
+            "safety",
+        )
+        .expect("write safety file");
+        fs::write(
+            backups_root
+                .join("char-Alt-NA-backup")
+                .join(".kalpa-char-backup.json"),
+            "{}",
+        )
+        .expect("write character marker");
+        fs::write(
+            backups_root
+                .join("char-Alt-NA-backup")
+                .join("Character.lua"),
+            "character",
+        )
+        .expect("write character file");
+
+        let snapshots = settings_backup_snapshots(&addons_root).expect("list backups");
+        assert_eq!(snapshots.len(), 3);
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.kind == BACKUP_KIND_MANUAL
+                && snapshot.entry.kind_label.as_str() == "Manual"
+                && snapshot.entry.file_count == 1));
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.kind == BACKUP_KIND_SAFETY
+                && snapshot.entry.display_name.as_str() == "Auto-saved before restore"));
+        let character = snapshots
+            .iter()
+            .find(|snapshot| snapshot.kind == BACKUP_KIND_CHARACTER)
+            .expect("character backup exists");
+        assert_eq!(character.entry.display_name.as_str(), "Alt-NA-backup");
+        assert_eq!(character.entry.file_count, 1);
+        assert!(!character.entry.restorable);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_backup_create_restore_and_delete_round_trip() {
+        let root = test_temp_dir("settings-backup-roundtrip");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::write(sv_dir.join("Live.lua"), "current").expect("write live file");
+        fs::write(sv_dir.join("Other.lua"), "other").expect("write other file");
+
+        let summary = create_settings_backup(&addons_root, "").expect("create backup");
+        assert!(summary.contains("2 files"));
+        let snapshots = settings_backup_snapshots(&addons_root).expect("list backups");
+        let manual = snapshots
+            .iter()
+            .find(|snapshot| snapshot.kind == BACKUP_KIND_MANUAL)
+            .expect("manual backup exists");
+        let manual_name = manual.entry.name.to_string();
+        create_settings_backup(&addons_root, "Raid UI Snapshot").expect("create labeled backup");
+        assert!(settings_backups_dir(&addons_root)
+            .join("Raid UI Snapshot")
+            .is_dir());
+        assert!(create_settings_backup(&addons_root, "char-reserved").is_err());
+
+        fs::write(sv_dir.join("Live.lua"), "changed").expect("modify live file");
+        let restore_summary =
+            restore_settings_backup(&addons_root, &manual_name).expect("restore backup");
+        assert!(restore_summary.contains("2 files"));
+        assert_eq!(
+            fs::read_to_string(sv_dir.join("Live.lua")).expect("read restored file"),
+            "current"
+        );
+        assert!(settings_backup_snapshots(&addons_root)
+            .expect("list backups after restore")
+            .iter()
+            .any(|snapshot| snapshot.kind == BACKUP_KIND_SAFETY));
+
+        delete_settings_backup(&addons_root, &manual_name).expect("delete backup");
+        assert!(!settings_backups_dir(&addons_root)
+            .join(&manual_name)
+            .exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_backup_restore_refuses_corrupt_character_metadata() {
+        let root = test_temp_dir("settings-backup-character-refuse");
+        let addons_root = root.join("AddOns");
+        let char_backup = root.join("kalpa-backups").join("char-Alt-NA-backup");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&char_backup).expect("create character backup");
+        fs::write(
+            char_backup.join(CHAR_BACKUP_MARKER),
+            b"kalpa character backup v2\n",
+        )
+        .expect("write character marker");
+        fs::write(char_backup.join("Character.lua"), "character").expect("write character file");
+
+        let error = restore_settings_backup(&addons_root, "char-Alt-NA-backup")
+            .expect_err("corrupt character restore should be refused");
+        assert!(error.contains("missing its metadata"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_backup_restore_merges_character_backup_without_touching_twins() {
+        let root = test_temp_dir("settings-backup-character-merge");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        let backup_dir = root.join("kalpa-backups").join("char-Bob-backup");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::create_dir_all(&backup_dir).expect("create character backup");
+
+        let live = concat!(
+            "TestAddon =\n{\n",
+            "\t[\"Default\"] =\n\t{\n",
+            "\t\t[\"NA Megaserver\"] =\n\t\t{\n",
+            "\t\t\t[\"@me\"] =\n\t\t\t{\n",
+            "\t\t\t\t[\"Bob\"] = { [\"hp\"] = 1, [\"loc\"] = \"NA\" },\n",
+            "\t\t\t},\n",
+            "\t\t},\n",
+            "\t\t[\"EU Megaserver\"] =\n\t\t{\n",
+            "\t\t\t[\"@me\"] =\n\t\t\t{\n",
+            "\t\t\t\t[\"Bob\"] = { [\"hp\"] = 2, [\"loc\"] = \"EU\" },\n",
+            "\t\t\t},\n",
+            "\t\t},\n",
+            "\t\t[\"@me\"] =\n\t\t{\n",
+            "\t\t\t[\"$AccountWide\"] = { [\"gold\"] = 9 },\n",
+            "\t\t},\n",
+            "\t},\n}\n"
+        );
+        let backup_source = live.replace("[\"hp\"] = 1", "[\"hp\"] = 100");
+        let blocks = char_backup::extract_character_blocks(
+            backup_source.as_bytes(),
+            b"Bob",
+            Some("NA Megaserver"),
+        );
+        let backup_file = char_backup::build_backup_file(&blocks).expect("build backup file");
+
+        fs::write(sv_dir.join("TestAddon.lua"), live).expect("write live saved variable");
+        fs::write(backup_dir.join("TestAddon.lua"), backup_file).expect("write backup file");
+        fs::write(
+            backup_dir.join(CHAR_BACKUP_MARKER),
+            b"kalpa character backup v2\n",
+        )
+        .expect("write marker");
+        fs::write(
+            backup_dir.join(CHAR_BACKUP_META),
+            serde_json::to_vec(&CharBackupMeta {
+                version: CHAR_BACKUP_VERSION,
+                character: "Bob".to_string(),
+                server: "NA Megaserver".to_string(),
+            })
+            .expect("serialize meta"),
+        )
+        .expect("write meta");
+
+        let summary =
+            restore_settings_backup(&addons_root, "char-Bob-backup").expect("restore character");
+        assert!(summary.contains("1 character file"));
+        let restored =
+            fs::read_to_string(sv_dir.join("TestAddon.lua")).expect("read restored saved variable");
+        assert!(restored.contains("[\"Bob\"] = { [\"hp\"] = 100, [\"loc\"] = \"NA\" }"));
+        assert!(restored.contains("[\"Bob\"] = { [\"hp\"] = 2, [\"loc\"] = \"EU\" }"));
+        assert!(restored.contains("[\"$AccountWide\"] = { [\"gold\"] = 9 }"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settings_backup_listing_recovers_orphaned_character_backup() {
+        let root = test_temp_dir("settings-backup-recover-char");
+        let addons_root = root.join("AddOns");
+        let backups_root = root.join("kalpa-backups");
+        let old = backups_root.join(".old-char-Bob-backup-42");
+        let staging = backups_root.join(".tmp-char-Bob-backup-42");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&old).expect("create tombstone backup");
+        fs::create_dir_all(&staging).expect("create staging backup");
+        fs::write(old.join(CHAR_BACKUP_MARKER), b"kalpa character backup\n").expect("write marker");
+        fs::write(old.join("TestAddon.lua"), "backup").expect("write backup file");
+
+        let snapshots = settings_backup_snapshots(&addons_root).expect("list backups");
+        assert!(backups_root.join("char-Bob-backup").is_dir());
+        assert!(!old.exists());
+        assert!(!staging.exists());
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.entry.name.as_str() == "char-Bob-backup"));
 
         let _ = fs::remove_dir_all(root);
     }

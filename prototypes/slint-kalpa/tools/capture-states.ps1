@@ -4,7 +4,16 @@ param(
   [string]$Preset = "low-memory",
   [string]$OutputDir,
   [switch]$Build,
-  [int]$WaitMilliseconds = 900
+  [int]$WaitMilliseconds = 900,
+  [int]$WindowWidth = 1920,
+  [int]$WindowHeight = 1080,
+  [switch]$FitPrimaryWorkArea,
+  [switch]$ScreenFallback,
+  [switch]$Foreground,
+  [switch]$KeepOpen,
+  [switch]$LeaveOpen,
+  [switch]$NoCapture,
+  [int]$KeepOpenSeconds = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,10 +47,15 @@ if (-not (Test-Path -LiteralPath $exe)) {
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
+if ($ScreenFallback -and -not $Foreground) {
+  throw "-ScreenFallback captures the visible desktop and requires -Foreground. It is disabled by default so verification cannot grab whatever you are using."
+}
+
 if (-not ("KalpaCaptureNative" -as [type])) {
   $pinvoke = @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 
 public static class KalpaCaptureNative {
   [StructLayout(LayoutKind.Sequential)]
@@ -72,6 +86,15 @@ public static class KalpaCaptureNative {
   [DllImport("user32.dll")]
   public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetWindowTextLength(IntPtr hWnd);
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int maxCount);
+
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  public static extern int GetClassName(IntPtr hWnd, StringBuilder text, int maxCount);
+
   [DllImport("user32.dll")]
   public static extern bool ShowWindow(IntPtr hWnd, int command);
 
@@ -85,6 +108,18 @@ public static class KalpaCaptureNative {
     int cy,
     uint flags);
 
+  [DllImport("user32.dll")]
+  public static extern bool BringWindowToTop(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  public static extern bool UpdateWindow(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint flags);
+
   [DllImport("dwmapi.dll")]
   public static extern int DwmFlush();
 }
@@ -95,6 +130,7 @@ public static class KalpaCaptureNative {
 [KalpaCaptureNative]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
 [KalpaCaptureNative]::SetProcessDPIAware() | Out-Null
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
 
 function New-StateEnvironment {
   param([string]$Name)
@@ -244,17 +280,36 @@ function Get-LargestProcessWindow {
     $windowProcessId = [uint32]0
     [KalpaCaptureNative]::GetWindowThreadProcessId($hWnd, [ref]$windowProcessId) | Out-Null
 
-    if ($windowProcessId -eq [uint32]$OwnerProcessId -and [KalpaCaptureNative]::IsWindowVisible($hWnd)) {
+    if ($windowProcessId -eq [uint32]$OwnerProcessId) {
       $rect = New-Object KalpaCaptureNative+RECT
       [KalpaCaptureNative]::GetWindowRect($hWnd, [ref]$rect) | Out-Null
       $width = $rect.Right - $rect.Left
       $height = $rect.Bottom - $rect.Top
+      $title = New-Object System.Text.StringBuilder 256
+      [KalpaCaptureNative]::GetWindowText($hWnd, $title, $title.Capacity) | Out-Null
+      $className = New-Object System.Text.StringBuilder 256
+      [KalpaCaptureNative]::GetClassName($hWnd, $className, $className.Capacity) | Out-Null
+      $visible = [KalpaCaptureNative]::IsWindowVisible($hWnd)
+      $score = $width * $height
+      if ($title.ToString() -eq "Kalpa") {
+        $score += 1000000000000
+      }
+      if ($className.ToString() -eq "Window Class") {
+        $score += 100000000000
+      }
+      if ($visible) {
+        $score += 10000000000
+      }
       $windows.Add([pscustomobject]@{
         Hwnd = $hWnd
         Rect = $rect
         Width = $width
         Height = $height
         Area = $width * $height
+        Title = $title.ToString()
+        ClassName = $className.ToString()
+        Visible = $visible
+        Score = $score
       }) | Out-Null
     }
 
@@ -264,8 +319,51 @@ function Get-LargestProcessWindow {
   [KalpaCaptureNative]::EnumWindows($callback, [IntPtr]::Zero) | Out-Null
   $windows |
     Where-Object { $_.Width -ge 400 -and $_.Height -ge 300 } |
-    Sort-Object Area -Descending |
+    Sort-Object Score -Descending |
     Select-Object -First 1
+}
+
+function Save-WindowCapture {
+  param(
+    [IntPtr]$Hwnd,
+    [KalpaCaptureNative+RECT]$Rect,
+    [string]$Path,
+    [switch]$UsePrintWindow
+  )
+
+  $width = $Rect.Right - $Rect.Left
+  $height = $Rect.Bottom - $Rect.Top
+  $bitmap = [System.Drawing.Bitmap]::new($width, $height)
+  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+  $method = "screen"
+
+  try {
+    if ($UsePrintWindow) {
+      $hdc = $graphics.GetHdc()
+      try {
+        if ([KalpaCaptureNative]::PrintWindow($Hwnd, $hdc, 2)) {
+          $method = "printwindow"
+        }
+      } finally {
+        $graphics.ReleaseHdc($hdc)
+      }
+    }
+
+    if ($method -eq "screen") {
+      $graphics.CopyFromScreen(
+        $Rect.Left,
+        $Rect.Top,
+        0,
+        0,
+        [System.Drawing.Size]::new($width, $height))
+    }
+
+    $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    return $method
+  } finally {
+    $graphics.Dispose()
+    $bitmap.Dispose()
+  }
 }
 
 function Get-HeaderSignature {
@@ -306,7 +404,8 @@ function Get-StateSignature {
     [string]$Name
   )
 
-  if (-not $Name.StartsWith("svm-")) {
+  $needsModalSignature = $Name.StartsWith("svm-") -or $Name.StartsWith("backup-restore-")
+  if (-not $needsModalSignature) {
     return [pscustomobject]@{
       LooksLikeState = $true
       GoldPixels = 0
@@ -381,9 +480,31 @@ function Capture-State {
       throw "No full-size Slint window found for '$Name'."
     }
 
-    $flags = 0x0001 -bor 0x0002 -bor 0x0010 -bor 0x0040
-    [KalpaCaptureNative]::ShowWindow($window.Hwnd, 5) | Out-Null
-    [KalpaCaptureNative]::SetWindowPos($window.Hwnd, [IntPtr](-1), 0, 0, 0, 0, $flags) | Out-Null
+    $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $targetLeft = $workArea.Left + 40
+    $targetTop = $workArea.Top + 40
+    $targetWidth = $WindowWidth
+    $targetHeight = $WindowHeight
+    if ($FitPrimaryWorkArea) {
+      $targetWidth = $workArea.Width - 80
+      $targetHeight = $workArea.Height - 80
+    }
+    $targetWidth = [Math]::Min([Math]::Max($targetWidth, 1200), $workArea.Width - 80)
+    $targetHeight = [Math]::Min([Math]::Max($targetHeight, 700), $workArea.Height - 80)
+    $showFlags = 0x0004 -bor 0x0040
+    $restoreFlags = 0x0001 -bor 0x0002 -bor 0x0040
+    [KalpaCaptureNative]::ShowWindow($window.Hwnd, 9) | Out-Null
+    $insertAfter = [IntPtr]::Zero
+    if ($Foreground) {
+      $showFlags = 0x0040
+      $insertAfter = [IntPtr](-1)
+    }
+    [KalpaCaptureNative]::SetWindowPos($window.Hwnd, $insertAfter, $targetLeft, $targetTop, $targetWidth, $targetHeight, $showFlags) | Out-Null
+    if ($Foreground) {
+      [KalpaCaptureNative]::BringWindowToTop($window.Hwnd) | Out-Null
+      [KalpaCaptureNative]::SetForegroundWindow($window.Hwnd) | Out-Null
+    }
+    [KalpaCaptureNative]::UpdateWindow($window.Hwnd) | Out-Null
     Start-Sleep -Milliseconds $WaitMilliseconds
     [KalpaCaptureNative]::DwmFlush() | Out-Null
 
@@ -396,29 +517,39 @@ function Capture-State {
       throw "Bad window rect for '$Name': ${width}x${height}."
     }
 
-    $bitmap = [System.Drawing.Bitmap]::new($width, $height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen(
-      $rect.Left,
-      $rect.Top,
-      0,
-      0,
-      [System.Drawing.Size]::new($width, $height))
-
     $path = Join-Path $OutputDir "$Name.png"
-    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-    $graphics.Dispose()
-    $bitmap.Dispose()
+    $captureMethod = if ($NoCapture) { "none" } else { "printwindow" }
+    $signatureOk = $true
+    if (-not $NoCapture) {
+      $captureMethod = Save-WindowCapture -Hwnd $window.Hwnd -Rect $rect -Path $path -UsePrintWindow
 
-    [KalpaCaptureNative]::SetWindowPos($window.Hwnd, [IntPtr](-2), 0, 0, 0, 0, $flags) | Out-Null
+      $signature = Get-HeaderSignature -Path $path
+      $stateSignature = Get-StateSignature -Path $path -Name $Name
+      $needsModalSignature = $Name.StartsWith("svm-") -or $Name.StartsWith("backup-restore-")
+      if ($needsModalSignature) {
+        $signatureOk = $stateSignature.LooksLikeState
+      } else {
+        $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-") -or $Name.StartsWith("uploader-")
+      }
 
-    $signature = Get-HeaderSignature -Path $path
-    $stateSignature = Get-StateSignature -Path $path -Name $Name
-    if ($Name.StartsWith("svm-")) {
-      $signatureOk = $stateSignature.LooksLikeState
-    } else {
-      $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-") -or $Name.StartsWith("uploader-") -or $Name.StartsWith("backup-restore-")
+      if (-not $signatureOk -and $ScreenFallback) {
+        $captureMethod = Save-WindowCapture -Hwnd $window.Hwnd -Rect $rect -Path $path
+        $signature = Get-HeaderSignature -Path $path
+        $stateSignature = Get-StateSignature -Path $path -Name $Name
+        if ($needsModalSignature) {
+          $signatureOk = $stateSignature.LooksLikeState
+        } else {
+          $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-") -or $Name.StartsWith("uploader-")
+        }
+      }
+
+      [KalpaCaptureNative]::SetWindowPos($window.Hwnd, [IntPtr](-2), 0, 0, 0, 0, $restoreFlags) | Out-Null
+
+      if ($needsModalSignature -and -not $signatureOk) {
+        throw "Capture for '$Name' did not match the expected modal signature. Inspect $path before trusting the screenshot."
+      }
     }
+
     [pscustomobject]@{
       State = $Name
       Path = $path
@@ -427,10 +558,26 @@ function Capture-State {
       Width = $width
       Height = $height
       Preset = $Preset
+      WindowTitle = $window.Title
+      WindowClass = $window.ClassName
+      WindowVisible = $window.Visible
+      CaptureMethod = $captureMethod
       HeaderSignature = $signatureOk
+      ProcessId = $process.Id
     }
   } finally {
-    if (-not $process.HasExited) {
+    if ($LeaveOpen -and -not $process.HasExited) {
+      Write-Host "Leaving prototype process $($process.Id) open. Close the Kalpa window when finished."
+    } elseif ($KeepOpen -and -not $process.HasExited) {
+      if ($KeepOpenSeconds -gt 0) {
+        Start-Sleep -Seconds $KeepOpenSeconds
+      } else {
+        Write-Host "Keeping prototype process $($process.Id) open. Close the Kalpa window when finished."
+        $process.WaitForExit()
+      }
+    }
+
+    if (-not $KeepOpen -and -not $LeaveOpen -and -not $process.HasExited) {
       $process.Kill()
       $process.WaitForExit(3000) | Out-Null
     }
