@@ -268,7 +268,9 @@ Current detail status:
   picker for `.esopack` import, native draft/publish, authenticated private
   share-code creation, voting, and account/session wiring still need production
   parity before this can replace the React Pack Hub implementation; the native
-  draft/publish controls are disabled rather than appearing actionable.
+  draft/publish controls are disabled rather than appearing actionable. Settings
+  Pack Hub account-data deletion now routes to the full Hub instead of exposing
+  an inert destructive native button.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,
@@ -278,9 +280,10 @@ Current detail status:
   profile choices and calls the shared raw-Lua profile copy command. The Editor
   now loads real files through the shared parser, renders native tree/settings
   rows, toggles boolean settings, previews diffs, saves through the shared write
-  path, and restores `.bak` files. Remaining Editor gaps are full text/number
-  editing, explicit tree row selection, search/filter behavior, raw mode,
-  schema customization, ESO-running guards, and richer error states.
+  path, restores `.bak` files, and copies serialized raw Lua to the clipboard
+  for inspection. Remaining Editor gaps are full text/number editing, explicit
+  tree row selection, search/filter behavior, full raw text editing, schema
+  customization, ESO-running guards, and richer error states.
 - The Settings > Tools Backup & Restore row now opens a native Slint backup
   overlay covering the main, custom-label, and restore-confirmation states. The
   overlay now lists real settings backups, creates manual backups, restores with
@@ -323,6 +326,19 @@ Current detail status:
   Remaining gaps are direct in-app ESO Logs upload/session login, progress and
   history reporting, report-name/guild options, split-workbench parity, and
   native live-stream timeline events.
+
+Ship-priority cutoff:
+
+- Keep WebView/full-Hub handoffs for authenticated Pack Hub account management,
+  native draft/publish, voting, private share-code creation, and signed updater
+  install/restart.
+- Keep the external ESO Logs uploader handoff for login/session upload flows.
+- Do not add a full raw SavedVariables text editor for the first shippable native
+  toggle; the native editor supports safe structured boolean edits and raw export
+  inspection.
+- Before shipping, prioritize no dead buttons, clear handoff messaging, stable
+  core install/update/file-edit flows, and final visual cleanup over advanced
+  account/session parity.
 - Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.

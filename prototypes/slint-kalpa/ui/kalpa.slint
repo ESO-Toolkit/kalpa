@@ -9358,6 +9358,7 @@ component SavedVariablesOverlay inherits Rectangle {
     callback editor-preview;
     callback editor-discard;
     callback editor-restore;
+    callback editor-copy-raw;
     callback editor-toggle-setting(int);
     visible: root.open;
     background: #000000c4;
@@ -9645,7 +9646,7 @@ component SavedVariablesOverlay inherits Rectangle {
             PackHubButton { x: 538px; y: 0px; width: 76px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: !root.editor-dirty; clicked => { root.editor-discard(); } }
             PackHubButton { x: 622px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; disabled: !root.editor-has-file; clicked => { root.editor-restore(); } }
             PackHubButton { x: 714px; y: 0px; width: 78px; icon: @image-url("../assets/icons/settings.svg"); label: "Settings"; }
-            PackHubButton { x: 800px; y: 0px; width: 44px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; show-icon: false; disabled: true; }
+            PackHubButton { x: 800px; y: 0px; width: 44px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; show-icon: false; disabled: !root.editor-has-file; clicked => { root.editor-copy-raw(); } }
 
             Rectangle {
                 x: 0px;
@@ -12215,6 +12216,7 @@ export component KalpaWindow inherits Window {
     callback svm-editor-preview;
     callback svm-editor-discard;
     callback svm-editor-restore;
+    callback svm-editor-copy-raw;
     callback svm-editor-toggle-setting(int);
     callback review-conflicts;
     no-frame: true;
@@ -12562,6 +12564,7 @@ export component KalpaWindow inherits Window {
             editor-preview => { root.svm-editor-preview(); }
             editor-discard => { root.svm-editor-discard(); }
             editor-restore => { root.svm-editor-restore(); }
+            editor-copy-raw => { root.svm-editor-copy-raw(); }
             editor-toggle-setting(index) => { root.svm-editor-toggle-setting(index); }
         }
 

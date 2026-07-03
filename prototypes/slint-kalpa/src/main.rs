@@ -4544,7 +4544,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let svm_editor_restore_ui = ui.as_weak();
-    let svm_editor_restore_state = svm_editor_state;
+    let svm_editor_restore_state = svm_editor_state.clone();
     ui.on_svm_editor_restore(move || {
         let Some(ui) = svm_editor_restore_ui.upgrade() else {
             return;
@@ -4572,6 +4572,34 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 apply_svm_editor_state(&ui, &svm_editor_restore_state.borrow());
                 ui.set_status_error_message(
                     format!("SavedVariables restore failed: {error}").into(),
+                );
+            }
+        }
+    });
+
+    let svm_editor_raw_ui = ui.as_weak();
+    let svm_editor_raw_state = svm_editor_state;
+    ui.on_svm_editor_copy_raw(move || {
+        let Some(ui) = svm_editor_raw_ui.upgrade() else {
+            return;
+        };
+        let result = {
+            let mut state = svm_editor_raw_state.borrow_mut();
+            copy_svm_editor_raw_to_clipboard(&mut state)
+        };
+        match result {
+            Ok(message) => {
+                ui.set_status_error_message(message.into());
+                apply_svm_editor_state(&ui, &svm_editor_raw_state.borrow());
+            }
+            Err(error) => {
+                {
+                    let mut state = svm_editor_raw_state.borrow_mut();
+                    state.message = format!("Raw copy failed: {error}");
+                }
+                apply_svm_editor_state(&ui, &svm_editor_raw_state.borrow());
+                ui.set_status_error_message(
+                    format!("SavedVariables raw copy failed: {error}").into(),
                 );
             }
         }
@@ -14849,6 +14877,26 @@ fn restore_svm_editor_backup(addons_root: &Path, state: &mut SvmEditorState) -> 
     Ok(())
 }
 
+fn copy_svm_editor_raw_to_clipboard(state: &mut SvmEditorState) -> Result<String, String> {
+    let raw_lua = svm_editor_raw_lua(state)?;
+    let size = raw_lua.len() as u64;
+    write_clipboard_text(raw_lua)?;
+    let message = format!(
+        "Copied raw SavedVariables Lua ({}) to clipboard.",
+        format_size(size)
+    );
+    state.message = message.clone();
+    Ok(message)
+}
+
+fn svm_editor_raw_lua(state: &SvmEditorState) -> Result<String, String> {
+    let tree = state
+        .tree
+        .as_ref()
+        .ok_or_else(|| "No SavedVariables file loaded.".to_string())?;
+    Ok(saved_variables::serializer::serialize_to_lua(tree))
+}
+
 fn clean_saved_variable_orphans(
     addons_root: &Path,
     orphaned: &[SavedVariableEntry],
@@ -18450,6 +18498,10 @@ CombatMetrics_SavedVariables = {
 
         preview_svm_editor_file(&addons_root, &mut state).expect("preview editor change");
         assert!(state.message.contains("pending change"));
+        let raw_preview = svm_editor_raw_lua(&state).expect("serialize raw editor lua");
+        assert!(
+            raw_preview.contains("enabled = true") || raw_preview.contains("[\"enabled\"] = true")
+        );
 
         save_svm_editor_file(&addons_root, &mut state).expect("save editor change");
         assert!(!state.dirty);
