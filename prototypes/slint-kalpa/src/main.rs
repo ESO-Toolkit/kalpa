@@ -746,6 +746,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_context_actions(&ui, addon_models.clone());
     let settings_models = addon_models.clone();
     let safety_models = addon_models.clone();
+    let migration_models = addon_models.clone();
     wire_detail_actions(&ui, addon_models);
     wire_discover(&ui, discover_model, discover_installed_ids);
     wire_theme_actions(&ui, custom_themes);
@@ -753,6 +754,7 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_backup_restore_actions(&ui);
     wire_character_actions(&ui);
     wire_safety_actions(&ui, safety_models);
+    wire_migration_actions(&ui, migration_models);
     if ui.get_pack_hub_open() {
         ui.invoke_open_pack_hub();
     }
@@ -761,6 +763,9 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     if ui.get_safety_open() {
         ui.invoke_open_safety();
+    }
+    if ui.get_migration_open() {
+        ui.invoke_open_migration();
     }
     ui.run()
 }
@@ -4299,6 +4304,110 @@ fn wire_safety_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 }
 
+fn wire_migration_actions(ui: &KalpaWindow, models: AddonModels) {
+    let open_ui = ui.as_weak();
+    ui.on_open_migration(move || {
+        let Some(ui) = open_ui.upgrade() else {
+            return;
+        };
+        apply_migration_preconditions(&ui);
+    });
+
+    let recheck_ui = ui.as_weak();
+    ui.on_migration_recheck(move || {
+        let Some(ui) = recheck_ui.upgrade() else {
+            return;
+        };
+        apply_migration_preconditions(&ui);
+    });
+
+    let continue_ui = ui.as_weak();
+    ui.on_migration_continue(move || {
+        let Some(ui) = continue_ui.upgrade() else {
+            return;
+        };
+        if ui.get_migration_can_proceed() {
+            ui.set_migration_phase(1);
+            ui.set_migration_status("Create a restore point before previewing the import.".into());
+        } else {
+            ui.set_status_error_message(
+                "Resolve migration precheck blockers before continuing.".into(),
+            );
+        }
+    });
+
+    let snapshot_ui = ui.as_weak();
+    ui.on_migration_create_snapshot(move |include_addons| {
+        let Some(ui) = snapshot_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before creating a migration snapshot.".into(),
+            );
+            return;
+        };
+        match safe_migration::create_pre_migration_snapshot(&addons_root, include_addons) {
+            Ok(snapshot) => {
+                let summary = format!(
+                    "Restore point saved: {} files, {}.",
+                    snapshot.file_count,
+                    format_size(snapshot.total_size)
+                );
+                ui.set_migration_snapshot_summary(summary.into());
+                apply_safety_center_model(&ui);
+                match safe_migration::dry_run_migration(&addons_root) {
+                    Ok(dry_run) => {
+                        apply_migration_dry_run(&ui, dry_run);
+                        ui.set_migration_phase(2);
+                    }
+                    Err(error) => ui.set_status_error_message(
+                        format!("Migration preview failed: {error}").into(),
+                    ),
+                }
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("Migration snapshot failed: {error}").into())
+            }
+        }
+    });
+
+    let execute_ui = ui.as_weak();
+    let execute_models = models.clone();
+    ui.on_migration_execute(move || {
+        let Some(ui) = execute_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before executing migration.".into(),
+            );
+            return;
+        };
+        match safe_migration::execute_migration(&addons_root) {
+            Ok(result) => {
+                ui.set_migration_result_summary(
+                    format!(
+                        "Imported {} addon{}, {} already tracked, {} missing on disk.",
+                        result.imported,
+                        if result.imported == 1 { "" } else { "s" },
+                        result.already_tracked,
+                        result.skipped_missing
+                    )
+                    .into(),
+                );
+                ui.set_migration_phase(3);
+                ui.set_status_error_message("Minion metadata import complete.".into());
+                let _ = reload_real_addon_models(&ui, &execute_models);
+                apply_safety_center_model(&ui);
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("Migration import failed: {error}").into())
+            }
+        }
+    });
+}
+
 fn seed_initial_theme_draft(ui: &KalpaWindow, custom_themes: &[CatalogTheme]) {
     let active_id = ui.get_active_theme_id().to_string();
     let draft = theme_by_id(&active_id, custom_themes)
@@ -7817,6 +7926,122 @@ fn apply_safety_integrity_result(ui: &KalpaWindow, result: safe_migration::Integ
     ui.set_safety_issues(Rc::new(VecModel::from(issues)).into());
 }
 
+fn apply_migration_preconditions(ui: &KalpaWindow) {
+    let Some(addons_root) = configured_addons_path() else {
+        ui.set_migration_phase(0);
+        ui.set_migration_can_proceed(false);
+        ui.set_migration_status(
+            "Configure the ESO AddOns folder before running Minion migration.".into(),
+        );
+        ui.set_migration_checks(Rc::new(VecModel::from(Vec::<MigrationCheckEntry>::new())).into());
+        ui.set_migration_preview(
+            Rc::new(VecModel::from(Vec::<MigrationPreviewEntry>::new())).into(),
+        );
+        return;
+    };
+
+    let preconditions = safe_migration::check_preconditions(&addons_root);
+    let checks = vec![
+        migration_check(
+            "Minion installation detected",
+            preconditions.minion_found,
+            false,
+        ),
+        migration_check(
+            "AddOns folder accessible",
+            preconditions.addons_path_valid,
+            false,
+        ),
+        migration_check(
+            "SavedVariables folder found",
+            preconditions.saved_variables_exists,
+            false,
+        ),
+        migration_check("ESO is not running", !preconditions.eso_running, false),
+        migration_check("Minion is not running", !preconditions.minion_running, true),
+    ];
+    let can_proceed = preconditions.minion_found
+        && preconditions.addons_path_valid
+        && preconditions.saved_variables_exists
+        && !preconditions.eso_running;
+    let status = if can_proceed {
+        if preconditions.minion_running {
+            "Ready, but close Minion first if you want the cleanest migration.".to_string()
+        } else {
+            "Ready to create the migration restore point.".to_string()
+        }
+    } else if preconditions.warnings.is_empty() {
+        "Migration precheck has blockers.".to_string()
+    } else {
+        preconditions.warnings.join(" ")
+    };
+
+    ui.set_migration_phase(0);
+    ui.set_migration_can_proceed(can_proceed);
+    ui.set_migration_status(status.into());
+    ui.set_migration_snapshot_summary("".into());
+    ui.set_migration_result_summary("".into());
+    ui.set_migration_checks(Rc::new(VecModel::from(checks)).into());
+    ui.set_migration_preview(Rc::new(VecModel::from(Vec::<MigrationPreviewEntry>::new())).into());
+}
+
+fn migration_check(label: &str, ok: bool, warn: bool) -> MigrationCheckEntry {
+    MigrationCheckEntry {
+        label: label.into(),
+        ok,
+        warn,
+    }
+}
+
+fn apply_migration_dry_run(ui: &KalpaWindow, dry_run: safe_migration::DryRunResult) {
+    let will_track = dry_run.will_track.len();
+    let already_tracked = dry_run.already_tracked.len();
+    let missing = dry_run.missing_on_disk.len();
+    let unmanaged = dry_run.unmanaged_on_disk.len();
+    let mut entries = Vec::new();
+
+    for addon in dry_run.will_track {
+        entries.push(MigrationPreviewEntry {
+            title: addon.folder_name.into(),
+            meta: format!(
+                "Will be tracked - ESOUI #{} - {}",
+                addon.esoui_id, addon.minion_version
+            )
+            .into(),
+            kind: 0,
+        });
+    }
+    for addon in dry_run.already_tracked {
+        entries.push(MigrationPreviewEntry {
+            title: addon.folder_name.into(),
+            meta: "Already tracked in Kalpa".into(),
+            kind: 1,
+        });
+    }
+    for addon in dry_run.missing_on_disk {
+        entries.push(MigrationPreviewEntry {
+            title: addon.folder_name.into(),
+            meta: format!("In Minion but not on disk - ESOUI #{}", addon.esoui_id).into(),
+            kind: 2,
+        });
+    }
+    for folder in dry_run.unmanaged_on_disk {
+        entries.push(MigrationPreviewEntry {
+            title: folder.into(),
+            meta: "On disk but unmanaged; will remain as-is".into(),
+            kind: 3,
+        });
+    }
+
+    ui.set_migration_status(
+        format!(
+            "Preview complete: {will_track} to import, {already_tracked} already tracked, {missing} missing, {unmanaged} unmanaged."
+        )
+        .into(),
+    );
+    ui.set_migration_preview(Rc::new(VecModel::from(entries)).into());
+}
+
 const BACKUP_KIND_MANUAL: i32 = 0;
 const BACKUP_KIND_SAFETY: i32 = 1;
 const BACKUP_KIND_CHARACTER: i32 = 2;
@@ -9934,6 +10159,7 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     ui.set_backup_restore_open(env_flag("KALPA_BACKUP_RESTORE_OPEN"));
     ui.set_characters_open(env_flag("KALPA_CHARACTERS_OPEN"));
     ui.set_safety_open(env_flag("KALPA_SAFETY_OPEN"));
+    ui.set_migration_open(env_flag("KALPA_MIGRATION_OPEN"));
     let pack_hub_view = std::env::var("KALPA_PACK_HUB_VIEW")
         .map(|value| match value.to_ascii_lowercase().as_str() {
             "1" | "create" | "create-details" | "details" => 1,

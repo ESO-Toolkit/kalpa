@@ -127,6 +127,18 @@ export struct SafetyLogEntry {
     success: bool,
 }
 
+export struct MigrationCheckEntry {
+    label: string,
+    ok: bool,
+    warn: bool,
+}
+
+export struct MigrationPreviewEntry {
+    title: string,
+    meta: string,
+    kind: int,
+}
+
 export struct DiscoverEntry {
     esoui-id: string,
     title: string,
@@ -4749,6 +4761,271 @@ component SafetyCenterOverlay inherits Rectangle {
             height: root.footer-height;
             background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
             PackHubButton { x: parent.width - 96px; y: 20px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => { root.open = false; } }
+        }
+    }
+}
+
+component MigrationPhasePill inherits Rectangle {
+    in property <string> label;
+    in property <int> index: 0;
+    in property <int> active-index: 0;
+    private property <bool> complete: root.index < root.active-index;
+    private property <bool> active: root.index == root.active-index;
+    height: 24px;
+    border-radius: 12px;
+    border-width: 0px;
+    background: root.complete ? Palette.emerald-15 : (root.active ? Palette.sky-15 : Palette.white-04);
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.complete ? "✓ " + root.label : root.index + 1 + " " + root.label;
+        color: root.complete ? Palette.emerald : (root.active ? Palette.sky : Palette.muted-half);
+        font-size: 10px;
+        font-weight: 850;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+component MigrationCheckRow inherits Rectangle {
+    in property <MigrationCheckEntry> entry;
+    height: 30px;
+    border-radius: 10px;
+    border-width: 0px;
+    background: root.entry.ok ? Palette.emerald-15 : (root.entry.warn ? Palette.gold-10 : Palette.red-04);
+
+    Text {
+        x: 12px;
+        y: 0px;
+        width: 24px;
+        height: parent.height;
+        text: root.entry.ok ? "✓" : (root.entry.warn ? "!" : "×");
+        color: root.entry.ok ? Palette.emerald : (root.entry.warn ? Palette.gold : Palette.red);
+        font-size: 12px;
+        font-weight: 900;
+        vertical-alignment: center;
+    }
+
+    Text {
+        x: 34px;
+        y: 0px;
+        width: parent.width - 46px;
+        height: parent.height;
+        text: root.entry.label;
+        color: root.entry.ok ? Palette.foreground : (root.entry.warn ? Palette.gold : Palette.red);
+        font-size: 12px;
+        font-weight: 750;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+component MigrationPreviewRow inherits Rectangle {
+    in property <MigrationPreviewEntry> entry;
+    height: 44px;
+    border-radius: 10px;
+    border-width: 0px;
+    background: root.entry.kind == 0 ? Palette.emerald-15 : (root.entry.kind == 1 ? Palette.sky-10 : (root.entry.kind == 2 ? Palette.gold-10 : Palette.white-03));
+
+    Text {
+        x: 14px;
+        y: 8px;
+        width: parent.width - 28px;
+        text: root.entry.title;
+        color: root.entry.kind == 0 ? Palette.emerald : (root.entry.kind == 1 ? Palette.sky : (root.entry.kind == 2 ? Palette.gold : Palette.foreground));
+        font-size: 12px;
+        font-weight: 850;
+        overflow: elide;
+    }
+
+    Text {
+        x: 14px;
+        y: 27px;
+        width: parent.width - 28px;
+        text: root.entry.meta;
+        color: Palette.muted-strong;
+        font-size: 10px;
+        font-weight: 650;
+        overflow: elide;
+    }
+}
+
+component MinionMigrationOverlay inherits Rectangle {
+    in-out property <bool> open: false;
+    in-out property <int> phase: 0;
+    in-out property <bool> include-addons: true;
+    in property <[MigrationCheckEntry]> checks;
+    in property <[MigrationPreviewEntry]> preview;
+    in property <bool> can-proceed: false;
+    in property <string> status: "";
+    in property <string> snapshot-summary: "";
+    in property <string> result-summary: "";
+    callback recheck;
+    callback continue-to-backup;
+    callback create-snapshot(bool);
+    callback execute-migration;
+    visible: root.open;
+    background: #000000c4;
+    private property <length> modal-width: root.width < 720px ? root.width - 48px : 640px;
+    private property <length> modal-height: root.height < 760px ? root.height - 32px : 700px;
+    private property <length> footer-height: 66px;
+    private property <length> content-top: 160px;
+    private property <length> content-height: max(160px, root.modal-height - root.footer-height - root.content-top - 12px);
+
+    TouchArea { width: root.width; height: root.height; clicked => { root.open = false; } }
+
+    panel := Rectangle {
+        width: root.modal-width;
+        height: root.modal-height;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Palette.border-strong;
+        background: Tokens.surface;
+        drop-shadow-blur: 30px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: #00000099;
+        clip: true;
+
+        TouchArea { width: parent.width; height: parent.height; clicked => { } }
+
+        Text { x: 28px; y: 24px; width: parent.width - 92px; text: "Safe Minion Migration"; color: Palette.gold; font-size: 18px; font-weight: 900; overflow: elide; }
+        Text { x: 28px; y: 54px; width: parent.width - 92px; height: 42px; text: "Import addon tracking metadata from Minion without moving addon folders or SavedVariables."; color: Palette.muted-strong; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+        GhostIconButton { x: parent.width - 52px; y: 20px; width: 36px; height: 36px; icon: @image-url("../assets/icons/x.svg"); clicked => { root.open = false; } }
+        Hairline { x: 0px; y: 116px; width: parent.width; height: 1px; opacity: 0.45; }
+
+        Rectangle {
+            x: 28px;
+            y: 128px;
+            width: parent.width - 56px;
+            height: 26px;
+            background: #00000000;
+            MigrationPhasePill { x: 0px; y: 0px; width: (parent.width - 32px) / 4; label: "Check"; index: 0; active-index: root.phase; }
+            MigrationPhasePill { x: (parent.width - 32px) / 4 + 10px; y: 0px; width: (parent.width - 32px) / 4; label: "Backup"; index: 1; active-index: root.phase; }
+            MigrationPhasePill { x: ((parent.width - 32px) / 4 + 10px) * 2; y: 0px; width: (parent.width - 32px) / 4; label: "Preview"; index: 2; active-index: root.phase; }
+            MigrationPhasePill { x: ((parent.width - 32px) / 4 + 10px) * 3; y: 0px; width: (parent.width - 32px) / 4; label: "Done"; index: 3; active-index: root.phase; }
+        }
+
+        if (root.phase == 0) : Rectangle {
+            x: 28px;
+            y: root.content-top;
+            width: parent.width - 56px;
+            height: root.content-height;
+            background: #00000000;
+            Text { x: 0px; y: 4px; width: parent.width; text: "Kalpa will import addon tracking data from Minion. Your addon files and ESO settings will not be modified."; color: Palette.muted-strong; font-size: 13px; font-weight: 650; wrap: word-wrap; }
+
+            ScrollView {
+                x: 0px;
+                y: 58px;
+                width: parent.width;
+                height: min(180px, parent.height - 112px);
+                viewport-width: self.width;
+                viewport-height: root.checks.length * 38px;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                Rectangle {
+                    width: parent.width;
+                    height: root.checks.length * 38px;
+                    background: #00000000;
+                    for check[index] in root.checks : MigrationCheckRow {
+                        x: 0px;
+                        y: index * 38px;
+                        width: parent.width;
+                        entry: check;
+                    }
+                }
+            }
+
+            Text { x: 0px; y: parent.height - 42px; width: parent.width - 220px; text: root.status; color: Palette.muted-half; font-size: 11px; font-weight: 650; overflow: elide; }
+            PackHubButton { x: parent.width - 206px; y: parent.height - 50px; width: 82px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Re-check"; clicked => { root.recheck(); } }
+            PackHubButton { x: parent.width - 114px; y: parent.height - 50px; width: 114px; icon: @image-url("../assets/icons/chevron-right.svg"); label: "Continue"; primary: true; disabled: !root.can-proceed; clicked => { root.continue-to-backup(); } }
+        }
+
+        if (root.phase == 1) : Rectangle {
+            x: 28px;
+            y: root.content-top;
+            width: parent.width - 56px;
+            height: root.content-height;
+            background: #00000000;
+            Text { x: 0px; y: 4px; width: parent.width; height: 46px; text: "Before importing metadata, Kalpa creates a restore point. SavedVariables, UserSettings.txt, and AddOnSettings.txt are always included."; color: Palette.muted-strong; font-size: 13px; font-weight: 650; wrap: word-wrap; }
+            SettingsToggleRow { x: 0px; y: 72px; width: parent.width; height: 58px; label: "Include AddOns folder"; description: "Larger backup, recommended for first migration"; checked <=> root.include-addons; }
+            Rectangle {
+                x: 0px;
+                y: 150px;
+                width: parent.width;
+                height: 76px;
+                border-radius: 12px;
+                border-width: 0px;
+                background: Palette.white-03;
+                Text { x: 16px; y: 14px; width: parent.width - 32px; text: root.snapshot-summary == "" ? "No restore point created yet." : root.snapshot-summary; color: root.snapshot-summary == "" ? Palette.muted-half : Palette.emerald; font-size: 12px; font-weight: 750; overflow: elide; }
+                Text { x: 16px; y: 38px; width: parent.width - 32px; text: "You can restore this snapshot later from Settings > Safety Center."; color: Palette.muted-strong; font-size: 11px; font-weight: 650; overflow: elide; }
+            }
+            PackHubButton { x: parent.width - 196px; y: parent.height - 50px; width: 196px; icon: @image-url("../assets/icons/save.svg"); label: "Create Snapshot & Continue"; primary: true; clicked => { root.create-snapshot(root.include-addons); } }
+        }
+
+        if (root.phase == 2) : Rectangle {
+            x: 28px;
+            y: root.content-top;
+            width: parent.width - 56px;
+            height: root.content-height;
+            background: #00000000;
+            Text { x: 0px; y: 4px; width: parent.width; text: root.status; color: Palette.muted-strong; font-size: 13px; font-weight: 650; overflow: elide; }
+
+            ScrollView {
+                x: 0px;
+                y: 38px;
+                width: parent.width;
+                height: parent.height - 96px;
+                viewport-width: self.width;
+                viewport-height: max(80px, root.preview.length * 52px);
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                Rectangle {
+                    width: parent.width;
+                    height: max(80px, root.preview.length * 52px);
+                    background: #00000000;
+                    if (root.preview.length == 0) : Text { x: 24px; y: 22px; width: parent.width - 48px; text: "All Minion addons are already tracked. Nothing to import."; color: Palette.muted-strong; font-size: 13px; font-weight: 750; horizontal-alignment: center; }
+                    for entry[index] in root.preview : MigrationPreviewRow {
+                        x: 0px;
+                        y: index * 52px;
+                        width: parent.width;
+                        entry: entry;
+                    }
+                }
+            }
+            PackHubButton { x: parent.width - 166px; y: parent.height - 50px; width: 166px; icon: @image-url("../assets/icons/check.svg"); label: "Import Metadata"; primary: true; clicked => { root.execute-migration(); } }
+        }
+
+        if (root.phase == 3) : Rectangle {
+            x: 28px;
+            y: root.content-top;
+            width: parent.width - 56px;
+            height: root.content-height;
+            background: #00000000;
+            Rectangle {
+                x: 0px;
+                y: 16px;
+                width: parent.width;
+                height: 96px;
+                border-radius: 14px;
+                border-width: 0px;
+                background: Palette.emerald-15;
+                Text { x: 20px; y: 18px; width: parent.width - 40px; text: "Migration complete"; color: Palette.emerald; font-size: 15px; font-weight: 900; }
+                Text { x: 20px; y: 48px; width: parent.width - 40px; text: root.result-summary; color: Palette.foreground; font-size: 12px; font-weight: 750; overflow: elide; }
+            }
+            Text { x: 0px; y: 132px; width: parent.width; text: root.snapshot-summary; color: Palette.muted-strong; font-size: 12px; font-weight: 700; wrap: word-wrap; }
+        }
+
+        Rectangle {
+            x: 0px;
+            y: parent.height - root.footer-height;
+            width: parent.width;
+            height: root.footer-height;
+            background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
+            PackHubButton { x: parent.width - 96px; y: 20px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: root.phase == 3 ? "Done" : "Cancel"; show-icon: false; clicked => { root.open = false; } }
         }
     }
 }
@@ -9621,6 +9898,8 @@ export component KalpaWindow inherits Window {
     in property <[SafetySnapshotEntry]> safety-snapshots;
     in property <[SafetyIssueEntry]> safety-issues;
     in property <[SafetyLogEntry]> safety-logs;
+    in property <[MigrationCheckEntry]> migration-checks;
+    in property <[MigrationPreviewEntry]> migration-preview;
     in property <[ThemeEntry]> themes;
     in property <int> total-addon-count: 0;
     in property <int> addon-kind-count: 0;
@@ -9682,6 +9961,13 @@ export component KalpaWindow inherits Window {
     in-out property <bool> safety-integrity-addons-ok: false;
     in-out property <bool> safety-integrity-sv-ok: false;
     in-out property <string> safety-integrity-addon-count: "0";
+    in-out property <bool> migration-open: false;
+    in-out property <int> migration-phase: 0;
+    in-out property <bool> migration-include-addons: true;
+    in-out property <bool> migration-can-proceed: false;
+    in-out property <string> migration-status;
+    in-out property <string> migration-snapshot-summary;
+    in-out property <string> migration-result-summary;
     in-out property <int> selected-index: 5;
     in-out property <int> selected-discover-index: 0;
     in-out property <bool> detail-files-active: false;
@@ -9834,6 +10120,11 @@ export component KalpaWindow inherits Window {
     callback safety-run-integrity;
     callback safety-restore-snapshot(int);
     callback safety-delete-snapshot(int);
+    callback open-migration;
+    callback migration-recheck;
+    callback migration-continue;
+    callback migration-create-snapshot(bool);
+    callback migration-execute;
     callback open-settings;
     callback theme-selected(string);
     callback theme-create;
@@ -10200,6 +10491,24 @@ export component KalpaWindow inherits Window {
             delete-snapshot(index) => { root.safety-delete-snapshot(index); }
         }
 
+        if (root.migration-open) : MinionMigrationOverlay {
+            width: root.width;
+            height: root.height;
+            open <=> root.migration-open;
+            phase <=> root.migration-phase;
+            include-addons <=> root.migration-include-addons;
+            checks: root.migration-checks;
+            preview: root.migration-preview;
+            can-proceed: root.migration-can-proceed;
+            status: root.migration-status;
+            snapshot-summary: root.migration-snapshot-summary;
+            result-summary: root.migration-result-summary;
+            recheck => { root.migration-recheck(); }
+            continue-to-backup => { root.migration-continue(); }
+            create-snapshot(value) => { root.migration-create-snapshot(value); }
+            execute-migration => { root.migration-execute(); }
+        }
+
         AppearanceOverlay {
             width: root.width;
             height: root.height;
@@ -10257,7 +10566,12 @@ export component KalpaWindow inherits Window {
             addons-path-applied(path) => { root.settings-addons-path-applied(path); }
             api-compat-clicked => { root.settings-api-compat(); }
             app-update-clicked => { root.settings-app-update(); }
-            minion-migration-clicked => { root.settings-minion-migration(); }
+            minion-migration-clicked => {
+                root.settings-open = false;
+                root.migration-open = true;
+                root.migration-phase = 0;
+                root.open-migration();
+            }
             safety-center-clicked => {
                 root.settings-open = false;
                 root.safety-open = true;

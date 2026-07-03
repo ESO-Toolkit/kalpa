@@ -262,6 +262,9 @@ function New-StateEnvironment {
     "safety" {
       $env.KALPA_SAFETY_OPEN = "1"
     }
+    "migration" {
+      $env.KALPA_MIGRATION_OPEN = "1"
+    }
     "theme-crimson" {
       $env.KALPA_THEME = "daedric-crimson"
     }

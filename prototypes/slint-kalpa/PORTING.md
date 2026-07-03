@@ -233,9 +233,14 @@ Current detail status:
   snapshots, runs integrity checks, and displays the operation log. Remaining
   gaps are restore/delete confirmation animations, row busy states, and final
   visual comparison against the WebView dialog.
-- Settings > Tools app updates and Minion migration now have native click
-  handlers with explicit status feedback, but their full React dialogs/workflows
-  still need native parity.
+- The Settings > Tools Minion Migration row now opens a native safe-migration
+  wizard backed by the shared migration module. It checks preconditions, creates
+  a pre-migration restore point, previews Minion metadata imports, executes the
+  metadata-only import, refreshes the native addon model, and writes to the
+  Safety Center operation log. Remaining gaps are exact React phase animation,
+  explicit per-step busy states, and final visual comparison.
+- Settings > Tools app updates now has native click feedback, but the full React
+  updater install/restart workflow still needs native parity.
 - Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.
@@ -321,6 +326,8 @@ Current backdrop status:
 - Launch with `KALPA_CHARACTERS_OPEN=1` to inspect the native Characters
   overlay.
 - Launch with `KALPA_SAFETY_OPEN=1` to inspect the native Safety Center overlay.
+- Launch with `KALPA_MIGRATION_OPEN=1` to inspect the native Minion Migration
+  overlay.
 - Launch with `KALPA_RENDER_PRESET=standard` for visual-fidelity checks, or
   `KALPA_SLINT_BACKEND=winit-skia` / `winit-femtovg` for direct backend checks
   on Slint builds that support those renderer names.
@@ -340,7 +347,7 @@ For repeatable full-window state captures on Windows, use the DPI-aware capture
 harness from `prototypes/slint-kalpa`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\capture-states.ps1 -Build -OutputDir .\captures\verify -State main,discover-popular,files,files-editing,settings-general,settings-theme-editor,packhub-browse,packhub-create1,packhub-create2,packhub-install,svm-overview,svm-cleanup,svm-copy,svm-editor,backup-restore-main,backup-restore-label,backup-restore-confirm,characters,safety
+powershell -ExecutionPolicy Bypass -File .\tools\capture-states.ps1 -Build -OutputDir .\captures\verify -State main,discover-popular,files,files-editing,settings-general,settings-theme-editor,packhub-browse,packhub-create1,packhub-create2,packhub-install,svm-overview,svm-cleanup,svm-copy,svm-editor,backup-restore-main,backup-restore-label,backup-restore-confirm,characters,safety,migration
 ```
 
 The harness launches a fresh prototype process per state, uses the low-memory
@@ -352,7 +359,7 @@ writes ignored PNGs under `captures/`. Supported states include `main`,
 `packhub-create1`, `packhub-create2`, `packhub-install`, `svm-overview`,
 `svm-cleanup`, `svm-copy`, `svm-editor`, `backup-restore-main`,
 `backup-restore-label`, `backup-restore-confirm`, `characters`, `safety`,
-`theme-crimson`, and `theme-frost`.
+`migration`, `theme-crimson`, and `theme-frost`.
 
 From `prototypes/slint-kalpa`, compare a captured native prototype PNG against
 the current WebView reference:
