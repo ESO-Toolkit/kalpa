@@ -1433,22 +1433,22 @@ component DiscoverResultRow inherits Rectangle {
 
     Rectangle {
         visible: root.selected;
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height;
-        border-radius: 0px;
+        x: 8px;
+        y: 5px;
+        width: parent.width - 16px;
+        height: parent.height - 10px;
+        border-radius: 9px;
         border-width: 0px;
         background: Palette.gold-06;
     }
 
     Rectangle {
         visible: root.selected;
-        x: 0px;
-        y: 0px;
+        x: 8px;
+        y: 9px;
         width: 3px;
-        height: parent.height;
-        border-radius: 0px;
+        height: parent.height - 18px;
+        border-radius: 2px;
         background: Palette.gold;
     }
 
