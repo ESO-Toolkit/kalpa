@@ -370,6 +370,14 @@ struct NativeAppUpdateInfo {
     signature: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeAddonUpdateCheck {
+    folder_name: String,
+    remote_version: String,
+    has_update: bool,
+    remote_last_update: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 struct NativeImportResult {
     installed: Vec<String>,
@@ -1613,6 +1621,7 @@ struct RealAddonDraft {
 }
 
 fn real_addon_entries(addons_root: &Path) -> Result<Vec<AddonEntry>, String> {
+    let store = metadata::load_metadata(addons_root);
     let mut addon_dirs = fs::read_dir(addons_root)
         .map_err(|error| format!("Failed to read AddOns folder: {error}"))?
         .filter_map(Result::ok)
@@ -1657,6 +1666,9 @@ fn real_addon_entries(addons_root: &Path) -> Result<Vec<AddonEntry>, String> {
     let addons = drafts
         .into_iter()
         .map(|mut draft| {
+            if let Some(meta) = store.addons.get(draft.entry.folder_name.as_str()) {
+                hydrate_addon_from_metadata(&mut draft.entry, meta);
+            }
             draft.entry.required_dependencies =
                 dependency_model_from_specs(draft.required_dependencies, &folder_names);
             draft.entry.optional_dependencies =
@@ -1666,6 +1678,26 @@ fn real_addon_entries(addons_root: &Path) -> Result<Vec<AddonEntry>, String> {
         .collect::<Vec<_>>();
 
     Ok(addons)
+}
+
+fn hydrate_addon_from_metadata(entry: &mut AddonEntry, meta: &metadata::AddonMetadata) {
+    if meta.esoui_id > 0 {
+        entry.esoui_id = meta.esoui_id.to_string().into();
+    }
+    if entry.version.is_empty() && !meta.installed_version.trim().is_empty() {
+        entry.version = meta.installed_version.as_str().into();
+        entry.meta = addon_meta(entry.version.as_str(), entry.author.as_str()).into();
+    }
+    if meta.esoui_last_update > 0 {
+        entry.last_updated = date_label_from_epoch_millis(meta.esoui_last_update).into();
+    }
+    if let Some(installed_at) = pack_iso_date_label(&meta.installed_at) {
+        entry.installed_at = installed_at.into();
+    }
+    if !meta.tags.is_empty() {
+        entry.tags = tag_model_from_ids(&meta.tags);
+        entry.favorite = tag_model_has_active(&entry.tags, "favorite");
+    }
 }
 
 fn real_addon_draft(addon_dir: &Path) -> Result<RealAddonDraft, String> {
@@ -2042,6 +2074,55 @@ fn addon_has_update(addon: &AddonEntry) -> bool {
     addon.state == 1 || addon.badge.as_str() == "Update"
 }
 
+fn clear_addon_update_state(addon: &mut AddonEntry) {
+    if addon.state == 1 {
+        addon.state = if addon.is_library { 3 } else { 0 };
+    }
+    if addon.badge.as_str() == "Update" {
+        addon.badge = "".into();
+        addon.badge_kind = 0;
+    }
+}
+
+fn addon_update_entries_from_model(
+    updates: &ModelRc<AddonUpdateCheckEntry>,
+) -> Vec<AddonUpdateCheckEntry> {
+    (0..updates.row_count())
+        .filter_map(|index| updates.row_data(index))
+        .collect()
+}
+
+fn apply_addon_update_check_results(
+    models: &AddonModels,
+    updates: &[AddonUpdateCheckEntry],
+) -> usize {
+    let update_by_folder = updates
+        .iter()
+        .map(|update| (update.folder_name.to_string(), update.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let mut available = 0usize;
+    for addon in models.all.borrow_mut().iter_mut() {
+        clear_addon_update_state(addon);
+
+        let Some(update) = update_by_folder.get(addon.folder_name.as_str()) else {
+            continue;
+        };
+
+        if !update.last_updated.is_empty() {
+            addon.last_updated = update.last_updated.clone();
+        }
+        if update.has_update {
+            available += 1;
+            addon.state = 1;
+            addon.badge = "Update".into();
+            addon.badge_kind = 1;
+        }
+    }
+
+    available
+}
+
 fn addon_has_required_dependency_issue(addon: &AddonEntry) -> bool {
     (0..addon.required_dependencies.row_count())
         .filter_map(|index| addon.required_dependencies.row_data(index))
@@ -2104,16 +2185,66 @@ fn sort_addons(addons: &mut [AddonEntry], sort_mode: i32) {
 }
 
 fn date_sort_key(value: &str) -> i32 {
+    if let Some(key) = slash_date_sort_key(value) {
+        return key;
+    }
+    if let Some(key) = iso_date_sort_key(value) {
+        return key;
+    }
+    named_date_sort_key(value).unwrap_or(0)
+}
+
+fn slash_date_sort_key(value: &str) -> Option<i32> {
     let parts = value
         .split('/')
         .filter_map(|part| part.parse::<i32>().ok())
         .collect::<Vec<_>>();
 
     if parts.len() == 3 {
-        parts[2] * 10_000 + parts[0] * 100 + parts[1]
+        Some(parts[2] * 10_000 + parts[0] * 100 + parts[1])
     } else {
-        0
+        None
     }
+}
+
+fn iso_date_sort_key(value: &str) -> Option<i32> {
+    let date = value.get(0..10)?;
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<i32>().ok()?;
+    let day = parts.next()?.parse::<i32>().ok()?;
+    Some(year * 10_000 + month * 100 + day)
+}
+
+fn named_date_sort_key(value: &str) -> Option<i32> {
+    let cleaned = value.replace(',', "");
+    let mut parts = cleaned.split_whitespace();
+    let month = month_number(parts.next()?)?;
+    let day = parts.next()?.parse::<i32>().ok()?;
+    let year = parts.next()?.parse::<i32>().ok()?;
+    Some(year * 10_000 + month * 100 + day)
+}
+
+fn month_number(month: &str) -> Option<i32> {
+    match month {
+        "Jan" | "January" => Some(1),
+        "Feb" | "February" => Some(2),
+        "Mar" | "March" => Some(3),
+        "Apr" | "April" => Some(4),
+        "May" => Some(5),
+        "Jun" | "June" => Some(6),
+        "Jul" | "July" => Some(7),
+        "Aug" | "August" => Some(8),
+        "Sep" | "September" => Some(9),
+        "Oct" | "October" => Some(10),
+        "Nov" | "November" => Some(11),
+        "Dec" | "December" => Some(12),
+        _ => None,
+    }
+}
+
+fn date_label_from_epoch_millis(epoch_millis: u64) -> String {
+    format_short_date(epoch_millis / 1_000)
 }
 
 fn selected_visible_addon_folder(ui: &KalpaWindow) -> Option<String> {
@@ -7234,6 +7365,20 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
 }
 
 fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
+    let update_finished_ui = ui.as_weak();
+    let update_finished_models = models.clone();
+    ui.on_addon_update_check_finished(move |updates, message| {
+        let Some(ui) = update_finished_ui.upgrade() else {
+            return;
+        };
+        let update_rows = addon_update_entries_from_model(&updates);
+        let available = apply_addon_update_check_results(&update_finished_models, &update_rows);
+        ui.set_checking_updates(false);
+        ui.set_update_available_count(available as i32);
+        apply_addon_view(&ui, &update_finished_models);
+        ui.set_status_error_message(message);
+    });
+
     let toggle_ui = ui.as_weak();
     let toggle_models = models.clone();
     ui.on_addon_selection_toggled(move |index| {
@@ -7346,20 +7491,18 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let update_ui = ui.as_weak();
-    let update_models = models.clone();
     ui.on_batch_update(move || {
         if let Some(ui) = update_ui.upgrade() {
-            for addon in update_models
-                .all
-                .borrow_mut()
-                .iter_mut()
-                .filter(|addon| addon.selected)
-            {
-                addon.state = 1;
-                addon.badge = "Update".into();
-                addon.badge_kind = 1;
-            }
-            apply_addon_view(&ui, &update_models);
+            let Some(addons_root) = addons_source_root() else {
+                ui.set_status_error_message(
+                    "AddOns folder was not found. Set it before checking for updates.".into(),
+                );
+                return;
+            };
+
+            ui.set_checking_updates(true);
+            ui.set_status_error_message("Checking ESOUI for addon updates...".into());
+            start_native_addon_update_check(ui.as_weak(), addons_root);
         }
     });
 
@@ -8768,6 +8911,129 @@ fn read_local_version(addons_dir: &Path, folder: &str) -> String {
         .unwrap_or_default()
 }
 
+fn normalized_addon_version(version: &str) -> &str {
+    version
+        .trim()
+        .strip_prefix('v')
+        .or_else(|| version.trim().strip_prefix('V'))
+        .unwrap_or(version.trim())
+}
+
+fn check_native_addon_updates_blocking(
+    addons_dir: &Path,
+) -> Result<Vec<NativeAddonUpdateCheck>, String> {
+    let api_lookup = esoui::fetch_filelist_lookup()?;
+    let mut store = metadata::load_metadata(addons_dir);
+    let folder_names = store.addons.keys().cloned().collect::<Vec<_>>();
+    let mut metadata_changed = false;
+    let mut results = Vec::new();
+
+    for folder_name in folder_names {
+        if !addons_dir.join(&folder_name).is_dir() {
+            continue;
+        }
+
+        let Some(meta) = store.addons.get(&folder_name).cloned() else {
+            continue;
+        };
+        if meta.esoui_id == 0 {
+            continue;
+        }
+
+        let Some(api_entry) = api_lookup.get(&folder_name) else {
+            continue;
+        };
+
+        let local_version = normalized_addon_version(&meta.installed_version);
+        let remote_version = normalized_addon_version(&api_entry.version);
+        let has_update = !remote_version.is_empty()
+            && !local_version.is_empty()
+            && remote_version != local_version;
+
+        if let Some(entry) = store.addons.get_mut(&folder_name) {
+            if !has_update && entry.installed_version != api_entry.version {
+                entry.installed_version = api_entry.version.clone();
+                metadata_changed = true;
+            }
+            if entry.esoui_last_update != api_entry.last_update {
+                entry.esoui_last_update = api_entry.last_update;
+                metadata_changed = true;
+            }
+        }
+
+        results.push(NativeAddonUpdateCheck {
+            folder_name,
+            remote_version: api_entry.version.clone(),
+            has_update,
+            remote_last_update: api_entry.last_update,
+        });
+    }
+
+    if metadata_changed {
+        metadata::save_metadata(addons_dir, &store)?;
+    }
+
+    Ok(results)
+}
+
+fn update_check_status_message(results: &[NativeAddonUpdateCheck]) -> String {
+    let checked = results.len();
+    let updates = results.iter().filter(|result| result.has_update).count();
+
+    if checked == 0 {
+        "No ESOUI-linked addons were found to check.".to_string()
+    } else if updates == 0 {
+        format!("Checked {checked} ESOUI addons; no updates available.")
+    } else {
+        format!(
+            "Checked {checked} ESOUI addons; {updates} update{} available.",
+            if updates == 1 { "" } else { "s" }
+        )
+    }
+}
+
+fn slint_update_check_entry(result: NativeAddonUpdateCheck) -> AddonUpdateCheckEntry {
+    AddonUpdateCheckEntry {
+        folder_name: result.folder_name.into(),
+        remote_version: result.remote_version.into(),
+        has_update: result.has_update,
+        last_updated: if result.remote_last_update > 0 {
+            date_label_from_epoch_millis(result.remote_last_update).into()
+        } else {
+            "".into()
+        },
+    }
+}
+
+fn start_native_addon_update_check(ui_weak: slint::Weak<KalpaWindow>, addons_dir: PathBuf) {
+    std::thread::spawn(move || {
+        let result = check_native_addon_updates_blocking(&addons_dir);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+
+            match result {
+                Ok(results) => {
+                    let message = update_check_status_message(&results);
+                    let entries = results
+                        .into_iter()
+                        .map(slint_update_check_entry)
+                        .collect::<Vec<_>>();
+                    ui.invoke_addon_update_check_finished(
+                        Rc::new(VecModel::from(entries)).into(),
+                        message.into(),
+                    );
+                }
+                Err(error) => {
+                    ui.set_checking_updates(false);
+                    ui.set_status_error_message(format!("Update check failed: {error}").into());
+                }
+            }
+        });
+    });
+}
+
 fn find_manifest(addons_dir: &Path, folder_name: &str) -> Option<PathBuf> {
     let folder_dir = addons_dir.join(folder_name);
     let txt = folder_dir.join(format!("{folder_name}.txt"));
@@ -9173,6 +9439,33 @@ fn tag_model(active_tags: Vec<&str>) -> ModelRc<TagEntry> {
         .map(str::to_string)
         .collect::<Vec<_>>();
     tag_model_from_entries(preset_tag_entries(&active))
+}
+
+fn tag_model_from_ids(active_tags: &[String]) -> ModelRc<TagEntry> {
+    let mut entries = preset_tag_entries(active_tags);
+    let mut seen = PRESET_TAGS
+        .iter()
+        .map(|tag| (*tag).to_string())
+        .collect::<BTreeSet<_>>();
+
+    for raw_tag in active_tags {
+        let Some(tag_id) = sanitize_custom_tag(raw_tag) else {
+            continue;
+        };
+        if seen.contains(&tag_id) {
+            continue;
+        }
+        seen.insert(tag_id.clone());
+        entries.push(TagEntry {
+            id: tag_id.as_str().into(),
+            label: tag_id.as_str().into(),
+            kind: 5,
+            active: true,
+            preset: false,
+        });
+    }
+
+    tag_model_from_entries(entries)
 }
 
 fn tag_model_from_entries(tags: Vec<TagEntry>) -> ModelRc<TagEntry> {
@@ -16304,6 +16597,13 @@ CombatMetrics_SavedVariables = {
     }
 
     #[test]
+    fn addon_date_sort_key_accepts_metadata_date_formats() {
+        assert_eq!(date_sort_key("2026-07-02T18:45:00Z"), 20260702);
+        assert_eq!(date_sort_key("Jul 2, 2026"), 20260702);
+        assert_eq!(date_sort_key("July 2 2026"), 20260702);
+    }
+
+    #[test]
     fn installed_addon_view_sorts_by_downloaded_desc() {
         let mut older = addon_entry(
             "Older", "Older", "1", "B", "1", "101048", "Addon", "3/1/2026", "", false, false,
@@ -16318,6 +16618,123 @@ CombatMetrics_SavedVariables = {
 
         let sorted = visible_addons(&[older, newer], "", 0, 3);
         assert_eq!(sorted[0].title.as_str(), "Newer");
+    }
+
+    #[test]
+    fn metadata_hydration_restores_esoui_dates_and_tags() {
+        let mut entry = addon_entry(
+            "Tracked Addon",
+            "TrackedAddon",
+            "",
+            "Author",
+            "",
+            "101049",
+            "Addon",
+            "",
+            "",
+            false,
+            false,
+            false,
+            0,
+            "",
+            0,
+            "",
+            0,
+            "",
+            0,
+        );
+        let meta = metadata::AddonMetadata {
+            esoui_id: 42,
+            installed_version: "v2.0.0".to_string(),
+            download_url: "https://example.test/addon.zip".to_string(),
+            installed_at: "2026-07-02T18:45:00Z".to_string(),
+            tags: vec!["favorite".to_string(), "pvp-build".to_string()],
+            esoui_last_update: 1_782_864_000_000,
+        };
+
+        hydrate_addon_from_metadata(&mut entry, &meta);
+
+        assert_eq!(entry.esoui_id.as_str(), "42");
+        assert_eq!(entry.version.as_str(), "v2.0.0");
+        assert!(entry.meta.as_str().contains("v2.0.0"));
+        assert_eq!(entry.last_updated.as_str(), "Jul 1, 2026");
+        assert_eq!(entry.installed_at.as_str(), "Jul 2, 2026");
+        assert!(entry.favorite);
+        assert!(tag_model_has_active(&entry.tags, "favorite"));
+        assert!(tag_model_has_active(&entry.tags, "pvp-build"));
+    }
+
+    #[test]
+    fn addon_update_check_results_replace_stale_badges() {
+        let current = addon_entry(
+            "Current",
+            "CurrentAddon",
+            "1",
+            "Author",
+            "1.0",
+            "101049",
+            "Addon",
+            "",
+            "",
+            false,
+            false,
+            false,
+            1,
+            "Update",
+            1,
+            "",
+            0,
+            "",
+            0,
+        );
+        let mut stale = addon_entry(
+            "Stale",
+            "StaleAddon",
+            "2",
+            "Author",
+            "1.0",
+            "101049",
+            "Addon",
+            "",
+            "",
+            false,
+            false,
+            false,
+            1,
+            "Update",
+            1,
+            "",
+            0,
+            "",
+            0,
+        );
+        stale.last_updated = "Jan 1, 2025".into();
+        let models = test_addon_models(vec![current, stale]);
+        let updates = vec![
+            AddonUpdateCheckEntry {
+                folder_name: "CurrentAddon".into(),
+                remote_version: "1.0".into(),
+                has_update: false,
+                last_updated: "Jul 1, 2026".into(),
+            },
+            AddonUpdateCheckEntry {
+                folder_name: "StaleAddon".into(),
+                remote_version: "2.0".into(),
+                has_update: true,
+                last_updated: "Jul 2, 2026".into(),
+            },
+        ];
+
+        let available = apply_addon_update_check_results(&models, &updates);
+        let addons = models.all.borrow();
+
+        assert_eq!(available, 1);
+        assert_eq!(addons[0].badge.as_str(), "");
+        assert_eq!(addons[0].state, 0);
+        assert_eq!(addons[0].last_updated.as_str(), "Jul 1, 2026");
+        assert_eq!(addons[1].state, 1);
+        assert_eq!(addons[1].badge.as_str(), "Update");
+        assert_eq!(addons[1].last_updated.as_str(), "Jul 2, 2026");
     }
 
     fn test_temp_dir(name: &str) -> &'static Path {

@@ -261,6 +261,13 @@ export struct AddonEntry {
     optional-dependencies: [DependencyEntry],
 }
 
+export struct AddonUpdateCheckEntry {
+    folder-name: string,
+    remote-version: string,
+    has-update: bool,
+    last-updated: string,
+}
+
 export global Tokens {
     in-out property <int> skin-kind: 0;
     in-out property <bool> low-memory-preset: true;
@@ -9264,7 +9271,7 @@ component Header inherits Rectangle {
         font-weight: 700;
     }
 
-    HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 292px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/refresh-cw.svg"); rotation: root.loading ? root.spinner-angle : 0deg; clicked => { root.refresh-requested(); } }
+    HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 292px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/refresh-cw.svg"); rotation: root.loading || root.checking-updates ? root.spinner-angle : 0deg; clicked => { root.refresh-requested(); } }
     HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 256px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/package.svg"); clicked => { root.open-pack-hub-clicked(); } }
     HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 220px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/file-sliders.svg"); clicked => { root.open-svm-clicked(); } }
     HeaderIcon { visible: !root.batch-active; x: root.chrome-width - 184px; y: 10px; width: 28px; height: 28px; icon: @image-url("../assets/icons/cloud-upload.svg"); clicked => { root.open-uploader-clicked(); } }
@@ -11278,6 +11285,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> app-update-action-label;
     in-out property <int> app-update-action-kind: 0;
     in-out property <int> update-available-count: 0;
+    in-out property <bool> checking-updates: false;
     in-out property <int> pending-conflict-count: 0;
     in-out property <string> active-theme-id: "nordic-runestone";
     in-out property <ThemeEntry> draft-theme;
@@ -11359,6 +11367,7 @@ export component KalpaWindow inherits Window {
     callback filter-selected(int);
     callback sort-selected(int);
     callback batch-update;
+    callback addon-update-check-finished([AddonUpdateCheckEntry], string);
     callback batch-disable;
     callback batch-tag;
     callback batch-remove;
@@ -11505,6 +11514,7 @@ export component KalpaWindow inherits Window {
             addons-count: root.total-addon-count;
             batch-active: root.batch-active;
             selected-count: root.selected-addon-count;
+            checking-updates: root.checking-updates;
             minimize-requested => { root.minimize-requested(); }
             maximize-requested => { root.maximize-requested(); }
             close-requested => { root.close-requested(); }

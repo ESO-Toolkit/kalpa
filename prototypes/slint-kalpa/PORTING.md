@@ -106,7 +106,10 @@ Current row status:
   rename/delete paths when a row is backed by disk, then fall back to in-memory
   prototype behavior for mock rows. Batch tag now persists the active tag model
   for disk-backed rows, but still needs the React tag menu/custom choice. Batch
-  update remains a native model action pending the production update path.
+  update now runs the production-style ESOUI filelist metadata check in the
+  background, clears stale update badges, marks real outdated rows, updates the
+  update banner count, and refreshes native last-updated dates; applying updates
+  with conflict decisions is still pending.
 - Rows now expose a native right-click context menu with Open Folder, View on
   ESOUI, Favorite/Unfavorite, Enable/Disable, and Remove actions. Enable/disable
   and remove use the same real folder operations as the detail footer for
@@ -128,11 +131,12 @@ Current row status:
   closely than the earlier RGB blend.
 - `primary-hover` now uses the React OKLCH lightness/chroma rule instead of RGB
   lightening.
-- Not accepted yet: real local manifest loading is not the same as the production
-  addon store; ESOUI IDs, update state, disabled state, persisted tags, dynamic
-  tag filter tabs, the real select popup, full keyboard focus/auto-scroll
-  behavior, custom context-menu styling, production context/batch commands, and
-  virtualized large-list behavior are not fully ported.
+- Not accepted yet: real local manifest loading plus Kalpa metadata hydration is
+  still not the full production addon store; update installation/conflict
+  decisions, dynamic tag filter tabs, the real select popup, full keyboard
+  focus/auto-scroll behavior, custom context-menu styling, remaining production
+  context/batch commands, and virtualized large-list behavior are not fully
+  ported.
 
 Current detail status:
 
