@@ -10798,7 +10798,7 @@ component DiscoverDetailPane inherits Rectangle {
         width: root.pane-width;
         height: root.height;
         viewport-width: root.pane-width;
-        viewport-height: root.show-screenshots ? 1360px : 900px;
+        viewport-height: root.show-screenshots ? 1240px : 760px;
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
@@ -10806,12 +10806,12 @@ component DiscoverDetailPane inherits Rectangle {
             x: 24px;
             y: 29px;
             width: root.pane-width - 48px;
-            height: root.show-screenshots ? 1340px : 860px;
+            height: root.show-screenshots ? 1220px : 740px;
             spacing: 0px;
 
             Rectangle {
                 width: parent.width;
-                height: 74px;
+                height: 100px;
                 background: #00000000;
 
                 Text {
@@ -10839,9 +10839,23 @@ component DiscoverDetailPane inherits Rectangle {
                     overflow: elide;
                 }
 
+                Pill {
+                    visible: root.entry.version != "";
+                    x: 0px;
+                    y: 30px;
+                    label: "v" + root.entry.version;
+                    tone: Palette.muted-half;
+                    fill: Palette.white-04;
+                    line: #00000000;
+                    pill-height: 19px;
+                    pill-padding-x: 7px;
+                    label-font-size: 11px;
+                    pill-max-width: 220px;
+                }
+
                 author-line := Text {
                     x: 0px;
-                    y: 44px;
+                    y: root.entry.version == "" ? 36px : 54px;
                     width: parent.width - 340px;
                     text: root.entry.author == "" ? "" : "by " + root.entry.author;
                     color: Palette.muted-half;
@@ -10853,11 +10867,23 @@ component DiscoverDetailPane inherits Rectangle {
                 Pill {
                     visible: root.entry.category != "";
                     x: min(author-line.preferred-width + 14px, parent.width - self.width - 190px);
-                    y: 40px;
+                    y: root.entry.version == "" ? 32px : 50px;
                     label: root.entry.category;
                     tone: Palette.muted-strong;
                     fill: Palette.white-03;
-                    line: Palette.white-10;
+                    line: #00000000;
+                }
+
+                Text {
+                    visible: root.entry.compatibility != "";
+                    x: 0px;
+                    y: root.entry.version == "" ? 60px : 78px;
+                    width: parent.width - 340px;
+                    text: "Compatible with " + root.entry.compatibility;
+                    color: Palette.muted-dim;
+                    font-size: 12px;
+                    font-weight: 500;
+                    overflow: elide;
                 }
 
                 SmallAction {
@@ -10892,7 +10918,7 @@ component DiscoverDetailPane inherits Rectangle {
                 }
             }
 
-            Rectangle { height: 2px; background: #00000000; }
+            Rectangle { height: 16px; background: #00000000; }
 
             stats-row := Rectangle {
                 width: parent.width;
@@ -10938,40 +10964,42 @@ component DiscoverDetailPane inherits Rectangle {
                 }
             }
 
-            Rectangle { height: 20px; background: #00000000; }
+            Rectangle { height: 16px; background: #00000000; }
 
             Rectangle {
                 width: parent.width;
-                height: 118px;
-                border-radius: 12px;
+                height: 28px;
+                border-radius: 0px;
                 border-width: 0px;
-                background: Palette.white-08;
-                clip: true;
+                background: #00000000;
 
-                Rectangle {
-                    x: 1px;
-                    y: 1px;
-                    width: parent.width - 2px;
-                    height: parent.height - 2px;
-                    border-radius: 11px;
-                    border-width: 0px;
-                    background: @linear-gradient(180deg, Palette.white-02 0%, #ffffff03 100%);
+                Text {
+                    visible: root.entry.created != "";
+                    x: 0px;
+                    y: 5px;
+                    width: parent.width * 0.45;
+                    text: "Created " + root.entry.created;
+                    color: Palette.muted-half;
+                    font-size: 12px;
+                    font-weight: 500;
+                    overflow: elide;
                 }
 
-                DetailSectionTitle { x: 22px; y: 18px; width: 180px; label: "VERSION"; }
-                Text { x: 22px; y: 46px; width: 260px; text: root.entry.version; color: Palette.foreground; font-size: 15px; font-weight: 700; overflow: elide; }
-
-                DetailSectionTitle { x: parent.width * 0.34; y: 18px; width: 220px; label: "COMPATIBILITY"; }
-                Text { x: parent.width * 0.34; y: 46px; width: parent.width * 0.27; text: root.entry.compatibility; color: Palette.foreground; font-size: 15px; font-weight: 700; overflow: elide; }
-
-                DetailSectionTitle { x: parent.width * 0.68; y: 18px; width: 180px; label: "MD5"; }
-                Text { x: parent.width * 0.68; y: 46px; width: parent.width * 0.30 - 20px; text: root.entry.md5; color: Palette.foreground; font-family: "Space Grotesk Light"; font-size: 14px; font-weight: 700; overflow: elide; }
-
-                DetailSectionTitle { x: 22px; y: 76px; width: 180px; label: "CREATED"; }
-                Text { x: 22px; y: 96px; width: 280px; text: root.entry.created; color: Palette.foreground; font-size: 15px; font-weight: 700; overflow: elide; }
+                Text {
+                    visible: root.entry.md5 != "";
+                    x: parent.width * 0.45;
+                    y: 5px;
+                    width: parent.width * 0.55;
+                    text: "MD5 " + root.entry.md5;
+                    color: Palette.muted-half;
+                    font-family: "Space Grotesk Light";
+                    font-size: 12px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
             }
 
-            Rectangle { height: 26px; background: #00000000; }
+            Rectangle { height: 24px; background: #00000000; }
 
             if (root.show-screenshots) : DetailSectionTitle {
                 width: parent.width;

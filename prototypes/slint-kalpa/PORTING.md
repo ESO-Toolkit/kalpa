@@ -205,7 +205,10 @@ Current detail status:
   use a flatter React-style selection stripe, compact rank tile, and author-first
   metadata row to avoid the previous selected-card artifact and cramped metadata.
   The Discover search/url field now uses the neutral bordered input affordance
-  instead of an always-blue browse panel. Discover detail hydration now
+  instead of an always-blue browse panel. The native Discover detail pane now
+  matches the React hierarchy more closely by keeping version and compatibility
+  in the header and reducing the large metadata card to a compact secondary
+  metadata row. Discover detail hydration now
   pulls trusted ESOUI screenshot URLs into a bounded temp cache and renders the
   native detail gallery with selectable thumbnails, previous/next controls, and
   dynamic screenshot counts. Installed Discover detail rows now expose a native
