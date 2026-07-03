@@ -571,11 +571,12 @@ component Pill inherits Rectangle {
     horizontal-stretch: 0;
     height: root.pill-height;
     border-radius: root.pill-height / 2;
-    border-width: 0px;
+    border-width: 1px;
+    border-color: root.line;
     background: root.fill;
-    inner-shadow-offset-y: 1px;
-    inner-shadow-blur: 1px;
-    inner-shadow-color: root.line;
+    inner-shadow-offset-y: 0px;
+    inner-shadow-blur: 0px;
+    inner-shadow-color: #00000000;
     clip: true;
 
     label-text := Text {
@@ -937,27 +938,33 @@ component SmallAction inherits Rectangle {
     in property <color> fill: Palette.sky-10;
     in property <color> fill-hover: Palette.sky-16;
     in property <color> fill-pressed: Palette.sky-22;
+    in property <color> line: Palette.white-10;
     callback clicked;
-    width: label-text.preferred-width + 16px;
+    private property <length> label-width: min(label-text.preferred-width, root.width - 18px);
+    private property <length> content-x: max(8px, (root.width - root.label-width) / 2);
+    width: label-text.preferred-width + 18px;
     preferred-width: self.width;
     horizontal-stretch: 0;
     height: 24px;
-    border-radius: 4px;
-    border-width: 0px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: root.line;
     background: touch.pressed ? root.fill-pressed : (touch.has-hover ? root.fill-hover : root.fill);
 
-    animate background { duration: 150ms; easing: ease-in-out; }
+    animate background, border-color { duration: 90ms; easing: ease-in-out; }
 
     label-text := Text {
-        x: 8px;
+        x: root.content-x;
         y: touch.pressed ? 1px : 0px;
-        width: label-text.preferred-width;
+        width: root.label-width;
         height: root.height;
         text: root.label;
         color: root.tone;
         font-size: 12px;
         font-weight: 600;
         vertical-alignment: center;
+        horizontal-alignment: center;
+        overflow: elide;
     }
 
     touch := TouchArea {
@@ -1209,10 +1216,12 @@ component RowBadge inherits Rectangle {
     in property <int> kind: 0;
     private property <color> tone: kind == 1 ? Palette.amber : (kind == 2 ? Palette.red : (kind == 3 ? Palette.violet : (kind == 4 ? Palette.gold : (kind == 5 ? #a1a1aa : Palette.muted-strong))));
     private property <color> fill: kind == 1 ? Palette.amber-04 : (kind == 2 ? Palette.red-04 : (kind == 3 ? Palette.violet-04 : (kind == 4 ? Palette.gold-04 : (kind == 5 ? #a1a1aa0a : Palette.white-03))));
+    private property <color> line: kind == 1 ? Palette.amber-20 : (kind == 2 ? Palette.red-20 : (kind == 3 ? Palette.violet-20 : (kind == 4 ? Palette.gold-20 : (kind == 5 ? #a1a1aa24 : Palette.white-10))));
     width: label-text.preferred-width + 16px;
     height: 20px;
     border-radius: 10px;
-    border-width: 0px;
+    border-width: 1px;
+    border-color: root.line;
     background: root.fill;
 
     label-text := Text {
@@ -1259,13 +1268,13 @@ component AddonRow inherits Rectangle {
     in-out property <length> menu-y: 18px;
 
     height: 52px;
-    background: root.active-current ? Palette.gold-04 : (root.selected ? Palette.gold-04 : (root.hovered ? Palette.white-04 : #00000000));
+    background: root.active-current ? Palette.gold-06 : (root.selected ? Palette.gold-06 : (root.hovered ? Palette.white-04 : #00000000));
     inner-shadow-offset-y: 0px;
-    inner-shadow-blur: 1px;
-    inner-shadow-color: root.active-current || root.selected ? Palette.gold-04 : #00000000;
+    inner-shadow-blur: 0px;
+    inner-shadow-color: #00000000;
     opacity: disabled ? 0.55 : 1.0;
 
-    animate background, opacity { duration: 150ms; easing: ease-in-out; }
+    animate background, opacity { duration: 90ms; easing: ease-in-out; }
 
     Rectangle {
         x: 0px;
@@ -1289,7 +1298,7 @@ component AddonRow inherits Rectangle {
         y: 17px;
         checked: root.selected;
         opacity: root.rail-open ? 1.0 : 0.42;
-        animate opacity { duration: 160ms; easing: ease-in-out; }
+        animate opacity { duration: 90ms; easing: ease-in-out; }
         clicked => { root.selected-toggled(); }
     }
 
@@ -1615,13 +1624,13 @@ component DiscoverResultRow inherits Rectangle {
     private property <length> meta-y: 38px;
     private property <length> extra-y: 57px;
     height: root.show-extra-meta ? 78px : 62px;
-    background: root.selected ? Palette.gold-04 : (touch.has-hover ? Palette.white-04 : #00000000);
+    background: root.selected ? Palette.gold-06 : (touch.has-hover ? Palette.white-04 : #00000000);
     border-radius: 0px;
     inner-shadow-offset-y: 0px;
-    inner-shadow-blur: 1px;
-    inner-shadow-color: root.selected ? Palette.gold-04 : #00000000;
+    inner-shadow-blur: 0px;
+    inner-shadow-color: #00000000;
 
-    animate background { duration: 150ms; easing: ease-in-out; }
+    animate background { duration: 90ms; easing: ease-in-out; }
 
     touch := TouchArea {
         width: parent.width;
@@ -1647,7 +1656,8 @@ component DiscoverResultRow inherits Rectangle {
         width: 24px;
         height: 24px;
         border-radius: 6px;
-        border-width: 0px;
+        border-width: 1px;
+        border-color: root.rank <= 3 ? Palette.gold-20 : Palette.white-08;
         background: root.rank <= 3 ? Palette.gold-15 : Palette.white-04;
 
         Text {
@@ -1693,7 +1703,7 @@ component DiscoverResultRow inherits Rectangle {
         label: root.category;
         tone: Palette.muted-strong;
         fill: Palette.white-03;
-        line: #00000000;
+        line: Palette.white-10;
         pill-height: 18px;
         pill-padding-x: 7px;
         label-font-size: 10px;
@@ -1744,6 +1754,7 @@ component DiscoverResultRow inherits Rectangle {
         fill: root.installed ? Palette.emerald-04 : Palette.gold-10;
         fill-hover: root.installed ? Palette.emerald-15 : Palette.gold-15;
         fill-pressed: root.installed ? Palette.emerald-20 : Palette.gold-20;
+        line: root.installed ? Palette.emerald-20 : Palette.gold-20;
         clicked => { root.install-clicked(); }
     }
 }
@@ -1764,11 +1775,12 @@ component DiscoverSortChip inherits Rectangle {
     horizontal-stretch: 0;
     height: 28px;
     border-radius: 8px;
-    border-width: 0px;
-    background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-10 : Palette.white-06);
-    inner-shadow-offset-y: 1px;
-    inner-shadow-blur: 1px;
-    inner-shadow-color: root.active ? Palette.gold-10 : Palette.white-06;
+    border-width: 1px;
+    border-color: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-10 : Palette.white-08);
+    background: root.active ? Palette.gold-10 : (touch.has-hover ? Palette.white-06 : Palette.white-04);
+    inner-shadow-offset-y: 0px;
+    inner-shadow-blur: 0px;
+    inner-shadow-color: #00000000;
     clip: true;
 
     Image {
@@ -1809,11 +1821,12 @@ component DiscoverSelectChip inherits Rectangle {
     width: root.chip-width;
     height: 32px;
     border-radius: 10px;
-    border-width: 0px;
-    background: touch.has-hover ? Palette.white-08 : Palette.white-04;
-    inner-shadow-offset-y: 1px;
-    inner-shadow-blur: 1px;
-    inner-shadow-color: touch.has-hover ? Palette.white-10 : Palette.white-06;
+    border-width: 1px;
+    border-color: touch.has-hover ? Palette.white-10 : Palette.white-08;
+    background: touch.has-hover ? Palette.white-06 : Palette.white-04;
+    inner-shadow-offset-y: 0px;
+    inner-shadow-blur: 0px;
+    inner-shadow-color: #00000000;
     clip: true;
 
     Image {
@@ -2031,11 +2044,12 @@ component DiscoverModePanel inherits Rectangle {
         width: parent.width - 24px;
         height: 30px;
         border-radius: 9px;
-        border-width: 0px;
+        border-width: 1px;
+        border-color: Palette.white-08;
         background: Palette.white-04;
-        inner-shadow-offset-y: 1px;
-        inner-shadow-blur: 1px;
-        inner-shadow-color: Palette.white-06;
+        inner-shadow-offset-y: 0px;
+        inner-shadow-blur: 0px;
+        inner-shadow-color: #00000000;
         clip: true;
 
         Image {
@@ -2148,6 +2162,7 @@ component DiscoverModePanel inherits Rectangle {
             fill: Palette.red-04;
             fill-hover: Palette.red-15;
             fill-pressed: Palette.red-20;
+            line: Palette.red-20;
             clicked => { root.retry(); }
         }
     }
@@ -2302,6 +2317,7 @@ component DiscoverModePanel inherits Rectangle {
             fill: root.loading ? Palette.white-04 : Palette.gold-10;
             fill-hover: root.loading ? Palette.white-04 : Palette.gold-15;
             fill-pressed: root.loading ? Palette.white-04 : Palette.gold-20;
+            line: root.loading ? Palette.white-10 : Palette.gold-20;
             clicked => {
                 if (!root.loading) {
                     root.load-more();
@@ -2413,6 +2429,7 @@ component DependencyRow inherits Rectangle {
         fill: Palette.sky-10;
         fill-hover: Palette.sky-16;
         fill-pressed: Palette.sky-22;
+        line: Palette.sky-20;
         clicked => { root.install-clicked(); }
     }
 
@@ -3410,6 +3427,7 @@ component StatusBanner inherits Rectangle {
         fill: root.tone == 2 ? Palette.red-04 : (root.tone == 1 ? Palette.amber-04 : (root.tone == 3 ? Palette.gold-10 : Palette.white-04));
         fill-hover: root.tone == 2 ? Palette.red-15 : (root.tone == 1 ? Palette.amber-15 : (root.tone == 3 ? Palette.gold-15 : Palette.white-06));
         fill-pressed: root.tone == 2 ? Palette.red-20 : (root.tone == 1 ? Palette.amber-20 : (root.tone == 3 ? Palette.gold-20 : Palette.white-08));
+        line: root.tone == 2 ? Palette.red-20 : (root.tone == 1 ? Palette.amber-20 : (root.tone == 3 ? Palette.gold-20 : Palette.white-10));
         clicked => { root.action-clicked(); }
     }
 }
@@ -4692,10 +4710,11 @@ component PackHubField inherits Rectangle {
     callback edited(string);
     height: 36px;
     border-radius: 10px;
-    border-width: 0px;
-    background: field-touch.has-hover || root.focused || root.editable ? Palette.sky-15 : Palette.white-06;
+    border-width: 1px;
+    border-color: field-touch.has-hover || root.focused || root.editable ? Palette.white-10 : Palette.white-08;
+    background: field-touch.has-hover || root.focused || root.editable ? Palette.white-06 : Palette.white-04;
 
-    animate background { duration: 150ms; easing: ease-in-out; }
+    animate background, border-color { duration: 90ms; easing: ease-in-out; }
 
     field-touch := TouchArea {
         width: root.width;
@@ -4709,7 +4728,7 @@ component PackHubField inherits Rectangle {
         height: parent.height / 2;
         border-radius: 10px;
         border-width: 0px;
-        background: field-touch.has-hover || root.focused || root.editable ? Palette.sky-06 : Palette.white-03;
+        background: #00000000;
     }
 
     Image {
@@ -4720,7 +4739,7 @@ component PackHubField inherits Rectangle {
         height: 14px;
         source: @image-url("../assets/icons/search.svg");
         image-fit: contain;
-        colorize: field-touch.has-hover || root.focused || root.editable ? Palette.sky : Palette.muted-half;
+        colorize: field-touch.has-hover || root.focused || root.editable ? Palette.foreground : Palette.muted-half;
     }
 
     Text {
@@ -5638,8 +5657,9 @@ component PackHubSelectField inherits Rectangle {
     callback clicked;
     height: 36px;
     border-radius: 10px;
-    border-width: 0px;
-    background: touch.has-hover ? Palette.white-10 : Palette.white-06;
+    border-width: 1px;
+    border-color: touch.has-hover ? Palette.white-10 : Palette.white-08;
+    background: touch.has-hover ? Palette.white-06 : Palette.white-04;
 
     Rectangle {
         x: 0px;
@@ -5648,7 +5668,7 @@ component PackHubSelectField inherits Rectangle {
         height: parent.height / 2;
         border-radius: 10px;
         border-width: 0px;
-        background: Palette.white-03;
+        background: #00000000;
     }
 
     Text {
@@ -5729,7 +5749,8 @@ component PackHubTag inherits Rectangle {
     width: label-text.preferred-width + 16px;
     height: 21px;
     border-radius: 7px;
-    border-width: 0px;
+    border-width: 1px;
+    border-color: Palette.white-10;
     background: Palette.white-03;
 
     label-text := Text {
@@ -9869,6 +9890,7 @@ component Header inherits Rectangle {
         fill: Palette.gold-10;
         fill-hover: Palette.gold-15;
         fill-pressed: Palette.gold-20;
+        line: Palette.gold-20;
         clicked => { root.batch-update(); }
     }
 
@@ -9880,6 +9902,7 @@ component Header inherits Rectangle {
         fill: Palette.amber-04;
         fill-hover: Palette.amber-15;
         fill-pressed: Palette.amber-20;
+        line: Palette.amber-20;
         clicked => { root.batch-disable(); }
     }
 
@@ -9891,6 +9914,7 @@ component Header inherits Rectangle {
         fill: Palette.sky-10;
         fill-hover: Palette.sky-16;
         fill-pressed: Palette.sky-22;
+        line: Palette.sky-20;
         clicked => { root.batch-tag(); }
     }
 
@@ -9902,6 +9926,7 @@ component Header inherits Rectangle {
         fill: Palette.red-04;
         fill-hover: Palette.red-15;
         fill-pressed: Palette.red-20;
+        line: Palette.red-20;
         clicked => { root.batch-remove(); }
     }
 
@@ -10068,15 +10093,16 @@ component Sidebar inherits Rectangle {
         width: root.width - 24px;
         height: 34px;
         border-radius: 10px;
-        border-width: 0px;
+        border-width: 1px;
+        border-color: Palette.white-08;
         visible: !root.compact-discover-chrome && (!root.discover-active || root.discover-tab == 0 || root.discover-tab == 3);
         background: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.white-06 : Palette.white-04;
-        inner-shadow-offset-y: 1px;
-        inner-shadow-blur: 1px;
-        inner-shadow-color: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-10 : Palette.white-06;
+        inner-shadow-offset-y: 0px;
+        inner-shadow-blur: 0px;
+        inner-shadow-color: #00000000;
         clip: true;
 
-        animate background, inner-shadow-color { duration: 150ms; easing: ease-in-out; }
+        animate background, border-color { duration: 90ms; easing: ease-in-out; }
 
         Image {
             visible: !(root.discover-active && root.discover-tab == 3);
@@ -11449,7 +11475,7 @@ component DiscoverDetailPane inherits Rectangle {
                     label: "v" + root.entry.version;
                     tone: Palette.muted-half;
                     fill: Palette.white-04;
-                    line: #00000000;
+                    line: Palette.white-10;
                     pill-height: 19px;
                     pill-padding-x: 7px;
                     label-font-size: 11px;
@@ -11474,7 +11500,7 @@ component DiscoverDetailPane inherits Rectangle {
                     label: root.entry.category;
                     tone: Palette.muted-strong;
                     fill: Palette.white-03;
-                    line: #00000000;
+                    line: Palette.white-10;
                 }
 
                 Text {
@@ -11498,6 +11524,7 @@ component DiscoverDetailPane inherits Rectangle {
                     fill: Palette.red-04;
                     fill-hover: Palette.red-15;
                     fill-pressed: Palette.red-20;
+                    line: Palette.red-20;
                     clicked => { root.remove-clicked(root.selected-index); }
                 }
 
@@ -11509,6 +11536,7 @@ component DiscoverDetailPane inherits Rectangle {
                     fill: Palette.gold-10;
                     fill-hover: Palette.gold-15;
                     fill-pressed: Palette.gold-20;
+                    line: Palette.gold-20;
                     clicked => { root.install-clicked(root.selected-index); }
                 }
 
