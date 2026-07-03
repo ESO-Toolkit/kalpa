@@ -38,6 +38,11 @@ export struct BackupEntry {
     relative-path: string,
 }
 
+export struct ConflictFileEntry {
+    relative-path: string,
+    decision: int,
+}
+
 export struct SavedVariableEntry {
     file-name: string,
     addon-name: string,
@@ -10390,10 +10395,11 @@ component ConflictChoiceButton inherits Rectangle {
 }
 
 component ConflictFileRow inherits Rectangle {
-    in property <string> relative-path;
-    in-out property <int> decision: 0;
-    callback view-diff;
-    height: 72px;
+    in property <int> row-index: 0;
+    in property <ConflictFileEntry> entry;
+    callback decision-clicked(int, int);
+    callback view-diff(int);
+    height: 76px;
     border-radius: 10px;
     border-width: 0px;
     background: Palette.white-02;
@@ -10402,7 +10408,7 @@ component ConflictFileRow inherits Rectangle {
         x: 12px;
         y: 10px;
         width: parent.width - 250px;
-        text: root.relative-path;
+        text: root.entry.relative-path;
         color: Palette.foreground;
         font-family: "Space Grotesk Light";
         font-size: 13px;
@@ -10411,12 +10417,12 @@ component ConflictFileRow inherits Rectangle {
     }
 
     Text {
-        visible: root.decision != 0;
+        visible: root.entry.decision != 0;
         x: parent.width - 140px;
         y: 10px;
         width: 128px;
-        text: root.decision == 1 ? "KEEPING YOURS" : "TAKING UPDATE";
-        color: root.decision == 1 ? Palette.gold : Palette.sky;
+        text: root.entry.decision == 1 ? "KEEPING YOURS" : "TAKING UPDATE";
+        color: root.entry.decision == 1 ? Palette.gold : Palette.sky;
         font-family: "Space Grotesk Light";
         font-size: 10px;
         font-weight: 800;
@@ -10428,18 +10434,18 @@ component ConflictFileRow inherits Rectangle {
         x: 12px;
         y: 36px;
         label: "Keep my version";
-        active: root.decision == 1;
+        active: root.entry.decision == 1;
         tone: Palette.gold;
-        clicked => { root.decision = 1; }
+        clicked => { root.decision-clicked(root.row-index, 1); }
     }
 
     ConflictChoiceButton {
         x: 136px;
         y: 36px;
         label: "Take the update";
-        active: root.decision == 2;
+        active: root.entry.decision == 2;
         tone: Palette.sky;
-        clicked => { root.decision = 2; }
+        clicked => { root.decision-clicked(root.row-index, 2); }
     }
 
     ConflictChoiceButton {
@@ -10447,17 +10453,30 @@ component ConflictFileRow inherits Rectangle {
         y: 36px;
         label: "View differences";
         tone: Palette.muted-strong;
-        clicked => { root.view-diff(); }
+        clicked => { root.view-diff(root.row-index); }
     }
 }
 
 component DetailConflictPanel inherits Rectangle {
     in property <AddonEntry> addon;
     in property <int> conflict-count: 0;
-    in-out property <int> decision-one: 0;
-    in-out property <int> decision-two: 0;
-    in-out property <bool> show-diff: false;
-    height: root.show-diff ? 390px : 334px;
+    in property <[ConflictFileEntry]> conflict-files;
+    in property <int> auto-kept-count: 0;
+    in property <int> safe-file-count: 0;
+    in property <string> update-version;
+    in property <bool> all-decided: false;
+    in property <string> diff-file;
+    in property <string> diff-user-preview;
+    in property <string> diff-upstream-preview;
+    in property <bool> diff-binary: false;
+    in property <bool> diff-loading: false;
+    callback decision-clicked(int, int);
+    callback view-diff(int);
+    callback apply-clicked;
+    callback skip-clicked;
+    private property <bool> has-diff: root.diff-file != "";
+    private property <length> auto-row-height: root.auto-kept-count > 0 ? 18px : 0px;
+    height: 130px + root.auto-row-height + root.conflict-files.length * 84px + (root.has-diff ? 132px : 0px);
     background: #00000000;
 
     stack := VerticalLayout {
@@ -10476,7 +10495,7 @@ component DetailConflictPanel inherits Rectangle {
                 x: 14px;
                 y: 12px;
                 width: parent.width - 28px;
-                text: root.addon.folder-name + " " + root.addon.version + " -> update";
+                text: root.addon.folder-name + " " + root.addon.version + " -> " + root.update-version;
                 color: Palette.amber;
                 font-family: "Space Grotesk Light";
                 font-size: 14px;
@@ -10488,7 +10507,7 @@ component DetailConflictPanel inherits Rectangle {
                 x: 14px;
                 y: 38px;
                 width: parent.width - 28px;
-                text: "You've edited " + root.conflict-count + " files that this update also changed. Choose which version to keep for each.";
+                text: "You've edited " + root.conflict-count + " file" + (root.conflict-count == 1 ? "" : "s") + " that this update also changed. Pick the version to keep for each file.";
                 color: Palette.muted-strong;
                 font-size: 12px;
                 font-weight: 500;
@@ -10497,41 +10516,59 @@ component DetailConflictPanel inherits Rectangle {
         }
 
         Text {
+            visible: root.auto-kept-count > 0;
             width: parent.width;
-            height: 18px;
-            text: "1 of your edited files is unchanged in this update - automatically preserved";
+            height: root.auto-row-height;
+            text: root.auto-kept-count + " locally edited file" + (root.auto-kept-count == 1 ? "" : "s") + " are unchanged in this update - automatically preserved";
             color: Palette.emerald;
             font-size: 12px;
             font-weight: 600;
             overflow: elide;
         }
 
-        ConflictFileRow {
+        for conflict[index] in root.conflict-files : ConflictFileRow {
             width: parent.width;
-            relative-path: root.addon.folder-name + ".lua";
-            decision <=> root.decision-one;
-            view-diff => { root.show-diff = !root.show-diff; }
+            row-index: index;
+            entry: conflict;
+            decision-clicked(row, decision) => { root.decision-clicked(row, decision); }
+            view-diff(row) => { root.view-diff(row); }
         }
 
-        ConflictFileRow {
+        if (root.has-diff) : Rectangle {
             width: parent.width;
-            relative-path: root.addon.folder-name + ".xml";
-            decision <=> root.decision-two;
-            view-diff => { root.show-diff = !root.show-diff; }
-        }
-
-        if (root.show-diff) : Rectangle {
-            width: parent.width;
-            height: 48px;
+            height: 126px;
             border-radius: 9px;
             border-width: 0px;
             background: Palette.white-02;
 
-            Text { x: 12px; y: 8px; width: parent.width / 2 - 18px; text: "Your version"; color: Palette.gold; font-size: 11px; font-weight: 700; }
-            Text { x: parent.width / 2 + 8px; y: 8px; width: parent.width / 2 - 20px; text: "The update"; color: Palette.sky; font-size: 11px; font-weight: 700; }
-            Text { x: 12px; y: 28px; width: parent.width / 2 - 18px; text: "- local edited line"; color: Palette.gold; font-family: "Space Grotesk Light"; font-size: 11px; overflow: elide; }
-            Text { x: parent.width / 2 + 8px; y: 28px; width: parent.width / 2 - 20px; text: "+ upstream changed line"; color: Palette.sky; font-family: "Space Grotesk Light"; font-size: 11px; overflow: elide; }
-            Rectangle { x: parent.width / 2; y: 4px; width: 1px; height: parent.height - 8px; background: Palette.white-04; }
+            Text {
+                x: 12px;
+                y: 8px;
+                width: parent.width - 24px;
+                text: root.diff-loading ? "Loading differences..." : root.diff-file;
+                color: root.diff-loading ? Palette.muted-strong : Palette.foreground;
+                font-family: "Space Grotesk Light";
+                font-size: 12px;
+                font-weight: 800;
+                overflow: elide;
+            }
+
+            if (root.diff-binary) : Text {
+                x: 12px;
+                y: 44px;
+                width: parent.width - 24px;
+                text: "Binary file - differences cannot be shown inline.";
+                color: Palette.muted-strong;
+                font-size: 12px;
+                font-weight: 650;
+                horizontal-alignment: center;
+            }
+
+            if (!root.diff-binary) : Text { x: 12px; y: 34px; width: parent.width / 2 - 18px; text: "Your version"; color: Palette.gold; font-size: 11px; font-weight: 700; }
+            if (!root.diff-binary) : Text { x: parent.width / 2 + 8px; y: 34px; width: parent.width / 2 - 20px; text: "The update"; color: Palette.sky; font-size: 11px; font-weight: 700; }
+            if (!root.diff-binary) : Text { x: 12px; y: 54px; width: parent.width / 2 - 18px; height: 64px; text: root.diff-user-preview; color: Palette.gold; font-family: "Space Grotesk Light"; font-size: 11px; wrap: word-wrap; overflow: elide; }
+            if (!root.diff-binary) : Text { x: parent.width / 2 + 8px; y: 54px; width: parent.width / 2 - 20px; height: 64px; text: root.diff-upstream-preview; color: Palette.sky; font-family: "Space Grotesk Light"; font-size: 11px; wrap: word-wrap; overflow: elide; }
+            if (!root.diff-binary) : Rectangle { x: parent.width / 2; y: 30px; width: 1px; height: parent.height - 36px; background: Palette.white-04; }
         }
 
         Rectangle {
@@ -10543,26 +10580,28 @@ component DetailConflictPanel inherits Rectangle {
                 x: 2px;
                 height: parent.height;
                 width: 260px;
-                text: "3 other files will update normally";
+                text: root.safe-file-count + " other file" + (root.safe-file-count == 1 ? "" : "s") + " will update normally";
                 color: Palette.muted-half;
                 font-size: 11px;
                 font-weight: 500;
                 vertical-alignment: center;
             }
 
-            SettingsActionButton {
-                x: parent.width - self.width - 116px;
+            apply := SettingsActionButton {
+                x: parent.width - self.width - skip.width - 10px;
                 y: 3px;
                 icon: @image-url("../assets/icons/save.svg");
                 label: "Apply & Update";
-                primary: true;
+                primary: root.all-decided;
+                clicked => { root.apply-clicked(); }
             }
 
-            SettingsActionButton {
+            skip := SettingsActionButton {
                 x: parent.width - self.width;
                 y: 3px;
                 icon: @image-url("../assets/icons/chevron-right.svg");
                 label: "Skip Update";
+                clicked => { root.skip-clicked(); }
             }
         }
     }
@@ -10572,8 +10611,19 @@ component DetailPane inherits Rectangle {
     in property <AddonEntry> addon;
     in property <[FileEntry]> files;
     in property <[BackupEntry]> edit-backups;
+    in property <[ConflictFileEntry]> conflict-files;
     in property <int> file-modified-count: 0;
     in property <int> pending-conflict-count: 0;
+    in property <int> conflict-auto-kept-count: 0;
+    in property <int> conflict-safe-file-count: 0;
+    in property <string> conflict-update-version;
+    in property <bool> conflict-all-decided: false;
+    in property <string> conflict-diff-file;
+    in property <string> conflict-diff-user-preview;
+    in property <string> conflict-diff-upstream-preview;
+    in property <bool> conflict-diff-binary: false;
+    in property <bool> conflict-diff-loading: false;
+    private property <bool> has-selected-conflicts: root.conflict-files.length > 0;
     in-out property <bool> files-active: false;
     in-out property <string> selected-file-path;
     in-out property <string> selected-file-name;
@@ -10605,6 +10655,10 @@ component DetailPane inherits Rectangle {
     callback remove-addon;
     callback install-dependency(string, bool);
     callback remove-dependency(string, bool);
+    callback conflict-decision-selected(int, int);
+    callback conflict-view-diff(int);
+    callback conflict-apply;
+    callback conflict-skip;
     background: #00000000;
     clip: true;
 
@@ -10614,7 +10668,7 @@ component DetailPane inherits Rectangle {
         width: root.width;
         height: root.height;
         viewport-width: root.width;
-        viewport-height: root.files-active ? 750px : (root.pending-conflict-count > 0 ? 1518px : root.height);
+        viewport-height: root.files-active ? 750px : (root.has-selected-conflicts ? 1518px : root.height);
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
@@ -10622,7 +10676,7 @@ component DetailPane inherits Rectangle {
             x: 24px;
             y: 29px;
             width: root.width - 48px;
-            height: root.files-active ? 730px : (root.pending-conflict-count > 0 ? 1458px : root.height - 58px);
+            height: root.files-active ? 730px : (root.has-selected-conflicts ? 1458px : root.height - 58px);
             spacing: 0px;
 
             GradientHeading {
@@ -10649,12 +10703,26 @@ component DetailPane inherits Rectangle {
                 }
             }
 
-            if (!root.files-active && root.pending-conflict-count > 0) : Rectangle { height: 16px; background: #00000000; }
+            if (!root.files-active && root.has-selected-conflicts) : Rectangle { height: 16px; background: #00000000; }
 
-            if (!root.files-active && root.pending-conflict-count > 0) : DetailConflictPanel {
+            if (!root.files-active && root.has-selected-conflicts) : DetailConflictPanel {
                 width: parent.width;
                 addon: root.addon;
-                conflict-count: root.pending-conflict-count;
+                conflict-count: root.conflict-files.length;
+                conflict-files: root.conflict-files;
+                auto-kept-count: root.conflict-auto-kept-count;
+                safe-file-count: root.conflict-safe-file-count;
+                update-version: root.conflict-update-version;
+                all-decided: root.conflict-all-decided;
+                diff-file: root.conflict-diff-file;
+                diff-user-preview: root.conflict-diff-user-preview;
+                diff-upstream-preview: root.conflict-diff-upstream-preview;
+                diff-binary: root.conflict-diff-binary;
+                diff-loading: root.conflict-diff-loading;
+                decision-clicked(row, decision) => { root.conflict-decision-selected(row, decision); }
+                view-diff(row) => { root.conflict-view-diff(row); }
+                apply-clicked => { root.conflict-apply(); }
+                skip-clicked => { root.conflict-skip(); }
             }
 
             Rectangle { height: 7px; background: #00000000; }
@@ -11411,6 +11479,16 @@ export component KalpaWindow inherits Window {
     in-out property <int> update-available-count: 0;
     in-out property <bool> checking-updates: false;
     in-out property <int> pending-conflict-count: 0;
+    in-out property <[ConflictFileEntry]> detail-conflict-files;
+    in-out property <int> detail-conflict-auto-kept-count: 0;
+    in-out property <int> detail-conflict-safe-file-count: 0;
+    in-out property <string> detail-conflict-update-version;
+    in-out property <bool> detail-conflict-all-decided: false;
+    in-out property <string> detail-conflict-diff-file;
+    in-out property <string> detail-conflict-diff-user-preview;
+    in-out property <string> detail-conflict-diff-upstream-preview;
+    in-out property <bool> detail-conflict-diff-binary: false;
+    in-out property <bool> detail-conflict-diff-loading: false;
     in-out property <string> active-theme-id: "nordic-runestone";
     in-out property <ThemeEntry> draft-theme;
     in-out property <string> draft-theme-id;
@@ -11515,6 +11593,10 @@ export component KalpaWindow inherits Window {
     callback remove-addon;
     callback install-dependency(string, bool);
     callback remove-dependency(string, bool);
+    callback conflict-decision-selected(int, int);
+    callback conflict-view-diff(int);
+    callback conflict-apply;
+    callback conflict-skip;
     callback discover-tab-selected(int);
     callback discover-selected(int);
     callback discover-install(int);
@@ -11752,8 +11834,18 @@ export component KalpaWindow inherits Window {
             addon: root.addons[root.selected-index];
             files: root.addon-files;
             edit-backups: root.edit-backups;
+            conflict-files: root.detail-conflict-files;
             file-modified-count: root.file-modified-count;
             pending-conflict-count: root.pending-conflict-count;
+            conflict-auto-kept-count: root.detail-conflict-auto-kept-count;
+            conflict-safe-file-count: root.detail-conflict-safe-file-count;
+            conflict-update-version: root.detail-conflict-update-version;
+            conflict-all-decided: root.detail-conflict-all-decided;
+            conflict-diff-file: root.detail-conflict-diff-file;
+            conflict-diff-user-preview: root.detail-conflict-diff-user-preview;
+            conflict-diff-upstream-preview: root.detail-conflict-diff-upstream-preview;
+            conflict-diff-binary: root.detail-conflict-diff-binary;
+            conflict-diff-loading: root.detail-conflict-diff-loading;
             files-active <=> root.detail-files-active;
             selected-file-path <=> root.selected-file-path;
             selected-file-name <=> root.selected-file-name;
@@ -11785,6 +11877,10 @@ export component KalpaWindow inherits Window {
             remove-addon => { root.remove-addon(); }
             install-dependency(name, optional) => { root.install-dependency(name, optional); }
             remove-dependency(name, optional) => { root.remove-dependency(name, optional); }
+            conflict-decision-selected(index, decision) => { root.conflict-decision-selected(index, decision); }
+            conflict-view-diff(index) => { root.conflict-view-diff(index); }
+            conflict-apply => { root.conflict-apply(); }
+            conflict-skip => { root.conflict-skip(); }
         }
 
         if (!side.discover-active && root.addons.length == 0) : DiscoverEmptyState {

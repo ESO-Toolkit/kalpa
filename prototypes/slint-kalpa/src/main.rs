@@ -485,15 +485,31 @@ struct NativeAddonUpdateTarget {
 struct NativeAddonUpdateApplyResult {
     checks: Vec<NativeAddonUpdateCheck>,
     completed: Vec<String>,
-    conflicts: Vec<String>,
+    conflicts: Vec<NativePendingConflict>,
     failed: Vec<String>,
     errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct NativeConflictReport {
+    safe_file_count: usize,
     auto_kept_files: Vec<String>,
     conflicts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativePendingConflict {
+    folder_name: String,
+    esoui_id: u32,
+    update_version: String,
+    title: String,
+    download_url: String,
+    safe_file_count: usize,
+    auto_kept_files: Vec<String>,
+    conflicts: Vec<String>,
+    decisions: HashMap<String, i32>,
+    zip_path: PathBuf,
+    zip_hashes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -627,6 +643,10 @@ thread_local! {
     static COLLAPSED_FILE_FOLDERS: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     static ORB_SKIN_CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
 }
+
+type NativePendingConflictStore = Arc<Mutex<HashMap<String, NativePendingConflict>>>;
+
+static PENDING_NATIVE_CONFLICTS: OnceLock<NativePendingConflictStore> = OnceLock::new();
 
 #[derive(Clone)]
 struct AddonModels {
@@ -1004,6 +1024,8 @@ fn main() -> Result<(), slint::PlatformError> {
     clear_discover_screenshots(&ui);
 
     let addon_models = apply_mock_data(&ui);
+    let pending_conflicts = Arc::new(Mutex::new(HashMap::new()));
+    let _ = PENDING_NATIVE_CONFLICTS.set(pending_conflicts);
     let active_theme_id = apply_initial_theme(&ui);
     ui.set_active_theme_id(active_theme_id.into());
     seed_initial_theme_draft(&ui, &custom_themes.borrow());
@@ -7586,6 +7608,15 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_filter_mode(4);
         apply_addon_view(&ui, &review_models);
 
+        let pending_folders = pending_conflict_store()
+            .and_then(|store| {
+                store
+                    .lock()
+                    .ok()
+                    .map(|pending| pending.keys().cloned().collect::<HashSet<_>>())
+            })
+            .unwrap_or_default();
+
         let first_update = (0..review_models.visible.row_count())
             .filter_map(|index| {
                 review_models
@@ -7593,7 +7624,17 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
                     .row_data(index)
                     .map(|addon| (index, addon))
             })
-            .find(|(_, addon)| addon_has_update(addon))
+            .find(|(_, addon)| pending_folders.contains(addon.folder_name.as_str()))
+            .or_else(|| {
+                (0..review_models.visible.row_count())
+                    .filter_map(|index| {
+                        review_models
+                            .visible
+                            .row_data(index)
+                            .map(|addon| (index, addon))
+                    })
+                    .find(|(_, addon)| addon_has_update(addon))
+            })
             .map(|(index, _)| index)
             .unwrap_or(0);
 
@@ -7606,6 +7647,133 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         } else {
             ui.set_pending_conflict_count(0);
             ui.set_status_error_message("No addon update conflicts are pending.".into());
+        }
+    });
+
+    let decision_ui = ui.as_weak();
+    ui.on_conflict_decision_selected(move |index, decision| {
+        let Some(ui) = decision_ui.upgrade() else {
+            return;
+        };
+        let Some(store) = pending_conflict_store() else {
+            return;
+        };
+        let folder_name = selected_addon_folder(&ui);
+        if let Ok(mut pending) = store.lock() {
+            if let Some(conflict) = pending.get_mut(&folder_name) {
+                if let Some(relative_path) = conflict.conflicts.get(index.max(0) as usize).cloned()
+                {
+                    if matches!(decision, 1 | 2) {
+                        conflict.decisions.insert(relative_path, decision);
+                    }
+                }
+            }
+        }
+        refresh_active_conflict_panel(&ui);
+    });
+
+    let diff_ui = ui.as_weak();
+    ui.on_conflict_view_diff(move |index| {
+        let Some(ui) = diff_ui.upgrade() else {
+            return;
+        };
+        let Some(pending) = selected_pending_conflict(&ui) else {
+            clear_active_conflict_diff(&ui);
+            return;
+        };
+        let Some(relative_path) = pending.conflicts.get(index.max(0) as usize).cloned() else {
+            return;
+        };
+
+        if ui.get_detail_conflict_diff_file().as_str() == relative_path.as_str()
+            && !ui.get_detail_conflict_diff_loading()
+        {
+            clear_active_conflict_diff(&ui);
+            return;
+        }
+
+        let Some(addons_dir) = addons_source_root() else {
+            ui.set_status_error_message("AddOns folder was not found.".into());
+            return;
+        };
+
+        ui.set_detail_conflict_diff_file(relative_path.clone().into());
+        ui.set_detail_conflict_diff_user_preview("".into());
+        ui.set_detail_conflict_diff_upstream_preview("".into());
+        ui.set_detail_conflict_diff_binary(false);
+        ui.set_detail_conflict_diff_loading(true);
+
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = native_pending_conflict_diff_blocking(
+                &addons_dir,
+                &pending,
+                relative_path.as_str(),
+            );
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                if ui.get_detail_conflict_diff_file().as_str() != relative_path.as_str() {
+                    return;
+                }
+                ui.set_detail_conflict_diff_loading(false);
+                match result {
+                    Ok(diff) => {
+                        ui.set_detail_conflict_diff_user_preview(diff.user_preview.into());
+                        ui.set_detail_conflict_diff_upstream_preview(diff.upstream_preview.into());
+                        ui.set_detail_conflict_diff_binary(diff.binary);
+                    }
+                    Err(error) => {
+                        clear_active_conflict_diff(&ui);
+                        ui.set_status_error_message(format!("Diff failed: {error}").into());
+                    }
+                }
+            });
+        });
+    });
+
+    let apply_conflict_ui = ui.as_weak();
+    ui.on_conflict_apply(move || {
+        let Some(ui) = apply_conflict_ui.upgrade() else {
+            return;
+        };
+        let Some(pending) = selected_pending_conflict(&ui) else {
+            ui.set_status_error_message("No pending conflict is selected.".into());
+            return;
+        };
+        if !pending_conflict_all_decided(&pending) {
+            ui.set_status_error_message("Choose keep or update for every conflicted file.".into());
+            return;
+        }
+        let Some(addons_dir) = addons_source_root() else {
+            ui.set_status_error_message("AddOns folder was not found.".into());
+            return;
+        };
+        ui.set_checking_updates(true);
+        ui.set_status_error_message("Applying conflict decisions...".into());
+        let eso_running = addon_write_eso_running_warning_active(&ui);
+        start_native_pending_conflict_apply(ui.as_weak(), addons_dir, pending, eso_running);
+    });
+
+    let skip_conflict_ui = ui.as_weak();
+    ui.on_conflict_skip(move || {
+        let Some(ui) = skip_conflict_ui.upgrade() else {
+            return;
+        };
+        let folder_name = selected_addon_folder(&ui);
+        let Some(store) = pending_conflict_store() else {
+            return;
+        };
+        let removed = store
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&folder_name));
+        if let Some(conflict) = removed {
+            cleanup_pending_conflict_zip(&conflict);
+            sync_pending_conflict_count(&ui);
+            refresh_active_conflict_panel(&ui);
+            ui.set_status_error_message(format!("Skipped update for {}.", folder_name).into());
         }
     });
 
@@ -9330,6 +9498,7 @@ fn start_native_addon_update_apply(
     conflict_policy: i32,
     eso_running: bool,
 ) {
+    let pending_store = pending_conflict_store();
     std::thread::spawn(move || {
         let result = apply_native_addon_updates_blocking(&addons_dir, targets, conflict_policy);
         let _ = slint::invoke_from_event_loop(move || {
@@ -9339,6 +9508,9 @@ fn start_native_addon_update_apply(
 
             match result {
                 Ok(result) => {
+                    if let Some(store) = pending_store.as_ref() {
+                        replace_pending_conflicts(store, result.conflicts.clone());
+                    }
                     let message = addon_write_status_message(
                         update_apply_status_message(&result),
                         eso_running,
@@ -9357,6 +9529,246 @@ fn start_native_addon_update_apply(
             }
         });
     });
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeConflictDiffPreview {
+    user_preview: String,
+    upstream_preview: String,
+    binary: bool,
+}
+
+fn start_native_pending_conflict_apply(
+    ui_weak: slint::Weak<KalpaWindow>,
+    addons_dir: PathBuf,
+    pending: NativePendingConflict,
+    eso_running: bool,
+) {
+    let pending_store = pending_conflict_store();
+    std::thread::spawn(move || {
+        let folder_name = pending.folder_name.clone();
+        let result = apply_native_pending_conflict_blocking(&addons_dir, &pending);
+        let conflict_count = if result.is_ok() {
+            if let Some(store) = pending_store.as_ref() {
+                if let Ok(mut conflicts) = store.lock() {
+                    conflicts.remove(&folder_name);
+                    conflicts.len()
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else {
+            pending_store
+                .as_ref()
+                .and_then(|store| store.lock().ok().map(|conflicts| conflicts.len()))
+                .unwrap_or_default()
+        };
+
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+
+            match result {
+                Ok(result) => {
+                    let message = addon_write_status_message(
+                        update_apply_status_message(&result),
+                        eso_running,
+                    );
+                    ui.invoke_addon_update_apply_finished(
+                        slint_update_check_model(result.checks),
+                        message.into(),
+                        conflict_count as i32,
+                    );
+                    refresh_active_conflict_panel(&ui);
+                }
+                Err(error) => {
+                    ui.set_checking_updates(false);
+                    ui.set_status_error_message(format!("Conflict update failed: {error}").into());
+                    refresh_active_conflict_panel(&ui);
+                }
+            }
+        });
+    });
+}
+
+fn apply_native_pending_conflict_blocking(
+    addons_dir: &Path,
+    pending: &NativePendingConflict,
+) -> Result<NativeAddonUpdateApplyResult, String> {
+    apply_native_pending_conflict_files_blocking(addons_dir, pending)?;
+
+    let checks =
+        check_native_addon_updates_blocking(addons_dir).unwrap_or_else(|_| {
+            vec![NativeAddonUpdateCheck {
+                folder_name: pending.folder_name.clone(),
+                remote_version: pending.update_version.clone(),
+                has_update: false,
+                remote_last_update: 0,
+            }]
+        });
+
+    Ok(NativeAddonUpdateApplyResult {
+        checks,
+        completed: vec![pending.folder_name.clone()],
+        conflicts: Vec::new(),
+        failed: Vec::new(),
+        errors: Vec::new(),
+    })
+}
+
+fn apply_native_pending_conflict_files_blocking(
+    addons_dir: &Path,
+    pending: &NativePendingConflict,
+) -> Result<Vec<String>, String> {
+    if !pending_conflict_all_decided(pending) {
+        return Err("Every conflicted file needs a decision.".to_string());
+    }
+
+    let mut kept_files = pending.auto_kept_files.clone();
+    let mut files_to_backup = Vec::new();
+    for relative_path in &pending.conflicts {
+        match pending.decisions.get(relative_path).copied() {
+            Some(1) => kept_files.push(relative_path.clone()),
+            Some(2) => files_to_backup.push(relative_path.clone()),
+            _ => return Err(format!("Missing conflict decision for {relative_path}.")),
+        }
+    }
+    kept_files.sort();
+    kept_files.dedup();
+
+    if !files_to_backup.is_empty() {
+        let from_version = file_hashes::load_hash_manifest(addons_dir, &pending.folder_name)
+            .map(|manifest| manifest.installed_version)
+            .unwrap_or_default();
+        edit_backups::backup_user_files(
+            addons_dir,
+            &pending.folder_name,
+            &files_to_backup,
+            &from_version,
+            &pending.update_version,
+        )?;
+    }
+
+    let skip_files = kept_files
+        .iter()
+        .map(|path| format!("{}/{}", pending.folder_name, path))
+        .collect::<HashSet<_>>();
+
+    let installed_folders = if skip_files.is_empty() {
+        installer::extract_addon_zip(&pending.zip_path, addons_dir)?
+    } else {
+        installer::extract_addon_zip_selective(&pending.zip_path, addons_dir, &skip_files)?
+    };
+
+    let zip_hashes = if pending.zip_hashes.is_empty() {
+        file_hashes::hash_zip_entries(&pending.zip_path, &pending.folder_name)?
+    } else {
+        pending.zip_hashes.clone()
+    };
+    let hash_overrides = native_hash_overrides(&kept_files, &zip_hashes);
+    file_hashes::record_hashes_with_zip_baseline(
+        addons_dir,
+        &pending.zip_path,
+        &installed_folders,
+        &pending.folder_name,
+        &zip_hashes,
+        pending.esoui_id,
+        &pending.update_version,
+        hash_overrides.as_ref(),
+    )?;
+
+    let mut store = metadata::load_metadata(addons_dir);
+    remove_stale_native_metadata(&mut store, pending.esoui_id, &installed_folders);
+    record_native_installed_folders(
+        &mut store,
+        addons_dir,
+        &installed_folders,
+        pending.esoui_id,
+        &pending.update_version,
+        &pending.title,
+        &pending.download_url,
+    );
+    let _ = native_resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
+    metadata::save_metadata(addons_dir, &store)?;
+    cleanup_pending_conflict_zip(pending);
+
+    Ok(installed_folders)
+}
+
+fn native_pending_conflict_diff_blocking(
+    addons_dir: &Path,
+    pending: &NativePendingConflict,
+    relative_path: &str,
+) -> Result<NativeConflictDiffPreview, String> {
+    if !pending.conflicts.iter().any(|path| path == relative_path) {
+        return Err("Conflict file was not found.".to_string());
+    }
+
+    let user_path = addon_file_path(addons_dir, &pending.folder_name, relative_path)?;
+    let user_bytes = fs::read(&user_path).unwrap_or_default();
+    if bytes_look_binary(&user_bytes) {
+        return Ok(NativeConflictDiffPreview {
+            binary: true,
+            ..NativeConflictDiffPreview::default()
+        });
+    }
+
+    let file = fs::File::open(&pending.zip_path)
+        .map_err(|error| format!("Failed to open pending update ZIP: {error}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|error| format!("Failed to read update ZIP: {error}"))?;
+    let zip_entry_name = format!("{}/{}", pending.folder_name, relative_path);
+    let mut entry = archive
+        .by_name(&zip_entry_name)
+        .map_err(|error| format!("File was not found in update ZIP: {error}"))?;
+
+    const MAX_DIFF_BYTES: u64 = 2 * 1024 * 1024;
+    if entry.size() > MAX_DIFF_BYTES {
+        return Err("File is too large to preview differences.".to_string());
+    }
+
+    let mut upstream_bytes = Vec::with_capacity(entry.size() as usize);
+    entry
+        .read_to_end(&mut upstream_bytes)
+        .map_err(|error| format!("Failed to read update ZIP entry: {error}"))?;
+    if bytes_look_binary(&upstream_bytes) {
+        return Ok(NativeConflictDiffPreview {
+            binary: true,
+            ..NativeConflictDiffPreview::default()
+        });
+    }
+
+    Ok(NativeConflictDiffPreview {
+        user_preview: text_preview(&String::from_utf8_lossy(&user_bytes)),
+        upstream_preview: text_preview(&String::from_utf8_lossy(&upstream_bytes)),
+        binary: false,
+    })
+}
+
+fn bytes_look_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(512).any(|byte| *byte == 0)
+}
+
+fn text_preview(text: &str) -> String {
+    const MAX_LINES: usize = 6;
+    const MAX_CHARS: usize = 900;
+    let mut preview = text.lines().take(MAX_LINES).collect::<Vec<_>>().join("\n");
+    if preview.chars().count() > MAX_CHARS {
+        preview = preview.chars().take(MAX_CHARS).collect::<String>();
+        preview.push_str("\n...");
+    } else if text.lines().count() > MAX_LINES {
+        preview.push_str("\n...");
+    }
+    preview
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NativeSingleUpdateOutcome {
+    Applied,
+    Pending(NativePendingConflict),
 }
 
 fn apply_native_addon_updates_blocking(
@@ -9385,11 +9797,11 @@ fn apply_native_addon_updates_blocking(
 
         match apply_native_single_addon_update(addons_dir, &target, remote_version, conflict_policy)
         {
-            Ok(true) => {
+            Ok(NativeSingleUpdateOutcome::Applied) => {
                 completed_set.insert(target.folder_name.clone());
                 result.completed.push(target.folder_name);
             }
-            Ok(false) => result.conflicts.push(target.folder_name),
+            Ok(NativeSingleUpdateOutcome::Pending(conflict)) => result.conflicts.push(conflict),
             Err(error) => {
                 result.failed.push(target.folder_name.clone());
                 result
@@ -9414,13 +9826,44 @@ fn apply_native_single_addon_update(
     target: &NativeAddonUpdateTarget,
     remote_version: &str,
     conflict_policy: i32,
-) -> Result<bool, String> {
+) -> Result<NativeSingleUpdateOutcome, String> {
     let (zip, info) = native_fetch_and_download_with_retry(target.esoui_id)?;
     let (report, zip_hashes) =
         build_native_conflict_report(addons_dir, &target.folder_name, zip.path())?;
 
+    if !report.conflicts.is_empty() && conflict_policy == 0 {
+        let (_, zip_path) = zip
+            .keep()
+            .map_err(|error| format!("Failed to preserve update ZIP: {error}"))?;
+        return Ok(NativeSingleUpdateOutcome::Pending(NativePendingConflict {
+            folder_name: target.folder_name.clone(),
+            esoui_id: target.esoui_id,
+            update_version: remote_version.to_string(),
+            title: info.title,
+            download_url: info.download_url,
+            safe_file_count: report.safe_file_count,
+            auto_kept_files: report.auto_kept_files,
+            conflicts: report.conflicts,
+            decisions: HashMap::new(),
+            zip_path,
+            zip_hashes,
+        }));
+    }
+
     let Some(kept_files) = native_kept_files_for_policy(&report, conflict_policy) else {
-        return Ok(false);
+        return Ok(NativeSingleUpdateOutcome::Pending(NativePendingConflict {
+            folder_name: target.folder_name.clone(),
+            esoui_id: target.esoui_id,
+            update_version: remote_version.to_string(),
+            title: info.title,
+            download_url: info.download_url,
+            safe_file_count: report.safe_file_count,
+            auto_kept_files: report.auto_kept_files,
+            conflicts: report.conflicts,
+            decisions: HashMap::new(),
+            zip_path: PathBuf::new(),
+            zip_hashes,
+        }));
     };
     if !report.conflicts.is_empty() && conflict_policy == 2 {
         backup_native_conflicting_files(addons_dir, target, remote_version, &report.conflicts)?;
@@ -9462,7 +9905,7 @@ fn apply_native_single_addon_update(
     let _ = native_resolve_transitive_deps(addons_dir, &installed_folders, &mut store);
     metadata::save_metadata(addons_dir, &store)?;
 
-    Ok(true)
+    Ok(NativeSingleUpdateOutcome::Applied)
 }
 
 fn native_kept_files_for_policy(
@@ -9548,6 +9991,7 @@ fn build_native_conflict_report(
     let zip_hashes = file_hashes::hash_zip_entries(zip_path, folder_name)?;
     let stored_files = stored.as_ref().map(|manifest| &manifest.files);
 
+    let mut safe_file_count = 0;
     let mut auto_kept_files = Vec::new();
     let mut conflicts = Vec::new();
 
@@ -9565,9 +10009,9 @@ fn build_native_conflict_report(
         };
 
         match (user_modified, upstream_changed) {
+            (false, _) => safe_file_count += 1,
             (true, false) => auto_kept_files.push(relative_path.clone()),
             (true, true) => conflicts.push(relative_path.clone()),
-            _ => {}
         }
     }
 
@@ -9576,6 +10020,7 @@ fn build_native_conflict_report(
 
     Ok((
         NativeConflictReport {
+            safe_file_count,
             auto_kept_files,
             conflicts,
         },
@@ -10513,6 +10958,105 @@ fn refresh_file_browser(ui: &KalpaWindow) {
 
     if ui.get_show_file_backups() {
         refresh_edit_backups(ui);
+    }
+
+    refresh_active_conflict_panel(ui);
+}
+
+fn pending_conflict_store() -> Option<NativePendingConflictStore> {
+    PENDING_NATIVE_CONFLICTS.get().cloned()
+}
+
+fn selected_pending_conflict(ui: &KalpaWindow) -> Option<NativePendingConflict> {
+    let folder_name = selected_addon_folder(ui);
+    pending_conflict_store()
+        .and_then(|store| store.lock().ok().and_then(|map| map.get(&folder_name).cloned()))
+}
+
+fn refresh_active_conflict_panel(ui: &KalpaWindow) {
+    let Some(pending) = selected_pending_conflict(ui) else {
+        clear_active_conflict_panel(ui);
+        return;
+    };
+
+    ui.set_detail_conflict_files(conflict_file_model(&pending));
+    ui.set_detail_conflict_auto_kept_count(pending.auto_kept_files.len() as i32);
+    ui.set_detail_conflict_safe_file_count(pending.safe_file_count as i32);
+    ui.set_detail_conflict_update_version(pending.update_version.clone().into());
+    ui.set_detail_conflict_all_decided(pending_conflict_all_decided(&pending));
+
+    let diff_file = ui.get_detail_conflict_diff_file().to_string();
+    if diff_file.is_empty() {
+        return;
+    }
+    if !pending.conflicts.iter().any(|path| path == &diff_file) {
+        clear_active_conflict_diff(ui);
+    }
+}
+
+fn clear_active_conflict_panel(ui: &KalpaWindow) {
+    ui.set_detail_conflict_files(Rc::new(VecModel::from(Vec::<ConflictFileEntry>::new())).into());
+    ui.set_detail_conflict_auto_kept_count(0);
+    ui.set_detail_conflict_safe_file_count(0);
+    ui.set_detail_conflict_update_version("".into());
+    ui.set_detail_conflict_all_decided(false);
+    clear_active_conflict_diff(ui);
+}
+
+fn clear_active_conflict_diff(ui: &KalpaWindow) {
+    ui.set_detail_conflict_diff_file("".into());
+    ui.set_detail_conflict_diff_user_preview("".into());
+    ui.set_detail_conflict_diff_upstream_preview("".into());
+    ui.set_detail_conflict_diff_binary(false);
+    ui.set_detail_conflict_diff_loading(false);
+}
+
+fn conflict_file_model(pending: &NativePendingConflict) -> ModelRc<ConflictFileEntry> {
+    Rc::new(VecModel::from(
+        pending
+            .conflicts
+            .iter()
+            .map(|relative_path| ConflictFileEntry {
+                relative_path: relative_path.clone().into(),
+                decision: pending.decisions.get(relative_path).copied().unwrap_or(0),
+            })
+            .collect::<Vec<_>>(),
+    ))
+    .into()
+}
+
+fn pending_conflict_all_decided(pending: &NativePendingConflict) -> bool {
+    !pending.conflicts.is_empty()
+        && pending
+            .conflicts
+            .iter()
+            .all(|path| matches!(pending.decisions.get(path), Some(1 | 2)))
+}
+
+fn sync_pending_conflict_count(ui: &KalpaWindow) {
+    let count = pending_conflict_store()
+        .and_then(|store| store.lock().ok().map(|map| map.len()))
+        .unwrap_or_default();
+    ui.set_pending_conflict_count(count as i32);
+}
+
+fn cleanup_pending_conflict_zip(pending: &NativePendingConflict) {
+    if !pending.zip_path.as_os_str().is_empty() {
+        let _ = fs::remove_file(&pending.zip_path);
+    }
+}
+
+fn replace_pending_conflicts(
+    store: &NativePendingConflictStore,
+    conflicts: Vec<NativePendingConflict>,
+) {
+    if let Ok(mut pending) = store.lock() {
+        for old in pending.drain().map(|(_, old)| old) {
+            cleanup_pending_conflict_zip(&old);
+        }
+        for conflict in conflicts {
+            pending.insert(conflict.folder_name.clone(), conflict);
+        }
     }
 }
 
@@ -17556,6 +18100,7 @@ CombatMetrics_SavedVariables = {
     #[test]
     fn native_conflict_policy_decides_kept_files() {
         let report = NativeConflictReport {
+            safe_file_count: 0,
             auto_kept_files: vec!["unchanged-user-edit.lua".to_string()],
             conflicts: vec!["changed-user-edit.lua".to_string()],
         };
@@ -17572,6 +18117,97 @@ CombatMetrics_SavedVariables = {
             native_kept_files_for_policy(&report, 2).expect("take update resolves"),
             vec!["unchanged-user-edit.lua".to_string()]
         );
+    }
+
+    #[test]
+    fn native_pending_conflict_apply_keeps_selected_user_file() {
+        let root = test_temp_dir("native-pending-conflict-keep");
+        let folder = "KeepConflictAddon";
+        seed_conflicted_addon(root, folder);
+
+        let zip_path = root.join("update.zip");
+        write_test_addon_zip_with_lua(&zip_path, folder, "2.0", "d('new upstream')\n");
+        let pending = pending_conflict_for_test(root, folder, &zip_path, 1);
+
+        let installed = apply_native_pending_conflict_files_blocking(root, &pending)
+            .expect("apply pending conflict");
+
+        assert!(installed.contains(&folder.to_string()));
+        assert_eq!(
+            fs::read_to_string(root.join(folder).join("main.lua")).expect("read kept file"),
+            "d('user edit')\n"
+        );
+        assert_eq!(
+            file_hashes::load_hash_manifest(root, folder)
+                .expect("hash manifest")
+                .installed_version,
+            "2.0"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_pending_conflict_apply_takes_update_and_backs_up_user_file() {
+        let root = test_temp_dir("native-pending-conflict-take");
+        let folder = "TakeConflictAddon";
+        seed_conflicted_addon(root, folder);
+
+        let zip_path = root.join("update.zip");
+        write_test_addon_zip_with_lua(&zip_path, folder, "2.0", "d('new upstream')\n");
+        let pending = pending_conflict_for_test(root, folder, &zip_path, 2);
+
+        apply_native_pending_conflict_files_blocking(root, &pending)
+            .expect("apply pending conflict");
+
+        assert_eq!(
+            fs::read_to_string(root.join(folder).join("main.lua")).expect("read updated file"),
+            "d('new upstream')\n"
+        );
+        let backups = edit_backups::list_backups(root, folder);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].files, vec!["main.lua".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn seed_conflicted_addon(root: &Path, folder: &str) {
+        let addon_dir = root.join(folder);
+        fs::create_dir_all(&addon_dir).expect("create addon dir");
+        fs::write(
+            addon_dir.join(format!("{folder}.txt")),
+            "## Title: Conflict Addon\n## Version: 1.0\n",
+        )
+        .expect("write manifest");
+        fs::write(addon_dir.join("main.lua"), "d('old upstream')\n").expect("write baseline");
+        file_hashes::record_hashes_for_folders(root, &[folder.to_string()], 42, "1.0")
+            .expect("record baseline");
+        fs::write(addon_dir.join("main.lua"), "d('user edit')\n").expect("write user edit");
+    }
+
+    fn pending_conflict_for_test(
+        root: &Path,
+        folder: &str,
+        zip_path: &Path,
+        decision: i32,
+    ) -> NativePendingConflict {
+        let (report, zip_hashes) =
+            build_native_conflict_report(root, folder, zip_path).expect("build report");
+        assert_eq!(report.conflicts, vec!["main.lua".to_string()]);
+
+        NativePendingConflict {
+            folder_name: folder.to_string(),
+            esoui_id: 42,
+            update_version: "2.0".to_string(),
+            title: folder.to_string(),
+            download_url: "https://example.invalid/update.zip".to_string(),
+            safe_file_count: report.safe_file_count,
+            auto_kept_files: report.auto_kept_files,
+            conflicts: report.conflicts,
+            decisions: HashMap::from([("main.lua".to_string(), decision)]),
+            zip_path: zip_path.to_path_buf(),
+            zip_hashes,
+        }
     }
 
     fn test_temp_dir(name: &str) -> &'static Path {

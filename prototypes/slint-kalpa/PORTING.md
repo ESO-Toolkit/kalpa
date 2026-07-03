@@ -119,8 +119,11 @@ Current row status:
   setting by reusing the production Windows process check and carrying the
   `/reloadui` notice through install/update/remove status messages. The conflict
   banner's Review action now switches back to My Addons, filters to outdated
-  rows, and selects the first row that still needs attention. The manual native
-  conflict-decision modal is still pending.
+  rows with real pending conflict reports, and selects the first row that still
+  needs attention. The native detail panel now renders actual conflicted file
+  paths, loads a bounded diff preview from the kept update ZIP, and applies
+  per-file keep/take-update decisions through selective extraction. Chosen
+  take-update files are backed up before overwrite.
 - Rows now expose a native right-click context menu with Open Folder, View on
   ESOUI, Favorite/Unfavorite, Enable/Disable, and Remove actions. Enable/disable
   and remove use the same real folder operations as the detail footer for
