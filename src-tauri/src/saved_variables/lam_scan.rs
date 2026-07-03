@@ -134,7 +134,14 @@ struct AddonFolder {
     declared_svs: Vec<String>,
 }
 
-const SV_SUFFIXES: &[&str] = &["SavedVariables", "SavedVars", "SV", "Vars", "Data", "Settings"];
+const SV_SUFFIXES: &[&str] = &[
+    "SavedVariables",
+    "SavedVars",
+    "SV",
+    "Vars",
+    "Data",
+    "Settings",
+];
 
 fn resolve_folders(addons_dir: &Path, sv_name: &str) -> Vec<MatchedFolder> {
     let mut addons: Vec<AddonFolder> = Vec::new();
@@ -353,8 +360,7 @@ fn collect_lua_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn extract_dropdowns(content: &str) -> Vec<(String, Vec<LamDropdownChoice>)> {
     static DROPDOWN_RE: OnceLock<Regex> = OnceLock::new();
-    let re = DROPDOWN_RE
-        .get_or_init(|| Regex::new(r#"type\s*=\s*["']dropdown["']"#).unwrap());
+    let re = DROPDOWN_RE.get_or_init(|| Regex::new(r#"type\s*=\s*["']dropdown["']"#).unwrap());
 
     let bytes = content.as_bytes();
     let mask = build_mask(bytes);
@@ -445,7 +451,7 @@ fn extract_from_block(
         }
         labels
             .iter()
-            .zip(values.into_iter())
+            .zip(values)
             .map(|(label, value)| LamDropdownChoice {
                 label: value_label(label),
                 value,
@@ -492,10 +498,7 @@ fn scan_top_fields(bytes: &[u8], mask: &[bool], open: usize, close: usize) -> Ve
             while j < close && (mask[j] || bytes[j].is_ascii_whitespace()) {
                 j += 1;
             }
-            if j < close
-                && bytes[j] == b'='
-                && !mask[j]
-                && !(j + 1 < close && bytes[j + 1] == b'=')
+            if j < close && bytes[j] == b'=' && !mask[j] && !(j + 1 < close && bytes[j + 1] == b'=')
             {
                 let mut v = j + 1;
                 while v < close && (mask[v] || bytes[v].is_ascii_whitespace()) {
@@ -1428,7 +1431,11 @@ mod tests {
 
         let resp = scan_lam_dropdowns_blocking(dir.path(), "MyAddonSV").unwrap();
         let has_dup = resp.hints.iter().any(|h| h.setting_key == "dup");
-        let same: Vec<_> = resp.hints.iter().filter(|h| h.setting_key == "same").collect();
+        let same: Vec<_> = resp
+            .hints
+            .iter()
+            .filter(|h| h.setting_key == "same")
+            .collect();
         assert!(!has_dup, "conflicting key should be dropped");
         assert_eq!(same.len(), 1, "identical key kept once");
     }
@@ -1512,7 +1519,10 @@ mod tests {
         let resp = scan_lam_dropdowns_blocking(dir.path(), "NestedSV").unwrap();
         assert_eq!(resp.matched_folders, vec!["NestedAddon".to_string()]);
         assert!(resp.hints.iter().any(|h| h.setting_key == "nestedKey"));
-        assert!(!resp.hints.iter().any(|h| h.setting_key == "shouldNotAppear"));
+        assert!(!resp
+            .hints
+            .iter()
+            .any(|h| h.setting_key == "shouldNotAppear"));
     }
 
     #[test]
