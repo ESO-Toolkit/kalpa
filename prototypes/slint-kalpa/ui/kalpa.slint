@@ -6300,6 +6300,7 @@ component SavedVariablesOverlay inherits Rectangle {
     in property <bool> has-orphans: false;
     in property <bool> has-files: false;
     callback refresh;
+    callback clean-orphans;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 980px ? root.width - 48px : 900px;
@@ -6498,7 +6499,7 @@ component SavedVariablesOverlay inherits Rectangle {
                 background: Palette.white-03;
 
                 Text { x: 14px; y: 0px; height: parent.height; text: "Select files to clean up"; color: Palette.muted-strong; font-size: 13px; font-weight: 750; vertical-alignment: center; }
-                PackHubButton { x: parent.width - 116px; y: 12px; width: 102px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Clean Up"; primary: true; }
+                PackHubButton { x: parent.width - 116px; y: 12px; width: 102px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Clean Up"; primary: true; disabled: root.orphaned-files.length == 0; clicked => { root.clean-orphans(); } }
             }
         }
 
@@ -8769,6 +8770,7 @@ export component KalpaWindow inherits Window {
     callback settings-api-compat;
     callback settings-addon-list-export;
     callback settings-addon-list-import;
+    callback svm-clean-orphans;
     callback review-conflicts;
     no-frame: true;
     preferred-width: 1462px;
@@ -8992,6 +8994,7 @@ export component KalpaWindow inherits Window {
             has-orphans: root.svm-has-orphans;
             has-files: root.svm-has-files;
             refresh => { root.svm-refresh(); }
+            clean-orphans => { root.svm-clean-orphans(); }
         }
 
         if (root.uploader-open) : UploaderOverlay {

@@ -25,6 +25,10 @@ mod manifest;
 #[path = "../../../src-tauri/src/metadata.rs"]
 mod metadata;
 
+#[allow(dead_code, unused_imports)]
+#[path = "../../../src-tauri/src/saved_variables/mod.rs"]
+mod saved_variables;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint::{
@@ -2230,11 +2234,51 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let svm_refresh_ui = ui.as_weak();
+    let svm_refresh_models = models.clone();
     ui.on_svm_refresh(move || {
         let Some(ui) = svm_refresh_ui.upgrade() else {
             return;
         };
-        apply_saved_variables_model(&ui, &models.all.borrow());
+        apply_saved_variables_model(&ui, &svm_refresh_models.all.borrow());
+    });
+
+    let svm_clean_ui = ui.as_weak();
+    let svm_clean_models = models.clone();
+    ui.on_svm_clean_orphans(move || {
+        let Some(ui) = svm_clean_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before cleaning SavedVariables.".into(),
+            );
+            return;
+        };
+
+        let orphaned_model = ui.get_svm_orphaned_files();
+        let orphaned = (0..orphaned_model.row_count())
+            .filter_map(|index| orphaned_model.row_data(index))
+            .collect::<Vec<_>>();
+        if orphaned.is_empty() {
+            ui.set_status_error_message("No orphaned SavedVariables files to clean.".into());
+            return;
+        }
+
+        match clean_saved_variable_orphans(&addons_root, &orphaned) {
+            Ok(deleted) => {
+                apply_saved_variables_model(&ui, &svm_clean_models.all.borrow());
+                ui.set_status_error_message(
+                    format!(
+                        "Deleted {deleted} orphaned SavedVariables file{} and created an automatic backup.",
+                        if deleted == 1 { "" } else { "s" }
+                    )
+                    .into(),
+                );
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("SavedVariables cleanup failed: {error}").into())
+            }
+        }
     });
 }
 
@@ -6110,6 +6154,21 @@ fn apply_saved_variables_model(ui: &KalpaWindow, addons: &[AddonEntry]) {
     ui.set_svm_orphaned_files(Rc::new(VecModel::from(orphaned)).into());
 }
 
+fn clean_saved_variable_orphans(
+    addons_root: &Path,
+    orphaned: &[SavedVariableEntry],
+) -> Result<u32, String> {
+    let file_names = orphaned
+        .iter()
+        .map(|entry| entry.file_name.to_string())
+        .collect::<Vec<_>>();
+    if file_names.is_empty() {
+        return Ok(0);
+    }
+
+    saved_variables::io::delete_saved_variables_blocking(addons_root, &file_names)
+}
+
 fn saved_variable_entries(
     addons_root: &Path,
     addons: &[AddonEntry],
@@ -9220,6 +9279,63 @@ CombatMetrics_SavedVariables = {
             .expect("orphaned entry exists");
         assert!(orphaned.orphaned);
         assert!(!orphaned.system);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_saved_variable_cleanup_deletes_orphans_and_keeps_installed_files() {
+        let root = test_temp_dir("saved-variable-cleanup");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::write(sv_dir.join("InstalledAddon.lua"), "InstalledAddon = {}\n")
+            .expect("write installed saved variable");
+        fs::write(sv_dir.join("RemovedAddon.lua"), "RemovedAddon = {}\n")
+            .expect("write orphaned saved variable");
+
+        let addons = vec![addon_entry(
+            "Installed Addon",
+            "InstalledAddon",
+            "100",
+            "Tester",
+            "1.0",
+            "101048",
+            "Addon",
+            "",
+            "",
+            false,
+            false,
+            false,
+            0,
+            "",
+            0,
+            "",
+            0,
+            "",
+            0,
+        )];
+        let entries = saved_variable_entries(&addons_root, &addons).expect("load saved variables");
+        let orphaned = entries
+            .iter()
+            .filter(|entry| entry.orphaned)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let deleted =
+            clean_saved_variable_orphans(&addons_root, &orphaned).expect("clean orphaned files");
+
+        assert_eq!(deleted, 1);
+        assert!(sv_dir.join("InstalledAddon.lua").is_file());
+        assert!(!sv_dir.join("RemovedAddon.lua").exists());
+        let backup_root = root.join("kalpa-backups");
+        let backup_files = fs::read_dir(&backup_root)
+            .expect("backup root exists")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("RemovedAddon.lua"))
+            .collect::<Vec<_>>();
+        assert!(backup_files.iter().any(|path| path.is_file()));
 
         let _ = fs::remove_dir_all(root);
     }

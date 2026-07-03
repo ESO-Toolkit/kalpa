@@ -193,9 +193,12 @@ Current detail status:
   can replace the React Pack Hub implementation.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
-  Editor surfaces. The current pass is static/prototype data for visual
-  fidelity; production still needs the real saved-variable parser, cleanup/copy
-  commands, editor write path, preview/raw/settings states, and error handling.
+  Editor surfaces. Overview and Cleanup now load real SavedVariables files,
+  classify installed/orphaned/system data against the native addon model, show
+  real size/profile counts, and delete orphaned files through the shared
+  auto-backup cleanup path. Copy Profile and Editor are still visual scaffolds;
+  they need the real profile copy command, parser-backed tree editor, write path,
+  preview/raw/settings states, and full error handling.
 - The Settings > Tools Backup & Restore row now opens a native Slint backup
   overlay covering the main, custom-label, and restore-confirmation states. The
   current pass is static/prototype data for visual fidelity; production still
