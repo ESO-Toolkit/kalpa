@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Last updated:** 2026-05-25
+**Last updated:** 2026-07-01
 
 Kalpa is an open-source desktop application for managing Elder Scrolls Online (ESO) addons. This policy explains what data Kalpa collects, how it is used, and your rights.
 
@@ -23,8 +23,9 @@ In accordance with the Elder Scrolls Online Terms of Service, users must be at l
 | File hash manifests | `{AddOns folder}/.kalpa-hashes/` | Detect user-modified files |
 | Manifest cache (SQLite) | `%LOCALAPPDATA%\com.kalpa.desktop\` | Speed up addon scanning |
 | Auth tokens | Windows Credential Manager | Sign in to Pack Hub |
+| Upload session cookie | Windows Credential Manager | Direct upload to ESO Logs |
 
-**Auth tokens** (ESO Logs OAuth access and refresh tokens) are stored in the Windows Credential Manager, which encrypts them using your Windows account credentials. They are not stored in plaintext files.
+**Auth tokens** (ESO Logs OAuth access and refresh tokens) and **Upload session cookie** (`wcl_session` for ESO Logs authentication) are stored in the Windows Credential Manager, which encrypts them using your Windows account credentials. They are not stored in plaintext files. The upload session cookie is removed when you sign out.
 
 ### Data sent to ESOUI
 
@@ -58,7 +59,16 @@ The Pack Hub (`kalpa-pack-hub.eso-toolkit.workers.dev`) powers community addon c
 
 ### Data sent to ESO Logs
 
-Sign-in uses OAuth via [esotk.com](https://esotk.com), which handles the authentication flow with ESO Logs. The only data retrieved from ESO Logs is your **numeric user ID** and **display name**. No combat logs, guild data, character stats, or other game data is accessed.
+Sign-in uses OAuth via [esotk.com](https://esotk.com), which handles the authentication flow with ESO Logs. The only data retrieved from ESO Logs is your **numeric user ID** and **display name**. No ESO game data (guild info, character stats, or other account data) is accessed through sign-in.
+
+### Direct upload to ESO Logs (opt-in)
+
+Kalpa includes an optional direct-upload feature for combat logs to ESO Logs. When enabled:
+
+- **Combat-log contents are uploaded only on explicit user action** — you must click "Upload" for each log or session. No background or automatic uploads occur.
+- **Report visibility is user-chosen** — you control whether a report is **Unlisted** (default, visible only via direct link), **Public** (listed on your profile), or **Private** (not visible to others). You choose the visibility in Kalpa before each upload; direct uploads apply it immediately, while the official-uploader handoff lets you confirm it there.
+- **Upload session authentication** — a session cookie (`wcl_session`) is captured from ESO Logs' login page inside Kalpa, stored in the Windows Credential Manager, and used only for upload authentication. This cookie is removed when you sign out.
+- **Alternative: handoff to official uploader** — if you disable direct upload or are not signed in, Kalpa can launch ESO Logs' standalone desktop uploader instead, which handles the upload in a separate application.
 
 ### Data sent to GitHub
 
@@ -71,7 +81,7 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 - **No analytics or telemetry** — Kalpa contains zero tracking, analytics libraries, or usage metrics
 - **No crash reporting** — no error data is sent to any server
 - **No addon file contents** — your addon source code (.lua, .xml) is never uploaded
-- **No ESO game data** — no combat logs, character stats, guild info, or inventory data
+- **No unauthorized game data uploads** — combat logs and other ESO data (character stats, guild info, inventory) are never uploaded without your explicit action
 - **No machine fingerprinting** — no hardware IDs, OS version telemetry, or device identifiers
 
 ---

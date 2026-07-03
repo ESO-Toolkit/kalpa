@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  attachRaceSafe,
+  deriveNativeState,
   esoLogsReportUrl,
   esotkReportUrl,
+  liveExitConfirmCopy,
   parseReportCode,
   primaryReportUrl,
+  shouldConfirmLiveExit,
 } from "../uploader-shared";
 
 describe("esotkReportUrl", () => {
@@ -98,5 +102,115 @@ describe("parseReportCode", () => {
   it("rejects ordinary words and short numeric ids", () => {
     expect(parseReportCode("unlisted")).toBeNull();
     expect(parseReportCode("123456789012")).toBeNull();
+  });
+});
+
+describe("shouldConfirmLiveExit", () => {
+  it("confirms only while a live session is active", () => {
+    expect(shouldConfirmLiveExit(true)).toBe(true);
+    expect(shouldConfirmLiveExit(false)).toBe(false);
+  });
+});
+
+describe("liveExitConfirmCopy", () => {
+  it("uses stop-tracking copy on the handoff path (uploader keeps streaming)", () => {
+    const copy = liveExitConfirmCopy(true);
+    expect(copy.title).toBe("Stop tracking in Kalpa?");
+    expect(copy.confirmLabel).toBe("Stop tracking");
+    expect(copy.description).toContain("keeps streaming");
+  });
+
+  it("warns the report closes on the native path", () => {
+    const copy = liveExitConfirmCopy(false);
+    expect(copy.title).toContain("close the report on ESO Logs");
+    expect(copy.confirmLabel).toBe("Stop upload");
+    expect(copy.description).toContain("closes the report on ESO Logs");
+  });
+});
+
+describe("attachRaceSafe", () => {
+  it("tears the listener down when unmount races the subscription resolution", async () => {
+    let resolveSub: (fn: () => void) => void = () => {};
+    const subscribe = () => new Promise<() => void>((res) => (resolveSub = res));
+    const unlisten = vi.fn();
+
+    const cleanup = attachRaceSafe(subscribe);
+    // Unmount BEFORE the subscription resolves.
+    cleanup();
+    // Now the subscription resolves — the listener must be torn down immediately
+    // instead of leaking.
+    resolveSub(unlisten);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the listener cleanup on a normal unmount", async () => {
+    const unlisten = vi.fn();
+    const cleanup = attachRaceSafe(() => Promise.resolve(unlisten));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(unlisten).not.toHaveBeenCalled();
+    cleanup();
+    expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows a rejected subscription without throwing", async () => {
+    const cleanup = attachRaceSafe(() => Promise.reject(new Error("no webview")));
+    await Promise.resolve();
+    await Promise.resolve();
+    // Cleanup is a no-op (nothing to tear down) and must not throw.
+    expect(() => cleanup()).not.toThrow();
+  });
+});
+
+describe("deriveNativeState", () => {
+  it("opts into native when neither opt-out is set and the store is trusted", () => {
+    expect(
+      deriveNativeState({
+        manual: { ok: true, value: false },
+        live: { ok: true, value: false },
+        session: true,
+        tainted: false,
+      })
+    ).toEqual({ nativeOptIn: true, hasNativeSession: true, liveUseOfficial: false });
+  });
+
+  it("fails closed on a failed store read (opted out; official for live)", () => {
+    expect(
+      deriveNativeState({
+        manual: { ok: false, value: false },
+        live: { ok: true, value: false },
+        session: true,
+        tainted: false,
+      })
+    ).toEqual({ nativeOptIn: false, hasNativeSession: true, liveUseOfficial: true });
+  });
+
+  it("fails closed on a tainted store", () => {
+    expect(
+      deriveNativeState({
+        manual: { ok: true, value: false },
+        live: { ok: true, value: false },
+        session: false,
+        tainted: true,
+      })
+    ).toEqual({ nativeOptIn: false, hasNativeSession: false, liveUseOfficial: true });
+  });
+
+  it("reports no session but still applies the opt-outs when the session check failed", () => {
+    // uploader_has_session rejects → session=false via the caller's .catch; the
+    // derivation still applies the opt-outs. This is the F3 fail-closed guarantee:
+    // the old named copy lacked the .catch and threw here, skipping every setState.
+    expect(
+      deriveNativeState({
+        manual: { ok: true, value: true },
+        live: { ok: true, value: false },
+        session: false,
+        tainted: false,
+      })
+    ).toEqual({ nativeOptIn: false, hasNativeSession: false, liveUseOfficial: false });
   });
 });

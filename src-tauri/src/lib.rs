@@ -224,7 +224,9 @@ fn cleanup_orphaned_pending_zips() {
 ///     would freeze those event handlers.
 /// `on_shown` resumes + restores NORMAL and is idempotent, so every path that
 /// makes the window visible (tray, deep link, focus) can call it safely — this
-/// guards against a dead/blank window on restore. TrySuspend requires the
+/// guards against a dead/blank window on restore. It is also cheap when nothing
+/// was saved: a `POWER_SAVED` flag short-circuits it to a no-op (no with_webview
+/// / COM) unless a hide path actually reduced the webview first. TrySuspend requires the
 /// controller be marked invisible first, which `window.hide()`/minimize does
 /// NOT do for us, so it is set explicitly. All no-ops on non-Windows and on
 /// WebView2 runtimes without the required interfaces (older than ~2022).
@@ -240,6 +242,10 @@ mod webview_power {
     use windows::core::Interface; // brings `.cast()` into scope
 
     static SUSPENDED: AtomicBool = AtomicBool::new(false);
+    // True whenever a hide path has actually reduced the webview (LOW or suspend)
+    // and it has not yet been restored. Lets `on_shown` short-circuit to a cheap
+    // no-op — skipping `with_webview` + COM entirely — when nothing was saved.
+    static POWER_SAVED: AtomicBool = AtomicBool::new(false);
 
     fn set_memory_target(window: &WebviewWindow, low: bool) {
         let level = if low {
@@ -263,9 +269,13 @@ mod webview_power {
             return;
         };
         if live {
+            // Mark saved before touching webview state so `on_shown` will restore.
+            POWER_SAVED.store(true, Ordering::SeqCst);
             set_memory_target(&window, true); // LOW: keep feed warm, trim caches
             return;
         }
+        // Mark saved before the SUSPENDED early-return / SetIsVisible below.
+        POWER_SAVED.store(true, Ordering::SeqCst);
         if SUSPENDED.swap(true, Ordering::SeqCst) {
             return; // already suspended
         }
@@ -316,6 +326,10 @@ mod webview_power {
     /// The main window is being shown/focused. Resume if suspended and restore
     /// NORMAL. Idempotent — safe (and intended) to call from every show path.
     pub fn on_shown(app: &AppHandle) {
+        // Nothing was ever reduced -> nothing to restore. Skip with_webview + COM.
+        if !POWER_SAVED.swap(false, Ordering::SeqCst) {
+            return;
+        }
         let Some(window) = app.get_webview_window("main") else {
             return;
         };
@@ -531,6 +545,22 @@ pub fn run() {
                         webview_power::on_shown(app);
                     } else if window.is_minimized().unwrap_or(false) {
                         webview_power::on_hidden(app, is_live());
+                    }
+                }
+                // Closes the already-unfocused-minimize gap: if the window is
+                // already unfocused (user clicked elsewhere) and is then minimized
+                // from the taskbar, no `Focused` event fires, so the arm above
+                // never runs. tao emits `Resized` on minimize/restore on Windows,
+                // so we power-manage off the minimized state here. A visible
+                // resize hits the `else` branch, and `on_shown` is a gated no-op
+                // (see POWER_SAVED) when nothing was saved — so interactive
+                // resizes of a visible window are effectively free and, per the
+                // multi-monitor note above, correctly leave it resumed at NORMAL.
+                tauri::WindowEvent::Resized(_) => {
+                    if window.is_minimized().unwrap_or(false) {
+                        webview_power::on_hidden(app, is_live());
+                    } else {
+                        webview_power::on_shown(app); // also covers restore-without-focus
                     }
                 }
                 _ => {}

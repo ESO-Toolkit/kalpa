@@ -2,50 +2,83 @@
 // status pill, the "what gets uploaded" privacy summary, and small helpers.
 
 import { useEffect, useState } from "react";
-import {
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
-  ChevronDown,
-  CircleDashed,
-  Loader2,
-  RefreshCw,
-  ShieldQuestion,
-  Swords,
-  Lock,
-  Zap,
-} from "lucide-react";
-import { InfoPill } from "@/components/ui/info-pill";
+import { ChevronDown, ShieldQuestion, Swords, Lock, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ReportRef, UploaderStatus, Visibility } from "@/types/uploader";
+import type { ReportRef, Visibility } from "@/types/uploader";
 
-/** Map the uploader status to its pill color, label, and icon. */
-export function StatusPill({ status }: { status: UploaderStatus }) {
-  const map: Record<
-    UploaderStatus,
-    {
-      color: "muted" | "sky" | "emerald" | "amber" | "red";
-      label: string;
-      Icon: typeof Activity;
-      spin?: boolean;
-    }
-  > = {
-    idle: { color: "muted", label: "Idle", Icon: CircleDashed },
-    watching: { color: "sky", label: "Watching", Icon: Activity },
-    uploading: { color: "sky", label: "Uploading", Icon: Loader2, spin: true },
-    upToDate: { color: "emerald", label: "Up to date", Icon: CheckCircle2 },
-    retrying: { color: "amber", label: "Retrying", Icon: RefreshCw, spin: true },
-    attention: { color: "red", label: "Needs attention", Icon: AlertTriangle },
+/** Whether an exit action — closing the dialog, or leaving Live for Manual — needs
+ *  a confirm first. Only while a live session is running (or still starting): on the
+ *  native path Stop ends the upload and closes its ESO Logs report, so an accidental
+ *  Esc/backdrop/X/tab-switch must not tear it down silently. */
+export function shouldConfirmLiveExit(liveSessionActive: boolean): boolean {
+  return liveSessionActive;
+}
+
+/** Copy for the live-exit confirm, branched by which path the running session took.
+ *  Native: Kalpa IS the uploader, so stopping ends the upload and closes the report
+ *  on ESO Logs. Handoff: the separate official uploader keeps streaming; Kalpa only
+ *  stops tracking. */
+export function liveExitConfirmCopy(handedOff: boolean): {
+  title: string;
+  description: string;
+  confirmLabel: string;
+} {
+  return handedOff
+    ? {
+        title: "Stop tracking in Kalpa?",
+        description:
+          "The official ESO Logs uploader keeps streaming in its own window — you'll need to stop it there to end the live report.",
+        confirmLabel: "Stop tracking",
+      }
+    : {
+        title: "Stop the live upload and close the report on ESO Logs?",
+        description:
+          "Kalpa is uploading directly, so stopping ends the upload and closes the report on ESO Logs. This can't be undone.",
+        confirmLabel: "Stop upload",
+      };
+}
+
+/** Subscribe to an async listener without leaking it when an unmount races the
+ *  subscription's resolution. If the returned cleanup already ran by the time
+ *  `subscribe` resolves, the listener is torn down immediately instead of leaking —
+ *  the StrictMode double-mount and dependency-change cases. Returns the effect
+ *  cleanup. A rejected subscription is swallowed (the listener is an enhancement). */
+export function attachRaceSafe(subscribe: () => Promise<() => void>): () => void {
+  let active = true;
+  let unlisten: (() => void) | undefined;
+  void subscribe()
+    .then((fn) => {
+      if (!active) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    })
+    .catch(() => {
+      /* the listener is optional; ignore if the API is unavailable */
+    });
+  return () => {
+    active = false;
+    unlisten?.();
   };
-  const { color, label, Icon, spin } = map[status];
-  return (
-    // role=status so screen readers announce status changes (text + icon, not
-    // color alone — the app is always dark).
-    <InfoPill color={color} role="status" aria-live="polite" className="gap-1.5 px-2.5 py-1">
-      <Icon className={cn("size-3.5", spin && "animate-spin")} aria-hidden />
-      {label}
-    </InfoPill>
-  );
+}
+
+/** Derive the direct-upload readout flags from the raw settings + session reads,
+ *  FAIL-CLOSED: a failed or tainted store read presents as opted-out (never claims
+ *  "direct" against an opt-out it couldn't confirm). Shared by the mount probe and
+ *  the post-change refresh so the two can't drift. */
+export function deriveNativeState(input: {
+  manual: { ok: boolean; value: boolean };
+  live: { ok: boolean; value: boolean };
+  session: boolean;
+  tainted: boolean;
+}): { nativeOptIn: boolean; hasNativeSession: boolean; liveUseOfficial: boolean } {
+  const readFailed = !input.manual.ok || !input.live.ok || input.tainted;
+  return {
+    nativeOptIn: !input.manual.value && !readFailed,
+    hasNativeSession: input.session,
+    liveUseOfficial: input.live.value || readFailed,
+  };
 }
 
 /** Format a byte-count compactly (kept local to avoid import churn). */
