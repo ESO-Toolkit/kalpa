@@ -277,10 +277,44 @@ struct NativeSharedPackBody {
     addons: Vec<NativePackAddonEntry>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeEsoPackFile {
+    format: String,
+    version: u32,
+    pack: NativeSharedPackBody,
+    shared_at: String,
+    shared_by: String,
+    #[serde(default)]
+    settings: HashMap<String, NativeAddonSettings>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeAddonSettings {
+    encoding: String,
+    lua: String,
+    #[serde(default)]
+    #[serde(rename = "originalBytes")]
+    _original_bytes: usize,
+    #[serde(default)]
+    #[serde(rename = "scrubbedBytes")]
+    _scrubbed_bytes: usize,
+    #[serde(default)]
+    #[serde(rename = "finalBytes")]
+    _final_bytes: usize,
+}
+
 #[derive(Debug, Clone)]
 struct NativePackDetailData {
     entry: PackHubEntry,
     addons: Vec<PackHubAddonEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct NativePackFileImportData {
+    detail: NativePackDetailData,
+    settings: HashMap<String, NativeAddonSettings>,
 }
 
 #[derive(Debug, Clone)]
@@ -296,6 +330,13 @@ struct NativePackInstallResult {
     installed: usize,
     failed: usize,
     folders: usize,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NativeSvImportResult {
+    applied: Vec<String>,
+    skipped: Vec<String>,
     errors: Vec<String>,
 }
 
@@ -3147,6 +3188,8 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         );
     });
 
+    let import_file_settings = Arc::new(Mutex::new(HashMap::<String, NativeAddonSettings>::new()));
+
     let import_code_ui = ui.as_weak();
     ui.on_pack_hub_import_share_code_edited(move |code| {
         let Some(ui) = import_code_ui.upgrade() else {
@@ -3159,18 +3202,34 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_pack_hub_import_message("".into());
     });
 
+    let import_file_path_ui = ui.as_weak();
+    ui.on_pack_hub_import_file_path_edited(move |path| {
+        let Some(ui) = import_file_path_ui.upgrade() else {
+            return;
+        };
+        ui.set_pack_hub_import_file_path(path.to_string().into());
+        ui.set_pack_hub_import_message("".into());
+    });
+
     let import_clear_ui = ui.as_weak();
+    let import_clear_settings = import_file_settings.clone();
     ui.on_pack_hub_import_clear(move || {
         let Some(ui) = import_clear_ui.upgrade() else {
             return;
         };
+        import_clear_settings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
         ui.set_pack_hub_import_loading(false);
         ui.set_pack_hub_import_share_code("".into());
+        ui.set_pack_hub_import_file_path("".into());
         clear_pack_hub_import_model(&ui);
     });
 
     let import_resolve_ui = ui.as_weak();
     let import_resolve_models = models.clone();
+    let import_resolve_settings = import_file_settings.clone();
     ui.on_pack_hub_import_resolve_share_code(move || {
         let Some(ui) = import_resolve_ui.upgrade() else {
             return;
@@ -3189,7 +3248,11 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_pack_hub_import_share_code(code.as_str().into());
         ui.set_pack_hub_import_loading(true);
         ui.set_pack_hub_import_message("Resolving share code...".into());
-        apply_pack_hub_import_model(&ui, empty_pack_hub_entry(), Vec::new());
+        import_resolve_settings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        apply_pack_hub_import_model(&ui, empty_pack_hub_entry(), Vec::new(), false);
 
         let installed_ids = installed_discover_ids(&import_resolve_models.all.borrow());
         let ui_weak = ui.as_weak();
@@ -3202,11 +3265,70 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 ui.set_pack_hub_import_loading(false);
                 match result {
                     Ok(detail) => {
-                        apply_pack_hub_import_model(&ui, detail.entry, detail.addons);
+                        apply_pack_hub_import_model(&ui, detail.entry, detail.addons, false);
                         ui.set_pack_hub_import_message("".into());
                     }
                     Err(error) => {
-                        apply_pack_hub_import_model(&ui, empty_pack_hub_entry(), Vec::new());
+                        apply_pack_hub_import_model(&ui, empty_pack_hub_entry(), Vec::new(), false);
+                        ui.set_pack_hub_import_message(error.into());
+                    }
+                }
+            });
+        });
+    });
+
+    let import_file_ui = ui.as_weak();
+    let import_file_models = models.clone();
+    let import_file_settings_state = import_file_settings.clone();
+    ui.on_pack_hub_import_file(move || {
+        let Some(ui) = import_file_ui.upgrade() else {
+            return;
+        };
+        if ui.get_pack_hub_import_loading() {
+            return;
+        }
+
+        let path = ui.get_pack_hub_import_file_path().to_string();
+        if path.trim().is_empty() {
+            ui.set_pack_hub_import_message("Enter a .esopack file path.".into());
+            return;
+        }
+
+        ui.set_pack_hub_import_loading(true);
+        ui.set_pack_hub_import_message("Reading .esopack file...".into());
+        ui.set_pack_hub_import_share_code("".into());
+        apply_pack_hub_import_model(&ui, empty_pack_hub_entry(), Vec::new(), false);
+
+        let installed_ids = installed_discover_ids(&import_file_models.all.borrow());
+        let ui_weak = ui.as_weak();
+        let settings_state = import_file_settings_state.clone();
+        std::thread::spawn(move || {
+            let result = import_esopack_file_blocking(Path::new(&path), &installed_ids);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                ui.set_pack_hub_import_loading(false);
+                match result {
+                    Ok(imported) => {
+                        let has_settings = !imported.settings.is_empty();
+                        *settings_state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner()) = imported.settings;
+                        apply_pack_hub_import_model(
+                            &ui,
+                            imported.detail.entry,
+                            imported.detail.addons,
+                            has_settings,
+                        );
+                        ui.set_pack_hub_import_message("".into());
+                    }
+                    Err(error) => {
+                        settings_state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .clear();
+                        apply_pack_hub_import_model(&ui, empty_pack_hub_entry(), Vec::new(), false);
                         ui.set_pack_hub_import_message(error.into());
                     }
                 }
@@ -3223,6 +3345,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     let import_install_ui = ui.as_weak();
+    let import_install_settings = import_file_settings;
     ui.on_pack_hub_import_install(move || {
         let Some(ui) = import_install_ui.upgrade() else {
             return;
@@ -3236,7 +3359,11 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             .iter()
             .filter(|row| !row.installed && row.selected)
             .count();
-        if pending == 0 {
+        let settings = import_install_settings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if pending == 0 && settings.is_empty() {
             ui.set_status_error_message(
                 "All required addons in this shared pack are already installed.".into(),
             );
@@ -3255,12 +3382,38 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
 
         let pack = ui.get_pack_hub_import_pack();
         ui.set_pack_hub_import_loading(true);
-        ui.set_pack_hub_import_install_label(format!("Installing {pending}...").into());
-        ui.set_status_error_message(format!("Installing {pending} shared pack addon(s)...").into());
+        ui.set_pack_hub_import_install_label(
+            if pending == 0 {
+                "Applying Settings".to_string()
+            } else {
+                format!("Installing {pending}...")
+            }
+            .into(),
+        );
+        ui.set_status_error_message(
+            if pending == 0 {
+                "Applying shared pack settings...".to_string()
+            } else {
+                format!("Installing {pending} shared pack addon(s)...")
+            }
+            .into(),
+        );
 
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
-            let result = install_pack_hub_addons_blocking(&addons_dir, rows);
+            let result = if pending == 0 {
+                NativePackInstallResult {
+                    rows,
+                    installed: 0,
+                    failed: 0,
+                    folders: 0,
+                    errors: Vec::new(),
+                }
+            } else {
+                install_pack_hub_addons_blocking(&addons_dir, rows)
+            };
+            let settings_result = (!settings.is_empty())
+                .then(|| apply_imported_pack_settings_blocking(&addons_dir, settings));
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
@@ -3269,10 +3422,15 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 let summary = pack_hub_install_summary(&result);
                 let installed = result.installed;
                 ui.set_pack_hub_import_loading(false);
-                apply_pack_hub_import_model(&ui, pack, result.rows);
+                let has_settings = ui.get_pack_hub_import_has_settings();
+                apply_pack_hub_import_model(&ui, pack, result.rows, has_settings);
                 if installed > 0 {
                     ui.invoke_refresh_requested();
                 }
+                let summary = settings_result
+                    .as_ref()
+                    .map(|settings| pack_hub_import_combined_summary(&summary, settings, pending))
+                    .unwrap_or(summary);
                 ui.set_status_error_message(summary.into());
             });
         });
@@ -3891,15 +4049,19 @@ fn apply_pack_hub_import_model(
     ui: &KalpaWindow,
     entry: PackHubEntry,
     addons: Vec<PackHubAddonEntry>,
+    has_settings: bool,
 ) {
-    ui.set_pack_hub_import_install_label(pack_hub_import_install_label(&addons).into());
+    ui.set_pack_hub_import_has_settings(has_settings);
+    ui.set_pack_hub_import_install_label(
+        pack_hub_import_install_label(&addons, has_settings).into(),
+    );
     ui.set_pack_hub_import_pack(entry);
     ui.set_pack_hub_import_addons(Rc::new(VecModel::from(addons)).into());
 }
 
 fn clear_pack_hub_import_model(ui: &KalpaWindow) {
     ui.set_pack_hub_import_message("".into());
-    apply_pack_hub_import_model(ui, empty_pack_hub_entry(), Vec::new());
+    apply_pack_hub_import_model(ui, empty_pack_hub_entry(), Vec::new(), false);
 }
 
 fn apply_pack_hub_create_state(ui: &KalpaWindow, models: &AddonModels, state: &PackHubCreateState) {
@@ -4325,6 +4487,56 @@ fn fetch_shared_pack_blocking(
     Ok(pack_hub_detail_from_shared_pack(&code, body, installed_ids))
 }
 
+fn import_esopack_file_blocking(
+    path: &Path,
+    installed_ids: &BTreeSet<String>,
+) -> Result<NativePackFileImportData, String> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("esopack") {
+        return Err("Only .esopack files can be imported.".to_string());
+    }
+
+    let path = path
+        .canonicalize()
+        .map_err(|_| "File not found.".to_string())?;
+    let metadata = fs::metadata(&path).map_err(|error| format!("Failed to read file: {error}"))?;
+    if metadata.len() > 10 * 1024 * 1024 {
+        return Err("File is too large (max 10 MB).".to_string());
+    }
+
+    let contents =
+        fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))?;
+    let pack: NativeEsoPackFile = serde_json::from_str(&contents)
+        .map_err(|error| format!("Invalid .esopack file: {error}"))?;
+
+    if pack.format != "esopack" {
+        return Err("Not a valid .esopack file (wrong format field).".to_string());
+    }
+    if pack.version != 1 && pack.version != 2 {
+        return Err(format!(
+            "Unsupported .esopack version {}. Please update the app.",
+            pack.version
+        ));
+    }
+
+    let id = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("imported-pack");
+    let detail = pack_hub_detail_from_imported_pack(
+        &format!("file:{id}"),
+        pack.pack,
+        pack.shared_by,
+        pack.shared_at,
+        installed_ids,
+    );
+
+    Ok(NativePackFileImportData {
+        detail,
+        settings: pack.settings,
+    })
+}
+
 fn pack_hub_detail_from_hub(
     hub: NativeHubPack,
     installed_ids: &BTreeSet<String>,
@@ -4353,6 +4565,22 @@ fn pack_hub_detail_from_shared_pack(
         shared_at,
         _expires_at: _,
     } = shared;
+    pack_hub_detail_from_imported_pack(
+        &format!("share:{code}"),
+        pack,
+        shared_by,
+        shared_at,
+        installed_ids,
+    )
+}
+
+fn pack_hub_detail_from_imported_pack(
+    id: &str,
+    pack: NativeSharedPackBody,
+    shared_by: String,
+    shared_at: String,
+    installed_ids: &BTreeSet<String>,
+) -> NativePackDetailData {
     let addon_count = pack.addons.len();
     let tag = pack
         .tags
@@ -4375,7 +4603,7 @@ fn pack_hub_detail_from_shared_pack(
         .unwrap_or_else(|| "Shared pack".to_string());
 
     let entry = PackHubEntry {
-        id: format!("share:{code}").into(),
+        id: id.into(),
         title: pack.title.as_str().into(),
         description: pack.description.as_str().into(),
         tag: tag.into(),
@@ -4386,7 +4614,7 @@ fn pack_hub_detail_from_shared_pack(
         updated_label: updated_label.into(),
         monogram: pack_monogram(&pack.title).into(),
         author_initial: author_initial(&author).into(),
-        identity_kind: pack_identity_kind(code, &pack.title, &pack.pack_type),
+        identity_kind: pack_identity_kind(id, &pack.title, &pack.pack_type),
         type_kind: pack_type_kind(&pack.pack_type),
         trial,
     };
@@ -4478,12 +4706,13 @@ fn pack_hub_install_label(addons: &[PackHubAddonEntry]) -> String {
     }
 }
 
-fn pack_hub_import_install_label(addons: &[PackHubAddonEntry]) -> String {
+fn pack_hub_import_install_label(addons: &[PackHubAddonEntry], has_settings: bool) -> String {
     match addons
         .iter()
         .filter(|addon| !addon.installed && addon.selected)
         .count()
     {
+        0 if has_settings => "Apply Settings".to_string(),
         0 => "All Addons Installed".to_string(),
         1 => "Install 1 New Addon".to_string(),
         count => format!("Install {count} New Addons"),
@@ -4656,6 +4885,193 @@ fn pack_hub_install_summary(result: &NativePackInstallResult) -> String {
         result.failed,
         first_error
     )
+}
+
+fn pack_hub_settings_summary(result: &NativeSvImportResult) -> String {
+    let mut summary = format!(
+        "Applied settings for {} addon{}",
+        result.applied.len(),
+        if result.applied.len() == 1 { "" } else { "s" }
+    );
+    if !result.skipped.is_empty() {
+        summary.push_str(&format!(", {} skipped", result.skipped.len()));
+    }
+    if !result.errors.is_empty() {
+        summary.push_str(&format!(
+            ", {} failed: {}",
+            result.errors.len(),
+            result.errors.join("; ")
+        ));
+    }
+    summary.push('.');
+    summary
+}
+
+fn pack_hub_import_combined_summary(
+    install_summary: &str,
+    settings: &NativeSvImportResult,
+    install_count: usize,
+) -> String {
+    if install_count == 0 {
+        return pack_hub_settings_summary(settings);
+    }
+    format!("{install_summary} {}", pack_hub_settings_summary(settings))
+}
+
+fn apply_imported_pack_settings_blocking(
+    addons_dir: &Path,
+    settings: HashMap<String, NativeAddonSettings>,
+) -> NativeSvImportResult {
+    if settings.is_empty() {
+        return NativeSvImportResult::default();
+    }
+
+    let sv_dir = settings_saved_variables_dir(addons_dir);
+    if let Err(error) = fs::create_dir_all(&sv_dir) {
+        return NativeSvImportResult {
+            errors: vec![format!(
+                "Failed to create SavedVariables directory: {error}"
+            )],
+            ..Default::default()
+        };
+    }
+
+    let ctx = collect_import_saved_variable_identities(addons_dir);
+    let mut result = NativeSvImportResult::default();
+    let mut folders = settings.keys().cloned().collect::<Vec<_>>();
+    folders.sort();
+
+    for folder in folders {
+        if let Err(error) = validate_addon_folder_name(&folder) {
+            result
+                .errors
+                .push(format!("{folder}: invalid folder name: {error}"));
+            continue;
+        }
+
+        let Some(entry) = settings.get(folder.as_str()) else {
+            result.skipped.push(folder);
+            continue;
+        };
+
+        if entry.encoding != "lua-text" {
+            result.errors.push(format!(
+                "{}: unsupported encoding '{}'",
+                folder, entry.encoding
+            ));
+            continue;
+        }
+
+        let substituted = saved_variables::scrub::substitute_placeholders(
+            &entry.lua,
+            &ctx,
+            saved_variables::scrub::WELL_KNOWN_WORLDS,
+        );
+        if has_unresolved_identity_placeholders(&substituted) {
+            result.errors.push(format!(
+                "{folder}: unresolved identity placeholders - launch ESO at least once to establish your identity"
+            ));
+            continue;
+        }
+
+        let file_name = format!("{folder}.lua");
+        if let Err(error) = saved_variables::parser::parse_sv_file(&substituted, &file_name) {
+            result.errors.push(format!(
+                "{folder}: settings file failed validation: {error}"
+            ));
+            continue;
+        }
+
+        let destination = sv_dir.join(&file_name);
+        if destination.is_file() {
+            let backup = destination.with_extension("lua.bak");
+            if let Err(error) = fs::copy(&destination, &backup) {
+                result
+                    .errors
+                    .push(format!("{folder}: failed to create backup: {error}"));
+                continue;
+            }
+        }
+
+        let temp = sv_dir.join(format!("{folder}.lua.tmp"));
+        if let Err(error) = fs::write(&temp, &substituted) {
+            result
+                .errors
+                .push(format!("{folder}: failed to write: {error}"));
+            continue;
+        }
+        if destination.exists() {
+            if let Err(error) = fs::remove_file(&destination) {
+                let _ = fs::remove_file(&temp);
+                result.errors.push(format!(
+                    "{folder}: failed to replace existing file: {error}"
+                ));
+                continue;
+            }
+        }
+        if let Err(error) = fs::rename(&temp, &destination) {
+            let _ = fs::remove_file(&temp);
+            result
+                .errors
+                .push(format!("{folder}: failed to finalize write: {error}"));
+            continue;
+        }
+
+        result.applied.push(folder);
+    }
+
+    result
+}
+
+fn collect_import_saved_variable_identities(
+    addons_dir: &Path,
+) -> saved_variables::scrub::ScrubContext {
+    let sv_dir = settings_saved_variables_dir(addons_dir);
+    let mut merged = saved_variables::scrub::ScrubContext::default();
+    let Ok(entries) = fs::read_dir(&sv_dir) else {
+        return merged;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("lua") {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("SavedVariables.lua");
+        let Ok(tree) = saved_variables::parser::parse_sv_file(&content, file_name) else {
+            continue;
+        };
+        let ctx = saved_variables::scrub::detect_identities_from_tree(&tree);
+        merge_unique_strings(&mut merged.accounts, ctx.accounts);
+        merge_unique_strings(&mut merged.characters, ctx.characters);
+        merge_unique_strings(&mut merged.character_ids, ctx.character_ids);
+        merge_unique_strings(&mut merged.extra_worlds, ctx.extra_worlds);
+    }
+
+    merged
+}
+
+fn merge_unique_strings(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+
+fn has_unresolved_identity_placeholders(lua: &str) -> bool {
+    lua.contains("${ACCOUNT}")
+        || lua.contains("${ACCOUNT:")
+        || lua.contains("${ACCOUNT_NAME}")
+        || lua.contains("${ACCOUNT_NAME:")
+        || lua.contains("${CHAR:")
+        || lua.contains("${CHAR_ID:")
 }
 
 fn addon_count_label(count: usize) -> String {
@@ -12102,6 +12518,13 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
         })
         .unwrap_or(0);
     ui.set_pack_hub_view(pack_hub_view);
+    if let Ok(path) = std::env::var("KALPA_PACK_HUB_IMPORT_FILE") {
+        if !path.trim().is_empty() {
+            ui.set_pack_hub_open(true);
+            ui.set_pack_hub_view(5);
+            ui.set_pack_hub_import_file_path(path.into());
+        }
+    }
     let uploader_view = std::env::var("KALPA_UPLOADER_VIEW")
         .map(|value| match value.to_ascii_lowercase().as_str() {
             "1" | "uploading" | "manual-uploading" => 1,
@@ -15702,14 +16125,90 @@ CombatMetrics_SavedVariables = {
         assert!(!detail.addons[1].required);
         assert!(!detail.addons[1].selected);
         assert_eq!(
-            pack_hub_import_install_label(&detail.addons),
+            pack_hub_import_install_label(&detail.addons, false),
             "All Addons Installed"
+        );
+        assert_eq!(
+            pack_hub_import_install_label(&detail.addons, true),
+            "Apply Settings"
         );
 
         let missing_required = pack_hub_detail_from_shared_pack("HK7M3P", shared, &BTreeSet::new());
         assert_eq!(
-            pack_hub_import_install_label(&missing_required.addons),
+            pack_hub_import_install_label(&missing_required.addons, true),
             "Install 1 New Addon"
+        );
+    }
+
+    #[test]
+    fn pack_hub_esopack_file_import_parses_v2_settings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("trial.esopack");
+        let json = serde_json::json!({
+            "format": "esopack",
+            "version": 2,
+            "pack": {
+                "title": "File Trial Pack",
+                "description": "Imported from disk",
+                "packType": "addon-pack",
+                "tags": ["trial"],
+                "addons": [
+                    { "esouiId": 4061, "name": "Ability Icons Framework", "required": true },
+                    { "esouiId": 1161, "name": "Addon Selector", "required": false }
+                ]
+            },
+            "sharedAt": "2026-01-04T00:00:00Z",
+            "sharedBy": "Guildmate",
+            "settings": {
+                "AddonSelector": {
+                    "encoding": "lua-text",
+                    "lua": "AddonSelector_SavedVariables = { }\n",
+                    "originalBytes": 32,
+                    "scrubbedBytes": 32,
+                    "finalBytes": 32
+                }
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).expect("write esopack");
+
+        let imported = import_esopack_file_blocking(&path, &BTreeSet::new()).expect("import file");
+
+        assert_eq!(imported.detail.entry.title.as_str(), "File Trial Pack");
+        assert_eq!(imported.detail.entry.author.as_str(), "Guildmate");
+        assert_eq!(
+            imported.detail.entry.updated_label.as_str(),
+            "Shared Jan 4, 2026"
+        );
+        assert_eq!(imported.detail.addons.len(), 2);
+        assert!(imported.settings.contains_key("AddonSelector"));
+    }
+
+    #[test]
+    fn pack_hub_esopack_settings_apply_writes_saved_variables() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let addons_root = temp.path().join("live").join("AddOns");
+        fs::create_dir_all(&addons_root).expect("addons root");
+        let mut settings = HashMap::new();
+        settings.insert(
+            "AddonSelector".to_string(),
+            NativeAddonSettings {
+                encoding: "lua-text".to_string(),
+                lua: "AddonSelector_SavedVariables = { }\n".to_string(),
+                _original_bytes: 32,
+                _scrubbed_bytes: 32,
+                _final_bytes: 32,
+            },
+        );
+
+        let result = apply_imported_pack_settings_blocking(&addons_root, settings);
+
+        assert_eq!(result.applied, vec!["AddonSelector".to_string()]);
+        assert!(result.errors.is_empty());
+        let written = settings_saved_variables_dir(&addons_root).join("AddonSelector.lua");
+        assert!(written.is_file());
+        assert_eq!(
+            fs::read_to_string(written).expect("written settings"),
+            "AddonSelector_SavedVariables = { }\n"
         );
     }
 

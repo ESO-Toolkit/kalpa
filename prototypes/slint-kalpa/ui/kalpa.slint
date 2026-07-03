@@ -6280,14 +6280,20 @@ component PackHubInstallView inherits Rectangle {
 
 component PackHubImportView inherits Rectangle {
     in-out property <string> share-code;
+    in-out property <string> file-path;
     in property <PackHubEntry> pack;
     in property <[PackHubAddonEntry]> addons;
     in property <bool> loading: false;
+    in property <bool> has-settings: false;
     in property <string> message: "";
     in property <string> install-label: "Install Addons";
+    private property <length> addons-title-y: root.has-settings ? 132px : 106px;
+    private property <length> addon-list-y: root.addons-title-y + 30px;
     callback back;
     callback share-code-edited(string);
+    callback file-path-edited(string);
     callback resolve-share-code;
+    callback import-file;
     callback clear-import;
     callback install-import;
     callback addon-selection-toggle(int);
@@ -6343,7 +6349,7 @@ component PackHubImportView inherits Rectangle {
 
         Rectangle {
             x: 42px;
-            y: 162px;
+            y: 154px;
             width: parent.width - 84px;
             height: 74px;
             border-radius: 12px;
@@ -6373,18 +6379,60 @@ component PackHubImportView inherits Rectangle {
             }
         }
 
+        Text {
+            x: 42px;
+            y: 242px;
+            width: parent.width - 84px;
+            text: "or import a .esopack file";
+            color: Palette.muted-half;
+            font-size: 11px;
+            font-weight: 800;
+            horizontal-alignment: center;
+        }
+
+        Rectangle {
+            x: 42px;
+            y: 264px;
+            width: parent.width - 84px;
+            height: 74px;
+            border-radius: 12px;
+            border-width: 0px;
+            background: Palette.white-02;
+
+            PackHubField {
+                x: 14px;
+                y: 19px;
+                width: parent.width - 128px;
+                placeholder: "C:\\path\\pack.esopack";
+                search: false;
+                editable: true;
+                value <=> root.file-path;
+                edited(value) => { root.file-path-edited(value); }
+            }
+
+            PackHubButton {
+                x: parent.width - 106px;
+                y: 21px;
+                width: 92px;
+                icon: @image-url("../assets/icons/file-text.svg");
+                label: "Import";
+                disabled: root.loading || root.file-path == "";
+                clicked => { root.import-file(); }
+            }
+        }
+
         if (root.message != "") : Rectangle {
             x: 42px;
-            y: 254px;
+            y: 350px;
             width: parent.width - 84px;
-            height: 76px;
+            height: 56px;
             border-radius: 12px;
             border-width: 0px;
             background: root.loading ? Palette.gold-04 : Palette.red-04;
 
             Image {
                 x: 16px;
-                y: 29px;
+                y: 20px;
                 width: 16px;
                 height: 16px;
                 source: root.loading ? @image-url("../assets/icons/refresh-cw.svg") : @image-url("../assets/icons/triangle-alert.svg");
@@ -6456,14 +6504,37 @@ component PackHubImportView inherits Rectangle {
         Pill { x: 108px; y: 62px; label: root.pack.tag; tone: root.pack.trial ? Palette.red : Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
         Text { x: 190px; y: 66px; width: parent.width - 190px; text: "shared by " + root.pack.author + " - " + root.pack.updated-label; color: Palette.muted-half; font-size: 11px; font-weight: 600; overflow: elide; }
 
-        DetailSectionTitle { x: 0px; y: 106px; width: parent.width; label: "ADDONS"; }
-        Text { x: parent.width - 176px; y: 106px; width: 176px; text: root.pack.addon-count; color: Palette.gold; font-size: 10px; font-weight: 800; horizontal-alignment: right; }
+        if (root.has-settings) : Rectangle {
+            x: 0px;
+            y: 94px;
+            width: parent.width;
+            height: 28px;
+            border-radius: 9px;
+            border-width: 0px;
+            background: Palette.gold-04;
+
+            Text {
+                x: 12px;
+                y: 0px;
+                width: parent.width - 24px;
+                height: parent.height;
+                text: "Includes SavedVariables settings";
+                color: Palette.gold;
+                font-size: 11px;
+                font-weight: 800;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        DetailSectionTitle { x: 0px; y: root.addons-title-y; width: parent.width; label: "ADDONS"; }
+        Text { x: parent.width - 176px; y: root.addons-title-y; width: 176px; text: root.pack.addon-count; color: Palette.gold; font-size: 10px; font-weight: 800; horizontal-alignment: right; }
 
         ScrollView {
             x: 0px;
-            y: 136px;
+            y: root.addon-list-y;
             width: parent.width;
-            height: parent.height - 194px;
+            height: parent.height - root.addon-list-y - 58px;
             viewport-width: self.width;
             viewport-height: root.addons.length * 48px;
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -6522,6 +6593,7 @@ component PackHubOverlay inherits Rectangle {
     in property <[PackHubCreateAddonEntry]> create-selected-addons;
     in-out property <string> browse-query;
     in-out property <string> import-share-code;
+    in-out property <string> import-file-path;
     in-out property <string> create-title;
     in-out property <string> create-description;
     in-out property <int> create-pack-type: 0;
@@ -6534,6 +6606,7 @@ component PackHubOverlay inherits Rectangle {
     in property <string> detail-message: "";
     in property <string> install-label: "Install Addons";
     in property <bool> import-loading: false;
+    in property <bool> import-has-settings: false;
     in property <string> import-message: "";
     in property <string> import-install-label: "Install Addons";
     in-out property <int> selected-pack-index: 0;
@@ -6543,7 +6616,9 @@ component PackHubOverlay inherits Rectangle {
     callback browse-sort-next;
     callback browse-load-more;
     callback import-share-code-edited(string);
+    callback import-file-path-edited(string);
     callback import-resolve-share-code;
+    callback import-file;
     callback import-clear;
     callback import-addon-selection-toggle(int);
     callback import-install;
@@ -6648,14 +6723,18 @@ component PackHubOverlay inherits Rectangle {
                 width: parent.width - 48px;
                 height: parent.height - 166px;
                 share-code <=> root.import-share-code;
+                file-path <=> root.import-file-path;
                 pack: root.import-pack;
                 addons: root.import-addons;
                 loading: root.import-loading;
+                has-settings: root.import-has-settings;
                 message: root.import-message;
                 install-label: root.import-install-label;
                 back => { root.view = 0; }
                 share-code-edited(value) => { root.import-share-code-edited(value); }
+                file-path-edited(value) => { root.import-file-path-edited(value); }
                 resolve-share-code => { root.import-resolve-share-code(); }
+                import-file => { root.import-file(); }
                 clear-import => { root.import-clear(); }
                 addon-selection-toggle(index) => { root.import-addon-selection-toggle(index); }
                 install-import => { root.import-install(); }
@@ -10741,6 +10820,7 @@ export component KalpaWindow inherits Window {
     in-out property <int> pack-hub-selected-index: 0;
     in-out property <string> pack-hub-browse-query;
     in-out property <string> pack-hub-import-share-code;
+    in-out property <string> pack-hub-import-file-path;
     in-out property <string> pack-hub-create-title;
     in-out property <string> pack-hub-create-description;
     in-out property <int> pack-hub-create-pack-type: 0;
@@ -10753,6 +10833,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> pack-hub-detail-message;
     in-out property <string> pack-hub-install-label: "Install Addons";
     in-out property <bool> pack-hub-import-loading: false;
+    in-out property <bool> pack-hub-import-has-settings: false;
     in-out property <string> pack-hub-import-message;
     in-out property <string> pack-hub-import-install-label: "Install Addons";
     in-out property <bool> uploader-open: false;
@@ -10936,7 +11017,9 @@ export component KalpaWindow inherits Window {
     callback pack-hub-browse-sort-next;
     callback pack-hub-browse-load-more;
     callback pack-hub-import-share-code-edited(string);
+    callback pack-hub-import-file-path-edited(string);
     callback pack-hub-import-resolve-share-code;
+    callback pack-hub-import-file;
     callback pack-hub-import-clear;
     callback pack-hub-import-addon-selection-toggle(int);
     callback pack-hub-import-install;
@@ -11237,6 +11320,7 @@ export component KalpaWindow inherits Window {
             create-selected-addons: root.pack-hub-create-selected-addons;
             browse-query <=> root.pack-hub-browse-query;
             import-share-code <=> root.pack-hub-import-share-code;
+            import-file-path <=> root.pack-hub-import-file-path;
             create-title <=> root.pack-hub-create-title;
             create-description <=> root.pack-hub-create-description;
             create-pack-type <=> root.pack-hub-create-pack-type;
@@ -11249,6 +11333,7 @@ export component KalpaWindow inherits Window {
             detail-message: root.pack-hub-detail-message;
             install-label: root.pack-hub-install-label;
             import-loading: root.pack-hub-import-loading;
+            import-has-settings: root.pack-hub-import-has-settings;
             import-message: root.pack-hub-import-message;
             import-install-label: root.pack-hub-import-install-label;
             selected-pack-index <=> root.pack-hub-selected-index;
@@ -11258,7 +11343,9 @@ export component KalpaWindow inherits Window {
             browse-sort-next => { root.pack-hub-browse-sort-next(); }
             browse-load-more => { root.pack-hub-browse-load-more(); }
             import-share-code-edited(value) => { root.pack-hub-import-share-code-edited(value); }
+            import-file-path-edited(value) => { root.pack-hub-import-file-path-edited(value); }
             import-resolve-share-code => { root.pack-hub-import-resolve-share-code(); }
+            import-file => { root.pack-hub-import-file(); }
             import-clear => { root.pack-hub-import-clear(); }
             import-addon-selection-toggle(index) => { root.pack-hub-import-addon-selection-toggle(index); }
             import-install => { root.pack-hub-import-install(); }
