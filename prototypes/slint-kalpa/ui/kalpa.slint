@@ -3423,6 +3423,7 @@ component AppearanceOverlay inherits Rectangle {
     callback addons-path-redetected;
     callback addons-path-applied(string);
     callback backup-restore-clicked;
+    callback api-compat-clicked;
     callback addon-list-exported;
     callback addon-list-imported;
     visible: root.open;
@@ -3860,7 +3861,7 @@ component AppearanceOverlay inherits Rectangle {
 
             SettingsToolRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../assets/icons/package.svg"); label: "Backup & Restore"; description: "Save and recover your addon settings"; clicked => { root.backup-restore-clicked(); } }
             SettingsToolRow { x: 0px; y: 68px; width: parent.width; icon: @image-url("../assets/icons/files.svg"); label: "Characters"; description: "View and manage your ESO characters"; }
-            SettingsToolRow { x: 0px; y: 136px; width: parent.width; icon: @image-url("../assets/icons/file-sliders.svg"); label: "API Compatibility"; description: "Check addons against current API version"; }
+            SettingsToolRow { x: 0px; y: 136px; width: parent.width; icon: @image-url("../assets/icons/file-sliders.svg"); label: "API Compatibility"; description: "Check addons against current API version"; clicked => { root.api-compat-clicked(); } }
             SettingsToolRow { x: 0px; y: 204px; width: parent.width; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Check for App Updates"; description: "See if a newer version of Kalpa is available"; }
             SettingsToolRow { visible: root.minion-detected; x: 0px; y: 272px; width: parent.width; icon: @image-url("../assets/icons/flame.svg"); label: "Minion Migration"; description: "Import tracking data from Minion with backup and preview"; accent: true; }
             SettingsToolRow { x: 0px; y: root.minion-detected ? 340px : 272px; width: parent.width; icon: @image-url("../assets/icons/power.svg"); label: "Safety Center"; description: "Snapshots, integrity checks, and operation log"; }
@@ -8777,6 +8778,7 @@ export component KalpaWindow inherits Window {
     callback settings-addons-path-opened;
     callback settings-addons-path-redetected;
     callback settings-addons-path-applied(string);
+    callback settings-api-compat;
     callback settings-addon-list-export;
     callback settings-addon-list-import;
     callback review-conflicts;
@@ -9084,6 +9086,7 @@ export component KalpaWindow inherits Window {
             addons-path-opened => { root.settings-addons-path-opened(); }
             addons-path-redetected => { root.settings-addons-path-redetected(); }
             addons-path-applied(path) => { root.settings-addons-path-applied(path); }
+            api-compat-clicked => { root.settings-api-compat(); }
             addon-list-exported => { root.settings-addon-list-export(); }
             addon-list-imported => { root.settings-addon-list-import(); }
             backup-restore-clicked => {

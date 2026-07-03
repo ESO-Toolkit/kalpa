@@ -135,6 +135,13 @@ struct NativeImportResult {
     skipped: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeApiCompatInfo {
+    game_api_version: u32,
+    outdated_addons: Vec<String>,
+    up_to_date_addons: Vec<String>,
+}
+
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
@@ -2339,6 +2346,37 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
         }
     });
 
+    let api_compat_ui = ui.as_weak();
+    ui.on_settings_api_compat(move || {
+        let Some(ui) = api_compat_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_dir) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before checking API compatibility.".into(),
+            );
+            return;
+        };
+
+        ui.set_status_error_message("Checking addon API compatibility...".into());
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = check_native_api_compatibility(&addons_dir);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                match result {
+                    Ok(info) => ui.set_status_error_message(api_compat_summary(&info).into()),
+                    Err(error) => ui.set_status_error_message(
+                        format!("API compatibility check failed: {error}").into(),
+                    ),
+                }
+            });
+        });
+    });
+
     let export_ui = ui.as_weak();
     ui.on_settings_addon_list_export(move || {
         let Some(ui) = export_ui.upgrade() else {
@@ -3967,6 +4005,101 @@ fn read_clipboard_text() -> Result<String, String> {
     clipboard
         .get_text()
         .map_err(|error| format!("Failed to read clipboard: {error}"))
+}
+
+fn check_native_api_compatibility(addons_dir: &Path) -> Result<NativeApiCompatInfo, String> {
+    let game_api_version = read_game_api_version(addons_dir)?;
+    let entries = fs::read_dir(addons_dir)
+        .map_err(|error| format!("Failed to read AddOns folder: {error}"))?;
+    let mut outdated_addons = Vec::new();
+    let mut up_to_date_addons = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(folder_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(manifest) = find_manifest(addons_dir, folder_name)
+            .and_then(|path| manifest::parse_manifest(folder_name, &path))
+        else {
+            continue;
+        };
+
+        if manifest.api_version.is_empty() {
+            continue;
+        }
+
+        if manifest.api_version.contains(&game_api_version) {
+            up_to_date_addons.push(manifest.title);
+        } else {
+            outdated_addons.push(manifest.title);
+        }
+    }
+
+    outdated_addons.sort();
+    up_to_date_addons.sort();
+
+    Ok(NativeApiCompatInfo {
+        game_api_version,
+        outdated_addons,
+        up_to_date_addons,
+    })
+}
+
+fn read_game_api_version(addons_dir: &Path) -> Result<u32, String> {
+    let settings_path = addons_dir
+        .parent()
+        .map(|path| path.join("AddOnSettings.txt"))
+        .ok_or_else(|| "Could not find AddOnSettings.txt.".to_string())?;
+    let content = fs::read_to_string(&settings_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "AddOnSettings.txt not found. Launch ESO at least once.".to_string()
+        } else {
+            format!("Failed to read AddOnSettings.txt: {error}")
+        }
+    })?;
+
+    content
+        .lines()
+        .find(|line| line.starts_with("#Version"))
+        .and_then(|line| line.strip_prefix("#Version").map(str::trim))
+        .and_then(|version| version.parse::<u32>().ok())
+        .filter(|version| *version != 0)
+        .ok_or_else(|| "Could not determine game API version.".to_string())
+}
+
+fn api_compat_summary(info: &NativeApiCompatInfo) -> String {
+    if info.outdated_addons.is_empty() {
+        return format!(
+            "API {}: all {} checked addons are compatible.",
+            info.game_api_version,
+            info.up_to_date_addons.len()
+        );
+    }
+
+    let sample = info
+        .outdated_addons
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if info.outdated_addons.len() > 3 {
+        format!(" and {} more", info.outdated_addons.len() - 3)
+    } else {
+        String::new()
+    };
+
+    format!(
+        "API {}: {} compatible, {} outdated ({sample}{suffix}).",
+        info.game_api_version,
+        info.up_to_date_addons.len(),
+        info.outdated_addons.len()
+    )
 }
 
 fn update_selected_dependency(
@@ -9408,6 +9541,37 @@ CombatMetrics_SavedVariables = {
         assert_eq!(export.addons[0].folder_name, "CombatMetrics");
         assert_eq!(export.addons[0].esoui_id, 1360);
         assert_eq!(export.addons[0].version, "1.7.7");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_api_compatibility_reads_game_version_and_manifests() {
+        let root = test_temp_dir("api-compat");
+        let addons_root = root.join("AddOns");
+        fs::create_dir_all(addons_root.join("CurrentAddon")).expect("create current addon");
+        fs::create_dir_all(addons_root.join("OldAddon")).expect("create old addon");
+        fs::write(root.join("AddOnSettings.txt"), "#Version 101048\n").expect("write settings");
+        fs::write(
+            addons_root.join("CurrentAddon").join("CurrentAddon.txt"),
+            "## Title: Current Addon\n## APIVersion: 101048 101049\n",
+        )
+        .expect("write current manifest");
+        fs::write(
+            addons_root.join("OldAddon").join("OldAddon.txt"),
+            "## Title: Old Addon\n## APIVersion: 101038\n",
+        )
+        .expect("write old manifest");
+
+        let info = check_native_api_compatibility(&addons_root).expect("check compat");
+
+        assert_eq!(info.game_api_version, 101048);
+        assert_eq!(info.up_to_date_addons, vec!["Current Addon".to_string()]);
+        assert_eq!(info.outdated_addons, vec!["Old Addon".to_string()]);
+        assert_eq!(
+            api_compat_summary(&info),
+            "API 101048: 1 compatible, 1 outdated (Old Addon)."
+        );
 
         let _ = fs::remove_dir_all(root);
     }
