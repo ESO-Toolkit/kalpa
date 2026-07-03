@@ -3,7 +3,7 @@ use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Seek};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 
@@ -1111,7 +1111,7 @@ pub struct ApiAddonLookup {
 
 struct FilelistCache {
     entries: Vec<ApiFileEntry>,
-    lookup: HashMap<String, ApiAddonLookup>,
+    lookup: Arc<HashMap<String, ApiAddonLookup>>,
     fetched_at: Instant,
 }
 
@@ -1153,10 +1153,10 @@ fn ensure_filelist_cache() -> Result<(), String> {
 /// Single HTTP request returns ~4000 addons with all their folder paths,
 /// versions, and last-updated timestamps. Result is cached in-memory for
 /// `FILELIST_TTL` so repeated update checks within a session don't re-fetch.
-pub fn fetch_filelist_lookup() -> Result<HashMap<String, ApiAddonLookup>, String> {
+pub fn fetch_filelist_lookup() -> Result<Arc<HashMap<String, ApiAddonLookup>>, String> {
     ensure_filelist_cache()?;
     let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
-    Ok(guard.as_ref().unwrap().lookup.clone())
+    Ok(Arc::clone(&guard.as_ref().unwrap().lookup))
 }
 
 fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
@@ -1176,7 +1176,7 @@ fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
         .map_err(|e| format!("Failed to parse ESOUI API response: {e}"))
 }
 
-fn build_filelist_lookup(entries: &[ApiFileEntry]) -> HashMap<String, ApiAddonLookup> {
+fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<HashMap<String, ApiAddonLookup>> {
     let mut map = HashMap::new();
     for entry in entries {
         let lookup = ApiAddonLookup {
@@ -1197,7 +1197,7 @@ fn build_filelist_lookup(entries: &[ApiFileEntry]) -> HashMap<String, ApiAddonLo
         }
     }
 
-    map
+    Arc::new(map)
 }
 
 #[cfg(test)]

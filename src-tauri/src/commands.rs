@@ -475,6 +475,54 @@ pub(crate) fn build_installed_index(
     (names, versions)
 }
 
+/// Like [`build_installed_index`] but seeds the TOP-LEVEL addon names/versions
+/// from an already-parsed manifest list instead of re-reading (and re-parsing
+/// the `AddOnVersion` from) every top-level manifest on disk a second time.
+///
+/// The startup scan has just parsed every top-level manifest; the parsed list is
+/// exactly the set of top-level folders that carry a matching manifest — the same
+/// gate [`record_addon`] applies — and each entry carries the same
+/// `addon_version` [`read_addon_version`] would recover. Bundled libraries under
+/// wrapper folders are NOT in the parsed list, so subfolders are still walked
+/// (over every non-disabled top-level directory, matching the descent in
+/// [`build_installed_index`]).
+fn build_installed_index_from_parsed(
+    parsed: &[AddonManifest],
+    top_dirs: &[(String, PathBuf, bool)],
+) -> (HashSet<String>, HashMap<String, Option<u32>>) {
+    let mut names = HashSet::new();
+    let mut versions: HashMap<String, Option<u32>> = HashMap::new();
+
+    // Top-level: mirror `record_addon` using the already-parsed manifest data.
+    // Disabled folders are excluded, exactly as `build_installed_index` skips
+    // `.disabled` directories.
+    for addon in parsed {
+        if addon.disabled {
+            continue;
+        }
+        let key = normalize_addon_name(&addon.folder_name);
+        match addon.addon_version {
+            Some(ver) => merge_max_version(&mut versions, key.clone(), ver),
+            None => {
+                versions.entry(key.clone()).or_insert(None);
+            }
+        }
+        names.insert(key);
+    }
+
+    // Subfolders (2 levels): ESO discovers nested addons/libraries under plain
+    // wrapper folders such as `Libs/`, so descend into every non-disabled
+    // top-level directory just as `build_installed_index` does.
+    for (_name, path, disabled) in top_dirs {
+        if *disabled {
+            continue;
+        }
+        collect_subfolders_into(path, &mut names, &mut versions);
+    }
+
+    (names, versions)
+}
+
 /// Names-only view of [`build_installed_index`], for callers that don't need
 /// versions (the install-time transitive resolver).
 pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
@@ -879,9 +927,12 @@ fn scan_installed_addons_blocking(
     }
     addons.extend(newly_parsed.into_iter().map(|(_, m, _)| m));
 
-    // One manifest-gated traversal yields both the installed-name set and the
-    // version map, so "missing" and "outdated" always agree on what exists.
-    let (installed, version_map) = build_installed_index(addons_dir);
+    // Derive the installed-name set and version map from the manifests just
+    // parsed above (top level) plus a subfolder-only walk for bundled libraries,
+    // instead of re-reading every top-level manifest a second time. "missing" and
+    // "outdated" still agree on what exists because the same manifest gate and
+    // `AddOnVersion` value feed both.
+    let (installed, version_map) = build_installed_index_from_parsed(&addons, &top_dirs);
 
     // Load metadata and clean up stale entries:
     // - Remove entries for addon folders that no longer exist on disk
@@ -950,9 +1001,10 @@ fn scan_installed_addons_blocking(
             addon.installed_at = meta.installed_at.clone();
         }
 
-        if let Some(hash_manifest) = file_hashes::load_hash_manifest(addons_dir, &addon.folder_name)
+        if let Some(count) =
+            file_hashes::load_modified_file_count(addons_dir, &addon.folder_name)
         {
-            addon.modified_file_count = hash_manifest.modified_files.len() as u32;
+            addon.modified_file_count = count;
         }
     }
 
@@ -1900,7 +1952,7 @@ fn generate_session_id(folder_name: &str) -> String {
         .as_nanos();
     let input = format!("{folder_name}-{nanos}");
     let hash = Sha256::digest(input.as_bytes());
-    hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
+    file_hashes::to_hex(&hash[..16])
 }
 
 /// Build a conflict report for one addon folder against a downloaded ZIP, and
@@ -2030,7 +2082,7 @@ pub async fn scan_update_conflicts(
                     folder_name: folder_name.clone(),
                     esoui_id,
                     update_version: info.version,
-                    zip_hashes,
+                    zip_hashes: Arc::new(zip_hashes),
                 },
             );
         }
@@ -2199,7 +2251,7 @@ pub async fn scan_batch_conflicts(
                                         folder_name: folder_name.clone(),
                                         esoui_id: dl.esoui_id,
                                         update_version: version.to_string(),
-                                        zip_hashes,
+                                        zip_hashes: Arc::new(zip_hashes),
                                     },
                                 );
                             }
@@ -2504,7 +2556,7 @@ fn extract_streamed_downloads(
                         folder_name: folder_name.clone(),
                         esoui_id: dl.esoui_id,
                         update_version: dl.api_version.clone(),
-                        zip_hashes: zip_hashes.clone(),
+                        zip_hashes: Arc::new(zip_hashes),
                     },
                 );
             }
@@ -2885,9 +2937,9 @@ fn update_with_decisions_inner(
     // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
     // "keep_mine" files so the user's edit stays detectable on the next update.
     let zip_hashes = if pu.zip_hashes.is_empty() {
-        file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?
+        Arc::new(file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?)
     } else {
-        pu.zip_hashes.clone()
+        Arc::clone(&pu.zip_hashes)
     };
     let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
         None
@@ -4301,11 +4353,12 @@ fn saved_variables_dir(addons_dir: &std::path::Path) -> PathBuf {
 }
 
 #[tauri::command]
-pub fn list_backups(
+pub async fn list_backups(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<Vec<BackupInfo>, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
     let backups = backups_dir(&addons_dir);
     if !backups.is_dir() {
         return Ok(Vec::new());
@@ -4385,6 +4438,9 @@ pub fn list_backups(
 
     results.sort_by_key(|b| std::cmp::Reverse(b.created_at_epoch));
     Ok(results)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Reserved directory-name prefixes inside `kalpa-backups`. User-created manual
@@ -4782,30 +4838,34 @@ pub fn get_backups_folder_path(
 }
 
 #[tauri::command]
-pub fn delete_backup(
+pub async fn delete_backup(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     backup_name: String,
 ) -> Result<(), String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let backups_root = backups_dir(&addons_dir);
-    // Reconcile crash leftovers before deleting so a deletion can't race with a
-    // pending recovery for the same backup name.
-    recover_orphaned_backups(&backups_root);
-    let backup_path = backups_root.join(&backup_name);
+    tokio::task::spawn_blocking(move || {
+        let backups_root = backups_dir(&addons_dir);
+        // Reconcile crash leftovers before deleting so a deletion can't race with a
+        // pending recovery for the same backup name.
+        recover_orphaned_backups(&backups_root);
+        let backup_path = backups_root.join(&backup_name);
 
-    if !backup_path.is_dir() {
-        return Err(format!("Backup '{backup_name}' not found."));
-    }
+        if !backup_path.is_dir() {
+            return Err(format!("Backup '{backup_name}' not found."));
+        }
 
-    fs::remove_dir_all(&backup_path).map_err(|e| format!("Failed to delete backup: {e}"))?;
+        fs::remove_dir_all(&backup_path).map_err(|e| format!("Failed to delete backup: {e}"))?;
 
-    // Also purge any leftover staging/tombstone scratch dirs for this backup so a
-    // crash-recovery pass can't later resurrect a deleted character backup from a
-    // tombstone that outlived a successful swap (e.g. failed cleanup).
-    purge_backup_scratch(&backups_root, &backup_name);
-    Ok(())
+        // Also purge any leftover staging/tombstone scratch dirs for this backup so a
+        // crash-recovery pass can't later resurrect a deleted character backup from a
+        // tombstone that outlived a successful swap (e.g. failed cleanup).
+        purge_backup_scratch(&backups_root, &backup_name);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Remove `.tmp-<name>-<seq>` / `.old-<name>-<seq>` scratch directories left for
@@ -5571,7 +5631,7 @@ fn resolve_char_backup_name(backups_root: &Path, backup_name: &str) -> Option<St
 }
 
 #[tauri::command]
-pub fn backup_character_settings(
+pub async fn backup_character_settings(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     character_name: String,
@@ -5586,6 +5646,7 @@ pub fn backup_character_settings(
     }
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
     let sv_dir = saved_variables_dir(&addons_dir);
     if !sv_dir.is_dir() {
         return Err("SavedVariables folder not found.".to_string());
@@ -5704,6 +5765,9 @@ pub fn backup_character_settings(
         .map_err(|e| format!("Failed to finalize backup: {e}"))?;
 
     Ok(copied)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── Minion Migration ────────────────────────────────────────
@@ -5793,18 +5857,22 @@ pub fn detect_minion() -> Result<bool, String> {
 /// Legacy migration command — delegates to the safe_migration implementation
 /// to avoid duplicating the import logic.
 #[tauri::command]
-pub fn migrate_from_minion(
+pub async fn migrate_from_minion(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<MinionMigrationResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let result = safe_migration::execute_migration(&addons_dir)?;
-    Ok(MinionMigrationResult {
-        found: true,
-        addon_count: result.addon_count,
-        imported: result.imported,
-        already_tracked: result.already_tracked,
+    tokio::task::spawn_blocking(move || {
+        let result = safe_migration::execute_migration(&addons_dir)?;
+        Ok(MinionMigrationResult {
+            found: true,
+            addon_count: result.addon_count,
+            imported: result.imported,
+            already_tracked: result.already_tracked,
+        })
     })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── Safe Migration Commands ────────────────────────────────────────
@@ -5835,21 +5903,25 @@ pub async fn migration_create_snapshot(
 }
 
 #[tauri::command]
-pub fn migration_dry_run(
+pub async fn migration_dry_run(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<safe_migration::DryRunResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::dry_run_migration(&addons_dir)
+    tokio::task::spawn_blocking(move || safe_migration::dry_run_migration(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn migration_execute(
+pub async fn migration_execute(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<safe_migration::MigrationResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::execute_migration(&addons_dir)
+    tokio::task::spawn_blocking(move || safe_migration::execute_migration(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5871,14 +5943,16 @@ pub fn list_snapshots(
 }
 
 #[tauri::command]
-pub fn restore_snapshot(
+pub async fn restore_snapshot(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     snapshot_id: String,
 ) -> Result<u32, String> {
     validate_name(&snapshot_id)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::restore_snapshot(&addons_dir, &snapshot_id)
+    tokio::task::spawn_blocking(move || safe_migration::restore_snapshot(&addons_dir, &snapshot_id))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5917,12 +5991,14 @@ pub fn read_ops_log(
 }
 
 #[tauri::command]
-pub fn backup_minion_config(
+pub async fn backup_minion_config(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<u32, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::backup_minion_config(&addons_dir)
+    tokio::task::spawn_blocking(move || safe_migration::backup_minion_config(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ── Pack Hub API (kalpa-pack-hub) ──────────────────────────────────────────
