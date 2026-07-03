@@ -6332,6 +6332,7 @@ component PackHubCreateAddonsView inherits Rectangle {
     callback addon-toggle(int);
     callback selected-remove(int);
     callback selected-required-toggle(int);
+    callback save-to-file;
     private property <string> selected-count-label: root.selected-addons.length == 1 ? "1 addon selected" : root.selected-addons.length + " addons selected";
     background: #00000000;
 
@@ -6439,7 +6440,7 @@ component PackHubCreateAddonsView inherits Rectangle {
         }
     }
 
-    PackHubButton { x: 0px; y: 420px; width: parent.width; icon: @image-url("../assets/icons/save.svg"); label: "Save to File"; disabled: root.selected-addons.length == 0; }
+    PackHubButton { x: 0px; y: 420px; width: parent.width; icon: @image-url("../assets/icons/save.svg"); label: "Save to File"; disabled: root.selected-addons.length == 0; clicked => { root.save-to-file(); } }
     Hairline { x: 0px; y: 462px; width: parent.width; height: 1px; opacity: 0.35; }
     Checkbox { x: 0px; y: 484px; checked: false; }
     Text { x: 28px; y: 480px; width: parent.width - 28px; text: "Publish anonymously"; color: Palette.muted-half; font-size: 12px; font-weight: 600; }
@@ -7117,6 +7118,7 @@ component PackHubOverlay inherits Rectangle {
     callback create-addon-toggle(int);
     callback create-selected-remove(int);
     callback create-selected-required-toggle(int);
+    callback create-save-to-file;
     callback detail-addon-selection-toggle(int);
     callback install-detail;
     callback manage-pack-detail;
@@ -7267,6 +7269,7 @@ component PackHubOverlay inherits Rectangle {
                 addon-toggle(index) => { root.create-addon-toggle(index); }
                 selected-remove(index) => { root.create-selected-remove(index); }
                 selected-required-toggle(index) => { root.create-selected-required-toggle(index); }
+                save-to-file => { root.create-save-to-file(); }
             }
 
             Rectangle {
@@ -11631,6 +11634,7 @@ export component KalpaWindow inherits Window {
     callback pack-hub-create-addon-toggle(int);
     callback pack-hub-create-selected-remove(int);
     callback pack-hub-create-selected-required-toggle(int);
+    callback pack-hub-create-save-to-file;
     callback pack-hub-detail-addon-selection-toggle(int);
     callback pack-hub-install-detail;
     callback pack-hub-manage-detail;
@@ -11978,6 +11982,7 @@ export component KalpaWindow inherits Window {
             create-addon-toggle(index) => { root.pack-hub-create-addon-toggle(index); }
             create-selected-remove(index) => { root.pack-hub-create-selected-remove(index); }
             create-selected-required-toggle(index) => { root.pack-hub-create-selected-required-toggle(index); }
+            create-save-to-file => { root.pack-hub-create-save-to-file(); }
             detail-addon-selection-toggle(index) => { root.pack-hub-detail-addon-selection-toggle(index); }
             install-detail => { root.pack-hub-install-detail(); }
             manage-pack-detail => { root.pack-hub-manage-detail(); }

@@ -256,10 +256,11 @@ Current detail status:
   rows, remove actions, and required/optional toggles. My Packs now has a native
   Installed sub-tab backed by local `installed_packs`, with native open-detail
   and remove-from-library actions; Created packs remain a full-Hub/account
-  handoff. An OS file picker for `.esopack` import, native
-  create/save/publish/export, private share-code creation, voting, and
-  account/session wiring still need production parity before this can replace
-  the React Pack Hub implementation.
+  handoff. The native Create flow can now export the selected addon list as an
+  importable `.esopack` file in the local Kalpa exports folder. An OS file
+  picker for `.esopack` import, native draft/publish, private share-code
+  creation, voting, and account/session wiring still need production parity
+  before this can replace the React Pack Hub implementation.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,

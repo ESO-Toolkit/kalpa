@@ -316,7 +316,7 @@ struct ExportData {
     addons: Vec<ExportEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 struct NativePackAddonEntry {
@@ -375,7 +375,7 @@ struct NativeSharedPackResponse {
     _expires_at: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeSharedPackBody {
     title: String,
@@ -385,7 +385,7 @@ struct NativeSharedPackBody {
     addons: Vec<NativePackAddonEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeEsoPackFile {
     format: String,
@@ -397,7 +397,7 @@ struct NativeEsoPackFile {
     settings: HashMap<String, NativeAddonSettings>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NativeAddonSettings {
     encoding: String,
@@ -4026,7 +4026,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
 
     let create_required_ui = ui.as_weak();
     let create_required_models = models.clone();
-    let create_required_state = pack_hub_create_state;
+    let create_required_state = pack_hub_create_state.clone();
     ui.on_pack_hub_create_selected_required_toggle(move |index| {
         let Some(ui) = create_required_ui.upgrade() else {
             return;
@@ -4040,6 +4040,32 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         let mut state = create_required_state.borrow_mut();
         toggle_pack_hub_create_required(&mut state, row);
         apply_pack_hub_create_state(&ui, &create_required_models, &state);
+    });
+
+    let create_save_ui = ui.as_weak();
+    let create_save_state = pack_hub_create_state;
+    ui.on_pack_hub_create_save_to_file(move || {
+        let Some(ui) = create_save_ui.upgrade() else {
+            return;
+        };
+        let title = ui.get_pack_hub_create_title().to_string();
+        let description = ui.get_pack_hub_create_description().to_string();
+        let pack_type = ui.get_pack_hub_create_pack_type();
+        let state = create_save_state.borrow();
+        match export_pack_hub_create_file(
+            title.as_str(),
+            description.as_str(),
+            pack_type,
+            &state.selected,
+            None,
+        ) {
+            Ok(path) => {
+                ui.set_status_error_message(
+                    format!("Pack saved to {}.", path.display()).into(),
+                );
+            }
+            Err(error) => ui.set_status_error_message(format!("Pack export failed: {error}").into()),
+        }
     });
 
     let detail_select_ui = ui.as_weak();
@@ -4661,6 +4687,109 @@ fn toggle_pack_hub_create_required(state: &mut PackHubCreateState, row: PackHubC
     {
         entry.required = !entry.required;
     }
+}
+
+fn export_pack_hub_create_file(
+    title: &str,
+    description: &str,
+    pack_type_kind: i32,
+    selected: &[PackHubCreateAddonEntry],
+    export_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Pack needs a title.".to_string());
+    }
+    if selected.is_empty() {
+        return Err("Add at least one addon.".to_string());
+    }
+
+    let pack_type = pack_type_key_from_kind(pack_type_kind).to_string();
+    let addons = selected
+        .iter()
+        .map(pack_hub_create_export_addon)
+        .collect::<Result<Vec<_>, _>>()?;
+    let pack = NativeEsoPackFile {
+        format: "esopack".to_string(),
+        version: 1,
+        pack: NativeSharedPackBody {
+            title: title.to_string(),
+            description: description.trim().to_string(),
+            pack_type: pack_type.clone(),
+            tags: vec![fallback_pack_tag(&pack_type)],
+            addons,
+        },
+        shared_at: current_iso_utc(),
+        shared_by: "Kalpa Native".to_string(),
+        settings: HashMap::new(),
+    };
+
+    let export_dir = export_dir.map(PathBuf::from).unwrap_or_else(default_pack_export_dir);
+    fs::create_dir_all(&export_dir)
+        .map_err(|error| format!("Failed to create export folder: {error}"))?;
+    let path = unique_export_path(&export_dir, safe_pack_file_stem(title));
+    let json = serde_json::to_string_pretty(&pack)
+        .map_err(|error| format!("Failed to serialize pack: {error}"))?;
+    fs::write(&path, json).map_err(|error| format!("Failed to write pack file: {error}"))?;
+    Ok(path)
+}
+
+fn pack_hub_create_export_addon(
+    row: &PackHubCreateAddonEntry,
+) -> Result<NativePackAddonEntry, String> {
+    let esoui_id = pack_hub_create_row_id(row)
+        .ok_or_else(|| format!("Invalid ESOUI id for {}.", row.title.as_str()))?
+        .parse::<u32>()
+        .map_err(|_| format!("Invalid ESOUI id for {}.", row.title.as_str()))?;
+    Ok(NativePackAddonEntry {
+        esoui_id,
+        name: row.title.to_string(),
+        required: row.required,
+        note: None,
+    })
+}
+
+fn default_pack_export_dir() -> PathBuf {
+    user_documents_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Kalpa")
+        .join("Exports")
+}
+
+fn user_documents_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|home| PathBuf::from(home).join("Documents"))
+}
+
+fn safe_pack_file_stem(title: &str) -> String {
+    let mut stem = String::new();
+    let mut last_dash = false;
+    for ch in title.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            stem.push(ch);
+            last_dash = false;
+        } else if ch.is_whitespace() && !last_dash && !stem.is_empty() {
+            stem.push('-');
+            last_dash = true;
+        }
+    }
+    let stem = stem.trim_matches('-');
+    if stem.is_empty() {
+        "kalpa-pack".to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+fn unique_export_path(dir: &Path, stem: String) -> PathBuf {
+    let mut path = dir.join(format!("{stem}.esopack"));
+    let mut suffix = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem}-{suffix}.esopack"));
+        suffix += 1;
+    }
+    path
 }
 
 fn empty_pack_hub_entry() -> PackHubEntry {
@@ -18670,6 +18799,49 @@ CombatMetrics_SavedVariables = {
 
         addon.is_library = true;
         assert!(pack_hub_create_entry_from_addon(&addon, &state).is_none());
+    }
+
+    #[test]
+    fn pack_hub_create_export_round_trips_as_esopack() {
+        let root = test_temp_dir("pack-hub-create-export");
+        let selected = vec![
+            PackHubCreateAddonEntry {
+                title: "Combat Metrics".into(),
+                meta: "by Solinur - v1.0 - #1360".into(),
+                esoui_id: "#1360".into(),
+                selected: true,
+                required: true,
+            },
+            PackHubCreateAddonEntry {
+                title: "Optional Helper".into(),
+                meta: "#2468".into(),
+                esoui_id: "#2468".into(),
+                selected: true,
+                required: false,
+            },
+        ];
+
+        let path = export_pack_hub_create_file(
+            "Trial Essentials",
+            "Core raid addons",
+            0,
+            &selected,
+            Some(root),
+        )
+        .expect("export pack");
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("Trial-Essentials.esopack")
+        );
+        let imported = import_esopack_file_blocking(&path, &BTreeSet::new()).expect("import pack");
+        assert_eq!(imported.detail.entry.title.as_str(), "Trial Essentials");
+        assert_eq!(imported.detail.addons.len(), 2);
+        assert!(imported.detail.addons[0].required);
+        assert!(!imported.detail.addons[1].required);
+        assert!(imported.settings.is_empty());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
