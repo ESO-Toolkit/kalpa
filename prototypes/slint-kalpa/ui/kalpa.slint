@@ -1963,10 +1963,12 @@ component DiscoverModePanel inherits Rectangle {
     in-out property <int> selected-index: 0;
     in-out property <string> query;
     in-out property <string> url-input;
+    in-out property <string> category-filter;
     callback result-selected(int);
     callback install-result(int);
     callback query-edited(string);
     callback url-edited(string);
+    callback category-filter-edited(string);
     callback popular-sort-selected(int);
     callback category-next;
     callback category-sort-next;
@@ -1976,7 +1978,8 @@ component DiscoverModePanel inherits Rectangle {
     callback retry;
     private property <bool> category-menu-open: false;
     private property <bool> category-sort-menu-open: false;
-    private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? 82px : 0px);
+    private property <bool> category-filter-visible: root.tab == 2 && (root.entries.length > 0 || root.category-filter != "");
+    private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? (root.category-filter-visible ? 120px : 82px) : 0px);
     private property <bool> footer-visible: (root.tab == 1 || root.tab == 2) && (root.loading || root.has-more);
     private property <length> footer-height: root.footer-visible ? 42px : 0px;
     background: #00000000;
@@ -2022,6 +2025,72 @@ component DiscoverModePanel inherits Rectangle {
         }
     }
 
+    if (root.category-filter-visible) : Rectangle {
+        x: 12px;
+        y: 82px;
+        width: parent.width - 24px;
+        height: 30px;
+        border-radius: 9px;
+        border-width: 0px;
+        background: Palette.white-04;
+        inner-shadow-offset-y: 1px;
+        inner-shadow-blur: 1px;
+        inner-shadow-color: Palette.white-06;
+        clip: true;
+
+        Image {
+            x: 11px;
+            y: 9px;
+            width: 12px;
+            height: 12px;
+            source: @image-url("../assets/icons/search.svg");
+            image-fit: contain;
+            colorize: Palette.muted-half;
+        }
+
+        Text {
+            visible: root.category-filter == "";
+            x: 31px;
+            width: parent.width - 42px;
+            height: parent.height;
+            text: "Filter " + root.category-label + "...";
+            color: Palette.muted-half;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        TextEdit {
+            x: 31px;
+            y: 0px;
+            width: parent.width - 42px;
+            height: parent.height;
+            opacity: 0.01;
+            text: root.category-filter;
+            font-size: 13px;
+            font-family: "Geist";
+            edited(content) => {
+                root.category-filter = content;
+                root.category-filter-edited(content);
+            }
+        }
+
+        Text {
+            visible: root.category-filter != "";
+            x: 31px;
+            y: 0px;
+            width: parent.width - 42px;
+            height: parent.height;
+            text: root.category-filter;
+            color: Palette.foreground;
+            font-size: 13px;
+            font-family: "Geist";
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
     if (root.loading && root.entries.length == 0) : DiscoverResultSkeletonList {
         y: root.list-y;
         width: parent.width;
@@ -2034,8 +2103,8 @@ component DiscoverModePanel inherits Rectangle {
         width: parent.width;
         height: parent.height - root.list-y;
         icon: @image-url("../assets/icons/search.svg");
-        title: root.tab == 3 ? "URL / ID Install" : "Search ESOUI";
-        subtitle: root.tab == 3 ? "Paste an ESOUI link or addon ID to install directly." : "Search ESOUI or choose a category to find addons.";
+        title: root.category-filter != "" ? "No matches" : (root.tab == 3 ? "URL / ID Install" : "Search ESOUI");
+        subtitle: root.category-filter != "" ? "No addons match that filter." : (root.tab == 3 ? "Paste an ESOUI link or addon ID to install directly." : "Search ESOUI or choose a category to find addons.");
     }
 
     if (!root.loading && root.entries.length == 0 && root.message != "") : Rectangle {
@@ -9729,6 +9798,7 @@ component Sidebar inherits Rectangle {
     in-out property <int> discover-tab: 0;
     in-out property <string> discover-query;
     in-out property <string> discover-url-input;
+    in-out property <string> discover-category-filter;
     in-out property <int> discover-popular-sort: 0;
     in-out property <string> discover-category-label: "Combat";
     in-out property <string> discover-category-sort-label: "Downloads";
@@ -9763,6 +9833,7 @@ component Sidebar inherits Rectangle {
     callback discover-install(int);
     callback discover-query-edited(string);
     callback discover-url-edited(string);
+    callback discover-category-filter-edited(string);
     callback discover-popular-sort-selected(int);
     callback discover-category-next;
     callback discover-category-sort-next;
@@ -10486,10 +10557,12 @@ component Sidebar inherits Rectangle {
         selected-index <=> root.selected-discover-index;
         query <=> root.discover-query;
         url-input <=> root.discover-url-input;
+        category-filter <=> root.discover-category-filter;
         result-selected(index) => { root.discover-selected(index); }
         install-result(index) => { root.discover-install(index); }
         query-edited(value) => { root.discover-query-edited(value); }
         url-edited(value) => { root.discover-url-edited(value); }
+        category-filter-edited(value) => { root.discover-category-filter-edited(value); }
         popular-sort-selected(sort) => { root.discover-popular-sort-selected(sort); }
         category-next => { root.discover-category-next(); }
         category-sort-next => { root.discover-category-sort-next(); }
@@ -11703,6 +11776,7 @@ export component KalpaWindow inherits Window {
     in-out property <int> discover-tab: 0;
     in-out property <string> discover-query;
     in-out property <string> discover-url-input;
+    in-out property <string> discover-category-filter;
     in-out property <int> discover-popular-sort: 0;
     in-out property <string> discover-category-label: "Combat";
     in-out property <string> discover-category-sort-label: "Downloads";
@@ -11844,6 +11918,7 @@ export component KalpaWindow inherits Window {
     callback discover-open-esoui(string);
     callback discover-query-edited(string);
     callback discover-url-edited(string);
+    callback discover-category-filter-edited(string);
     callback discover-popular-sort-selected(int);
     callback discover-category-next;
     callback discover-category-sort-next;
@@ -12045,6 +12120,7 @@ export component KalpaWindow inherits Window {
             discover-tab <=> root.discover-tab;
             discover-query <=> root.discover-query;
             discover-url-input <=> root.discover-url-input;
+            discover-category-filter <=> root.discover-category-filter;
             discover-popular-sort <=> root.discover-popular-sort;
             discover-category-label <=> root.discover-category-label;
             discover-category-sort-label <=> root.discover-category-sort-label;
@@ -12068,6 +12144,7 @@ export component KalpaWindow inherits Window {
             discover-install(index) => { root.discover-install(index); }
             discover-query-edited(value) => { root.discover-query-edited(value); }
             discover-url-edited(value) => { root.discover-url-edited(value); }
+            discover-category-filter-edited(value) => { root.discover-category-filter-edited(value); }
             discover-popular-sort-selected(sort) => { root.discover-popular-sort-selected(sort); }
             discover-category-next => { root.discover-category-next(); }
             discover-category-sort-next => { root.discover-category-sort-next(); }

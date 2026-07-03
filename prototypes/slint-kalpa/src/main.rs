@@ -2491,6 +2491,36 @@ fn append_discover_results(ui: &KalpaWindow, entries: Vec<DiscoverEntry>) {
     ui.set_discover_results(Rc::new(VecModel::from(rows)).into());
 }
 
+fn filter_category_discover_entries(entries: &[DiscoverEntry], query: &str) -> Vec<DiscoverEntry> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return entries.to_vec();
+    }
+
+    entries
+        .iter()
+        .filter(|entry| {
+            entry.title.to_string().to_ascii_lowercase().contains(&query)
+                || entry
+                    .author
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains(&query)
+        })
+        .cloned()
+        .collect()
+}
+
+fn apply_category_discover_results(ui: &KalpaWindow, entries: &[DiscoverEntry]) {
+    let rows = filter_category_discover_entries(entries, ui.get_discover_category_filter().as_str());
+    let selected_index = ui
+        .get_selected_discover_index()
+        .max(0)
+        .min(rows.len().saturating_sub(1) as i32);
+    ui.set_selected_discover_index(selected_index);
+    ui.set_discover_results(Rc::new(VecModel::from(rows)).into());
+}
+
 fn discover_entries_for_tab(
     tab: i32,
     installed_ids: &BTreeSet<String>,
@@ -8499,11 +8529,13 @@ fn wire_discover(
     let tab_model = discover_model.clone();
     let tab_installed_ids = installed_ids.clone();
     let browse_state = Arc::new(Mutex::new(DiscoverBrowseState::default()));
+    let category_loaded_entries = Arc::new(Mutex::new(Vec::<DiscoverEntry>::new()));
     let popular_request_counter = Arc::new(AtomicU64::new(0));
     let tab_popular_request_counter = popular_request_counter.clone();
     let category_request_counter = Arc::new(AtomicU64::new(0));
     let tab_category_request_counter = category_request_counter.clone();
     let tab_browse_state = browse_state.clone();
+    let tab_category_loaded_entries = category_loaded_entries.clone();
     ui.on_discover_tab_selected(move |tab| {
         let Some(ui) = tab_ui.upgrade() else {
             return;
@@ -8519,6 +8551,9 @@ fn wire_discover(
         if normalized_tab != 1 && normalized_tab != 2 {
             ui.set_discover_browse_loading(false);
             ui.set_discover_browse_has_more(false);
+        }
+        if normalized_tab != 2 {
+            ui.set_discover_category_filter("".into());
         }
 
         if normalized_tab == 1 {
@@ -8591,6 +8626,7 @@ fn wire_discover(
             let request_counter = tab_category_request_counter.clone();
             let installed_snapshot = discover_installed_snapshot(&tab_installed_ids);
             let browse_state = tab_browse_state.clone();
+            let loaded_entries = tab_category_loaded_entries.clone();
             let state_snapshot = {
                 let mut state = browse_state.lock().unwrap_or_else(|e| e.into_inner());
                 state.reset_category_page();
@@ -8599,6 +8635,7 @@ fn wire_discover(
             };
             ui.set_discover_browse_loading(true);
             ui.set_discover_browse_message("".into());
+            ui.set_discover_category_filter("".into());
             let ui_weak = ui.as_weak();
             std::thread::spawn(move || {
                 let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -8625,6 +8662,9 @@ fn wire_discover(
                                 apply_discover_browse_state(&ui, &state);
                             }
                             ui.set_discover_browse_has_more(has_more);
+                            if let Ok(mut loaded) = loaded_entries.lock() {
+                                *loaded = entries.clone();
+                            }
                             let model = Rc::new(VecModel::from(entries));
                             ui.set_selected_discover_index(0);
                             ui.set_discover_results(model.into());
@@ -8638,6 +8678,9 @@ fn wire_discover(
                                 apply_discover_browse_state(&ui, &state);
                             }
                             ui.set_discover_browse_has_more(has_more);
+                            if let Ok(mut loaded) = loaded_entries.lock() {
+                                loaded.clear();
+                            }
                             ui.set_discover_browse_message("".into());
                         }
                         Err(error) => {
@@ -8733,6 +8776,7 @@ fn wire_discover(
     let category_next_state = browse_state.clone();
     let category_next_installed_ids = installed_ids.clone();
     let category_next_counter = category_request_counter.clone();
+    let category_next_loaded_entries = category_loaded_entries.clone();
     ui.on_discover_category_next(move || {
         let Some(ui) = category_next_ui.upgrade() else {
             return;
@@ -8756,8 +8800,10 @@ fn wire_discover(
             .unwrap_or_default();
         let installed_snapshot = discover_installed_snapshot(&category_next_installed_ids);
         let browse_state = category_next_state.clone();
+        let loaded_entries = category_next_loaded_entries.clone();
         ui.set_discover_browse_loading(true);
         ui.set_discover_browse_message("".into());
+        ui.set_discover_category_filter("".into());
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -8781,6 +8827,9 @@ fn wire_discover(
                             apply_discover_browse_state(&ui, &state);
                         }
                         ui.set_discover_browse_has_more(has_more);
+                        if let Ok(mut loaded) = loaded_entries.lock() {
+                            *loaded = entries.clone();
+                        }
                         let model = Rc::new(VecModel::from(entries));
                         ui.set_selected_discover_index(0);
                         ui.set_discover_results(model.into());
@@ -8794,6 +8843,9 @@ fn wire_discover(
                             apply_discover_browse_state(&ui, &state);
                         }
                         ui.set_discover_browse_has_more(has_more);
+                        if let Ok(mut loaded) = loaded_entries.lock() {
+                            loaded.clear();
+                        }
                         ui.set_discover_browse_message("".into());
                     }
                     Err(error) => {
@@ -8811,6 +8863,7 @@ fn wire_discover(
     let category_select_state = browse_state.clone();
     let category_select_installed_ids = installed_ids.clone();
     let category_select_counter = category_request_counter.clone();
+    let category_select_loaded_entries = category_loaded_entries.clone();
     ui.on_discover_category_selected(move |index| {
         let Some(ui) = category_select_ui.upgrade() else {
             return;
@@ -8834,8 +8887,10 @@ fn wire_discover(
             .unwrap_or_default();
         let installed_snapshot = discover_installed_snapshot(&category_select_installed_ids);
         let browse_state = category_select_state.clone();
+        let loaded_entries = category_select_loaded_entries.clone();
         ui.set_discover_browse_loading(true);
         ui.set_discover_browse_message("".into());
+        ui.set_discover_category_filter("".into());
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -8859,6 +8914,9 @@ fn wire_discover(
                             apply_discover_browse_state(&ui, &state);
                         }
                         ui.set_discover_browse_has_more(has_more);
+                        if let Ok(mut loaded) = loaded_entries.lock() {
+                            *loaded = entries.clone();
+                        }
                         let model = Rc::new(VecModel::from(entries));
                         ui.set_selected_discover_index(0);
                         ui.set_discover_results(model.into());
@@ -8872,6 +8930,9 @@ fn wire_discover(
                             apply_discover_browse_state(&ui, &state);
                         }
                         ui.set_discover_browse_has_more(has_more);
+                        if let Ok(mut loaded) = loaded_entries.lock() {
+                            loaded.clear();
+                        }
                         ui.set_discover_browse_message("".into());
                     }
                     Err(error) => {
@@ -8889,6 +8950,7 @@ fn wire_discover(
     let category_sort_state = browse_state.clone();
     let category_sort_installed_ids = installed_ids.clone();
     let category_sort_counter = category_request_counter.clone();
+    let category_sort_loaded_entries = category_loaded_entries.clone();
     ui.on_discover_category_sort_next(move || {
         let Some(ui) = category_sort_ui.upgrade() else {
             return;
@@ -8912,8 +8974,10 @@ fn wire_discover(
             .unwrap_or_default();
         let installed_snapshot = discover_installed_snapshot(&category_sort_installed_ids);
         let browse_state = category_sort_state.clone();
+        let loaded_entries = category_sort_loaded_entries.clone();
         ui.set_discover_browse_loading(true);
         ui.set_discover_browse_message("".into());
+        ui.set_discover_category_filter("".into());
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -8937,6 +9001,9 @@ fn wire_discover(
                             apply_discover_browse_state(&ui, &state);
                         }
                         ui.set_discover_browse_has_more(has_more);
+                        if let Ok(mut loaded) = loaded_entries.lock() {
+                            *loaded = entries.clone();
+                        }
                         let model = Rc::new(VecModel::from(entries));
                         ui.set_selected_discover_index(0);
                         ui.set_discover_results(model.into());
@@ -8950,6 +9017,9 @@ fn wire_discover(
                             apply_discover_browse_state(&ui, &state);
                         }
                         ui.set_discover_browse_has_more(has_more);
+                        if let Ok(mut loaded) = loaded_entries.lock() {
+                            loaded.clear();
+                        }
                         ui.set_discover_browse_message("".into());
                     }
                     Err(error) => {
@@ -8967,6 +9037,7 @@ fn wire_discover(
     let category_sort_select_state = browse_state.clone();
     let category_sort_select_installed_ids = installed_ids.clone();
     let category_sort_select_counter = category_request_counter.clone();
+    let category_sort_select_loaded_entries = category_loaded_entries.clone();
     ui.on_discover_category_sort_selected(move |sort| {
         let Some(ui) = category_sort_select_ui.upgrade() else {
             return;
@@ -8990,8 +9061,10 @@ fn wire_discover(
             .unwrap_or_default();
         let installed_snapshot = discover_installed_snapshot(&category_sort_select_installed_ids);
         let browse_state = category_sort_select_state.clone();
+        let loaded_entries = category_sort_select_loaded_entries.clone();
         ui.set_discover_browse_loading(true);
         ui.set_discover_browse_message("".into());
+        ui.set_discover_category_filter("".into());
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -9015,6 +9088,9 @@ fn wire_discover(
                             apply_discover_browse_state(&ui, &state);
                         }
                         ui.set_discover_browse_has_more(has_more);
+                        if let Ok(mut loaded) = loaded_entries.lock() {
+                            *loaded = entries.clone();
+                        }
                         let model = Rc::new(VecModel::from(entries));
                         ui.set_selected_discover_index(0);
                         ui.set_discover_results(model.into());
@@ -9028,6 +9104,9 @@ fn wire_discover(
                             apply_discover_browse_state(&ui, &state);
                         }
                         ui.set_discover_browse_has_more(has_more);
+                        if let Ok(mut loaded) = loaded_entries.lock() {
+                            loaded.clear();
+                        }
                         ui.set_discover_browse_message("".into());
                     }
                     Err(error) => {
@@ -9046,6 +9125,7 @@ fn wire_discover(
     let load_more_installed_ids = installed_ids.clone();
     let load_more_popular_counter = popular_request_counter.clone();
     let load_more_category_counter = category_request_counter.clone();
+    let load_more_category_entries = category_loaded_entries.clone();
     ui.on_discover_load_more(move || {
         let Some(ui) = load_more_ui.upgrade() else {
             return;
@@ -9120,6 +9200,7 @@ fn wire_discover(
                     .unwrap_or_default();
                 let installed_snapshot = discover_installed_snapshot(&load_more_installed_ids);
                 let browse_state = load_more_state.clone();
+                let loaded_entries = load_more_category_entries.clone();
                 ui.set_discover_browse_loading(true);
                 ui.set_discover_browse_message("".into());
                 let ui_weak = ui.as_weak();
@@ -9151,7 +9232,12 @@ fn wire_discover(
                                         "No more ESOUI category addons to load.".into(),
                                     );
                                 } else {
-                                    append_discover_results(&ui, entries);
+                                    if let Ok(mut loaded) = loaded_entries.lock() {
+                                        loaded.extend(entries);
+                                        apply_category_discover_results(&ui, &loaded);
+                                    } else {
+                                        append_discover_results(&ui, entries);
+                                    }
                                     ui.set_discover_browse_message("".into());
                                     ui.set_status_error_message("".into());
                                 }
@@ -9176,6 +9262,7 @@ fn wire_discover(
     let retry_installed_ids = installed_ids.clone();
     let retry_popular_counter = popular_request_counter.clone();
     let retry_category_counter = category_request_counter.clone();
+    let retry_category_entries = category_loaded_entries.clone();
     ui.on_discover_browse_retry(move || {
         let Some(ui) = retry_ui.upgrade() else {
             return;
@@ -9255,8 +9342,10 @@ fn wire_discover(
                     state.clone()
                 };
                 let browse_state = retry_state.clone();
+                let loaded_entries = retry_category_entries.clone();
                 ui.set_discover_browse_loading(true);
                 ui.set_discover_browse_message("".into());
+                ui.set_discover_category_filter("".into());
                 let ui_weak = ui.as_weak();
                 std::thread::spawn(move || {
                     let result = load_discover_category_page(state_snapshot, &installed_snapshot);
@@ -9280,6 +9369,9 @@ fn wire_discover(
                                     apply_discover_browse_state(&ui, &state);
                                 }
                                 ui.set_discover_browse_has_more(has_more);
+                                if let Ok(mut loaded) = loaded_entries.lock() {
+                                    *loaded = entries.clone();
+                                }
                                 let model = Rc::new(VecModel::from(entries));
                                 ui.set_selected_discover_index(0);
                                 ui.set_discover_results(model.into());
@@ -9293,6 +9385,9 @@ fn wire_discover(
                                     apply_discover_browse_state(&ui, &state);
                                 }
                                 ui.set_discover_browse_has_more(has_more);
+                                if let Ok(mut loaded) = loaded_entries.lock() {
+                                    loaded.clear();
+                                }
                                 ui.set_discover_browse_message("".into());
                             }
                             Err(error) => {
@@ -9307,6 +9402,31 @@ fn wire_discover(
                 });
             }
             _ => {}
+        }
+    });
+
+    let category_filter_ui = ui.as_weak();
+    let category_filter_entries = category_loaded_entries.clone();
+    let category_filter_state = browse_state.clone();
+    ui.on_discover_category_filter_edited(move |value| {
+        let Some(ui) = category_filter_ui.upgrade() else {
+            return;
+        };
+        if ui.get_discover_tab() != 2 {
+            return;
+        }
+
+        ui.set_discover_category_filter(value.clone());
+        if let Ok(entries) = category_filter_entries.lock() {
+            apply_category_discover_results(&ui, &entries);
+        }
+
+        if value.trim().is_empty() {
+            if let Ok(state) = category_filter_state.lock() {
+                apply_discover_browse_state(&ui, &state);
+            }
+        } else {
+            ui.set_discover_browse_has_more(false);
         }
     });
 
@@ -19748,6 +19868,29 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title.as_str(), "CombatMetrics");
         assert_eq!(entries[0].rank, 1);
+    }
+
+    #[test]
+    fn discover_category_filter_matches_title_and_author() {
+        let installed = BTreeSet::new();
+        let entries = vec![
+            discover_entry(
+                "1", "Combat Metrics", "Solinur", "Combat", "", "", "", "", "", "", "", "", "",
+                1, &installed,
+            ),
+            discover_entry(
+                "2", "Inventory Grid", "Crafty", "Bags", "", "", "", "", "", "", "", "", "", 2,
+                &installed,
+            ),
+        ];
+
+        let title_matches = filter_category_discover_entries(&entries, "combat");
+        assert_eq!(title_matches.len(), 1);
+        assert_eq!(title_matches[0].title.as_str(), "Combat Metrics");
+
+        let author_matches = filter_category_discover_entries(&entries, "crafty");
+        assert_eq!(author_matches.len(), 1);
+        assert_eq!(author_matches[0].title.as_str(), "Inventory Grid");
     }
 
     #[test]
