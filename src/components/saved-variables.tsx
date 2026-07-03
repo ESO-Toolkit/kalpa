@@ -15,6 +15,8 @@ import type {
   WidgetType,
   WidgetOverride,
   WidgetProps,
+  LamHintMap,
+  LamScanResponse,
 } from "../types";
 import {
   Dialog,
@@ -875,7 +877,11 @@ function WidgetCustomizer({
             className="mt-0.5 w-full rounded border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none"
             value={options}
             onChange={(e) => setOptions(e.target.value)}
-            placeholder="option1, option2, option3"
+            placeholder={
+              field.props.optionItems?.length && !existing?.props?.options?.length
+                ? field.props.optionItems.map((o) => o.label).join(", ")
+                : "option1, option2, option3"
+            }
           />
         </div>
       )}
@@ -1078,6 +1084,7 @@ function DetailPanel({
   selectedPath,
   tree,
   overlay,
+  lamHints,
   knownCharacters,
   onNavigate,
   onEdit,
@@ -1088,6 +1095,7 @@ function DetailPanel({
   selectedPath: string[];
   tree: SvTreeNode | null;
   overlay: SvSchemaOverlay;
+  lamHints: LamHintMap | null;
   knownCharacters: Set<string>;
   onNavigate: (depth: number) => void;
   onEdit: (path: string[], value: string | number | boolean | null) => void;
@@ -1109,9 +1117,17 @@ function DetailPanel({
     return leafChildren.map((child) => {
       const childPath = [...selectedPath, child.key];
       const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
-      return resolveEffectiveField(child, childPath, ctx, overlay, addonName, knownCharacters);
+      return resolveEffectiveField(
+        child,
+        childPath,
+        ctx,
+        overlay,
+        addonName,
+        knownCharacters,
+        lamHints ?? undefined
+      );
     });
-  }, [leafChildren, selectedPath, knownCharacters, overlay, addonName]);
+  }, [leafChildren, selectedPath, knownCharacters, overlay, addonName, lamHints]);
 
   // Color table children also get form rendering
   const colorTableFields = useMemo(() => {
@@ -1125,11 +1141,19 @@ function DetailPanel({
         const childPath = [...selectedPath, child.key];
         const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
         return {
-          field: resolveEffectiveField(child, childPath, ctx, overlay, addonName, knownCharacters),
+          field: resolveEffectiveField(
+            child,
+            childPath,
+            ctx,
+            overlay,
+            addonName,
+            knownCharacters,
+            lamHints ?? undefined
+          ),
           node: child,
         };
       });
-  }, [tableChildren, selectedPath, knownCharacters, overlay, addonName]);
+  }, [tableChildren, selectedPath, knownCharacters, overlay, addonName, lamHints]);
 
   if (!selectedNode || !tree) {
     return (
@@ -1265,6 +1289,10 @@ function DetailPanel({
 
 // ── Editor Tab ──────────────────────────────────────────────
 
+// Session cache of LAM dropdown scan results, keyed `${addonsPath}|${svName}`.
+// Persists across file switches within a session so we scan each addon once.
+const lamHintCache = new Map<string, LamHintMap | null>();
+
 function EditorTab({
   files,
   addonsPath,
@@ -1288,6 +1316,7 @@ function EditorTab({
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [overlay, setOverlay] = useState<SvSchemaOverlay>({});
   const [rawMode, setRawMode] = useState(false);
+  const [lamHints, setLamHints] = useState<LamHintMap | null>(null);
 
   // Navigation state
   const [selectedPath, setSelectedPath] = useState<string[]>([]);
@@ -1334,6 +1363,26 @@ function EditorTab({
       setDirty(false);
       setSelectedPath([]);
       setSelectedNode(null);
+      // LAM dropdown scan (fire-and-forget, silent on failure). Keyed by the
+      // SV file's base name, which matches the addon's SavedVariables account.
+      const svName = fileName.replace(/\.lua$/i, "");
+      const cacheKey = `${addonsPath}|${svName}`;
+      if (lamHintCache.has(cacheKey)) {
+        setLamHints(lamHintCache.get(cacheKey) ?? null);
+      } else {
+        setLamHints(null);
+        void invokeOrThrow<LamScanResponse>("scan_lam_dropdowns", { addonsPath, svName })
+          .then((res) => {
+            const map: LamHintMap = {};
+            for (const h of res.hints) map[h.settingKey.toLowerCase()] = h.choices;
+            const value = Object.keys(map).length ? map : null;
+            lamHintCache.set(cacheKey, value);
+            if (!signal?.cancelled) setLamHints(value);
+          })
+          .catch(() => {
+            /* silent — scan failure must never surface */
+          });
+      }
       try {
         const result = await invokeOrThrow<SvReadResponse>("read_saved_variable", {
           addonsPath,
@@ -1673,6 +1722,7 @@ function EditorTab({
                 selectedPath={selectedPath}
                 tree={tree}
                 overlay={overlay}
+                lamHints={lamHints}
                 knownCharacters={knownCharacters}
                 onNavigate={handleBreadcrumbNavigate}
                 onEdit={handleEdit}

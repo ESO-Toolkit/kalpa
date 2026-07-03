@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { EffectiveField, SvTreeNode } from "../types";
+import type { DropdownOptionItem, EffectiveField, SvTreeNode } from "../types";
 import {
   Select,
   SelectContent,
@@ -240,21 +240,56 @@ export function TextControl({
   );
 }
 
+/**
+ * Build the list of dropdown items for a field, sourcing typed optionItems when
+ * available (LAM-inferred), else the manual comma-separated `options`. Dedupes
+ * by stringified value and prepends the current value if it isn't already an
+ * option so the active selection is always representable.
+ */
+export function buildDropdownItems(field: EffectiveField): DropdownOptionItem[] {
+  const source: DropdownOptionItem[] =
+    field.props.optionItems && field.props.optionItems.length > 0
+      ? field.props.optionItems
+      : (field.props.options ?? []).map((o) => ({ label: o, value: o }));
+
+  // Dedupe by String(value), first occurrence wins.
+  const seen = new Set<string>();
+  const items: DropdownOptionItem[] = [];
+  for (const item of source) {
+    const key = String(item.value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(item);
+  }
+
+  // Prepend the current value if it isn't already present.
+  const currentKey = String(field.value ?? "");
+  if (!items.some((item) => String(item.value) === currentKey)) {
+    items.unshift({ label: currentKey, value: field.value ?? "" });
+  }
+
+  return items;
+}
+
 export function DropdownControl({
   field,
   onChange,
 }: {
   field: EffectiveField;
-  onChange: (val: string | number) => void;
+  onChange: (val: string | number | boolean) => void;
 }) {
-  const options = field.props.options ?? [];
-  const currentVal = String(field.value ?? "");
-  const allOptions = options.includes(currentVal) ? options : [currentVal, ...options];
+  const items = buildDropdownItems(field);
 
   const commit = (v: string | null) => {
     if (!v) return;
-    // Preserve numeric type when the field is currently a number and the
-    // chosen option parses cleanly as a finite number.
+    const match = items.find((item) => String(item.value) === v);
+    // Typed source (LAM optionItems): preserve the exact value type.
+    if (match && field.props.optionItems?.length) {
+      onChange(match.value);
+      return;
+    }
+    // Otherwise preserve numeric type when the field is currently a number and
+    // the chosen option parses cleanly as a finite number.
     if (typeof field.value === "number") {
       const num = Number(v);
       if (v.trim() !== "" && Number.isFinite(num)) {
@@ -266,14 +301,14 @@ export function DropdownControl({
   };
 
   return (
-    <Select value={currentVal} onValueChange={commit} disabled={field.readOnly}>
+    <Select value={String(field.value ?? "")} onValueChange={commit} disabled={field.readOnly}>
       <SelectTrigger className="h-7 w-40 text-xs">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        {allOptions.map((opt) => (
-          <SelectItem key={opt} value={opt}>
-            {opt}
+        {items.map((item) => (
+          <SelectItem key={String(item.value)} value={String(item.value)}>
+            {item.label}
           </SelectItem>
         ))}
       </SelectContent>
