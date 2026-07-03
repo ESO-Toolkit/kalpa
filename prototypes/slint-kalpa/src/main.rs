@@ -10,6 +10,10 @@ mod char_backup;
 mod esoui;
 
 #[allow(dead_code)]
+#[path = "../../../src-tauri/src/edit_backups.rs"]
+mod edit_backups;
+
+#[allow(dead_code)]
 #[path = "../../../src-tauri/src/file_hashes.rs"]
 mod file_hashes;
 
@@ -7609,7 +7613,12 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
                     )
                     .into(),
                 );
-                start_native_addon_update_apply(ui.as_weak(), addons_root, targets);
+                start_native_addon_update_apply(
+                    ui.as_weak(),
+                    addons_root,
+                    targets,
+                    ui.get_settings_conflict_policy().clamp(0, 2),
+                );
             }
         }
     });
@@ -9154,9 +9163,10 @@ fn start_native_addon_update_apply(
     ui_weak: slint::Weak<KalpaWindow>,
     addons_dir: PathBuf,
     targets: Vec<NativeAddonUpdateTarget>,
+    conflict_policy: i32,
 ) {
     std::thread::spawn(move || {
-        let result = apply_native_addon_updates_blocking(&addons_dir, targets);
+        let result = apply_native_addon_updates_blocking(&addons_dir, targets, conflict_policy);
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -9184,6 +9194,7 @@ fn start_native_addon_update_apply(
 fn apply_native_addon_updates_blocking(
     addons_dir: &Path,
     targets: Vec<NativeAddonUpdateTarget>,
+    conflict_policy: i32,
 ) -> Result<NativeAddonUpdateApplyResult, String> {
     let initial_checks = check_native_addon_updates_blocking(addons_dir)?;
     let target_folders = targets
@@ -9204,7 +9215,8 @@ fn apply_native_addon_updates_blocking(
             continue;
         };
 
-        match apply_native_single_addon_update(addons_dir, &target, remote_version) {
+        match apply_native_single_addon_update(addons_dir, &target, remote_version, conflict_policy)
+        {
             Ok(true) => {
                 completed_set.insert(target.folder_name.clone());
                 result.completed.push(target.folder_name);
@@ -9233,16 +9245,18 @@ fn apply_native_single_addon_update(
     addons_dir: &Path,
     target: &NativeAddonUpdateTarget,
     remote_version: &str,
+    conflict_policy: i32,
 ) -> Result<bool, String> {
     let (zip, info) = native_fetch_and_download_with_retry(target.esoui_id)?;
     let (report, zip_hashes) =
         build_native_conflict_report(addons_dir, &target.folder_name, zip.path())?;
 
-    if !report.conflicts.is_empty() {
+    let Some(kept_files) = native_kept_files_for_policy(&report, conflict_policy) else {
         return Ok(false);
+    };
+    if !report.conflicts.is_empty() && conflict_policy == 2 {
+        backup_native_conflicting_files(addons_dir, target, remote_version, &report.conflicts)?;
     }
-
-    let kept_files = report.auto_kept_files;
     let skip_files = kept_files
         .iter()
         .map(|path| format!("{}/{}", target.folder_name, path))
@@ -9281,6 +9295,41 @@ fn apply_native_single_addon_update(
     metadata::save_metadata(addons_dir, &store)?;
 
     Ok(true)
+}
+
+fn native_kept_files_for_policy(
+    report: &NativeConflictReport,
+    conflict_policy: i32,
+) -> Option<Vec<String>> {
+    if !report.conflicts.is_empty() && conflict_policy == 0 {
+        return None;
+    }
+
+    let mut kept_files = report.auto_kept_files.clone();
+    if !report.conflicts.is_empty() && conflict_policy == 1 {
+        kept_files.extend(report.conflicts.clone());
+        kept_files.sort();
+        kept_files.dedup();
+    }
+    Some(kept_files)
+}
+
+fn backup_native_conflicting_files(
+    addons_dir: &Path,
+    target: &NativeAddonUpdateTarget,
+    remote_version: &str,
+    conflicts: &[String],
+) -> Result<(), String> {
+    let from_version = file_hashes::load_hash_manifest(addons_dir, &target.folder_name)
+        .map(|manifest| manifest.installed_version)
+        .unwrap_or_default();
+    edit_backups::backup_user_files(
+        addons_dir,
+        &target.folder_name,
+        conflicts,
+        &from_version,
+        remote_version,
+    )
 }
 
 fn native_hash_overrides(
@@ -17318,6 +17367,27 @@ CombatMetrics_SavedVariables = {
         assert_eq!(report.auto_kept_files, vec!["main.lua".to_string()]);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_conflict_policy_decides_kept_files() {
+        let report = NativeConflictReport {
+            auto_kept_files: vec!["unchanged-user-edit.lua".to_string()],
+            conflicts: vec!["changed-user-edit.lua".to_string()],
+        };
+
+        assert!(native_kept_files_for_policy(&report, 0).is_none());
+        assert_eq!(
+            native_kept_files_for_policy(&report, 1).expect("keep mine resolves"),
+            vec![
+                "changed-user-edit.lua".to_string(),
+                "unchanged-user-edit.lua".to_string()
+            ]
+        );
+        assert_eq!(
+            native_kept_files_for_policy(&report, 2).expect("take update resolves"),
+            vec!["unchanged-user-edit.lua".to_string()]
+        );
     }
 
     fn test_temp_dir(name: &str) -> &'static Path {

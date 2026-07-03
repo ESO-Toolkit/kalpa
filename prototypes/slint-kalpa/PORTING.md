@@ -112,8 +112,10 @@ Current row status:
   state is already known, the same action now applies safe non-conflicting
   updates through the shared download/extract/hash/metadata path, preserves
   auto-kept user-only edits, resolves transitive dependencies, and leaves
-  conflict rows marked for review; the native conflict-decision modal is still
-  pending.
+  conflict rows marked for review when the policy is `ask`. The native path now
+  honors the saved automatic conflict policies too: keep-mine applies selective
+  extraction and take-update writes edit backups before overwriting conflicts.
+  The manual native conflict-decision modal is still pending.
 - Rows now expose a native right-click context menu with Open Folder, View on
   ESOUI, Favorite/Unfavorite, Enable/Disable, and Remove actions. Enable/disable
   and remove use the same real folder operations as the detail footer for
@@ -136,11 +138,11 @@ Current row status:
 - `primary-hover` now uses the React OKLCH lightness/chroma rule instead of RGB
   lightening.
 - Not accepted yet: real local manifest loading plus Kalpa metadata hydration is
-  still not the full production addon store; update installation/conflict
-  decisions for edited files, dynamic tag filter tabs, the real select popup,
-  full keyboard focus/auto-scroll behavior, custom context-menu styling,
-  remaining production context/batch commands, and virtualized large-list
-  behavior are not fully ported.
+  still not the full production addon store; manual update conflict decisions
+  for edited files, dynamic tag filter tabs, the real select popup, full
+  keyboard focus/auto-scroll behavior, custom context-menu styling, remaining
+  production context/batch commands, and virtualized large-list behavior are not
+  fully ported.
 
 Current detail status:
 
