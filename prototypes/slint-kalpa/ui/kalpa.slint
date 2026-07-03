@@ -567,17 +567,10 @@ component Pill inherits Rectangle {
     border-radius: root.pill-height / 2;
     border-width: 0px;
     background: root.fill;
+    inner-shadow-offset-y: 1px;
+    inner-shadow-blur: 1px;
+    inner-shadow-color: root.line;
     clip: true;
-
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height / 2;
-        border-radius: root.border-radius;
-        border-width: 0px;
-        background: root.line;
-    }
 
     label-text := Text {
         x: root.pill-padding-x;
@@ -1260,21 +1253,13 @@ component AddonRow inherits Rectangle {
     in-out property <length> menu-y: 18px;
 
     height: 52px;
-    background: #00000000;
+    background: root.active-current ? Palette.gold-04 : (root.selected ? Palette.gold-04 : (root.hovered ? Palette.white-04 : #00000000));
+    inner-shadow-offset-y: 0px;
+    inner-shadow-blur: 1px;
+    inner-shadow-color: root.active-current || root.selected ? Palette.gold-04 : #00000000;
     opacity: disabled ? 0.55 : 1.0;
 
     animate background, opacity { duration: 150ms; easing: ease-in-out; }
-
-    Rectangle {
-        visible: root.active-current || root.selected || root.hovered;
-        x: root.active-current || root.selected ? 0px : 8px;
-        y: root.active-current || root.selected ? 1px : 4px;
-        width: parent.width - (root.active-current || root.selected ? 0px : 16px);
-        height: parent.height - (root.active-current || root.selected ? 2px : 8px);
-        border-radius: root.active-current || root.selected ? 0px : 8px;
-        border-width: 0px;
-        background: root.active-current ? @linear-gradient(90deg, Palette.gold-06 0%, Palette.white-02 42%, #00000000 100%) : (root.selected ? @linear-gradient(90deg, Palette.gold-04 0%, Palette.white-02 42%, #00000000 100%) : Palette.white-02);
-    }
 
     Rectangle {
         x: 0px;
@@ -1289,8 +1274,8 @@ component AddonRow inherits Rectangle {
         y: 0px;
         width: 34px;
         height: root.height;
-        visible: root.active-current || root.selected || state != 0 || disabled;
-        background: root.active-current || root.selected ? @linear-gradient(90deg, Palette.gold-15 0%, #00000000 100%) : @linear-gradient(90deg, root.state-wash 0%, #00000000 100%);
+        visible: !root.active-current && !root.selected && (state != 0 || disabled);
+        background: @linear-gradient(90deg, root.state-wash 0%, #00000000 100%);
     }
 
     Checkbox {
@@ -1624,8 +1609,11 @@ component DiscoverResultRow inherits Rectangle {
     private property <length> meta-y: 38px;
     private property <length> extra-y: 57px;
     height: root.show-extra-meta ? 78px : 62px;
-    background: root.selected ? @linear-gradient(90deg, Palette.gold-06 0%, Palette.white-02 48%, #00000000 100%) : (touch.has-hover ? Palette.white-04 : #00000000);
+    background: root.selected ? Palette.gold-04 : (touch.has-hover ? Palette.white-04 : #00000000);
     border-radius: 0px;
+    inner-shadow-offset-y: 0px;
+    inner-shadow-blur: 1px;
+    inner-shadow-color: root.selected ? Palette.gold-04 : #00000000;
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
@@ -1697,8 +1685,8 @@ component DiscoverResultRow inherits Rectangle {
         x: root.meta == "" ? root.body-x : author-text.x + author-text.width + 8px;
         y: root.meta-y - 3px;
         label: root.category;
-        tone: root.selected ? Palette.gold-hot : Palette.muted-strong;
-        fill: root.selected ? Palette.gold-10 : Palette.white-03;
+        tone: Palette.muted-strong;
+        fill: Palette.white-03;
         line: #00000000;
         pill-height: 18px;
         pill-padding-x: 7px;
@@ -1760,6 +1748,11 @@ component DiscoverSortChip inherits Rectangle {
     in property <bool> active: false;
     in property <length> chip-width: label-text.preferred-width + 42px;
     callback clicked;
+    private property <length> icon-size: 11px;
+    private property <length> icon-gap: 7px;
+    private property <length> label-width: min(label-text.preferred-width, max(28px, root.width - root.icon-size - root.icon-gap - 22px));
+    private property <length> content-width: root.icon-size + root.icon-gap + root.label-width;
+    private property <length> content-x: max(11px, (root.width - root.content-width) / 2);
     width: root.chip-width;
     preferred-width: self.width;
     horizontal-stretch: 0;
@@ -1767,31 +1760,24 @@ component DiscoverSortChip inherits Rectangle {
     border-radius: 8px;
     border-width: 0px;
     background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-10 : Palette.white-06);
+    inner-shadow-offset-y: 1px;
+    inner-shadow-blur: 1px;
+    inner-shadow-color: root.active ? Palette.gold-10 : Palette.white-06;
     clip: true;
 
-    Rectangle {
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height / 2;
-        border-radius: root.border-radius;
-        border-width: 0px;
-        background: #00000000;
-    }
-
     Image {
-        x: 12px;
-        y: 8px;
-        width: 11px;
-        height: 11px;
+        x: root.content-x;
+        y: (root.height - root.icon-size) / 2;
+        width: root.icon-size;
+        height: root.icon-size;
         source: root.icon;
         image-fit: contain;
         colorize: root.active ? Palette.gold : Palette.muted-half;
     }
 
     label-text := Text {
-        x: 30px;
-        width: root.width - 40px;
+        x: root.content-x + root.icon-size + root.icon-gap;
+        width: root.label-width;
         height: root.height;
         text: root.label;
         color: root.active ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
@@ -1817,20 +1803,12 @@ component DiscoverSelectChip inherits Rectangle {
     width: root.chip-width;
     height: 32px;
     border-radius: 10px;
-    border-width: 1px;
-    border-color: touch.has-hover ? Palette.white-10 : Palette.border;
-    background: touch.has-hover ? Palette.white-06 : Palette.white-04;
+    border-width: 0px;
+    background: touch.has-hover ? Palette.white-08 : Palette.white-04;
+    inner-shadow-offset-y: 1px;
+    inner-shadow-blur: 1px;
+    inner-shadow-color: touch.has-hover ? Palette.white-10 : Palette.white-06;
     clip: true;
-
-    Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: (parent.height - 2px) / 2;
-        border-radius: 9px;
-        border-width: 0px;
-        background: Palette.white-02;
-    }
 
     Image {
         x: 11px;
@@ -1862,6 +1840,56 @@ component DiscoverSelectChip inherits Rectangle {
         source: @image-url("../assets/icons/chevron-down.svg");
         image-fit: contain;
         colorize: touch.has-hover ? Palette.foreground : Palette.muted-half;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+component DiscoverSubTab inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked;
+    private property <length> icon-size: 12px;
+    private property <length> icon-gap: 5px;
+    private property <length> label-width: min(label-text.preferred-width, max(24px, root.width - root.icon-size - root.icon-gap - 14px));
+    private property <length> content-width: root.icon-size + root.icon-gap + root.label-width;
+    private property <length> content-x: max(7px, (root.width - root.content-width) / 2);
+    height: 24px;
+    border-radius: 8px;
+    border-width: 0px;
+    background: root.active ? Palette.gold-15 : (touch.has-hover ? Palette.white-04 : #00000000);
+
+    animate background { duration: 150ms; easing: ease-in-out; }
+
+    Image {
+        x: root.content-x;
+        y: (root.height - root.icon-size) / 2;
+        width: root.icon-size;
+        height: root.icon-size;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.active ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
+
+        animate colorize { duration: 150ms; easing: ease-in-out; }
+    }
+
+    label-text := Text {
+        x: root.content-x + root.icon-size + root.icon-gap;
+        width: root.label-width;
+        height: root.height;
+        text: root.label;
+        color: root.active ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
+        font-size: 11px;
+        font-weight: 500;
+        vertical-alignment: center;
+        overflow: elide;
+
+        animate color { duration: 150ms; easing: ease-in-out; }
     }
 
     touch := TouchArea {
@@ -4370,6 +4398,7 @@ component PackHubButton inherits Rectangle {
     private property <length> label-width: min(button-label.preferred-width, root.width - root.icon-size - root.icon-gap - 18px);
     private property <length> content-width: root.icon-size + root.icon-gap + root.label-width;
     private property <length> content-x: max(0px, (root.width - root.content-width) / 2);
+    private property <length> content-y: touch.pressed ? 1px : 0px;
     height: 32px;
     border-radius: 8px;
     border-width: 0px;
@@ -4377,37 +4406,30 @@ component PackHubButton inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    content := Rectangle {
+    Image {
+        visible: root.show-icon;
         x: root.content-x;
-        y: touch.pressed ? 1px : 0px;
+        y: (root.height - root.icon-size) / 2 + root.content-y;
+        width: root.icon-size;
+        height: root.icon-size;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
+        opacity: root.disabled ? 0.35 : 1.0;
+    }
+
+    button-label := Text {
+        x: root.content-x + root.icon-size + root.icon-gap;
+        y: root.content-y;
+        width: root.label-width;
         height: root.height;
-        width: root.content-width;
-        background: #00000000;
-
-        Image {
-            visible: root.show-icon;
-            x: 0px;
-            y: (parent.height - root.icon-size) / 2;
-            width: root.icon-size;
-            height: root.icon-size;
-            source: root.icon;
-            image-fit: contain;
-            colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
-            opacity: root.disabled ? 0.35 : 1.0;
-        }
-
-        button-label := Text {
-            x: root.icon-size + root.icon-gap;
-            width: root.label-width;
-            height: parent.height;
-            text: root.label;
-            color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
-            font-size: 12px;
-            font-weight: root.primary ? 800 : 700;
-            vertical-alignment: center;
-            horizontal-alignment: left;
-            overflow: elide;
-        }
+        text: root.label;
+        color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
+        font-size: 12px;
+        font-weight: root.primary ? 800 : 700;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+        overflow: elide;
     }
 
     touch := TouchArea {
@@ -9667,26 +9689,15 @@ component Sidebar inherits Rectangle {
         width: root.width - 24px;
         height: 34px;
         border-radius: 10px;
-        border-width: 1px;
-        border-color: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-20 : Palette.border;
+        border-width: 0px;
         visible: !root.compact-discover-chrome && (!root.discover-active || root.discover-tab == 0 || root.discover-tab == 3);
-        background: Palette.white-04;
+        background: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.white-06 : Palette.white-04;
         inner-shadow-offset-y: 1px;
-        inner-shadow-blur: 2px;
-        inner-shadow-color: #00000040;
+        inner-shadow-blur: 1px;
+        inner-shadow-color: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-10 : Palette.white-06;
         clip: true;
 
-        animate background, border-color { duration: 150ms; easing: ease-in-out; }
-
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: (parent.height - 2px) / 2;
-            border-radius: 9px;
-            border-width: 0px;
-            background: Palette.white-02;
-        }
+        animate background, inner-shadow-color { duration: 150ms; easing: ease-in-out; }
 
         Image {
             visible: !(root.discover-active && root.discover-tab == 3);
@@ -10069,87 +10080,48 @@ component Sidebar inherits Rectangle {
         private property <length> tab-gap: 4px;
         private property <length> tab-w: (self.width - self.tab-gap * 3) / 4;
 
-        Rectangle {
+        DiscoverSubTab {
             x: 0px;
             width: parent.tab-w;
-            height: 24px;
-            border-radius: 8px;
-            border-width: 0px;
-            background: root.discover-tab == 0 ? Palette.gold-15 : #00000000;
-
-            Image { x: 11px; y: 6px; width: 12px; height: 12px; source: @image-url("../assets/icons/search.svg"); image-fit: contain; colorize: root.discover-tab == 0 ? Palette.gold : Palette.muted-strong; }
-            Text { x: 28px; width: parent.width - 36px; height: parent.height; text: "Search"; color: root.discover-tab == 0 ? Palette.gold : Palette.muted-strong; font-size: 11px; font-weight: 500; vertical-alignment: center; overflow: elide; }
-        }
-
-        Rectangle {
-            x: parent.tab-w + parent.tab-gap;
-            width: parent.tab-w;
-            height: 24px;
-            border-radius: 8px;
-            border-width: 0px;
-            background: root.discover-tab == 1 ? Palette.gold-15 : (popular-touch.has-hover ? Palette.white-04 : #00000000);
-
-            Image { x: 11px; y: 6px; width: 12px; height: 12px; source: @image-url("../assets/icons/flame.svg"); image-fit: contain; colorize: root.discover-tab == 1 ? Palette.gold : (popular-touch.has-hover ? Palette.foreground : Palette.muted-strong); }
-            Text { x: 28px; width: parent.width - 36px; height: parent.height; text: "Popular"; color: root.discover-tab == 1 ? Palette.gold : (popular-touch.has-hover ? Palette.foreground : Palette.muted-strong); font-size: 11px; font-weight: 500; vertical-alignment: center; overflow: elide; }
-        }
-
-        Rectangle {
-            x: (parent.tab-w + parent.tab-gap) * 2;
-            width: parent.tab-w;
-            height: 24px;
-            border-radius: 8px;
-            border-width: 0px;
-            background: root.discover-tab == 2 ? Palette.gold-15 : (categories-touch.has-hover ? Palette.white-04 : #00000000);
-
-            Image { x: 11px; y: 6px; width: 12px; height: 12px; source: @image-url("../assets/icons/folder-open.svg"); image-fit: contain; colorize: root.discover-tab == 2 ? Palette.gold : (categories-touch.has-hover ? Palette.foreground : Palette.muted-strong); }
-            Text { x: 28px; width: parent.width - 36px; height: parent.height; text: "Category"; color: root.discover-tab == 2 ? Palette.gold : (categories-touch.has-hover ? Palette.foreground : Palette.muted-strong); font-size: 11px; font-weight: 500; vertical-alignment: center; overflow: elide; }
-        }
-
-        Rectangle {
-            x: (parent.tab-w + parent.tab-gap) * 3;
-            width: parent.tab-w;
-            height: 24px;
-            border-radius: 8px;
-            border-width: 0px;
-            background: root.discover-tab == 3 ? Palette.gold-15 : (url-touch.has-hover ? Palette.white-04 : #00000000);
-
-            Image { x: 11px; y: 6px; width: 12px; height: 12px; source: @image-url("../assets/icons/link.svg"); image-fit: contain; colorize: root.discover-tab == 3 ? Palette.gold : (url-touch.has-hover ? Palette.foreground : Palette.muted-strong); }
-            Text { x: 28px; width: parent.width - 36px; height: parent.height; text: "URL / ID"; color: root.discover-tab == 3 ? Palette.gold : (url-touch.has-hover ? Palette.foreground : Palette.muted-strong); font-size: 11px; font-weight: 500; vertical-alignment: center; overflow: elide; }
-        }
-
-        search-touch := TouchArea {
-            width: parent.tab-w;
-            height: parent.height;
+            icon: @image-url("../assets/icons/search.svg");
+            label: "Search";
+            active: root.discover-tab == 0;
             clicked => {
                 root.discover-tab = 0;
                 root.discover-tab-selected(0);
             }
         }
 
-        popular-touch := TouchArea {
+        DiscoverSubTab {
             x: parent.tab-w + parent.tab-gap;
             width: parent.tab-w;
-            height: parent.height;
+            icon: @image-url("../assets/icons/flame.svg");
+            label: "Popular";
+            active: root.discover-tab == 1;
             clicked => {
                 root.discover-tab = 1;
                 root.discover-tab-selected(1);
             }
         }
 
-        categories-touch := TouchArea {
+        DiscoverSubTab {
             x: (parent.tab-w + parent.tab-gap) * 2;
             width: parent.tab-w;
-            height: parent.height;
+            icon: @image-url("../assets/icons/folder-open.svg");
+            label: "Category";
+            active: root.discover-tab == 2;
             clicked => {
                 root.discover-tab = 2;
                 root.discover-tab-selected(2);
             }
         }
 
-        url-touch := TouchArea {
+        DiscoverSubTab {
             x: (parent.tab-w + parent.tab-gap) * 3;
             width: parent.tab-w;
-            height: parent.height;
+            icon: @image-url("../assets/icons/link.svg");
+            label: "URL / ID";
+            active: root.discover-tab == 3;
             clicked => {
                 root.discover-tab = 3;
                 root.discover-tab-selected(3);
