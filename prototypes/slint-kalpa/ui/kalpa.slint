@@ -38,6 +38,18 @@ export struct BackupEntry {
     relative-path: string,
 }
 
+export struct SavedVariableEntry {
+    file-name: string,
+    addon-name: string,
+    title: string,
+    meta: string,
+    size-label: string,
+    size-bytes: int,
+    meter-width: int,
+    system: bool,
+    orphaned: bool,
+}
+
 export struct DiscoverEntry {
     esoui-id: string,
     title: string,
@@ -6045,6 +6057,16 @@ component SvmSettingRow inherits Rectangle {
 component SavedVariablesOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
+    in property <[SavedVariableEntry]> files;
+    in property <[SavedVariableEntry]> orphaned-files;
+    in property <string> file-count-label;
+    in property <string> total-size-label;
+    in property <string> orphan-count-label;
+    in property <string> orphan-size-label;
+    in property <string> large-count-label;
+    in property <bool> has-orphans: false;
+    in property <bool> has-files: false;
+    callback refresh;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 980px ? root.width - 48px : 900px;
@@ -6106,11 +6128,12 @@ component SavedVariablesOverlay inherits Rectangle {
             height: parent.height - 222px;
             background: #00000000;
 
-            SvmStatCard { x: 0px; y: 0px; width: (parent.width - 24px) / 3; value: "111"; label: "FILES"; }
-            SvmStatCard { x: (parent.width - 24px) / 3 + 12px; y: 0px; width: (parent.width - 24px) / 3; value: "16.6 MB"; label: "TOTAL SIZE"; }
-            SvmStatCard { x: ((parent.width - 24px) / 3 + 12px) * 2; y: 0px; width: (parent.width - 24px) / 3; value: "24"; label: "ORPHANED"; warning: true; }
+            SvmStatCard { x: 0px; y: 0px; width: (parent.width - 24px) / 3; value: root.file-count-label; label: "FILES"; }
+            SvmStatCard { x: (parent.width - 24px) / 3 + 12px; y: 0px; width: (parent.width - 24px) / 3; value: root.total-size-label; label: "TOTAL SIZE"; }
+            SvmStatCard { x: ((parent.width - 24px) / 3 + 12px) * 2; y: 0px; width: (parent.width - 24px) / 3; value: root.orphan-count-label; label: "ORPHANED"; warning: root.has-orphans; }
 
             Rectangle {
+                visible: root.has-orphans;
                 x: 0px;
                 y: 78px;
                 width: parent.width;
@@ -6121,17 +6144,17 @@ component SavedVariablesOverlay inherits Rectangle {
                 background: Palette.gold-04;
 
                 Image { x: 14px; y: 13px; width: 16px; height: 16px; source: @image-url("../assets/icons/package.svg"); image-fit: contain; colorize: Palette.gold; }
-                Text { x: 40px; y: 0px; height: parent.height; text: "24 orphaned files (1.0 MB) from uninstalled addons. Clean up ->"; color: Palette.gold; font-size: 13px; font-weight: 900; vertical-alignment: center; }
+                Text { x: 40px; y: 0px; height: parent.height; text: root.orphan-count-label + " orphaned files (" + root.orphan-size-label + ") from uninstalled addons. Clean up ->"; color: Palette.gold; font-size: 13px; font-weight: 900; vertical-alignment: center; }
                 TouchArea { width: parent.width; height: parent.height; clicked => { root.view = 1; } }
             }
 
             FilterTab { x: 0px; y: 130px; label: "All"; active: true; }
-            FilterTab { x: 58px; y: 130px; label: "Orphaned (24)"; }
-            FilterTab { x: 170px; y: 130px; label: "Large (0)"; }
+            FilterTab { x: 58px; y: 130px; label: "Orphaned (" + root.orphan-count-label + ")"; }
+            FilterTab { x: 170px; y: 130px; label: "Large (" + root.large-count-label + ")"; }
             Text { x: parent.width - 140px; y: 136px; text: "Size"; color: Palette.muted-strong; font-size: 12px; font-weight: 750; }
-            PackHubButton { x: parent.width - 88px; y: 126px; width: 88px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; }
+            PackHubButton { x: parent.width - 88px; y: 126px; width: 88px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; clicked => { root.refresh(); } }
 
-            Rectangle {
+            if (!root.has-files) : Rectangle {
                 x: 0px;
                 y: 176px;
                 width: parent.width;
@@ -6140,11 +6163,37 @@ component SavedVariablesOverlay inherits Rectangle {
                 background: Palette.white-02;
                 clip: true;
 
-                SvmOverviewRow { x: 0px; y: 0px; width: parent.width; title: "CraftStoreFixedAndImproved"; meta: "Apr 2, 2026"; size-label: "3.4 MB"; meter-width: 56px; }
-                SvmOverviewRow { x: 0px; y: 62px; width: parent.width; title: "CombatMetricsFightData"; meta: "Apr 2, 2026"; size-label: "2.9 MB"; meter-width: 48px; }
-                SvmOverviewRow { x: 0px; y: 124px; width: parent.width; title: "IlIfA"; meta: "Apr 2, 2026 - 4 profiles"; size-label: "1.4 MB"; meter-width: 32px; }
-                SvmOverviewRow { x: 0px; y: 186px; width: parent.width; title: "AccountSettings"; meta: "Jul 4, 2025"; size-label: "1.4 MB"; meter-width: 31px; system: true; }
-                SvmOverviewRow { x: 0px; y: 248px; width: parent.width; title: "Srendarr"; meta: "Mar 25, 2026 - 3 profiles"; size-label: "1.1 MB"; meter-width: 25px; }
+                Text { x: 24px; y: 0px; width: parent.width - 48px; height: parent.height; text: "No SavedVariables files found."; color: Palette.muted-strong; font-size: 14px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+            }
+
+            if (root.has-files) : ScrollView {
+                x: 0px;
+                y: 176px;
+                width: parent.width;
+                height: 312px;
+                viewport-width: self.width;
+                viewport-height: root.files.length * 62px;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                Rectangle {
+                    width: parent.width;
+                    height: root.files.length * 62px;
+                    border-radius: 12px;
+                    background: Palette.white-02;
+                    clip: true;
+
+                    for file[index] in root.files : SvmOverviewRow {
+                        x: 0px;
+                        y: index * 62px;
+                        width: parent.width;
+                        title: file.title;
+                        meta: file.meta;
+                        size-label: file.size-label;
+                        meter-width: file.meter-width * 1px;
+                        system: file.system;
+                    }
+                }
 
                 Rectangle { x: parent.width - 10px; y: 14px; width: 5px; height: 260px; border-radius: 3px; background: Palette.white-04; }
                 Rectangle { x: parent.width - 10px; y: 26px; width: 5px; height: 34px; border-radius: 3px; background: Palette.sky; }
@@ -6160,11 +6209,11 @@ component SavedVariablesOverlay inherits Rectangle {
 
             Image { x: 0px; y: 5px; width: 16px; height: 16px; source: @image-url("../assets/icons/package.svg"); image-fit: contain; colorize: Palette.gold; }
             Text { x: 24px; y: 0px; text: "Orphaned Files"; color: Palette.foreground; font-size: 16px; font-weight: 900; }
-            Text { x: 184px; y: 1px; text: "(24 files, 1.0 MB)"; color: Palette.muted-strong; font-size: 15px; font-weight: 700; }
+            Text { x: 184px; y: 1px; text: "(" + root.orphan-count-label + " files, " + root.orphan-size-label + ")"; color: Palette.muted-strong; font-size: 15px; font-weight: 700; }
             Text { x: 0px; y: 32px; width: parent.width - 120px; text: "These files belong to addons that are no longer installed."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; }
             Text { x: parent.width - 62px; y: 4px; text: "Select all"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; horizontal-alignment: right; }
 
-            Rectangle {
+            if (root.orphaned-files.length == 0) : Rectangle {
                 x: 0px;
                 y: 62px;
                 width: parent.width;
@@ -6173,10 +6222,34 @@ component SavedVariablesOverlay inherits Rectangle {
                 background: Palette.white-02;
                 clip: true;
 
-                SvmCleanupRow { x: 0px; y: 0px; width: parent.width; title: "AbilityIconsFramework"; meta: "12.5 KB - Apr 2, 2026"; }
-                SvmCleanupRow { x: 0px; y: 64px; width: parent.width; title: "ActionDurationReminder"; meta: "47.1 KB - Apr 2, 2026"; }
-                SvmCleanupRow { x: 0px; y: 128px; width: parent.width; title: "AddonSelector"; meta: "20.5 KB - Apr 2, 2026"; }
-                SvmCleanupRow { x: 0px; y: 192px; width: parent.width; title: "AsquartOsseinCageHelper"; meta: "3.5 KB - Apr 2, 2026"; }
+                Text { x: 24px; y: 0px; width: parent.width - 48px; height: parent.height; text: "No orphaned SavedVariables files found."; color: Palette.muted-strong; font-size: 14px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+            }
+
+            if (root.orphaned-files.length > 0) : ScrollView {
+                x: 0px;
+                y: 62px;
+                width: parent.width;
+                height: 244px;
+                viewport-width: self.width;
+                viewport-height: root.orphaned-files.length * 64px;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                Rectangle {
+                    width: parent.width;
+                    height: root.orphaned-files.length * 64px;
+                    border-radius: 12px;
+                    background: Palette.white-02;
+                    clip: true;
+
+                    for file[index] in root.orphaned-files : SvmCleanupRow {
+                        x: 0px;
+                        y: index * 64px;
+                        width: parent.width;
+                        title: file.title;
+                        meta: file.size-label + " - " + file.meta;
+                    }
+                }
                 Rectangle { x: parent.width - 10px; y: 8px; width: 5px; height: 214px; border-radius: 3px; background: Palette.white-04; }
                 Rectangle { x: parent.width - 10px; y: 16px; width: 5px; height: 42px; border-radius: 3px; background: Palette.sky; }
             }
@@ -8285,6 +8358,8 @@ export component KalpaWindow inherits Window {
     in property <[FileEntry]> addon-files;
     in property <[BackupEntry]> edit-backups;
     in property <[DiscoverEntry]> discover-results;
+    in property <[SavedVariableEntry]> svm-files;
+    in property <[SavedVariableEntry]> svm-orphaned-files;
     in property <[ThemeEntry]> themes;
     in property <int> total-addon-count: 0;
     in property <int> addon-kind-count: 0;
@@ -8368,6 +8443,13 @@ export component KalpaWindow inherits Window {
     in-out property <string> settings-addons-path;
     in-out property <bool> settings-minion-detected: false;
     in-out property <bool> settings-pack-hub-authenticated: false;
+    in-out property <string> svm-file-count-label: "0";
+    in-out property <string> svm-total-size-label: "0 B";
+    in-out property <string> svm-orphan-count-label: "0";
+    in-out property <string> svm-orphan-size-label: "0 B";
+    in-out property <string> svm-large-count-label: "0";
+    in-out property <bool> svm-has-orphans: false;
+    in-out property <bool> svm-has-files: false;
     private property <length> error-banner-height: root.status-error-message != "" ? 36px : 0px;
     private property <length> offline-banner-height: root.offline-active ? 36px : 0px;
     private property <length> app-update-banner-height: root.app-update-message != "" ? 36px : 0px;
@@ -8423,6 +8505,7 @@ export component KalpaWindow inherits Window {
     callback open-pack-hub;
     callback open-uploader;
     callback open-svm;
+    callback svm-refresh;
     callback open-backup-restore;
     callback open-settings;
     callback theme-selected(string);
@@ -8653,6 +8736,16 @@ export component KalpaWindow inherits Window {
             height: root.height;
             open <=> root.svm-open;
             view <=> root.svm-view;
+            files: root.svm-files;
+            orphaned-files: root.svm-orphaned-files;
+            file-count-label: root.svm-file-count-label;
+            total-size-label: root.svm-total-size-label;
+            orphan-count-label: root.svm-orphan-count-label;
+            orphan-size-label: root.svm-orphan-size-label;
+            large-count-label: root.svm-large-count-label;
+            has-orphans: root.svm-has-orphans;
+            has-files: root.svm-has-files;
+            refresh => { root.svm-refresh(); }
         }
 
         if (root.uploader-open) : UploaderOverlay {

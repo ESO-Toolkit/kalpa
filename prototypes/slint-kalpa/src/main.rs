@@ -8,7 +8,7 @@ use slint::{
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -825,6 +825,7 @@ fn addon_models_from_entries(ui: &KalpaWindow, mut addons: Vec<AddonEntry>) -> A
     let model = Rc::new(VecModel::from(addons));
     ui.set_addons(model.clone().into());
     set_addon_counts(ui, &all.borrow());
+    apply_saved_variables_model(ui, &all.borrow());
     AddonModels {
         all,
         visible: model,
@@ -2021,6 +2022,7 @@ fn wire_addon_filters(ui: &KalpaWindow, models: AddonModels) {
 
 fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
     let refresh_ui = ui.as_weak();
+    let refresh_models = models.clone();
     ui.on_refresh_requested(move || {
         let Some(ui) = refresh_ui.upgrade() else {
             return;
@@ -2032,20 +2034,41 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         if let Some(addons_root) = addons_source_root() {
             match real_addon_entries(&addons_root) {
                 Ok(addons) if !addons.is_empty() => {
-                    *models.all.borrow_mut() = addons;
-                    apply_addon_view(&ui, &models);
+                    *refresh_models.all.borrow_mut() = addons;
+                    apply_addon_view(&ui, &refresh_models);
+                    apply_saved_variables_model(&ui, &refresh_models.all.borrow());
                     ui.set_status_error_message("".into());
                 }
                 Ok(_) => {
+                    apply_saved_variables_model(&ui, &refresh_models.all.borrow());
                     ui.set_status_error_message("No addons were found in the configured AddOns folder.".into());
                 }
                 Err(error) => {
+                    apply_saved_variables_model(&ui, &refresh_models.all.borrow());
                     ui.set_status_error_message(error.into());
                 }
             }
         } else {
+            apply_saved_variables_model(&ui, &refresh_models.all.borrow());
             ui.set_status_error_message("AddOns folder was not found. Set KALPA_ADDONS_PATH or configure the ESO AddOns path.".into());
         }
+    });
+
+    let svm_open_ui = ui.as_weak();
+    let svm_open_models = models.clone();
+    ui.on_open_svm(move || {
+        let Some(ui) = svm_open_ui.upgrade() else {
+            return;
+        };
+        apply_saved_variables_model(&ui, &svm_open_models.all.borrow());
+    });
+
+    let svm_refresh_ui = ui.as_weak();
+    ui.on_svm_refresh(move || {
+        let Some(ui) = svm_refresh_ui.upgrade() else {
+            return;
+        };
+        apply_saved_variables_model(&ui, &models.all.borrow());
     });
 }
 
@@ -4145,6 +4168,279 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+fn apply_saved_variables_model(ui: &KalpaWindow, addons: &[AddonEntry]) {
+    let entries = addons_source_root()
+        .and_then(|addons_root| saved_variable_entries(&addons_root, addons).ok())
+        .unwrap_or_default();
+
+    let orphaned = entries
+        .iter()
+        .filter(|entry| entry.orphaned)
+        .cloned()
+        .collect::<Vec<_>>();
+    let total_size = entries
+        .iter()
+        .map(|entry| entry.size_bytes.max(0) as u64)
+        .sum::<u64>();
+    let orphan_size = orphaned
+        .iter()
+        .map(|entry| entry.size_bytes.max(0) as u64)
+        .sum::<u64>();
+    let large_count = entries
+        .iter()
+        .filter(|entry| entry.size_bytes >= (5 * 1024 * 1024))
+        .count();
+
+    ui.set_svm_file_count_label(entries.len().to_string().into());
+    ui.set_svm_total_size_label(format_size(total_size).into());
+    ui.set_svm_orphan_count_label(orphaned.len().to_string().into());
+    ui.set_svm_orphan_size_label(format_size(orphan_size).into());
+    ui.set_svm_large_count_label(large_count.to_string().into());
+    ui.set_svm_has_orphans(!orphaned.is_empty());
+    ui.set_svm_has_files(!entries.is_empty());
+    ui.set_svm_files(Rc::new(VecModel::from(entries)).into());
+    ui.set_svm_orphaned_files(Rc::new(VecModel::from(orphaned)).into());
+}
+
+fn saved_variable_entries(
+    addons_root: &Path,
+    addons: &[AddonEntry],
+) -> Result<Vec<SavedVariableEntry>, String> {
+    let sv_dir = addons_root
+        .parent()
+        .unwrap_or(addons_root)
+        .join("SavedVariables");
+    if !sv_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let installed = addons
+        .iter()
+        .map(|addon| addon.folder_name.to_string())
+        .collect::<HashSet<_>>();
+    let mut raw = fs::read_dir(&sv_dir)
+        .map_err(|error| format!("Failed to read SavedVariables folder: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| saved_variable_entry(&entry.path(), &installed))
+        .collect::<Vec<_>>();
+
+    let max_size = raw.iter().map(|entry| entry.1).max().unwrap_or(1);
+    raw.sort_by(|left, right| {
+        right.1.cmp(&left.1).then_with(|| {
+            left.0
+                .title
+                .to_ascii_lowercase()
+                .cmp(&right.0.title.to_ascii_lowercase())
+        })
+    });
+
+    Ok(raw
+        .into_iter()
+        .map(|(mut entry, size)| {
+            let ratio = if max_size == 0 {
+                0.0
+            } else {
+                size as f32 / max_size as f32
+            };
+            entry.meter_width = (10.0 + ratio * 46.0).clamp(10.0, 56.0).round() as i32;
+            entry
+        })
+        .collect())
+}
+
+fn saved_variable_entry(
+    path: &Path,
+    installed: &HashSet<String>,
+) -> Option<(SavedVariableEntry, u64)> {
+    let file_name = path.file_name()?.to_string_lossy().to_string();
+    if !file_name.ends_with(".lua") {
+        return None;
+    }
+
+    let addon_name = file_name
+        .strip_suffix(".lua")
+        .unwrap_or(&file_name)
+        .to_string();
+    let metadata = fs::metadata(path).ok();
+    let size = metadata
+        .as_ref()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let modified = metadata
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| format_short_date(duration.as_secs()))
+        .unwrap_or_default();
+    let profile_count = extract_saved_variable_profile_count(path);
+    let meta = if profile_count > 0 {
+        format!(
+            "{} - {} profile{}",
+            modified,
+            profile_count,
+            if profile_count == 1 { "" } else { "s" }
+        )
+    } else {
+        modified
+    };
+    let status = classify_saved_variable(&addon_name, installed);
+
+    Some((
+        SavedVariableEntry {
+            file_name: file_name.into(),
+            addon_name: addon_name.clone().into(),
+            title: addon_name.into(),
+            meta: meta.into(),
+            size_label: format_size(size).into(),
+            size_bytes: size.min(i32::MAX as u64) as i32,
+            meter_width: 10,
+            system: status == SavedVariableStatus::System,
+            orphaned: status == SavedVariableStatus::Orphaned,
+        },
+        size,
+    ))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SavedVariableStatus {
+    Installed,
+    System,
+    Orphaned,
+}
+
+fn classify_saved_variable(addon_name: &str, installed: &HashSet<String>) -> SavedVariableStatus {
+    const SYSTEM_NAMES: &[&str] = &[
+        "ZO_Ingame",
+        "ZO_InternalIngame",
+        "ZO_Pregame",
+        "AccountSettings",
+        "GuildHistoryCache",
+    ];
+
+    if SYSTEM_NAMES.contains(&addon_name) {
+        return SavedVariableStatus::System;
+    }
+    if installed.contains(addon_name) {
+        return SavedVariableStatus::Installed;
+    }
+
+    for folder in installed {
+        if folder.len() < 4 || !addon_name.starts_with(folder) || addon_name.len() <= folder.len() {
+            continue;
+        }
+        let boundary = addon_name[folder.len()..].chars().next();
+        if boundary
+            .map(|character| character == '_' || character == '-' || character.is_ascii_uppercase())
+            .unwrap_or(true)
+        {
+            return SavedVariableStatus::Installed;
+        }
+    }
+
+    SavedVariableStatus::Orphaned
+}
+
+fn extract_saved_variable_profile_count(path: &Path) -> usize {
+    let Ok(mut file) = fs::File::open(path) else {
+        return 0;
+    };
+    let mut buffer = vec![0u8; 256 * 1024];
+    let Ok(count) = std::io::Read::read(&mut file, &mut buffer) else {
+        return 0;
+    };
+    buffer.truncate(count);
+    let content = String::from_utf8_lossy(&buffer);
+    extract_saved_variable_profiles(&content).len()
+}
+
+fn extract_saved_variable_profiles(content: &str) -> BTreeSet<String> {
+    let mut profiles = BTreeSet::new();
+    let mut depth: i32 = 0;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if depth == 3 {
+            if let Some(key) = saved_variable_key(trimmed) {
+                if key != "$AccountWide" {
+                    profiles.insert(key.to_string());
+                }
+            }
+        }
+        depth += brace_delta_ignoring_strings(line);
+    }
+
+    profiles
+}
+
+fn saved_variable_key(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("[\"")?;
+    let end = rest.find("\"]")?;
+    let after = rest[end + 2..].trim_start();
+    if !after.starts_with('=') {
+        return None;
+    }
+    Some(&rest[..end])
+}
+
+fn brace_delta_ignoring_strings(line: &str) -> i32 {
+    let bytes = line.as_bytes();
+    let mut index = 0usize;
+    let mut delta = 0i32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() && bytes[index] != quote {
+                    if bytes[index] == b'\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'-' if index + 1 < bytes.len() && bytes[index + 1] == b'-' => break,
+            b'{' => {
+                delta += 1;
+                index += 1;
+            }
+            b'}' => {
+                delta -= 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    delta
+}
+
+fn format_short_date(epoch_secs: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = epoch_secs / 86_400;
+    let (year, month, day) = civil_from_days(days as i64);
+    let month_name = MONTHS
+        .get(month.saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or("Jan");
+    format!("{month_name} {day}, {year}")
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year as i32, m as u32, d as u32)
 }
 
 fn read_text_file(
@@ -6667,6 +6963,148 @@ mod tests {
             "local value = 2\n"
         );
         assert!(write_text_file(root, "EditableAddon", "../escape.lua", "bad").is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saved_variable_classification_matches_installed_boundaries() {
+        let installed = HashSet::from([
+            "CombatMetrics".to_string(),
+            "HarvestMap".to_string(),
+            "LibAddonMenu-2.0".to_string(),
+        ]);
+
+        assert!(matches!(
+            classify_saved_variable("CombatMetrics", &installed),
+            SavedVariableStatus::Installed
+        ));
+        assert!(matches!(
+            classify_saved_variable("CombatMetricsFightData", &installed),
+            SavedVariableStatus::Installed
+        ));
+        assert!(matches!(
+            classify_saved_variable("CombatMetrics_Data", &installed),
+            SavedVariableStatus::Installed
+        ));
+        assert!(matches!(
+            classify_saved_variable("HarvestMap-Extra", &installed),
+            SavedVariableStatus::Installed
+        ));
+        assert!(matches!(
+            classify_saved_variable("AccountSettings", &installed),
+            SavedVariableStatus::System
+        ));
+        assert!(matches!(
+            classify_saved_variable("CombatMetricsextra", &installed),
+            SavedVariableStatus::Orphaned
+        ));
+        assert!(matches!(
+            classify_saved_variable("RemovedAddon", &installed),
+            SavedVariableStatus::Orphaned
+        ));
+    }
+
+    #[test]
+    fn saved_variable_profile_parser_ignores_accountwide_and_nested_keys() {
+        let profiles = extract_saved_variable_profiles(
+            r#"
+CombatMetrics_SavedVariables = {
+    ["Default"] = {
+        ["@Account"] = {
+            ["$AccountWide"] = {
+                ["nested"] = "{ not a profile }",
+            },
+            ["Main"] = {
+                ["note"] = "contains } in a string",
+            },
+            ["Alt"] = {
+                -- comment with { braces } should be ignored
+            },
+        },
+    },
+}
+"#,
+        );
+
+        assert_eq!(
+            profiles,
+            BTreeSet::from(["Alt".to_string(), "Main".to_string()])
+        );
+    }
+
+    #[test]
+    fn short_date_uses_readable_month_names() {
+        assert_eq!(format_short_date(0), "Jan 1, 1970");
+        assert_eq!(format_short_date(1_782_864_000), "Jul 1, 2026");
+    }
+
+    #[test]
+    fn saved_variable_entries_sort_and_mark_statuses() {
+        let root = test_temp_dir("saved-variable-entries");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::write(
+            sv_dir.join("CombatMetricsFightData.lua"),
+            format!("CombatMetricsFightData = {{}}\n{}", "x".repeat(4096)),
+        )
+        .expect("write installed saved variable");
+        fs::write(
+            sv_dir.join("OldAddon.lua"),
+            "OldAddon = {\n    [\"Default\"] = {\n    },\n}\n",
+        )
+        .expect("write orphaned saved variable");
+        fs::write(sv_dir.join("AccountSettings.lua"), "AccountSettings = {}\n")
+            .expect("write system saved variable");
+        fs::write(sv_dir.join("readme.txt"), "ignored").expect("write ignored file");
+
+        let addons = vec![addon_entry(
+            "CombatMetrics",
+            "CombatMetrics",
+            "1360",
+            "Solinur",
+            "1.7.7",
+            "101048",
+            "Addon",
+            "3/3/2026",
+            "",
+            false,
+            false,
+            false,
+            0,
+            "",
+            0,
+            "",
+            0,
+            "",
+            0,
+        )];
+        let entries = saved_variable_entries(&addons_root, &addons).expect("load saved variables");
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].title.as_str(), "CombatMetricsFightData");
+        assert_eq!(entries[0].meter_width, 56);
+        assert!(!entries[0].orphaned);
+        assert!(!entries[0].system);
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.file_name.as_str() == "readme.txt"));
+
+        let account_settings = entries
+            .iter()
+            .find(|entry| entry.title.as_str() == "AccountSettings")
+            .expect("system entry exists");
+        assert!(account_settings.system);
+        assert!(!account_settings.orphaned);
+
+        let orphaned = entries
+            .iter()
+            .find(|entry| entry.title.as_str() == "OldAddon")
+            .expect("orphaned entry exists");
+        assert!(orphaned.orphaned);
+        assert!(!orphaned.system);
 
         let _ = fs::remove_dir_all(root);
     }

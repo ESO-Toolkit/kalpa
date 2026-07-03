@@ -300,6 +300,51 @@ function Get-HeaderSignature {
   }
 }
 
+function Get-StateSignature {
+  param(
+    [string]$Path,
+    [string]$Name
+  )
+
+  if (-not $Name.StartsWith("svm-")) {
+    return [pscustomobject]@{
+      LooksLikeState = $true
+      GoldPixels = 0
+      PanelPixels = 0
+    }
+  }
+
+  $bitmap = [System.Drawing.Bitmap]::FromFile($Path)
+  try {
+    $xStart = [int]($bitmap.Width * 0.18)
+    $xEnd = [int]($bitmap.Width * 0.72)
+    $yStart = [int]($bitmap.Height * 0.06)
+    $yEnd = [int]($bitmap.Height * 0.20)
+    $gold = 0
+    $panel = 0
+
+    for ($y = $yStart; $y -lt $yEnd; $y += 2) {
+      for ($x = $xStart; $x -lt $xEnd; $x += 2) {
+        $pixel = $bitmap.GetPixel($x, $y)
+        if ($pixel.R -gt 150 -and $pixel.G -gt 95 -and $pixel.G -lt 190 -and $pixel.B -lt 95) {
+          $gold++
+        }
+        if ($pixel.R -ge 24 -and $pixel.R -le 48 -and $pixel.G -ge 28 -and $pixel.G -le 54 -and $pixel.B -ge 34 -and $pixel.B -le 62) {
+          $panel++
+        }
+      }
+    }
+
+    [pscustomobject]@{
+      LooksLikeState = ($gold -gt 20 -and $panel -gt 400)
+      GoldPixels = $gold
+      PanelPixels = $panel
+    }
+  } finally {
+    $bitmap.Dispose()
+  }
+}
+
 function Capture-State {
   param(
     [string]$Name,
@@ -368,7 +413,12 @@ function Capture-State {
     [KalpaCaptureNative]::SetWindowPos($window.Hwnd, [IntPtr](-2), 0, 0, 0, 0, $flags) | Out-Null
 
     $signature = Get-HeaderSignature -Path $path
-    $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-") -or $Name.StartsWith("uploader-") -or $Name.StartsWith("svm-") -or $Name.StartsWith("backup-restore-")
+    $stateSignature = Get-StateSignature -Path $path -Name $Name
+    if ($Name.StartsWith("svm-")) {
+      $signatureOk = $stateSignature.LooksLikeState
+    } else {
+      $signatureOk = $signature.LooksLikeKalpa -or $Name.StartsWith("settings-") -or $Name.StartsWith("packhub-") -or $Name.StartsWith("uploader-") -or $Name.StartsWith("backup-restore-")
+    }
     [pscustomobject]@{
       State = $Name
       Path = $path
