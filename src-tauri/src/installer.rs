@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use typed_path::{Utf8WindowsComponent, Utf8WindowsPath};
 
 /// Maximum total extracted size (500 MB) to guard against ZIP bombs.
 const MAX_EXTRACT_SIZE: u64 = 500 * 1024 * 1024;
@@ -163,41 +164,44 @@ fn extract_with_rollback(
     result
 }
 
-/// The first top-level path component of a ZIP entry name, or `None` when the
-/// name is unsafe. Mirrors the protection `ZipFile::enclosed_name` applies: a
-/// leading root/prefix is stripped, and `..` traversal that would escape the
-/// archive root rejects the whole name. Backslashes are normalized to `/` first
-/// so a Windows-style separator splits into components on every platform,
-/// matching the `Utf8WindowsPath` semantics `enclosed_name` uses internally.
+/// The first path component of a ZIP entry name, or `None` when the name is
+/// unsafe. Replicates `ZipFile::enclosed_name` exactly — including its
+/// `Utf8WindowsPath` parsing, which on every platform splits on `\` as well as
+/// `/`, strips a *leading* drive prefix or root, and rejects the whole name on
+/// NUL bytes, a mid-path prefix/root, or `..` traversal that escapes the
+/// archive root — then takes the first component of the simplified path. The
+/// extraction loop derives its created-folder names from `enclosed_name`, so
+/// any divergence here could make rollback miss (or mistarget) a folder the
+/// extractor actually created.
 ///
 /// Used by the rollback passes, which only need top-level folder names and can
 /// therefore read them straight from the central directory (`file_names`)
 /// instead of paying a per-entry local-header read via `by_index`.
 fn enclosed_top_component(name: &str) -> Option<String> {
-    let normalized = name.replace('\\', "/");
+    if name.contains('\0') {
+        return None;
+    }
     let mut depth = 0usize;
-    let mut out = PathBuf::new();
-    for component in Path::new(&normalized).components() {
+    let mut components: Vec<&str> = Vec::new();
+    for component in Utf8WindowsPath::new(name).components() {
         match component {
-            Component::Prefix(_) | Component::RootDir => {
+            Utf8WindowsComponent::Prefix(_) | Utf8WindowsComponent::RootDir => {
                 if depth > 0 {
                     return None;
                 }
             }
-            Component::ParentDir => {
+            Utf8WindowsComponent::ParentDir => {
                 depth = depth.checked_sub(1)?;
-                out.pop();
+                components.pop();
             }
-            Component::Normal(s) => {
+            Utf8WindowsComponent::Normal(s) => {
                 depth += 1;
-                out.push(s);
+                components.push(s);
             }
-            Component::CurDir => (),
+            Utf8WindowsComponent::CurDir => (),
         }
     }
-    out.components()
-        .next()
-        .map(|c| c.as_os_str().to_string_lossy().to_string())
+    components.first().map(|s| (*s).to_string())
 }
 
 /// Collect top-level folder names from a ZIP archive's central directory.
@@ -349,6 +353,53 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;
+
+    /// The rollback passes derive top-level names from central-directory
+    /// strings via `enclosed_top_component`, while the extraction loop derives
+    /// them from `entry.enclosed_name()`. This proves the two agree for every
+    /// shape of entry name, including hostile ones (absolute paths, Windows
+    /// drive prefixes, backslash separators, `..` traversal).
+    #[test]
+    fn enclosed_top_component_matches_enclosed_name_first_component() {
+        let names = [
+            "MyAddon/file.lua",
+            "MyAddon/sub/deep/file.lua",
+            "toplevel.lua",
+            "MyAddon\\file.lua",
+            "C:\\MyAddon\\file.lua",
+            "C:/MyAddon/file.lua",
+            "/abs/file.lua",
+            "../escape.lua",
+            "foo/../bar.lua",
+            "foo/../../escape.lua",
+            "./MyAddon/file.lua",
+            "MyAddon/./file.lua",
+        ];
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let options = zip::write::SimpleFileOptions::default();
+            for n in &names {
+                w.start_file(*n, options).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buf)).unwrap();
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).unwrap();
+            let name = entry.name().to_string();
+            let expected = entry.enclosed_name().and_then(|p| {
+                p.components()
+                    .next()
+                    .map(|c| c.as_os_str().to_string_lossy().to_string())
+            });
+            assert_eq!(
+                enclosed_top_component(&name),
+                expected,
+                "rollback and extraction disagree on top-level name for {name:?}"
+            );
+        }
+    }
 
     #[test]
     fn permission_denied_mentions_controlled_folder_access() {

@@ -19,10 +19,7 @@ export function AppBackground() {
   }, []);
 
   return (
-    <div
-      data-slot="app-background"
-      className="fixed inset-0 -z-10 overflow-hidden bg-bg-base"
-    >
+    <div data-slot="app-background" className="fixed inset-0 -z-10 overflow-hidden bg-bg-base">
       {/* Material texture (art themes only; "none" by default) */}
       <div
         className="absolute inset-0"

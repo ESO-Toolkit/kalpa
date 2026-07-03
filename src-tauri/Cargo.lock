@@ -2373,6 +2373,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tempfile",
  "tokio",
+ "typed-path",
  "winreg 0.56.0",
  "zip 8.6.0",
 ]
