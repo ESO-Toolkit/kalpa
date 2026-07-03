@@ -8312,6 +8312,14 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn native_performance_mode_enabled_from_value(value: &serde_json::Value) -> Option<bool> {
+    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "native-slint" | "slint" | "native" | "low-memory" => Some(true),
+        "webview" | "web" | "standard" => Some(false),
+        _ => None,
+    }
+}
+
 fn native_performance_mode_enabled_from_path(path: &Path) -> Result<bool, String> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -8323,8 +8331,8 @@ fn native_performance_mode_enabled_from_path(path: &Path) -> Result<bool, String
     Ok(value
         .as_object()
         .and_then(|object| object.get("performanceMode"))
-        .and_then(|value| value.as_str())
-        == Some("native-slint"))
+        .and_then(native_performance_mode_enabled_from_value)
+        .unwrap_or(false))
 }
 
 pub fn try_launch_native_performance_mode_on_startup(
@@ -9399,5 +9407,35 @@ mod tests {
                 .unwrap();
 
         assert_eq!(resolved, sidecar);
+    }
+
+    #[test]
+    fn native_performance_mode_startup_reads_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = root.path().join("settings.json");
+
+        for enabled_value in ["native-slint", "slint", "native", "low-memory"] {
+            fs::write(
+                &settings,
+                format!(r#"{{"performanceMode":"{enabled_value}"}}"#),
+            )
+            .unwrap();
+            assert!(
+                native_performance_mode_enabled_from_path(&settings).unwrap(),
+                "{enabled_value} should enable the native startup gate"
+            );
+        }
+
+        for disabled_value in ["webview", "web", "standard"] {
+            fs::write(
+                &settings,
+                format!(r#"{{"performanceMode":"{disabled_value}"}}"#),
+            )
+            .unwrap();
+            assert!(
+                !native_performance_mode_enabled_from_path(&settings).unwrap(),
+                "{disabled_value} should keep the WebView startup path"
+            );
+        }
     }
 }

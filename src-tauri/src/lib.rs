@@ -268,6 +268,12 @@ pub fn run() {
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
 
+            // Repair settings.json left partial/corrupt by an interrupted write
+            // before the native-mode startup gate reads it directly. If the user
+            // opted into Slint, the WebView process exits before the plugin store
+            // is opened, so this is the only recovery pass that always runs.
+            settings_store::recover(app.handle());
+
             match commands::try_launch_native_performance_mode_on_startup(app.handle()) {
                 Ok(Some(_)) => {
                     app.handle().exit(0);
@@ -335,11 +341,6 @@ pub fn run() {
             if let Ok(mut guard) = app.state::<TrayState>().0.lock() {
                 *guard = Some(tray);
             }
-
-            // Repair settings.json left partial/corrupt by an interrupted write,
-            // BEFORE anything opens (and merge-loads) the store below: clear
-            // uncommitted staging leftovers and quarantine a corrupt primary.
-            settings_store::recover(app.handle());
 
             // Migrate auth tokens from plaintext store to credential manager
             // (one-time). This is also the first opener of the settings store.
