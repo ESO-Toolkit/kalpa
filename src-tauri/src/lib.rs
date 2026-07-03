@@ -226,6 +226,7 @@ fn cleanup_orphaned_pending_zips() {
 ///     `MemoryUsageTargetLevel = LOW` (evicts caches, nudges GC) so the webview
 ///     stays alive and the live feed keeps updating in the tray — TrySuspend
 ///     would freeze those event handlers.
+///
 /// `on_shown` resumes + restores NORMAL and is idempotent, so every path that
 /// makes the window visible (tray, deep link, focus) can call it safely — this
 /// guards against a dead/blank window on restore. It is also cheap when nothing
