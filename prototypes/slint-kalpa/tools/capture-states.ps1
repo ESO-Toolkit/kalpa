@@ -256,6 +256,9 @@ function New-StateEnvironment {
       $env.KALPA_BACKUP_RESTORE_OPEN = "1"
       $env.KALPA_BACKUP_RESTORE_VIEW = "restore-confirm"
     }
+    "characters" {
+      $env.KALPA_CHARACTERS_OPEN = "1"
+    }
     "theme-crimson" {
       $env.KALPA_THEME = "daedric-crimson"
     }

@@ -216,9 +216,21 @@ Current detail status:
   schema customization, ESO-running guards, and richer error states.
 - The Settings > Tools Backup & Restore row now opens a native Slint backup
   overlay covering the main, custom-label, and restore-confirmation states. The
-  current pass is static/prototype data for visual fidelity; production still
-  needs real backup discovery, create/restore/delete/show-folder command wiring,
-  ESO-running guards, and failure states.
+  overlay now lists real settings backups, creates manual backups, restores with
+  safety snapshots, deletes backups, reveals the backups folder, and classifies
+  character backups as restorable/refused through the shared native backup path.
+  Remaining gaps are ESO-running guards, richer failure states, and final visual
+  comparison against the WebView dialog.
+- The Settings > Tools Characters row now opens a dedicated native Characters
+  overlay instead of incorrectly routing to SavedVariables. It loads the roster
+  from `AddOnSettings.txt` plus the bounded-memory SavedVariables roster scanner,
+  warns when files are unreadable/malformed, and writes server-scoped v2
+  per-character backups that preserve account-wide data and same-name NA/EU
+  twins. Remaining gaps are exact React grouping/animation polish, per-row busy
+  states, and restore cross-linking back into Backup & Restore.
+- Settings > Tools app updates, Minion migration, and Safety Center now have
+  native click handlers with explicit status feedback, but their full React
+  dialogs/workflows still need native parity.
 - Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.
@@ -301,6 +313,8 @@ Current backdrop status:
 - Launch with `KALPA_BACKUP_RESTORE_OPEN=1` and optional
   `KALPA_BACKUP_RESTORE_VIEW=main|custom-label|restore-confirm` to inspect
   native Backup & Restore scaffolds.
+- Launch with `KALPA_CHARACTERS_OPEN=1` to inspect the native Characters
+  overlay.
 - Launch with `KALPA_RENDER_PRESET=standard` for visual-fidelity checks, or
   `KALPA_SLINT_BACKEND=winit-skia` / `winit-femtovg` for direct backend checks
   on Slint builds that support those renderer names.
@@ -320,7 +334,7 @@ For repeatable full-window state captures on Windows, use the DPI-aware capture
 harness from `prototypes/slint-kalpa`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\capture-states.ps1 -Build -OutputDir .\captures\verify -State main,discover-popular,files,files-editing,settings-general,settings-theme-editor,packhub-browse,packhub-create1,packhub-create2,packhub-install,svm-overview,svm-cleanup,svm-copy,svm-editor,backup-restore-main,backup-restore-label,backup-restore-confirm
+powershell -ExecutionPolicy Bypass -File .\tools\capture-states.ps1 -Build -OutputDir .\captures\verify -State main,discover-popular,files,files-editing,settings-general,settings-theme-editor,packhub-browse,packhub-create1,packhub-create2,packhub-install,svm-overview,svm-cleanup,svm-copy,svm-editor,backup-restore-main,backup-restore-label,backup-restore-confirm,characters
 ```
 
 The harness launches a fresh prototype process per state, uses the low-memory
@@ -331,8 +345,8 @@ writes ignored PNGs under `captures/`. Supported states include `main`,
 `settings-theme-editor`, `settings-tools`, `settings-data`, `packhub-browse`,
 `packhub-create1`, `packhub-create2`, `packhub-install`, `svm-overview`,
 `svm-cleanup`, `svm-copy`, `svm-editor`, `backup-restore-main`,
-`backup-restore-label`, `backup-restore-confirm`, `theme-crimson`, and
-`theme-frost`.
+`backup-restore-label`, `backup-restore-confirm`, `characters`,
+`theme-crimson`, and `theme-frost`.
 
 From `prototypes/slint-kalpa`, compare a captured native prototype PNG against
 the current WebView reference:

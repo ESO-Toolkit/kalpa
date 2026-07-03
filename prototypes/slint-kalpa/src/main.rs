@@ -36,7 +36,7 @@ use slint::{
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -675,8 +675,12 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_theme_actions(&ui, custom_themes);
     wire_settings_actions(&ui, settings_models);
     wire_backup_restore_actions(&ui);
+    wire_character_actions(&ui);
     if ui.get_pack_hub_open() {
         ui.invoke_open_pack_hub();
+    }
+    if ui.get_characters_open() {
+        ui.invoke_open_characters();
     }
     ui.run()
 }
@@ -3826,6 +3830,39 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
         });
     });
 
+    let app_update_ui = ui.as_weak();
+    ui.on_settings_app_update(move || {
+        let Some(ui) = app_update_ui.upgrade() else {
+            return;
+        };
+        ui.set_status_error_message(
+            "Native app update checks are not ported yet; use the WebView shell for updater install/restart."
+                .into(),
+        );
+    });
+
+    let migration_ui = ui.as_weak();
+    ui.on_settings_minion_migration(move || {
+        let Some(ui) = migration_ui.upgrade() else {
+            return;
+        };
+        ui.set_status_error_message(
+            "Native Minion migration is not ported yet; the safe migration wizard still runs in the WebView shell."
+                .into(),
+        );
+    });
+
+    let safety_ui = ui.as_weak();
+    ui.on_settings_safety_center(move || {
+        let Some(ui) = safety_ui.upgrade() else {
+            return;
+        };
+        ui.set_status_error_message(
+            "Native Safety Center is not ported yet; snapshots and integrity tools still run in the WebView shell."
+                .into(),
+        );
+    });
+
     let export_ui = ui.as_weak();
     ui.on_settings_addon_list_export(move || {
         let Some(ui) = export_ui.upgrade() else {
@@ -4025,6 +4062,67 @@ fn wire_backup_restore_actions(ui: &KalpaWindow) {
             ui.set_status_error_message(
                 "AddOns folder was not found. Configure it before opening backups.".into(),
             );
+        }
+    });
+}
+
+fn wire_character_actions(ui: &KalpaWindow) {
+    let open_ui = ui.as_weak();
+    ui.on_open_characters(move || {
+        let Some(ui) = open_ui.upgrade() else {
+            return;
+        };
+        apply_character_roster_model(&ui);
+    });
+
+    let refresh_ui = ui.as_weak();
+    ui.on_characters_refresh(move || {
+        let Some(ui) = refresh_ui.upgrade() else {
+            return;
+        };
+        apply_character_roster_model(&ui);
+    });
+
+    let backup_ui = ui.as_weak();
+    ui.on_character_backup(move |index, label| {
+        let Some(ui) = backup_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = addons_source_root() else {
+            ui.set_status_error_message(
+                "AddOns folder was not found. Configure it before backing up a character.".into(),
+            );
+            return;
+        };
+        let characters = ui.get_characters();
+        let Some(character) = characters.row_data(index.max(0) as usize) else {
+            ui.set_status_error_message("Choose a character to back up.".into());
+            return;
+        };
+
+        match create_character_settings_backup(
+            &addons_root,
+            character.name.as_str(),
+            character.server.as_str(),
+            label.as_str(),
+        ) {
+            Ok(count) => {
+                ui.set_status_error_message(
+                    format!(
+                        "Backed up {}'s settings ({} addon file{}).",
+                        character.name.as_str(),
+                        count,
+                        if count == 1 { "" } else { "s" }
+                    )
+                    .into(),
+                );
+                ui.set_character_backup_label_draft("".into());
+                apply_backup_restore_model(&ui);
+                apply_character_roster_model(&ui);
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("Character backup failed: {error}").into())
+            }
         }
     });
 }
@@ -7176,13 +7274,294 @@ fn apply_backup_restore_model(ui: &KalpaWindow) {
     ui.set_settings_backups(Rc::new(VecModel::from(entries)).into());
 }
 
+#[derive(Debug, Clone)]
+struct NativeCharacterInfo {
+    server: String,
+    name: String,
+    recovered: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NativeCharacterRoster {
+    characters: Vec<NativeCharacterInfo>,
+    skipped_files: u32,
+}
+
+const UNKNOWN_SERVER: &str = "Unknown";
+
+fn apply_character_roster_model(ui: &KalpaWindow) {
+    let Some(addons_root) = configured_addons_path() else {
+        ui.set_characters(Rc::new(VecModel::from(Vec::<CharacterEntry>::new())).into());
+        ui.set_characters_summary(
+            "Configure the ESO AddOns folder before loading characters.".into(),
+        );
+        ui.set_characters_warning("".into());
+        return;
+    };
+
+    match native_character_roster(&addons_root) {
+        Ok(mut roster) => {
+            roster.characters.sort_by(|left, right| {
+                let left_unknown = left.server == UNKNOWN_SERVER;
+                let right_unknown = right.server == UNKNOWN_SERVER;
+                left_unknown
+                    .cmp(&right_unknown)
+                    .then_with(|| left.server.cmp(&right.server))
+                    .then_with(|| left.name.cmp(&right.name))
+            });
+
+            let summary = character_roster_summary(&roster.characters);
+            let warning = if roster.skipped_files == 0 {
+                String::new()
+            } else {
+                format!(
+                    "{} SavedVariables file{} could not be fully read; a character may be missing.",
+                    roster.skipped_files,
+                    if roster.skipped_files == 1 { "" } else { "s" }
+                )
+            };
+            let entries = roster
+                .characters
+                .into_iter()
+                .map(|character| CharacterEntry {
+                    backup_label: default_character_backup_name(&character.name, &character.server)
+                        .into(),
+                    server: character.server.into(),
+                    name: character.name.into(),
+                    recovered: character.recovered,
+                })
+                .collect::<Vec<_>>();
+            ui.set_characters_summary(summary.into());
+            ui.set_characters_warning(warning.into());
+            ui.set_characters(Rc::new(VecModel::from(entries)).into());
+        }
+        Err(error) => {
+            ui.set_characters(Rc::new(VecModel::from(Vec::<CharacterEntry>::new())).into());
+            ui.set_characters_summary("Characters could not be loaded.".into());
+            ui.set_characters_warning("".into());
+            ui.set_status_error_message(format!("Failed to load characters: {error}").into());
+        }
+    }
+}
+
+fn character_roster_summary(characters: &[NativeCharacterInfo]) -> String {
+    if characters.is_empty() {
+        return "No characters found.".to_string();
+    }
+    let servers = characters
+        .iter()
+        .map(|character| character.server.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    format!(
+        "{} character{} across {} server{}",
+        characters.len(),
+        if characters.len() == 1 { "" } else { "s" },
+        servers,
+        if servers == 1 { "" } else { "s" }
+    )
+}
+
+fn native_character_roster(addons_root: &Path) -> Result<NativeCharacterRoster, String> {
+    let addon_settings = match addons_root
+        .parent()
+        .map(|parent| parent.join("AddOnSettings.txt"))
+    {
+        Some(path) => match fs::read_to_string(&path) {
+            Ok(content) => Some(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Failed to read AddOnSettings.txt: {error}")),
+        },
+        None => None,
+    };
+    let (sv_chars, skipped_files) = collect_native_roster_characters(addons_root);
+    Ok(NativeCharacterRoster {
+        characters: build_native_character_list(addon_settings.as_deref(), &sv_chars),
+        skipped_files: skipped_files.min(u32::MAX as usize) as u32,
+    })
+}
+
+fn normalize_character_name(name: &str) -> String {
+    name.split('^').next().unwrap_or(name).trim().to_string()
+}
+
+fn build_native_character_list(
+    addon_settings: Option<&str>,
+    sv_chars: &[(String, Option<String>)],
+) -> Vec<NativeCharacterInfo> {
+    let mut characters = Vec::new();
+    let mut seen_pairs: HashSet<(String, String)> = HashSet::new();
+    let mut known_names: HashSet<String> = HashSet::new();
+
+    if let Some(content) = addon_settings {
+        let skip_prefixes = [
+            "Version",
+            "Acknowledged",
+            "AddOnsEnabled",
+            "LoadOutOfDateAddOns",
+        ];
+        for line in content.lines() {
+            let Some(line) = line.strip_prefix('#') else {
+                continue;
+            };
+            if line.starts_with('$') || skip_prefixes.iter().any(|prefix| line.starts_with(prefix))
+            {
+                continue;
+            }
+            let Some(pos) = line.find('-') else {
+                continue;
+            };
+            let server = line[..pos].trim().to_string();
+            let name = line[pos + 1..].trim().to_string();
+            if server.is_empty() || name.is_empty() {
+                continue;
+            }
+            let normalized = normalize_character_name(&name);
+            if seen_pairs.insert((server.clone(), normalized.clone())) {
+                known_names.insert(normalized);
+                characters.push(NativeCharacterInfo {
+                    server,
+                    name,
+                    recovered: false,
+                });
+            }
+        }
+    }
+
+    let mut recovered = Vec::new();
+    for (raw, world) in sv_chars {
+        let name = normalize_character_name(raw);
+        if name.is_empty()
+            || name.starts_with('$')
+            || name.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let server = world
+            .as_deref()
+            .filter(|world| char_backup::WELL_KNOWN_WORLDS.contains(world))
+            .map(str::to_string);
+        recovered.push((name, server));
+    }
+    recovered.sort_by_key(|(_, server)| server.is_none());
+
+    for (name, server) in recovered {
+        match server {
+            Some(server) => {
+                if seen_pairs.insert((server.clone(), name.clone())) {
+                    known_names.insert(name.clone());
+                    characters.push(NativeCharacterInfo {
+                        server,
+                        name,
+                        recovered: true,
+                    });
+                }
+            }
+            None => {
+                if known_names.insert(name.clone()) {
+                    characters.push(NativeCharacterInfo {
+                        server: UNKNOWN_SERVER.to_string(),
+                        name,
+                        recovered: true,
+                    });
+                }
+            }
+        }
+    }
+
+    characters
+}
+
+fn collect_native_roster_characters(addons_root: &Path) -> (Vec<(String, Option<String>)>, usize) {
+    const ROSTER_TOTAL_MAX: usize = 100_000;
+
+    let sv_dir = settings_saved_variables_dir(addons_root);
+    let entries = match fs::read_dir(&sv_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), 0),
+        Err(_) => return (Vec::new(), 1),
+    };
+
+    let mut known_worlds: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut all_names: BTreeSet<String> = BTreeSet::new();
+    let mut skipped = 0usize;
+    let mut aggregate_truncated = false;
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("lua") {
+            continue;
+        }
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        let scan = match saved_variables::roster_stream::extract_roster_characters_streaming(
+            std::io::BufReader::new(file),
+        ) {
+            Ok(scan) => scan,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        if scan.malformed {
+            skipped += 1;
+        }
+        for (name, world) in scan.characters {
+            if all_names.contains(&name) {
+                if let Some(world) = world {
+                    known_worlds.entry(name).or_default().insert(world);
+                }
+            } else if all_names.len() < ROSTER_TOTAL_MAX {
+                all_names.insert(name.clone());
+                if let Some(world) = world {
+                    known_worlds.entry(name).or_default().insert(world);
+                }
+            } else {
+                aggregate_truncated = true;
+            }
+        }
+    }
+
+    if aggregate_truncated {
+        skipped += 1;
+    }
+
+    let mut out = Vec::new();
+    for name in all_names {
+        match known_worlds.get(&name) {
+            Some(worlds) if !worlds.is_empty() => {
+                for world in worlds {
+                    out.push((name.clone(), Some(world.clone())));
+                }
+            }
+            _ => out.push((name, None)),
+        }
+    }
+    (out, skipped)
+}
+
 const BACKUP_KIND_MANUAL: i32 = 0;
 const BACKUP_KIND_SAFETY: i32 = 1;
 const BACKUP_KIND_CHARACTER: i32 = 2;
 const CHAR_BACKUP_MARKER: &str = ".kalpa-char-backup";
+const CHAR_BACKUP_MARKER_V2_BODY: &[u8] = b"kalpa character backup v2\n";
 const CHAR_BACKUP_MARKER_V2_PREFIX: &[u8] = b"kalpa character backup v2";
 const CHAR_BACKUP_META: &str = ".kalpa-char-backup.json";
 const CHAR_BACKUP_VERSION: u32 = 2;
+static CHARACTER_BACKUP_SEQ: AtomicU64 = AtomicU64::new(0);
+static CHARACTER_BACKUP_FINALIZE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct CharBackupMeta {
@@ -7371,6 +7750,270 @@ fn create_settings_backup(addons_root: &Path, requested_name: &str) -> Result<St
         .map_err(|error| format!("Failed to create backup: {error}"))?;
     let (file_count, total_size) = copy_directory_files(&sv_dir, &backup_path, false)?;
     Ok(backup_detail(file_count, total_size))
+}
+
+fn create_character_settings_backup(
+    addons_root: &Path,
+    character_name: &str,
+    server: &str,
+    requested_name: &str,
+) -> Result<u32, String> {
+    let character_name = character_name.trim();
+    if character_name.is_empty() {
+        return Err("Character name cannot be empty.".to_string());
+    }
+    if character_name.len() < 3 {
+        return Err("Character name must be at least 3 characters.".to_string());
+    }
+
+    let backup_name = requested_name.trim();
+    let backup_name = if backup_name.is_empty() {
+        default_character_backup_name(character_name, server)
+    } else {
+        validate_character_backup_name(backup_name)?;
+        backup_name.to_string()
+    };
+    validate_character_backup_name(&backup_name)?;
+
+    let sv_dir = settings_saved_variables_dir(addons_root);
+    if !sv_dir.is_dir() {
+        return Err("SavedVariables folder not found.".to_string());
+    }
+    let world = if char_backup::WELL_KNOWN_WORLDS.contains(&server) {
+        Some(server)
+    } else {
+        None
+    };
+
+    let backups_root = settings_backups_dir(addons_root);
+    fs::create_dir_all(&backups_root)
+        .map_err(|error| format!("Failed to create backups folder: {error}"))?;
+    recover_orphaned_backups(&backups_root);
+
+    let effective_name =
+        resolve_character_backup_name(&backups_root, &backup_name).ok_or_else(|| {
+            "Too many existing backups with this name; choose a different name.".to_string()
+        })?;
+    let final_dir = backups_root.join(format!("char-{effective_name}"));
+    let seq = CHARACTER_BACKUP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging = backups_root.join(format!(".tmp-char-{effective_name}-{seq}"));
+    let tombstone = backups_root.join(format!(".old-char-{effective_name}-{seq}"));
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)
+        .map_err(|error| format!("Failed to create backup folder: {error}"))?;
+
+    let (matched, copied, last_copy_error) = match stage_character_subtrees(
+        &sv_dir,
+        character_name,
+        world,
+        &staging,
+    ) {
+        Ok(counts) => counts,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!(
+                    "Could not read all SavedVariables files while backing up \"{character_name}\" ({error}). Close ESO and try again."
+                ));
+        }
+    };
+
+    if matched == 0 {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!(
+            "No per-character SavedVariables data found for \"{character_name}\". This character may only use account-wide addon settings."
+        ));
+    }
+
+    if copied < matched {
+        let _ = fs::remove_dir_all(&staging);
+        let detail = last_copy_error
+            .map(|error| format!(" ({error})"))
+            .unwrap_or_default();
+        return Err(format!(
+            "Backed up only {copied} of {matched} SavedVariables files for \"{character_name}\"; some files could not be saved{detail}."
+        ));
+    }
+
+    if let Err(error) = fs::write(staging.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("Failed to write backup marker: {error}"));
+    }
+
+    let meta = CharBackupMeta {
+        version: CHAR_BACKUP_VERSION,
+        character: character_name.to_string(),
+        server: server.to_string(),
+    };
+    match serde_json::to_vec_pretty(&meta) {
+        Ok(json) => {
+            if let Err(error) = fs::write(staging.join(CHAR_BACKUP_META), json) {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(format!("Failed to write backup metadata: {error}"));
+            }
+        }
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Failed to serialize backup metadata: {error}"));
+        }
+    }
+
+    finalize_character_backup_replace(&staging, &final_dir, &tombstone)
+        .map_err(|error| format!("Failed to finalize backup: {error}"))?;
+    Ok(copied)
+}
+
+fn validate_character_backup_name(name: &str) -> Result<(), String> {
+    validate_backup_name_for_lookup(name)?;
+    if name.starts_with('.') || name.starts_with("auto-before-restore-") {
+        return Err("Backup name uses a reserved prefix. Choose another name.".to_string());
+    }
+    Ok(())
+}
+
+fn default_character_backup_name(name: &str, server: &str) -> String {
+    let safe_name = safe_backup_name_component(name);
+    if server == UNKNOWN_SERVER {
+        format!("{safe_name}-backup")
+    } else {
+        format!("{}-{}-backup", safe_name, character_server_tag(server))
+    }
+}
+
+fn character_server_tag(server: &str) -> String {
+    match server {
+        "NA Megaserver" => "NA".to_string(),
+        "EU Megaserver" => "EU".to_string(),
+        "PTS" => "PTS".to_string(),
+        other => safe_backup_name_component(other)
+            .split_whitespace()
+            .next()
+            .filter(|tag| !tag.is_empty())
+            .unwrap_or("Server")
+            .to_string(),
+    }
+}
+
+fn safe_backup_name_component(value: &str) -> String {
+    let mut out = value
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                '-'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    while out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+    }
+    if out.trim().is_empty() {
+        "Character".to_string()
+    } else {
+        out
+    }
+}
+
+fn stage_character_subtrees(
+    sv_dir: &Path,
+    character_name: &str,
+    world: Option<&str>,
+    staging: &Path,
+) -> Result<(u32, u32, Option<String>), String> {
+    let base = char_backup::char_base(character_name.as_bytes()).to_vec();
+    let entries = fs::read_dir(sv_dir)
+        .map_err(|error| format!("Failed to read SavedVariables folder: {error}"))?;
+    let mut matched = 0u32;
+    let mut copied = 0u32;
+    let mut last_error = None;
+
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Failed to enumerate SavedVariables: {error}"))?;
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("lua")
+        {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let bytes =
+            fs::read(&path).map_err(|error| format!("Could not read {file_name}: {error}"))?;
+        let blocks = char_backup::extract_character_blocks(&bytes, &base, world);
+        if blocks.is_empty() {
+            continue;
+        }
+        matched += 1;
+        match char_backup::build_backup_file(&blocks) {
+            Ok(content) => match fs::write(staging.join(&file_name), &content) {
+                Ok(()) => copied += 1,
+                Err(error) => last_error = Some(error.to_string()),
+            },
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Ok((matched, copied, last_error))
+}
+
+fn character_backup_replaceable(final_dir: &Path) -> bool {
+    !final_dir.exists() || final_dir.join(CHAR_BACKUP_MARKER).is_file()
+}
+
+fn resolve_character_backup_name(backups_root: &Path, backup_name: &str) -> Option<String> {
+    if character_backup_replaceable(&backups_root.join(format!("char-{backup_name}"))) {
+        return Some(backup_name.to_string());
+    }
+    (2..=999).find_map(|index| {
+        let candidate = format!("{backup_name}-{index}");
+        character_backup_replaceable(&backups_root.join(format!("char-{candidate}")))
+            .then_some(candidate)
+    })
+}
+
+fn finalize_character_backup_replace(
+    staging: &Path,
+    final_dir: &Path,
+    tombstone: &Path,
+) -> std::io::Result<()> {
+    let _guard = CHARACTER_BACKUP_FINALIZE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let had_previous = final_dir.exists();
+    if had_previous {
+        let _ = fs::remove_dir_all(tombstone);
+        fs::rename(final_dir, tombstone)?;
+    }
+    match fs::rename(staging, final_dir) {
+        Ok(()) => {
+            if had_previous {
+                let _ = fs::remove_dir_all(tombstone);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if had_previous {
+                match fs::rename(tombstone, final_dir) {
+                    Ok(()) => {
+                        let _ = fs::remove_dir_all(staging);
+                    }
+                    Err(_) => return Err(error),
+                }
+            } else {
+                let _ = fs::remove_dir_all(staging);
+            }
+            Err(error)
+        }
+    }
 }
 
 fn next_available_backup_name(backups_dir: &Path, base_name: &str) -> String {
@@ -9024,6 +9667,7 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     ui.set_uploader_open(env_flag("KALPA_UPLOADER_OPEN"));
     ui.set_svm_open(env_flag("KALPA_SVM_OPEN"));
     ui.set_backup_restore_open(env_flag("KALPA_BACKUP_RESTORE_OPEN"));
+    ui.set_characters_open(env_flag("KALPA_CHARACTERS_OPEN"));
     let pack_hub_view = std::env::var("KALPA_PACK_HUB_VIEW")
         .map(|value| match value.to_ascii_lowercase().as_str() {
             "1" | "create" | "create-details" | "details" => 1,
@@ -11902,6 +12546,98 @@ CombatMetrics_SavedVariables = {
         assert!(!settings_backups_dir(&addons_root)
             .join(&manual_name)
             .exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_character_roster_merges_addon_settings_and_saved_variables() {
+        let root = test_temp_dir("native-character-roster");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::write(
+            root.join("AddOnSettings.txt"),
+            "#Version 101046\n#NA Megaserver-Main Character\n",
+        )
+        .expect("write AddOnSettings");
+        fs::write(
+            sv_dir.join("Roster.lua"),
+            concat!(
+                "Roster =\n{\n",
+                "\t[\"Default\"] =\n\t{\n",
+                "\t\t[\"EU Megaserver\"] =\n\t\t{\n",
+                "\t\t\t[\"@me\"] =\n\t\t\t{\n",
+                "\t\t\t\t[\"Recovered Alt\"] = { [\"enabled\"] = true },\n",
+                "\t\t\t},\n",
+                "\t\t},\n",
+                "\t},\n}\n"
+            ),
+        )
+        .expect("write roster saved variable");
+
+        let roster = native_character_roster(&addons_root).expect("load roster");
+        assert_eq!(roster.skipped_files, 0);
+        assert!(roster.characters.iter().any(|character| {
+            character.name == "Main Character"
+                && character.server == "NA Megaserver"
+                && !character.recovered
+        }));
+        assert!(roster.characters.iter().any(|character| {
+            character.name == "Recovered Alt"
+                && character.server == "EU Megaserver"
+                && character.recovered
+        }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_character_backup_writes_v2_subtree_backup() {
+        let root = test_temp_dir("native-character-backup");
+        let addons_root = root.join("AddOns");
+        let sv_dir = root.join("SavedVariables");
+        fs::create_dir_all(&addons_root).expect("create addon root");
+        fs::create_dir_all(&sv_dir).expect("create saved variables root");
+        fs::write(
+            sv_dir.join("TestAddon.lua"),
+            concat!(
+                "TestAddon =\n{\n",
+                "\t[\"Default\"] =\n\t{\n",
+                "\t\t[\"NA Megaserver\"] =\n\t\t{\n",
+                "\t\t\t[\"@me\"] =\n\t\t\t{\n",
+                "\t\t\t\t[\"Bob\"] = { [\"hp\"] = 1, [\"loc\"] = \"NA\" },\n",
+                "\t\t\t},\n",
+                "\t\t},\n",
+                "\t\t[\"EU Megaserver\"] =\n\t\t{\n",
+                "\t\t\t[\"@me\"] =\n\t\t\t{\n",
+                "\t\t\t\t[\"Bob\"] = { [\"hp\"] = 2, [\"loc\"] = \"EU\" },\n",
+                "\t\t\t},\n",
+                "\t\t},\n",
+                "\t},\n}\n"
+            ),
+        )
+        .expect("write saved variable");
+
+        let copied = create_character_settings_backup(&addons_root, "Bob", "NA Megaserver", "")
+            .expect("create character backup");
+        assert_eq!(copied, 1);
+
+        let backup_dir = settings_backups_dir(&addons_root).join("char-Bob-NA-backup");
+        assert!(backup_dir.is_dir());
+        assert!(fs::read(backup_dir.join(CHAR_BACKUP_MARKER))
+            .expect("read marker")
+            .starts_with(CHAR_BACKUP_MARKER_V2_PREFIX));
+        let meta = serde_json::from_slice::<CharBackupMeta>(
+            &fs::read(backup_dir.join(CHAR_BACKUP_META)).expect("read metadata"),
+        )
+        .expect("parse metadata");
+        assert_eq!(meta.character, "Bob");
+        assert_eq!(meta.server, "NA Megaserver");
+        let backup = fs::read_to_string(backup_dir.join("TestAddon.lua")).expect("read backup");
+        assert!(backup.contains("[\"hp\"] = 1"));
+        assert!(!backup.contains("[\"hp\"] = 2"));
 
         let _ = fs::remove_dir_all(root);
     }

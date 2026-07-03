@@ -100,6 +100,13 @@ export struct SettingsBackupEntry {
     restorable: bool,
 }
 
+export struct CharacterEntry {
+    server: string,
+    name: string,
+    recovered: bool,
+    backup-label: string,
+}
+
 export struct DiscoverEntry {
     esoui-id: string,
     title: string,
@@ -3474,6 +3481,9 @@ component AppearanceOverlay inherits Rectangle {
     callback backup-restore-clicked;
     callback characters-clicked;
     callback api-compat-clicked;
+    callback app-update-clicked;
+    callback minion-migration-clicked;
+    callback safety-center-clicked;
     callback addon-list-exported;
     callback addon-list-imported;
     visible: root.open;
@@ -3912,9 +3922,9 @@ component AppearanceOverlay inherits Rectangle {
             SettingsToolRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../assets/icons/package.svg"); label: "Backup & Restore"; description: "Save and recover your addon settings"; clicked => { root.backup-restore-clicked(); } }
             SettingsToolRow { x: 0px; y: 68px; width: parent.width; icon: @image-url("../assets/icons/files.svg"); label: "Characters"; description: "View and manage your ESO characters"; clicked => { root.characters-clicked(); } }
             SettingsToolRow { x: 0px; y: 136px; width: parent.width; icon: @image-url("../assets/icons/file-sliders.svg"); label: "API Compatibility"; description: "Check addons against current API version"; clicked => { root.api-compat-clicked(); } }
-            SettingsToolRow { x: 0px; y: 204px; width: parent.width; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Check for App Updates"; description: "See if a newer version of Kalpa is available"; }
-            SettingsToolRow { visible: root.minion-detected; x: 0px; y: 272px; width: parent.width; icon: @image-url("../assets/icons/flame.svg"); label: "Minion Migration"; description: "Import tracking data from Minion with backup and preview"; accent: true; }
-            SettingsToolRow { x: 0px; y: root.minion-detected ? 340px : 272px; width: parent.width; icon: @image-url("../assets/icons/power.svg"); label: "Safety Center"; description: "Snapshots, integrity checks, and operation log"; }
+            SettingsToolRow { x: 0px; y: 204px; width: parent.width; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Check for App Updates"; description: "See if a newer version of Kalpa is available"; clicked => { root.app-update-clicked(); } }
+            SettingsToolRow { visible: root.minion-detected; x: 0px; y: 272px; width: parent.width; icon: @image-url("../assets/icons/flame.svg"); label: "Minion Migration"; description: "Import tracking data from Minion with backup and preview"; accent: true; clicked => { root.minion-migration-clicked(); } }
+            SettingsToolRow { x: 0px; y: root.minion-detected ? 340px : 272px; width: parent.width; icon: @image-url("../assets/icons/power.svg"); label: "Safety Center"; description: "Snapshots, integrity checks, and operation log"; clicked => { root.safety-center-clicked(); } }
         }
 
         if (root.active-tab == 3) : Rectangle {
@@ -4119,6 +4129,277 @@ component PackHubField inherits Rectangle {
         font-weight: 600;
         vertical-alignment: center;
         overflow: elide;
+    }
+}
+
+component CharacterListRow inherits Rectangle {
+    in property <CharacterEntry> character;
+    callback backup-clicked;
+    height: 62px;
+    border-radius: 12px;
+    border-width: 0px;
+    background: touch.has-hover ? Palette.white-04 : Palette.white-02;
+
+    animate background { duration: 150ms; easing: ease-in-out; }
+
+    Rectangle {
+        x: 14px;
+        y: 13px;
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        border-width: 0px;
+        background: root.character.recovered ? Palette.gold-10 : Palette.sky-15;
+
+        Image {
+            x: 9px;
+            y: 9px;
+            width: 18px;
+            height: 18px;
+            source: @image-url("../assets/icons/files.svg");
+            image-fit: contain;
+            colorize: root.character.recovered ? Palette.gold : Palette.sky;
+        }
+    }
+
+    Text {
+        x: 62px;
+        y: 10px;
+        width: parent.width - 214px;
+        text: root.character.name;
+        color: Palette.foreground;
+        font-size: 13px;
+        font-weight: 850;
+        overflow: elide;
+    }
+
+    server-pill := Rectangle {
+        x: 62px;
+        y: 33px;
+        width: min(server-label.preferred-width + 20px, parent.width - 232px);
+        height: 20px;
+        border-radius: 10px;
+        border-width: 0px;
+        background: root.character.recovered ? Palette.gold-10 : Palette.sky-10;
+
+        server-label := Text {
+            x: 10px;
+            y: 0px;
+            width: parent.width - 20px;
+            height: parent.height;
+            text: root.character.server + (root.character.recovered ? " - recovered" : "");
+            color: root.character.recovered ? Palette.gold : Palette.sky;
+            font-size: 10px;
+            font-weight: 800;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    PackHubButton {
+        x: parent.width - 138px;
+        y: 15px;
+        width: 122px;
+        icon: @image-url("../assets/icons/save.svg");
+        label: "Backup";
+        clicked => { root.backup-clicked(); }
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+    }
+}
+
+component CharactersOverlay inherits Rectangle {
+    in-out property <bool> open: false;
+    in property <[CharacterEntry]> characters;
+    in property <string> summary: "No characters loaded";
+    in property <string> warning;
+    in-out property <string> backup-label-draft;
+    callback refresh-characters;
+    callback backup-character(int, string);
+    visible: root.open;
+    background: #000000c4;
+    private property <length> modal-width: root.width < 720px ? root.width - 48px : 640px;
+    private property <length> modal-height: root.height < 760px ? root.height - 32px : 700px;
+    private property <length> footer-height: 66px;
+    private property <length> list-top: root.warning == "" ? 226px : 258px;
+    private property <length> list-height: max(120px, root.modal-height - root.footer-height - root.list-top - 10px);
+
+    TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.open = false; }
+    }
+
+    panel := Rectangle {
+        width: root.modal-width;
+        height: root.modal-height;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Palette.border-strong;
+        background: Tokens.surface;
+        drop-shadow-blur: 30px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: #00000099;
+        clip: true;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { }
+        }
+
+        Text {
+            x: 28px;
+            y: 24px;
+            width: parent.width - 92px;
+            text: "Characters";
+            color: Palette.gold;
+            font-size: 18px;
+            font-weight: 900;
+            overflow: elide;
+        }
+
+        Text {
+            x: 28px;
+            y: 54px;
+            width: parent.width - 92px;
+            height: 50px;
+            text: "Your ESO characters. A backup saves just this character's SavedVariables and restores without touching other characters.";
+            color: Palette.muted-strong;
+            font-size: 14px;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+
+        GhostIconButton {
+            x: parent.width - 52px;
+            y: 20px;
+            width: 36px;
+            height: 36px;
+            icon: @image-url("../assets/icons/x.svg");
+            clicked => { root.open = false; }
+        }
+
+        Hairline { x: 0px; y: 116px; width: parent.width; height: 1px; opacity: 0.45; }
+
+        Text {
+            x: 28px;
+            y: 132px;
+            width: 180px;
+            text: "BACKUP NAME";
+            color: Palette.muted-half;
+            font-family: "Space Grotesk Light";
+            font-size: 10px;
+            font-weight: 900;
+        }
+
+        PackHubField {
+            x: 28px;
+            y: 150px;
+            width: parent.width - 56px;
+            placeholder: "Leave blank for auto-name";
+            search: false;
+            editable: true;
+            value <=> root.backup-label-draft;
+        }
+
+        Text {
+            x: 28px;
+            y: 196px;
+            width: parent.width - 150px;
+            text: root.summary;
+            color: Palette.muted-strong;
+            font-size: 12px;
+            font-weight: 750;
+            overflow: elide;
+        }
+
+        PackHubButton {
+            x: parent.width - 112px;
+            y: 188px;
+            width: 84px;
+            icon: @image-url("../assets/icons/refresh-cw.svg");
+            label: "Refresh";
+            clicked => { root.refresh-characters(); }
+        }
+
+        if (root.warning != "") : Rectangle {
+            x: 28px;
+            y: 224px;
+            width: parent.width - 56px;
+            height: 26px;
+            border-radius: 10px;
+            border-width: 0px;
+            background: Palette.gold-10;
+
+            Text {
+                x: 12px;
+                y: 0px;
+                width: parent.width - 24px;
+                height: parent.height;
+                text: root.warning;
+                color: Palette.gold;
+                font-size: 11px;
+                font-weight: 750;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        if (root.characters.length == 0) : Rectangle {
+            x: 28px;
+            y: root.list-top;
+            width: parent.width - 56px;
+            height: min(128px, root.list-height);
+            border-radius: 13px;
+            border-width: 1px;
+            border-color: Palette.white-06;
+            background: Palette.white-03;
+
+            Image { x: (parent.width - 28px) / 2; y: 24px; width: 28px; height: 28px; source: @image-url("../assets/icons/files.svg"); image-fit: contain; colorize: Palette.muted-half; }
+            Text { x: 24px; y: 62px; width: parent.width - 48px; text: "No characters found"; color: Palette.foreground; font-size: 14px; font-weight: 900; horizontal-alignment: center; }
+            Text { x: 44px; y: 88px; width: parent.width - 88px; text: "Launch ESO at least once to generate character data."; color: Palette.muted-strong; font-size: 12px; font-weight: 600; horizontal-alignment: center; wrap: word-wrap; }
+        }
+
+        if (root.characters.length > 0) : ScrollView {
+            x: 28px;
+            y: root.list-top;
+            width: parent.width - 56px;
+            height: root.list-height;
+            viewport-width: self.width;
+            viewport-height: root.characters.length * 72px;
+            vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+            Rectangle {
+                width: parent.width;
+                height: root.characters.length * 72px;
+                background: #00000000;
+
+                for character[index] in root.characters : CharacterListRow {
+                    x: 0px;
+                    y: index * 72px;
+                    width: parent.width;
+                    character: character;
+                    backup-clicked => { root.backup-character(index, root.backup-label-draft); }
+                }
+            }
+        }
+
+        Rectangle {
+            x: 0px;
+            y: parent.height - root.footer-height;
+            width: parent.width;
+            height: root.footer-height;
+            background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
+
+            PackHubButton { x: parent.width - 96px; y: 20px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => { root.open = false; } }
+        }
     }
 }
 
@@ -8986,6 +9267,7 @@ export component KalpaWindow inherits Window {
     in property <[SvmEditorTreeEntry]> svm-editor-tree;
     in property <[SvmEditorSettingEntry]> svm-editor-settings;
     in property <[SettingsBackupEntry]> settings-backups;
+    in property <[CharacterEntry]> characters;
     in property <[ThemeEntry]> themes;
     in property <int> total-addon-count: 0;
     in property <int> addon-kind-count: 0;
@@ -9036,6 +9318,10 @@ export component KalpaWindow inherits Window {
     in-out property <bool> backup-restore-open: false;
     in-out property <int> backup-restore-view: 0;
     in-out property <string> backup-label-draft;
+    in-out property <bool> characters-open: false;
+    in-out property <string> character-backup-label-draft;
+    in-out property <string> characters-summary: "No characters loaded";
+    in-out property <string> characters-warning;
     in-out property <int> selected-index: 5;
     in-out property <int> selected-discover-index: 0;
     in-out property <bool> detail-files-active: false;
@@ -9180,6 +9466,9 @@ export component KalpaWindow inherits Window {
     callback backup-restore-restore(int);
     callback backup-restore-delete(int);
     callback backup-restore-reveal-folder;
+    callback open-characters;
+    callback characters-refresh;
+    callback character-backup(int, string);
     callback open-settings;
     callback theme-selected(string);
     callback theme-create;
@@ -9197,6 +9486,9 @@ export component KalpaWindow inherits Window {
     callback settings-addons-path-redetected;
     callback settings-addons-path-applied(string);
     callback settings-api-compat;
+    callback settings-app-update;
+    callback settings-minion-migration;
+    callback settings-safety-center;
     callback settings-addon-list-export;
     callback settings-addon-list-import;
     callback svm-clean-orphans;
@@ -9512,6 +9804,18 @@ export component KalpaWindow inherits Window {
             reveal-backups-folder => { root.backup-restore-reveal-folder(); }
         }
 
+        if (root.characters-open) : CharactersOverlay {
+            width: root.width;
+            height: root.height;
+            open <=> root.characters-open;
+            characters: root.characters;
+            summary: root.characters-summary;
+            warning: root.characters-warning;
+            backup-label-draft <=> root.character-backup-label-draft;
+            refresh-characters => { root.characters-refresh(); }
+            backup-character(index, label) => { root.character-backup(index, label); }
+        }
+
         AppearanceOverlay {
             width: root.width;
             height: root.height;
@@ -9568,6 +9872,9 @@ export component KalpaWindow inherits Window {
             addons-path-redetected => { root.settings-addons-path-redetected(); }
             addons-path-applied(path) => { root.settings-addons-path-applied(path); }
             api-compat-clicked => { root.settings-api-compat(); }
+            app-update-clicked => { root.settings-app-update(); }
+            minion-migration-clicked => { root.settings-minion-migration(); }
+            safety-center-clicked => { root.settings-safety-center(); }
             addon-list-exported => { root.settings-addon-list-export(); }
             addon-list-imported => { root.settings-addon-list-import(); }
             backup-restore-clicked => {
@@ -9578,9 +9885,8 @@ export component KalpaWindow inherits Window {
             }
             characters-clicked => {
                 root.settings-open = false;
-                root.svm-open = true;
-                root.svm-view = 0;
-                root.open-svm();
+                root.characters-open = true;
+                root.open-characters();
             }
         }
 
