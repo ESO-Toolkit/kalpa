@@ -43,7 +43,7 @@ use std::{
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -132,6 +132,51 @@ struct ExportData {
     addons: Vec<ExportEntry>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct NativePackAddonEntry {
+    esoui_id: u32,
+    name: String,
+    #[serde(default = "default_true")]
+    required: bool,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+struct NativeHubPack {
+    id: String,
+    #[serde(default)]
+    author_id: String,
+    author_name: String,
+    #[serde(default)]
+    is_anonymous: bool,
+    title: String,
+    description: String,
+    pack_type: String,
+    addons: serde_json::Value,
+    vote_count: i64,
+    #[serde(default)]
+    install_count: i64,
+    created_at: String,
+    updated_at: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    user_voted: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NativePackListResponse {
+    packs: Vec<NativeHubPack>,
+    page: i64,
+    sort: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct NativeImportResult {
     installed: Vec<String>,
@@ -144,6 +189,10 @@ struct NativeApiCompatInfo {
     game_api_version: u32,
     outdated_addons: Vec<String>,
     up_to_date_addons: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -293,6 +342,7 @@ fn main() -> Result<(), slint::PlatformError> {
     apply_initial_native_settings(&ui);
     apply_runtime_flags(&ui, render_config.preset);
     apply_backup_restore_model(&ui);
+    apply_pack_hub_model(&ui, fallback_pack_hub_entries());
     apply_addon_view(&ui, &addon_models);
     let discover_installed_ids = Arc::new(Mutex::new(installed_discover_ids(
         &addon_models.all.borrow(),
@@ -317,6 +367,9 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_theme_actions(&ui, custom_themes);
     wire_settings_actions(&ui, settings_models);
     wire_backup_restore_actions(&ui);
+    if ui.get_pack_hub_open() {
+        refresh_pack_hub_packs(&ui);
+    }
     ui.run()
 }
 
@@ -2224,6 +2277,14 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         }
     });
 
+    let pack_hub_ui = ui.as_weak();
+    ui.on_open_pack_hub(move || {
+        let Some(ui) = pack_hub_ui.upgrade() else {
+            return;
+        };
+        refresh_pack_hub_packs(&ui);
+    });
+
     let svm_open_ui = ui.as_weak();
     let svm_open_models = models.clone();
     ui.on_open_svm(move || {
@@ -2280,6 +2341,172 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             }
         }
     });
+}
+
+fn apply_pack_hub_model(ui: &KalpaWindow, entries: Vec<PackHubEntry>) {
+    ui.set_pack_hub_packs(Rc::new(VecModel::from(entries)).into());
+}
+
+fn fallback_pack_hub_entries() -> Vec<PackHubEntry> {
+    vec![
+        PackHubEntry {
+            id: "demo-spikes-utilities".into(),
+            title: "Spike's Utilities".into(),
+            description: "just some addons I always use, i really like Caro's!!".into(),
+            tag: "utility".into(),
+            addon_count: "22 addons".into(),
+            vote_count: "1".into(),
+            author: "Spike'jo".into(),
+            pack_type_label: "Addon Pack".into(),
+            trial: false,
+        },
+        PackHubEntry {
+            id: "demo-spikes-trial-necessities".into(),
+            title: "Spike's Trial Necessities".into(),
+            description: "just some addons i never play without".into(),
+            tag: "trial".into(),
+            addon_count: "18 addons".into(),
+            vote_count: "1".into(),
+            author: "Spike'jo".into(),
+            pack_type_label: "Addon Pack".into(),
+            trial: true,
+        },
+    ]
+}
+
+fn refresh_pack_hub_packs(ui: &KalpaWindow) {
+    ui.set_status_error_message("Loading Pack Hub packs...".into());
+    let ui_weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let result = fetch_pack_hub_packs_blocking();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+
+            match result {
+                Ok(entries) if !entries.is_empty() => {
+                    apply_pack_hub_model(&ui, entries);
+                    ui.set_status_error_message("".into());
+                }
+                Ok(_) => {
+                    ui.set_status_error_message("Pack Hub returned no published packs.".into());
+                }
+                Err(error) => {
+                    ui.set_status_error_message(
+                        format!("Could not load Pack Hub packs: {error}").into(),
+                    );
+                }
+            }
+        });
+    });
+}
+
+fn pack_hub_url() -> &'static str {
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        std::env::var("PACK_HUB_API_URL")
+            .unwrap_or_else(|_| "https://kalpa-pack-hub.eso-toolkit.workers.dev".to_string())
+    })
+}
+
+fn pack_hub_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent("Kalpa Slint Prototype")
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("failed to build Pack Hub HTTP client")
+    })
+}
+
+fn fetch_pack_hub_packs_blocking() -> Result<Vec<PackHubEntry>, String> {
+    let response = pack_hub_client()
+        .get(format!("{}/packs", pack_hub_url()))
+        .query(&[("sort", "votes"), ("page", "1")])
+        .send()
+        .map_err(|error| {
+            if error.is_connect() || error.is_timeout() {
+                "Could not connect to Pack Hub. Check your internet connection.".to_string()
+            } else {
+                format!("Network error: {error}")
+            }
+        })?;
+
+    if !response.status().is_success() {
+        return Err(format!("Pack Hub returned HTTP {}", response.status()));
+    }
+
+    let body: NativePackListResponse = response
+        .json()
+        .map_err(|error| format!("Failed to parse packs response: {error}"))?;
+    let _ = (body.page, body.sort.as_str());
+
+    Ok(body
+        .packs
+        .into_iter()
+        .map(pack_hub_entry_from_hub)
+        .collect())
+}
+
+fn pack_hub_entry_from_hub(hub: NativeHubPack) -> PackHubEntry {
+    let addons = native_pack_addons(&hub.addons);
+    let addon_count = addons.len();
+    let tag = hub
+        .tags
+        .first()
+        .cloned()
+        .filter(|tag| !tag.trim().is_empty())
+        .unwrap_or_else(|| fallback_pack_tag(&hub.pack_type));
+    let trial = hub.tags.iter().any(|tag| tag.eq_ignore_ascii_case("trial"))
+        || hub.pack_type.eq_ignore_ascii_case("trial");
+
+    PackHubEntry {
+        id: hub.id.into(),
+        title: hub.title.into(),
+        description: hub.description.into(),
+        tag: tag.into(),
+        addon_count: addon_count_label(addon_count).into(),
+        vote_count: hub.vote_count.max(0).to_string().into(),
+        author: if hub.is_anonymous {
+            "Anonymous".into()
+        } else {
+            hub.author_name.into()
+        },
+        pack_type_label: pack_type_label(&hub.pack_type).into(),
+        trial,
+    }
+}
+
+fn native_pack_addons(addons: &serde_json::Value) -> Vec<NativePackAddonEntry> {
+    match addons {
+        serde_json::Value::String(value) => serde_json::from_str(value).unwrap_or_default(),
+        serde_json::Value::Array(_) => serde_json::from_value(addons.clone()).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn addon_count_label(count: usize) -> String {
+    format!("{count} addon{}", if count == 1 { "" } else { "s" })
+}
+
+fn pack_type_label(pack_type: &str) -> String {
+    match pack_type {
+        "build" => "Build Pack",
+        "roster" => "Roster Pack",
+        _ => "Addon Pack",
+    }
+    .to_string()
+}
+
+fn fallback_pack_tag(pack_type: &str) -> String {
+    match pack_type {
+        "build" => "build",
+        "roster" => "roster",
+        _ => "addon",
+    }
+    .to_string()
 }
 
 fn apply_initial_native_settings(ui: &KalpaWindow) {
@@ -9041,8 +9268,11 @@ mod tests {
         let root = test_temp_dir("native-disable-enable");
         let addon_dir = root.join("ToggleAddon");
         fs::create_dir_all(&addon_dir).expect("create addon folder");
-        fs::write(addon_dir.join("ToggleAddon.txt"), "## Title: Toggle Addon\n")
-            .expect("write manifest");
+        fs::write(
+            addon_dir.join("ToggleAddon.txt"),
+            "## Title: Toggle Addon\n",
+        )
+        .expect("write manifest");
 
         set_addon_disabled_on_disk(root, "ToggleAddon", true).expect("disable addon");
         assert!(!root.join("ToggleAddon").exists());
@@ -9074,7 +9304,13 @@ mod tests {
         fs::create_dir_all(root.join("DuplicateAddon.disabled")).expect("create disabled addon");
 
         let mut store = metadata::MetadataStore::default();
-        metadata::record_install(&mut store, "DuplicateAddon", 1360, "1.0", "https://example.test");
+        metadata::record_install(
+            &mut store,
+            "DuplicateAddon",
+            1360,
+            "1.0",
+            "https://example.test",
+        );
         metadata::save_metadata(root, &store).expect("save metadata");
 
         remove_addon_from_disk(root, "DuplicateAddon").expect("remove addon");
@@ -9738,6 +9974,26 @@ CombatMetrics_SavedVariables = {
         archive.finish().expect("finish test zip");
     }
 
+    fn sample_native_hub_pack(addons: serde_json::Value) -> NativeHubPack {
+        NativeHubPack {
+            id: "pack-1".to_string(),
+            author_id: "author-1".to_string(),
+            author_name: "Spike'jo".to_string(),
+            is_anonymous: false,
+            title: "Trial Essentials".to_string(),
+            description: "Core addons for trial nights".to_string(),
+            pack_type: "addon".to_string(),
+            addons,
+            vote_count: 7,
+            install_count: 3,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+            tags: vec!["trial".to_string(), "healer".to_string()],
+            user_voted: None,
+            status: Some("published".to_string()),
+        }
+    }
+
     #[test]
     fn discover_tabs_have_model_backed_rows() {
         let installed = BTreeSet::new();
@@ -9755,6 +10011,44 @@ CombatMetrics_SavedVariables = {
                 "tab {tab} rows should carry ESOUI ids"
             );
         }
+    }
+
+    #[test]
+    fn pack_hub_entry_maps_worker_json_string_shape() {
+        let pack = sample_native_hub_pack(serde_json::Value::String(
+            r#"[{"esouiId":4061,"name":"Ability Icons Framework","required":true},{"esouiId":1161,"name":"Addon Selector","required":false,"note":"Optional profile helper"}]"#
+                .to_string(),
+        ));
+
+        let entry = pack_hub_entry_from_hub(pack);
+
+        assert_eq!(entry.title.as_str(), "Trial Essentials");
+        assert_eq!(entry.addon_count.as_str(), "2 addons");
+        assert_eq!(entry.vote_count.as_str(), "7");
+        assert_eq!(entry.tag.as_str(), "trial");
+        assert_eq!(entry.author.as_str(), "Spike'jo");
+        assert_eq!(entry.pack_type_label.as_str(), "Addon Pack");
+        assert!(entry.trial);
+    }
+
+    #[test]
+    fn pack_hub_entry_maps_array_shape_and_anonymous_author() {
+        let mut pack = sample_native_hub_pack(serde_json::json!([
+            { "esouiId": 4061, "name": "Ability Icons Framework" }
+        ]));
+        pack.is_anonymous = true;
+        pack.author_name = "Hidden Author".to_string();
+        pack.pack_type = "build".to_string();
+        pack.tags.clear();
+        pack.vote_count = -5;
+
+        let entry = pack_hub_entry_from_hub(pack);
+
+        assert_eq!(entry.addon_count.as_str(), "1 addon");
+        assert_eq!(entry.vote_count.as_str(), "0");
+        assert_eq!(entry.author.as_str(), "Anonymous");
+        assert_eq!(entry.pack_type_label.as_str(), "Build Pack");
+        assert_eq!(entry.tag.as_str(), "build");
     }
 
     #[test]

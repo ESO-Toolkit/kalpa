@@ -188,8 +188,10 @@ Current detail status:
   loading/error polish, screenshots/gallery parity, and remove/update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
   the reference Browse, Create details, Create addons, and install-detail flows.
-  The flow is still prototype-data backed; production needs real pack storage,
-  import/export, publish, voting, install, and account/session wiring before it
+  Browse now loads published packs from the public Pack Hub `/packs` endpoint
+  into native cards with live title, author, type, tag, vote, and addon-count
+  metadata. My Packs, Create/Edit, share/import links, voting, install, detail
+  hydration, and account/session wiring still need production parity before this
   can replace the React Pack Hub implementation.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and

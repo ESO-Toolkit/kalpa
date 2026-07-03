@@ -50,6 +50,18 @@ export struct SavedVariableEntry {
     orphaned: bool,
 }
 
+export struct PackHubEntry {
+    id: string,
+    title: string,
+    description: string,
+    tag: string,
+    addon-count: string,
+    vote-count: string,
+    author: string,
+    pack-type-label: string,
+    trial: bool,
+}
+
 export struct SettingsBackupEntry {
     name: string,
     display-name: string,
@@ -4162,6 +4174,9 @@ component PackHubPackCard inherits Rectangle {
     in property <string> description;
     in property <string> tag;
     in property <string> addon-count;
+    in property <string> vote-count: "0";
+    in property <string> author: "";
+    in property <string> pack-type-label: "Addon Pack";
     in property <bool> trial: false;
     callback open-detail;
     height: 98px;
@@ -4196,7 +4211,7 @@ component PackHubPackCard inherits Rectangle {
     Pill {
         x: min(16px + title-text.preferred-width + 14px, parent.width - 158px);
         y: 12px;
-        label: "Addon Pack";
+        label: root.pack-type-label;
         tone: Palette.gold;
         fill: Palette.gold-04;
         pill-height: 21px;
@@ -4267,7 +4282,7 @@ component PackHubPackCard inherits Rectangle {
             x: 0px;
             y: 21px;
             width: parent.width;
-            text: "1";
+            text: root.vote-count;
             color: Palette.muted-half;
             font-size: 12px;
             font-weight: 800;
@@ -4300,7 +4315,7 @@ component PackHubPackCard inherits Rectangle {
         x: parent.width - 52px;
         y: 74px;
         width: 42px;
-        text: "Spike'jo";
+        text: root.author;
         color: Palette.muted-half;
         font-size: 11px;
         font-weight: 600;
@@ -4575,6 +4590,7 @@ component PackHubInstallRow inherits Rectangle {
 }
 
 component PackHubBrowseView inherits Rectangle {
+    in property <[PackHubEntry]> packs;
     callback open-detail;
     background: #00000000;
 
@@ -4598,27 +4614,59 @@ component PackHubBrowseView inherits Rectangle {
     PackHubSelectField { x: parent.width - 256px; y: 52px; width: 142px; label: "all"; }
     PackHubSelectField { x: parent.width - 104px; y: 52px; width: 104px; label: "votes"; }
 
-    PackHubPackCard {
+    if (root.packs.length == 0) : Rectangle {
         x: 0px;
         y: 102px;
         width: parent.width;
-        title: "Spike's Utilities";
-        description: "just some addons I always use, i really like Caro's!!";
-        tag: "utility";
-        addon-count: "22 addons";
-        open-detail => { root.open-detail(); }
+        height: 218px;
+        border-radius: 12px;
+        border-width: 0px;
+        background: Palette.white-02;
+
+        Text {
+            x: 24px;
+            y: 0px;
+            width: parent.width - 48px;
+            height: parent.height;
+            text: "Loading Pack Hub packs...";
+            color: Palette.muted-strong;
+            font-size: 14px;
+            font-weight: 800;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
 
-    PackHubPackCard {
+    if (root.packs.length > 0) : ScrollView {
         x: 0px;
-        y: 210px;
+        y: 102px;
         width: parent.width;
-        title: "Spike's Trial Necessities";
-        description: "just some addons i never play without";
-        tag: "trial";
-        addon-count: "18 addons";
-        trial: true;
-        open-detail => { root.open-detail(); }
+        height: parent.height - 102px;
+        viewport-width: self.width;
+        viewport-height: root.packs.length * 108px;
+        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+        Rectangle {
+            width: parent.width;
+            height: root.packs.length * 108px;
+            background: #00000000;
+
+            for pack[index] in root.packs : PackHubPackCard {
+                x: 0px;
+                y: index * 108px;
+                width: parent.width;
+                title: pack.title;
+                description: pack.description;
+                tag: pack.tag;
+                addon-count: pack.addon-count;
+                vote-count: pack.vote-count;
+                author: pack.author;
+                pack-type-label: pack.pack-type-label;
+                trial: pack.trial;
+                open-detail => { root.open-detail(); }
+            }
+        }
     }
 }
 
@@ -4809,6 +4857,7 @@ component PackHubInstallView inherits Rectangle {
 component PackHubOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
+    in property <[PackHubEntry]> packs;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
@@ -4879,6 +4928,7 @@ component PackHubOverlay inherits Rectangle {
                 y: 142px;
                 width: parent.width - 48px;
                 height: parent.height - 212px;
+                packs: root.packs;
                 open-detail => { root.view = 3; }
             }
 
@@ -8591,6 +8641,7 @@ export component KalpaWindow inherits Window {
     in property <[FileEntry]> addon-files;
     in property <[BackupEntry]> edit-backups;
     in property <[DiscoverEntry]> discover-results;
+    in property <[PackHubEntry]> pack-hub-packs;
     in property <[SavedVariableEntry]> svm-files;
     in property <[SavedVariableEntry]> svm-orphaned-files;
     in property <[SettingsBackupEntry]> settings-backups;
@@ -8977,6 +9028,7 @@ export component KalpaWindow inherits Window {
             height: root.height;
             open <=> root.pack-hub-open;
             view <=> root.pack-hub-view;
+            packs: root.pack-hub-packs;
         }
 
         if (root.svm-open) : SavedVariablesOverlay {
