@@ -3436,6 +3436,14 @@ fn fallback_pack_hub_entries() -> Vec<PackHubEntry> {
             author: "Spike'jo".into(),
             pack_type_label: "Addon Pack".into(),
             updated_label: "Updated recently".into(),
+            monogram: pack_monogram("Spike's Utilities").into(),
+            author_initial: author_initial("Spike'jo").into(),
+            identity_kind: pack_identity_kind(
+                "demo-spikes-utilities",
+                "Spike's Utilities",
+                "addon-pack",
+            ),
+            type_kind: pack_type_kind("addon-pack"),
             trial: false,
         },
         PackHubEntry {
@@ -3448,6 +3456,14 @@ fn fallback_pack_hub_entries() -> Vec<PackHubEntry> {
             author: "Spike'jo".into(),
             pack_type_label: "Addon Pack".into(),
             updated_label: "Updated recently".into(),
+            monogram: pack_monogram("Spike's Trial Necessities").into(),
+            author_initial: author_initial("Spike'jo").into(),
+            identity_kind: pack_identity_kind(
+                "demo-spikes-trial-necessities",
+                "Spike's Trial Necessities",
+                "addon-pack",
+            ),
+            type_kind: pack_type_kind("addon-pack"),
             trial: true,
         },
     ]
@@ -3659,6 +3675,12 @@ fn pack_hub_entry_from_hub_with_count(hub: &NativeHubPack, addon_count: usize) -
     let trial = hub.tags.iter().any(|tag| tag.eq_ignore_ascii_case("trial"))
         || hub.pack_type.eq_ignore_ascii_case("trial");
 
+    let author = if hub.is_anonymous {
+        "Anonymous".to_string()
+    } else {
+        hub.author_name.clone()
+    };
+
     PackHubEntry {
         id: hub.id.as_str().into(),
         title: hub.title.as_str().into(),
@@ -3666,13 +3688,13 @@ fn pack_hub_entry_from_hub_with_count(hub: &NativeHubPack, addon_count: usize) -
         tag: tag.into(),
         addon_count: addon_count_label(addon_count).into(),
         vote_count: hub.vote_count.max(0).to_string().into(),
-        author: if hub.is_anonymous {
-            "Anonymous".into()
-        } else {
-            hub.author_name.clone().into()
-        },
+        author: author.as_str().into(),
         pack_type_label: pack_type_label(&hub.pack_type).into(),
         updated_label: pack_updated_label(&hub.created_at, &hub.updated_at).into(),
+        monogram: pack_monogram(&hub.title).into(),
+        author_initial: author_initial(&author).into(),
+        identity_kind: pack_identity_kind(&hub.id, &hub.title, &hub.pack_type),
+        type_kind: pack_type_kind(&hub.pack_type),
         trial,
     }
 }
@@ -3706,6 +3728,75 @@ fn pack_hub_install_label(addons: &[PackHubAddonEntry]) -> String {
         1 => "Install 1 New Addon".to_string(),
         count => format!("Install {count} New Addons"),
     }
+}
+
+fn hash_pack_id(input: &str) -> u32 {
+    input.bytes().fold(0x811c9dc5, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x01000193)
+    })
+}
+
+fn pack_monogram(title: &str) -> String {
+    let words = title
+        .split(|ch: char| !(ch.is_alphanumeric() || ch.is_whitespace()))
+        .flat_map(str::split_whitespace)
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+
+    match words.as_slice() {
+        [] => "?".to_string(),
+        [word] => word.chars().take(2).collect::<String>().to_uppercase(),
+        [first, .., last] => {
+            let mut mono = String::new();
+            if let Some(ch) = first.chars().next() {
+                mono.push(ch);
+            }
+            if let Some(ch) = last.chars().next() {
+                mono.push(ch);
+            }
+            if mono.is_empty() {
+                "?".to_string()
+            } else {
+                mono.to_uppercase()
+            }
+        }
+    }
+}
+
+fn author_initial(author: &str) -> String {
+    author
+        .chars()
+        .find(|ch| ch.is_alphanumeric())
+        .map(|ch| ch.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn pack_type_kind(pack_type: &str) -> i32 {
+    match pack_type {
+        "build" | "build-pack" => 1,
+        "roster" | "roster-pack" => 2,
+        _ => 0,
+    }
+}
+
+fn pack_identity_kind(pack_id: &str, title: &str, pack_type: &str) -> i32 {
+    const IDENTITY_COUNT: u32 = 7;
+    let seed = if pack_id.trim().is_empty() {
+        title
+    } else {
+        pack_id
+    };
+    let mut kind = hash_pack_id(seed) % IDENTITY_COUNT;
+    let type_kind = match pack_type_kind(pack_type) {
+        0 => 0,
+        1 => 1,
+        2 => 6,
+        _ => 0,
+    };
+    if kind as i32 == type_kind {
+        kind = (kind + 1) % IDENTITY_COUNT;
+    }
+    kind as i32
 }
 
 fn pack_hub_detail_addons(ui: &KalpaWindow) -> Vec<PackHubAddonEntry> {
@@ -14382,6 +14473,9 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entry.author.as_str(), "Spike'jo");
         assert_eq!(entry.pack_type_label.as_str(), "Addon Pack");
         assert_eq!(entry.updated_label.as_str(), "Updated Jan 2, 2026");
+        assert_eq!(entry.monogram.as_str(), "TE");
+        assert_eq!(entry.author_initial.as_str(), "S");
+        assert_eq!(entry.type_kind, 0);
         assert!(entry.trial);
     }
 
@@ -14401,8 +14495,26 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entry.addon_count.as_str(), "1 addon");
         assert_eq!(entry.vote_count.as_str(), "0");
         assert_eq!(entry.author.as_str(), "Anonymous");
+        assert_eq!(entry.author_initial.as_str(), "A");
         assert_eq!(entry.pack_type_label.as_str(), "Build Pack");
         assert_eq!(entry.tag.as_str(), "build");
+        assert_eq!(entry.type_kind, 1);
+    }
+
+    #[test]
+    fn pack_hub_identity_derives_monograms_and_distinct_type_color() {
+        assert_eq!(pack_monogram("Trial Essentials"), "TE");
+        assert_eq!(pack_monogram("CombatMetrics"), "CO");
+        assert_eq!(pack_monogram("!!!"), "?");
+        assert_eq!(author_initial("@code65536"), "C");
+
+        assert_eq!(pack_type_kind("addon-pack"), 0);
+        assert_eq!(pack_type_kind("build-pack"), 1);
+        assert_eq!(pack_type_kind("roster-pack"), 2);
+
+        let addon_identity = pack_identity_kind("pack-1", "Trial Essentials", "addon-pack");
+        assert!((0..7).contains(&addon_identity));
+        assert_ne!(addon_identity, 0);
     }
 
     #[test]

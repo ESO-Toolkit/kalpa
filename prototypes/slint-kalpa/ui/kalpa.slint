@@ -76,6 +76,10 @@ export struct PackHubEntry {
     author: string,
     pack-type-label: string,
     updated-label: string,
+    monogram: string,
+    author-initial: string,
+    identity-kind: int,
+    type-kind: int,
     trial: bool,
 }
 
@@ -5181,31 +5185,83 @@ component PackHubPackCard inherits Rectangle {
     in property <string> addon-count;
     in property <string> vote-count: "0";
     in property <string> author: "";
+    in property <string> author-initial: "?";
     in property <string> pack-type-label: "Addon Pack";
+    in property <string> monogram: "?";
+    in property <int> identity-kind: 0;
+    in property <int> type-kind: 0;
     in property <bool> trial: false;
     callback open-detail;
-    height: 98px;
+    private property <color> type-tone: root.type-kind == 1 ? Palette.sky : (root.type-kind == 2 ? Palette.violet : Palette.gold);
+    private property <color> type-fill: root.type-kind == 1 ? Palette.sky-04 : (root.type-kind == 2 ? Palette.violet-04 : Palette.gold-04);
+    private property <color> identity-tone: root.identity-kind == 1 ? Palette.sky : (root.identity-kind == 2 ? Palette.logo : (root.identity-kind == 3 ? Palette.emerald : (root.identity-kind == 4 ? Palette.amber : (root.identity-kind == 5 ? Palette.red : (root.identity-kind == 6 ? Palette.violet : Palette.gold)))));
+    private property <color> identity-fill: root.identity-kind == 1 ? Palette.sky-15 : (root.identity-kind == 2 ? #4dc2e626 : (root.identity-kind == 3 ? Palette.emerald-15 : (root.identity-kind == 4 ? Palette.amber-15 : (root.identity-kind == 5 ? Palette.red-15 : (root.identity-kind == 6 ? Palette.violet-15 : Palette.gold-15)))));
+    private property <color> identity-wash: root.identity-kind == 1 ? Palette.sky-06 : (root.identity-kind == 2 ? #4dc2e610 : (root.identity-kind == 3 ? Palette.emerald-04 : (root.identity-kind == 4 ? Palette.amber-04 : (root.identity-kind == 5 ? Palette.red-04 : (root.identity-kind == 6 ? Palette.violet-04 : Palette.gold-04)))));
+    private property <length> content-x: 66px;
+    height: 108px;
     border-radius: 12px;
-    border-width: 0px;
-    background: touch.has-hover ? Palette.white-06 : Palette.white-03;
+    border-width: 1px;
+    border-color: touch.has-hover ? Palette.border-strong : Palette.border;
+    background: @linear-gradient(180deg, Palette.white-06 0%, Palette.white-03 100%);
     clip: true;
+    drop-shadow-blur: touch.has-hover ? 22px : 12px;
+    drop-shadow-offset-y: touch.has-hover ? 8px : 4px;
+    drop-shadow-color: #00000066;
 
-    animate background { duration: 150ms; easing: ease-in-out; }
+    animate border-color, drop-shadow-blur, drop-shadow-offset-y { duration: 150ms; easing: ease-in-out; }
 
     Rectangle {
         x: 0px;
         y: 0px;
-        width: 2px;
+        width: 210px;
         height: parent.height;
-        border-radius: 2px;
+        background: @linear-gradient(90deg, root.identity-wash 0%, #00000000 100%);
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 3px;
+        height: parent.height;
+        border-radius: 3px;
         border-width: 0px;
-        background: Palette.gold;
+        background: root.type-tone;
+    }
+
+    Rectangle {
+        x: 14px;
+        y: 14px;
+        width: 40px;
+        height: 40px;
+        border-radius: 9px;
+        border-width: 1px;
+        border-color: root.identity-fill;
+        background: @linear-gradient(135deg, root.identity-fill 0%, root.identity-wash 100%);
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: 1px;
+            background: Palette.white-10;
+        }
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: root.monogram;
+            color: root.identity-tone;
+            font-size: 13px;
+            font-weight: 900;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
 
     title-text := Text {
-        x: 16px;
+        x: root.content-x;
         y: 14px;
-        width: parent.width - 190px;
+        width: parent.width - 244px;
         text: root.title;
         color: Palette.foreground;
         font-size: 14px;
@@ -5214,36 +5270,38 @@ component PackHubPackCard inherits Rectangle {
     }
 
     Pill {
-        x: min(16px + title-text.preferred-width + 14px, parent.width - 158px);
+        x: min(root.content-x + title-text.preferred-width + 10px, parent.width - 174px);
         y: 12px;
         label: root.pack-type-label;
-        tone: Palette.gold;
-        fill: Palette.gold-04;
+        tone: root.type-tone;
+        fill: root.type-fill;
         pill-height: 21px;
         label-font-size: 11px;
     }
 
     Text {
-        x: 16px;
-        y: 48px;
-        width: parent.width - 132px;
+        x: root.content-x;
+        y: 39px;
+        width: parent.width - 138px;
+        height: 28px;
         text: root.description;
-        color: Palette.muted-half;
+        color: Palette.muted-strong;
         font-size: 12px;
         font-weight: 600;
+        wrap: word-wrap;
         overflow: elide;
     }
 
-    PackHubTag {
-        x: 16px;
-        y: 72px;
+    tag-pill := PackHubTag {
+        x: root.content-x;
+        y: 77px;
         label: root.tag;
         tone: root.trial ? Palette.red : Palette.muted-strong;
     }
 
     Image {
-        x: 96px;
-        y: 77px;
+        x: tag-pill.x + tag-pill.width + 12px;
+        y: 82px;
         width: 12px;
         height: 12px;
         source: @image-url("../assets/icons/package.svg");
@@ -5252,8 +5310,8 @@ component PackHubPackCard inherits Rectangle {
     }
 
     Text {
-        x: 114px;
-        y: 73px;
+        x: tag-pill.x + tag-pill.width + 30px;
+        y: 78px;
         width: 90px;
         height: 20px;
         text: root.addon-count;
@@ -5270,7 +5328,7 @@ component PackHubPackCard inherits Rectangle {
         height: 42px;
         border-radius: 8px;
         border-width: 0px;
-        background: Palette.white-04;
+        background: touch.has-hover ? root.type-fill : Palette.white-04;
 
         Image {
             x: 9px;
@@ -5280,7 +5338,7 @@ component PackHubPackCard inherits Rectangle {
             source: @image-url("../assets/icons/chevron-down.svg");
             transform-rotation: 180deg;
             image-fit: contain;
-            colorize: Palette.muted-half;
+            colorize: touch.has-hover ? root.type-tone : Palette.muted-half;
         }
 
         Text {
@@ -5288,7 +5346,7 @@ component PackHubPackCard inherits Rectangle {
             y: 21px;
             width: parent.width;
             text: root.vote-count;
-            color: Palette.muted-half;
+            color: touch.has-hover ? root.type-tone : Palette.muted-half;
             font-size: 12px;
             font-weight: 800;
             horizontal-alignment: center;
@@ -5297,17 +5355,17 @@ component PackHubPackCard inherits Rectangle {
 
     Rectangle {
         x: parent.width - 78px;
-        y: 73px;
+        y: 78px;
         width: 18px;
         height: 18px;
         border-radius: 9px;
         border-width: 0px;
-        background: Palette.white-08;
+        background: Palette.white-06;
 
         Text {
             width: parent.width;
             height: parent.height;
-            text: "S";
+            text: root.author-initial;
             color: Palette.muted-half;
             font-size: 9px;
             font-weight: 900;
@@ -5318,7 +5376,7 @@ component PackHubPackCard inherits Rectangle {
 
     Text {
         x: parent.width - 52px;
-        y: 74px;
+        y: 79px;
         width: 42px;
         text: root.author;
         color: Palette.muted-half;
@@ -5680,7 +5738,11 @@ component PackHubBrowseView inherits Rectangle {
                 addon-count: pack.addon-count;
                 vote-count: pack.vote-count;
                 author: pack.author;
+                author-initial: pack.author-initial;
                 pack-type-label: pack.pack-type-label;
+                monogram: pack.monogram;
+                identity-kind: pack.identity-kind;
+                type-kind: pack.type-kind;
                 trial: pack.trial;
                 open-detail => { root.open-detail(index); }
             }

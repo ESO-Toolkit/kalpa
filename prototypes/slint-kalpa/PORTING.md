@@ -202,9 +202,11 @@ Current detail status:
   installed-pack library tracking, and install-count tracking. Pack detail
   Edit/Delete/Share actions now hand off to the full WebView Pack Hub with the
   selected pack id because those flows still require the React account/session
-  and share-code surfaces. My Packs, Create/Edit, share/import links, voting,
-  and account/session wiring still need production parity before this can
-  replace the React Pack Hub implementation.
+  and share-code surfaces. Pack browse cards now use the React-style
+  deterministic identity model: type accent, hash-derived monogram tile, dynamic
+  author initial, and a denser title/type/description/meta hierarchy. My Packs,
+  Create/Edit, share/import links, voting, and account/session wiring still need
+  production parity before this can replace the React Pack Hub implementation.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,
