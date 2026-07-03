@@ -15434,7 +15434,7 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     tokens.set_reduced_motion(reduced_motion);
     tokens.set_ambient_motion(env_flag_with_default(
         "KALPA_AMBIENT_MOTION",
-        render_preset == NativeRenderPreset::Standard,
+        false,
     ));
 
     let detail_files_active = std::env::var("KALPA_DETAIL_TAB")

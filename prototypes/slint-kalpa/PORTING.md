@@ -339,11 +339,12 @@ Current detail status:
 Current backdrop status:
 
 - The native backdrop now follows the React `AppBackground` structure more
-  closely: theme base color, optional generated skin layer, three animated
+  closely: theme base color, optional generated skin layer, three static
   ambient theme-token orbs, and a light diagonal wash. The orb layers now use
   low-resolution pre-blurred image sprites generated from the active theme in
-  Rust, which avoids the blocky/pixelated look of Slint radial-gradient stacks
-  while preserving the slow drift animation.
+  Rust, which avoids the blocky/pixelated look of Slint radial-gradient stacks.
+  Slow orb drift remains available only as an explicit `KALPA_AMBIENT_MOTION=1`
+  inspection mode.
 - The previous native-only bottom darkening layer was removed because it created
   a blockier lower-right surface than the WebView background.
 - Tiny rounded chips and pills use theme-aware nine-slice backplates generated
@@ -385,9 +386,9 @@ Current backdrop status:
   low-memory path.
   `winit-femtovg`
   ~84 MB / 132 MB, `winit-skia` ~86 MB / 132 MB.
-- Keep timers state-gated; idle UI must not run animation timers. The low-memory
-  preset disables ambient backdrop motion by default, while the standard preset
-  enables it unless `KALPA_AMBIENT_MOTION=0`.
+- Keep timers state-gated; idle UI must not run animation timers. Ambient
+  backdrop motion is disabled by default in every preset; use
+  `KALPA_AMBIENT_MOTION=1` only for manual animation inspection.
 - Launch with `KALPA_REDUCED_MOTION=1` to inspect the native reduced-motion token.
 - Launch with `KALPA_ADDONS_PATH=<AddOns path>` to inspect a specific local addon
   folder. Without the env var, the Windows default live AddOns path is used when
