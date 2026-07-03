@@ -796,6 +796,7 @@ fn main() -> Result<(), slint::PlatformError> {
     place_demo_window(&ui);
     let custom_themes = Rc::new(RefCell::new(read_custom_themes()));
     set_theme_gallery(&ui, &custom_themes.borrow());
+    clear_discover_screenshots(&ui);
 
     let addon_models = apply_mock_data(&ui);
     let active_theme_id = apply_initial_theme(&ui);
@@ -2738,6 +2739,132 @@ fn merge_discover_detail(
     entry.compatibility = detail.compatibility.into();
     entry.description = detail.description.into();
     entry
+}
+
+const DISCOVER_SCREENSHOT_LIMIT: usize = 4;
+
+fn clear_discover_screenshots(ui: &KalpaWindow) {
+    ui.set_discover_screenshot_index(0);
+    ui.set_discover_screenshots(
+        Rc::new(VecModel::from(Vec::<DiscoverScreenshotEntry>::new())).into(),
+    );
+}
+
+fn discover_screenshot_entries(
+    paths: &[PathBuf],
+    selected_index: usize,
+) -> Vec<DiscoverScreenshotEntry> {
+    paths
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            Image::load_from_path(path)
+                .ok()
+                .map(|image| DiscoverScreenshotEntry {
+                    image,
+                    selected: index == selected_index,
+                })
+        })
+        .collect()
+}
+
+fn apply_discover_screenshot_selection(ui: &KalpaWindow, selected_index: usize) {
+    let screenshot_count = ui.get_discover_screenshots().row_count();
+    if screenshot_count == 0 {
+        ui.set_discover_screenshot_index(0);
+        return;
+    }
+
+    let selected_index = selected_index.min(screenshot_count.saturating_sub(1));
+    let rows = (0..screenshot_count)
+        .filter_map(|index| ui.get_discover_screenshots().row_data(index))
+        .enumerate()
+        .map(|(index, mut shot)| {
+            shot.selected = index == selected_index;
+            shot
+        })
+        .collect::<Vec<_>>();
+    ui.set_discover_screenshot_index(selected_index as i32);
+    ui.set_discover_screenshots(Rc::new(VecModel::from(rows)).into());
+}
+
+fn discover_screenshot_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("kalpa-slint-discover-screenshots")
+}
+
+fn discover_screenshot_cache_path(addon_id: &str, index: usize, url: &str) -> PathBuf {
+    let extension = url
+        .split(['?', '#'])
+        .next()
+        .and_then(|value| value.rsplit('.').next())
+        .filter(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "jpg" | "jpeg" | "png" | "webp"
+            )
+        })
+        .unwrap_or("jpg");
+    discover_screenshot_cache_dir().join(format!("{addon_id}-{index}.{extension}"))
+}
+
+fn download_discover_screenshot(
+    addon_id: &str,
+    index: usize,
+    url: &str,
+) -> Result<PathBuf, String> {
+    if !url.starts_with("https://cdn.esoui.com/") && !url.starts_with("https://www.esoui.com/") {
+        return Err("Ignoring screenshot from an untrusted host.".to_string());
+    }
+
+    let path = discover_screenshot_cache_path(addon_id, index, url);
+    if path.is_file() {
+        return Ok(path);
+    }
+
+    fs::create_dir_all(discover_screenshot_cache_dir())
+        .map_err(|error| format!("Could not create screenshot cache: {error}"))?;
+    let bytes = reqwest::blocking::get(url)
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| format!("Could not fetch screenshot: {error}"))?
+        .bytes()
+        .map_err(|error| format!("Could not read screenshot: {error}"))?;
+    fs::write(&path, bytes).map_err(|error| format!("Could not cache screenshot: {error}"))?;
+    Ok(path)
+}
+
+fn request_discover_screenshots(
+    ui: &KalpaWindow,
+    addon_id: String,
+    urls: Vec<String>,
+    request_counter: Arc<AtomicU64>,
+) {
+    clear_discover_screenshots(ui);
+    if urls.is_empty() {
+        return;
+    }
+
+    let request_id = request_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let ui_weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let paths = urls
+            .into_iter()
+            .take(DISCOVER_SCREENSHOT_LIMIT)
+            .enumerate()
+            .filter_map(|(index, url)| download_discover_screenshot(&addon_id, index, &url).ok())
+            .collect::<Vec<_>>();
+
+        let _ = slint::invoke_from_event_loop(move || {
+            if request_counter.load(Ordering::SeqCst) != request_id {
+                return;
+            }
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let entries = discover_screenshot_entries(&paths, 0);
+            ui.set_discover_screenshot_index(0);
+            ui.set_discover_screenshots(Rc::new(VecModel::from(entries)).into());
+        });
+    });
 }
 
 fn dependency_model(dependencies: Vec<DependencyEntry>) -> ModelRc<DependencyEntry> {
@@ -6929,6 +7056,7 @@ fn wire_discover(
                         let model = Rc::new(VecModel::from(entries));
                         ui.set_selected_discover_index(selected_index);
                         ui.set_discover_results(model.into());
+                        clear_discover_screenshots(&ui);
                         ui.set_status_error_message("".into());
                     }
                     Err(error) => {
@@ -6941,10 +7069,13 @@ fn wire_discover(
         });
     });
 
+    let screenshot_request_counter = Arc::new(AtomicU64::new(0));
+
     let url_ui = ui.as_weak();
     let url_model = discover_model.clone();
     let url_installed_ids = installed_ids.clone();
     let url_request_counter = Arc::new(AtomicU64::new(0));
+    let url_screenshot_counter = screenshot_request_counter.clone();
     ui.on_discover_url_edited(move |_| {
         let Some(ui) = url_ui.upgrade() else {
             return;
@@ -6965,14 +7096,21 @@ fn wire_discover(
 
         let request_id = url_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
         let request_counter = url_request_counter.clone();
+        let screenshot_counter = url_screenshot_counter.clone();
         let installed_snapshot = discover_installed_snapshot(&url_installed_ids);
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = esoui::parse_esoui_input(input.as_str())
                 .and_then(esoui::fetch_addon_detail)
                 .map(|detail| {
+                    let screenshots = detail.screenshots.clone();
+                    let addon_id = detail.id.to_string();
                     let installed = installed_snapshot.contains(&detail.id.to_string());
-                    discover_entry_from_esoui_detail(detail, installed, 0)
+                    (
+                        discover_entry_from_esoui_detail(detail, installed, 0),
+                        addon_id,
+                        screenshots,
+                    )
                 });
 
             let _ = slint::invoke_from_event_loop(move || {
@@ -6985,10 +7123,16 @@ fn wire_discover(
                 };
 
                 match result {
-                    Ok(entry) => {
+                    Ok((entry, addon_id, screenshots)) => {
                         let model = Rc::new(VecModel::from(vec![entry]));
                         ui.set_selected_discover_index(0);
                         ui.set_discover_results(model.into());
+                        request_discover_screenshots(
+                            &ui,
+                            addon_id,
+                            screenshots,
+                            screenshot_counter.clone(),
+                        );
                         ui.set_status_error_message("".into());
                     }
                     Err(error) => {
@@ -7012,11 +7156,14 @@ fn wire_discover(
         let row_count = model.row_count();
         if row_count == 0 {
             ui.set_selected_discover_index(0);
+            clear_discover_screenshots(&ui);
             return;
         }
 
         let next_index = (index.max(0) as usize).min(row_count.saturating_sub(1));
         ui.set_selected_discover_index(next_index as i32);
+        clear_discover_screenshots(&ui);
+        screenshot_request_counter.fetch_add(1, Ordering::SeqCst);
 
         let Some(entry) = model.row_data(next_index) else {
             return;
@@ -7026,6 +7173,7 @@ fn wire_discover(
         };
         let request_id = detail_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
         let request_counter = detail_request_counter.clone();
+        let screenshot_counter = screenshot_request_counter.clone();
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = esoui::fetch_addon_detail(esoui_id);
@@ -7051,7 +7199,14 @@ fn wire_discover(
 
                 match result {
                     Ok(detail) => {
+                        let screenshots = detail.screenshots.clone();
                         model.set_row_data(selected_index, merge_discover_detail(entry, detail));
+                        request_discover_screenshots(
+                            &ui,
+                            esoui_id.to_string(),
+                            screenshots,
+                            screenshot_counter.clone(),
+                        );
                         ui.set_status_error_message("".into());
                     }
                     Err(error) => {
@@ -7062,6 +7217,50 @@ fn wire_discover(
                 }
             });
         });
+    });
+
+    let screenshot_prev_ui = ui.as_weak();
+    ui.on_discover_screenshot_prev(move || {
+        let Some(ui) = screenshot_prev_ui.upgrade() else {
+            return;
+        };
+        let screenshot_count = ui.get_discover_screenshots().row_count();
+        if screenshot_count <= 1 {
+            return;
+        }
+        let current = ui.get_discover_screenshot_index().max(0) as usize;
+        let next = if current == 0 {
+            screenshot_count.saturating_sub(1)
+        } else {
+            current.saturating_sub(1)
+        };
+        apply_discover_screenshot_selection(&ui, next);
+    });
+
+    let screenshot_next_ui = ui.as_weak();
+    ui.on_discover_screenshot_next(move || {
+        let Some(ui) = screenshot_next_ui.upgrade() else {
+            return;
+        };
+        let screenshot_count = ui.get_discover_screenshots().row_count();
+        if screenshot_count <= 1 {
+            return;
+        }
+        let current = ui.get_discover_screenshot_index().max(0) as usize;
+        apply_discover_screenshot_selection(&ui, (current + 1) % screenshot_count);
+    });
+
+    let screenshot_select_ui = ui.as_weak();
+    ui.on_discover_screenshot_select(move |index| {
+        let Some(ui) = screenshot_select_ui.upgrade() else {
+            return;
+        };
+        let screenshot_count = ui.get_discover_screenshots().row_count();
+        if screenshot_count == 0 {
+            return;
+        }
+        let next = (index.max(0) as usize).min(screenshot_count.saturating_sub(1));
+        apply_discover_screenshot_selection(&ui, next);
     });
 
     let install_ui = ui.as_weak();

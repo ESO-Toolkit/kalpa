@@ -190,9 +190,11 @@ Current detail status:
   downloads/newest/category/sort choices. Popular and category browse modes now
   track loading, page state, and load-more pagination, and the native result rows
   use clearer card-style selection/rank/meta hierarchy to avoid the previous
-  stripe-like selected state and cramped metadata. Remaining Discover gaps are
-  category picker polish, richer skeleton/error states, screenshots/gallery
-  parity, and remove/update flows.
+  stripe-like selected state and cramped metadata. Discover detail hydration now
+  pulls trusted ESOUI screenshot URLs into a bounded temp cache and renders the
+  native detail gallery with selectable thumbnails, previous/next controls, and
+  dynamic screenshot counts. Remaining Discover gaps are category picker polish,
+  richer skeleton/error states, and remove/update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
   the reference Browse, Create details, Create addons, and install-detail flows.
   Browse now loads published packs from the public Pack Hub `/packs` endpoint

@@ -176,6 +176,11 @@ export struct DiscoverEntry {
     rank: int,
 }
 
+export struct DiscoverScreenshotEntry {
+    image: image,
+    selected: bool,
+}
+
 export struct ThemeEntry {
     id: string,
     name: string,
@@ -9781,11 +9786,17 @@ component DiscoverStatCard inherits Rectangle {
 
 component DiscoverDetailPane inherits Rectangle {
     in property <DiscoverEntry> entry;
+    in property <[DiscoverScreenshotEntry]> screenshots;
     in property <int> selected-index: 0;
+    in-out property <int> screenshot-index: 0;
     in property <length> pane-width: 1082px;
     callback install-clicked(int);
     callback open-esoui(string);
-    private property <bool> show-screenshots: root.entry.esoui-id == "1346";
+    callback screenshot-prev;
+    callback screenshot-next;
+    callback screenshot-select(int);
+    private property <bool> show-screenshots: root.screenshots.length > 0;
+    private property <int> safe-screenshot-index: min(max(root.screenshot-index, 0), max(root.screenshots.length - 1, 0));
     background: #00000000;
     clip: true;
 
@@ -9958,7 +9969,7 @@ component DiscoverDetailPane inherits Rectangle {
 
             if (root.show-screenshots) : DetailSectionTitle {
                 width: parent.width;
-                label: "SCREENSHOTS (3)";
+                label: "SCREENSHOTS (" + root.screenshots.length + ")";
             }
 
             if (root.show-screenshots) : Rectangle { height: 8px; background: #00000000; }
@@ -9989,11 +10000,12 @@ component DiscoverDetailPane inherits Rectangle {
                     y: 8px;
                     width: 516px;
                     height: 268px;
-                    source: @image-url("../assets/discover/lazy-writ-crafter-main.png");
-                    image-fit: cover;
+                    source: root.screenshots[root.safe-screenshot-index].image;
+                    image-fit: contain;
                 }
 
                 Rectangle {
+                    visible: root.screenshots.length > 1;
                     x: 16px;
                     y: parent.height / 2 - 18px;
                     width: 36px;
@@ -10003,9 +10015,11 @@ component DiscoverDetailPane inherits Rectangle {
                     background: #00000059;
 
                     Image { x: 11px; y: 11px; width: 14px; height: 14px; source: @image-url("../assets/icons/chevron-right.svg"); image-fit: contain; colorize: Palette.foreground; transform-rotation: 180deg; }
+                    TouchArea { width: parent.width; height: parent.height; clicked => { root.screenshot-prev(); } }
                 }
 
                 Rectangle {
+                    visible: root.screenshots.length > 1;
                     x: parent.width - 52px;
                     y: parent.height / 2 - 18px;
                     width: 36px;
@@ -10015,9 +10029,11 @@ component DiscoverDetailPane inherits Rectangle {
                     background: #00000059;
 
                     Image { x: 11px; y: 11px; width: 14px; height: 14px; source: @image-url("../assets/icons/chevron-right.svg"); image-fit: contain; colorize: Palette.foreground; }
+                    TouchArea { width: parent.width; height: parent.height; clicked => { root.screenshot-next(); } }
                 }
 
                 Rectangle {
+                    visible: root.screenshots.length > 1;
                     x: parent.width - 60px;
                     y: 12px;
                     width: 44px;
@@ -10026,10 +10042,11 @@ component DiscoverDetailPane inherits Rectangle {
                     border-width: 0px;
                     background: #00000066;
 
-                    Text { width: parent.width; height: parent.height; text: "1 / 3"; color: Palette.foreground; font-size: 10px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { width: parent.width; height: parent.height; text: (root.safe-screenshot-index + 1) + " / " + root.screenshots.length; color: Palette.foreground; font-size: 10px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
                 }
 
                 Rectangle {
+                    visible: root.screenshots.length > 1;
                     x: parent.width / 2 - 26px;
                     y: parent.height - 42px;
                     width: 52px;
@@ -10038,9 +10055,15 @@ component DiscoverDetailPane inherits Rectangle {
                     border-width: 0px;
                     background: #00000059;
 
-                    Rectangle { x: 11px; y: 6px; width: 6px; height: 6px; border-radius: 3px; background: Palette.gold; }
-                    Rectangle { x: 23px; y: 6px; width: 6px; height: 6px; border-radius: 3px; background: Palette.muted-half; }
-                    Rectangle { x: 35px; y: 6px; width: 6px; height: 6px; border-radius: 3px; background: Palette.muted-half; }
+                    for shot[index] in root.screenshots : Rectangle {
+                        visible: index < 3;
+                        x: 11px + index * 12px;
+                        y: 6px;
+                        width: 6px;
+                        height: 6px;
+                        border-radius: 3px;
+                        background: shot.selected ? Palette.gold : Palette.muted-half;
+                    }
                 }
             }
 
@@ -10051,10 +10074,21 @@ component DiscoverDetailPane inherits Rectangle {
                 height: 58px;
                 background: #00000000;
 
-                Rectangle { x: 0px; y: 0px; width: 100px; height: 58px; border-radius: 7px; border-width: 0px; background: Palette.gold-25; }
-                Image { x: 2px; y: 2px; width: 96px; height: 54px; source: @image-url("../assets/discover/lazy-writ-crafter-thumb-1.png"); image-fit: cover; opacity: 0.98; }
-                Image { x: 112px; y: 0px; width: 100px; height: 58px; source: @image-url("../assets/discover/lazy-writ-crafter-thumb-2.png"); image-fit: cover; opacity: 0.45; }
-                Image { x: 224px; y: 0px; width: 100px; height: 58px; source: @image-url("../assets/discover/lazy-writ-crafter-thumb-3.png"); image-fit: cover; opacity: 0.45; }
+                for shot[index] in root.screenshots : Rectangle {
+                    visible: index < 4;
+                    x: index * 112px;
+                    y: 0px;
+                    width: 100px;
+                    height: 58px;
+                    border-radius: 7px;
+                    border-width: shot.selected ? 2px : 0px;
+                    border-color: Palette.gold;
+                    background: shot.selected ? Palette.gold-25 : Palette.white-04;
+                    clip: true;
+
+                    Image { x: shot.selected ? 2px : 0px; y: shot.selected ? 2px : 0px; width: shot.selected ? 96px : 100px; height: shot.selected ? 54px : 58px; source: shot.image; image-fit: cover; opacity: shot.selected ? 0.98 : 0.55; }
+                    TouchArea { width: parent.width; height: parent.height; clicked => { root.screenshot-select(index); } }
+                }
             }
 
             if (root.show-screenshots) : Rectangle { height: 24px; background: #00000000; }
@@ -10117,6 +10151,7 @@ export component KalpaWindow inherits Window {
     in property <[FileEntry]> addon-files;
     in property <[BackupEntry]> edit-backups;
     in property <[DiscoverEntry]> discover-results;
+    in property <[DiscoverScreenshotEntry]> discover-screenshots;
     in property <[PackHubEntry]> pack-hub-packs;
     in property <[PackHubAddonEntry]> pack-hub-detail-addons;
     in property <[SavedVariableEntry]> svm-files;
@@ -10212,6 +10247,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> migration-result-summary;
     in-out property <int> selected-index: 5;
     in-out property <int> selected-discover-index: 0;
+    in-out property <int> discover-screenshot-index: 0;
     in-out property <bool> detail-files-active: false;
     in-out property <bool> discover-active: false;
     in-out property <int> filter-mode: 0;
@@ -10343,6 +10379,9 @@ export component KalpaWindow inherits Window {
     callback discover-category-next;
     callback discover-category-sort-next;
     callback discover-load-more;
+    callback discover-screenshot-prev;
+    callback discover-screenshot-next;
+    callback discover-screenshot-select(int);
     callback open-pack-hub;
     callback pack-hub-open-detail(int);
     callback pack-hub-browse-query-edited(string);
@@ -10602,9 +10641,14 @@ export component KalpaWindow inherits Window {
             pane-width: root.content-width;
             height: root.height - 48px - root.banner-height;
             entry: root.discover-results[root.selected-discover-index];
+            screenshots: root.discover-screenshots;
             selected-index: root.selected-discover-index;
+            screenshot-index <=> root.discover-screenshot-index;
             install-clicked(index) => { root.discover-install(index); }
             open-esoui(id) => { root.discover-open-esoui(id); }
+            screenshot-prev => { root.discover-screenshot-prev(); }
+            screenshot-next => { root.discover-screenshot-next(); }
+            screenshot-select(index) => { root.discover-screenshot-select(index); }
         }
 
         if (side.discover-active && root.discover-results.length == 0) : DiscoverEmptyState {
