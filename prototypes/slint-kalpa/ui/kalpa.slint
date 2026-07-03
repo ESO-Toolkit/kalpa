@@ -1810,42 +1810,53 @@ component DiscoverSelectChip inherits Rectangle {
     in property <length> chip-width: 120px;
     callback clicked;
     width: root.chip-width;
-    height: 28px;
-    border-radius: 8px;
-    border-width: 0px;
-    background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-10 : Palette.white-06);
+    height: 32px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: touch.has-hover ? Palette.white-10 : Palette.border;
+    background: touch.has-hover ? Palette.white-06 : Palette.white-04;
     clip: true;
 
     Rectangle {
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height / 2;
-        border-radius: root.border-radius;
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: (parent.height - 2px) / 2;
+        border-radius: 9px;
         border-width: 0px;
-        background: #00000000;
+        background: Palette.white-02;
     }
 
     Image {
-        x: 10px;
-        y: 8px;
+        x: 11px;
+        y: 10px;
         width: 12px;
         height: 12px;
         source: root.icon;
         image-fit: contain;
-        colorize: root.active ? Palette.gold : Palette.muted-half;
+        colorize: touch.has-hover ? Palette.foreground : Palette.muted-half;
     }
 
     Text {
-        x: 28px;
-        width: root.width - 38px;
+        x: 31px;
+        width: root.width - 60px;
         height: root.height;
         text: root.label;
-        color: root.active ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
+        color: touch.has-hover ? Palette.foreground : Palette.muted-strong;
         font-size: 11px;
-        font-weight: 650;
+        font-weight: 700;
         vertical-alignment: center;
         overflow: elide;
+    }
+
+    Image {
+        x: parent.width - 26px;
+        y: 10px;
+        width: 12px;
+        height: 12px;
+        source: @image-url("../assets/icons/chevron-down.svg");
+        image-fit: contain;
+        colorize: touch.has-hover ? Palette.foreground : Palette.muted-half;
     }
 
     touch := TouchArea {
@@ -1874,7 +1885,7 @@ component DiscoverModePanel inherits Rectangle {
     callback category-next;
     callback category-sort-next;
     callback load-more;
-    private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? 36px : 0px);
+    private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? 42px : 0px);
     private property <bool> footer-visible: (root.tab == 1 || root.tab == 2) && (root.loading || root.has-more);
     private property <length> footer-height: root.footer-visible ? 42px : 0px;
     background: #00000000;
@@ -1894,7 +1905,7 @@ component DiscoverModePanel inherits Rectangle {
         x: 12px;
         y: 0px;
         width: parent.width - 24px;
-        height: 28px;
+        height: 32px;
         background: #00000000;
 
         DiscoverSelectChip {
@@ -1908,7 +1919,7 @@ component DiscoverModePanel inherits Rectangle {
         DiscoverSelectChip {
             x: (parent.width + 8px) / 2;
             chip-width: (parent.width - 8px) / 2;
-            icon: @image-url("../assets/icons/chevron-down.svg");
+            icon: @image-url("../assets/icons/refresh-cw.svg");
             label: root.category-sort-label;
             clicked => { root.category-sort-next(); }
         }

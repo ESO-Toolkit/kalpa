@@ -215,8 +215,10 @@ Current detail status:
   uninstall action that removes matching ESOUI addon folders and metadata, and
   Popular/Categories no longer use search-input chrome for their browse headers.
   Active Discover loading now shows compact native row skeletons instead of a
-  centered empty-state placeholder. Remaining Discover gaps are category picker
-  polish, richer error states, and update flows.
+  centered empty-state placeholder. Category/sort browse controls now use
+  neutral select-trigger styling with bordered fields and chevrons instead of
+  pill chips, though true dropdown menus are still pending. Remaining Discover
+  gaps are richer error states and update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
   the reference Browse, share-code Import, Create details, Create addons, and
   install-detail flows.
