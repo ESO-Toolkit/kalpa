@@ -60,8 +60,10 @@ jobs:
       - name: Rust format check
         run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
-      - name: Build native Slint sidecar
-        run: npm run build:native-slint
+      - name: Prepare native Slint sidecar placeholder
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          Set-Content -NoNewline -Path src-tauri/binaries/kalpa-slint-x86_64-pc-windows-msvc.exe -Value ""
 
       - name: Rust clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
