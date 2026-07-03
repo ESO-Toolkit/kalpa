@@ -129,6 +129,7 @@ function App() {
 
   const initRan = useRef(false);
   const autoLinkRan = useRef(false);
+  const checkForAppUpdateRef = useRef(checkForAppUpdate);
   const selectedAddonRef = useRef<AddonManifest | null>(null);
   const addonsPathRef = useRef("");
   const viewModeRef = useRef<ViewMode>("installed");
@@ -144,6 +145,10 @@ function App() {
   const batchPreflightRef = useRef(false);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
+
+  useEffect(() => {
+    checkForAppUpdateRef.current = checkForAppUpdate;
+  }, [checkForAppUpdate]);
 
   useEffect(() => {
     selectedAddonRef.current = selectedAddon;
@@ -248,7 +253,7 @@ function App() {
       .then((payload) => {
         if (disposed) return;
         if (payload.appUpdate) {
-          void checkForAppUpdate(false);
+          void checkForAppUpdateRef.current(false);
         }
         if (payload.logUpload) {
           setActiveDialog("log-upload");
