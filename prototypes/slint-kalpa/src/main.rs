@@ -8061,12 +8061,29 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         let Some(theme) = theme else {
             return;
         };
-        let Ok(json) = serde_json::to_string_pretty(&theme) else {
-            return;
+        let json = match serde_json::to_string_pretty(&theme) {
+            Ok(json) => json,
+            Err(error) => {
+                if let Some(ui) = export_ui.upgrade() {
+                    ui.set_status_error_message(format!("Theme export failed: {error}").into());
+                }
+                return;
+            }
         };
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(json);
-        }
+        match write_clipboard_text(json) {
+            Ok(()) => {
+                if let Some(ui) = export_ui.upgrade() {
+                    ui.set_status_error_message(
+                        format!("Copied theme '{}' to clipboard.", theme.name).into(),
+                    );
+                }
+            }
+            Err(error) => {
+                if let Some(ui) = export_ui.upgrade() {
+                    ui.set_status_error_message(format!("Theme export failed: {error}").into());
+                }
+            }
+        };
     });
 
     let import_ui = ui.as_weak();
@@ -8075,13 +8092,12 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         let Some(ui) = import_ui.upgrade() else {
             return;
         };
-        let Ok(mut clipboard) = arboard::Clipboard::new() else {
-            ui.set_status_error_message("Could not open the system clipboard.".into());
-            return;
-        };
-        let Ok(text) = clipboard.get_text() else {
-            ui.set_status_error_message("Clipboard does not contain theme JSON.".into());
-            return;
+        let text = match read_clipboard_text() {
+            Ok(text) => text,
+            Err(error) => {
+                ui.set_status_error_message(format!("Theme import failed: {error}").into());
+                return;
+            }
         };
         let Some(theme) = parse_imported_custom_theme(&text) else {
             ui.set_status_error_message("Clipboard does not contain a valid theme.".into());
@@ -8099,6 +8115,7 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         ui.set_active_theme_id(theme.id.clone().into());
         persist_active_theme_id(&theme.id);
         set_theme_draft(&ui, &theme, false);
+        ui.set_status_error_message(format!("Imported theme '{}'.", theme.name).into());
     });
 }
 
