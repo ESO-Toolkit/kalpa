@@ -25,6 +25,81 @@ mod manifest;
 #[path = "../../../src-tauri/src/metadata.rs"]
 mod metadata;
 
+#[allow(dead_code)]
+mod commands {
+    use regex::Regex;
+    use serde::Serialize;
+    use std::{path::PathBuf, sync::OnceLock};
+
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct MinionAddon {
+        pub uid: u32,
+        pub version: String,
+        pub folders: Vec<String>,
+    }
+
+    pub fn find_minion_xml() -> Option<PathBuf> {
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)?;
+        let path = home.join(".minion").join("minion.xml");
+        path.exists().then_some(path)
+    }
+
+    pub fn parse_minion_addons(xml_content: &str) -> Vec<MinionAddon> {
+        let mut addons = Vec::new();
+        static RE_ADDON: OnceLock<Regex> = OnceLock::new();
+        let re_addon = RE_ADDON.get_or_init(|| {
+            Regex::new(r#"<addon[^>]*uid="(\d+)"[^>]*ui-version="([^"]*)"[^>]*>"#).unwrap()
+        });
+        static RE_DIR: OnceLock<Regex> = OnceLock::new();
+        let re_dir = RE_DIR.get_or_init(|| Regex::new(r"<dir>([^<]+)</dir>").unwrap());
+
+        let mut current_uid = None;
+        let mut current_version = String::new();
+        let mut current_dirs = Vec::new();
+
+        for line in xml_content.lines() {
+            let line = line.trim();
+            if let Some(caps) = re_addon.captures(line) {
+                if let Some(uid) = current_uid {
+                    if !current_dirs.is_empty() {
+                        addons.push(MinionAddon {
+                            uid,
+                            version: current_version.clone(),
+                            folders: current_dirs.clone(),
+                        });
+                    }
+                }
+                current_uid = caps[1].parse::<u32>().ok();
+                current_version = caps[2].to_string();
+                current_dirs.clear();
+            } else if let Some(caps) = re_dir.captures(line) {
+                current_dirs.push(caps[1].to_string());
+            } else if line.contains("</addon>") {
+                if let Some(uid) = current_uid {
+                    if !current_dirs.is_empty() {
+                        addons.push(MinionAddon {
+                            uid,
+                            version: current_version.clone(),
+                            folders: current_dirs.clone(),
+                        });
+                    }
+                }
+                current_uid = None;
+                current_dirs.clear();
+            }
+        }
+
+        addons
+    }
+}
+
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/safe_migration.rs"]
+mod safe_migration;
+
 #[allow(dead_code, unused_imports)]
 #[path = "../../../src-tauri/src/saved_variables/mod.rs"]
 mod saved_variables;
@@ -670,17 +745,22 @@ fn main() -> Result<(), slint::PlatformError> {
     wire_batch_actions(&ui, addon_models.clone());
     wire_context_actions(&ui, addon_models.clone());
     let settings_models = addon_models.clone();
+    let safety_models = addon_models.clone();
     wire_detail_actions(&ui, addon_models);
     wire_discover(&ui, discover_model, discover_installed_ids);
     wire_theme_actions(&ui, custom_themes);
     wire_settings_actions(&ui, settings_models);
     wire_backup_restore_actions(&ui);
     wire_character_actions(&ui);
+    wire_safety_actions(&ui, safety_models);
     if ui.get_pack_hub_open() {
         ui.invoke_open_pack_hub();
     }
     if ui.get_characters_open() {
         ui.invoke_open_characters();
+    }
+    if ui.get_safety_open() {
+        ui.invoke_open_safety();
     }
     ui.run()
 }
@@ -4127,6 +4207,98 @@ fn wire_character_actions(ui: &KalpaWindow) {
     });
 }
 
+fn wire_safety_actions(ui: &KalpaWindow, models: AddonModels) {
+    let open_ui = ui.as_weak();
+    ui.on_open_safety(move || {
+        let Some(ui) = open_ui.upgrade() else {
+            return;
+        };
+        apply_safety_center_model(&ui);
+    });
+
+    let refresh_ui = ui.as_weak();
+    ui.on_safety_refresh(move || {
+        let Some(ui) = refresh_ui.upgrade() else {
+            return;
+        };
+        apply_safety_center_model(&ui);
+    });
+
+    let integrity_ui = ui.as_weak();
+    ui.on_safety_run_integrity(move || {
+        let Some(ui) = integrity_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before running integrity checks.".into(),
+            );
+            return;
+        };
+        let result = safe_migration::check_integrity(&addons_root);
+        apply_safety_integrity_result(&ui, result);
+    });
+
+    let restore_ui = ui.as_weak();
+    let restore_models = models.clone();
+    ui.on_safety_restore_snapshot(move |index| {
+        let Some(ui) = restore_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before restoring snapshots.".into(),
+            );
+            return;
+        };
+        let snapshots = ui.get_safety_snapshots();
+        let Some(snapshot) = snapshots.row_data(index.max(0) as usize) else {
+            ui.set_status_error_message("Choose a snapshot to restore.".into());
+            return;
+        };
+        match safe_migration::restore_snapshot(&addons_root, snapshot.id.as_str()) {
+            Ok(count) => {
+                ui.set_status_error_message(
+                    format!("Restored {count} files from snapshot.").into(),
+                );
+                let _ = reload_real_addon_models(&ui, &restore_models);
+                apply_safety_center_model(&ui);
+                apply_backup_restore_model(&ui);
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("Snapshot restore failed: {error}").into())
+            }
+        }
+    });
+
+    let delete_ui = ui.as_weak();
+    ui.on_safety_delete_snapshot(move |index| {
+        let Some(ui) = delete_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_root) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before deleting snapshots.".into(),
+            );
+            return;
+        };
+        let snapshots = ui.get_safety_snapshots();
+        let Some(snapshot) = snapshots.row_data(index.max(0) as usize) else {
+            ui.set_status_error_message("Choose a snapshot to delete.".into());
+            return;
+        };
+        match safe_migration::delete_snapshot(&addons_root, snapshot.id.as_str()) {
+            Ok(()) => {
+                ui.set_status_error_message("Snapshot deleted.".into());
+                apply_safety_center_model(&ui);
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("Snapshot delete failed: {error}").into())
+            }
+        }
+    });
+}
+
 fn seed_initial_theme_draft(ui: &KalpaWindow, custom_themes: &[CatalogTheme]) {
     let active_id = ui.get_active_theme_id().to_string();
     let draft = theme_by_id(&active_id, custom_themes)
@@ -7552,6 +7724,99 @@ fn collect_native_roster_characters(addons_root: &Path) -> (Vec<(String, Option<
     (out, skipped)
 }
 
+fn apply_safety_center_model(ui: &KalpaWindow) {
+    let Some(addons_root) = configured_addons_path() else {
+        ui.set_safety_snapshots(Rc::new(VecModel::from(Vec::<SafetySnapshotEntry>::new())).into());
+        ui.set_safety_logs(Rc::new(VecModel::from(Vec::<SafetyLogEntry>::new())).into());
+        ui.set_safety_snapshot_summary(
+            "Configure the ESO AddOns folder before loading Safety Center.".into(),
+        );
+        return;
+    };
+
+    let snapshots = safe_migration::list_snapshots(&addons_root);
+    let snapshot_summary = if snapshots.is_empty() {
+        "No snapshots yet.".to_string()
+    } else {
+        let total_size = snapshots
+            .iter()
+            .map(|snapshot| snapshot.total_size)
+            .sum::<u64>();
+        format!(
+            "{} snapshot{} - {} total",
+            snapshots.len(),
+            if snapshots.len() == 1 { "" } else { "s" },
+            format_size(total_size)
+        )
+    };
+    let snapshot_entries = snapshots
+        .into_iter()
+        .map(safety_snapshot_entry)
+        .collect::<Vec<_>>();
+    ui.set_safety_snapshot_summary(snapshot_summary.into());
+    ui.set_safety_snapshots(Rc::new(VecModel::from(snapshot_entries)).into());
+
+    let mut logs = safe_migration::read_ops_log(&addons_root);
+    logs.reverse();
+    let log_entries = logs.into_iter().map(safety_log_entry).collect::<Vec<_>>();
+    ui.set_safety_logs(Rc::new(VecModel::from(log_entries)).into());
+}
+
+fn safety_snapshot_entry(snapshot: safe_migration::SnapshotManifest) -> SafetySnapshotEntry {
+    SafetySnapshotEntry {
+        id: snapshot.id.into(),
+        label: snapshot.label.into(),
+        meta: format!(
+            "{} file{} - {} - {}",
+            snapshot.file_count,
+            if snapshot.file_count == 1 { "" } else { "s" },
+            format_size(snapshot.total_size),
+            snapshot.created_at
+        )
+        .into(),
+        sources: if snapshot.source_paths.is_empty() {
+            "Includes: no source paths recorded".into()
+        } else {
+            format!("Includes: {}", snapshot.source_paths.join(", ")).into()
+        },
+    }
+}
+
+fn safety_log_entry(entry: safe_migration::OpLogEntry) -> SafetyLogEntry {
+    SafetyLogEntry {
+        operation: entry.operation.into(),
+        status: entry.status.clone().into(),
+        details: entry.details.into(),
+        timing: format!("{} -> {}", entry.started_at, entry.finished_at).into(),
+        snapshot_id: entry.snapshot_id.unwrap_or_default().into(),
+        success: entry.status == "success",
+    }
+}
+
+fn apply_safety_integrity_result(ui: &KalpaWindow, result: safe_migration::IntegrityResult) {
+    let issues = result
+        .issues
+        .iter()
+        .map(|issue| SafetyIssueEntry {
+            message: issue.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    let summary = if issues.is_empty() {
+        "All checks passed. No issues found.".to_string()
+    } else {
+        format!(
+            "{} issue{} found.",
+            issues.len(),
+            if issues.len() == 1 { "" } else { "s" }
+        )
+    };
+    ui.set_safety_integrity_addons_ok(result.addons_folder_ok);
+    ui.set_safety_integrity_sv_ok(result.saved_variables_ok);
+    ui.set_safety_integrity_addon_count(result.addon_count.to_string().into());
+    ui.set_safety_integrity_summary(summary.into());
+    ui.set_safety_issues(Rc::new(VecModel::from(issues)).into());
+}
+
 const BACKUP_KIND_MANUAL: i32 = 0;
 const BACKUP_KIND_SAFETY: i32 = 1;
 const BACKUP_KIND_CHARACTER: i32 = 2;
@@ -9668,6 +9933,7 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     ui.set_svm_open(env_flag("KALPA_SVM_OPEN"));
     ui.set_backup_restore_open(env_flag("KALPA_BACKUP_RESTORE_OPEN"));
     ui.set_characters_open(env_flag("KALPA_CHARACTERS_OPEN"));
+    ui.set_safety_open(env_flag("KALPA_SAFETY_OPEN"));
     let pack_hub_view = std::env::var("KALPA_PACK_HUB_VIEW")
         .map(|value| match value.to_ascii_lowercase().as_str() {
             "1" | "create" | "create-details" | "details" => 1,

@@ -107,6 +107,26 @@ export struct CharacterEntry {
     backup-label: string,
 }
 
+export struct SafetySnapshotEntry {
+    id: string,
+    label: string,
+    meta: string,
+    sources: string,
+}
+
+export struct SafetyIssueEntry {
+    message: string,
+}
+
+export struct SafetyLogEntry {
+    operation: string,
+    status: string,
+    details: string,
+    timing: string,
+    snapshot-id: string,
+    success: bool,
+}
+
 export struct DiscoverEntry {
     esoui-id: string,
     title: string,
@@ -4398,6 +4418,336 @@ component CharactersOverlay inherits Rectangle {
             height: root.footer-height;
             background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
 
+            PackHubButton { x: parent.width - 96px; y: 20px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => { root.open = false; } }
+        }
+    }
+}
+
+component SafetyTabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    callback clicked;
+    height: 34px;
+    border-radius: 9px;
+    border-width: 0px;
+    background: root.active ? Palette.white-08 : (touch.has-hover ? Palette.white-03 : #00000000);
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: root.active ? Palette.foreground : Palette.muted-half;
+        font-size: 12px;
+        font-weight: 850;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SafetySnapshotRow inherits Rectangle {
+    in property <SafetySnapshotEntry> snapshot;
+    callback restore-clicked;
+    callback delete-clicked;
+    height: 82px;
+    border-radius: 12px;
+    border-width: 0px;
+    background: touch.has-hover ? Palette.white-04 : Palette.white-02;
+
+    Text {
+        x: 16px;
+        y: 12px;
+        width: parent.width - 214px;
+        text: root.snapshot.label;
+        color: Palette.foreground;
+        font-size: 13px;
+        font-weight: 850;
+        overflow: elide;
+    }
+
+    Text {
+        x: 16px;
+        y: 34px;
+        width: parent.width - 214px;
+        text: root.snapshot.meta;
+        color: Palette.muted-strong;
+        font-size: 11px;
+        font-weight: 650;
+        overflow: elide;
+    }
+
+    Text {
+        x: 16px;
+        y: 56px;
+        width: parent.width - 214px;
+        text: root.snapshot.sources;
+        color: Palette.muted-half;
+        font-size: 10px;
+        font-weight: 600;
+        overflow: elide;
+    }
+
+    PackHubButton { x: parent.width - 178px; y: 16px; width: 82px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; clicked => { root.restore-clicked(); } }
+    PackHubButton { x: parent.width - 88px; y: 16px; width: 72px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; clicked => { root.delete-clicked(); } }
+
+    touch := TouchArea { width: root.width; height: root.height; }
+}
+
+component SafetyIssueRow inherits Rectangle {
+    in property <SafetyIssueEntry> issue;
+    height: 32px;
+    border-radius: 10px;
+    border-width: 0px;
+    background: Palette.gold-10;
+
+    Text {
+        x: 12px;
+        y: 0px;
+        width: parent.width - 24px;
+        height: parent.height;
+        text: root.issue.message;
+        color: Palette.gold;
+        font-size: 11px;
+        font-weight: 700;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+component SafetyLogRow inherits Rectangle {
+    in property <SafetyLogEntry> entry;
+    height: 68px;
+    border-radius: 12px;
+    border-width: 0px;
+    background: Palette.white-02;
+
+    Text { x: 14px; y: 10px; width: parent.width - 116px; text: root.entry.operation; color: Palette.foreground; font-size: 12px; font-weight: 850; overflow: elide; }
+    Text { x: parent.width - 94px; y: 10px; width: 80px; text: root.entry.status; color: root.entry.success ? Palette.emerald : Palette.red; font-size: 11px; font-weight: 850; horizontal-alignment: right; overflow: elide; }
+    Text { x: 14px; y: 31px; width: parent.width - 28px; text: root.entry.details; color: Palette.muted-strong; font-size: 11px; font-weight: 650; overflow: elide; }
+    Text { x: 14px; y: 50px; width: parent.width - 28px; text: root.entry.timing + (root.entry.snapshot-id != "" ? "  |  Snapshot: " + root.entry.snapshot-id : ""); color: Palette.muted-half; font-size: 10px; font-weight: 600; overflow: elide; }
+}
+
+component SafetyCenterOverlay inherits Rectangle {
+    in-out property <bool> open: false;
+    in-out property <int> view: 0;
+    in property <[SafetySnapshotEntry]> snapshots;
+    in property <[SafetyIssueEntry]> issues;
+    in property <[SafetyLogEntry]> logs;
+    in property <string> snapshot-summary: "No snapshots yet.";
+    in property <string> integrity-summary: "Integrity has not been checked.";
+    in property <bool> integrity-addons-ok: false;
+    in property <bool> integrity-sv-ok: false;
+    in property <string> integrity-addon-count: "0";
+    callback refresh-safety;
+    callback run-integrity;
+    callback restore-snapshot(int);
+    callback delete-snapshot(int);
+    visible: root.open;
+    background: #000000c4;
+    private property <length> modal-width: root.width < 720px ? root.width - 48px : 640px;
+    private property <length> modal-height: root.height < 760px ? root.height - 32px : 700px;
+    private property <length> footer-height: 66px;
+    private property <length> content-top: 166px;
+    private property <length> content-height: max(160px, root.modal-height - root.footer-height - root.content-top - 12px);
+
+    TouchArea { width: root.width; height: root.height; clicked => { root.open = false; } }
+
+    panel := Rectangle {
+        width: root.modal-width;
+        height: root.modal-height;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: 16px;
+        border-width: 1px;
+        border-color: Palette.border-strong;
+        background: Tokens.surface;
+        drop-shadow-blur: 30px;
+        drop-shadow-offset-y: 12px;
+        drop-shadow-color: #00000099;
+        clip: true;
+
+        TouchArea { width: parent.width; height: parent.height; clicked => { } }
+
+        Text { x: 28px; y: 24px; width: parent.width - 92px; text: "Safety Center"; color: Palette.gold; font-size: 18px; font-weight: 900; overflow: elide; }
+        Text { x: 28px; y: 54px; width: parent.width - 92px; height: 42px; text: "Snapshots, integrity checks, and the local operation log for your ESO data."; color: Palette.muted-strong; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+        GhostIconButton { x: parent.width - 52px; y: 20px; width: 36px; height: 36px; icon: @image-url("../assets/icons/x.svg"); clicked => { root.open = false; } }
+        Hairline { x: 0px; y: 116px; width: parent.width; height: 1px; opacity: 0.45; }
+
+        Rectangle {
+            x: 28px;
+            y: 130px;
+            width: parent.width - 56px;
+            height: 38px;
+            border-radius: 11px;
+            border-width: 0px;
+            background: Palette.white-03;
+
+            SafetyTabButton { x: 4px; y: 2px; width: (parent.width - 8px) / 3; label: "Snapshots"; active: root.view == 0; clicked => { root.view = 0; } }
+            SafetyTabButton { x: 4px + (parent.width - 8px) / 3; y: 2px; width: (parent.width - 8px) / 3; label: "Integrity"; active: root.view == 1; clicked => { root.view = 1; } }
+            SafetyTabButton { x: 4px + ((parent.width - 8px) / 3) * 2; y: 2px; width: (parent.width - 8px) / 3; label: "Activity Log"; active: root.view == 2; clicked => { root.view = 2; } }
+        }
+
+        if (root.view == 0) : Rectangle {
+            x: 28px;
+            y: root.content-top;
+            width: parent.width - 56px;
+            height: root.content-height;
+            background: #00000000;
+
+            Text { x: 0px; y: 8px; width: parent.width - 94px; text: root.snapshot-summary; color: Palette.muted-strong; font-size: 12px; font-weight: 700; overflow: elide; }
+            PackHubButton { x: parent.width - 84px; y: 0px; width: 84px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; clicked => { root.refresh-safety(); } }
+
+            if (root.snapshots.length == 0) : Rectangle {
+                x: 0px;
+                y: 46px;
+                width: parent.width;
+                height: min(128px, parent.height - 46px);
+                border-radius: 13px;
+                border-width: 1px;
+                border-color: Palette.white-06;
+                background: Palette.white-03;
+                Text { x: 24px; y: 44px; width: parent.width - 48px; text: "No snapshots yet."; color: Palette.muted-strong; font-size: 14px; font-weight: 850; horizontal-alignment: center; }
+            }
+
+            if (root.snapshots.length > 0) : ScrollView {
+                x: 0px;
+                y: 46px;
+                width: parent.width;
+                height: parent.height - 46px;
+                viewport-width: self.width;
+                viewport-height: root.snapshots.length * 92px;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                Rectangle {
+                    width: parent.width;
+                    height: root.snapshots.length * 92px;
+                    background: #00000000;
+                    for snapshot[index] in root.snapshots : SafetySnapshotRow {
+                        x: 0px;
+                        y: index * 92px;
+                        width: parent.width;
+                        snapshot: snapshot;
+                        restore-clicked => { root.restore-snapshot(index); }
+                        delete-clicked => { root.delete-snapshot(index); }
+                    }
+                }
+            }
+        }
+
+        if (root.view == 1) : Rectangle {
+            x: 28px;
+            y: root.content-top;
+            width: parent.width - 56px;
+            height: root.content-height;
+            background: #00000000;
+
+            Text { x: 0px; y: 8px; width: parent.width - 150px; text: root.integrity-summary; color: Palette.muted-strong; font-size: 12px; font-weight: 700; overflow: elide; }
+            PackHubButton { x: parent.width - 132px; y: 0px; width: 132px; icon: @image-url("../assets/icons/check.svg"); label: "Run Check"; primary: true; clicked => { root.run-integrity(); } }
+
+            Rectangle {
+                x: 0px;
+                y: 48px;
+                width: parent.width;
+                height: 58px;
+                border-radius: 13px;
+                border-width: 0px;
+                background: Palette.white-03;
+                Text { x: 16px; y: 12px; width: parent.width / 3 - 20px; text: root.integrity-addons-ok ? "AddOns OK" : "AddOns unchecked"; color: root.integrity-addons-ok ? Palette.emerald : Palette.muted-half; font-size: 12px; font-weight: 850; overflow: elide; }
+                Text { x: parent.width / 3 + 8px; y: 12px; width: parent.width / 3 - 20px; text: root.integrity-sv-ok ? "SavedVariables OK" : "SavedVariables unchecked"; color: root.integrity-sv-ok ? Palette.emerald : Palette.muted-half; font-size: 12px; font-weight: 850; overflow: elide; }
+                Text { x: (parent.width / 3) * 2 + 8px; y: 12px; width: parent.width / 3 - 20px; text: root.integrity-addon-count + " tracked"; color: Palette.foreground; font-size: 12px; font-weight: 850; overflow: elide; }
+                Text { x: 16px; y: 34px; width: parent.width - 32px; text: "Checks AddOns, SavedVariables, tracked addon folders, manifests, and empty SavedVariables files."; color: Palette.muted-half; font-size: 10px; font-weight: 650; overflow: elide; }
+            }
+
+            if (root.issues.length == 0) : Rectangle {
+                x: 0px;
+                y: 124px;
+                width: parent.width;
+                height: 44px;
+                border-radius: 12px;
+                border-width: 0px;
+                background: root.integrity-summary == "All checks passed. No issues found." ? Palette.emerald-15 : Palette.white-02;
+                Text { x: 16px; y: 0px; width: parent.width - 32px; height: parent.height; text: root.integrity-summary == "All checks passed. No issues found." ? "All checks passed. No issues found." : "Run an integrity check to list issues here."; color: root.integrity-summary == "All checks passed. No issues found." ? Palette.emerald : Palette.muted-half; font-size: 12px; font-weight: 750; vertical-alignment: center; overflow: elide; }
+            }
+
+            if (root.issues.length > 0) : ScrollView {
+                x: 0px;
+                y: 124px;
+                width: parent.width;
+                height: parent.height - 124px;
+                viewport-width: self.width;
+                viewport-height: root.issues.length * 40px;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                Rectangle {
+                    width: parent.width;
+                    height: root.issues.length * 40px;
+                    background: #00000000;
+                    for issue[index] in root.issues : SafetyIssueRow {
+                        x: 0px;
+                        y: index * 40px;
+                        width: parent.width;
+                        issue: issue;
+                    }
+                }
+            }
+        }
+
+        if (root.view == 2) : Rectangle {
+            x: 28px;
+            y: root.content-top;
+            width: parent.width - 56px;
+            height: root.content-height;
+            background: #00000000;
+
+            Text { x: 0px; y: 8px; width: parent.width - 94px; text: "A record of local Kalpa operations on your ESO data."; color: Palette.muted-strong; font-size: 12px; font-weight: 700; overflow: elide; }
+            PackHubButton { x: parent.width - 84px; y: 0px; width: 84px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; clicked => { root.refresh-safety(); } }
+
+            if (root.logs.length == 0) : Rectangle {
+                x: 0px;
+                y: 46px;
+                width: parent.width;
+                height: min(128px, parent.height - 46px);
+                border-radius: 13px;
+                border-width: 1px;
+                border-color: Palette.white-06;
+                background: Palette.white-03;
+                Text { x: 24px; y: 44px; width: parent.width - 48px; text: "No operations logged."; color: Palette.muted-strong; font-size: 14px; font-weight: 850; horizontal-alignment: center; }
+            }
+
+            if (root.logs.length > 0) : ScrollView {
+                x: 0px;
+                y: 46px;
+                width: parent.width;
+                height: parent.height - 46px;
+                viewport-width: self.width;
+                viewport-height: root.logs.length * 76px;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                Rectangle {
+                    width: parent.width;
+                    height: root.logs.length * 76px;
+                    background: #00000000;
+                    for entry[index] in root.logs : SafetyLogRow {
+                        x: 0px;
+                        y: index * 76px;
+                        width: parent.width;
+                        entry: entry;
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            x: 0px;
+            y: parent.height - root.footer-height;
+            width: parent.width;
+            height: root.footer-height;
+            background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
             PackHubButton { x: parent.width - 96px; y: 20px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => { root.open = false; } }
         }
     }
@@ -9268,6 +9618,9 @@ export component KalpaWindow inherits Window {
     in property <[SvmEditorSettingEntry]> svm-editor-settings;
     in property <[SettingsBackupEntry]> settings-backups;
     in property <[CharacterEntry]> characters;
+    in property <[SafetySnapshotEntry]> safety-snapshots;
+    in property <[SafetyIssueEntry]> safety-issues;
+    in property <[SafetyLogEntry]> safety-logs;
     in property <[ThemeEntry]> themes;
     in property <int> total-addon-count: 0;
     in property <int> addon-kind-count: 0;
@@ -9322,6 +9675,13 @@ export component KalpaWindow inherits Window {
     in-out property <string> character-backup-label-draft;
     in-out property <string> characters-summary: "No characters loaded";
     in-out property <string> characters-warning;
+    in-out property <bool> safety-open: false;
+    in-out property <int> safety-view: 0;
+    in-out property <string> safety-snapshot-summary: "No snapshots yet.";
+    in-out property <string> safety-integrity-summary: "Integrity has not been checked.";
+    in-out property <bool> safety-integrity-addons-ok: false;
+    in-out property <bool> safety-integrity-sv-ok: false;
+    in-out property <string> safety-integrity-addon-count: "0";
     in-out property <int> selected-index: 5;
     in-out property <int> selected-discover-index: 0;
     in-out property <bool> detail-files-active: false;
@@ -9469,6 +9829,11 @@ export component KalpaWindow inherits Window {
     callback open-characters;
     callback characters-refresh;
     callback character-backup(int, string);
+    callback open-safety;
+    callback safety-refresh;
+    callback safety-run-integrity;
+    callback safety-restore-snapshot(int);
+    callback safety-delete-snapshot(int);
     callback open-settings;
     callback theme-selected(string);
     callback theme-create;
@@ -9816,6 +10181,25 @@ export component KalpaWindow inherits Window {
             backup-character(index, label) => { root.character-backup(index, label); }
         }
 
+        if (root.safety-open) : SafetyCenterOverlay {
+            width: root.width;
+            height: root.height;
+            open <=> root.safety-open;
+            view <=> root.safety-view;
+            snapshots: root.safety-snapshots;
+            issues: root.safety-issues;
+            logs: root.safety-logs;
+            snapshot-summary: root.safety-snapshot-summary;
+            integrity-summary: root.safety-integrity-summary;
+            integrity-addons-ok: root.safety-integrity-addons-ok;
+            integrity-sv-ok: root.safety-integrity-sv-ok;
+            integrity-addon-count: root.safety-integrity-addon-count;
+            refresh-safety => { root.safety-refresh(); }
+            run-integrity => { root.safety-run-integrity(); }
+            restore-snapshot(index) => { root.safety-restore-snapshot(index); }
+            delete-snapshot(index) => { root.safety-delete-snapshot(index); }
+        }
+
         AppearanceOverlay {
             width: root.width;
             height: root.height;
@@ -9874,7 +10258,12 @@ export component KalpaWindow inherits Window {
             api-compat-clicked => { root.settings-api-compat(); }
             app-update-clicked => { root.settings-app-update(); }
             minion-migration-clicked => { root.settings-minion-migration(); }
-            safety-center-clicked => { root.settings-safety-center(); }
+            safety-center-clicked => {
+                root.settings-open = false;
+                root.safety-open = true;
+                root.safety-view = 0;
+                root.open-safety();
+            }
             addon-list-exported => { root.settings-addon-list-export(); }
             addon-list-imported => { root.settings-addon-list-import(); }
             backup-restore-clicked => {

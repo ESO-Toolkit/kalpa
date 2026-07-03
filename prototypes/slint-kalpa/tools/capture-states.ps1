@@ -259,6 +259,9 @@ function New-StateEnvironment {
     "characters" {
       $env.KALPA_CHARACTERS_OPEN = "1"
     }
+    "safety" {
+      $env.KALPA_SAFETY_OPEN = "1"
+    }
     "theme-crimson" {
       $env.KALPA_THEME = "daedric-crimson"
     }

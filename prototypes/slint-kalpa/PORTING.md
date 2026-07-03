@@ -228,9 +228,14 @@ Current detail status:
   per-character backups that preserve account-wide data and same-name NA/EU
   twins. Remaining gaps are exact React grouping/animation polish, per-row busy
   states, and restore cross-linking back into Backup & Restore.
-- Settings > Tools app updates, Minion migration, and Safety Center now have
-  native click handlers with explicit status feedback, but their full React
-  dialogs/workflows still need native parity.
+- The Settings > Tools Safety Center row now opens a native overlay backed by
+  the shared safe-migration module. It lists snapshots, restores and deletes
+  snapshots, runs integrity checks, and displays the operation log. Remaining
+  gaps are restore/delete confirmation animations, row busy states, and final
+  visual comparison against the WebView dialog.
+- Settings > Tools app updates and Minion migration now have native click
+  handlers with explicit status feedback, but their full React dialogs/workflows
+  still need native parity.
 - Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.
@@ -315,6 +320,7 @@ Current backdrop status:
   native Backup & Restore scaffolds.
 - Launch with `KALPA_CHARACTERS_OPEN=1` to inspect the native Characters
   overlay.
+- Launch with `KALPA_SAFETY_OPEN=1` to inspect the native Safety Center overlay.
 - Launch with `KALPA_RENDER_PRESET=standard` for visual-fidelity checks, or
   `KALPA_SLINT_BACKEND=winit-skia` / `winit-femtovg` for direct backend checks
   on Slint builds that support those renderer names.
@@ -334,7 +340,7 @@ For repeatable full-window state captures on Windows, use the DPI-aware capture
 harness from `prototypes/slint-kalpa`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\capture-states.ps1 -Build -OutputDir .\captures\verify -State main,discover-popular,files,files-editing,settings-general,settings-theme-editor,packhub-browse,packhub-create1,packhub-create2,packhub-install,svm-overview,svm-cleanup,svm-copy,svm-editor,backup-restore-main,backup-restore-label,backup-restore-confirm,characters
+powershell -ExecutionPolicy Bypass -File .\tools\capture-states.ps1 -Build -OutputDir .\captures\verify -State main,discover-popular,files,files-editing,settings-general,settings-theme-editor,packhub-browse,packhub-create1,packhub-create2,packhub-install,svm-overview,svm-cleanup,svm-copy,svm-editor,backup-restore-main,backup-restore-label,backup-restore-confirm,characters,safety
 ```
 
 The harness launches a fresh prototype process per state, uses the low-memory
@@ -345,7 +351,7 @@ writes ignored PNGs under `captures/`. Supported states include `main`,
 `settings-theme-editor`, `settings-tools`, `settings-data`, `packhub-browse`,
 `packhub-create1`, `packhub-create2`, `packhub-install`, `svm-overview`,
 `svm-cleanup`, `svm-copy`, `svm-editor`, `backup-restore-main`,
-`backup-restore-label`, `backup-restore-confirm`, `characters`,
+`backup-restore-label`, `backup-restore-confirm`, `characters`, `safety`,
 `theme-crimson`, and `theme-frost`.
 
 From `prototypes/slint-kalpa`, compare a captured native prototype PNG against
