@@ -7069,10 +7069,8 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
         let Some(ui) = migration_ui.upgrade() else {
             return;
         };
-        ui.set_status_error_message(
-            "Native Minion migration is not ported yet; the safe migration wizard still runs in the WebView shell."
-                .into(),
-        );
+        ui.set_migration_open(true);
+        apply_migration_preconditions(&ui);
     });
 
     let safety_ui = ui.as_weak();
@@ -7080,10 +7078,8 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
         let Some(ui) = safety_ui.upgrade() else {
             return;
         };
-        ui.set_status_error_message(
-            "Native Safety Center is not ported yet; snapshots and integrity tools still run in the WebView shell."
-                .into(),
-        );
+        ui.set_safety_open(true);
+        apply_safety_center_model(&ui);
     });
 
     let export_ui = ui.as_weak();
