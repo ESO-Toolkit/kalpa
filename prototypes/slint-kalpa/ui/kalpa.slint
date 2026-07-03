@@ -3423,6 +3423,8 @@ component AppearanceOverlay inherits Rectangle {
     callback addons-path-redetected;
     callback addons-path-applied(string);
     callback backup-restore-clicked;
+    callback addon-list-exported;
+    callback addon-list-imported;
     visible: root.open;
     background: #000000c8;
 
@@ -3882,8 +3884,8 @@ component AppearanceOverlay inherits Rectangle {
 
                 DetailSectionTitle { x: 14px; y: 14px; width: parent.width - 28px; label: "ADDON LIST BACKUP"; }
                 Text { x: 14px; y: 42px; width: parent.width - 28px; height: 36px; text: "Export your tracked addon list to clipboard, or import a previously exported list to restore on a new machine."; color: Palette.muted-half; font-size: 12px; font-weight: 500; wrap: word-wrap; }
-                SettingsActionButton { x: 14px; y: 88px; icon: @image-url("../assets/icons/files.svg"); label: "Export to Clipboard"; }
-                SettingsActionButton { x: 176px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Import from Clipboard"; }
+                SettingsActionButton { x: 14px; y: 88px; icon: @image-url("../assets/icons/files.svg"); label: "Export to Clipboard"; clicked => { root.addon-list-exported(); } }
+                SettingsActionButton { x: 176px; y: 88px; icon: @image-url("../assets/icons/save.svg"); label: "Import from Clipboard"; clicked => { root.addon-list-imported(); } }
             }
 
             Rectangle {
@@ -8775,6 +8777,8 @@ export component KalpaWindow inherits Window {
     callback settings-addons-path-opened;
     callback settings-addons-path-redetected;
     callback settings-addons-path-applied(string);
+    callback settings-addon-list-export;
+    callback settings-addon-list-import;
     callback review-conflicts;
     no-frame: true;
     preferred-width: 1462px;
@@ -9080,6 +9084,8 @@ export component KalpaWindow inherits Window {
             addons-path-opened => { root.settings-addons-path-opened(); }
             addons-path-redetected => { root.settings-addons-path-redetected(); }
             addons-path-applied(path) => { root.settings-addons-path-applied(path); }
+            addon-list-exported => { root.settings-addon-list-export(); }
+            addon-list-imported => { root.settings-addon-list-import(); }
             backup-restore-clicked => {
                 root.settings-open = false;
                 root.backup-restore-open = true;

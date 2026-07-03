@@ -113,6 +113,28 @@ struct NativeSettings {
     conflict_policy: i32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportEntry {
+    esoui_id: u32,
+    folder_name: String,
+    version: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportData {
+    version: u32,
+    addons: Vec<ExportEntry>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NativeImportResult {
+    installed: Vec<String>,
+    failed: Vec<String>,
+    skipped: Vec<String>,
+}
+
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
@@ -2316,6 +2338,74 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
             }
         }
     });
+
+    let export_ui = ui.as_weak();
+    ui.on_settings_addon_list_export(move || {
+        let Some(ui) = export_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_dir) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before exporting the addon list.".into(),
+            );
+            return;
+        };
+
+        match export_addon_list_json(&addons_dir).and_then(write_clipboard_text) {
+            Ok(()) => ui.set_status_error_message("Addon list copied to clipboard.".into()),
+            Err(error) => {
+                ui.set_status_error_message(format!("Addon list export failed: {error}").into())
+            }
+        }
+    });
+
+    let import_ui = ui.as_weak();
+    ui.on_settings_addon_list_import(move || {
+        let Some(ui) = import_ui.upgrade() else {
+            return;
+        };
+        let Some(addons_dir) = configured_addons_path() else {
+            ui.set_status_error_message(
+                "Configure the ESO AddOns folder before importing an addon list.".into(),
+            );
+            return;
+        };
+
+        let json_data = match read_clipboard_text() {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => {
+                ui.set_status_error_message(
+                    "Clipboard is empty. Copy an addon-list export first.".into(),
+                );
+                return;
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("Addon list import failed: {error}").into());
+                return;
+            }
+        };
+
+        ui.set_status_error_message("Importing addon list from clipboard...".into());
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = import_addon_list_json(&addons_dir, &json_data);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                match result {
+                    Ok(result) => {
+                        ui.invoke_refresh_requested();
+                        ui.set_status_error_message(import_result_summary(&result).into());
+                    }
+                    Err(error) => ui.set_status_error_message(
+                        format!("Addon list import failed: {error}").into(),
+                    ),
+                }
+            });
+        });
+    });
 }
 
 fn reload_real_addon_models(ui: &KalpaWindow, models: &AddonModels) -> Result<(), String> {
@@ -3692,16 +3782,37 @@ fn install_discover_download_blocking(
     zip_path: &Path,
     detail: &esoui::EsouiAddonDetail,
 ) -> Result<Vec<String>, String> {
-    let installed_folders = installer::extract_addon_zip(zip_path, addons_dir)?;
-    file_hashes::record_hashes_for_folders(
+    install_downloaded_addon_blocking(
         addons_dir,
-        &installed_folders,
+        zip_path,
         detail.id,
+        &detail.title,
         &detail.version,
-    )?;
+        &detail.download_url,
+    )
+}
+
+fn install_downloaded_addon_blocking(
+    addons_dir: &Path,
+    zip_path: &Path,
+    esoui_id: u32,
+    title: &str,
+    version: &str,
+    download_url: &str,
+) -> Result<Vec<String>, String> {
+    let installed_folders = installer::extract_addon_zip(zip_path, addons_dir)?;
+    file_hashes::record_hashes_for_folders(addons_dir, &installed_folders, esoui_id, version)?;
 
     let mut store = metadata::load_metadata(addons_dir);
-    record_native_installed_folders(&mut store, addons_dir, &installed_folders, detail);
+    record_native_installed_folders(
+        &mut store,
+        addons_dir,
+        &installed_folders,
+        esoui_id,
+        version,
+        title,
+        download_url,
+    );
     metadata::save_metadata(addons_dir, &store)?;
 
     Ok(installed_folders)
@@ -3711,22 +3822,25 @@ fn record_native_installed_folders(
     store: &mut metadata::MetadataStore,
     addons_dir: &Path,
     installed_folders: &[String],
-    detail: &esoui::EsouiAddonDetail,
+    esoui_id: u32,
+    esoui_version: &str,
+    esoui_title: &str,
+    download_url: &str,
 ) {
-    let primary = determine_primary_folder(installed_folders, &detail.title);
+    let primary = determine_primary_folder(installed_folders, esoui_title);
     for folder in installed_folders {
         let is_primary = *folder == primary;
-        let version = if is_primary && !detail.version.is_empty() {
-            detail.version.clone()
+        let version = if is_primary && !esoui_version.is_empty() {
+            esoui_version.to_string()
         } else {
             read_local_version(addons_dir, folder)
         };
         metadata::record_install_ext(
             store,
             folder,
-            if is_primary { detail.id } else { 0 },
+            if is_primary { esoui_id } else { 0 },
             &version,
-            &detail.download_url,
+            download_url,
             0,
         );
     }
@@ -3761,6 +3875,98 @@ fn find_manifest(addons_dir: &Path, folder_name: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+fn export_addon_list_json(addons_dir: &Path) -> Result<String, String> {
+    let store = metadata::load_metadata(addons_dir);
+    let mut entries = store
+        .addons
+        .iter()
+        .filter(|(folder, _)| addons_dir.join(folder).is_dir())
+        .map(|(folder, meta)| ExportEntry {
+            esoui_id: meta.esoui_id,
+            folder_name: folder.clone(),
+            version: meta.installed_version.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(|a, b| a.folder_name.cmp(&b.folder_name));
+
+    let mut seen_ids = BTreeSet::new();
+    entries.retain(|entry| entry.esoui_id == 0 || seen_ids.insert(entry.esoui_id));
+
+    serde_json::to_string_pretty(&ExportData {
+        version: 1,
+        addons: entries,
+    })
+    .map_err(|error| format!("Failed to export addon list: {error}"))
+}
+
+fn import_addon_list_json(
+    addons_dir: &Path,
+    json_data: &str,
+) -> Result<NativeImportResult, String> {
+    let export = serde_json::from_str::<ExportData>(json_data)
+        .map_err(|error| format!("Invalid addon list export: {error}"))?;
+    let mut result = NativeImportResult::default();
+
+    for entry in export.addons {
+        if addons_dir.join(&entry.folder_name).is_dir() {
+            result.skipped.push(entry.folder_name);
+            continue;
+        }
+
+        if entry.esoui_id == 0 {
+            result.failed.push(entry.folder_name);
+            continue;
+        }
+
+        match import_addon_entry_blocking(addons_dir, &entry) {
+            Ok(()) => result.installed.push(entry.folder_name),
+            Err(_) => result.failed.push(entry.folder_name),
+        }
+    }
+
+    Ok(result)
+}
+
+fn import_addon_entry_blocking(addons_dir: &Path, entry: &ExportEntry) -> Result<(), String> {
+    let info = esoui::fetch_addon_info(entry.esoui_id)?;
+    let tmp = esoui::download_addon(&info.download_url, None)?;
+    install_downloaded_addon_blocking(
+        addons_dir,
+        tmp.path(),
+        entry.esoui_id,
+        &info.title,
+        &info.version,
+        &info.download_url,
+    )
+    .map(|_| ())
+}
+
+fn import_result_summary(result: &NativeImportResult) -> String {
+    format!(
+        "Import complete: {} installed, {} skipped, {} failed.",
+        result.installed.len(),
+        result.skipped.len(),
+        result.failed.len()
+    )
+}
+
+fn write_clipboard_text(text: String) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("Clipboard unavailable: {error}"))?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| format!("Failed to write clipboard: {error}"))
+}
+
+fn read_clipboard_text() -> Result<String, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("Clipboard unavailable: {error}"))?;
+    clipboard
+        .get_text()
+        .map_err(|error| format!("Failed to read clipboard: {error}"))
 }
 
 fn update_selected_dependency(
@@ -9153,6 +9359,55 @@ CombatMetrics_SavedVariables = {
         assert_eq!(meta.esoui_id, 1360);
         assert_eq!(meta.installed_version, "1.7.7");
         assert_eq!(meta.download_url, detail.download_url);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_addon_list_export_matches_production_shape() {
+        let root = test_temp_dir("addon-list-export");
+        let addons_root = root.join("AddOns");
+        fs::create_dir_all(addons_root.join("CombatMetrics")).expect("create addon folder");
+        fs::create_dir_all(addons_root.join("LibCombat")).expect("create bundled folder");
+        fs::create_dir_all(&addons_root).expect("create AddOns root");
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(
+            &mut store,
+            "CombatMetrics",
+            1360,
+            "1.7.7",
+            "https://cdn.esoui.com/downloads/file1360.zip",
+            0,
+        );
+        metadata::record_install_ext(
+            &mut store,
+            "LibCombat",
+            1360,
+            "1.7.7",
+            "https://cdn.esoui.com/downloads/file1360.zip",
+            0,
+        );
+        metadata::record_install_ext(
+            &mut store,
+            "MissingAddon",
+            9999,
+            "0.0.1",
+            "https://cdn.esoui.com/downloads/missing.zip",
+            0,
+        );
+        metadata::save_metadata(&addons_root, &store).expect("save metadata");
+
+        let export = serde_json::from_str::<ExportData>(
+            &export_addon_list_json(&addons_root).expect("export addon list"),
+        )
+        .expect("parse export json");
+
+        assert_eq!(export.version, 1);
+        assert_eq!(export.addons.len(), 1);
+        assert_eq!(export.addons[0].folder_name, "CombatMetrics");
+        assert_eq!(export.addons[0].esoui_id, 1360);
+        assert_eq!(export.addons[0].version, "1.7.7");
 
         let _ = fs::remove_dir_all(root);
     }
