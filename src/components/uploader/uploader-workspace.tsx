@@ -2604,6 +2604,10 @@ function LiveDashboard({
   // /reloadui) or not yet (turn on /encounterlog). A confident "already running" verdict
   // also offers the official-uploader escape hatch.
   const alreadyLogging = readiness?.verdict === "activeNoHeader";
+  // Map live fights to display rows once per liveFights change, so the memoized
+  // FightList sees a stable `fights` reference and can skip re-rendering when the
+  // dashboard re-renders for an unrelated reason (e.g. a ticking timer).
+  const liveRows = useMemo(() => rowsFromLive(liveFights), [liveFights]);
   return (
     <GlassPanel variant="primary" className="space-y-3 p-4">
       <div className="flex items-center justify-between gap-3">
@@ -2831,7 +2835,7 @@ function LiveDashboard({
       )}
 
       <FightList
-        fights={rowsFromLive(liveFights)}
+        fights={liveRows}
         newestFirst
         emptyHint={running ? "No fights yet this session." : "Start live logging to begin."}
       />

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
+import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { toast } from "sonner";
 import type {
   BrowsePopularPage,
@@ -193,6 +194,73 @@ const DiscoverResultRow = memo(function DiscoverResultRow({
   );
 });
 
+// Shared virtualized body for the Search / Popular / Category result lists. Only
+// the visible window of rows is mounted (mirrors the installed-addon list's
+// @tanstack/react-virtual usage) so deep infinite-scroll browsing no longer keeps
+// 1000+ heavy DOM rows alive. The parent owns the scroll container + sentinel; this
+// renders the sized spacer and the absolutely-positioned visible rows.
+function VirtualResultRows({
+  rowVirtualizer,
+  results,
+  selectedResultId,
+  installingId,
+  installedIds,
+  onSelectResult,
+  onInstall,
+  showRank = false,
+}: {
+  rowVirtualizer: Virtualizer<HTMLDivElement, Element>;
+  results: EsouiSearchResult[];
+  selectedResultId: number | null;
+  installingId: number | null;
+  installedIds: Set<number>;
+  onSelectResult: (result: EsouiSearchResult | null) => void;
+  onInstall: (id: number) => void;
+  showRank?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        height: `${rowVirtualizer.getTotalSize()}px`,
+        width: "100%",
+        position: "relative",
+      }}
+    >
+      {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+        const r = results[virtualRow.index];
+        if (!r) return null;
+        return (
+          <div
+            key={r.id}
+            data-result-row
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              width: "100%",
+              transform: `translateY(${virtualRow.start}px)`,
+            }}
+            ref={rowVirtualizer.measureElement}
+            data-index={virtualRow.index}
+          >
+            <DiscoverResultRow
+              result={r}
+              selected={selectedResultId === r.id}
+              isInstalling={installingId === r.id}
+              anyInstalling={installingId !== null}
+              installed={installedIds.has(r.id)}
+              onSelect={onSelectResult}
+              onInstall={onInstall}
+              showMeta
+              rank={showRank ? virtualRow.index + 1 : undefined}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 const DISCOVER_TABS: [DiscoverTab, string, React.FC<{ className?: string }>][] = [
   ["search", "Search", Search],
   ["popular", "Popular", Flame],
@@ -373,6 +441,16 @@ function SearchContent({
   const searchIdRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirtualizer = useVirtualizer({
+    count: results.length,
+    getScrollElement: () => listRef.current,
+    // Multi-line result rows (title + author/category + meta). measureElement
+    // corrects the estimate once each row mounts.
+    estimateSize: () => 84,
+    overscan: 8,
+  });
+
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -414,19 +492,17 @@ function SearchContent({
         e.preventDefault();
         const next = currentIdx < results.length - 1 ? currentIdx + 1 : 0;
         onSelectResult(results[next] ?? null);
-        listRef.current?.querySelectorAll("[data-result-row]")?.[next]?.scrollIntoView({
-          block: "nearest",
-        });
+        // Virtualized: scroll the (possibly unmounted) target into view via the
+        // virtualizer rather than querying the DOM for a row that may not exist.
+        rowVirtualizer.scrollToIndex(next, { align: "auto" });
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         const prev = currentIdx > 0 ? currentIdx - 1 : results.length - 1;
         onSelectResult(results[prev] ?? null);
-        listRef.current?.querySelectorAll("[data-result-row]")?.[prev]?.scrollIntoView({
-          block: "nearest",
-        });
+        rowVirtualizer.scrollToIndex(prev, { align: "auto" });
       }
     },
-    [results, selectedResultId, onSelectResult]
+    [results, selectedResultId, onSelectResult, rowVirtualizer]
   );
 
   return (
@@ -471,20 +547,15 @@ function SearchContent({
             subtitle="Type to find addons by name, author, or keyword"
           />
         ) : (
-          results.map((r) => (
-            <div key={r.id} data-result-row>
-              <DiscoverResultRow
-                result={r}
-                selected={selectedResultId === r.id}
-                isInstalling={installingId === r.id}
-                anyInstalling={installingId !== null}
-                installed={installedIds.has(r.id)}
-                onSelect={onSelectResult}
-                onInstall={onInstall}
-                showMeta
-              />
-            </div>
-          ))
+          <VirtualResultRows
+            rowVirtualizer={rowVirtualizer}
+            results={results}
+            selectedResultId={selectedResultId}
+            installingId={installingId}
+            installedIds={installedIds}
+            onSelectResult={onSelectResult}
+            onInstall={onInstall}
+          />
         )}
       </div>
     </>
@@ -513,6 +584,15 @@ function PopularContent({
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(true);
   const pageRef = useRef(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirtualizer = useVirtualizer({
+    count: results.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 84,
+    overscan: 8,
+  });
 
   const loadPage = useCallback(async (p: number, sort: PopularSort, append: boolean) => {
     setLoading(true);
@@ -533,7 +613,6 @@ function PopularContent({
 
   // Load on mount
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadPage(0, "downloads", false);
   }, [loadPage]);
 
@@ -584,7 +663,7 @@ function PopularContent({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {results.length === 0 && loading ? (
           <DiscoverResultListSkeleton />
         ) : results.length === 0 ? (
@@ -595,20 +674,16 @@ function PopularContent({
           />
         ) : (
           <>
-            {results.map((r, idx) => (
-              <DiscoverResultRow
-                key={r.id}
-                result={r}
-                selected={selectedResultId === r.id}
-                isInstalling={installingId === r.id}
-                anyInstalling={installingId !== null}
-                installed={installedIds.has(r.id)}
-                onSelect={onSelectResult}
-                onInstall={onInstall}
-                showMeta
-                rank={idx + 1}
-              />
-            ))}
+            <VirtualResultRows
+              rowVirtualizer={rowVirtualizer}
+              results={results}
+              selectedResultId={selectedResultId}
+              installingId={installingId}
+              installedIds={installedIds}
+              onSelectResult={onSelectResult}
+              onInstall={onInstall}
+              showRank
+            />
             {hasMore && <div ref={sentinelRef} className="h-1" />}
             {loading && <DiscoverResultListSkeleton count={3} />}
           </>
@@ -641,6 +716,7 @@ function CategoryContent({
   const [hasMore, setHasMore] = useState(false);
   const [filterText, setFilterText] = useState("");
   const pageRef = useRef(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void invokeResult<EsouiCategory[]>("get_esoui_categories").then((result) => {
@@ -710,6 +786,14 @@ function CategoryContent({
     );
   }, [results, filterText]);
 
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const rowVirtualizer = useVirtualizer({
+    count: filteredResults.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 84,
+    overscan: 8,
+  });
+
   const selectedCategoryName = useMemo(
     () => categories.find((c) => c.id === selectedCategory)?.name ?? null,
     [categories, selectedCategory]
@@ -767,7 +851,7 @@ function CategoryContent({
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {results.length === 0 && loading ? (
           <DiscoverResultListSkeleton />
         ) : filteredResults.length === 0 && filterText ? (
@@ -788,19 +872,15 @@ function CategoryContent({
           />
         ) : (
           <>
-            {filteredResults.map((r) => (
-              <DiscoverResultRow
-                key={r.id}
-                result={r}
-                selected={selectedResultId === r.id}
-                isInstalling={installingId === r.id}
-                anyInstalling={installingId !== null}
-                installed={installedIds.has(r.id)}
-                onSelect={onSelectResult}
-                onInstall={onInstall}
-                showMeta
-              />
-            ))}
+            <VirtualResultRows
+              rowVirtualizer={rowVirtualizer}
+              results={filteredResults}
+              selectedResultId={selectedResultId}
+              installingId={installingId}
+              installedIds={installedIds}
+              onSelectResult={onSelectResult}
+              onInstall={onInstall}
+            />
             {hasMore && !filterText && <div ref={sentinelRef} className="h-1" />}
             {loading && <DiscoverResultListSkeleton count={3} />}
           </>
