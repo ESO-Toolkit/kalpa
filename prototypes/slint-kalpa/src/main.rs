@@ -1044,11 +1044,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let addon_models = apply_mock_data(&ui);
     let pending_conflicts = Arc::new(Mutex::new(HashMap::new()));
     let _ = PENDING_NATIVE_CONFLICTS.set(pending_conflicts);
+    apply_initial_native_settings(&ui);
+    apply_runtime_flags(&ui, render_config.preset);
     let active_theme_id = apply_initial_theme(&ui);
     ui.set_active_theme_id(active_theme_id.into());
     seed_initial_theme_draft(&ui, &custom_themes.borrow());
-    apply_initial_native_settings(&ui);
-    apply_runtime_flags(&ui, render_config.preset);
     apply_backup_restore_model(&ui);
     apply_pack_hub_model(&ui, fallback_pack_hub_entries());
     apply_installed_pack_refs(&ui, read_installed_pack_refs());
@@ -11796,7 +11796,15 @@ fn wire_file_browser(ui: &KalpaWindow) {
             if guard_unsaved_editor(&ui) {
                 return;
             }
-            refresh_file_browser(&ui);
+            if needs_file_browser_refresh_on_addon_selection(
+                ui.get_detail_files_active(),
+                ui.get_editor_open(),
+                ui.get_show_file_backups(),
+            ) {
+                refresh_file_browser(&ui);
+            } else {
+                refresh_active_conflict_panel(&ui);
+            }
         }
     });
 
@@ -11949,6 +11957,14 @@ fn refresh_file_browser(ui: &KalpaWindow) {
     refresh_active_conflict_panel(ui);
 }
 
+fn needs_file_browser_refresh_on_addon_selection(
+    files_active: bool,
+    editor_open: bool,
+    show_backups: bool,
+) -> bool {
+    files_active || editor_open || show_backups
+}
+
 fn pending_conflict_store() -> Option<NativePendingConflictStore> {
     PENDING_NATIVE_CONFLICTS.get().cloned()
 }
@@ -11965,7 +11981,7 @@ fn selected_pending_conflict(ui: &KalpaWindow) -> Option<NativePendingConflict> 
 
 fn refresh_active_conflict_panel(ui: &KalpaWindow) {
     let Some(pending) = selected_pending_conflict(ui) else {
-        clear_active_conflict_panel(ui);
+        clear_active_conflict_panel_if_needed(ui);
         return;
     };
 
@@ -11981,6 +11997,23 @@ fn refresh_active_conflict_panel(ui: &KalpaWindow) {
     }
     if !pending.conflicts.iter().any(|path| path == &diff_file) {
         clear_active_conflict_diff(ui);
+    }
+}
+
+fn clear_active_conflict_panel_if_needed(ui: &KalpaWindow) {
+    let has_conflict_state = ui.get_detail_conflict_files().row_count() > 0
+        || ui.get_detail_conflict_auto_kept_count() != 0
+        || ui.get_detail_conflict_safe_file_count() != 0
+        || !ui.get_detail_conflict_update_version().is_empty()
+        || ui.get_detail_conflict_all_decided()
+        || !ui.get_detail_conflict_diff_file().is_empty()
+        || !ui.get_detail_conflict_diff_user_preview().is_empty()
+        || !ui.get_detail_conflict_diff_upstream_preview().is_empty()
+        || ui.get_detail_conflict_diff_binary()
+        || ui.get_detail_conflict_diff_loading();
+
+    if has_conflict_state {
+        clear_active_conflict_panel(ui);
     }
 }
 
@@ -15707,9 +15740,27 @@ fn apply_theme_selection(ui: &KalpaWindow, selection: &ThemeSelection) {
 
 fn apply_backdrop_skins(ui: &KalpaWindow, seed: &ThemeSeed) {
     let backdrop = ui.global::<BackdropSkins>();
-    backdrop.set_orb_one(cached_blurred_orb_skin(600, rgb_from_hex(&seed.orb1), 0.20));
-    backdrop.set_orb_two(cached_blurred_orb_skin(500, rgb_from_hex(&seed.orb2), 0.15));
-    backdrop.set_orb_three(cached_blurred_orb_skin(400, rgb_from_hex(&seed.orb3), 0.10));
+    let low_memory = ui.global::<Tokens>().get_low_memory_preset();
+    let (orb_one, orb_two, orb_three) = if low_memory {
+        ((420, 0.18), (340, 0.13), (260, 0.09))
+    } else {
+        ((600, 0.20), (500, 0.15), (400, 0.10))
+    };
+    backdrop.set_orb_one(cached_blurred_orb_skin(
+        orb_one.0,
+        rgb_from_hex(&seed.orb1),
+        orb_one.1,
+    ));
+    backdrop.set_orb_two(cached_blurred_orb_skin(
+        orb_two.0,
+        rgb_from_hex(&seed.orb2),
+        orb_two.1,
+    ));
+    backdrop.set_orb_three(cached_blurred_orb_skin(
+        orb_three.0,
+        rgb_from_hex(&seed.orb3),
+        orb_three.1,
+    ));
 }
 
 fn cached_blurred_orb_skin(size: u32, color: (u8, u8, u8), opacity: f32) -> Image {
@@ -17593,6 +17644,22 @@ mod tests {
             .expect("xml file exists");
         assert!(xml.modified);
         assert_eq!(modified_count, 2);
+    }
+
+    #[test]
+    fn addon_selection_defers_file_browser_until_visible_or_editing() {
+        assert!(!needs_file_browser_refresh_on_addon_selection(
+            false, false, false
+        ));
+        assert!(needs_file_browser_refresh_on_addon_selection(
+            true, false, false
+        ));
+        assert!(needs_file_browser_refresh_on_addon_selection(
+            false, true, false
+        ));
+        assert!(needs_file_browser_refresh_on_addon_selection(
+            false, false, true
+        ));
     }
 
     #[test]

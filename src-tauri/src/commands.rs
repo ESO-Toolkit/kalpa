@@ -8282,10 +8282,12 @@ fn launch_native_shell_process(
     app_data_dir: Option<PathBuf>,
     webview_exe: Option<PathBuf>,
 ) -> Result<(), String> {
+    let render_preset = native_shell_render_preset();
+    let render_backend = native_shell_backend_for_preset(&render_preset);
     let mut command = std::process::Command::new(exe_path);
     command
-        .env("KALPA_RENDER_PRESET", "low-memory")
-        .env("KALPA_SLINT_BACKEND", "winit-software")
+        .env("KALPA_RENDER_PRESET", render_preset)
+        .env("KALPA_SLINT_BACKEND", render_backend)
         .env("KALPA_NATIVE_AUTO_PLACE", "0");
 
     if let Some(path) = app_data_dir {
@@ -8308,6 +8310,39 @@ fn launch_native_shell_process(
         Err(error) => Err(format!(
             "Failed to verify native performance UI launch: {error}"
         )),
+    }
+}
+
+fn native_shell_render_preset() -> String {
+    std::env::var("KALPA_NATIVE_RENDER_PRESET")
+        .or_else(|_| std::env::var("KALPA_RENDER_PRESET"))
+        .map(|value| {
+            if value.trim().is_empty() {
+                "low-memory".to_string()
+            } else {
+                value
+            }
+        })
+        .unwrap_or_else(|_| "low-memory".to_string())
+}
+
+fn native_shell_backend_for_preset(render_preset: &str) -> String {
+    std::env::var("KALPA_NATIVE_SLINT_BACKEND")
+        .or_else(|_| std::env::var("KALPA_SLINT_BACKEND"))
+        .map(|value| {
+            if value.trim().is_empty() {
+                native_shell_default_backend(render_preset).to_string()
+            } else {
+                value
+            }
+        })
+        .unwrap_or_else(|_| native_shell_default_backend(render_preset).to_string())
+}
+
+fn native_shell_default_backend(render_preset: &str) -> &'static str {
+    match render_preset.trim().to_ascii_lowercase().as_str() {
+        "standard" | "fidelity" | "quality" | "femtovg" | "skia" => "winit-femtovg",
+        _ => "winit-software",
     }
 }
 
@@ -8515,6 +8550,8 @@ pub fn open_ransomware_protection_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn should_emit_progress_first_stride_and_completion() {
@@ -9447,5 +9484,50 @@ mod tests {
                 "{disabled_value} should keep the WebView startup path"
             );
         }
+    }
+
+    #[test]
+    fn native_shell_renderer_defaults_to_low_memory_software() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
+        std::env::remove_var("KALPA_RENDER_PRESET");
+        std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+
+        let preset = native_shell_render_preset();
+
+        assert_eq!(preset, "low-memory");
+        assert_eq!(native_shell_backend_for_preset(&preset), "winit-software");
+    }
+
+    #[test]
+    fn native_shell_renderer_allows_standard_diagnostics() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("KALPA_NATIVE_RENDER_PRESET", "standard");
+        std::env::remove_var("KALPA_RENDER_PRESET");
+        std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+
+        let preset = native_shell_render_preset();
+
+        assert_eq!(preset, "standard");
+        assert_eq!(native_shell_backend_for_preset(&preset), "winit-femtovg");
+        std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
+    }
+
+    #[test]
+    fn native_shell_renderer_backend_override_wins() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("KALPA_NATIVE_RENDER_PRESET", "low-memory");
+        std::env::set_var("KALPA_NATIVE_SLINT_BACKEND", "winit-femtovg");
+        std::env::remove_var("KALPA_RENDER_PRESET");
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+
+        let preset = native_shell_render_preset();
+
+        assert_eq!(preset, "low-memory");
+        assert_eq!(native_shell_backend_for_preset(&preset), "winit-femtovg");
+        std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
+        std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
     }
 }
