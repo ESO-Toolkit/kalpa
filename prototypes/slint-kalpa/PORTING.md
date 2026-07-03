@@ -231,8 +231,9 @@ Current detail status:
   into native cards with live title, author, type, tag, vote, and addon-count
   metadata, and selecting a pack hydrates the native detail/install addon rows
   from `/packs/{id}`. Browse search, type filters, sort selection, and load-more
-  pagination now drive native Pack Hub requests. The install footer now installs
-  selected missing pack addons through the native ESOUI
+  pagination now drive native Pack Hub requests, and failed browse loads now
+  render an inline native error state with Retry instead of only using the global
+  status banner. The install footer now installs selected missing pack addons through the native ESOUI
   download/extract/hash/metadata path, with required addons selected by default
   and optional missing addons toggled directly in the native detail rows. It
   records normal detail installs in the same local `installed_packs` settings

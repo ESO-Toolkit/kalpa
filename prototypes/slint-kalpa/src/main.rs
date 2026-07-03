@@ -3531,6 +3531,21 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         );
     });
 
+    let pack_retry_ui = ui.as_weak();
+    let pack_retry_state = pack_hub_browse_state.clone();
+    let pack_retry_counter = pack_hub_browse_counter.clone();
+    ui.on_pack_hub_browse_retry(move || {
+        let Some(ui) = pack_retry_ui.upgrade() else {
+            return;
+        };
+        request_pack_hub_browse_page(
+            &ui,
+            pack_retry_state.clone(),
+            pack_retry_counter.clone(),
+            false,
+        );
+    });
+
     let import_file_settings = Arc::new(Mutex::new(HashMap::<String, NativeAddonSettings>::new()));
 
     let import_code_ui = ui.as_weak();
@@ -4873,6 +4888,7 @@ fn request_pack_hub_browse_page(
     };
 
     ui.set_pack_hub_browse_loading(true);
+    ui.set_pack_hub_browse_message("".into());
     ui.set_status_error_message("Loading Pack Hub packs...".into());
 
     let ui_weak = ui.as_weak();
@@ -4905,12 +4921,14 @@ fn request_pack_hub_browse_page(
                             ui.set_status_error_message("No more Pack Hub packs to load.".into());
                         } else {
                             append_pack_hub_model(&ui, page.entries);
+                            ui.set_pack_hub_browse_message("".into());
                             ui.set_status_error_message("".into());
                         }
                     } else {
                         let empty = page.entries.is_empty();
                         apply_pack_hub_model(&ui, page.entries);
                         ui.set_pack_hub_selected_index(0);
+                        ui.set_pack_hub_browse_message("".into());
                         ui.set_status_error_message(
                             if empty {
                                 "No Pack Hub packs match the current filters."
@@ -4925,6 +4943,7 @@ fn request_pack_hub_browse_page(
                     ui.set_pack_hub_browse_has_more(false);
                     if !append {
                         apply_pack_hub_model(&ui, Vec::new());
+                        ui.set_pack_hub_browse_message(error.clone().into());
                     }
                     ui.set_status_error_message(
                         format!("Could not load Pack Hub packs: {error}").into(),

@@ -6130,12 +6130,14 @@ component PackHubBrowseView inherits Rectangle {
     in property <string> sort-label: "Votes";
     in property <bool> loading: false;
     in property <bool> has-more: false;
+    in property <string> message: "";
     callback import-clicked;
     callback open-detail(int);
     callback query-edited(string);
     callback type-next;
     callback sort-next;
     callback load-more;
+    callback retry;
     background: #00000000;
 
     PackHubButton {
@@ -6172,15 +6174,40 @@ component PackHubBrowseView inherits Rectangle {
 
         Text {
             x: 24px;
-            y: 0px;
+            y: root.message != "" && !root.loading ? 54px : 0px;
             width: parent.width - 48px;
-            height: parent.height;
-            text: root.loading ? "Loading Pack Hub packs..." : "No packs match this browse filter.";
-            color: Palette.muted-strong;
+            height: root.message != "" && !root.loading ? 30px : parent.height;
+            text: root.loading ? "Loading Pack Hub packs..." : (root.message != "" ? "Could not load packs" : "No packs match this browse filter.");
+            color: root.message != "" && !root.loading ? Palette.red : Palette.muted-strong;
             font-size: 14px;
             font-weight: 800;
             horizontal-alignment: center;
             vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            visible: root.message != "" && !root.loading;
+            x: 42px;
+            y: 88px;
+            width: parent.width - 84px;
+            height: 34px;
+            text: root.message;
+            color: Palette.muted-strong;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        PackHubButton {
+            visible: root.message != "" && !root.loading;
+            x: (parent.width - 92px) / 2;
+            y: 146px;
+            width: 92px;
+            icon: @image-url("../assets/icons/refresh-cw.svg");
+            label: "Retry";
+            clicked => { root.retry(); }
         }
     }
 
@@ -7090,6 +7117,7 @@ component PackHubOverlay inherits Rectangle {
     in property <string> browse-sort-label: "Votes";
     in property <bool> browse-loading: false;
     in property <bool> browse-has-more: false;
+    in property <string> browse-message: "";
     in property <bool> detail-loading: false;
     in property <string> detail-message: "";
     in property <string> install-label: "Install Addons";
@@ -7107,6 +7135,7 @@ component PackHubOverlay inherits Rectangle {
     callback browse-type-next;
     callback browse-sort-next;
     callback browse-load-more;
+    callback browse-retry;
     callback import-share-code-edited(string);
     callback import-file-path-edited(string);
     callback import-resolve-share-code;
@@ -7198,6 +7227,7 @@ component PackHubOverlay inherits Rectangle {
                 sort-label: root.browse-sort-label;
                 loading: root.browse-loading;
                 has-more: root.browse-has-more;
+                message: root.browse-message;
                 import-clicked => { root.view = 5; }
                 open-detail(index) => {
                     root.selected-pack-index = index;
@@ -7208,6 +7238,7 @@ component PackHubOverlay inherits Rectangle {
                 type-next => { root.browse-type-next(); }
                 sort-next => { root.browse-sort-next(); }
                 load-more => { root.browse-load-more(); }
+                retry => { root.browse-retry(); }
             }
 
             if (root.view == 5) : PackHubImportView {
@@ -11414,6 +11445,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> pack-hub-browse-sort-label: "Votes";
     in-out property <bool> pack-hub-browse-loading: false;
     in-out property <bool> pack-hub-browse-has-more: false;
+    in-out property <string> pack-hub-browse-message;
     in-out property <bool> pack-hub-detail-loading: false;
     in-out property <string> pack-hub-detail-message;
     in-out property <string> pack-hub-install-label: "Install Addons";
@@ -11623,6 +11655,7 @@ export component KalpaWindow inherits Window {
     callback pack-hub-browse-type-next;
     callback pack-hub-browse-sort-next;
     callback pack-hub-browse-load-more;
+    callback pack-hub-browse-retry;
     callback pack-hub-import-share-code-edited(string);
     callback pack-hub-import-file-path-edited(string);
     callback pack-hub-import-resolve-share-code;
@@ -11954,6 +11987,7 @@ export component KalpaWindow inherits Window {
             browse-sort-label: root.pack-hub-browse-sort-label;
             browse-loading: root.pack-hub-browse-loading;
             browse-has-more: root.pack-hub-browse-has-more;
+            browse-message: root.pack-hub-browse-message;
             detail-loading: root.pack-hub-detail-loading;
             detail-message: root.pack-hub-detail-message;
             install-label: root.pack-hub-install-label;
@@ -11971,6 +12005,7 @@ export component KalpaWindow inherits Window {
             browse-type-next => { root.pack-hub-browse-type-next(); }
             browse-sort-next => { root.pack-hub-browse-sort-next(); }
             browse-load-more => { root.pack-hub-browse-load-more(); }
+            browse-retry => { root.pack-hub-browse-retry(); }
             import-share-code-edited(value) => { root.pack-hub-import-share-code-edited(value); }
             import-file-path-edited(value) => { root.pack-hub-import-file-path-edited(value); }
             import-resolve-share-code => { root.pack-hub-import-resolve-share-code(); }
