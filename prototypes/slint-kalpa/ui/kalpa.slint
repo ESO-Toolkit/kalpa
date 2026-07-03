@@ -3423,6 +3423,7 @@ component AppearanceOverlay inherits Rectangle {
     callback addons-path-redetected;
     callback addons-path-applied(string);
     callback backup-restore-clicked;
+    callback characters-clicked;
     callback api-compat-clicked;
     callback addon-list-exported;
     callback addon-list-imported;
@@ -3860,7 +3861,7 @@ component AppearanceOverlay inherits Rectangle {
             background: #00000000;
 
             SettingsToolRow { x: 0px; y: 0px; width: parent.width; icon: @image-url("../assets/icons/package.svg"); label: "Backup & Restore"; description: "Save and recover your addon settings"; clicked => { root.backup-restore-clicked(); } }
-            SettingsToolRow { x: 0px; y: 68px; width: parent.width; icon: @image-url("../assets/icons/files.svg"); label: "Characters"; description: "View and manage your ESO characters"; }
+            SettingsToolRow { x: 0px; y: 68px; width: parent.width; icon: @image-url("../assets/icons/files.svg"); label: "Characters"; description: "View and manage your ESO characters"; clicked => { root.characters-clicked(); } }
             SettingsToolRow { x: 0px; y: 136px; width: parent.width; icon: @image-url("../assets/icons/file-sliders.svg"); label: "API Compatibility"; description: "Check addons against current API version"; clicked => { root.api-compat-clicked(); } }
             SettingsToolRow { x: 0px; y: 204px; width: parent.width; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Check for App Updates"; description: "See if a newer version of Kalpa is available"; }
             SettingsToolRow { visible: root.minion-detected; x: 0px; y: 272px; width: parent.width; icon: @image-url("../assets/icons/flame.svg"); label: "Minion Migration"; description: "Import tracking data from Minion with backup and preview"; accent: true; }
@@ -9094,6 +9095,12 @@ export component KalpaWindow inherits Window {
                 root.backup-restore-open = true;
                 root.backup-restore-view = 0;
                 root.open-backup-restore();
+            }
+            characters-clicked => {
+                root.settings-open = false;
+                root.svm-open = true;
+                root.svm-view = 0;
+                root.open-svm();
             }
         }
 
