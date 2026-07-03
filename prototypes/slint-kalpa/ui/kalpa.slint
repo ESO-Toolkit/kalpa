@@ -1540,13 +1540,15 @@ component DiscoverResultRow inherits Rectangle {
     callback row-selected;
     callback install-clicked;
     private property <bool> has-rank: root.rank > 0;
-    private property <length> body-x: root.has-rank ? 66px : 22px;
-    private property <length> action-reserve: 100px;
-    private property <length> meta-y: 40px;
-    private property <length> extra-y: 66px;
-    height: root.show-extra-meta ? 92px : 72px;
-    background: #00000000;
+    private property <length> body-x: root.has-rank ? 54px : 16px;
+    private property <length> action-reserve: 96px;
+    private property <length> meta-y: 38px;
+    private property <length> extra-y: 57px;
+    height: root.show-extra-meta ? 78px : 62px;
+    background: root.selected ? @linear-gradient(90deg, Palette.gold-06 0%, Palette.white-02 48%, #00000000 100%) : (touch.has-hover ? Palette.white-04 : #00000000);
     border-radius: 0px;
+
+    animate background { duration: 150ms; easing: ease-in-out; }
 
     touch := TouchArea {
         width: parent.width;
@@ -1554,40 +1556,26 @@ component DiscoverResultRow inherits Rectangle {
         clicked => { root.row-selected(); }
     }
 
-    card := Rectangle {
-        x: 8px;
-        y: 6px;
-        width: parent.width - 16px;
-        height: parent.height - 12px;
-        border-radius: 10px;
-        border-width: 1px;
-        border-color: root.selected ? Palette.gold-20 : (touch.has-hover ? Palette.border-strong : Palette.border);
-        background: root.selected ? Palette.gold-04 : (touch.has-hover ? Palette.white-04 : Palette.white-02);
-
-        animate background, border-color { duration: 150ms; easing: ease-in-out; }
-    }
-
     Rectangle {
         visible: root.selected;
-        x: 8px;
-        y: 12px;
+        x: 0px;
+        y: 0px;
         width: 3px;
-        height: parent.height - 24px;
-        border-radius: 3px;
+        height: parent.height;
+        border-radius: 0px;
         border-width: 0px;
         background: Palette.gold;
     }
 
     Rectangle {
         visible: root.has-rank;
-        x: 18px;
-        y: 16px;
-        width: 34px;
-        height: 34px;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: root.rank <= 3 ? Palette.gold-20 : Palette.border;
-        background: root.rank <= 3 ? Palette.gold-10 : Palette.white-04;
+        x: 16px;
+        y: 14px;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        border-width: 0px;
+        background: root.rank <= 3 ? Palette.gold-15 : Palette.white-04;
 
         Text {
             width: parent.width;
@@ -1604,49 +1592,39 @@ component DiscoverResultRow inherits Rectangle {
 
     title-text := Text {
         x: root.body-x;
-        y: 13px;
+        y: 12px;
         width: parent.width - root.body-x - root.action-reserve;
         text: root.title;
         color: Palette.foreground;
         font-size: 13px;
-        font-weight: 800;
+        font-weight: 700;
         overflow: elide;
-    }
-
-    category-chip := Rectangle {
-        visible: root.category != "";
-        x: root.body-x;
-        y: root.meta-y - 1px;
-        width: min(category-label.preferred-width + 14px, max(58px, parent.width - root.body-x - root.action-reserve - (root.meta == "" ? 0px : 88px)));
-        height: 18px;
-        border-radius: 9px;
-        border-width: 0px;
-        background: root.selected ? Palette.gold-10 : Palette.white-03;
-        clip: true;
-
-        category-label := Text {
-            x: 7px;
-            width: parent.width - 14px;
-            height: parent.height;
-            text: root.category;
-            color: root.selected ? Palette.gold-hot : Palette.muted-strong;
-            font-size: 10px;
-            font-weight: 650;
-            vertical-alignment: center;
-            overflow: elide;
-        }
     }
 
     author-text := Text {
         visible: root.meta != "";
-        x: root.category == "" ? root.body-x : category-chip.x + category-chip.width + 8px;
+        x: root.body-x;
         y: root.meta-y;
-        width: root.category == "" ? parent.width - root.body-x - root.action-reserve : max(48px, parent.width - root.body-x - root.action-reserve - category-chip.width - 8px);
+        width: min(author-text.preferred-width, max(48px, parent.width - root.body-x - root.action-reserve - (root.category == "" ? 0px : 76px)));
         text: root.meta;
         color: Palette.muted-half;
         font-size: 11px;
         font-weight: 500;
         overflow: elide;
+    }
+
+    category-chip := Pill {
+        visible: root.category != "";
+        x: root.meta == "" ? root.body-x : author-text.x + author-text.width + 8px;
+        y: root.meta-y - 3px;
+        label: root.category;
+        tone: root.selected ? Palette.gold-hot : Palette.muted-strong;
+        fill: root.selected ? Palette.gold-10 : Palette.white-03;
+        line: #00000000;
+        pill-height: 18px;
+        pill-padding-x: 7px;
+        label-font-size: 10px;
+        pill-max-width: max(58px, parent.width - self.x - root.action-reserve);
     }
 
     Image {
@@ -1719,7 +1697,7 @@ component DiscoverSortChip inherits Rectangle {
         height: parent.height / 2;
         border-radius: root.border-radius;
         border-width: 0px;
-        background: root.active ? Palette.gold-10 : Palette.white-03;
+        background: #00000000;
     }
 
     Image {
@@ -1771,7 +1749,7 @@ component DiscoverSelectChip inherits Rectangle {
         height: parent.height / 2;
         border-radius: root.border-radius;
         border-width: 0px;
-        background: root.active ? Palette.gold-10 : Palette.white-03;
+        background: #00000000;
     }
 
     Image {
@@ -2235,30 +2213,37 @@ component FileToolbarAction inherits Rectangle {
 
     animate background, opacity { duration: 150ms; easing: ease-in-out; }
 
-    Image {
+    content := Rectangle {
         x: root.content-x;
-        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
-        width: root.icon-size;
-        height: root.icon-size;
-        source: root.icon;
-        image-fit: contain;
-        colorize: primary ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
-
-        animate colorize { duration: 150ms; easing: ease-in-out; }
-    }
-
-    label-text := Text {
-        x: root.content-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
-        width: label-text.preferred-width;
         height: root.height;
-        text: root.label;
-        color: primary ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
-        font-size: 12px;
-        font-weight: 600;
-        vertical-alignment: center;
+        width: root.content-width;
+        background: #00000000;
 
-        animate color { duration: 150ms; easing: ease-in-out; }
+        Image {
+            x: 0px;
+            y: (parent.height - root.icon-size) / 2;
+            width: root.icon-size;
+            height: root.icon-size;
+            source: root.icon;
+            image-fit: contain;
+            colorize: primary ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
+
+            animate colorize { duration: 150ms; easing: ease-in-out; }
+        }
+
+        label-text := Text {
+            x: root.icon-size + root.icon-gap;
+            width: label-text.preferred-width;
+            height: parent.height;
+            text: root.label;
+            color: primary ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+
+            animate color { duration: 150ms; easing: ease-in-out; }
+        }
     }
 
     touch := TouchArea {
@@ -3142,26 +3127,33 @@ component SettingsActionButton inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    Image {
+    content := Rectangle {
         x: root.content-x;
-        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
-        width: root.icon-size;
-        height: root.icon-size;
-        source: root.icon;
-        image-fit: contain;
-        colorize: root.primary ? Palette.gold : (root.danger ? Palette.red : (touch.has-hover ? Palette.foreground : Palette.muted-strong));
-    }
-
-    label-text := Text {
-        x: root.content-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
-        width: label-text.preferred-width;
         height: root.height;
-        text: root.label;
-        color: root.primary ? Palette.gold : (root.danger ? Palette.red : (touch.has-hover ? Palette.foreground : Palette.muted-strong));
-        font-size: 12px;
-        font-weight: 700;
-        vertical-alignment: center;
+        width: root.content-width;
+        background: #00000000;
+
+        Image {
+            x: 0px;
+            y: (parent.height - root.icon-size) / 2;
+            width: root.icon-size;
+            height: root.icon-size;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.primary ? Palette.gold : (root.danger ? Palette.red : (touch.has-hover ? Palette.foreground : Palette.muted-strong));
+        }
+
+        label-text := Text {
+            x: root.icon-size + root.icon-gap;
+            width: label-text.preferred-width;
+            height: parent.height;
+            text: root.label;
+            color: root.primary ? Palette.gold : (root.danger ? Palette.red : (touch.has-hover ? Palette.foreground : Palette.muted-strong));
+            font-size: 12px;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
     }
 
     touch := TouchArea {
@@ -4240,30 +4232,37 @@ component PackHubButton inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    Image {
-        visible: root.show-icon;
+    content := Rectangle {
         x: root.content-x;
-        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
-        width: root.icon-size;
-        height: root.icon-size;
-        source: root.icon;
-        image-fit: contain;
-        colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
-        opacity: root.disabled ? 0.35 : 1.0;
-    }
-
-    button-label := Text {
-        x: root.content-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
-        width: root.label-width;
         height: root.height;
-        text: root.label;
-        color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
-        font-size: 12px;
-        font-weight: root.primary ? 800 : 700;
-        vertical-alignment: center;
-        horizontal-alignment: center;
-        overflow: elide;
+        width: root.content-width;
+        background: #00000000;
+
+        Image {
+            visible: root.show-icon;
+            x: 0px;
+            y: (parent.height - root.icon-size) / 2;
+            width: root.icon-size;
+            height: root.icon-size;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
+            opacity: root.disabled ? 0.35 : 1.0;
+        }
+
+        button-label := Text {
+            x: root.icon-size + root.icon-gap;
+            width: root.label-width;
+            height: parent.height;
+            text: root.label;
+            color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
+            font-size: 12px;
+            font-weight: root.primary ? 800 : 700;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            overflow: elide;
+        }
     }
 
     touch := TouchArea {
@@ -9485,24 +9484,27 @@ component Sidebar inherits Rectangle {
         x: 12px;
         y: 56px;
         width: root.width - 24px;
-        height: 36px;
-        border-radius: 11px;
-        border-width: 0px;
+        height: 34px;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-20 : Palette.border;
         visible: !root.compact-discover-chrome && (!root.discover-active || root.discover-tab == 0 || root.discover-tab == 3);
-        background: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-15 : Palette.white-06;
+        background: Palette.white-04;
         inner-shadow-offset-y: 1px;
-        inner-shadow-blur: 1px;
-        inner-shadow-color: #00000033;
+        inner-shadow-blur: 2px;
+        inner-shadow-color: #00000040;
         clip: true;
 
+        animate background, border-color { duration: 150ms; easing: ease-in-out; }
+
         Rectangle {
-            x: 0px;
-            y: 0px;
-            width: parent.width;
-            height: parent.height / 2;
-            border-radius: 11px;
+            x: 1px;
+            y: 1px;
+            width: parent.width - 2px;
+            height: (parent.height - 2px) / 2;
+            border-radius: 9px;
             border-width: 0px;
-            background: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-06 : Palette.white-03;
+            background: Palette.white-02;
         }
 
         Image {
@@ -9513,7 +9515,7 @@ component Sidebar inherits Rectangle {
             height: 14px;
             source: @image-url("../assets/icons/search.svg");
             image-fit: contain;
-            colorize: root.discover-active && root.discover-tab == 0 ? Palette.sky : Palette.muted-half;
+            colorize: root.discover-active && root.discover-tab == 0 ? Palette.muted-strong : Palette.muted-half;
         }
 
         Image {
@@ -9524,7 +9526,7 @@ component Sidebar inherits Rectangle {
             height: 14px;
             source: @image-url("../assets/icons/link.svg");
             image-fit: contain;
-            colorize: Palette.sky;
+            colorize: Palette.muted-strong;
         }
 
         Text {
@@ -9603,6 +9605,7 @@ component Sidebar inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
+
     }
 
     if (!root.discover-active) : Rectangle {

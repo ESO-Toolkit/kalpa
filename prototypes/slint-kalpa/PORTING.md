@@ -202,8 +202,10 @@ Current detail status:
   path. Popular and category browse chips drive native ESOUI requests for
   downloads/newest/category/sort choices. Popular and category browse modes now
   track loading, page state, and load-more pagination, and the native result rows
-  use clearer card-style selection/rank/meta hierarchy to avoid the previous
-  stripe-like selected state and cramped metadata. Discover detail hydration now
+  use a flatter React-style selection stripe, compact rank tile, and author-first
+  metadata row to avoid the previous selected-card artifact and cramped metadata.
+  The Discover search/url field now uses the neutral bordered input affordance
+  instead of an always-blue browse panel. Discover detail hydration now
   pulls trusted ESOUI screenshot URLs into a bounded temp cache and renders the
   native detail gallery with selectable thumbnails, previous/next controls, and
   dynamic screenshot counts. Installed Discover detail rows now expose a native
@@ -227,7 +229,9 @@ Current detail status:
   endpoint on a best-effort background request. It still lacks the React
   batch-progress UI and transitive dependency pass. Pack detail Edit/Delete/Share
   actions now hand off to the full WebView Pack Hub with the selected pack id
-  because those flows still require the React account/session surfaces.
+  because those flows still require the React account/session surfaces. Shared
+  native icon+label buttons now center the icon/text group as one unit, fixing
+  the visible drift in Pack Hub, file toolbar, and settings action buttons.
   Share-code import now resolves `/shares/{code}` natively, previews required
   and optional addons, and installs only required missing addons to match the
   React import behavior. `.esopack` v1/v2 files can be imported natively by
