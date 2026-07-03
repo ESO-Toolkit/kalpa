@@ -9,6 +9,22 @@ mod char_backup;
 #[path = "../../../src-tauri/src/esoui.rs"]
 mod esoui;
 
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/file_hashes.rs"]
+mod file_hashes;
+
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/installer.rs"]
+mod installer;
+
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/manifest.rs"]
+mod manifest;
+
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/metadata.rs"]
+mod metadata;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint::{
@@ -23,7 +39,7 @@ use std::{
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -245,13 +261,13 @@ fn main() -> Result<(), slint::PlatformError> {
     apply_runtime_flags(&ui, render_config.preset);
     apply_backup_restore_model(&ui);
     apply_addon_view(&ui, &addon_models);
-    let discover_installed_ids = Rc::new(RefCell::new(installed_discover_ids(
+    let discover_installed_ids = Arc::new(Mutex::new(installed_discover_ids(
         &addon_models.all.borrow(),
     )));
     let discover_model = Rc::new(RefCell::new(apply_discover_data(
         &ui,
         ui.get_discover_tab(),
-        &discover_installed_ids.borrow(),
+        &discover_installed_snapshot(&discover_installed_ids),
     )));
     refresh_file_browser(&ui);
 
@@ -3298,7 +3314,7 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
 fn wire_discover(
     ui: &KalpaWindow,
     discover_model: Rc<RefCell<Rc<VecModel<DiscoverEntry>>>>,
-    installed_ids: Rc<RefCell<BTreeSet<String>>>,
+    installed_ids: Arc<Mutex<BTreeSet<String>>>,
 ) {
     let tab_ui = ui.as_weak();
     let tab_model = discover_model.clone();
@@ -3310,13 +3326,13 @@ fn wire_discover(
             return;
         };
 
-        let model = apply_discover_data(&ui, tab, &tab_installed_ids.borrow());
+        let model = apply_discover_data(&ui, tab, &discover_installed_snapshot(&tab_installed_ids));
         *tab_model.borrow_mut() = model;
 
         if normalize_discover_tab(tab) == 1 {
             let request_id = tab_popular_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
             let request_counter = tab_popular_request_counter.clone();
-            let installed_snapshot = tab_installed_ids.borrow().clone();
+            let installed_snapshot = discover_installed_snapshot(&tab_installed_ids);
             let ui_weak = ui.as_weak();
             std::thread::spawn(move || {
                 let result = esoui::browse_popular(0, "downloads").map(|page| {
@@ -3368,7 +3384,7 @@ fn wire_discover(
             return;
         }
 
-        let model = apply_discover_data(&ui, 0, &query_installed_ids.borrow());
+        let model = apply_discover_data(&ui, 0, &discover_installed_snapshot(&query_installed_ids));
         *query_model.borrow_mut() = model;
 
         let query = ui.get_discover_query().to_string();
@@ -3379,7 +3395,7 @@ fn wire_discover(
 
         let request_id = query_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
         let request_counter = query_request_counter.clone();
-        let installed_snapshot = query_installed_ids.borrow().clone();
+        let installed_snapshot = discover_installed_snapshot(&query_installed_ids);
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = esoui::search_esoui(query.as_str())
@@ -3435,7 +3451,7 @@ fn wire_discover(
             return;
         }
 
-        let model = apply_discover_data(&ui, 3, &url_installed_ids.borrow());
+        let model = apply_discover_data(&ui, 3, &discover_installed_snapshot(&url_installed_ids));
         *url_model.borrow_mut() = model;
 
         let input = ui.get_discover_url_input().to_string();
@@ -3446,7 +3462,7 @@ fn wire_discover(
 
         let request_id = url_request_counter.fetch_add(1, Ordering::SeqCst) + 1;
         let request_counter = url_request_counter.clone();
-        let installed_snapshot = url_installed_ids.borrow().clone();
+        let installed_snapshot = discover_installed_snapshot(&url_installed_ids);
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = esoui::parse_esoui_input(input.as_str())
@@ -3557,8 +3573,60 @@ fn wire_discover(
         };
 
         let esoui_id = entry.esoui_id.to_string();
-        install_ids.borrow_mut().insert(esoui_id.clone());
-        mark_discover_installed_model(&model, &esoui_id);
+        let addons_dir = match configured_addons_path() {
+            Some(path) => path,
+            None => {
+                ui.set_status_error_message(
+                    "Configure the ESO AddOns folder before installing from Discover.".into(),
+                );
+                return;
+            }
+        };
+
+        ui.set_status_error_message(format!("Installing {}...", entry.title.as_str()).into());
+
+        let installed_ids = install_ids.clone();
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = install_discover_entry_blocking(&addons_dir, entry).map(|installed| {
+                (
+                    installed,
+                    format!("Installed ESOUI addon {esoui_id}."),
+                    esoui_id,
+                )
+            });
+
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+
+                match result {
+                    Ok((installed_folders, message, esoui_id)) => {
+                        if let Ok(mut ids) = installed_ids.lock() {
+                            ids.insert(esoui_id.clone());
+                        }
+                        mark_discover_installed_model(&ui.get_discover_results(), &esoui_id);
+                        ui.invoke_refresh_requested();
+                        ui.set_status_error_message(
+                            format!(
+                                "{message} {} folder{} added.",
+                                installed_folders.len(),
+                                if installed_folders.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            )
+                            .into(),
+                        );
+                    }
+                    Err(error) => {
+                        ui.set_status_error_message(format!("Install failed: {error}").into());
+                    }
+                }
+            });
+        });
     });
 
     ui.on_discover_open_esoui(move |esoui_id| {
@@ -3596,6 +3664,103 @@ fn mark_discover_installed_model(discover_model: &ModelRc<DiscoverEntry>, esoui_
             discover_model.set_row_data(index, entry);
         }
     }
+}
+
+fn discover_installed_snapshot(installed_ids: &Arc<Mutex<BTreeSet<String>>>) -> BTreeSet<String> {
+    installed_ids
+        .lock()
+        .map(|ids| ids.clone())
+        .unwrap_or_default()
+}
+
+fn install_discover_entry_blocking(
+    addons_dir: &Path,
+    entry: DiscoverEntry,
+) -> Result<Vec<String>, String> {
+    let esoui_id = entry
+        .esoui_id
+        .parse::<u32>()
+        .map_err(|_| "Selected Discover row does not have a valid ESOUI id.".to_string())?;
+    let detail = esoui::fetch_addon_detail(esoui_id)?;
+    let expected_md5 = (!detail.md5.trim().is_empty()).then_some(detail.md5.as_str());
+    let tmp_file = esoui::download_addon(&detail.download_url, expected_md5)?;
+    install_discover_download_blocking(addons_dir, tmp_file.path(), &detail)
+}
+
+fn install_discover_download_blocking(
+    addons_dir: &Path,
+    zip_path: &Path,
+    detail: &esoui::EsouiAddonDetail,
+) -> Result<Vec<String>, String> {
+    let installed_folders = installer::extract_addon_zip(zip_path, addons_dir)?;
+    file_hashes::record_hashes_for_folders(
+        addons_dir,
+        &installed_folders,
+        detail.id,
+        &detail.version,
+    )?;
+
+    let mut store = metadata::load_metadata(addons_dir);
+    record_native_installed_folders(&mut store, addons_dir, &installed_folders, detail);
+    metadata::save_metadata(addons_dir, &store)?;
+
+    Ok(installed_folders)
+}
+
+fn record_native_installed_folders(
+    store: &mut metadata::MetadataStore,
+    addons_dir: &Path,
+    installed_folders: &[String],
+    detail: &esoui::EsouiAddonDetail,
+) {
+    let primary = determine_primary_folder(installed_folders, &detail.title);
+    for folder in installed_folders {
+        let is_primary = *folder == primary;
+        let version = if is_primary && !detail.version.is_empty() {
+            detail.version.clone()
+        } else {
+            read_local_version(addons_dir, folder)
+        };
+        metadata::record_install_ext(
+            store,
+            folder,
+            if is_primary { detail.id } else { 0 },
+            &version,
+            &detail.download_url,
+            0,
+        );
+    }
+}
+
+fn determine_primary_folder(installed_folders: &[String], esoui_title: &str) -> String {
+    installed_folders
+        .iter()
+        .find(|folder| esoui_title.contains(folder.as_str()))
+        .or(installed_folders.first())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn read_local_version(addons_dir: &Path, folder: &str) -> String {
+    find_manifest(addons_dir, folder)
+        .and_then(|path| manifest::parse_manifest(folder, &path))
+        .map(|manifest| manifest.version)
+        .unwrap_or_default()
+}
+
+fn find_manifest(addons_dir: &Path, folder_name: &str) -> Option<PathBuf> {
+    let folder_dir = addons_dir.join(folder_name);
+    let txt = folder_dir.join(format!("{folder_name}.txt"));
+    if txt.exists() {
+        return Some(txt);
+    }
+
+    let addon = folder_dir.join(format!("{folder_name}.addon"));
+    if addon.exists() {
+        return Some(addon);
+    }
+
+    None
 }
 
 fn update_selected_dependency(
@@ -4370,6 +4535,10 @@ fn addons_source_root() -> Option<PathBuf> {
     }
 
     default_addons_root().filter(|path| path.is_dir())
+}
+
+fn configured_addons_path() -> Option<PathBuf> {
+    addons_source_root().filter(|path| path.is_dir())
 }
 
 fn configured_addons_path_display() -> String {
@@ -8792,6 +8961,30 @@ CombatMetrics_SavedVariables = {
         }
     }
 
+    fn write_test_addon_zip(path: &Path, folder: &str, version: &str) {
+        let file = fs::File::create(path).expect("create test zip");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file(format!("{folder}/{folder}.txt"), options)
+            .expect("start manifest file");
+        archive
+            .write_all(
+                format!(
+                    "## Title: {folder}\n## Author: Kalpa\n## Version: {version}\n## APIVersion: 101048\n"
+                )
+                .as_bytes(),
+            )
+            .expect("write manifest");
+        archive
+            .start_file(format!("{folder}/main.lua"), options)
+            .expect("start lua file");
+        archive
+            .write_all(b"d('installed')\n")
+            .expect("write lua file");
+        archive.finish().expect("finish test zip");
+    }
+
     #[test]
     fn discover_tabs_have_model_backed_rows() {
         let installed = BTreeSet::new();
@@ -8915,6 +9108,53 @@ CombatMetrics_SavedVariables = {
         assert!(merged.installed);
         assert_eq!(merged.version.as_str(), "1.7.7");
         assert_eq!(merged.description.as_str(), "Full detail");
+    }
+
+    #[test]
+    fn native_discover_install_extracts_hashes_and_records_metadata() {
+        let root = test_temp_dir("discover-install");
+        let addons_root = root.join("AddOns");
+        fs::create_dir_all(&addons_root).expect("create AddOns root");
+        let zip_path = root.join("CombatMetrics.zip");
+        write_test_addon_zip(&zip_path, "CombatMetrics", "1.7.7");
+
+        let detail = esoui::EsouiAddonDetail {
+            id: 1360,
+            title: "CombatMetrics".to_string(),
+            version: "1.7.7".to_string(),
+            author: "Solinur".to_string(),
+            description: "Full detail".to_string(),
+            compatibility: "101048".to_string(),
+            md5: String::new(),
+            total_downloads: "5,200,000".to_string(),
+            monthly_downloads: "213,000".to_string(),
+            favorites: "8,800".to_string(),
+            updated: "03/03/26".to_string(),
+            created: "08/05/14".to_string(),
+            screenshots: Vec::new(),
+            download_url: "https://cdn.esoui.com/downloads/file1360.zip".to_string(),
+        };
+
+        let installed =
+            install_discover_download_blocking(&addons_root, &zip_path, &detail).unwrap();
+
+        assert_eq!(installed, vec!["CombatMetrics".to_string()]);
+        assert!(addons_root.join("CombatMetrics").join("main.lua").is_file());
+        assert!(addons_root
+            .join(".kalpa-hashes")
+            .join("CombatMetrics.json")
+            .is_file());
+
+        let store = metadata::load_metadata(&addons_root);
+        let meta = store
+            .addons
+            .get("CombatMetrics")
+            .expect("metadata entry recorded");
+        assert_eq!(meta.esoui_id, 1360);
+        assert_eq!(meta.installed_version, "1.7.7");
+        assert_eq!(meta.download_url, detail.download_url);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -2987,6 +2987,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "md-5",
+ "rayon",
  "regex",
  "reqwest",
  "scraper",
