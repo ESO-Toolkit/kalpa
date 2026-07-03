@@ -118,6 +118,12 @@ fn save_snapshot_store(addons_dir: &Path, store: &SnapshotStore) -> Result<(), S
     metadata::save_json_with_backup(&snapshot_store_path(addons_dir), store)
 }
 
+/// Guards every load-modify-save sequence against `snapshots.json` so that
+/// concurrent snapshot creators/deleters cannot race and silently drop each
+/// other's manifest entry. Hold this only around the store mutation itself,
+/// never across zip building/hashing or an `.await`.
+static SNAPSHOT_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Generate a timestamp-based snapshot ID with millisecond precision to avoid collisions.
 fn snapshot_id(label_hint: &str) -> String {
     let dur = SystemTime::now()
@@ -343,9 +349,14 @@ fn create_zip_snapshot(
         total_size,
         archive_sha256: sha256,
     };
-    let mut store = load_snapshot_store(addons_dir);
-    store.snapshots.push(manifest.clone());
-    save_snapshot_store(addons_dir, &store)?;
+    {
+        let _guard = SNAPSHOT_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut store = load_snapshot_store(addons_dir);
+        store.snapshots.push(manifest.clone());
+        save_snapshot_store(addons_dir, &store)?;
+    }
 
     Ok(manifest)
 }
@@ -381,6 +392,10 @@ fn add_dir_to_zip(
                 }
                 stack.push((path, zip_path));
             } else if path.is_file() {
+                // Skip symlinks/reparse points (matches the directory branch above)
+                if path.read_link().is_ok() {
+                    continue;
+                }
                 let data = match fs::read(&path) {
                     Ok(d) => d,
                     Err(_) => continue, // Skip unreadable files (e.g. locked by another process)
@@ -756,46 +771,12 @@ pub fn list_snapshots(addons_dir: &Path) -> Vec<SnapshotManifest> {
     store.snapshots
 }
 
-/// Restore a snapshot by ID — extracts the ZIP back to the ESO live directory.
-/// Automatically creates a pre-restore snapshot of SavedVariables and settings
-/// so the user can undo the restore if it doesn't produce the desired result.
-pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, String> {
-    let start = now_timestamp();
-
-    // Create an automatic pre-restore snapshot (SavedVariables + settings only, fast)
-    // so the user has a rollback point if the restore goes wrong partway through.
-    if let Err(e) = create_zip_snapshot("Pre-restore", addons_dir, false, true, true) {
-        return Err(format!(
-            "Failed to create a safety snapshot before restoring. \
-             Your current data would be unrecoverable if the restore fails. \
-             Please free disk space or create a manual snapshot first. Error: {e}"
-        ));
-    }
-
-    let store = load_snapshot_store(addons_dir);
-    let manifest = store
-        .snapshots
-        .iter()
-        .find(|s| s.id == snapshot_id)
-        .ok_or("Snapshot not found.")?;
-
-    let root = snapshots_root(addons_dir);
-    let archive_path = root.join(format!("{snapshot_id}.zip"));
-    if !archive_path.is_file() {
-        return Err("Snapshot archive file not found.".to_string());
-    }
-
-    // Verify SHA-256
-    let actual_sha = sha256_file(&archive_path)?;
-    if actual_sha != manifest.archive_sha256 {
-        return Err(format!(
-            "Snapshot archive integrity check failed. Expected SHA-256: {}, got: {}",
-            manifest.archive_sha256, actual_sha
-        ));
-    }
-
-    let parent = addons_dir.parent().unwrap_or(addons_dir);
-    let file = fs::File::open(&archive_path)
+/// Extract a snapshot ZIP archive entry-by-entry onto the live directory.
+/// Pure extraction with no snapshotting side effects — shared by the normal
+/// restore path and by the automatic rollback path, so rollback can never
+/// recursively create another Pre-restore snapshot.
+fn extract_archive_entries(archive_path: &Path, parent: &Path) -> Result<u32, String> {
+    let file = fs::File::open(archive_path)
         .map_err(|e| format!("Failed to open snapshot archive: {e}"))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Failed to read snapshot archive: {e}"))?;
@@ -832,13 +813,11 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
                 .map_err(|e| format!("Failed to create restore file: {e}"))?;
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("Failed to write restore file: {e}"))?;
-            // On Windows, fs::rename fails if the destination exists. Remove it first.
-            if dest.exists() {
-                fs::remove_file(&dest).map_err(|e| {
-                    let _ = fs::remove_file(&tmp_dest);
-                    format!("Failed to replace existing file: {e}")
-                })?;
-            }
+            // `std::fs::rename` replaces the destination atomically on Windows
+            // (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`) — same guarantee used
+            // by saved_variables/io.rs::write_raw_bytes — so no separate remove is
+            // needed. Removing first would leave a gap where `dest` doesn't exist at
+            // all if the rename that follows then failed.
             fs::rename(&tmp_dest, &dest).map_err(|e| {
                 let _ = fs::remove_file(&tmp_dest);
                 format!("Failed to finalize restored file: {e}")
@@ -846,6 +825,114 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
             restored += 1;
         }
     }
+
+    Ok(restored)
+}
+
+/// Restore a snapshot by ID — extracts the ZIP back to the ESO live directory.
+/// Automatically creates a pre-restore snapshot of SavedVariables and settings
+/// so the user can undo the restore if it doesn't produce the desired result.
+/// If extraction fails partway through, this automatically attempts to roll
+/// back to that pre-restore snapshot so the tree is never left half-restored
+/// without at least an attempt to recover, and the error always names the
+/// pre-restore snapshot so the user can restore it manually if rollback fails.
+pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, String> {
+    let start = now_timestamp();
+
+    // Look up the target snapshot's manifest first so the automatic pre-restore
+    // safety snapshot (below) can mirror whether it includes the AddOns folder.
+    let store = load_snapshot_store(addons_dir);
+    let manifest = store
+        .snapshots
+        .iter()
+        .find(|s| s.id == snapshot_id)
+        .ok_or("Snapshot not found.")?;
+
+    // Create an automatic pre-restore snapshot (SavedVariables + settings always,
+    // plus AddOns whenever the target snapshot includes AddOns) so the user has a
+    // rollback point if the restore goes wrong partway through. Mirroring the
+    // target's AddOns inclusion matters: if an AddOns-inclusive restore fails
+    // partway, the rollback below re-extracts this Pre-restore snapshot — and a
+    // Pre-restore snapshot with no AddOns entries would leave AddOns half-restored
+    // while the error still reports a full automatic recovery.
+    let include_addons = manifest.source_paths.iter().any(|p| p == "AddOns");
+    let pre_restore_manifest =
+        create_zip_snapshot("Pre-restore", addons_dir, include_addons, true, true).map_err(
+            |e| {
+                format!(
+                    "Failed to create a safety snapshot before restoring. \
+                 Your current data would be unrecoverable if the restore fails. \
+                 Please free disk space or create a manual snapshot first. Error: {e}"
+                )
+            },
+        )?;
+
+    let root = snapshots_root(addons_dir);
+    let archive_path = root.join(format!("{snapshot_id}.zip"));
+    if !archive_path.is_file() {
+        return Err("Snapshot archive file not found.".to_string());
+    }
+
+    // Verify SHA-256
+    let actual_sha = sha256_file(&archive_path)?;
+    if actual_sha != manifest.archive_sha256 {
+        return Err(format!(
+            "Snapshot archive integrity check failed. Expected SHA-256: {}, got: {}",
+            manifest.archive_sha256, actual_sha
+        ));
+    }
+
+    let parent = addons_dir.parent().unwrap_or(addons_dir);
+
+    let restored = match extract_archive_entries(&archive_path, parent) {
+        Ok(restored) => restored,
+        Err(e) => {
+            // Best-effort rollback: restore the just-created Pre-restore snapshot's
+            // own archive directly via the shared extraction helper (not through
+            // restore_snapshot itself), so this can never re-enter the rollback
+            // logic or create yet another Pre-restore snapshot.
+            let pre_restore_archive = root.join(format!("{}.zip", pre_restore_manifest.id));
+            let rollback_result = extract_archive_entries(&pre_restore_archive, parent);
+            let rollback_ok = rollback_result.is_ok();
+
+            let _ = append_op_log(
+                addons_dir,
+                &OpLogEntry {
+                    operation: "restore_snapshot".to_string(),
+                    started_at: start.clone(),
+                    finished_at: now_timestamp(),
+                    status: "failed".to_string(),
+                    snapshot_id: Some(snapshot_id.to_string()),
+                    files_created: vec![],
+                    files_modified: vec![],
+                    details: format!(
+                        "Restore from snapshot {snapshot_id} failed: {e}. Automatic rollback to \
+                         Pre-restore snapshot {}: {}",
+                        pre_restore_manifest.id,
+                        match &rollback_result {
+                            Ok(n) => format!("succeeded ({n} files restored)"),
+                            Err(rollback_err) => format!("failed ({rollback_err})"),
+                        }
+                    ),
+                },
+            );
+
+            return if rollback_ok {
+                Err(format!(
+                    "Restore failed ({e}). Your pre-restore state was automatically restored \
+                     from snapshot {} (\"{}\").",
+                    pre_restore_manifest.id, pre_restore_manifest.label
+                ))
+            } else {
+                let rollback_err = rollback_result.err().unwrap_or_default();
+                Err(format!(
+                    "Restore failed ({e}); automatic rollback also failed ({rollback_err}). \
+                     Restore manually from snapshot {} (\"{}\").",
+                    pre_restore_manifest.id, pre_restore_manifest.label
+                ))
+            };
+        }
+    };
 
     let _ = append_op_log(
         addons_dir,
@@ -868,14 +955,24 @@ pub fn restore_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<u32, Str
 pub fn delete_snapshot(addons_dir: &Path, snapshot_id: &str) -> Result<(), String> {
     let root = snapshots_root(addons_dir);
     let archive_path = root.join(format!("{snapshot_id}.zip"));
+
+    // Update and persist the manifest FIRST, and only delete the archive file
+    // after that succeeds. Deleting the archive before the store write could
+    // leave a dangling manifest entry (pointing at a now-missing archive) if
+    // the store save then failed.
+    {
+        let _guard = SNAPSHOT_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut store = load_snapshot_store(addons_dir);
+        store.snapshots.retain(|s| s.id != snapshot_id);
+        save_snapshot_store(addons_dir, &store)?;
+    }
+
     if archive_path.is_file() {
         fs::remove_file(&archive_path)
             .map_err(|e| format!("Failed to delete snapshot archive: {e}"))?;
     }
-
-    let mut store = load_snapshot_store(addons_dir);
-    store.snapshots.retain(|s| s.id != snapshot_id);
-    save_snapshot_store(addons_dir, &store)?;
 
     Ok(())
 }
