@@ -327,10 +327,8 @@ struct MonitorPlacement {
 
 #[cfg(target_os = "windows")]
 fn place_demo_window(ui: &KalpaWindow) {
-    if std::env::var("KALPA_NATIVE_AUTO_PLACE")
-        .map(|value| matches!(value.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
-        .unwrap_or(false)
-    {
+    let auto_place = std::env::var("KALPA_NATIVE_AUTO_PLACE").ok();
+    if !native_auto_place_enabled(auto_place.as_deref()) {
         return;
     }
 
@@ -344,6 +342,11 @@ fn place_demo_window(ui: &KalpaWindow) {
 
 #[cfg(not(target_os = "windows"))]
 fn place_demo_window(_ui: &KalpaWindow) {}
+
+#[cfg(target_os = "windows")]
+fn native_auto_place_enabled(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "TRUE" | "yes" | "YES"))
+}
 
 #[cfg(target_os = "windows")]
 fn preferred_demo_monitor(monitors: &[MonitorPlacement]) -> Option<MonitorPlacement> {
@@ -7125,6 +7128,17 @@ mod tests {
         let json = serde_json::to_string(&unknown_skin).expect("serialize unknown skin theme");
         let imported = parse_imported_custom_theme(&json).expect("parse unknown skin theme");
         assert_eq!(imported.skin_id, None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn native_auto_place_is_opt_in() {
+        assert!(!native_auto_place_enabled(None));
+        assert!(!native_auto_place_enabled(Some("0")));
+        assert!(!native_auto_place_enabled(Some("false")));
+        assert!(native_auto_place_enabled(Some("1")));
+        assert!(native_auto_place_enabled(Some("true")));
+        assert!(native_auto_place_enabled(Some("YES")));
     }
 
     #[cfg(target_os = "windows")]
