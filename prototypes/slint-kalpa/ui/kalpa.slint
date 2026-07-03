@@ -470,17 +470,17 @@ component Pill inherits Rectangle {
     height: root.pill-height;
     border-radius: root.pill-height / 2;
     border-width: 0px;
-    background: root.line;
+    background: root.fill;
     clip: true;
 
     Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: parent.height - 2px;
-        border-radius: (root.pill-height - 2px) / 2;
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height / 2;
+        border-radius: root.border-radius;
         border-width: 0px;
-        background: root.fill;
+        background: root.line;
     }
 
     label-text := Text {
@@ -1441,11 +1441,11 @@ component DiscoverResultRow inherits Rectangle {
     callback row-selected;
     callback install-clicked;
     private property <bool> has-rank: root.rank > 0;
-    private property <length> body-x: root.has-rank ? 56px : 18px;
+    private property <length> body-x: root.has-rank ? 60px : 18px;
     private property <length> action-reserve: 104px;
-    private property <length> meta-y: 32px;
-    private property <length> extra-y: 54px;
-    height: root.show-extra-meta ? 76px : 56px;
+    private property <length> meta-y: 38px;
+    private property <length> extra-y: 61px;
+    height: root.show-extra-meta ? 84px : 64px;
     background: #00000000;
     border-radius: 0px;
 
@@ -1460,10 +1460,10 @@ component DiscoverResultRow inherits Rectangle {
     Rectangle {
         visible: !root.selected && touch.has-hover;
         x: 8px;
-        y: 5px;
+        y: 6px;
         width: parent.width - 16px;
-        height: parent.height - 10px;
-        border-radius: 9px;
+        height: parent.height - 12px;
+        border-radius: 10px;
         border-width: 0px;
         background: Palette.white-03;
     }
@@ -1471,43 +1471,23 @@ component DiscoverResultRow inherits Rectangle {
     Rectangle {
         visible: root.selected;
         x: 8px;
-        y: 5px;
+        y: 6px;
         width: parent.width - 16px;
-        height: parent.height - 10px;
-        border-radius: 9px;
+        height: parent.height - 12px;
+        border-radius: 10px;
         border-width: 0px;
-        background: Palette.gold-06;
-    }
-
-    Rectangle {
-        visible: root.selected;
-        x: 8px;
-        y: 9px;
-        width: 3px;
-        height: parent.height - 18px;
-        border-radius: 2px;
-        background: Palette.gold;
+        background: Palette.gold-04;
     }
 
     Rectangle {
         visible: root.has-rank;
         x: 18px;
-        y: 11px;
-        width: 24px;
-        height: 24px;
-        border-radius: 6px;
+        y: 14px;
+        width: 28px;
+        height: 28px;
+        border-radius: 7px;
         border-width: 0px;
-        background: root.rank <= 3 ? Palette.gold-20 : Palette.white-06;
-
-        Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: parent.height - 2px;
-            border-radius: 5px;
-            border-width: 0px;
-            background: root.rank <= 3 ? Palette.gold-10 : Palette.white-03;
-        }
+        background: root.rank <= 3 ? Palette.gold-15 : Palette.white-06;
 
         Text {
             width: parent.width;
@@ -1524,7 +1504,7 @@ component DiscoverResultRow inherits Rectangle {
 
     title-text := Text {
         x: root.body-x;
-        y: 10px;
+        y: 14px;
         width: parent.width - root.body-x - root.action-reserve;
         text: root.title;
         color: Palette.foreground;
@@ -1533,30 +1513,40 @@ component DiscoverResultRow inherits Rectangle {
         overflow: elide;
     }
 
+    category-chip := Rectangle {
+        visible: root.category != "";
+        x: root.body-x;
+        y: root.meta-y - 1px;
+        width: min(category-label.preferred-width + 14px, max(58px, parent.width - root.body-x - root.action-reserve - (root.meta == "" ? 0px : 88px)));
+        height: 18px;
+        border-radius: 9px;
+        border-width: 0px;
+        background: root.selected ? Palette.gold-10 : Palette.white-04;
+        clip: true;
+
+        category-label := Text {
+            x: 7px;
+            width: parent.width - 14px;
+            height: parent.height;
+            text: root.category;
+            color: root.selected ? Palette.gold-hot : Palette.muted-strong;
+            font-size: 10px;
+            font-weight: 650;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
     author-text := Text {
         visible: root.meta != "";
-        x: root.body-x;
+        x: root.category == "" ? root.body-x : category-chip.x + category-chip.width + 8px;
         y: root.meta-y;
-        width: root.category == "" ? parent.width - root.body-x - root.action-reserve : min(author-text.preferred-width, max(48px, parent.width - root.body-x - root.action-reserve - 128px));
+        width: root.category == "" ? parent.width - root.body-x - root.action-reserve : max(48px, parent.width - root.body-x - root.action-reserve - category-chip.width - 8px);
         text: root.meta;
         color: Palette.muted-half;
         font-size: 11px;
         font-weight: 500;
         overflow: elide;
-    }
-
-    category-pill := Pill {
-        visible: root.category != "";
-        x: root.meta == "" ? root.body-x : root.body-x + min(author-text.preferred-width, author-text.width) + 8px;
-        y: root.meta-y - 2px;
-        label: root.category;
-        tone: Palette.muted;
-        fill: Palette.white-04;
-        line: Palette.white-10;
-        pill-height: 18px;
-        pill-padding-x: 7px;
-        pill-max-width: min(124px, parent.width - root.body-x - root.action-reserve - 8px);
-        label-font-size: 10px;
     }
 
     Image {
@@ -1597,7 +1587,7 @@ component DiscoverResultRow inherits Rectangle {
     SmallAction {
         visible: root.installed || touch.has-hover;
         x: parent.width - self.width - 16px;
-        y: 10px;
+        y: 15px;
         label: root.installed ? "Installed" : "Install";
         tone: root.installed ? Palette.emerald : Palette.gold;
         fill: root.installed ? Palette.emerald-04 : Palette.gold-10;
@@ -1619,17 +1609,17 @@ component DiscoverSortChip inherits Rectangle {
     height: 28px;
     border-radius: 8px;
     border-width: 0px;
-    background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-08 : Palette.white-06);
+    background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-10 : Palette.white-06);
     clip: true;
 
     Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: parent.height - 2px;
-        border-radius: 7px;
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height / 2;
+        border-radius: root.border-radius;
         border-width: 0px;
-        background: root.active ? Palette.gold-10 : Palette.white-04;
+        background: root.active ? Palette.gold-10 : Palette.white-03;
     }
 
     Image {
@@ -1671,17 +1661,17 @@ component DiscoverSelectChip inherits Rectangle {
     height: 28px;
     border-radius: 8px;
     border-width: 0px;
-    background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-08 : Palette.white-06);
+    background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-10 : Palette.white-06);
     clip: true;
 
     Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: parent.height - 2px;
-        border-radius: 7px;
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height / 2;
+        border-radius: root.border-radius;
         border-width: 0px;
-        background: root.active ? Palette.gold-10 : Palette.white-04;
+        background: root.active ? Palette.gold-10 : Palette.white-03;
     }
 
     Image {
@@ -4007,6 +3997,9 @@ component PackHubButton inherits Rectangle {
     callback clicked;
     private property <length> icon-size: root.show-icon ? 14px : 0px;
     private property <length> icon-gap: root.show-icon ? 6px : 0px;
+    private property <length> label-width: min(button-label.preferred-width, root.width - root.icon-size - root.icon-gap - 18px);
+    private property <length> content-width: root.icon-size + root.icon-gap + root.label-width;
+    private property <length> content-x: max(0px, (root.width - root.content-width) / 2);
     height: 32px;
     border-radius: 8px;
     border-width: 0px;
@@ -4014,47 +4007,30 @@ component PackHubButton inherits Rectangle {
 
     animate background { duration: 150ms; easing: ease-in-out; }
 
-    HorizontalLayout {
+    Image {
+        visible: root.show-icon;
+        x: root.content-x;
+        y: (root.height - root.icon-size) / 2 + (touch.pressed ? 1px : 0px);
+        width: root.icon-size;
+        height: root.icon-size;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
+        opacity: root.disabled ? 0.35 : 1.0;
+    }
+
+    button-label := Text {
+        x: root.content-x + root.icon-size + root.icon-gap;
         y: touch.pressed ? 1px : 0px;
-        width: root.width;
+        width: root.label-width;
         height: root.height;
-        spacing: root.icon-gap;
-        alignment: center;
-        cross-axis-alignment: center;
-
-        Rectangle {
-            width: root.icon-size;
-            height: root.icon-size;
-            background: #00000000;
-
-            Image {
-                visible: root.show-icon;
-                width: root.icon-size;
-                height: root.icon-size;
-                source: root.icon;
-                image-fit: contain;
-                colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
-                opacity: root.disabled ? 0.35 : 1.0;
-            }
-        }
-
-        label-wrap := Rectangle {
-            width: min(label-text.preferred-width, root.width - root.icon-size - root.icon-gap - 18px);
-            height: root.height;
-            background: #00000000;
-
-            label-text := Text {
-                width: parent.width;
-                height: parent.height;
-                text: root.label;
-                color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
-                font-size: 12px;
-                font-weight: root.primary ? 800 : 700;
-                vertical-alignment: center;
-                horizontal-alignment: center;
-                overflow: elide;
-            }
-        }
+        text: root.label;
+        color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
+        font-size: 12px;
+        font-weight: root.primary ? 800 : 700;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+        overflow: elide;
     }
 
     touch := TouchArea {
@@ -4075,16 +4051,16 @@ component PackHubField inherits Rectangle {
     height: 36px;
     border-radius: 10px;
     border-width: 0px;
-    background: root.focused ? Palette.sky-15 : Palette.border;
+    background: root.focused ? Palette.sky-15 : Palette.white-06;
 
     Rectangle {
-        x: 1px;
-        y: 1px;
-        width: parent.width - 2px;
-        height: parent.height - 2px;
-        border-radius: 9px;
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height / 2;
+        border-radius: 10px;
         border-width: 0px;
-        background: Palette.white-02;
+        background: root.focused ? Palette.sky-06 : Palette.white-03;
     }
 
     Image {
@@ -7301,20 +7277,20 @@ component Sidebar inherits Rectangle {
         height: 36px;
         border-radius: 11px;
         border-width: 0px;
-        background: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-25 : Palette.white-08;
+        background: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-15 : Palette.white-06;
         inner-shadow-offset-y: 1px;
         inner-shadow-blur: 1px;
         inner-shadow-color: #00000033;
         clip: true;
 
         Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: parent.height - 2px;
-            border-radius: 10px;
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height / 2;
+            border-radius: 11px;
             border-width: 0px;
-            background: @linear-gradient(180deg, Palette.white-04 0%, Palette.white-02 100%);
+            background: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-06 : Palette.white-03;
         }
 
         Image {
