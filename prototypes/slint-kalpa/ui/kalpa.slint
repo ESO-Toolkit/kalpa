@@ -1612,13 +1612,14 @@ component DiscoverSortChip inherits Rectangle {
     in property <string> label;
     in property <bool> active: false;
     in property <length> chip-width: label-text.preferred-width + 42px;
+    callback clicked;
     width: root.chip-width;
     preferred-width: self.width;
     horizontal-stretch: 0;
     height: 28px;
     border-radius: 8px;
     border-width: 0px;
-    background: root.active ? Palette.gold-20 : Palette.white-06;
+    background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-08 : Palette.white-06);
     clip: true;
 
     Rectangle {
@@ -1646,11 +1647,17 @@ component DiscoverSortChip inherits Rectangle {
         width: root.width - 40px;
         height: root.height;
         text: root.label;
-        color: root.active ? Palette.gold : Palette.muted-strong;
+        color: root.active ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
         font-size: 11px;
         font-weight: 700;
         vertical-alignment: center;
         overflow: elide;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -1659,11 +1666,12 @@ component DiscoverSelectChip inherits Rectangle {
     in property <string> label;
     in property <bool> active: false;
     in property <length> chip-width: 120px;
+    callback clicked;
     width: root.chip-width;
     height: 28px;
     border-radius: 8px;
     border-width: 0px;
-    background: root.active ? Palette.gold-20 : Palette.white-06;
+    background: root.active ? Palette.gold-20 : (touch.has-hover ? Palette.white-08 : Palette.white-06);
     clip: true;
 
     Rectangle {
@@ -1691,17 +1699,26 @@ component DiscoverSelectChip inherits Rectangle {
         width: root.width - 38px;
         height: root.height;
         text: root.label;
-        color: root.active ? Palette.gold : Palette.muted-strong;
+        color: root.active ? Palette.gold : (touch.has-hover ? Palette.foreground : Palette.muted-strong);
         font-size: 11px;
         font-weight: 650;
         vertical-alignment: center;
         overflow: elide;
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
     }
 }
 
 component DiscoverModePanel inherits Rectangle {
     in property <int> tab: 0;
     in property <[DiscoverEntry]> entries;
+    in property <int> popular-sort: 0;
+    in property <string> category-label: "Combat";
+    in property <string> category-sort-label: "Downloads";
     in-out property <int> selected-index: 0;
     in-out property <string> query;
     in-out property <string> url-input;
@@ -1709,6 +1726,9 @@ component DiscoverModePanel inherits Rectangle {
     callback install-result(int);
     callback query-edited(string);
     callback url-edited(string);
+    callback popular-sort-selected(int);
+    callback category-next;
+    callback category-sort-next;
     private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? 36px : 0px);
     background: #00000000;
     clip: true;
@@ -1719,8 +1739,8 @@ component DiscoverModePanel inherits Rectangle {
         width: parent.width - 24px;
         height: 28px;
         spacing: 8px;
-        DiscoverSortChip { chip-width: (parent.width - 8px) / 2; label: "Most Popular"; active: true; icon: @image-url("../assets/icons/flame.svg"); }
-        DiscoverSortChip { chip-width: (parent.width - 8px) / 2; label: "Recently Updated"; icon: @image-url("../assets/icons/refresh-cw.svg"); }
+        DiscoverSortChip { chip-width: (parent.width - 8px) / 2; label: "Most Popular"; active: root.popular-sort == 0; icon: @image-url("../assets/icons/flame.svg"); clicked => { root.popular-sort-selected(0); } }
+        DiscoverSortChip { chip-width: (parent.width - 8px) / 2; label: "Recently Updated"; active: root.popular-sort == 1; icon: @image-url("../assets/icons/refresh-cw.svg"); clicked => { root.popular-sort-selected(1); } }
     }
 
     if (root.tab == 2) : Rectangle {
@@ -1733,15 +1753,17 @@ component DiscoverModePanel inherits Rectangle {
         DiscoverSelectChip {
             chip-width: (parent.width - 8px) / 2;
             icon: @image-url("../assets/icons/folder-open.svg");
-            label: "Combat";
+            label: root.category-label;
             active: true;
+            clicked => { root.category-next(); }
         }
 
         DiscoverSelectChip {
             x: (parent.width + 8px) / 2;
             chip-width: (parent.width - 8px) / 2;
             icon: @image-url("../assets/icons/chevron-down.svg");
-            label: "Downloads";
+            label: root.category-sort-label;
+            clicked => { root.category-sort-next(); }
         }
     }
 
@@ -7151,6 +7173,9 @@ component Sidebar inherits Rectangle {
     in-out property <int> discover-tab: 0;
     in-out property <string> discover-query;
     in-out property <string> discover-url-input;
+    in-out property <int> discover-popular-sort: 0;
+    in-out property <string> discover-category-label: "Combat";
+    in-out property <string> discover-category-sort-label: "Downloads";
     in property <int> total-addon-count: 0;
     in property <int> addon-kind-count: 0;
     in property <int> library-kind-count: 0;
@@ -7177,6 +7202,9 @@ component Sidebar inherits Rectangle {
     callback discover-install(int);
     callback discover-query-edited(string);
     callback discover-url-edited(string);
+    callback discover-popular-sort-selected(int);
+    callback discover-category-next;
+    callback discover-category-sort-next;
     private property <string> count-label: root.addons.length == 1 ? "1 ADDON" : root.addons.length + " ADDONS";
     private property <string> sort-label: sort-mode == 1 ? "Author" : (sort-mode == 2 ? "Recently Updated" : (sort-mode == 3 ? "Recently Downloaded" : "Name"));
     private property <bool> compact-discover-chrome: root.discover-active && (root.discover-tab == 1 || root.discover-tab == 2);
@@ -7928,6 +7956,9 @@ component Sidebar inherits Rectangle {
         height: root.height - root.discover-panel-y;
         tab: root.discover-tab;
         entries: root.discover-results;
+        popular-sort: root.discover-popular-sort;
+        category-label: root.discover-category-label;
+        category-sort-label: root.discover-category-sort-label;
         selected-index <=> root.selected-discover-index;
         query <=> root.discover-query;
         url-input <=> root.discover-url-input;
@@ -7935,6 +7966,9 @@ component Sidebar inherits Rectangle {
         install-result(index) => { root.discover-install(index); }
         query-edited(value) => { root.discover-query-edited(value); }
         url-edited(value) => { root.discover-url-edited(value); }
+        popular-sort-selected(sort) => { root.discover-popular-sort-selected(sort); }
+        category-next => { root.discover-category-next(); }
+        category-sort-next => { root.discover-category-sort-next(); }
     }
 
     Rectangle {
@@ -8948,6 +8982,9 @@ export component KalpaWindow inherits Window {
     in-out property <int> discover-tab: 0;
     in-out property <string> discover-query;
     in-out property <string> discover-url-input;
+    in-out property <int> discover-popular-sort: 0;
+    in-out property <string> discover-category-label: "Combat";
+    in-out property <string> discover-category-sort-label: "Downloads";
     in-out property <string> status-error-message;
     in-out property <bool> offline-active: false;
     in-out property <string> app-update-message;
@@ -9061,6 +9098,9 @@ export component KalpaWindow inherits Window {
     callback discover-open-esoui(string);
     callback discover-query-edited(string);
     callback discover-url-edited(string);
+    callback discover-popular-sort-selected(int);
+    callback discover-category-next;
+    callback discover-category-sort-next;
     callback open-pack-hub;
     callback pack-hub-open-detail(int);
     callback pack-hub-install-detail;
@@ -9206,6 +9246,9 @@ export component KalpaWindow inherits Window {
             discover-tab <=> root.discover-tab;
             discover-query <=> root.discover-query;
             discover-url-input <=> root.discover-url-input;
+            discover-popular-sort <=> root.discover-popular-sort;
+            discover-category-label <=> root.discover-category-label;
+            discover-category-sort-label <=> root.discover-category-sort-label;
             addon-selected(index) => { root.addon-selected(index); }
             addon-selection-toggled(index) => { root.addon-selection-toggled(index); }
             addon-context-open-folder(index) => { root.addon-context-open-folder(index); }
@@ -9221,6 +9264,9 @@ export component KalpaWindow inherits Window {
             discover-install(index) => { root.discover-install(index); }
             discover-query-edited(value) => { root.discover-query-edited(value); }
             discover-url-edited(value) => { root.discover-url-edited(value); }
+            discover-popular-sort-selected(sort) => { root.discover-popular-sort-selected(sort); }
+            discover-category-next => { root.discover-category-next(); }
+            discover-category-sort-next => { root.discover-category-sort-next(); }
         }
 
         if (!side.discover-active && root.addons.length > 0) : DetailPane {
