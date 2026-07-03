@@ -193,6 +193,17 @@ struct NativeSettings {
     conflict_policy: i32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct NativeInstalledPackRef {
+    pack_id: String,
+    title: String,
+    pack_type: String,
+    author_name: String,
+    addon_count: usize,
+    installed_at: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExportEntry {
@@ -459,6 +470,7 @@ enum NativeRenderPreset {
 const STORE_KEY_ACTIVE_THEME: &str = "appearance.activeThemeId";
 const STORE_KEY_ADDONS_PATH: &str = "addonsPath";
 const STORE_KEY_CUSTOM_THEMES: &str = "appearance.customThemes";
+const STORE_KEY_INSTALLED_PACKS: &str = "installed_packs";
 const STORE_KEY_PERFORMANCE_MODE: &str = "performanceMode";
 const APP_UPDATE_MANIFEST_URL: &str =
     "https://github.com/ESO-Toolkit/kalpa/releases/latest/download/latest.json";
@@ -873,6 +885,7 @@ fn main() -> Result<(), slint::PlatformError> {
     apply_runtime_flags(&ui, render_config.preset);
     apply_backup_restore_model(&ui);
     apply_pack_hub_model(&ui, fallback_pack_hub_entries());
+    apply_installed_pack_refs(&ui, read_installed_pack_refs());
     clear_pack_hub_import_model(&ui);
     apply_addon_view(&ui, &addon_models);
     let discover_installed_ids = Arc::new(Mutex::new(installed_discover_ids(
@@ -3089,6 +3102,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             &pack_hub_create_models,
             &pack_hub_create_state_open.borrow(),
         );
+        apply_installed_pack_refs(&ui, read_installed_pack_refs());
         request_pack_hub_browse_page(&ui, pack_hub_state.clone(), pack_hub_counter.clone(), false);
     });
 
@@ -3455,43 +3469,84 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         };
 
-        let pack_id = pack.id.to_string();
         let installed_ids = installed_discover_ids(&pack_detail_models.all.borrow());
-        let ui_weak = ui.as_weak();
-        std::thread::spawn(move || {
-            let result = fetch_pack_hub_detail_blocking(&pack_id, &installed_ids);
-            let _ = slint::invoke_from_event_loop(move || {
-                let Some(ui) = ui_weak.upgrade() else {
-                    return;
-                };
+        request_pack_hub_detail(&ui, index, pack.id.to_string(), installed_ids);
+    });
 
-                ui.set_pack_hub_detail_loading(false);
-                match result {
-                    Ok(detail) => {
-                        let packs = ui.get_pack_hub_packs();
-                        if index < packs.row_count() {
-                            packs.set_row_data(index, detail.entry);
-                        }
-                        let empty = detail.addons.is_empty();
-                        apply_pack_hub_detail_model(&ui, detail.addons);
-                        ui.set_pack_hub_detail_message(
-                            if empty {
-                                "No addons are listed for this pack."
-                            } else {
-                                ""
-                            }
-                            .into(),
-                        );
-                    }
-                    Err(error) => {
-                        apply_pack_hub_detail_model(&ui, Vec::new());
-                        ui.set_pack_hub_detail_message(
-                            format!("Could not load pack details: {error}").into(),
-                        );
-                    }
-                }
-            });
-        });
+    let installed_pack_open_ui = ui.as_weak();
+    let installed_pack_open_models = models.clone();
+    ui.on_pack_hub_open_installed_pack(move |index| {
+        let Some(ui) = installed_pack_open_ui.upgrade() else {
+            return;
+        };
+
+        let index = index.max(0) as usize;
+        let Some(entry) = pack_hub_installed_entries_from_model(&ui)
+            .get(index)
+            .cloned()
+        else {
+            ui.set_status_error_message("Select an installed pack to open.".into());
+            return;
+        };
+        if entry.pack_id.trim().is_empty() {
+            ui.set_status_error_message("Installed pack has no Pack Hub id.".into());
+            return;
+        }
+
+        let pack_index = ensure_pack_hub_entry_for_installed(&ui, &entry);
+        ui.set_pack_hub_selected_index(pack_index as i32);
+        ui.set_pack_hub_view(3);
+        ui.set_pack_hub_detail_loading(true);
+        ui.set_pack_hub_detail_message("".into());
+        apply_pack_hub_detail_model(&ui, Vec::new());
+
+        let installed_ids = installed_discover_ids(&installed_pack_open_models.all.borrow());
+        request_pack_hub_detail(&ui, pack_index, entry.pack_id.to_string(), installed_ids);
+    });
+
+    let installed_pack_remove_ui = ui.as_weak();
+    ui.on_pack_hub_remove_installed_pack(move |index| {
+        let Some(ui) = installed_pack_remove_ui.upgrade() else {
+            return;
+        };
+
+        let index = index.max(0) as usize;
+        let Some(entry) = pack_hub_installed_entries_from_model(&ui)
+            .get(index)
+            .cloned()
+        else {
+            return;
+        };
+        match remove_installed_pack_ref(entry.pack_id.as_str()) {
+            Ok(refs) => {
+                apply_installed_pack_refs(&ui, refs);
+                ui.set_status_error_message("Removed pack from local library.".into());
+            }
+            Err(error) => {
+                ui.set_status_error_message(
+                    format!("Could not update installed pack library: {error}").into(),
+                );
+            }
+        }
+    });
+
+    let pack_hub_full_ui = ui.as_weak();
+    ui.on_pack_hub_open_full_hub(move || {
+        let Some(ui) = pack_hub_full_ui.upgrade() else {
+            return;
+        };
+
+        match return_to_webview_shell(false, false, true, None) {
+            Ok(()) => {
+                ui.set_status_error_message("Opening full Pack Hub...".into());
+                let _ = slint::quit_event_loop();
+            }
+            Err(error) => {
+                ui.set_status_error_message(
+                    format!("Failed to open full Pack Hub: {error}").into(),
+                );
+            }
+        }
     });
 
     let pack_install_ui = ui.as_weak();
@@ -3523,19 +3578,34 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_pack_hub_install_label(format!("Installing {pending}...").into());
         ui.set_status_error_message(format!("Installing {pending} Pack Hub addon(s)...").into());
 
+        let installed_pack_entry = selected_pack_hub_entry(&ui);
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = install_pack_hub_addons_blocking(&addons_dir, rows);
+            if result.installed > 0 {
+                if let Some(entry) = installed_pack_entry.as_ref() {
+                    track_pack_install_blocking(entry.id.as_str());
+                }
+            }
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
 
-                let summary = pack_hub_install_summary(&result);
+                let mut summary = pack_hub_install_summary(&result);
                 let installed = result.installed;
                 apply_pack_hub_detail_model(&ui, result.rows);
                 if installed > 0 {
                     ui.invoke_refresh_requested();
+                    if let Some(entry) = installed_pack_entry.as_ref() {
+                        match upsert_installed_pack_ref(entry) {
+                            Ok(refs) => apply_installed_pack_refs(&ui, refs),
+                            Err(error) => {
+                                summary =
+                                    format!("{summary} Could not update pack library: {error}");
+                            }
+                        }
+                    }
                 }
 
                 ui.set_status_error_message(summary.into());
@@ -4000,6 +4070,72 @@ fn append_pack_hub_model(ui: &KalpaWindow, entries: Vec<PackHubEntry>) {
     apply_pack_hub_model(ui, rows);
 }
 
+fn apply_installed_pack_refs(ui: &KalpaWindow, refs: Vec<NativeInstalledPackRef>) {
+    let entries = refs
+        .into_iter()
+        .map(pack_hub_installed_entry_from_ref)
+        .collect::<Vec<_>>();
+    ui.set_pack_hub_installed_packs(Rc::new(VecModel::from(entries)).into());
+}
+
+fn pack_hub_installed_entries_from_model(ui: &KalpaWindow) -> Vec<PackHubInstalledPackEntry> {
+    let model = ui.get_pack_hub_installed_packs();
+    (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .collect()
+}
+
+fn pack_hub_installed_entry_from_ref(
+    reference: NativeInstalledPackRef,
+) -> PackHubInstalledPackEntry {
+    let pack_type = normalize_pack_type_key(&reference.pack_type);
+    PackHubInstalledPackEntry {
+        pack_id: reference.pack_id.as_str().into(),
+        title: reference.title.as_str().into(),
+        pack_type_label: pack_type_label(&pack_type).into(),
+        author: reference.author_name.as_str().into(),
+        addon_count: addon_count_label(reference.addon_count).into(),
+        installed_label: installed_pack_date_label(&reference.installed_at).into(),
+        monogram: pack_monogram(&reference.title).into(),
+        identity_kind: pack_identity_kind(&reference.pack_id, &reference.title, &pack_type),
+        type_kind: pack_type_kind(&pack_type),
+    }
+}
+
+fn ensure_pack_hub_entry_for_installed(
+    ui: &KalpaWindow,
+    entry: &PackHubInstalledPackEntry,
+) -> usize {
+    let mut rows = pack_hub_entries_from_model(ui);
+    if let Some(index) = rows
+        .iter()
+        .position(|row| row.id.as_str() == entry.pack_id.as_str())
+    {
+        return index;
+    }
+
+    let pack_type = pack_type_key_from_kind(entry.type_kind);
+    rows.push(PackHubEntry {
+        id: entry.pack_id.clone(),
+        title: entry.title.clone(),
+        description: "Installed locally from Pack Hub.".into(),
+        tag: fallback_pack_tag(pack_type).into(),
+        addon_count: entry.addon_count.clone(),
+        vote_count: "0".into(),
+        author: entry.author.clone(),
+        pack_type_label: entry.pack_type_label.clone(),
+        updated_label: entry.installed_label.clone(),
+        monogram: entry.monogram.clone(),
+        author_initial: author_initial(entry.author.as_str()).into(),
+        identity_kind: entry.identity_kind,
+        type_kind: entry.type_kind,
+        trial: false,
+    });
+    let index = rows.len() - 1;
+    apply_pack_hub_model(ui, rows);
+    index
+}
+
 fn pack_hub_type_filter_key(filter: i32) -> Option<&'static str> {
     match filter {
         1 => Some("addon-pack"),
@@ -4331,6 +4467,49 @@ fn request_pack_hub_browse_page(
     });
 }
 
+fn request_pack_hub_detail(
+    ui: &KalpaWindow,
+    index: usize,
+    pack_id: String,
+    installed_ids: BTreeSet<String>,
+) {
+    let ui_weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let result = fetch_pack_hub_detail_blocking(&pack_id, &installed_ids);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+
+            ui.set_pack_hub_detail_loading(false);
+            match result {
+                Ok(detail) => {
+                    let packs = ui.get_pack_hub_packs();
+                    if index < packs.row_count() {
+                        packs.set_row_data(index, detail.entry);
+                    }
+                    let empty = detail.addons.is_empty();
+                    apply_pack_hub_detail_model(&ui, detail.addons);
+                    ui.set_pack_hub_detail_message(
+                        if empty {
+                            "No addons are listed for this pack."
+                        } else {
+                            ""
+                        }
+                        .into(),
+                    );
+                }
+                Err(error) => {
+                    apply_pack_hub_detail_model(&ui, Vec::new());
+                    ui.set_pack_hub_detail_message(
+                        format!("Could not load pack details: {error}").into(),
+                    );
+                }
+            }
+        });
+    });
+}
+
 fn pack_hub_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
@@ -4455,6 +4634,18 @@ fn fetch_pack_hub_detail_blocking(
         .map_err(|error| format!("Failed to parse pack detail response: {error}"))?;
 
     Ok(pack_hub_detail_from_hub(body.pack, installed_ids))
+}
+
+fn track_pack_install_blocking(pack_id: &str) {
+    let pack_id = pack_id.trim();
+    if pack_id.is_empty() || pack_id.contains('/') || pack_id.contains('\\') {
+        return;
+    }
+    drop(
+        pack_hub_client()
+            .post(format!("{}/packs/{pack_id}/install", pack_hub_url()))
+            .send(),
+    );
 }
 
 fn fetch_shared_pack_blocking(
@@ -4802,10 +4993,13 @@ fn pack_hub_import_addons(ui: &KalpaWindow) -> Vec<PackHubAddonEntry> {
         .collect()
 }
 
-fn selected_pack_hub_id(ui: &KalpaWindow) -> Option<String> {
+fn selected_pack_hub_entry(ui: &KalpaWindow) -> Option<PackHubEntry> {
     let index = ui.get_pack_hub_selected_index().max(0) as usize;
-    ui.get_pack_hub_packs()
-        .row_data(index)
+    ui.get_pack_hub_packs().row_data(index)
+}
+
+fn selected_pack_hub_id(ui: &KalpaWindow) -> Option<String> {
+    selected_pack_hub_entry(ui)
         .map(|pack| pack.id.to_string())
         .filter(|id| !id.trim().is_empty())
 }
@@ -5087,6 +5281,23 @@ fn pack_type_label(pack_type: &str) -> String {
     .to_string()
 }
 
+fn normalize_pack_type_key(pack_type: &str) -> String {
+    match pack_type {
+        "build" | "build-pack" | "Build Pack" => "build-pack",
+        "roster" | "roster-pack" | "Roster Pack" => "roster-pack",
+        _ => "addon-pack",
+    }
+    .to_string()
+}
+
+fn pack_type_key_from_kind(kind: i32) -> &'static str {
+    match kind {
+        1 => "build-pack",
+        2 => "roster-pack",
+        _ => "addon-pack",
+    }
+}
+
 fn fallback_pack_tag(pack_type: &str) -> String {
     match pack_type {
         "build" | "build-pack" => "build",
@@ -5106,6 +5317,12 @@ fn pack_updated_label(created_at: &str, updated_at: &str) -> String {
     pack_iso_date_label(source)
         .map(|date| format!("{prefix} {date}"))
         .unwrap_or_default()
+}
+
+fn installed_pack_date_label(installed_at: &str) -> String {
+    pack_iso_date_label(installed_at)
+        .map(|date| format!("Installed {date}"))
+        .unwrap_or_else(|| "Installed locally".to_string())
 }
 
 fn pack_iso_date_label(value: &str) -> Option<String> {
@@ -9624,6 +9841,123 @@ fn persist_addons_path_to_settings_path(path: &Path, addons_path: &str) -> Resul
     write_settings_store_object_to_path(path, object)
 }
 
+fn read_installed_pack_refs() -> Vec<NativeInstalledPackRef> {
+    for path in native_settings_store_paths() {
+        match read_installed_pack_refs_from_settings_path(&path) {
+            Ok(Some(refs)) => return refs,
+            Ok(None) => {}
+            Err(error) => eprintln!("Failed to read installed packs from {path:?}: {error}"),
+        }
+    }
+
+    Vec::new()
+}
+
+fn read_installed_pack_refs_from_settings_path(
+    path: &Path,
+) -> Result<Option<Vec<NativeInstalledPackRef>>, String> {
+    let Some(value) = read_settings_store_key_from_path(path, STORE_KEY_INSTALLED_PACKS)? else {
+        return Ok(None);
+    };
+
+    serde_json::from_value::<Vec<NativeInstalledPackRef>>(value)
+        .map(normalize_installed_pack_refs)
+        .map(Some)
+        .map_err(|error| format!("Failed to parse installed packs: {error}"))
+}
+
+fn persist_installed_pack_refs(refs: &[NativeInstalledPackRef]) -> Result<(), String> {
+    let Some(path) = native_settings_store_path() else {
+        return Err("settings store path was not available".to_string());
+    };
+    persist_installed_pack_refs_to_settings_path(&path, refs)
+}
+
+fn persist_installed_pack_refs_to_settings_path(
+    path: &Path,
+    refs: &[NativeInstalledPackRef],
+) -> Result<(), String> {
+    let mut object = read_settings_store_object_from_path(path)?;
+    object.insert(
+        STORE_KEY_INSTALLED_PACKS.to_string(),
+        serde_json::to_value(normalize_installed_pack_refs(refs.to_vec()))
+            .map_err(|error| format!("Failed to serialize installed packs: {error}"))?,
+    );
+    write_settings_store_object_to_path(path, object)
+}
+
+fn normalize_installed_pack_refs(refs: Vec<NativeInstalledPackRef>) -> Vec<NativeInstalledPackRef> {
+    let mut seen = HashSet::new();
+    refs.into_iter()
+        .filter_map(|mut reference| {
+            reference.pack_id = reference.pack_id.trim().to_string();
+            reference.title = reference.title.trim().to_string();
+            if reference.pack_id.is_empty()
+                || reference.title.is_empty()
+                || !seen.insert(reference.pack_id.clone())
+            {
+                return None;
+            }
+            reference.pack_type = normalize_pack_type_key(&reference.pack_type);
+            reference.author_name = reference.author_name.trim().to_string();
+            Some(reference)
+        })
+        .collect()
+}
+
+fn upsert_installed_pack_ref(entry: &PackHubEntry) -> Result<Vec<NativeInstalledPackRef>, String> {
+    if entry.id.trim().is_empty() {
+        return Err("Pack Hub pack has no id.".to_string());
+    }
+
+    let reference = NativeInstalledPackRef {
+        pack_id: entry.id.trim().to_string(),
+        title: entry.title.trim().to_string(),
+        pack_type: pack_type_key_from_kind(entry.type_kind).to_string(),
+        author_name: entry.author.trim().to_string(),
+        addon_count: parse_addon_count_label(entry.addon_count.as_str()),
+        installed_at: current_iso_utc(),
+    };
+
+    let mut refs = read_installed_pack_refs();
+    refs.retain(|existing| existing.pack_id != reference.pack_id);
+    refs.insert(0, reference);
+    persist_installed_pack_refs(&refs)?;
+    Ok(refs)
+}
+
+fn remove_installed_pack_ref(pack_id: &str) -> Result<Vec<NativeInstalledPackRef>, String> {
+    let mut refs = read_installed_pack_refs();
+    let before = refs.len();
+    refs.retain(|reference| reference.pack_id != pack_id);
+    if refs.len() != before {
+        persist_installed_pack_refs(&refs)?;
+    }
+    Ok(refs)
+}
+
+fn parse_addon_count_label(label: &str) -> usize {
+    label
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn current_iso_utc() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let days = seconds / 86_400;
+    let day_seconds = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days as i64);
+    let hour = day_seconds / 3_600;
+    let minute = (day_seconds % 3_600) / 60;
+    let second = day_seconds % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
 fn default_addons_root() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -12513,6 +12847,7 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
             "1" | "create" | "create-details" | "details" => 1,
             "2" | "create-addons" | "addons" => 2,
             "3" | "install" | "detail" | "install-detail" => 3,
+            "4" | "my" | "my-packs" | "installed" => 4,
             "5" | "import" | "share" | "share-code" => 5,
             _ => 0,
         })
@@ -13936,6 +14271,76 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_pack_refs_round_trip_through_production_settings_key() {
+        let root = test_temp_dir("installed-packs-production");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings directory");
+        fs::write(&path, r#"{"autoUpdate":true}"#).expect("seed settings store");
+        let refs = vec![
+            NativeInstalledPackRef {
+                pack_id: "pack-1".to_string(),
+                title: "Trial Essentials".to_string(),
+                pack_type: "build".to_string(),
+                author_name: "Spike'jo".to_string(),
+                addon_count: 12,
+                installed_at: "2026-07-02T18:45:00Z".to_string(),
+            },
+            NativeInstalledPackRef {
+                pack_id: "pack-1".to_string(),
+                title: "Duplicate".to_string(),
+                pack_type: "addon-pack".to_string(),
+                author_name: "Ignored".to_string(),
+                addon_count: 1,
+                installed_at: "2026-07-03T00:00:00Z".to_string(),
+            },
+        ];
+
+        persist_installed_pack_refs_to_settings_path(&path, &refs)
+            .expect("persist installed packs");
+        let restored = read_installed_pack_refs_from_settings_path(&path)
+            .expect("read installed packs")
+            .expect("installed packs key exists");
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].pack_id, "pack-1");
+        assert_eq!(restored[0].pack_type, "build-pack");
+        assert_eq!(restored[0].addon_count, 12);
+
+        let object = read_settings_store_object_from_path(&path).expect("read settings object");
+        assert_eq!(
+            object
+                .get("autoUpdate")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(object
+            .get(STORE_KEY_INSTALLED_PACKS)
+            .and_then(serde_json::Value::as_array)
+            .is_some());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn installed_pack_ref_maps_to_native_card_entry() {
+        let entry = pack_hub_installed_entry_from_ref(NativeInstalledPackRef {
+            pack_id: "build-pack-7".to_string(),
+            title: "Cloudrest Build".to_string(),
+            pack_type: "build-pack".to_string(),
+            author_name: "Alyx".to_string(),
+            addon_count: 5,
+            installed_at: "2026-07-02T18:45:00Z".to_string(),
+        });
+
+        assert_eq!(entry.pack_id.as_str(), "build-pack-7");
+        assert_eq!(entry.pack_type_label.as_str(), "Build Pack");
+        assert_eq!(entry.addon_count.as_str(), "5 addons");
+        assert_eq!(entry.installed_label.as_str(), "Installed Jul 2, 2026");
+        assert_eq!(entry.monogram.as_str(), "CB");
+        assert_eq!(entry.type_kind, 1);
     }
 
     #[test]

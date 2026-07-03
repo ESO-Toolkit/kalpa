@@ -206,25 +206,29 @@ Current detail status:
   selected missing pack addons through the native ESOUI
   download/extract/hash/metadata path, with required addons selected by default
   and optional missing addons toggled directly in the native detail rows. It
-  still lacks the React batch-progress UI, transitive dependency pass,
-  installed-pack library tracking, and install-count tracking. Pack detail
-  Edit/Delete/Share actions now hand off to the full WebView Pack Hub with the
-  selected pack id because those flows still require the React account/session
-  surfaces. Share-code import now resolves `/shares/{code}` natively, previews
-  required and optional addons, and installs only required missing addons to
-  match the React import behavior. `.esopack` v1/v2 files can be imported
-  natively by path, previewed through the same import surface, and v2
-  SavedVariables settings are applied after install or as a settings-only
-  action with the existing parser/scrubber identity substitution. Pack browse
-  cards now use the React-style
+  records normal detail installs in the same local `installed_packs` settings
+  key used by the WebView My Packs library and fires the Pack Hub install-count
+  endpoint on a best-effort background request. It still lacks the React
+  batch-progress UI and transitive dependency pass. Pack detail Edit/Delete/Share
+  actions now hand off to the full WebView Pack Hub with the selected pack id
+  because those flows still require the React account/session surfaces.
+  Share-code import now resolves `/shares/{code}` natively, previews required
+  and optional addons, and installs only required missing addons to match the
+  React import behavior. `.esopack` v1/v2 files can be imported natively by
+  path, previewed through the same import surface, and v2 SavedVariables
+  settings are applied after install or as a settings-only action with the
+  existing parser/scrubber identity substitution. Pack browse cards now use the React-style
   deterministic identity model: type accent, hash-derived monogram tile, dynamic
   author initial, and a denser title/type/description/meta hierarchy. The native
   Create flow now has editable title/description/type state and the Addons step
   is backed by real installed addons with ESOUI ids, filter text, selected-addon
-  rows, remove actions, and required/optional toggles. My Packs, an OS file
-  picker for `.esopack` import, native create/save/publish/export, private
-  share-code creation, voting, and account/session wiring still need production
-  parity before this can replace the React Pack Hub implementation.
+  rows, remove actions, and required/optional toggles. My Packs now has a native
+  Installed sub-tab backed by local `installed_packs`, with native open-detail
+  and remove-from-library actions; Created packs remain a full-Hub/account
+  handoff. An OS file picker for `.esopack` import, native
+  create/save/publish/export, private share-code creation, voting, and
+  account/session wiring still need production parity before this can replace
+  the React Pack Hub implementation.
 - The header SavedVariables action now opens a native Slint SavedVariables
   Manager overlay covering the reference Overview, Cleanup, Copy Profile, and
   Editor surfaces. Overview and Cleanup now load real SavedVariables files,
@@ -349,7 +353,7 @@ Current backdrop status:
   `KALPA_DISCOVER_TAB=popular|categories|url`, `KALPA_DISCOVER_QUERY=<query>`,
   or `KALPA_DISCOVER_URL=<url-or-id>` to inspect Discover scaffolds.
 - Launch with `KALPA_PACK_HUB_OPEN=1` and optional
-  `KALPA_PACK_HUB_VIEW=browse|import|create-details|create-addons|install-detail`
+  `KALPA_PACK_HUB_VIEW=browse|import|my-packs|create-details|create-addons|install-detail`
   to inspect native Pack Hub scaffolds. Use
   `KALPA_PACK_HUB_IMPORT_FILE=<path-to.esopack>` to open the native file-import
   view with a path prefilled.
