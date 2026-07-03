@@ -8301,9 +8301,13 @@ fn launch_native_shell_process(
 
     std::thread::sleep(Duration::from_millis(200));
     match child.try_wait() {
-        Ok(Some(status)) => Err(format!("Native performance UI exited immediately: {status}")),
+        Ok(Some(status)) => Err(format!(
+            "Native performance UI exited immediately: {status}"
+        )),
         Ok(None) => Ok(()),
-        Err(error) => Err(format!("Failed to verify native performance UI launch: {error}")),
+        Err(error) => Err(format!(
+            "Failed to verify native performance UI launch: {error}"
+        )),
     }
 }
 
