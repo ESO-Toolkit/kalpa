@@ -164,6 +164,7 @@ export interface BackupInfo {
   fileCount: number;
   totalSize: number;
   kind: BackupKind;
+  worldsSpanned?: number;
 }
 
 export interface SafeRestoreResult {

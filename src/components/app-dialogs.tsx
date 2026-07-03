@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
 import type { AddonManifest, AuthUser, GameInstance } from "@/types";
 import {
   Dialog,
@@ -110,6 +110,11 @@ export function AppDialogs({
   onRefresh,
   onShowDialog,
 }: AppDialogsProps) {
+  // Shared across the Backups and Characters dialogs so a create/restore/delete
+  // (or character backup) started in one surface still gates the destructive
+  // buttons in the other if the user switches dialogs mid-operation.
+  const [backupSurfaceBusy, setBackupSurfaceBusy] = useState(false);
+
   if (!activeDialog) return null;
   const fallback = (
     <DialogLoadingFallback title={DIALOG_LABELS[activeDialog]} onClose={onCloseDialog} />
@@ -134,14 +139,26 @@ export function AppDialogs({
         <Profiles addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
       )}
 
-      {activeDialog === "backups" && <Backups addonsPath={addonsPath} onClose={onCloseDialog} />}
+      {activeDialog === "backups" && (
+        <Backups
+          addonsPath={addonsPath}
+          onClose={onCloseDialog}
+          sharedOpInFlight={backupSurfaceBusy}
+          onSharedOpInFlightChange={setBackupSurfaceBusy}
+        />
+      )}
 
       {activeDialog === "api-compat" && (
         <ApiCompat addonsPath={addonsPath} onClose={onCloseDialog} />
       )}
 
       {activeDialog === "characters" && (
-        <Characters addonsPath={addonsPath} onClose={onCloseDialog} />
+        <Characters
+          addonsPath={addonsPath}
+          onClose={onCloseDialog}
+          sharedOpInFlight={backupSurfaceBusy}
+          onSharedOpInFlightChange={setBackupSurfaceBusy}
+        />
       )}
 
       {activeDialog === "saved-variables" && (

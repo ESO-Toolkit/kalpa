@@ -1756,6 +1756,7 @@ function CopyProfileTab({
   const [destKey, setDestKey] = useState<string>("");
   const [customDest, setCustomDest] = useState<string>("");
   const [copying, setCopying] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const currentFile = useMemo(
     () => files.find((f) => f.fileName === selectedFile),
@@ -1782,6 +1783,10 @@ function CopyProfileTab({
   );
 
   const actualDest = destKey === "__custom__" ? customDest : destKey;
+  const trimmedDest = actualDest.trim();
+
+  // Destination already holds data in this file — copying will silently overwrite it.
+  const isOverwrite = destInFile.includes(trimmedDest);
 
   const handleCopy = async () => {
     if (!selectedFile || !sourceKey || !actualDest) return;
@@ -1791,7 +1796,7 @@ function CopyProfileTab({
         addonsPath,
         fileName: selectedFile,
         fromKey: sourceKey,
-        toKey: actualDest,
+        toKey: trimmedDest,
       });
       toast.success(`Copied "${sourceKey}" to "${actualDest}" in ${currentFile?.addonName}`);
       onRefresh();
@@ -1911,10 +1916,31 @@ function CopyProfileTab({
             {" in "}
             <span className="font-medium">{currentFile?.addonName}.lua</span>
           </p>
+          {isOverwrite && (
+            <div className="mt-2 flex items-center gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-2.5 text-xs text-amber-400 shadow-[0_0_16px_color-mix(in_oklab,var(--status-warning-strong)_6%,transparent),inset_0_1px_0_color-mix(in_oklab,var(--status-warning-strong)_4%,transparent)]">
+              <AlertTriangleIcon className="size-4 shrink-0" />
+              <span>
+                <span className="font-medium">{actualDest}</span> already has settings in this file
+                &mdash; copying will overwrite them. A .bak is kept and can be restored from the
+                Editor tab&apos;s Restore button.
+              </span>
+            </div>
+          )}
           <Button
             className="mt-2"
             size="sm"
-            onClick={() => void handleCopy()}
+            onClick={() => {
+              if (isOverwrite) {
+                setConfirmState({
+                  title: "Overwrite existing profile",
+                  description: `"${actualDest}" already has settings in ${currentFile?.addonName}.lua. Copying "${sourceKey}" will overwrite them. A .bak is kept and can be restored from the Editor tab.`,
+                  confirmLabel: "Overwrite",
+                  onConfirm: () => void handleCopy(),
+                });
+              } else {
+                void handleCopy();
+              }
+            }}
             disabled={copying || !actualDest.trim()}
           >
             <CopyIcon className="mr-1 size-3" />
@@ -1922,6 +1948,8 @@ function CopyProfileTab({
           </Button>
         </div>
       )}
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
