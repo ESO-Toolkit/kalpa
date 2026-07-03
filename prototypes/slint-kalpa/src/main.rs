@@ -908,8 +908,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let settings_models = addon_models.clone();
     let safety_models = addon_models.clone();
     let migration_models = addon_models.clone();
+    let discover_addon_models = addon_models.clone();
     wire_detail_actions(&ui, addon_models);
-    wire_discover(&ui, discover_model, discover_installed_ids);
+    wire_discover(
+        &ui,
+        discover_model,
+        discover_installed_ids,
+        discover_addon_models,
+    );
     wire_theme_actions(&ui, custom_themes);
     wire_settings_actions(&ui, settings_models);
     wire_uploader_actions(&ui);
@@ -7712,6 +7718,7 @@ fn wire_discover(
     ui: &KalpaWindow,
     discover_model: Rc<RefCell<Rc<VecModel<DiscoverEntry>>>>,
     installed_ids: Arc<Mutex<BTreeSet<String>>>,
+    addon_models: AddonModels,
 ) {
     let tab_ui = ui.as_weak();
     let tab_model = discover_model.clone();
@@ -8475,7 +8482,7 @@ fn wire_discover(
     });
 
     let install_ui = ui.as_weak();
-    let install_ids = installed_ids;
+    let install_ids = installed_ids.clone();
     ui.on_discover_install(move |index| {
         let Some(ui) = install_ui.upgrade() else {
             return;
@@ -8542,6 +8549,43 @@ fn wire_discover(
         });
     });
 
+    let remove_ui = ui.as_weak();
+    let remove_models = addon_models;
+    let remove_ids = installed_ids;
+    ui.on_discover_remove(move |index| {
+        let Some(ui) = remove_ui.upgrade() else {
+            return;
+        };
+
+        let model = ui.get_discover_results();
+        let Some(entry) = model.row_data(index.max(0) as usize) else {
+            return;
+        };
+        let esoui_id = entry.esoui_id.to_string();
+
+        match remove_addons_by_esoui_id(&remove_models, &esoui_id) {
+            Ok(removed) => {
+                if let Ok(mut ids) = remove_ids.lock() {
+                    ids.remove(&esoui_id);
+                }
+                mark_discover_uninstalled_model(&model, &esoui_id);
+                apply_addon_view(&ui, &remove_models);
+                ui.set_status_error_message(
+                    format!(
+                        "Removed {} addon folder{} for ESOUI {}.",
+                        removed.len(),
+                        if removed.len() == 1 { "" } else { "s" },
+                        esoui_id
+                    )
+                    .into(),
+                );
+            }
+            Err(error) => {
+                ui.set_status_error_message(format!("Remove failed: {error}").into());
+            }
+        }
+    });
+
     ui.on_discover_open_esoui(move |esoui_id| {
         if !esoui_id.is_empty() {
             open_url(&format!(
@@ -8577,6 +8621,45 @@ fn mark_discover_installed_model(discover_model: &ModelRc<DiscoverEntry>, esoui_
             discover_model.set_row_data(index, entry);
         }
     }
+}
+
+fn mark_discover_uninstalled_model(discover_model: &ModelRc<DiscoverEntry>, esoui_id: &str) {
+    for index in 0..discover_model.row_count() {
+        let Some(mut entry) = discover_model.row_data(index) else {
+            continue;
+        };
+
+        if entry.esoui_id.as_str() == esoui_id {
+            entry.installed = false;
+            discover_model.set_row_data(index, entry);
+        }
+    }
+}
+
+fn remove_addons_by_esoui_id(models: &AddonModels, esoui_id: &str) -> Result<Vec<String>, String> {
+    let targets = models
+        .all
+        .borrow()
+        .iter()
+        .filter(|addon| addon.esoui_id.as_str() == esoui_id)
+        .map(|addon| addon.folder_name.to_string())
+        .collect::<Vec<_>>();
+
+    if targets.is_empty() {
+        return Err(format!("No installed addon found for ESOUI {esoui_id}."));
+    }
+
+    for folder_name in &targets {
+        if let Some(addons_root) = disk_root_for_addon(folder_name) {
+            remove_addon_from_disk(&addons_root, folder_name)?;
+        }
+    }
+
+    for folder_name in &targets {
+        remove_master_addon(models, folder_name);
+    }
+
+    Ok(targets)
 }
 
 fn discover_installed_snapshot(installed_ids: &Arc<Mutex<BTreeSet<String>>>) -> BTreeSet<String> {
@@ -16250,6 +16333,14 @@ CombatMetrics_SavedVariables = {
         Box::leak(path.into_boxed_path())
     }
 
+    fn test_addon_models(addons: Vec<AddonEntry>) -> AddonModels {
+        AddonModels {
+            all: Rc::new(RefCell::new(addons.clone())),
+            visible: Rc::new(VecModel::from(addons)),
+            view_key: Rc::new(RefCell::new(None)),
+        }
+    }
+
     fn sample_custom_theme(id: &str, name: &str) -> CatalogTheme {
         CatalogTheme {
             id: id.to_string(),
@@ -16730,7 +16821,7 @@ CombatMetrics_SavedVariables = {
 
     #[test]
     fn discover_entries_reflect_installed_ids() {
-        let installed = BTreeSet::from(["3317".to_string()]);
+        let installed = BTreeSet::from(["1346".to_string(), "3317".to_string()]);
         let entries = popular_discover_entries(&installed);
 
         let lazy_writ = entries
@@ -16937,6 +17028,187 @@ CombatMetrics_SavedVariables = {
         assert_eq!(meta.installed_version, "1.7.7");
         assert_eq!(meta.download_url, detail.download_url);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discover_uninstall_marks_matching_rows_not_installed() {
+        let installed = BTreeSet::from(["1360".to_string(), "3520".to_string()]);
+        let model: ModelRc<DiscoverEntry> = Rc::new(VecModel::from(vec![
+            discover_entry(
+                "1360",
+                "CombatMetrics",
+                "Solinur",
+                "Combat",
+                "1.7.7",
+                "5.2M",
+                "",
+                "",
+                "3/3/2026",
+                "",
+                "",
+                "",
+                "",
+                0,
+                &installed,
+            ),
+            discover_entry(
+                "3520",
+                "Wizards Wardrobe",
+                "Dolgubon",
+                "Utility",
+                "1.0.0",
+                "2.1M",
+                "",
+                "",
+                "4/1/2026",
+                "",
+                "",
+                "",
+                "",
+                0,
+                &installed,
+            ),
+        ]))
+        .into();
+
+        mark_discover_uninstalled_model(&model, "1360");
+
+        assert!(!model.row_data(0).expect("first row").installed);
+        assert!(model.row_data(1).expect("second row").installed);
+    }
+
+    #[test]
+    fn remove_addons_by_esoui_id_deletes_matching_folders_and_metadata() {
+        static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = TEST_ENV_LOCK.lock().expect("test env lock");
+        let previous = std::env::var_os("KALPA_ADDONS_PATH");
+        let root = test_temp_dir("discover-remove-esoui");
+        let addons_root = root.join("AddOns");
+        fs::create_dir_all(addons_root.join("CombatMetrics")).expect("create addon folder");
+        fs::create_dir_all(addons_root.join("CombatMetricsHelper"))
+            .expect("create bundled addon folder");
+        fs::create_dir_all(addons_root.join("OtherAddon")).expect("create other addon folder");
+        std::env::set_var("KALPA_ADDONS_PATH", &addons_root);
+
+        let mut store = metadata::MetadataStore::default();
+        metadata::record_install_ext(
+            &mut store,
+            "CombatMetrics",
+            1360,
+            "1.7.7",
+            "https://cdn.esoui.com/downloads/file1360.zip",
+            0,
+        );
+        metadata::record_install_ext(
+            &mut store,
+            "CombatMetricsHelper",
+            1360,
+            "1.7.7",
+            "https://cdn.esoui.com/downloads/file1360.zip",
+            0,
+        );
+        metadata::record_install_ext(
+            &mut store,
+            "OtherAddon",
+            3520,
+            "1.0.0",
+            "https://cdn.esoui.com/downloads/file3520.zip",
+            0,
+        );
+        metadata::save_metadata(&addons_root, &store).expect("save metadata");
+
+        let models = test_addon_models(vec![
+            addon_entry(
+                "CombatMetrics",
+                "CombatMetrics",
+                "1360",
+                "Solinur",
+                "1.7.7",
+                "101048",
+                "Addon",
+                "3/3/2026",
+                "",
+                false,
+                false,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+            addon_entry(
+                "CombatMetrics Helper",
+                "CombatMetricsHelper",
+                "1360",
+                "Solinur",
+                "1.7.7",
+                "101048",
+                "Library",
+                "3/3/2026",
+                "",
+                false,
+                true,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+            addon_entry(
+                "Other Addon",
+                "OtherAddon",
+                "3520",
+                "Author",
+                "1.0.0",
+                "101048",
+                "Addon",
+                "4/1/2026",
+                "",
+                false,
+                false,
+                false,
+                0,
+                "",
+                0,
+                "",
+                0,
+                "",
+                0,
+            ),
+        ]);
+
+        let removed = remove_addons_by_esoui_id(&models, "1360").expect("remove by esoui id");
+
+        assert_eq!(
+            removed,
+            vec![
+                "CombatMetrics".to_string(),
+                "CombatMetricsHelper".to_string()
+            ]
+        );
+        assert!(!addons_root.join("CombatMetrics").exists());
+        assert!(!addons_root.join("CombatMetricsHelper").exists());
+        assert!(addons_root.join("OtherAddon").exists());
+        assert_eq!(models.all.borrow().len(), 1);
+        assert_eq!(models.all.borrow()[0].folder_name.as_str(), "OtherAddon");
+
+        let store = metadata::load_metadata(&addons_root);
+        assert!(!store.addons.contains_key("CombatMetrics"));
+        assert!(!store.addons.contains_key("CombatMetricsHelper"));
+        assert!(store.addons.contains_key("OtherAddon"));
+
+        if let Some(previous) = previous {
+            std::env::set_var("KALPA_ADDONS_PATH", previous);
+        } else {
+            std::env::remove_var("KALPA_ADDONS_PATH");
+        }
         let _ = fs::remove_dir_all(root);
     }
 

@@ -9475,13 +9475,13 @@ component Sidebar inherits Rectangle {
     }
 
     Rectangle {
-        visible: !root.compact-discover-chrome;
         x: 12px;
         y: 56px;
         width: root.width - 24px;
         height: 36px;
         border-radius: 11px;
         border-width: 0px;
+        visible: !root.compact-discover-chrome && (!root.discover-active || root.discover-tab == 0 || root.discover-tab == 3);
         background: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3) ? Palette.sky-15 : Palette.white-06;
         inner-shadow-offset-y: 1px;
         inner-shadow-blur: 1px;
@@ -10774,6 +10774,7 @@ component DiscoverDetailPane inherits Rectangle {
     in-out property <int> screenshot-index: 0;
     in property <length> pane-width: 1082px;
     callback install-clicked(int);
+    callback remove-clicked(int);
     callback open-esoui(string);
     callback screenshot-prev;
     callback screenshot-next;
@@ -10847,6 +10848,18 @@ component DiscoverDetailPane inherits Rectangle {
                     tone: Palette.muted-strong;
                     fill: Palette.white-03;
                     line: Palette.white-10;
+                }
+
+                SmallAction {
+                    visible: root.entry.installed;
+                    x: parent.width - 188px;
+                    y: 0px;
+                    label: "Uninstall";
+                    tone: Palette.red;
+                    fill: Palette.red-04;
+                    fill-hover: Palette.red-15;
+                    fill-pressed: Palette.red-20;
+                    clicked => { root.remove-clicked(root.selected-index); }
                 }
 
                 SmallAction {
@@ -11371,6 +11384,7 @@ export component KalpaWindow inherits Window {
     callback discover-tab-selected(int);
     callback discover-selected(int);
     callback discover-install(int);
+    callback discover-remove(int);
     callback discover-open-esoui(string);
     callback discover-query-edited(string);
     callback discover-url-edited(string);
@@ -11659,6 +11673,7 @@ export component KalpaWindow inherits Window {
             selected-index: root.selected-discover-index;
             screenshot-index <=> root.discover-screenshot-index;
             install-clicked(index) => { root.discover-install(index); }
+            remove-clicked(index) => { root.discover-remove(index); }
             open-esoui(id) => { root.discover-open-esoui(id); }
             screenshot-prev => { root.discover-screenshot-prev(); }
             screenshot-next => { root.discover-screenshot-next(); }

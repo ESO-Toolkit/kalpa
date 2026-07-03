@@ -193,8 +193,11 @@ Current detail status:
   stripe-like selected state and cramped metadata. Discover detail hydration now
   pulls trusted ESOUI screenshot URLs into a bounded temp cache and renders the
   native detail gallery with selectable thumbnails, previous/next controls, and
-  dynamic screenshot counts. Remaining Discover gaps are category picker polish,
-  richer skeleton/error states, and remove/update flows.
+  dynamic screenshot counts. Installed Discover detail rows now expose a native
+  uninstall action that removes matching ESOUI addon folders and metadata, and
+  Popular/Categories no longer use search-input chrome for their browse headers.
+  Remaining Discover gaps are category picker polish, richer skeleton/error
+  states, and update flows.
 - The header Pack Hub action now opens a native Slint Pack Hub overlay covering
   the reference Browse, share-code Import, Create details, Create addons, and
   install-detail flows.
