@@ -1070,9 +1070,7 @@ impl EventEmitter {
         let a = self.alloc_for(&unit_id, "61322", &unit_id);
         // Self-target (src == tgt): both masks are the unit's own side, S == T.
         let (src_mask, tgt_mask) = self.masks(&unit_id, &unit_id);
-        let sub = self
-            .actors
-            .code1_subordinal(a, &unit_id, &unit_id);
+        let sub = self.actors.code1_subordinal(a, &unit_id, &unit_id);
         Some(format!(
             "{ts}|4|{sub}|{src_mask}|{tgt_mask}|S{block}|T{block}|1|{effective_regen}",
             ts = self.seg_ts(raw_ts),
@@ -1212,9 +1210,7 @@ impl EventEmitter {
         };
 
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
-        let sub = self
-            .actors
-            .code1_subordinal(a, &src_unit, &tgt_unit);
+        let sub = self.actors.code1_subordinal(a, &src_unit, &tgt_unit);
         let ts = self.seg_ts(raw_ts);
 
         // Shield history. On GAINED/FADED both unit pools are reconciled against the
@@ -1325,9 +1321,7 @@ impl EventEmitter {
             // attributes every InterruptionRemoved to the universal Break-Free action
             // (ability 16565), regardless of which cast actually removed the CC.
             let a28 = self.alloc_for(&tgt_unit, "16565", &tgt_unit);
-            let sub28 = self
-                .actors
-                .code1_subordinal(a28, &tgt_unit, &tgt_unit);
+            let sub28 = self.actors.code1_subordinal(a28, &tgt_unit, &tgt_unit);
             // Own-side masks derived from the broke-free unit (16 friendly / 64
             // hostile) rather than hardcoded — players give 16|16 as in the captures,
             // but a hostile breaker would correctly be 64|64.
@@ -1432,9 +1426,7 @@ impl EventEmitter {
             }
         }
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
-        let sub = self
-            .actors
-            .code1_subordinal(a, &src_unit, &tgt_unit);
+        let sub = self.actors.code1_subordinal(a, &src_unit, &tgt_unit);
 
         let src_cp = self.cp_of(&src_unit);
         let s_block = encode_state_block(&src_state, src_cp)?;
@@ -1471,9 +1463,7 @@ impl EventEmitter {
         // tuple verbatim — no new tuple is allocated for the completion line).
         let (a, src_unit, tgt_unit) = self.timed_cast.get(cast_track_id)?.clone();
         let (src_mask, tgt_mask) = self.masks(&src_unit, &tgt_unit);
-        let sub = self
-            .actors
-            .code1_subordinal(a, &src_unit, &tgt_unit);
+        let sub = self.actors.code1_subordinal(a, &src_unit, &tgt_unit);
         Some(format!(
             "{ts}|16|{sub}|{src_mask}|{tgt_mask}",
             ts = self.seg_ts(raw_ts),
@@ -1537,9 +1527,7 @@ impl EventEmitter {
         // interrupter and caster are usually cross-faction (16|64) but can be same
         // side (16|16 / 64|64), which the earlier/later ordering can't produce.
         let (src_mask, tgt_mask) = self.masks(interrupting_unit, &caster);
-        let sub = self
-            .actors
-            .code1_subordinal(a, interrupting_unit, &caster);
+        let sub = self.actors.code1_subordinal(a, interrupting_unit, &caster);
         let interrupted_idx = self.ability_index(interrupted_ability);
         Some(format!(
             "{ts}|27|{sub}|{src_mask}|{tgt_mask}|{interrupted_idx}",
@@ -1841,9 +1829,7 @@ impl EventEmitter {
         } else {
             self.combat_masks(&src_unit, &tgt_unit)
         };
-        let sub = self
-            .actors
-            .code1_subordinal(a, &src_unit, &tgt_unit);
+        let sub = self.actors.code1_subordinal(a, &src_unit, &tgt_unit);
 
         let mut line = format!(
             "{ts}|{code}|{sub}|{src_mask}|{tgt_mask}|C{cast_track_id}",
@@ -2155,13 +2141,11 @@ impl EventEmitter {
         let sub = match ward_caster {
             Some(caster) => {
                 let a = self.alloc_for(&caster, shield_ability, tgt_unit);
-                self.actors
-                    .code1_subordinal(a, &caster, tgt_unit)
+                self.actors.code1_subordinal(a, &caster, tgt_unit)
             }
             None => {
                 let a = self.alloc_for(tgt_unit, shield_ability, tgt_unit);
-                self.actors
-                    .code1_subordinal(a, tgt_unit, tgt_unit)
+                self.actors.code1_subordinal(a, tgt_unit, tgt_unit)
             }
         };
         let shield_mask = self.own_side(tgt_unit); // f4 == f5 (shield owner)

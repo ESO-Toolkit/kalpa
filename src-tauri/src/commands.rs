@@ -1001,9 +1001,7 @@ fn scan_installed_addons_blocking(
             addon.installed_at = meta.installed_at.clone();
         }
 
-        if let Some(count) =
-            file_hashes::load_modified_file_count(addons_dir, &addon.folder_name)
-        {
+        if let Some(count) = file_hashes::load_modified_file_count(addons_dir, &addon.folder_name) {
             addon.modified_file_count = count;
         }
     }
@@ -2937,7 +2935,10 @@ fn update_with_decisions_inner(
     // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
     // "keep_mine" files so the user's edit stays detectable on the next update.
     let zip_hashes = if pu.zip_hashes.is_empty() {
-        Arc::new(file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?)
+        Arc::new(file_hashes::hash_zip_entries(
+            &pu.zip_path,
+            &pu.folder_name,
+        )?)
     } else {
         Arc::clone(&pu.zip_hashes)
     };
@@ -4359,85 +4360,85 @@ pub async fn list_backups(
 ) -> Result<Vec<BackupInfo>, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-    let backups = backups_dir(&addons_dir);
-    if !backups.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    // Self-heal any character backup orphaned by a crash mid-finalization before
-    // listing, so a recovered backup is visible to the restore flow.
-    recover_orphaned_backups(&backups);
-
-    let mut results: Vec<BackupInfo> = Vec::new();
-    let entries =
-        fs::read_dir(&backups).map_err(|e| format!("Failed to read backups folder: {e}"))?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        // Skip dot-prefixed transient dirs (e.g. a crash-orphaned char-backup
-        // staging folder); real backups never start with '.'.
-        if name.starts_with('.') {
-            continue;
+        let backups = backups_dir(&addons_dir);
+        if !backups.is_dir() {
+            return Ok(Vec::new());
         }
 
-        // Count files and total size (skip dot-prefixed metadata like the
-        // character-backup marker so the count reflects real SavedVariables).
-        let mut file_count: u32 = 0;
-        let mut total_size: u64 = 0;
-        if let Ok(files) = fs::read_dir(&path) {
-            for f in files.flatten() {
-                let is_dotfile = f
-                    .file_name()
-                    .to_str()
-                    .map(|n| n.starts_with('.'))
-                    .unwrap_or(false);
-                if f.path().is_file() && !is_dotfile {
-                    file_count += 1;
-                    total_size += f.metadata().map(|m| m.len()).unwrap_or(0);
+        // Self-heal any character backup orphaned by a crash mid-finalization before
+        // listing, so a recovered backup is visible to the restore flow.
+        recover_orphaned_backups(&backups);
+
+        let mut results: Vec<BackupInfo> = Vec::new();
+        let entries =
+            fs::read_dir(&backups).map_err(|e| format!("Failed to read backups folder: {e}"))?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Skip dot-prefixed transient dirs (e.g. a crash-orphaned char-backup
+            // staging folder); real backups never start with '.'.
+            if name.starts_with('.') {
+                continue;
+            }
+
+            // Count files and total size (skip dot-prefixed metadata like the
+            // character-backup marker so the count reflects real SavedVariables).
+            let mut file_count: u32 = 0;
+            let mut total_size: u64 = 0;
+            if let Ok(files) = fs::read_dir(&path) {
+                for f in files.flatten() {
+                    let is_dotfile = f
+                        .file_name()
+                        .to_str()
+                        .map(|n| n.starts_with('.'))
+                        .unwrap_or(false);
+                    if f.path().is_file() && !is_dotfile {
+                        file_count += 1;
+                        total_size += f.metadata().map(|m| m.len()).unwrap_or(0);
+                    }
                 }
             }
+
+            // Extract timestamp from folder name or use modification time
+            let created_at_epoch = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                })
+                .unwrap_or(0);
+            let created_at = metadata::format_timestamp(created_at_epoch);
+
+            let kind = if name.starts_with("char-") {
+                BackupKind::Character
+            } else if name.starts_with("auto-before-restore-") {
+                BackupKind::AutoBeforeRestore
+            } else {
+                BackupKind::Manual
+            };
+
+            results.push(BackupInfo {
+                name,
+                created_at,
+                created_at_epoch,
+                file_count,
+                total_size,
+                kind,
+            });
         }
 
-        // Extract timestamp from folder name or use modification time
-        let created_at_epoch = fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .map(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            })
-            .unwrap_or(0);
-        let created_at = metadata::format_timestamp(created_at_epoch);
-
-        let kind = if name.starts_with("char-") {
-            BackupKind::Character
-        } else if name.starts_with("auto-before-restore-") {
-            BackupKind::AutoBeforeRestore
-        } else {
-            BackupKind::Manual
-        };
-
-        results.push(BackupInfo {
-            name,
-            created_at,
-            created_at_epoch,
-            file_count,
-            total_size,
-            kind,
-        });
-    }
-
-    results.sort_by_key(|b| std::cmp::Reverse(b.created_at_epoch));
-    Ok(results)
+        results.sort_by_key(|b| std::cmp::Reverse(b.created_at_epoch));
+        Ok(results)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -5647,124 +5648,125 @@ pub async fn backup_character_settings(
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-    let sv_dir = saved_variables_dir(&addons_dir);
-    if !sv_dir.is_dir() {
-        return Err("SavedVariables folder not found.".to_string());
-    }
+        let sv_dir = saved_variables_dir(&addons_dir);
+        if !sv_dir.is_dir() {
+            return Err("SavedVariables folder not found.".to_string());
+        }
 
-    // Restrict world-scoped subtrees to this character's megaserver so a same-name
-    // NA/EU twin is backed up independently. A non-megaserver `server` (the
-    // `Unknown` recovered bucket) means we can't isolate by world, so we take any
-    // world-scoped occurrence (and account-keyed data, which carries no world).
-    let world: Option<&str> =
-        if crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(&server.as_str()) {
-            Some(server.as_str())
-        } else {
-            None
-        };
+        // Restrict world-scoped subtrees to this character's megaserver so a same-name
+        // NA/EU twin is backed up independently. A non-megaserver `server` (the
+        // `Unknown` recovered bucket) means we can't isolate by world, so we take any
+        // world-scoped occurrence (and account-keyed data, which carries no world).
+        let world: Option<&str> =
+            if crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(&server.as_str()) {
+                Some(server.as_str())
+            } else {
+                None
+            };
 
-    // Stage into a dot-prefixed temp dir on the same volume, then atomically
-    // rename into place only after every matched file copies. This keeps a
-    // failed/partial backup from leaving restorable state and replaces any prior
-    // backup of the same name wholesale rather than mixing into it. A per-call
-    // sequence number makes the staging/tombstone unique so concurrent backups
-    // don't collide; the `.` prefix keeps them out of `list_backups`.
-    let backups_root = backups_dir(&addons_dir);
-    // Recover any crash-orphaned backup BEFORE touching scratch paths. The
-    // sequence counter resets on restart, so a retried backup of the same name
-    // could otherwise reuse a crash leftover's staging name and destroy the proof
-    // that recovery relies on. Running recovery first restores/cleans the leftover
-    // before this attempt can collide with it.
-    recover_orphaned_backups(&backups_root);
+        // Stage into a dot-prefixed temp dir on the same volume, then atomically
+        // rename into place only after every matched file copies. This keeps a
+        // failed/partial backup from leaving restorable state and replaces any prior
+        // backup of the same name wholesale rather than mixing into it. A per-call
+        // sequence number makes the staging/tombstone unique so concurrent backups
+        // don't collide; the `.` prefix keeps them out of `list_backups`.
+        let backups_root = backups_dir(&addons_dir);
+        // Recover any crash-orphaned backup BEFORE touching scratch paths. The
+        // sequence counter resets on restart, so a retried backup of the same name
+        // could otherwise reuse a crash leftover's staging name and destroy the proof
+        // that recovery relies on. Running recovery first restores/cleans the leftover
+        // before this attempt can collide with it.
+        recover_orphaned_backups(&backups_root);
 
-    // Pick a target that is free or an existing marked character backup; route
-    // around an unmarked `char-*` directory (legacy/manual) to a numbered name so
-    // it is preserved, never silently overwritten.
-    let effective_name =
-        resolve_char_backup_name(&backups_root, &backup_name).ok_or_else(|| {
-            "Too many existing backups with this name; please choose a different name.".to_string()
-        })?;
-    let final_dir = backups_root.join(format!("char-{effective_name}"));
-    let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let staging = backups_root.join(format!(".tmp-char-{effective_name}-{seq}"));
-    let tombstone = backups_root.join(format!(".old-char-{effective_name}-{seq}"));
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup folder: {e}"))?;
+        // Pick a target that is free or an existing marked character backup; route
+        // around an unmarked `char-*` directory (legacy/manual) to a numbered name so
+        // it is preserved, never silently overwritten.
+        let effective_name =
+            resolve_char_backup_name(&backups_root, &backup_name).ok_or_else(|| {
+                "Too many existing backups with this name; please choose a different name."
+                    .to_string()
+            })?;
+        let final_dir = backups_root.join(format!("char-{effective_name}"));
+        let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = backups_root.join(format!(".tmp-char-{effective_name}-{seq}"));
+        let tombstone = backups_root.join(format!(".old-char-{effective_name}-{seq}"));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup folder: {e}"))?;
 
-    // Extract + stage just this character's per-character subtree(s) from each
-    // file. Aborts if any file can't be read, so an incomplete scan never
-    // silently produces (or installs) an incomplete backup.
-    let (matched, copied, last_copy_err) =
-        match stage_character_subtrees(&sv_dir, &character_name, world, &staging) {
-            Ok(counts) => counts,
-            Err(e) => {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(format!(
-                    "Could not read all SavedVariables files while backing up \
+        // Extract + stage just this character's per-character subtree(s) from each
+        // file. Aborts if any file can't be read, so an incomplete scan never
+        // silently produces (or installs) an incomplete backup.
+        let (matched, copied, last_copy_err) =
+            match stage_character_subtrees(&sv_dir, &character_name, world, &staging) {
+                Ok(counts) => counts,
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(format!(
+                        "Could not read all SavedVariables files while backing up \
                      \"{character_name}\" ({e}). Backup aborted to avoid an incomplete \
                      copy; close ESO and try again."
-                ));
-            }
-        };
+                    ));
+                }
+            };
 
-    if matched == 0 {
-        // No file held this character's per-character data — discard staging and
-        // don't report success. A character with only account-wide addon settings
-        // (or, for a known server, data only under the OTHER megaserver) has no
-        // per-character subtree to copy.
-        let _ = fs::remove_dir_all(&staging);
-        return Err(format!(
-            "No per-character SavedVariables data found for \"{character_name}\". \
-             This character may only use account-wide addon settings."
-        ));
-    }
-
-    if copied < matched {
-        // A subtree matched but couldn't be written or safely represented —
-        // discard the partial staging dir and surface it instead of leaving a
-        // restorable incomplete backup.
-        let _ = fs::remove_dir_all(&staging);
-        let detail = last_copy_err.map(|e| format!(" ({e})")).unwrap_or_default();
-        return Err(format!(
-            "Backed up only {copied} of {matched} SavedVariables files for \
-             \"{character_name}\"; some files could not be saved{detail}."
-        ));
-    }
-
-    // Stamp the staged dir as a per-character (v2) backup. The versioned marker
-    // body positively identifies the format for restore (independent of the JSON
-    // sidecar), while the filename is what `char_backup_replaceable` checks.
-    if let Err(e) = fs::write(staging.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY) {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(format!("Failed to write backup marker: {e}"));
-    }
-
-    // Write the per-character metadata sidecar. Its presence routes restore
-    // through the subtree-MERGE path (vs. the legacy whole-file copy).
-    let meta = CharBackupMeta {
-        version: CHAR_BACKUP_VERSION,
-        character: character_name.clone(),
-        server: server.clone(),
-    };
-    match serde_json::to_vec_pretty(&meta) {
-        Ok(json) => {
-            if let Err(e) = fs::write(staging.join(CHAR_BACKUP_META), json) {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(format!("Failed to write backup metadata: {e}"));
-            }
-        }
-        Err(e) => {
+        if matched == 0 {
+            // No file held this character's per-character data — discard staging and
+            // don't report success. A character with only account-wide addon settings
+            // (or, for a known server, data only under the OTHER megaserver) has no
+            // per-character subtree to copy.
             let _ = fs::remove_dir_all(&staging);
-            return Err(format!("Failed to serialize backup metadata: {e}"));
+            return Err(format!(
+                "No per-character SavedVariables data found for \"{character_name}\". \
+             This character may only use account-wide addon settings."
+            ));
         }
-    }
 
-    // All subtrees staged — install atomically, preserving any prior backup of
-    // this name if finalization fails.
-    finalize_backup_replace(&staging, &final_dir, &tombstone)
-        .map_err(|e| format!("Failed to finalize backup: {e}"))?;
+        if copied < matched {
+            // A subtree matched but couldn't be written or safely represented —
+            // discard the partial staging dir and surface it instead of leaving a
+            // restorable incomplete backup.
+            let _ = fs::remove_dir_all(&staging);
+            let detail = last_copy_err.map(|e| format!(" ({e})")).unwrap_or_default();
+            return Err(format!(
+                "Backed up only {copied} of {matched} SavedVariables files for \
+             \"{character_name}\"; some files could not be saved{detail}."
+            ));
+        }
 
-    Ok(copied)
+        // Stamp the staged dir as a per-character (v2) backup. The versioned marker
+        // body positively identifies the format for restore (independent of the JSON
+        // sidecar), while the filename is what `char_backup_replaceable` checks.
+        if let Err(e) = fs::write(staging.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Failed to write backup marker: {e}"));
+        }
+
+        // Write the per-character metadata sidecar. Its presence routes restore
+        // through the subtree-MERGE path (vs. the legacy whole-file copy).
+        let meta = CharBackupMeta {
+            version: CHAR_BACKUP_VERSION,
+            character: character_name.clone(),
+            server: server.clone(),
+        };
+        match serde_json::to_vec_pretty(&meta) {
+            Ok(json) => {
+                if let Err(e) = fs::write(staging.join(CHAR_BACKUP_META), json) {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(format!("Failed to write backup metadata: {e}"));
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(format!("Failed to serialize backup metadata: {e}"));
+            }
+        }
+
+        // All subtrees staged — install atomically, preserving any prior backup of
+        // this name if finalization fails.
+        finalize_backup_replace(&staging, &final_dir, &tombstone)
+            .map_err(|e| format!("Failed to finalize backup: {e}"))?;
+
+        Ok(copied)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -7390,9 +7392,11 @@ pub async fn export_sv_settings(
             };
 
             let ctx = detect_identities_from_tree(&tree);
-            let (scrubbed, report) = scrub(&tree, &ctx);
+            // `scrub` consumes `tree` (mutating it in place); `ctx` was already
+            // computed from it above, and it is not used afterwards.
+            let (scrubbed, report) = scrub(tree, &ctx);
 
-            let account_wide_only = strip_per_character_data(&scrubbed);
+            let account_wide_only = strip_per_character_data(scrubbed);
             let lua = serialize_to_lua(&account_wide_only);
             let final_bytes = lua.len();
 
@@ -7418,7 +7422,7 @@ pub async fn export_sv_settings(
 }
 
 fn strip_per_character_data(
-    tree: &crate::saved_variables::types::SvTreeNode,
+    tree: crate::saved_variables::types::SvTreeNode,
 ) -> crate::saved_variables::types::SvTreeNode {
     crate::saved_variables::scrub::strip_per_character_data(tree)
 }
@@ -7582,9 +7586,11 @@ pub async fn import_sv_settings(
 /// the number of `.lua` files skipped for ANY reason (size, unreadable, or
 /// parse failure) so a caller relying on completeness can react.
 ///
-/// NOTE: the Characters roster no longer uses this — it streams the bytes via
-/// [`collect_roster_characters`] with no size cap. The `Some(max)` branch is
+/// NOTE: neither the Characters roster nor the identity-export path uses this
+/// anymore — both stream the raw bytes with bounded memory
+/// ([`collect_roster_characters`] and [`collect_local_identities`]). It is
 /// retained for the size-cap unit test and any future tree-based caller.
+#[cfg_attr(not(test), allow(dead_code))]
 fn for_each_sv_tree(
     addons_dir: &Path,
     max_file_bytes: Option<u64>,
@@ -7645,17 +7651,44 @@ fn for_each_sv_tree(
     skipped
 }
 
-/// Walk every parseable SavedVariables `.lua` file and accumulate the merged
+/// Walk every SavedVariables `.lua` file and accumulate the merged
 /// account/character identities found across all of them. Used by the scrub/
 /// import path, which must see every identity, so it is intentionally uncapped.
 ///
+/// Streams each file's raw bytes through
+/// [`detect_identities_streaming`](crate::saved_variables::identity_stream), the
+/// bounded-memory scanner that emits the SAME identities as the tree-based
+/// `detect_identities_from_tree` (verified by a parity test) — instead of
+/// parsing every `.lua` into a full `SvTreeNode` tree (~10x the source size),
+/// which on a 1–2 GB SavedVariables file was a multi-GB transient. Memory is now
+/// `O(nesting depth + one key)` per file regardless of file size, so the export
+/// path no longer needs a size cap to stay safe.
+///
 /// Runs synchronously; callers wrap it in `spawn_blocking`.
 fn collect_local_identities(addons_dir: &Path) -> crate::saved_variables::scrub::ScrubContext {
-    use crate::saved_variables::scrub::{detect_identities_from_tree, ScrubContext};
+    use crate::saved_variables::identity_stream::detect_identities_streaming;
+    use crate::saved_variables::scrub::ScrubContext;
+
+    let sv_dir = sv_io::saved_variables_dir(addons_dir);
+    let entries = match fs::read_dir(&sv_dir) {
+        Ok(e) => e,
+        Err(_) => return ScrubContext::default(),
+    };
 
     let mut merged = ScrubContext::default();
-    for_each_sv_tree(addons_dir, None, |tree| {
-        let ctx = detect_identities_from_tree(tree);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+            continue;
+        }
+        let file = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let ctx = match detect_identities_streaming(std::io::BufReader::new(file)) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
         for acc in ctx.accounts {
             if !merged.accounts.contains(&acc) {
                 merged.accounts.push(acc);
@@ -7676,7 +7709,7 @@ fn collect_local_identities(addons_dir: &Path) -> crate::saved_variables::scrub:
                 merged.extra_worlds.push(w);
             }
         }
-    });
+    }
     merged
 }
 
@@ -8171,8 +8204,9 @@ pub async fn dev_scrub_saved_variable(
         let effective_ctx = ctx.unwrap_or_else(|| {
             crate::saved_variables::scrub::detect_identities_from_tree(&response.tree)
         });
+        // `scrub` consumes the tree; `effective_ctx` is already resolved above.
         let (scrubbed, report) =
-            crate::saved_variables::scrub::scrub(&response.tree, &effective_ctx);
+            crate::saved_variables::scrub::scrub(response.tree, &effective_ctx);
         let scrubbed_lua = crate::saved_variables::serializer::serialize_to_lua(&scrubbed);
         Ok(DevScrubResult {
             file_name,
