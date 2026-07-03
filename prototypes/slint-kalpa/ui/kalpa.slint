@@ -2928,10 +2928,12 @@ component AppBannerStack inherits Rectangle {
     in property <string> status-error-message;
     in property <bool> offline-active: false;
     in property <string> app-update-message;
+    in property <string> app-update-action-label;
     in property <int> update-available-count: 0;
     in property <int> pending-conflict-count: 0;
     callback open-settings-clicked;
     callback dismiss-offline-clicked;
+    callback app-update-action-clicked;
     callback update-all-clicked;
     callback review-conflicts-clicked;
     private property <length> error-height: root.status-error-message != "" ? 36px : 0px;
@@ -2965,9 +2967,9 @@ component AppBannerStack inherits Rectangle {
         y: root.error-height + root.offline-height;
         width: root.width;
         message: root.app-update-message;
-        action-label: "Restart";
+        action-label: root.app-update-action-label;
         tone: 3;
-        action-clicked => { root.open-settings-clicked(); }
+        action-clicked => { root.app-update-action-clicked(); }
     }
 
     if (root.update-available-count > 0) : StatusBanner {
@@ -9983,6 +9985,8 @@ export component KalpaWindow inherits Window {
     in-out property <string> status-error-message;
     in-out property <bool> offline-active: false;
     in-out property <string> app-update-message;
+    in-out property <string> app-update-action-label;
+    in-out property <int> app-update-action-kind: 0;
     in-out property <int> update-available-count: 0;
     in-out property <int> pending-conflict-count: 0;
     in-out property <string> active-theme-id: "nordic-runestone";
@@ -10143,6 +10147,7 @@ export component KalpaWindow inherits Window {
     callback settings-addons-path-applied(string);
     callback settings-api-compat;
     callback settings-app-update;
+    callback app-update-action;
     callback settings-minion-migration;
     callback settings-safety-center;
     callback settings-addon-list-export;
@@ -10222,6 +10227,7 @@ export component KalpaWindow inherits Window {
             status-error-message: root.status-error-message;
             offline-active: root.offline-active;
             app-update-message: root.app-update-message;
+            app-update-action-label: root.app-update-action-label;
             update-available-count: root.update-available-count;
             pending-conflict-count: root.pending-conflict-count;
             open-settings-clicked => {
@@ -10229,6 +10235,7 @@ export component KalpaWindow inherits Window {
                 root.open-settings();
             }
             dismiss-offline-clicked => { root.offline-active = false; }
+            app-update-action-clicked => { root.app-update-action(); }
             update-all-clicked => { root.batch-update(); }
             review-conflicts-clicked => { root.review-conflicts(); }
         }

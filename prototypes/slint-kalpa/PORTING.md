@@ -239,8 +239,12 @@ Current detail status:
   metadata-only import, refreshes the native addon model, and writes to the
   Safety Center operation log. Remaining gaps are exact React phase animation,
   explicit per-step busy states, and final visual comparison.
-- Settings > Tools app updates now has native click feedback, but the full React
-  updater install/restart workflow still needs native parity.
+- Settings > Tools app updates now run a native manifest check against the
+  Tauri updater `latest.json`, compare prerelease versions correctly, and hand
+  off to the WebView host only for the signed updater install/restart flow. This
+  preserves Tauri's signature verification while avoiding a dead placeholder in
+  native mode. Remaining gap is a fully Slint-hosted signed updater, if we decide
+  to reimplement signature verification outside Tauri.
 - Detail dependency install/remove affordances still mutate the selected addon's
   dependency models in memory. Production install/remove still needs the existing
   backend/network command path.

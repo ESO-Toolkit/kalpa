@@ -58,6 +58,7 @@ interface PendingDeepLinkPayload {
   packId: string | null;
   shareCode: string | null;
   installPackId: string | null;
+  appUpdate: boolean;
 }
 
 function App() {
@@ -244,6 +245,9 @@ function App() {
     void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
       .then((payload) => {
         if (disposed) return;
+        if (payload.appUpdate) {
+          void checkForAppUpdate(false);
+        }
         if (payload.installPackId) {
           setRosterPackInstallId(payload.installPackId);
         } else if (payload.packId) {

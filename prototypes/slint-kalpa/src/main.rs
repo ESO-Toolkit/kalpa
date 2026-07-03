@@ -111,6 +111,7 @@ use slint::{
 };
 use std::{
     cell::RefCell,
+    cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::{Read, Write},
@@ -120,7 +121,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -278,6 +279,25 @@ struct NativePackInstallResult {
     errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct NativeAppUpdateManifest {
+    version: String,
+    platforms: HashMap<String, NativeAppUpdatePlatform>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NativeAppUpdatePlatform {
+    url: String,
+    signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeAppUpdateInfo {
+    version: String,
+    url: String,
+    signature: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct NativeImportResult {
     installed: Vec<String>,
@@ -355,6 +375,9 @@ const STORE_KEY_ACTIVE_THEME: &str = "appearance.activeThemeId";
 const STORE_KEY_ADDONS_PATH: &str = "addonsPath";
 const STORE_KEY_CUSTOM_THEMES: &str = "appearance.customThemes";
 const STORE_KEY_PERFORMANCE_MODE: &str = "performanceMode";
+const APP_UPDATE_MANIFEST_URL: &str =
+    "https://github.com/ESO-Toolkit/kalpa/releases/latest/download/latest.json";
+const TAURI_CONF_JSON: &str = include_str!("../../../src-tauri/tauri.conf.json");
 
 #[derive(Debug, PartialEq, Eq)]
 struct NativeRenderConfig {
@@ -767,6 +790,7 @@ fn main() -> Result<(), slint::PlatformError> {
     if ui.get_migration_open() {
         ui.invoke_open_migration();
     }
+    start_native_app_update_check(ui.as_weak(), true);
     ui.run()
 }
 
@@ -3792,6 +3816,222 @@ fn native_settings_from_ui(ui: &KalpaWindow) -> NativeSettings {
     }
 }
 
+fn current_app_version() -> &'static str {
+    static CURRENT: OnceLock<String> = OnceLock::new();
+    CURRENT
+        .get_or_init(|| {
+            serde_json::from_str::<serde_json::Value>(TAURI_CONF_JSON)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("version")
+                        .and_then(|version| version.as_str())
+                        .map(str::to_string)
+                })
+                .filter(|version| !version.trim().is_empty())
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+        })
+        .as_str()
+}
+
+fn normalize_app_version(value: &str) -> &str {
+    value.trim().trim_start_matches(['v', 'V'])
+}
+
+fn split_app_version(value: &str) -> (&str, Option<&str>) {
+    let value = normalize_app_version(value)
+        .split_once('+')
+        .map(|(base, _)| base)
+        .unwrap_or_else(|| normalize_app_version(value));
+    value
+        .split_once('-')
+        .map(|(core, pre)| (core, Some(pre)))
+        .unwrap_or((value, None))
+}
+
+fn compare_numeric_identifier(left: &str, right: &str) -> CmpOrdering {
+    let left_number = left.parse::<u64>();
+    let right_number = right.parse::<u64>();
+    match (left_number, right_number) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => CmpOrdering::Less,
+        (Err(_), Ok(_)) => CmpOrdering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
+}
+
+fn compare_prerelease(left: &str, right: &str) -> CmpOrdering {
+    let mut left_parts = left.split('.');
+    let mut right_parts = right.split('.');
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (Some(left), Some(right)) => {
+                let ordering = compare_numeric_identifier(left, right);
+                if ordering != CmpOrdering::Equal {
+                    return ordering;
+                }
+            }
+            (Some(_), None) => return CmpOrdering::Greater,
+            (None, Some(_)) => return CmpOrdering::Less,
+            (None, None) => return CmpOrdering::Equal,
+        }
+    }
+}
+
+fn compare_app_versions(left: &str, right: &str) -> CmpOrdering {
+    let (left_core, left_pre) = split_app_version(left);
+    let (right_core, right_pre) = split_app_version(right);
+    let mut left_core_parts = left_core.split('.');
+    let mut right_core_parts = right_core.split('.');
+    loop {
+        match (left_core_parts.next(), right_core_parts.next()) {
+            (Some(left), Some(right)) => {
+                let ordering = left
+                    .parse::<u64>()
+                    .unwrap_or_default()
+                    .cmp(&right.parse::<u64>().unwrap_or_default());
+                if ordering != CmpOrdering::Equal {
+                    return ordering;
+                }
+            }
+            (Some(left), None) => {
+                let ordering = left.parse::<u64>().unwrap_or_default().cmp(&0);
+                if ordering != CmpOrdering::Equal {
+                    return ordering;
+                }
+            }
+            (None, Some(right)) => {
+                let ordering = 0.cmp(&right.parse::<u64>().unwrap_or_default());
+                if ordering != CmpOrdering::Equal {
+                    return ordering;
+                }
+            }
+            (None, None) => break,
+        }
+    }
+
+    match (left_pre, right_pre) {
+        (None, None) => CmpOrdering::Equal,
+        (None, Some(_)) => CmpOrdering::Greater,
+        (Some(_), None) => CmpOrdering::Less,
+        (Some(left), Some(right)) => compare_prerelease(left, right),
+    }
+}
+
+fn app_version_is_newer(remote: &str, current: &str) -> bool {
+    compare_app_versions(remote, current) == CmpOrdering::Greater
+}
+
+fn native_app_update_platform_keys() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        &["windows-x86_64-nsis", "windows-x86_64"]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &["darwin-x86_64", "darwin-aarch64"]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        &["linux-x86_64", "linux-x86_64-appimage"]
+    }
+}
+
+fn native_app_update_info_from_manifest(
+    manifest: NativeAppUpdateManifest,
+    current_version: &str,
+) -> Option<NativeAppUpdateInfo> {
+    if !app_version_is_newer(&manifest.version, current_version) {
+        return None;
+    }
+
+    native_app_update_platform_keys()
+        .iter()
+        .find_map(|key| manifest.platforms.get(*key))
+        .map(|platform| NativeAppUpdateInfo {
+            version: manifest.version,
+            url: platform.url.clone(),
+            signature: platform.signature.clone(),
+        })
+}
+
+fn fetch_native_app_update_info() -> Result<Option<NativeAppUpdateInfo>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(format!("Kalpa/{} native-slint", current_app_version()))
+        .build()
+        .map_err(|error| format!("Failed to build update client: {error}"))?;
+    let manifest = client
+        .get(APP_UPDATE_MANIFEST_URL)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| format!("Failed to fetch update manifest: {error}"))?
+        .json::<NativeAppUpdateManifest>()
+        .map_err(|error| format!("Failed to parse update manifest: {error}"))?;
+    Ok(native_app_update_info_from_manifest(
+        manifest,
+        current_app_version(),
+    ))
+}
+
+fn set_app_update_banner(ui: &KalpaWindow, message: &str, action_label: &str, action_kind: i32) {
+    ui.set_app_update_message(message.into());
+    ui.set_app_update_action_label(action_label.into());
+    ui.set_app_update_action_kind(action_kind);
+}
+
+fn start_native_app_update_check(ui_weak: slint::Weak<KalpaWindow>, silent: bool) {
+    if !silent {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_settings_open(false);
+            set_app_update_banner(&ui, "Checking for Kalpa updates...", "", 0);
+        }
+    }
+
+    std::thread::spawn(move || {
+        let result = fetch_native_app_update_info();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+
+            match result {
+                Ok(Some(update)) => {
+                    debug_assert!(!update.url.is_empty());
+                    debug_assert!(!update.signature.is_empty());
+                    set_app_update_banner(
+                        &ui,
+                        &format!(
+                            "Version {} available - open the signed updater to install.",
+                            update.version
+                        ),
+                        "Install",
+                        1,
+                    );
+                }
+                Ok(None) if !silent => {
+                    set_app_update_banner(
+                        &ui,
+                        &format!("Kalpa is up to date ({}).", current_app_version()),
+                        "Dismiss",
+                        2,
+                    );
+                }
+                Ok(None) => {}
+                Err(error) if !silent => {
+                    set_app_update_banner(
+                        &ui,
+                        &format!("Update check failed: {error}"),
+                        "Dismiss",
+                        2,
+                    );
+                }
+                Err(_) => {}
+            }
+        });
+    });
+}
+
 fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
     let settings_ui = ui.as_weak();
     ui.on_settings_changed(move || {
@@ -3811,7 +4051,7 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
             return;
         }
 
-        match return_to_webview_shell() {
+        match return_to_webview_shell(false) {
             Ok(()) => {
                 let _ = slint::quit_event_loop();
             }
@@ -3920,10 +4160,30 @@ fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
         let Some(ui) = app_update_ui.upgrade() else {
             return;
         };
-        ui.set_status_error_message(
-            "Native app update checks are not ported yet; use the WebView shell for updater install/restart."
-                .into(),
-        );
+        start_native_app_update_check(ui.as_weak(), false);
+    });
+
+    let app_update_action_ui = ui.as_weak();
+    ui.on_app_update_action(move || {
+        let Some(ui) = app_update_action_ui.upgrade() else {
+            return;
+        };
+
+        match ui.get_app_update_action_kind() {
+            1 => match return_to_webview_shell(true) {
+                Ok(()) => {
+                    set_app_update_banner(&ui, "Opening the signed updater...", "", 0);
+                    let _ = slint::quit_event_loop();
+                }
+                Err(error) => {
+                    ui.set_status_error_message(
+                        format!("Failed to open signed updater: {error}").into(),
+                    );
+                }
+            },
+            2 => set_app_update_banner(&ui, "", "", 0),
+            _ => {}
+        }
     });
 
     let migration_ui = ui.as_weak();
@@ -10094,7 +10354,7 @@ fn open_path(path: &Path) {
     }
 }
 
-fn return_to_webview_shell() -> Result<(), String> {
+fn return_to_webview_shell(start_app_update: bool) -> Result<(), String> {
     let exe = std::env::var_os("KALPA_WEBVIEW_EXE")
         .map(PathBuf::from)
         .ok_or_else(|| "webview launcher path was not provided".to_string())?;
@@ -10105,8 +10365,13 @@ fn return_to_webview_shell() -> Result<(), String> {
         ));
     }
 
-    std::process::Command::new(&exe)
-        .env("KALPA_FORCE_WEBVIEW", "1")
+    let mut command = std::process::Command::new(&exe);
+    command.env("KALPA_FORCE_WEBVIEW", "1");
+    if start_app_update {
+        command.env("KALPA_START_APP_UPDATE", "1");
+    }
+
+    command
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("failed to launch webview shell: {error}"))
@@ -11734,6 +11999,55 @@ mod tests {
             render_config_from_inputs(None, Some("winit-software"), None).preset,
             NativeRenderPreset::LowMemory
         );
+    }
+
+    #[test]
+    fn current_app_version_comes_from_tauri_config() {
+        assert_eq!(current_app_version(), "0.1.0-beta.9");
+    }
+
+    #[test]
+    fn app_version_compare_handles_beta_identifiers() {
+        assert!(app_version_is_newer("0.1.0-beta.10", "0.1.0-beta.9"));
+        assert!(app_version_is_newer("0.1.0", "0.1.0-beta.10"));
+        assert!(app_version_is_newer("v0.1.1-beta.1", "0.1.0"));
+        assert!(!app_version_is_newer("0.1.0-beta.9", "0.1.0-beta.9"));
+        assert!(!app_version_is_newer("0.1.0-beta.8", "0.1.0-beta.9"));
+    }
+
+    #[test]
+    fn app_update_manifest_selects_windows_nsis_and_ignores_same_version() {
+        let manifest = NativeAppUpdateManifest {
+            version: "0.1.0-beta.10".to_string(),
+            platforms: HashMap::from([
+                (
+                    "windows-x86_64".to_string(),
+                    NativeAppUpdatePlatform {
+                        url: "https://example.invalid/plain.exe".to_string(),
+                        signature: "plain-sig".to_string(),
+                    },
+                ),
+                (
+                    "windows-x86_64-nsis".to_string(),
+                    NativeAppUpdatePlatform {
+                        url: "https://example.invalid/nsis.exe".to_string(),
+                        signature: "nsis-sig".to_string(),
+                    },
+                ),
+            ]),
+        };
+
+        let update =
+            native_app_update_info_from_manifest(manifest, "0.1.0-beta.9").expect("new update");
+        assert_eq!(update.version, "0.1.0-beta.10");
+        assert_eq!(update.url, "https://example.invalid/nsis.exe");
+        assert_eq!(update.signature, "nsis-sig");
+
+        let same_version = NativeAppUpdateManifest {
+            version: "0.1.0-beta.9".to_string(),
+            platforms: HashMap::new(),
+        };
+        assert!(native_app_update_info_from_manifest(same_version, "0.1.0-beta.9").is_none());
     }
 
     #[test]
