@@ -6722,6 +6722,7 @@ component PackHubCreateAddonsView inherits Rectangle {
     callback selected-remove(int);
     callback selected-required-toggle(int);
     callback save-to-file;
+    callback open-full-pack-hub;
     private property <string> selected-count-label: root.selected-addons.length == 1 ? "1 addon selected" : root.selected-addons.length + " addons selected";
     background: #00000000;
 
@@ -6832,12 +6833,29 @@ component PackHubCreateAddonsView inherits Rectangle {
         }
     }
 
-    PackHubButton { x: 0px; y: 420px; width: parent.width; icon: @image-url("../assets/icons/save.svg"); label: "Save to File"; disabled: root.selected-addons.length == 0; clicked => { root.save-to-file(); } }
+    PackHubButton { x: 0px; y: 420px; width: parent.width; icon: @image-url("../assets/icons/save.svg"); label: "Save .esopack File"; disabled: root.selected-addons.length == 0; clicked => { root.save-to-file(); } }
     Hairline { x: 0px; y: 462px; width: parent.width; height: 1px; opacity: 0.35; }
-    Checkbox { x: 0px; y: 484px; checked: false; }
-    Text { x: 28px; y: 480px; width: parent.width - 28px; text: "Publish anonymously"; color: Palette.muted-half; font-size: 12px; font-weight: 600; }
-    PackHubButton { x: 0px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/save.svg"); label: "Save as Draft"; disabled: true; }
-    PackHubButton { x: (parent.width - 12px) / 2 + 12px; y: 512px; width: (parent.width - 12px) / 2; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "Publish"; primary: true; disabled: true; }
+    Text {
+        x: 0px;
+        y: 482px;
+        width: parent.width;
+        height: 34px;
+        text: "Drafts and publishing use your Pack Hub account, so they open in the full Hub for now.";
+        color: Palette.muted-half;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        wrap: word-wrap;
+    }
+    PackHubButton {
+        x: 0px;
+        y: 524px;
+        width: parent.width;
+        icon: @image-url("../assets/icons/external-link.svg");
+        label: "Open Full Hub to Publish";
+        primary: true;
+        clicked => { root.open-full-pack-hub(); }
+    }
 }
 
 component PackHubInstallView inherits Rectangle {
@@ -7695,6 +7713,7 @@ component PackHubOverlay inherits Rectangle {
                 selected-remove(index) => { root.create-selected-remove(index); }
                 selected-required-toggle(index) => { root.create-selected-required-toggle(index); }
                 save-to-file => { root.create-save-to-file(); }
+                open-full-pack-hub => { root.open-full-pack-hub(); }
             }
 
             Rectangle {
