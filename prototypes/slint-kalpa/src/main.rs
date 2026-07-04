@@ -550,6 +550,7 @@ struct NativeUploaderFight {
     index: usize,
     start_ms: u64,
     end_ms: u64,
+    zone_name: String,
 }
 
 fn default_true() -> bool {
@@ -6523,7 +6524,7 @@ fn start_native_app_update_check(ui_weak: slint::Weak<KalpaWindow>, silent: bool
 }
 
 const UPLOADER_ACTIVE_WINDOW_SECS: u64 = 90;
-const UPLOADER_FIGHT_PREVIEW_LIMIT: usize = 4;
+const UPLOADER_FIGHT_PREVIEW_LIMIT: usize = 6;
 
 fn native_uploader_logs_dir() -> (Option<PathBuf>, String) {
     let addons_root = configured_addons_path().or_else(default_addons_root);
@@ -6749,19 +6750,29 @@ fn scan_native_uploader_log(path: &Path) -> Result<NativeUploaderPreflight, Stri
     let file = fs::File::open(path).map_err(|error| format!("Failed to open log: {error}"))?;
     let reader = BufReader::new(file);
     let mut preflight = NativeUploaderPreflight::default();
-    let mut in_fight: Option<(usize, u64)> = None;
+    let mut in_fight: Option<(usize, u64, String)> = None;
+    let mut current_zone = String::new();
 
     for line in reader.lines() {
         let line = line.map_err(|error| format!("Failed to read log: {error}"))?;
         match uploader_line_type(&line) {
             "BEGIN_LOG" => preflight.sessions += 1,
+            "ZONE_CHANGED" => {
+                if let Some(zone) = uploader_line_quoted_field(&line, 3) {
+                    current_zone = zone;
+                }
+            }
             "BEGIN_COMBAT" => {
                 if in_fight.is_none() {
-                    in_fight = Some((preflight.total_fights, uploader_line_ms(&line)));
+                    in_fight = Some((
+                        preflight.total_fights,
+                        uploader_line_ms(&line),
+                        current_zone.clone(),
+                    ));
                 }
             }
             "END_COMBAT" => {
-                if let Some((index, start_ms)) = in_fight.take() {
+                if let Some((index, start_ms, zone_name)) = in_fight.take() {
                     let end_ms = uploader_line_ms(&line).max(start_ms);
                     preflight.total_fights += 1;
                     if preflight.fights.len() < UPLOADER_FIGHT_PREVIEW_LIMIT {
@@ -6769,6 +6780,7 @@ fn scan_native_uploader_log(path: &Path) -> Result<NativeUploaderPreflight, Stri
                             index,
                             start_ms,
                             end_ms,
+                            zone_name,
                         });
                     } else {
                         preflight.truncated = true;
@@ -6780,6 +6792,17 @@ fn scan_native_uploader_log(path: &Path) -> Result<NativeUploaderPreflight, Stri
     }
 
     Ok(preflight)
+}
+
+/// Extract the Nth comma field of an encounter-log line and strip surrounding
+/// quotes (ESO wraps names/zones in double quotes).
+fn uploader_line_quoted_field(line: &str, index: usize) -> Option<String> {
+    let value = line.split(',').nth(index)?.trim().trim_matches('"').trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn uploader_line_type(line: &str) -> &str {
@@ -6850,12 +6873,27 @@ fn apply_native_uploader_preflight(
 }
 
 fn uploader_fight_entry(fight: &NativeUploaderFight) -> UploaderFightEntry {
+    let duration = fight.end_ms.saturating_sub(fight.start_ms);
+    let title = if fight.zone_name.is_empty() {
+        format!("Fight {}", fight.index + 1)
+    } else {
+        format!("{} - Fight {}", fight.zone_name, fight.index + 1)
+    };
+    // A short duration-derived hint, mirroring the WebView's fight labels.
+    let hint = if duration > 0 && duration < 12_000 {
+        "  -  quick reset"
+    } else if duration >= 90_000 {
+        "  -  long pull"
+    } else {
+        ""
+    };
     UploaderFightEntry {
-        title: format!("Fight {}", fight.index + 1).into(),
+        title: title.into(),
         meta: format!(
-            "{} start - {}",
+            "{} start  -  {}{}",
             format_relative_ms(fight.start_ms),
-            format_duration_ms(fight.end_ms.saturating_sub(fight.start_ms))
+            format_duration_ms(duration),
+            hint
         )
         .into(),
         result: "READY".into(),
@@ -10192,7 +10230,9 @@ fn wire_discover(
                         // retry), not just in the global status line, so a bad
                         // URL/ID doesn't look like an empty search.
                         let message = format!("Could not resolve ESOUI addon: {error}");
-                        ui.set_discover_results(Rc::new(VecModel::from(Vec::<DiscoverEntry>::new())).into());
+                        ui.set_discover_results(
+                            Rc::new(VecModel::from(Vec::<DiscoverEntry>::new())).into(),
+                        );
                         ui.set_discover_browse_message(message.clone().into());
                         ui.set_status_error_message(message.into());
                     }
@@ -17807,6 +17847,71 @@ mod tests {
     }
 
     #[test]
+    fn native_uploader_preflight_captures_zone_and_titles_fights() {
+        let root = test_temp_dir("uploader-zone");
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("Encounter.log");
+        fs::write(
+            &path,
+            concat!(
+                "0,BEGIN_LOG,1780641553946,15,\"NA Megaserver\"\n",
+                "500,ZONE_CHANGED,1000,\"Sunspire\",VETERAN\n",
+                "1000,BEGIN_COMBAT\n",
+                "8000,END_COMBAT\n",
+                "9000,ZONE_CHANGED,1001,\"Rockgrove\",VETERAN\n",
+                "10000,BEGIN_COMBAT\n",
+                "130000,END_COMBAT\n",
+            ),
+        )
+        .expect("write log");
+
+        let preflight = scan_native_uploader_log(&path).expect("scan log");
+        assert_eq!(preflight.total_fights, 2);
+        assert_eq!(preflight.fights[0].zone_name, "Sunspire");
+        assert_eq!(preflight.fights[1].zone_name, "Rockgrove");
+
+        // A short fight is flagged as a quick reset; a long one as a long pull.
+        let quick = uploader_fight_entry(&preflight.fights[0]);
+        assert!(
+            quick.title.starts_with("Sunspire"),
+            "title: {}",
+            quick.title
+        );
+        assert!(
+            quick.meta.contains("quick reset"),
+            "quick meta: {}",
+            quick.meta
+        );
+        let long = uploader_fight_entry(&preflight.fights[1]);
+        assert!(long.meta.contains("long pull"), "long meta: {}", long.meta);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_uploader_preflight_previews_up_to_six_fights() {
+        let root = test_temp_dir("uploader-cap");
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("Encounter.log");
+        let mut log = String::from("0,BEGIN_LOG,1780641553946,15,\"NA Megaserver\"\n");
+        for i in 0..8 {
+            let start = 1000 + i * 20000;
+            let end = start + 15000;
+            log.push_str(&format!("{start},BEGIN_COMBAT\n"));
+            log.push_str(&format!("{end},END_COMBAT\n"));
+        }
+        fs::write(&path, log).expect("write log");
+
+        let preflight = scan_native_uploader_log(&path).expect("scan log");
+        assert_eq!(preflight.total_fights, 8);
+        assert_eq!(preflight.fights.len(), UPLOADER_FIGHT_PREVIEW_LIMIT);
+        assert_eq!(UPLOADER_FIGHT_PREVIEW_LIMIT, 6);
+        assert!(preflight.truncated);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn official_uploader_candidates_prefer_archon_app() {
         let roots = [
             PathBuf::from("C:/Program Files"),
@@ -18997,11 +19102,14 @@ CombatMetrics_SavedVariables = {
                 "Main".to_string()
             ]
         );
-        assert!(
-            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path, false, "")
-                .iter()
-                .any(|entry| entry.active && entry.label.as_str() == "Main")
-        );
+        assert!(svm_editor_tree_entries(
+            state.tree.as_ref().unwrap(),
+            &state.selected_path,
+            false,
+            ""
+        )
+        .iter()
+        .any(|entry| entry.active && entry.label.as_str() == "Main"));
         assert!(
             svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path, true, "")
                 .len()

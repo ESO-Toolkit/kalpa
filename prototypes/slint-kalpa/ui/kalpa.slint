@@ -8973,7 +8973,7 @@ component UploaderOverlay inherits Rectangle {
                 }
 
                 for fight[index] in root.fights : UploaderFightRow {
-                    visible: index < 4;
+                    visible: index < 6;
                     x: 18px;
                     y: (root.uploading ? 174px : 160px) + index * 42px;
                     width: parent.width - 36px;
@@ -8985,9 +8985,9 @@ component UploaderOverlay inherits Rectangle {
 
                 if (root.fights.length > 0) : Text {
                     x: 18px;
-                    y: (root.uploading ? 174px : 160px) + min(root.fights.length, 4) * 42px + 6px;
+                    y: (root.uploading ? 174px : 160px) + min(root.fights.length, 6) * 42px + 6px;
                     width: parent.width - 36px;
-                    text: root.fights.length > 4 ? "+ " + (root.fights.length - 4) + " more — the uploader hands off the entire log." : "The uploader hands off the entire log, not just this preview.";
+                    text: "Preview of recent fights - the uploader hands off the entire log, not just what is shown here.";
                     color: Palette.muted-half;
                     font-size: 11px;
                     font-weight: 650;
