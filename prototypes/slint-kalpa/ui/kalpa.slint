@@ -53,10 +53,12 @@ export struct SavedVariableEntry {
     meter-width: int,
     system: bool,
     orphaned: bool,
+    selected: bool,
 }
 
 export struct SvmEditorTreeEntry {
     label: string,
+    path: string,
     count: string,
     indent: int,
     active: bool,
@@ -4367,7 +4369,10 @@ component AppearanceOverlay inherits Rectangle {
                         text: root.draft-theme-name;
                         font-size: 13px;
                         font-family: "Geist";
-                        edited(content) => { root.draft-theme-name = content; }
+                        edited(content) => {
+                            root.draft-theme-name = content;
+                            root.theme-draft-updated();
+                        }
                     }
                 }
 
@@ -4390,6 +4395,58 @@ component AppearanceOverlay inherits Rectangle {
                         height: 118px;
                         theme: root.draft-theme;
                         active: true;
+                    }
+
+                    Text {
+                        x: 310px;
+                        y: 15px;
+                        width: parent.width - 324px;
+                        text: "DESCRIPTION";
+                        color: Palette.muted-half;
+                        font-family: "Space Grotesk Light";
+                        font-size: 10px;
+                        font-weight: 900;
+                        overflow: elide;
+                    }
+
+                    Rectangle {
+                        x: 310px;
+                        y: 36px;
+                        width: parent.width - 324px;
+                        height: 56px;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: Palette.white-08;
+                        background: Palette.white-03;
+                        clip: true;
+
+                        Text {
+                            visible: root.draft-theme-description == "";
+                            x: 10px;
+                            y: 0px;
+                            width: parent.width - 20px;
+                            height: parent.height;
+                            text: "Short note for this theme";
+                            color: Palette.muted-half;
+                            font-size: 12px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+
+                        TextEdit {
+                            x: 10px;
+                            y: 5px;
+                            width: parent.width - 20px;
+                            height: parent.height - 10px;
+                            text: root.draft-theme-description;
+                            font-size: 12px;
+                            font-family: "Geist";
+                            edited(content) => {
+                                root.draft-theme-description = content;
+                                root.theme-draft-updated();
+                            }
+                        }
                     }
 
                     Text {
@@ -4683,14 +4740,14 @@ component PackHubButton inherits Rectangle {
     in property <bool> disabled: false;
     in property <bool> show-icon: true;
     callback clicked;
-    private property <length> icon-size: root.show-icon ? 14px : 0px;
-    private property <length> icon-gap: root.show-icon ? 6px : 0px;
-    private property <length> label-width: min(button-label.preferred-width, root.width - root.icon-size - root.icon-gap - 18px);
+    private property <length> icon-size: root.show-icon ? 15px : 0px;
+    private property <length> icon-gap: root.show-icon ? 7px : 0px;
+    private property <length> label-width: min(button-label.preferred-width, max(0px, root.width - root.icon-size - root.icon-gap - 18px));
     private property <length> content-width: root.icon-size + root.icon-gap + root.label-width;
     private property <length> content-x: max(0px, (root.width - root.content-width) / 2);
     private property <length> content-y: touch.pressed ? 1px : 0px;
     height: 32px;
-    border-radius: 8px;
+    border-radius: 7px;
     border-width: 1px;
     border-color: root.disabled ? Palette.white-04 : (root.primary ? Palette.gold-25 : (root.danger ? Palette.red-20 : (touch.has-hover ? Palette.white-10 : Palette.white-08)));
     background: root.disabled ? Palette.white-02 : (touch.pressed ? (root.primary ? Palette.gold : (root.danger ? Palette.red-15 : Palette.white-08)) : (touch.has-hover ? (root.primary ? Palette.gold-hot : (root.danger ? Palette.red-15 : Palette.white-06)) : (root.primary ? Palette.gold : (root.danger ? Palette.red-04 : Palette.white-03))));
@@ -4744,8 +4801,8 @@ component PackHubField inherits Rectangle {
     height: 36px;
     border-radius: 10px;
     border-width: 1px;
-    border-color: field-touch.has-hover || root.focused || root.editable ? Palette.white-10 : Palette.white-08;
-    background: field-touch.has-hover || root.focused || root.editable ? Palette.white-06 : Palette.white-04;
+    border-color: root.focused || root.editable ? Palette.white-10 : (field-touch.has-hover ? Palette.white-10 : Palette.white-08);
+    background: root.focused || root.editable ? Palette.white-04 : (field-touch.has-hover ? Palette.white-06 : Palette.white-03);
 
     animate background, border-color { duration: Tokens.low-memory-preset ? 0ms : 90ms; easing: ease-in-out; }
 
@@ -5818,14 +5875,14 @@ component PackHubPackCard inherits Rectangle {
     private property <color> identity-fill: root.identity-kind == 1 ? Palette.sky-15 : (root.identity-kind == 2 ? #4dc2e626 : (root.identity-kind == 3 ? Palette.emerald-15 : (root.identity-kind == 4 ? Palette.amber-15 : (root.identity-kind == 5 ? Palette.red-15 : (root.identity-kind == 6 ? Palette.violet-15 : Palette.gold-15)))));
     private property <color> identity-wash: root.identity-kind == 1 ? Palette.sky-06 : (root.identity-kind == 2 ? #4dc2e610 : (root.identity-kind == 3 ? Palette.emerald-04 : (root.identity-kind == 4 ? Palette.amber-04 : (root.identity-kind == 5 ? Palette.red-04 : (root.identity-kind == 6 ? Palette.violet-04 : Palette.gold-04)))));
     private property <length> content-x: 66px;
-    height: 108px;
+    height: 104px;
     border-radius: 12px;
     border-width: 1px;
     border-color: touch.has-hover ? Palette.border-strong : Palette.border;
     background: @linear-gradient(180deg, Palette.white-06 0%, Palette.white-03 100%);
     clip: true;
-    drop-shadow-blur: touch.has-hover ? 22px : 12px;
-    drop-shadow-offset-y: touch.has-hover ? 8px : 4px;
+    drop-shadow-blur: touch.has-hover ? 20px : 10px;
+    drop-shadow-offset-y: touch.has-hover ? 7px : 3px;
     drop-shadow-color: #00000066;
 
     animate border-color, drop-shadow-blur, drop-shadow-offset-y { duration: Tokens.low-memory-preset ? 0ms : 150ms; easing: ease-in-out; }
@@ -5881,17 +5938,17 @@ component PackHubPackCard inherits Rectangle {
     title-text := Text {
         x: root.content-x;
         y: 14px;
-        width: parent.width - 244px;
+        width: parent.width - root.content-x - 116px;
         text: root.title;
-        color: Palette.foreground;
+        color: touch.has-hover ? Palette.gold : Palette.foreground;
         font-size: 14px;
         font-weight: 900;
         overflow: elide;
     }
 
     Pill {
-        x: min(root.content-x + title-text.preferred-width + 10px, parent.width - 174px);
-        y: 12px;
+        x: root.content-x;
+        y: 38px;
         label: root.pack-type-label;
         tone: root.type-tone;
         fill: root.type-fill;
@@ -5901,27 +5958,26 @@ component PackHubPackCard inherits Rectangle {
 
     Text {
         x: root.content-x;
-        y: 39px;
-        width: parent.width - 138px;
-        height: 28px;
+        y: 62px;
+        width: parent.width - root.content-x - 80px;
+        height: 18px;
         text: root.description;
         color: Palette.muted-strong;
         font-size: 12px;
         font-weight: 600;
-        wrap: word-wrap;
         overflow: elide;
     }
 
     tag-pill := PackHubTag {
-        x: root.content-x;
-        y: 77px;
+        x: root.content-x + 112px;
+        y: 38px;
         label: root.tag;
         tone: root.trial ? Palette.red : Palette.muted-strong;
     }
 
     Image {
-        x: tag-pill.x + tag-pill.width + 12px;
-        y: 82px;
+        x: root.content-x;
+        y: 86px;
         width: 12px;
         height: 12px;
         source: @image-url("../assets/icons/package.svg");
@@ -5930,9 +5986,9 @@ component PackHubPackCard inherits Rectangle {
     }
 
     Text {
-        x: tag-pill.x + tag-pill.width + 30px;
-        y: 78px;
-        width: 90px;
+        x: root.content-x + 18px;
+        y: 82px;
+        width: 112px;
         height: 20px;
         text: root.addon-count;
         color: Palette.muted-half;
@@ -5974,8 +6030,9 @@ component PackHubPackCard inherits Rectangle {
     }
 
     Rectangle {
-        x: parent.width - 78px;
-        y: 78px;
+        visible: root.author != "";
+        x: parent.width - 122px;
+        y: 82px;
         width: 18px;
         height: 18px;
         border-radius: 9px;
@@ -5995,9 +6052,10 @@ component PackHubPackCard inherits Rectangle {
     }
 
     Text {
-        x: parent.width - 52px;
-        y: 79px;
-        width: 42px;
+        visible: root.author != "";
+        x: parent.width - 98px;
+        y: 83px;
+        width: 82px;
         text: root.author;
         color: Palette.muted-half;
         font-size: 11px;
@@ -6460,9 +6518,9 @@ component PackHubInstallRow inherits Rectangle {
     }
 
     Text {
-        x: parent.width - 72px;
+        x: parent.width - 86px;
         y: 0px;
-        width: 52px;
+        width: 70px;
         height: parent.height;
         text: root.esoui-id;
         color: Palette.muted-half;
@@ -6470,16 +6528,6 @@ component PackHubInstallRow inherits Rectangle {
         font-weight: 700;
         horizontal-alignment: right;
         vertical-alignment: center;
-    }
-
-    Image {
-        x: parent.width - 16px;
-        y: 17px;
-        width: 12px;
-        height: 12px;
-        source: @image-url("../assets/icons/external-link.svg");
-        image-fit: contain;
-        colorize: Palette.muted-half;
     }
 
     touch := TouchArea {
@@ -6587,18 +6635,18 @@ component PackHubBrowseView inherits Rectangle {
         width: parent.width;
         height: parent.height - (root.has-more || root.loading ? 148px : 102px);
         viewport-width: self.width;
-        viewport-height: root.packs.length * 108px;
+        viewport-height: root.packs.length * 116px;
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
         Rectangle {
             width: parent.width;
-            height: root.packs.length * 108px;
+            height: root.packs.length * 116px;
             background: #00000000;
 
             for pack[index] in root.packs : PackHubPackCard {
                 x: 0px;
-                y: index * 108px;
+                y: index * 116px;
                 width: parent.width;
                 title: pack.title;
                 description: pack.description;
@@ -6747,19 +6795,7 @@ component PackHubCreateAddonsView inherits Rectangle {
     Text { x: 20px; y: 66px; width: 120px; text: "Back to details"; color: Palette.muted-strong; font-size: 12px; font-weight: 700; }
     TouchArea { x: 0px; y: 60px; width: 140px; height: 28px; clicked => { root.back(); } }
 
-    Rectangle {
-        x: 0px;
-        y: 100px;
-        width: parent.width;
-        height: 36px;
-        border-radius: 10px;
-        border-width: 1px;
-        border-color: Palette.white-06;
-        background: Palette.white-03;
-
-        PackHubTabButton { x: 4px; y: 4px; width: (parent.width - 8px) / 2; label: "Search ESOUI"; }
-        PackHubTabButton { x: 4px + (parent.width - 8px) / 2; y: 4px; width: (parent.width - 8px) / 2; label: "My Installed"; active: true; }
-    }
+    DetailSectionTitle { x: 0px; y: 104px; width: parent.width; label: "MY INSTALLED ADDONS"; }
 
     PackHubField {
         x: 0px;
@@ -6876,7 +6912,6 @@ component PackHubInstallView inherits Rectangle {
     in property <string> share-status: "";
     callback back;
     callback edit-requested;
-    callback delete-requested;
     callback share-requested;
     callback addon-selection-toggle(int);
     background: #00000000;
@@ -6896,8 +6931,7 @@ component PackHubInstallView inherits Rectangle {
     Pill { x: 108px; y: 40px; label: root.pack.tag; tone: root.pack.trial ? Palette.red : Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
     Text { x: 190px; y: 44px; width: 78px; text: "by " + root.pack.author; color: Palette.muted-half; font-size: 11px; font-weight: 600; overflow: elide; }
     Text { x: 274px; y: 44px; width: 120px; text: root.pack.updated-label; color: Palette.muted-half; font-size: 10px; font-weight: 600; overflow: elide; }
-    PackHubButton { x: parent.width - 322px; y: 36px; width: 94px; icon: @image-url("../assets/icons/pencil.svg"); label: "Edit"; clicked => { root.edit-requested(); } }
-    PackHubButton { x: parent.width - 216px; y: 36px; width: 104px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; clicked => { root.delete-requested(); } }
+    PackHubButton { x: parent.width - 216px; y: 36px; width: 104px; icon: @image-url("../assets/icons/external-link.svg"); label: "Manage"; clicked => { root.edit-requested(); } }
     PackHubButton { x: parent.width - 100px; y: 36px; width: 100px; icon: @image-url("../assets/icons/copy.svg"); label: root.sharing ? "Sharing" : "Share"; disabled: root.sharing || root.addons.length == 0; clicked => { root.share-requested(); } }
 
     if (root.share-status != "") : Rectangle {
@@ -7777,7 +7811,6 @@ component PackHubOverlay inherits Rectangle {
                 share-status: root.detail-share-status;
                 back => { root.view = 0; }
                 edit-requested => { root.manage-pack-detail(); }
-                delete-requested => { root.manage-pack-detail(); }
                 share-requested => { root.share-pack-detail(); }
                 addon-selection-toggle(index) => { root.detail-addon-selection-toggle(index); }
             }
@@ -8634,23 +8667,6 @@ component UploaderFightRow inherits Rectangle {
     }
 }
 
-component UploaderProgressBar inherits Rectangle {
-    in property <float> progress: 0.0;
-    height: 8px;
-    border-radius: 4px;
-    border-width: 0px;
-    background: Palette.white-04;
-    clip: true;
-
-    Rectangle {
-        width: parent.width * root.progress;
-        height: parent.height;
-        border-radius: 4px;
-        border-width: 0px;
-        background: @linear-gradient(90deg, Palette.sky 0%, Palette.gold 100%);
-    }
-}
-
 component UploaderOverlay inherits Rectangle {
     in-out property <bool> open: false;
     in-out property <int> view: 0;
@@ -8678,8 +8694,8 @@ component UploaderOverlay inherits Rectangle {
     private property <bool> manual: root.view < 2;
     private property <bool> uploading: root.view == 1;
     private property <bool> live-running: root.view == 3;
-    private property <length> modal-width: root.width < 850px ? root.width - 48px : 760px;
-    private property <length> modal-height: root.height < 700px ? root.height - 48px : 650px;
+    private property <length> modal-width: root.width < 900px ? root.width - 48px : 820px;
+    private property <length> modal-height: root.height < 720px ? root.height - 48px : 670px;
     private property <string> region-label: root.region == 2 ? "EU" : "NA";
     private property <string> visibility-label: root.visibility-mode == 0 ? "Public" : (root.visibility-mode == 1 ? "Private" : "Unlisted");
 
@@ -8706,8 +8722,33 @@ component UploaderOverlay inherits Rectangle {
         TouchArea { width: parent.width; height: parent.height; clicked => { } }
 
         Image { x: 28px; y: 26px; width: 18px; height: 18px; source: @image-url("../assets/icons/cloud-upload.svg"); image-fit: contain; colorize: Palette.gold; }
-        Text { x: 58px; y: 21px; width: parent.width - 118px; text: "Log Uploader"; color: Palette.gold; font-size: 18px; font-weight: 900; overflow: elide; }
-        Text { x: 58px; y: 52px; width: parent.width - 118px; text: root.manual ? "Upload completed encounter logs or inspect fights before sending." : "Stream new ESO Logs fights while the game writes Combat Metrics data."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
+        Text { x: 58px; y: 21px; width: parent.width - 250px; text: "Upload to ESO Logs"; color: Palette.gold; font-size: 18px; font-weight: 900; overflow: elide; }
+        Text { x: 58px; y: 52px; width: parent.width - 118px; text: root.manual ? "Select a log, review detected fights, then upload." : "Stream fights while ESO writes Combat Metrics data."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
+
+        Rectangle {
+            x: parent.width - 184px;
+            y: 24px;
+            width: 116px;
+            height: 28px;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: root.manual ? Palette.gold-20 : (root.live-running ? Palette.emerald-20 : Palette.white-08);
+            background: root.manual ? Palette.gold-04 : (root.live-running ? Palette.emerald-04 : Palette.white-03);
+
+            Text {
+                x: 12px;
+                y: 0px;
+                width: parent.width - 24px;
+                height: parent.height;
+                text: root.manual ? root.fight-count-label : root.live-status-label;
+                color: root.manual ? Palette.gold : (root.live-running ? Palette.emerald : Palette.muted-strong);
+                font-size: 11px;
+                font-weight: 900;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
 
         GhostIconButton {
             x: parent.width - 52px;
@@ -8834,8 +8875,19 @@ component UploaderOverlay inherits Rectangle {
                     }
                 }
 
-                if (root.uploading) : UploaderProgressBar { x: 18px; y: 92px; width: parent.width - 36px; progress: 0.58; }
-                if (root.uploading) : Text { x: 18px; y: 112px; width: parent.width - 36px; text: "58% - packaging segment 2 of 2"; color: Palette.sky; font-size: 11px; font-weight: 800; }
+                if (root.uploading) : Rectangle {
+                    x: 18px;
+                    y: 88px;
+                    width: parent.width - 36px;
+                    height: 42px;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: Palette.sky-15;
+                    background: Palette.sky-04;
+
+                    Image { x: 14px; y: 13px; width: 16px; height: 16px; source: @image-url("../assets/icons/cloud-upload.svg"); image-fit: contain; colorize: Palette.sky; }
+                    Text { x: 42px; y: 0px; width: parent.width - 56px; height: parent.height; text: "Opening the ESO Logs uploader..."; color: Palette.foreground; font-size: 12px; font-weight: 850; vertical-alignment: center; overflow: elide; }
+                }
 
                 DetailSectionTitle { x: 18px; y: root.uploading ? 146px : 132px; width: parent.width - 36px; label: "FIGHTS"; }
 
@@ -8945,7 +8997,7 @@ component UploaderOverlay inherits Rectangle {
 
             PackHubButton { x: 28px; y: 22px; width: 116px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; clicked => { root.refresh(); } }
             PackHubButton { x: parent.width - 284px; y: 22px; width: 116px; icon: @image-url("../assets/icons/x.svg"); label: root.live-running ? "Stop" : "Cancel"; danger: root.live-running; clicked => { if (root.live-running) { root.live-toggle(); } else { root.open = false; } } }
-            PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? "Upload" : (root.live-running ? "Running" : "Go Live"); primary: true; disabled: root.manual ? root.logs.length == 0 : false; clicked => { if (root.manual) { root.upload-requested(); } else { root.live-toggle(); } } }
+            PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? "Upload" : (root.live-running ? "Running" : "Go Live"); primary: true; disabled: root.manual ? root.logs.length == 0 : (!root.live-running && root.live-log-label != "Encounter.log"); clicked => { if (root.manual) { root.upload-requested(); } else { root.live-toggle(); } } }
         }
     }
 }
@@ -9114,6 +9166,7 @@ component SvmCleanupRow inherits Rectangle {
     in property <string> title;
     in property <string> meta;
     in property <bool> checked: false;
+    callback clicked;
     height: 58px;
     border-radius: 10px;
     background: touch.has-hover ? Palette.white-04 : Palette.white-03;
@@ -9142,7 +9195,11 @@ component SvmCleanupRow inherits Rectangle {
         overflow: elide;
     }
 
-    touch := TouchArea { width: root.width; height: root.height; }
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
+    }
 }
 
 component SvmSelectField inherits Rectangle {
@@ -9209,13 +9266,17 @@ component SvmToggle inherits Rectangle {
 
 component SvmEditorTreeRow inherits Rectangle {
     in property <string> label;
+    in property <string> path;
     in property <string> count;
     in property <int> indent: 0;
     in property <bool> active: false;
     in property <bool> expanded: false;
+    callback clicked(string);
     height: 28px;
     border-radius: 7px;
-    background: root.active ? Palette.white-10 : #00000000;
+    background: root.active ? Palette.white-10 : (touch.has-hover ? Palette.white-04 : #00000000);
+
+    animate background { duration: Tokens.low-memory-preset ? 0ms : 90ms; easing: ease-in-out; }
 
     Image {
         visible: root.indent > 0 || root.expanded;
@@ -9253,6 +9314,12 @@ component SvmEditorTreeRow inherits Rectangle {
         horizontal-alignment: right;
         vertical-alignment: center;
     }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(root.path); }
+    }
 }
 
 component SvmSettingRow inherits Rectangle {
@@ -9262,11 +9329,22 @@ component SvmSettingRow inherits Rectangle {
     in property <string> value: "";
     in property <bool> checked: false;
     callback clicked;
+    callback value-edited(string);
     height: 42px;
     border-radius: 8px;
     background: touch.has-hover ? Palette.white-03 : #00000000;
 
     animate background { duration: Tokens.low-memory-preset ? 0ms : 150ms; easing: ease-in-out; }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => {
+            if (root.kind == 0) {
+                root.clicked();
+            }
+        }
+    }
 
     Text {
         x: 12px;
@@ -9302,9 +9380,13 @@ component SvmSettingRow inherits Rectangle {
         width: 176px;
         height: 30px;
         border-radius: 9px;
-        background: Palette.white-03;
+        border-width: 1px;
+        border-color: Palette.white-08;
+        background: Palette.white-04;
+        clip: true;
 
         Text {
+            visible: root.value != "";
             x: 12px;
             y: 0px;
             height: parent.height;
@@ -9314,6 +9396,19 @@ component SvmSettingRow inherits Rectangle {
             font-size: 13px;
             font-weight: 750;
             vertical-alignment: center;
+            overflow: elide;
+        }
+
+        TextEdit {
+            x: 12px;
+            y: 0px;
+            width: parent.width - 24px;
+            height: parent.height;
+            opacity: 0.01;
+            text: root.value;
+            font-size: 13px;
+            font-family: "Geist";
+            edited(content) => { root.value-edited(content); }
         }
     }
 
@@ -9323,15 +9418,24 @@ component SvmSettingRow inherits Rectangle {
         width: 176px;
         height: 30px;
         border-radius: 9px;
-        background: Palette.white-03;
+        border-width: 1px;
+        border-color: Palette.white-08;
+        background: Palette.white-04;
+        clip: true;
 
         Text { x: 12px; width: parent.width - 24px; height: parent.height; text: root.value; color: Palette.foreground; font-size: 13px; font-weight: 800; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
-    }
 
-    touch := TouchArea {
-        width: root.width;
-        height: root.height;
-        clicked => { root.clicked(); }
+        TextEdit {
+            x: 12px;
+            y: 0px;
+            width: parent.width - 24px;
+            height: parent.height;
+            opacity: 0.01;
+            text: root.value;
+            font-size: 13px;
+            font-family: "Geist";
+            edited(content) => { root.value-edited(content); }
+        }
     }
 }
 
@@ -9347,6 +9451,7 @@ component SavedVariablesOverlay inherits Rectangle {
     in property <string> orphan-count-label;
     in property <string> orphan-size-label;
     in property <string> large-count-label;
+    in-out property <int> cleanup-selected-count: 0;
     in property <bool> has-orphans: false;
     in property <bool> has-files: false;
     in property <string> copy-file-label: "No profile files";
@@ -9367,6 +9472,8 @@ component SavedVariablesOverlay inherits Rectangle {
     in property <bool> editor-dirty: false;
     callback refresh;
     callback clean-orphans;
+    callback orphan-selection-toggled(int);
+    callback orphan-select-all(bool);
     callback copy-select-file;
     callback copy-select-source;
     callback copy-select-dest;
@@ -9378,6 +9485,10 @@ component SavedVariablesOverlay inherits Rectangle {
     callback editor-restore;
     callback editor-copy-raw;
     callback editor-toggle-setting(int);
+    callback editor-select-path(string);
+    callback editor-edit-setting(int, string);
+    callback editor-expand-all;
+    callback editor-collapse-all;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 980px ? root.width - 48px : 900px;
@@ -9459,9 +9570,9 @@ component SavedVariablesOverlay inherits Rectangle {
                 TouchArea { width: parent.width; height: parent.height; clicked => { root.view = 1; } }
             }
 
-            FilterTab { x: 0px; y: 130px; label: "All"; active: true; }
-            FilterTab { x: 58px; y: 130px; label: "Orphaned (" + root.orphan-count-label + ")"; }
-            FilterTab { x: 170px; y: 130px; label: "Large (" + root.large-count-label + ")"; }
+            Pill { x: 0px; y: 130px; label: "All files"; tone: Palette.gold; fill: Palette.gold-04; line: Palette.gold-20; pill-height: 24px; }
+            Pill { x: 76px; y: 130px; label: "Orphaned " + root.orphan-count-label; tone: root.has-orphans ? Palette.gold : Palette.muted-strong; fill: Palette.white-03; line: Palette.white-08; pill-height: 24px; }
+            Pill { x: 190px; y: 130px; label: "Large " + root.large-count-label; tone: Palette.muted-strong; fill: Palette.white-03; line: Palette.white-08; pill-height: 24px; }
             Text { x: parent.width - 140px; y: 136px; text: "Size"; color: Palette.muted-strong; font-size: 12px; font-weight: 750; }
             PackHubButton { x: parent.width - 88px; y: 126px; width: 88px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; clicked => { root.refresh(); } }
 
@@ -9522,7 +9633,23 @@ component SavedVariablesOverlay inherits Rectangle {
             Text { x: 24px; y: 0px; text: "Orphaned Files"; color: Palette.foreground; font-size: 16px; font-weight: 900; }
             Text { x: 184px; y: 1px; text: "(" + root.orphan-count-label + " files, " + root.orphan-size-label + ")"; color: Palette.muted-strong; font-size: 15px; font-weight: 700; }
             Text { x: 0px; y: 32px; width: parent.width - 120px; text: "These files belong to addons that are no longer installed."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; }
-            Text { x: parent.width - 62px; y: 4px; text: "Select all"; color: Palette.muted-strong; font-size: 13px; font-weight: 800; horizontal-alignment: right; }
+            Text {
+                x: parent.width - 92px;
+                y: 4px;
+                width: 92px;
+                text: root.cleanup-selected-count == root.orphaned-files.length && root.orphaned-files.length > 0 ? "Clear all" : "Select all";
+                color: Palette.muted-strong;
+                font-size: 13px;
+                font-weight: 800;
+                horizontal-alignment: right;
+            }
+            TouchArea {
+                x: parent.width - 104px;
+                y: -4px;
+                width: 104px;
+                height: 30px;
+                clicked => { root.orphan-select-all(!(root.cleanup-selected-count == root.orphaned-files.length && root.orphaned-files.length > 0)); }
+            }
 
             if (root.orphaned-files.length == 0) : Rectangle {
                 x: 0px;
@@ -9559,6 +9686,8 @@ component SavedVariablesOverlay inherits Rectangle {
                         width: parent.width;
                         title: file.title;
                         meta: file.size-label + " - " + file.meta;
+                        checked: file.selected;
+                        clicked => { root.orphan-selection-toggled(index); }
                     }
                 }
                 Rectangle { x: parent.width - 10px; y: 8px; width: 5px; height: 214px; border-radius: 3px; background: Palette.white-04; }
@@ -9575,8 +9704,17 @@ component SavedVariablesOverlay inherits Rectangle {
                 border-color: Palette.white-06;
                 background: Palette.white-03;
 
-                Text { x: 14px; y: 0px; height: parent.height; text: "Select files to clean up"; color: Palette.muted-strong; font-size: 13px; font-weight: 750; vertical-alignment: center; }
-                PackHubButton { x: parent.width - 116px; y: 12px; width: 102px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Clean Up"; primary: true; disabled: root.orphaned-files.length == 0; clicked => { root.clean-orphans(); } }
+                Text {
+                    x: 14px;
+                    y: 0px;
+                    height: parent.height;
+                    text: root.cleanup-selected-count == 0 ? "Select files to clean up" : (root.cleanup-selected-count == 1 ? "1 file selected" : root.cleanup-selected-count + " files selected");
+                    color: Palette.muted-strong;
+                    font-size: 13px;
+                    font-weight: 750;
+                    vertical-alignment: center;
+                }
+                PackHubButton { x: parent.width - 116px; y: 12px; width: 102px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Clean Up"; primary: true; disabled: root.cleanup-selected-count == 0; clicked => { root.clean-orphans(); } }
             }
         }
 
@@ -9682,15 +9820,15 @@ component SavedVariablesOverlay inherits Rectangle {
                     background: Palette.white-02;
                     border-width: 0px;
 
-                    PackHubField { x: 10px; y: 10px; width: parent.width - 20px; placeholder: "Search..."; }
+                    DetailSectionTitle { x: 14px; y: 14px; width: parent.width - 28px; label: "BRANCHES"; }
 
-                    if (!root.editor-has-file) : Text { x: 16px; y: 74px; width: parent.width - 32px; text: "No SavedVariables files found."; color: Palette.muted-strong; font-size: 12px; font-weight: 800; horizontal-alignment: center; }
+                    if (!root.editor-has-file) : Text { x: 16px; y: 62px; width: parent.width - 32px; text: "No SavedVariables files found."; color: Palette.muted-strong; font-size: 12px; font-weight: 800; horizontal-alignment: center; }
 
                     if (root.editor-has-file) : ScrollView {
                         x: 0px;
-                        y: 54px;
+                        y: 42px;
                         width: parent.width;
-                        height: parent.height - 88px;
+                        height: parent.height - 76px;
                         viewport-width: self.width;
                         viewport-height: max(root.editor-tree.length * 28px, self.height);
                         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -9701,19 +9839,23 @@ component SavedVariablesOverlay inherits Rectangle {
                             y: index * 28px;
                             width: parent.width - 20px;
                             label: row.label;
+                            path: row.path;
                             count: row.count;
                             indent: row.indent;
                             active: row.active;
                             expanded: row.expanded;
+                            clicked(path) => { root.editor-select-path(path); }
                         }
                     }
 
-                    Rectangle { x: parent.width - 8px; y: 64px; width: 5px; height: 266px; border-radius: 3px; background: Palette.white-04; visible: root.editor-tree.length * 28px > parent.height - 88px; }
-                    Rectangle { x: parent.width - 8px; y: 78px; width: 5px; height: 142px; border-radius: 3px; background: Palette.sky; visible: root.editor-tree.length * 28px > parent.height - 88px; }
+                    Rectangle { x: parent.width - 8px; y: 52px; width: 5px; height: 276px; border-radius: 3px; background: Palette.white-04; visible: root.editor-tree.length * 28px > parent.height - 76px; }
+                    Rectangle { x: parent.width - 8px; y: 66px; width: 5px; height: 142px; border-radius: 3px; background: Palette.sky; visible: root.editor-tree.length * 28px > parent.height - 76px; }
 
                     Hairline { x: 0px; y: parent.height - 34px; width: parent.width; height: 1px; opacity: 0.45; }
                     Text { x: 34px; y: parent.height - 24px; text: "Expand All"; color: Palette.muted-strong; font-size: 11px; font-weight: 800; }
+                    TouchArea { x: 24px; y: parent.height - 32px; width: 78px; height: 28px; clicked => { root.editor-expand-all(); } }
                     Text { x: parent.width - 86px; y: parent.height - 24px; text: "Collapse All"; color: Palette.muted-strong; font-size: 11px; font-weight: 800; }
+                    TouchArea { x: parent.width - 100px; y: parent.height - 32px; width: 92px; height: 28px; clicked => { root.editor-collapse-all(); } }
                 }
 
                 Hairline { x: 214px; y: 0px; width: 1px; height: parent.height; opacity: 0.45; }
@@ -9763,6 +9905,7 @@ component SavedVariablesOverlay inherits Rectangle {
                         value: setting.value;
                         checked: setting.checked;
                         clicked => { root.editor-toggle-setting(index); }
+                        value-edited(value) => { root.editor-edit-setting(index, value); }
                     }
                 }
 
@@ -12059,6 +12202,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> svm-orphan-count-label: "0";
     in-out property <string> svm-orphan-size-label: "0 B";
     in-out property <string> svm-large-count-label: "0";
+    in-out property <int> svm-cleanup-selected-count: 0;
     in-out property <bool> svm-has-orphans: false;
     in-out property <bool> svm-has-files: false;
     in-out property <string> svm-copy-file-label: "No profile files";
@@ -12228,6 +12372,8 @@ export component KalpaWindow inherits Window {
     callback settings-addon-list-export;
     callback settings-addon-list-import;
     callback svm-clean-orphans;
+    callback svm-orphan-selection-toggled(int);
+    callback svm-orphan-select-all(bool);
     callback svm-copy-select-file;
     callback svm-copy-select-source;
     callback svm-copy-select-dest;
@@ -12239,6 +12385,10 @@ export component KalpaWindow inherits Window {
     callback svm-editor-restore;
     callback svm-editor-copy-raw;
     callback svm-editor-toggle-setting(int);
+    callback svm-editor-select-path(string);
+    callback svm-editor-edit-setting(int, string);
+    callback svm-editor-expand-all;
+    callback svm-editor-collapse-all;
     callback review-conflicts;
     no-frame: true;
     preferred-width: 1462px;
@@ -12556,6 +12706,7 @@ export component KalpaWindow inherits Window {
             orphan-count-label: root.svm-orphan-count-label;
             orphan-size-label: root.svm-orphan-size-label;
             large-count-label: root.svm-large-count-label;
+            cleanup-selected-count <=> root.svm-cleanup-selected-count;
             has-orphans: root.svm-has-orphans;
             has-files: root.svm-has-files;
             copy-file-label: root.svm-copy-file-label;
@@ -12576,6 +12727,8 @@ export component KalpaWindow inherits Window {
             editor-dirty: root.svm-editor-dirty;
             refresh => { root.svm-refresh(); }
             clean-orphans => { root.svm-clean-orphans(); }
+            orphan-selection-toggled(index) => { root.svm-orphan-selection-toggled(index); }
+            orphan-select-all(selected) => { root.svm-orphan-select-all(selected); }
             copy-select-file => { root.svm-copy-select-file(); }
             copy-select-source => { root.svm-copy-select-source(); }
             copy-select-dest => { root.svm-copy-select-dest(); }
@@ -12587,6 +12740,10 @@ export component KalpaWindow inherits Window {
             editor-restore => { root.svm-editor-restore(); }
             editor-copy-raw => { root.svm-editor-copy-raw(); }
             editor-toggle-setting(index) => { root.svm-editor-toggle-setting(index); }
+            editor-select-path(path) => { root.svm-editor-select-path(path); }
+            editor-edit-setting(index, value) => { root.svm-editor-edit-setting(index, value); }
+            editor-expand-all => { root.svm-editor-expand-all(); }
+            editor-collapse-all => { root.svm-editor-collapse-all(); }
         }
 
         if (root.uploader-open) : UploaderOverlay {

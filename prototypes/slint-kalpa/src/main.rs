@@ -808,6 +808,7 @@ struct SvmEditorState {
     tree: Option<saved_variables::SvTreeNode>,
     stamp: Option<saved_variables::SvFileStamp>,
     selected_path: Vec<String>,
+    tree_expanded_all: bool,
     dirty: bool,
     message: String,
 }
@@ -2559,7 +2560,11 @@ fn filter_category_discover_entries(entries: &[DiscoverEntry], query: &str) -> V
     entries
         .iter()
         .filter(|entry| {
-            entry.title.to_string().to_ascii_lowercase().contains(&query)
+            entry
+                .title
+                .to_string()
+                .to_ascii_lowercase()
+                .contains(&query)
                 || entry
                     .author
                     .to_string()
@@ -2571,7 +2576,8 @@ fn filter_category_discover_entries(entries: &[DiscoverEntry], query: &str) -> V
 }
 
 fn apply_category_discover_results(ui: &KalpaWindow, entries: &[DiscoverEntry]) {
-    let rows = filter_category_discover_entries(entries, ui.get_discover_category_filter().as_str());
+    let rows =
+        filter_category_discover_entries(entries, ui.get_discover_category_filter().as_str());
     let selected_index = ui
         .get_selected_discover_index()
         .max(0)
@@ -4363,9 +4369,10 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         let orphaned_model = ui.get_svm_orphaned_files();
         let orphaned = (0..orphaned_model.row_count())
             .filter_map(|index| orphaned_model.row_data(index))
+            .filter(|entry| entry.selected)
             .collect::<Vec<_>>();
         if orphaned.is_empty() {
-            ui.set_status_error_message("No orphaned SavedVariables files to clean.".into());
+            ui.set_status_error_message("Select orphaned SavedVariables files to clean.".into());
             return;
         }
 
@@ -4389,6 +4396,36 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 ui.set_status_error_message(format!("SavedVariables cleanup failed: {error}").into())
             }
         }
+    });
+
+    let svm_orphan_toggle_ui = ui.as_weak();
+    ui.on_svm_orphan_selection_toggled(move |index| {
+        let Some(ui) = svm_orphan_toggle_ui.upgrade() else {
+            return;
+        };
+        let model = ui.get_svm_orphaned_files();
+        let index = index.max(0) as usize;
+        let Some(mut row) = model.row_data(index) else {
+            return;
+        };
+        row.selected = !row.selected;
+        model.set_row_data(index, row);
+        update_svm_cleanup_selected_count(&ui);
+    });
+
+    let svm_orphan_select_all_ui = ui.as_weak();
+    ui.on_svm_orphan_select_all(move |selected| {
+        let Some(ui) = svm_orphan_select_all_ui.upgrade() else {
+            return;
+        };
+        let model = ui.get_svm_orphaned_files();
+        for index in 0..model.row_count() {
+            if let Some(mut row) = model.row_data(index) {
+                row.selected = selected;
+                model.set_row_data(index, row);
+            }
+        }
+        update_svm_cleanup_selected_count(&ui);
     });
 
     let svm_copy_file_ui = ui.as_weak();
@@ -4522,6 +4559,80 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 ui.set_status_error_message(error.into());
             }
         }
+    });
+
+    let svm_editor_select_path_ui = ui.as_weak();
+    let svm_editor_select_path_state = svm_editor_state.clone();
+    ui.on_svm_editor_select_path(move |path_json| {
+        let Some(ui) = svm_editor_select_path_ui.upgrade() else {
+            return;
+        };
+        let result = {
+            let mut state = svm_editor_select_path_state.borrow_mut();
+            select_svm_editor_tree_path(&mut state, path_json.as_str())
+        };
+        match result {
+            Ok(()) => apply_svm_editor_state(&ui, &svm_editor_select_path_state.borrow()),
+            Err(error) => {
+                {
+                    let mut state = svm_editor_select_path_state.borrow_mut();
+                    state.message = error.clone();
+                }
+                apply_svm_editor_state(&ui, &svm_editor_select_path_state.borrow());
+                ui.set_status_error_message(error.into());
+            }
+        }
+    });
+
+    let svm_editor_edit_ui = ui.as_weak();
+    let svm_editor_edit_state = svm_editor_state.clone();
+    ui.on_svm_editor_edit_setting(move |index, value| {
+        let Some(ui) = svm_editor_edit_ui.upgrade() else {
+            return;
+        };
+        let result = {
+            let mut state = svm_editor_edit_state.borrow_mut();
+            edit_svm_editor_setting(&mut state, index as usize, value.as_str())
+        };
+        match result {
+            Ok(()) => apply_svm_editor_state(&ui, &svm_editor_edit_state.borrow()),
+            Err(error) => {
+                {
+                    let mut state = svm_editor_edit_state.borrow_mut();
+                    state.message = error.clone();
+                }
+                apply_svm_editor_state(&ui, &svm_editor_edit_state.borrow());
+                ui.set_status_error_message(error.into());
+            }
+        }
+    });
+
+    let svm_editor_expand_ui = ui.as_weak();
+    let svm_editor_expand_state = svm_editor_state.clone();
+    ui.on_svm_editor_expand_all(move || {
+        let Some(ui) = svm_editor_expand_ui.upgrade() else {
+            return;
+        };
+        {
+            let mut state = svm_editor_expand_state.borrow_mut();
+            state.tree_expanded_all = true;
+            state.message.clear();
+        }
+        apply_svm_editor_state(&ui, &svm_editor_expand_state.borrow());
+    });
+
+    let svm_editor_collapse_ui = ui.as_weak();
+    let svm_editor_collapse_state = svm_editor_state.clone();
+    ui.on_svm_editor_collapse_all(move || {
+        let Some(ui) = svm_editor_collapse_ui.upgrade() else {
+            return;
+        };
+        {
+            let mut state = svm_editor_collapse_state.borrow_mut();
+            state.tree_expanded_all = false;
+            state.message.clear();
+        }
+        apply_svm_editor_state(&ui, &svm_editor_collapse_state.borrow());
     });
 
     let svm_editor_save_ui = ui.as_weak();
@@ -8041,6 +8152,10 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
 
         let mut draft = save_draft.borrow().clone();
         draft.name = normalized_name.to_string();
+        draft.description = ui.get_draft_theme_description().trim().to_string();
+        if draft.description.is_empty() {
+            draft.description = "My custom theme.".to_string();
+        }
         draft.category = "Custom".to_string();
         draft.skin_id = normalize_skin_id(draft.skin_id);
         draft.colors = draft_colors_from_ui(&ui, &draft.colors);
@@ -8071,8 +8186,18 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
 
         let mut draft = preview_draft.borrow().clone();
         let next_colors = draft_colors_from_ui(&ui, &draft.colors);
-        if next_colors == draft.colors {
+        let next_name = ui.get_draft_theme_name().trim().to_string();
+        let next_description = ui.get_draft_theme_description().trim().to_string();
+        let description_changed = next_description != draft.description;
+        let name_changed = !next_name.is_empty() && next_name != draft.name;
+        if next_colors == draft.colors && !description_changed && !name_changed {
             return;
+        }
+        if name_changed {
+            draft.name = next_name;
+        }
+        if description_changed {
+            draft.description = next_description;
         }
         draft.colors = next_colors;
         *preview_draft.borrow_mut() = draft.clone();
@@ -14398,6 +14523,10 @@ fn apply_saved_variables_model(ui: &KalpaWindow, addons: &[AddonEntry]) {
         .iter()
         .filter(|entry| entry.orphaned)
         .cloned()
+        .map(|mut entry| {
+            entry.selected = true;
+            entry
+        })
         .collect::<Vec<_>>();
     let total_size = entries
         .iter()
@@ -14420,7 +14549,17 @@ fn apply_saved_variables_model(ui: &KalpaWindow, addons: &[AddonEntry]) {
     ui.set_svm_has_orphans(!orphaned.is_empty());
     ui.set_svm_has_files(!entries.is_empty());
     ui.set_svm_files(Rc::new(VecModel::from(entries)).into());
+    ui.set_svm_cleanup_selected_count(orphaned.len() as i32);
     ui.set_svm_orphaned_files(Rc::new(VecModel::from(orphaned)).into());
+}
+
+fn update_svm_cleanup_selected_count(ui: &KalpaWindow) {
+    let model = ui.get_svm_orphaned_files();
+    let selected = (0..model.row_count())
+        .filter_map(|index| model.row_data(index))
+        .filter(|entry| entry.selected)
+        .count();
+    ui.set_svm_cleanup_selected_count(selected as i32);
 }
 
 fn refresh_saved_variables_overlay_model(
@@ -14644,6 +14783,7 @@ fn load_svm_editor_selected_file(
     state.tree = Some(response.tree);
     state.stamp = Some(response.stamp);
     state.selected_path = selected_path;
+    state.tree_expanded_all = false;
     state.dirty = false;
     state.message.clear();
     Ok(())
@@ -14657,7 +14797,7 @@ fn apply_svm_editor_state(ui: &KalpaWindow, state: &SvmEditorState) {
     let tree_entries = state
         .tree
         .as_ref()
-        .map(|tree| svm_editor_tree_entries(tree, &state.selected_path))
+        .map(|tree| svm_editor_tree_entries(tree, &state.selected_path, state.tree_expanded_all))
         .unwrap_or_default();
     let setting_entries = svm_editor_setting_entries(state);
     let path_label = if state.selected_path.is_empty() {
@@ -14720,12 +14860,14 @@ fn default_svm_editor_path(tree: &saved_variables::SvTreeNode) -> Option<Vec<Str
 fn svm_editor_tree_entries(
     tree: &saved_variables::SvTreeNode,
     selected_path: &[String],
+    expand_all: bool,
 ) -> Vec<SvmEditorTreeEntry> {
     fn collect(
         node: &saved_variables::SvTreeNode,
         depth: i32,
         path: Vec<String>,
         selected_path: &[String],
+        expand_all: bool,
         rows: &mut Vec<SvmEditorTreeEntry>,
     ) {
         if rows.len() >= 80 {
@@ -14742,10 +14884,12 @@ fn svm_editor_tree_entries(
             let mut child_path = path.clone();
             child_path.push(child.key.clone());
             let child_count = child.children.as_ref().map(Vec::len).unwrap_or(0);
-            let expanded =
-                child_count > 0 && (depth == 0 || path_is_prefix(&child_path, selected_path));
+            let expanded = child_count > 0
+                && (expand_all || depth == 0 || path_is_prefix(&child_path, selected_path));
+            let path_json = serde_json::to_string(&child_path).unwrap_or_else(|_| "[]".to_string());
             rows.push(SvmEditorTreeEntry {
                 label: child.key.clone().into(),
+                path: path_json.into(),
                 count: if child_count == 0 {
                     String::new().into()
                 } else {
@@ -14756,13 +14900,20 @@ fn svm_editor_tree_entries(
                 expanded,
             });
             if expanded {
-                collect(child, depth + 1, child_path, selected_path, rows);
+                collect(
+                    child,
+                    depth + 1,
+                    child_path,
+                    selected_path,
+                    expand_all,
+                    rows,
+                );
             }
         }
     }
 
     let mut rows = Vec::new();
-    collect(tree, 0, Vec::new(), selected_path, &mut rows);
+    collect(tree, 0, Vec::new(), selected_path, expand_all, &mut rows);
     rows
 }
 
@@ -14799,6 +14950,23 @@ fn svm_editor_setting_entries(state: &SvmEditorState) -> Vec<SvmEditorSettingEnt
                 .unwrap_or(false),
         })
         .collect()
+}
+
+fn select_svm_editor_tree_path(state: &mut SvmEditorState, path_json: &str) -> Result<(), String> {
+    let path: Vec<String> = serde_json::from_str(path_json)
+        .map_err(|_| "Could not read the SavedVariables branch path.".to_string())?;
+    let tree = state
+        .tree
+        .as_ref()
+        .ok_or_else(|| "No SavedVariables file loaded.".to_string())?;
+    let node = sv_node_at_path(tree, &path)
+        .ok_or_else(|| "SavedVariables branch not found.".to_string())?;
+    if !matches!(node.value_type, saved_variables::types::SvValueType::Table) {
+        return Err("Select a table branch to inspect its settings.".to_string());
+    }
+    state.selected_path = path;
+    state.message.clear();
+    Ok(())
 }
 
 fn svm_editor_setting_paths(state: &SvmEditorState) -> Vec<Vec<String>> {
@@ -14941,9 +15109,7 @@ fn toggle_svm_editor_setting(state: &mut SvmEditorState, index: usize) -> Result
         node.value_type,
         saved_variables::types::SvValueType::Boolean
     ) {
-        return Err(
-            "Only boolean settings can be toggled in the native editor right now.".to_string(),
-        );
+        return Err("Edit this setting in its value field instead of toggling it.".to_string());
     }
     let current = node
         .value
@@ -14951,6 +15117,61 @@ fn toggle_svm_editor_setting(state: &mut SvmEditorState, index: usize) -> Result
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
     node.value = Some(serde_json::Value::Bool(!current));
+    state.dirty = true;
+    state.message = "Unsaved SavedVariables change.".to_string();
+    Ok(())
+}
+
+fn edit_svm_editor_setting(
+    state: &mut SvmEditorState,
+    index: usize,
+    value: &str,
+) -> Result<(), String> {
+    let path = svm_editor_setting_paths(state)
+        .get(index)
+        .cloned()
+        .ok_or_else(|| "Setting row not found.".to_string())?;
+    let tree = state
+        .tree
+        .as_mut()
+        .ok_or_else(|| "No SavedVariables file loaded.".to_string())?;
+    let node =
+        sv_node_at_path_mut(tree, &path).ok_or_else(|| "Setting node not found.".to_string())?;
+
+    match node.value_type {
+        saved_variables::types::SvValueType::Boolean => {
+            let lowered = value.trim().to_ascii_lowercase();
+            let parsed = match lowered.as_str() {
+                "true" | "1" | "yes" | "on" => true,
+                "false" | "0" | "no" | "off" => false,
+                _ => return Err("Use true or false for this SavedVariables setting.".to_string()),
+            };
+            node.value = Some(serde_json::Value::Bool(parsed));
+        }
+        saved_variables::types::SvValueType::Number => {
+            let trimmed = value.trim();
+            let parsed = trimmed
+                .parse::<f64>()
+                .map_err(|_| "Enter a valid number for this SavedVariables setting.".to_string())?;
+            let number = serde_json::Number::from_f64(parsed).ok_or_else(|| {
+                "Enter a finite number for this SavedVariables setting.".to_string()
+            })?;
+            node.value = Some(serde_json::Value::Number(number));
+        }
+        saved_variables::types::SvValueType::String => {
+            node.value = Some(serde_json::Value::String(value.to_string()));
+            node.raw_lua_value = None;
+        }
+        saved_variables::types::SvValueType::Nil => {
+            node.value = Some(serde_json::Value::String(value.to_string()));
+            node.value_type = saved_variables::types::SvValueType::String;
+            node.raw_lua_value = None;
+        }
+        saved_variables::types::SvValueType::Table => {
+            return Err("Select a child setting before editing a value.".to_string());
+        }
+    }
+
     state.dirty = true;
     state.message = "Unsaved SavedVariables change.".to_string();
     Ok(())
@@ -15136,6 +15357,7 @@ fn saved_variable_entry(
             meter_width: 10,
             system: status == SavedVariableStatus::System,
             orphaned: status == SavedVariableStatus::Orphaned,
+            selected: false,
         },
         size,
     ))
@@ -15623,10 +15845,7 @@ fn apply_runtime_flags(ui: &KalpaWindow, render_preset: NativeRenderPreset) {
     let tokens = ui.global::<Tokens>();
     tokens.set_low_memory_preset(render_preset == NativeRenderPreset::LowMemory);
     tokens.set_reduced_motion(reduced_motion);
-    tokens.set_ambient_motion(env_flag_with_default(
-        "KALPA_AMBIENT_MOTION",
-        false,
-    ));
+    tokens.set_ambient_motion(env_flag_with_default("KALPA_AMBIENT_MOTION", false));
 
     let detail_files_active = std::env::var("KALPA_DETAIL_TAB")
         .map(|value| value.eq_ignore_ascii_case("files"))
@@ -18611,9 +18830,10 @@ CombatMetrics_SavedVariables = {
             r#"TestAddon_SavedVariables = {
     ["Default"] = {
         ["@Account"] = {
-            ["Main"] = {
+                ["Main"] = {
                 ["enabled"] = false,
                 ["size"] = 12,
+                ["theme"] = "classic",
             },
         },
     },
@@ -18639,15 +18859,27 @@ CombatMetrics_SavedVariables = {
             ]
         );
         assert!(
-            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path)
+            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path, false)
                 .iter()
                 .any(|entry| entry.active && entry.label.as_str() == "Main")
+        );
+        assert!(
+            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path, true).len()
+                >= svm_editor_tree_entries(
+                    state.tree.as_ref().unwrap(),
+                    &state.selected_path,
+                    false
+                )
+                .len()
         );
 
         let settings = svm_editor_setting_entries(&state);
         assert!(settings
             .iter()
             .any(|entry| entry.key_name.as_str() == "enabled" && !entry.checked));
+        assert!(settings
+            .iter()
+            .any(|entry| entry.key_name.as_str() == "theme" && entry.value.as_str() == "classic"));
         let enabled_index = settings
             .iter()
             .position(|entry| entry.key_name.as_str() == "enabled")
@@ -18655,10 +18887,47 @@ CombatMetrics_SavedVariables = {
 
         toggle_svm_editor_setting(&mut state, enabled_index).expect("toggle enabled");
         assert!(state.dirty);
+
+        let settings = svm_editor_setting_entries(&state);
+        let theme_index = settings
+            .iter()
+            .position(|entry| entry.key_name.as_str() == "theme")
+            .expect("theme setting exists");
+        edit_svm_editor_setting(&mut state, theme_index, "dark").expect("edit theme string");
+
+        let settings = svm_editor_setting_entries(&state);
+        let size_index = settings
+            .iter()
+            .position(|entry| entry.key_name.as_str() == "size")
+            .expect("size setting exists");
+        edit_svm_editor_setting(&mut state, size_index, "18").expect("edit size number");
+
         let settings = svm_editor_setting_entries(&state);
         assert!(settings
             .iter()
             .any(|entry| entry.key_name.as_str() == "enabled" && entry.checked));
+        assert!(settings
+            .iter()
+            .any(|entry| entry.key_name.as_str() == "theme" && entry.value.as_str() == "dark"));
+        assert!(settings
+            .iter()
+            .any(|entry| entry.key_name.as_str() == "size" && entry.value.as_str() == "18"));
+
+        let account_path = serde_json::to_string(&vec![
+            "TestAddon_SavedVariables".to_string(),
+            "Default".to_string(),
+            "@Account".to_string(),
+        ])
+        .expect("serialize path");
+        select_svm_editor_tree_path(&mut state, &account_path).expect("select account branch");
+        assert_eq!(
+            state.selected_path,
+            vec![
+                "TestAddon_SavedVariables".to_string(),
+                "Default".to_string(),
+                "@Account".to_string()
+            ]
+        );
 
         preview_svm_editor_file(&addons_root, &mut state).expect("preview editor change");
         assert!(state.message.contains("pending change"));
@@ -18666,12 +18935,19 @@ CombatMetrics_SavedVariables = {
         assert!(
             raw_preview.contains("enabled = true") || raw_preview.contains("[\"enabled\"] = true")
         );
+        assert!(
+            raw_preview.contains("theme = \"dark\"")
+                || raw_preview.contains("[\"theme\"] = \"dark\"")
+        );
+        assert!(raw_preview.contains("size = 18") || raw_preview.contains("[\"size\"] = 18"));
 
         save_svm_editor_file(&addons_root, &mut state).expect("save editor change");
         assert!(!state.dirty);
         let updated =
             fs::read_to_string(sv_dir.join("TestAddon.lua")).expect("read saved variable");
         assert!(updated.contains("enabled = true") || updated.contains("[\"enabled\"] = true"));
+        assert!(updated.contains("theme = \"dark\"") || updated.contains("[\"theme\"] = \"dark\""));
+        assert!(updated.contains("size = 18") || updated.contains("[\"size\"] = 18"));
         assert!(sv_dir.join("TestAddon.lua.bak").is_file());
 
         let _ = fs::remove_dir_all(root);
@@ -20586,11 +20862,37 @@ CombatMetrics_SavedVariables = {
         let installed = BTreeSet::new();
         let entries = vec![
             discover_entry(
-                "1", "Combat Metrics", "Solinur", "Combat", "", "", "", "", "", "", "", "", "",
-                1, &installed,
+                "1",
+                "Combat Metrics",
+                "Solinur",
+                "Combat",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                1,
+                &installed,
             ),
             discover_entry(
-                "2", "Inventory Grid", "Crafty", "Bags", "", "", "", "", "", "", "", "", "", 2,
+                "2",
+                "Inventory Grid",
+                "Crafty",
+                "Bags",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                2,
                 &installed,
             ),
         ];
