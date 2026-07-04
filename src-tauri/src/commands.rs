@@ -3165,6 +3165,18 @@ fn validate_relative_path(relative_path: &str) -> Result<(), String> {
     if relative_path.starts_with('/') || relative_path.starts_with('\\') {
         return Err("Path must be relative.".to_string());
     }
+    // Reject Windows-forbidden characters (same set as `validate_name`) in any
+    // path segment. Without this, ':' slips through and enables NTFS
+    // alternate-data-stream syntax ("file.lua:stream") or a drive-relative path
+    // ("C:foo"), neither of which is caught by the checks above.
+    let forbidden: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+    for segment in relative_path.split(['/', '\\']) {
+        if segment.contains(forbidden) {
+            return Err(
+                "Path contains a forbidden character (< > : \" | ? * are not allowed).".to_string(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -4333,6 +4345,13 @@ pub struct BackupInfo {
     pub file_count: u32,
     pub total_size: u64,
     pub kind: BackupKind,
+    /// Distinct megaservers this backup's world-scoped subtrees span (read
+    /// from the character-backup metadata sidecar). `> 1` means an
+    /// Unknown-server backup silently bundled a same-named twin from another
+    /// server. `None` for non-`Character` backups or if the sidecar can't be
+    /// read (e.g. an older backup predating this field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worlds_spanned: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -4419,13 +4438,29 @@ pub async fn list_backups(
                 .unwrap_or(0);
             let created_at = metadata::format_timestamp(created_at_epoch);
 
-            let kind = if name.starts_with("char-") {
+            // Only classify a `char-`-named dir as Character when it actually
+            // carries the v2 marker file — an unmarked `char-*` dir (e.g. a
+            // legacy/manual backup routed there by `resolve_char_backup_name`)
+            // restores via the WholeFile path (see classify_backup_for_restore),
+            // so it must display as Manual to match, not claim a Character
+            // format it doesn't have.
+            let kind = if name.starts_with("char-") && path.join(CHAR_BACKUP_MARKER).is_file() {
                 BackupKind::Character
             } else if name.starts_with("auto-before-restore-") {
                 BackupKind::AutoBeforeRestore
             } else {
                 BackupKind::Manual
             };
+
+            // For a Character backup, read `worlds_spanned` from its metadata
+            // sidecar so the restore UI can warn about an Unknown-server backup
+            // that silently spans multiple megaservers. Best-effort: a missing or
+            // unreadable sidecar (e.g. an older backup) just yields `None`.
+            let worlds_spanned = (kind == BackupKind::Character)
+                .then(|| fs::read(path.join(CHAR_BACKUP_META)).ok())
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<CharBackupMeta>(&bytes).ok())
+                .map(|m| m.worlds_spanned);
 
             results.push(BackupInfo {
                 name,
@@ -4434,6 +4469,7 @@ pub async fn list_backups(
                 file_count,
                 total_size,
                 kind,
+                worlds_spanned,
             });
         }
 
@@ -4447,8 +4483,9 @@ pub async fn list_backups(
 /// Reserved directory-name prefixes inside `kalpa-backups`. User-created manual
 /// backups must not use them, or they could collide with — and the transactional
 /// swap could overwrite — a character backup (`char-`), a safe-restore snapshot
-/// (`auto-before-restore-`), or a dot-prefixed scratch dir.
-const RESERVED_BACKUP_PREFIXES: &[&str] = &["char-", "auto-before-restore-"];
+/// (`auto-before-restore-`), an auto-cleanup snapshot (`auto-cleanup-`, created
+/// by `delete_saved_variables_blocking` in `io.rs`), or a dot-prefixed scratch dir.
+const RESERVED_BACKUP_PREFIXES: &[&str] = &["char-", "auto-before-restore-", "auto-cleanup-"];
 
 /// Validate a user-supplied *manual* backup name: the general name rules plus a
 /// rejection of the reserved internal prefixes. (Restore/delete keep using
@@ -4473,6 +4510,11 @@ pub async fn create_backup(
     validate_backup_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
+        // Serialize against every other backup-surface command (restore/delete/
+        // character-backup) for the whole operation.
+        let _mutation_guard = BACKUP_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sv_dir = saved_variables_dir(&addons_dir);
         if !sv_dir.is_dir() {
             return Err("SavedVariables folder not found.".to_string());
@@ -4487,20 +4529,50 @@ pub async fn create_backup(
             return Err(format!("Backup '{backup_name}' already exists."));
         }
 
-        fs::create_dir_all(&backup_path).map_err(|e| format!("Failed to create backup: {e}"))?;
+        // Best-effort sweep of stale `.tmp-manual-*` staging dirs left behind by a
+        // crash between a prior staging-dir creation and its final rename below.
+        // Safe to remove unconditionally here: `BACKUP_MUTATION_LOCK` (acquired
+        // above) serializes every `create_backup` call, so none can be mid-staging
+        // concurrently, and manual staging is always disposable — a partial
+        // manual backup is discarded on failure, never recovered.
+        if let Ok(entries) = fs::read_dir(&backups) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(".tmp-manual-"))
+                {
+                    let _ = fs::remove_dir_all(&path);
+                }
+            }
+        }
+
+        // Stage into a dot-prefixed sibling dir and only rename it into the final
+        // visible name once every file has copied successfully. This mirrors the
+        // character-backup staging pattern: a crash mid-loop leaves only an
+        // ignored `.tmp-manual-*` scratch dir (list_backups skips '.'-prefixed
+        // entries) instead of a partial backup under the real, restorable name.
+        let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = backups.join(format!(".tmp-manual-{backup_name}-{seq}"));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup: {e}"))?;
 
         // Copy all .lua files from SavedVariables
         let mut file_count: u32 = 0;
         let mut total_size: u64 = 0;
-        let entries =
-            fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {e}"))?;
+        let entries = fs::read_dir(&sv_dir).map_err(|e| {
+            let _ = fs::remove_dir_all(&staging);
+            format!("Failed to read SavedVariables: {e}")
+        })?;
 
         let mut failed: Vec<String> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
                 if let Some(name) = path.file_name() {
-                    let dest = backup_path.join(name);
+                    let dest = staging.join(name);
                     match fs::copy(&path, &dest) {
                         Ok(_) => {
                             file_count += 1;
@@ -4515,11 +4587,18 @@ pub async fn create_backup(
         }
 
         if !failed.is_empty() {
+            let _ = fs::remove_dir_all(&staging);
             return Err(format!(
                 "Backup incomplete — {} file(s) failed to copy: {}",
                 failed.len(),
                 failed.join(", ")
             ));
+        }
+
+        // All files copied — publish atomically under the real name.
+        if let Err(e) = fs::rename(&staging, &backup_path) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Failed to finalize backup: {e}"));
         }
 
         let created_at_epoch = std::time::SystemTime::now()
@@ -4528,9 +4607,12 @@ pub async fn create_backup(
             .as_secs();
         let created_at = metadata::format_timestamp(created_at_epoch);
 
-        let kind = if backup_name.starts_with("char-") {
-            BackupKind::Character
-        } else if backup_name.starts_with("auto-before-restore-") {
+        // Manual backups created here never carry the `char-` marked format —
+        // reserved prefixes are rejected up front by `validate_backup_name`, and
+        // this path never writes CHAR_BACKUP_MARKER — so classify strictly
+        // between AutoBeforeRestore and Manual (see list_backups for the
+        // marker-based Character classification).
+        let kind = if backup_name.starts_with("auto-before-restore-") {
             BackupKind::AutoBeforeRestore
         } else {
             BackupKind::Manual
@@ -4543,6 +4625,9 @@ pub async fn create_backup(
             file_count,
             total_size,
             kind,
+            // This path never creates a Character backup (see `kind` above), so
+            // there is no sidecar to read a world span from.
+            worlds_spanned: None,
         })
     })
     .await
@@ -4556,10 +4641,9 @@ pub struct SafeRestoreResult {
     pub safety_snapshot: Option<BackupInfo>,
 }
 
-/// Remove oldest `auto-before-restore-*` snapshots, keeping at most `keep` of the most recent.
+/// Remove oldest snapshots matching `prefix`, keeping at most `keep` of the most recent.
 /// Errors are logged but do not fail the caller — pruning is best-effort.
-fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
-    let prefix = "auto-before-restore-";
+fn prune_auto_snapshots(backups_dir: &std::path::Path, prefix: &str, keep: usize) {
     let mut dirs: Vec<_> = match fs::read_dir(backups_dir) {
         Ok(rd) => rd
             .flatten()
@@ -4586,9 +4670,14 @@ fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
 
 /// Restore a per-character (v2) backup by MERGING each stored character subtree
 /// into the matching live SavedVariables file, leaving other characters and all
-/// account-wide data byte-identical. Returns `(restored_file_count, failures)`;
-/// failures are surfaced by the caller (the live data is unchanged on failure of
-/// a given file, and the caller has already taken a safety snapshot).
+/// account-wide data byte-identical. Returns `(restored_file_count, failures)`.
+///
+/// This is all-or-nothing: every backup file is read, extracted, and merged
+/// into memory first (phase 1); only if every file merges cleanly are the
+/// results written to disk (phase 2). If any file fails during phase 1, the
+/// restore aborts before writing anything, so live SavedVariables can never
+/// be left in a mixed old/new state (the caller has already taken a safety
+/// snapshot before calling this).
 fn restore_character_subtrees_merge(
     backup_path: &Path,
     sv_dir: &Path,
@@ -4621,6 +4710,12 @@ fn restore_character_subtrees_merge(
         }
     };
 
+    // Phase 1: read + extract + merge every backup file into memory without
+    // touching any live SavedVariables file. If any file fails, abort
+    // immediately (before phase 2 writes anything) so a mid-list failure can
+    // never leave the live data in a mixed old/new state.
+    let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
+
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -4638,13 +4733,13 @@ fn restore_character_subtrees_merge(
             Ok(b) => b,
             Err(e) => {
                 failed.push(format!("{name_str}: {e}"));
-                continue;
+                return (0, failed);
             }
         };
         let blocks = extract_character_blocks(&stored, &base, world);
         if blocks.is_empty() {
             failed.push(format!("{name_str}: no character subtree found in backup"));
-            continue;
+            return (0, failed);
         }
         let live_path = sv_dir.join(&name_str);
         let mut live = if live_path.is_file() {
@@ -4652,27 +4747,28 @@ fn restore_character_subtrees_merge(
                 Ok(b) => b,
                 Err(e) => {
                     failed.push(format!("{name_str}: {e}"));
-                    continue;
+                    return (0, failed);
                 }
             }
         } else {
             Vec::new()
         };
-        let mut ok = true;
         for block in &blocks {
             match merge_character_block(&live, block) {
                 Ok(merged) => live = merged,
                 Err(e) => {
                     failed.push(format!("{name_str}: {e}"));
-                    ok = false;
-                    break;
+                    return (0, failed);
                 }
             }
         }
-        if !ok {
-            continue;
-        }
-        match sv_io::write_raw_bytes(sv_dir, &name_str, &live) {
+        buffered.push((name_str, live));
+    }
+
+    // Phase 2: every file merged cleanly in phase 1 (no early return above),
+    // so commit all buffered writes.
+    for (name_str, bytes) in buffered {
+        match sv_io::write_raw_bytes(sv_dir, &name_str, &bytes) {
             Ok(_) => restored += 1,
             Err(e) => failed.push(format!("{name_str}: {e}")),
         }
@@ -4699,6 +4795,11 @@ pub async fn restore_backup_safe(
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
+    // Serialize against every other backup-surface command (create/delete/
+    // character-backup) for the whole operation.
+    let _mutation_guard = BACKUP_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sv_dir = saved_variables_dir(&addons_dir);
     let backup_path = backups_dir(&addons_dir).join(&backup_name);
 
@@ -4751,11 +4852,12 @@ pub async fn restore_backup_safe(
                 file_count,
                 total_size,
                 kind: BackupKind::AutoBeforeRestore,
+                worlds_spanned: None,
             });
 
             // Keep only the 3 most recent auto-before-restore snapshots to prevent
             // unbounded disk growth (SavedVariables can reach 1-2 GB on trade-addon-heavy accounts).
-            prune_auto_snapshots(&backups_dir(&addons_dir), 3);
+            prune_auto_snapshots(&backups_dir(&addons_dir), "auto-before-restore-", 3);
         }
     }
 
@@ -4776,9 +4878,13 @@ pub async fn restore_backup_safe(
         }
         CharRestoreMode::WholeFile => {
             // Manual / auto-before-restore / legacy whole-file character backup:
-            // copy whole files into the SavedVariables folder.
+            // read every source file into memory first (phase 1), then only
+            // write them into the SavedVariables folder (phase 2) if every
+            // read succeeded — a mid-list read failure must not leave the
+            // live data half-restored.
             let entries =
                 fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {e}"))?;
+            let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
             for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
@@ -4788,15 +4894,24 @@ pub async fn restore_backup_safe(
                     if name.to_str().map(|n| n.starts_with('.')).unwrap_or(false) {
                         continue;
                     }
-                    let dest = sv_dir.join(name);
-                    match fs::copy(&path, &dest) {
-                        Ok(_) => restored += 1,
+                    let name_str = name.to_string_lossy().to_string();
+                    match fs::read(&path) {
+                        Ok(bytes) => buffered.push((name_str, bytes)),
                         Err(e) => {
-                            failed.push(format!("{}: {}", name.to_string_lossy(), e));
+                            failed.push(format!("{name_str}: {e}"));
                         }
                     }
                 }
             }
+            }
+
+            if failed.is_empty() {
+                for (name_str, bytes) in buffered {
+                    match sv_io::write_raw_bytes(&sv_dir, &name_str, &bytes) {
+                        Ok(_) => restored += 1,
+                        Err(e) => failed.push(format!("{name_str}: {e}")),
+                    }
+                }
             }
         }
     }
@@ -4847,6 +4962,13 @@ pub async fn delete_backup(
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
+        // Serialize against every other backup-surface command (create/restore/
+        // character-backup) for the whole operation. Acquired before
+        // `BACKUP_FINALIZE_LOCK` (taken below by `recover_orphaned_backups` and
+        // `purge_backup_scratch`) to keep lock ordering consistent.
+        let _mutation_guard = BACKUP_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let backups_root = backups_dir(&addons_dir);
         // Reconcile crash leftovers before deleting so a deletion can't race with a
         // pending recovery for the same backup name.
@@ -5308,6 +5430,20 @@ static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// directory can't race on it (the per-call staging/tombstone handle the rest).
 static BACKUP_FINALIZE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Serializes whole backup-surface commands (`create_backup`,
+/// `restore_backup_safe`, `delete_backup`, `backup_character_settings`) against
+/// each other, so e.g. a restore can't race a concurrent create/delete over the
+/// same `kalpa-backups` folder. This is a *separate* lock from
+/// `BACKUP_FINALIZE_LOCK` — that one is non-reentrant and already held by
+/// `finalize_backup_replace`/`recover_orphaned_backups`, which are called from
+/// inside some of these commands, so reusing it here would self-deadlock.
+/// Lock ordering: callers always acquire `BACKUP_MUTATION_LOCK` first (for the
+/// whole command) and only afterwards, while still holding it, acquire
+/// `BACKUP_FINALIZE_LOCK` (via `recover_orphaned_backups`/
+/// `finalize_backup_replace`/`purge_backup_scratch`) — never the reverse — so
+/// the two locks can't deadlock each other.
+static BACKUP_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
 /// Extract `character_name`'s per-character subtree from each `.lua`
 /// SavedVariables file and write a minimal, self-contained, restorable copy of
 /// just that subtree into `staging` (same filename). `world` restricts
@@ -5315,8 +5451,14 @@ static BACKUP_FINALIZE_LOCK: Mutex<()> = Mutex::new(());
 /// `Unknown`-server recovered characters). Account-wide data and other
 /// characters are excluded.
 ///
-/// Returns `(matched, copied, last_err)` where `matched` is files that yielded at
-/// least one subtree and `copied` is files whose minimal copy was written.
+/// Returns `(matched, copied, last_err, worlds_spanned)` where `matched` is
+/// files that yielded at least one subtree, `copied` is files whose minimal
+/// copy was written, and `worlds_spanned` is the count of DISTINCT world-scoped
+/// layers seen across every matched block (account-only data contributes 0).
+/// This is only ever `> 1` for an Unknown-server backup (`world == None`),
+/// which takes world-scoped subtrees from every megaserver since it has no
+/// single world to filter to — a value `> 1` means a same-named twin on
+/// another server was silently bundled into this backup.
 /// Aborts with `Err` if any `.lua` file cannot be read, so an incomplete scan
 /// never produces an incomplete backup that could replace a good one.
 fn stage_character_subtrees(
@@ -5324,7 +5466,7 @@ fn stage_character_subtrees(
     character_name: &str,
     world: Option<&str>,
     staging: &Path,
-) -> Result<(u32, u32, Option<String>), String> {
+) -> Result<(u32, u32, Option<String>, u32), String> {
     use crate::saved_variables::char_backup::{
         build_backup_file, char_base, extract_character_blocks,
     };
@@ -5336,6 +5478,10 @@ fn stage_character_subtrees(
     let mut matched: u32 = 0;
     let mut copied: u32 = 0;
     let mut last_err: Option<String> = None;
+    // Distinct world-layer keys seen across every matched block. Only account-
+    // keyed blocks (no world layer) leave this empty; a world-scoped block adds
+    // its megaserver key.
+    let mut worlds_seen: HashSet<Vec<u8>> = HashSet::new();
 
     for entry in entries {
         // Abort on a directory-enumeration error rather than silently omitting a
@@ -5357,6 +5503,11 @@ fn stage_character_subtrees(
             continue;
         }
         matched += 1;
+        for block in &blocks {
+            if let Some(w) = block.world_layer() {
+                worlds_seen.insert(w.to_vec());
+            }
+        }
         match build_backup_file(&blocks) {
             Ok(content) => match fs::write(staging.join(&fname), &content) {
                 Ok(_) => copied += 1,
@@ -5369,7 +5520,7 @@ fn stage_character_subtrees(
         }
     }
 
-    Ok((matched, copied, last_err))
+    Ok((matched, copied, last_err, worlds_seen.len() as u32))
 }
 
 /// Atomically replace `final_dir` with `staging`, preserving the previous
@@ -5521,6 +5672,14 @@ struct CharBackupMeta {
     /// The character's megaserver as shown in the UI (a known megaserver, or
     /// `Unknown`); informational/display only.
     server: String,
+    /// Count of DISTINCT world-scoped layers this backup's subtrees span (see
+    /// `stage_character_subtrees`). Always `<= 1` for a known-server backup
+    /// (isolated by `world`); a value `> 1` only occurs for an Unknown-server
+    /// backup and means a same-named twin on another megaserver was silently
+    /// bundled in. Additive field: `#[serde(default)]` so older backups
+    /// without it deserialize as `0` (no false warning).
+    #[serde(default)]
+    worlds_spanned: u32,
 }
 
 /// How `restore_backup_safe` should restore a backup directory.
@@ -5631,6 +5790,18 @@ fn resolve_char_backup_name(backups_root: &Path, backup_name: &str) -> Option<St
     })
 }
 
+/// Result of [`backup_character_settings`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharBackupResult {
+    /// Files copied into the backup (previously the whole return value).
+    pub restored_files: u32,
+    /// Distinct megaservers this backup's world-scoped subtrees span. `> 1`
+    /// only for an Unknown-server character, and means a same-named twin on
+    /// another server was silently bundled in — the caller should warn.
+    pub worlds_spanned: u32,
+}
+
 #[tauri::command]
 pub async fn backup_character_settings(
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -5638,7 +5809,7 @@ pub async fn backup_character_settings(
     character_name: String,
     server: String,
     backup_name: String,
-) -> Result<u32, String> {
+) -> Result<CharBackupResult, String> {
     if character_name.trim().is_empty() {
         return Err("Character name cannot be empty.".to_string());
     }
@@ -5652,6 +5823,14 @@ pub async fn backup_character_settings(
         if !sv_dir.is_dir() {
             return Err("SavedVariables folder not found.".to_string());
         }
+
+        // Serialize against every other backup-surface command (create/restore/
+        // delete) for the whole operation. Acquired before `BACKUP_FINALIZE_LOCK`
+        // (taken below by `recover_orphaned_backups`/`finalize_backup_replace`) to
+        // keep lock ordering consistent.
+        let _mutation_guard = BACKUP_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Restrict world-scoped subtrees to this character's megaserver so a same-name
         // NA/EU twin is backed up independently. A non-megaserver `server` (the
@@ -5696,15 +5875,15 @@ pub async fn backup_character_settings(
         // Extract + stage just this character's per-character subtree(s) from each
         // file. Aborts if any file can't be read, so an incomplete scan never
         // silently produces (or installs) an incomplete backup.
-        let (matched, copied, last_copy_err) =
+        let (matched, copied, last_copy_err, worlds_spanned) =
             match stage_character_subtrees(&sv_dir, &character_name, world, &staging) {
                 Ok(counts) => counts,
                 Err(e) => {
                     let _ = fs::remove_dir_all(&staging);
                     return Err(format!(
                         "Could not read all SavedVariables files while backing up \
-                     \"{character_name}\" ({e}). Backup aborted to avoid an incomplete \
-                     copy; close ESO and try again."
+                         \"{character_name}\" ({e}). Backup aborted to avoid an incomplete \
+                         copy; close ESO and try again."
                     ));
                 }
             };
@@ -5717,7 +5896,7 @@ pub async fn backup_character_settings(
             let _ = fs::remove_dir_all(&staging);
             return Err(format!(
                 "No per-character SavedVariables data found for \"{character_name}\". \
-             This character may only use account-wide addon settings."
+                 This character may only use account-wide addon settings."
             ));
         }
 
@@ -5729,7 +5908,7 @@ pub async fn backup_character_settings(
             let detail = last_copy_err.map(|e| format!(" ({e})")).unwrap_or_default();
             return Err(format!(
                 "Backed up only {copied} of {matched} SavedVariables files for \
-             \"{character_name}\"; some files could not be saved{detail}."
+                 \"{character_name}\"; some files could not be saved{detail}."
             ));
         }
 
@@ -5747,6 +5926,7 @@ pub async fn backup_character_settings(
             version: CHAR_BACKUP_VERSION,
             character: character_name.clone(),
             server: server.clone(),
+            worlds_spanned,
         };
         match serde_json::to_vec_pretty(&meta) {
             Ok(json) => {
@@ -5766,7 +5946,10 @@ pub async fn backup_character_settings(
         finalize_backup_replace(&staging, &final_dir, &tombstone)
             .map_err(|e| format!("Failed to finalize backup: {e}"))?;
 
-        Ok(copied)
+        Ok(CharBackupResult {
+            restored_files: copied,
+            worlds_spanned,
+        })
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -8161,7 +8344,13 @@ pub async fn delete_saved_variables(
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        sv_io::delete_saved_variables_blocking(&addons_dir, &file_names)
+        let result = sv_io::delete_saved_variables_blocking(&addons_dir, &file_names);
+        if result.is_ok() {
+            // Keep only the 3 most recent auto-cleanup snapshots to prevent
+            // unbounded disk growth from repeated deletes; best-effort.
+            prune_auto_snapshots(&backups_dir(&addons_dir), "auto-cleanup-", 3);
+        }
+        result
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -8417,6 +8606,35 @@ mod tests {
         assert_eq!(download_thread_count(50), 6);
         // Defensive: an empty batch never yields a zero-thread pool.
         assert_eq!(download_thread_count(0), 1);
+    }
+
+    #[test]
+    fn prune_auto_snapshots_keeps_newest_removes_oldest() {
+        // Names embed epoch timestamps and are sorted lexicographically, so an
+        // inverted sort would delete the newest snapshots instead of the oldest.
+        let tmp = tempfile::tempdir().unwrap();
+        let backups_dir = tmp.path();
+        let prefix = "auto-before-restore-";
+        let epochs = [1_000_u64, 1_100, 1_200, 1_300, 1_400];
+        for epoch in epochs {
+            fs::create_dir_all(backups_dir.join(format!("{prefix}{epoch}"))).unwrap();
+        }
+
+        prune_auto_snapshots(backups_dir, prefix, 3);
+
+        let remaining: std::collections::HashSet<String> = fs::read_dir(backups_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+
+        // Only the 3 highest-epoch snapshots survive.
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining.contains(&format!("{prefix}1200")));
+        assert!(remaining.contains(&format!("{prefix}1300")));
+        assert!(remaining.contains(&format!("{prefix}1400")));
+        assert!(!remaining.contains(&format!("{prefix}1000")));
+        assert!(!remaining.contains(&format!("{prefix}1100")));
     }
 
     /// Build a roster slice of `(raw_key, world)` from terse pairs.
@@ -8703,10 +8921,22 @@ mod tests {
         // Manual backups must not collide with internal namespaces.
         assert!(validate_backup_name("char-raid").is_err());
         assert!(validate_backup_name("auto-before-restore-2026").is_err());
+        assert!(validate_backup_name("auto-cleanup-2026").is_err());
         assert!(validate_backup_name(".staging").is_err());
         // Ordinary names are fine.
         assert!(validate_backup_name("my raid backup").is_ok());
         assert!(validate_backup_name("character-naming").is_ok());
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_colon_tricks() {
+        // NTFS alternate-data-stream syntax must be rejected.
+        assert!(validate_relative_path("a.lua:stream").is_err());
+        // Windows drive-relative paths (no leading separator, so not caught by
+        // the absolute-path/leading-separator checks) must also be rejected.
+        assert!(validate_relative_path("C:foo").is_err());
+        // Ordinary relative paths remain valid.
+        assert!(validate_relative_path("Sub/dir/file.lua").is_ok());
     }
 
     /// A world-scoped NA/EU twin file plus a non-.lua decoy.
@@ -8735,11 +8965,13 @@ mod tests {
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let (matched, copied, err) =
+        let (matched, copied, err, worlds_spanned) =
             stage_character_subtrees(&sv, "Bob", Some("NA Megaserver"), &staging).unwrap();
         assert_eq!(matched, 1);
         assert_eq!(copied, 1);
         assert!(err.is_none());
+        // Known-server backup: isolated to a single world, so span is 1.
+        assert_eq!(worlds_spanned, 1);
 
         // The staged minimal file holds NA Bob but not EU Bob.
         let staged = fs::read(staging.join("Addon.lua")).unwrap();
@@ -8747,6 +8979,27 @@ mod tests {
         assert!(s.contains("\"NA\""));
         assert!(!s.contains("\"EU\""));
         assert!(!staging.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn stage_subtrees_unknown_server_reports_worlds_spanned() {
+        // An Unknown-server (world == None) backup takes world-scoped subtrees
+        // from EVERY megaserver, so a same-named NA/EU twin both land in the
+        // same backup. worlds_spanned must surface that as 2 so the caller can
+        // warn, even though the staged file itself has no way to tell the
+        // twins apart later.
+        let tmp = tempfile::tempdir().unwrap();
+        let sv = tmp.path().join("SavedVariables");
+        write_twin_sv(&sv);
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        let (matched, copied, err, worlds_spanned) =
+            stage_character_subtrees(&sv, "Bob", None, &staging).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(copied, 1);
+        assert!(err.is_none());
+        assert_eq!(worlds_spanned, 2, "NA + EU twin both bundled in");
     }
 
     #[test]
@@ -8768,7 +9021,7 @@ mod tests {
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let (matched, _, _) =
+        let (matched, _, _, _) =
             stage_character_subtrees(&sv, "Bob", Some("NA Megaserver"), &staging).unwrap();
         assert_eq!(matched, 0);
     }
@@ -8790,7 +9043,8 @@ mod tests {
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let (matched, copied, err) = stage_character_subtrees(&sv, "Bob", None, &staging).unwrap();
+        let (matched, copied, err, _) =
+            stage_character_subtrees(&sv, "Bob", None, &staging).unwrap();
         assert_eq!((matched, copied), (1, 1));
         assert!(err.is_none());
         let staged = fs::read(staging.join("Addon.lua")).unwrap();
@@ -8805,6 +9059,7 @@ mod tests {
             version: CHAR_BACKUP_VERSION,
             character: "Bob".to_string(),
             server: "NA Megaserver".to_string(),
+            worlds_spanned: 1,
         })
         .unwrap();
 
@@ -8905,6 +9160,7 @@ mod tests {
             version: CHAR_BACKUP_VERSION,
             character: "Bob".to_string(),
             server: "NA Megaserver".to_string(),
+            worlds_spanned: 1,
         };
         fs::write(
             backup_dir.join(CHAR_BACKUP_META),

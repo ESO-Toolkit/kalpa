@@ -1805,6 +1805,7 @@ function CopyProfileTab({
   const [destKey, setDestKey] = useState<string>("");
   const [customDest, setCustomDest] = useState<string>("");
   const [copying, setCopying] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const currentFile = useMemo(
     () => files.find((f) => f.fileName === selectedFile),
@@ -2001,7 +2002,18 @@ function CopyProfileTab({
           <Button
             className="mt-2"
             size="sm"
-            onClick={() => void handleCopy()}
+            onClick={() => {
+              if (destExists) {
+                setConfirmState({
+                  title: "Overwrite existing profile",
+                  description: `"${actualDest}" already has settings in ${currentFile?.addonName}.lua. Copying "${sourceKey}" will overwrite them. A .bak is kept and can be restored from the Editor tab.`,
+                  confirmLabel: "Overwrite",
+                  onConfirm: () => void handleCopy(),
+                });
+              } else {
+                void handleCopy();
+              }
+            }}
             disabled={copying || !actualDest.trim() || !!customError}
           >
             <CopyIcon className="mr-1 size-3" />
@@ -2009,6 +2021,8 @@ function CopyProfileTab({
           </Button>
         </div>
       )}
+
+      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
