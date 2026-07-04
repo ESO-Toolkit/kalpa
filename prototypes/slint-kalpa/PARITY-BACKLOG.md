@@ -24,6 +24,17 @@ Anchors are `ui/kalpa.slint` and `src/main.rs` in this crate unless noted; React
   below, now DONE). Verified: picker renders, selection applies.
 - **Uploader fight note** — the preview no longer silently drops fights; an honest line
   clarifies the uploader hands off the entire log.
+- **Uploader richer fight preview** — `scan_native_uploader_log` now tracks the zone from
+  `ZONE_CHANGED` and titles each fight by zone, adds quick-reset / long-pull duration hints,
+  and raises the preview cap 4 → 6 (`main.rs`). Tested.
+- **Uploader split workbench (ToS-safe)** — the production splitter/scanner
+  (`src-tauri/src/uploader/{types,tail_io,scanner,splitter}.rs`) are now `#[path]`-included
+  and driven by a native Split modal (`SplitWorkbench` in `kalpa.slint`): scan once on open,
+  By-fight / By-session modes, per-item toggle, select-all/clear, and byte-range writes to
+  CFA-safe app-data (`%APPDATA%\Kalpa\log-splits`). Upload still hands off; only the local
+  slice is native. Verified end-to-end (scan → select → split → valid single-fight logs on
+  disk) and unit-tested (`split_plan_*`, `uploader_split_fight_title_*`). Brought 35 of the
+  production splitter/scanner tests into the prototype suite (now 404 pass).
 
 ## Ship-readiness (all green)
 
@@ -107,15 +118,16 @@ Anchors are `ui/kalpa.slint` and `src/main.rs` in this crate unless noted; React
 
 ## LARGER FEATURES (deliberate builds; some need a product call)
 
-- **Uploader split workbench (ToS-safe).** Local split by session/fight with per-item include +
-  naming, byte-range file writes to the Logs folder — upload stays the Archon handoff. Needs
-  per-session offsets/size/realm + per-fight offsets in the scan (`main.rs:6729`,
-  `NativeUploaderPreflight`/`NativeUploaderFight` `main.rs:540-553`) and a new modal
-  (`kalpa.slint`, sibling to `UploaderFightRow`). Highest-lift ToS-safe uploader item.
-- **Uploader fight richness + history (ToS-safe).** Parse zone/boss names per fight and title
-  boss > zone > ordinal (`main.rs:6729,6833`); show all fights + "+N more" instead of the silent
-  4-cap (`main.rs:6507`, `kalpa.slint`); local handoff history + paste-report-link reopen
-  (`parseReportCode`); pass guild through the CLI (currently `--guild null`, `main.rs:6933`).
+- ~~**Uploader split workbench (ToS-safe).**~~ **DONE** (see "Already shipped"). Built on the
+  production splitter/scanner rather than the prototype's own scan, so it gets real per-session
+  offsets/size/realm + per-fight offsets + zone/boss names for free; writes to app-data (not the
+  Logs folder) to dodge Controlled Folder Access.
+- **Uploader fight richness + history (ToS-safe).** Zone titling + duration hints + raised cap are
+  **DONE** (see "Already shipped"). Still open, low-value under the handoff model: *boss*-name
+  titling in the *inline* preview (the split modal already does boss > zone > ordinal via the
+  production scanner); local handoff history + paste-report-link reopen (`parseReportCode`) — worth
+  little because the handoff never returns a report code to Kalpa; pass guild through the CLI
+  (currently `--guild null`, `main.rs`).
 - **Theme skin picker (new feature for BOTH apps).** Neither editor exposes skins today; custom
   themes are color-only by design in React and native. Native is cheap to add — the skin runtime
   (`Tokens.skin-kind`, 8 `assets/skins/*.svg`, `skin_id` model, import preservation) is already
@@ -125,12 +137,20 @@ Anchors are `ui/kalpa.slint` and `src/main.rs` in this crate unless noted; React
   (`main.rs:15052`), file dropdown instead of cycle (`kalpa.slint:9803`), visual diff preview
   (data already computed, `main.rs:15229`).
 
-## INTENTIONAL HANDOFFS (do NOT reimplement without product/legal sign-off)
+## ARCHITECTURE-GATED (needs a Kalpa-owned WebView, or a product decision)
 
-- **Native ESO Logs upload / sign-in / live direct streaming.** There is no ToS-compliant way to
-  own the upload call; spoofing was explicitly rejected. The upload stays an external Archon App
-  handoff (`launch_external_uploader`, `main.rs:6911`). Do not build `DirectUploadSection`,
-  `uploader_login_esologs`, `uploader_upload_log`, or the native live fight ticker.
+- **Native ESO Logs upload / sign-in / live direct streaming.** CORRECTION to an earlier note in
+  this file: production *does* ship a native uploader (`src-tauri/src/uploader/native/*` +
+  `uploader_login_esologs` / `uploader_upload_log` / `uploader_start_live`), opt-in with the Archon
+  handoff as the default. It is NOT ToS-blocked. What the Slint prototype lacks is the **sign-in
+  surface**: `uploader_login_esologs` opens "a webview Kalpa owns" for ESO Logs' OAuth, and a
+  WebView-less Slint shell has none — so there is no session cookie, and `uploader_upload_log` /
+  `uploader_start_live` are gated downstream of it. The encoder + transport
+  (`native::{encode,events,format,client}`) are pure Rust and portable, but wiring them for a
+  "signed-in-elsewhere-only" path (reading the shared `StoredSessionProvider` cookie) is a large
+  port that yields a partial UX; do it only on a product decision. Until then the upload stays the
+  external Archon App handoff (`launch_external_uploader`, `main.rs`). The **split workbench above**
+  is the shipped ToS-safe slice of "uploader parity".
 - **Authenticated Pack Hub mutations** — edit/delete ("Manage"), publish/draft, private
   share-codes, voting. These correctly defer to the signed-in WebView Pack Hub
   (`return_to_webview_shell`, `main.rs:4046,4138`). Local `.esopack` export stays native.
