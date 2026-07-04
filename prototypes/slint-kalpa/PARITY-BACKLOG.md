@@ -38,6 +38,11 @@ Anchors are `ui/kalpa.slint` and `src/main.rs` in this crate unless noted; React
 
 ## MUST-FIX (real bugs / data loss)
 
+> **Update:** #1, #2, #3 (discard-on-close/switch), #5, #6, #7 are now **DONE** on this
+> branch and verified. Still **OPEN**: #4 (Pack Hub create tags — low-value, publish is a
+> handoff), and the ESO-running-*save* guard from #3 (the discard-on-close/switch confirm is
+> done; a "SavedVariables save while ESO is running" warning is not yet wired).
+
 1. **SavedVariables string/number editors are effectively unusable.** kind 1/2 rows overlay
    an invisible `TextEdit` (`opacity: 0.01`, `kalpa.slint:9406,9432`) and fire `value-edited`
    per keystroke; `apply_svm_editor_state` (`main.rs:14821-14853`) rebuilds the whole model
