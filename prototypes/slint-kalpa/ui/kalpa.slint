@@ -1232,9 +1232,9 @@ component RowBadge inherits Rectangle {
     width: label-text.preferred-width + 16px;
     height: 20px;
     border-radius: 10px;
-    border-width: 1px;
+    border-width: Tokens.low-memory-preset ? 0px : 1px;
     border-color: root.line;
-    background: root.fill;
+    background: Tokens.low-memory-preset ? Palette.white-03 : root.fill;
 
     label-text := Text {
         x: 8px;
@@ -1301,10 +1301,10 @@ component AddonRow inherits Rectangle {
     Rectangle {
         x: 3px;
         y: 0px;
-        width: 34px;
+        width: Tokens.low-memory-preset ? 8px : 34px;
         height: root.height;
         visible: !root.active-current && !root.selected && (state != 0 || disabled);
-        background: @linear-gradient(90deg, root.state-wash 0%, #00000000 100%);
+        background: Tokens.low-memory-preset ? root.state-wash : @linear-gradient(90deg, root.state-wash 0%, #00000000 100%);
     }
 
     Checkbox {
