@@ -9062,6 +9062,49 @@ fn wire_detail_actions(ui: &KalpaWindow, models: AddonModels) {
         );
     });
 
+    let update_addon_ui = ui.as_weak();
+    let update_addon_models = models.clone();
+    ui.on_update_addon(move || {
+        let Some(ui) = update_addon_ui.upgrade() else {
+            return;
+        };
+        if ui.get_checking_updates() {
+            return;
+        }
+        let Some(addons_root) = addons_source_root() else {
+            ui.set_status_error_message(
+                "AddOns folder was not found. Set it before updating.".into(),
+            );
+            return;
+        };
+        let index = ui.get_selected_index().max(0) as usize;
+        let Some(addon) = update_addon_models.visible.row_data(index) else {
+            return;
+        };
+        if !addon_has_update(&addon) {
+            return;
+        }
+        let Ok(esoui_id) = addon.esoui_id.parse::<u32>() else {
+            return;
+        };
+        let target = NativeAddonUpdateTarget {
+            folder_name: addon.folder_name.to_string(),
+            esoui_id,
+        };
+        let eso_running = addon_write_eso_running_warning_active(&ui);
+        ui.set_checking_updates(true);
+        ui.set_status_error_message(
+            addon_write_status_message(format!("Updating {}...", addon.title), eso_running).into(),
+        );
+        start_native_addon_update_apply(
+            ui.as_weak(),
+            addons_root,
+            vec![target],
+            ui.get_settings_conflict_policy().clamp(0, 2),
+            eso_running,
+        );
+    });
+
     let install_ui = ui.as_weak();
     let install_models = models.clone();
     ui.on_install_dependency(move |name, optional| {

@@ -11417,6 +11417,7 @@ component DetailPane inherits Rectangle {
     in property <bool> conflict-diff-binary: false;
     in property <bool> conflict-diff-loading: false;
     private property <bool> has-selected-conflicts: root.conflict-files.length > 0;
+    private property <bool> has-update: root.addon.state == 1 || root.addon.badge == "Update" || root.addon.badge2 == "Update" || root.addon.badge3 == "Update";
     in-out property <bool> files-active: false;
     in-out property <string> selected-file-path;
     in-out property <string> selected-file-name;
@@ -11446,6 +11447,7 @@ component DetailPane inherits Rectangle {
     callback open-esoui(string);
     callback toggle-addon-disabled;
     callback remove-addon;
+    callback update-addon;
     callback install-dependency(string, bool);
     callback remove-dependency(string, bool);
     callback conflict-decision-selected(int, int);
@@ -11493,6 +11495,51 @@ component DetailPane inherits Rectangle {
                     tone: Palette.sky;
                     fill: Palette.sky-04;
                     line: Palette.sky-20;
+                }
+            }
+
+            if (!root.files-active && root.has-update && !root.has-selected-conflicts) : Rectangle { height: 14px; background: #00000000; }
+            if (!root.files-active && root.has-update && !root.has-selected-conflicts) : Rectangle {
+                width: parent.width;
+                height: 46px;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Palette.gold-20;
+                background: Palette.gold-06;
+
+                Image {
+                    x: 14px;
+                    y: 15px;
+                    width: 16px;
+                    height: 16px;
+                    source: @image-url("../assets/icons/refresh-cw.svg");
+                    image-fit: contain;
+                    colorize: Palette.gold;
+                }
+
+                Text {
+                    x: 42px;
+                    y: 0px;
+                    width: parent.width - 160px;
+                    height: parent.height;
+                    text: "An update is available for this addon.";
+                    color: Palette.gold;
+                    font-size: 13px;
+                    font-weight: 800;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                SmallAction {
+                    x: parent.width - self.width - 12px;
+                    y: 11px;
+                    label: "Update";
+                    tone: Palette.gold;
+                    fill: Palette.gold-10;
+                    fill-hover: Palette.gold-15;
+                    fill-pressed: Palette.gold-20;
+                    line: Palette.gold-20;
+                    clicked => { root.update-addon(); }
                 }
             }
 
@@ -12441,6 +12488,7 @@ export component KalpaWindow inherits Window {
     callback open-esoui(string);
     callback toggle-addon-disabled;
     callback remove-addon;
+    callback update-addon;
     callback install-dependency(string, bool);
     callback remove-dependency(string, bool);
     callback conflict-decision-selected(int, int);
@@ -12750,6 +12798,7 @@ export component KalpaWindow inherits Window {
             open-esoui(id) => { root.open-esoui(id); }
             toggle-addon-disabled => { root.toggle-addon-disabled(); }
             remove-addon => { root.remove-addon(); }
+            update-addon => { root.update-addon(); }
             install-dependency(name, optional) => { root.install-dependency(name, optional); }
             remove-dependency(name, optional) => { root.remove-dependency(name, optional); }
             conflict-decision-selected(index, decision) => { root.conflict-decision-selected(index, decision); }
