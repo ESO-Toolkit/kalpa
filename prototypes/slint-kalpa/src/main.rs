@@ -7358,11 +7358,24 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
     });
 
     let live_ui = ui.as_weak();
+    let live_session = session.clone();
+    // Holds the running native-live cancel flag so the Stop press can end it.
+    let live_cancel: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>> =
+        Arc::new(Mutex::new(None));
+    let live_cancel_toggle = live_cancel.clone();
     ui.on_uploader_live_toggle(move || {
         let Some(ui) = live_ui.upgrade() else {
             return;
         };
         if ui.get_uploader_view() == 3 {
+            // Stop a native session by signalling its driver (it terminates the
+            // report cleanly and returns the UI to Ready); else stop the handoff.
+            if let Some(flag) = live_cancel_toggle.lock().unwrap().take() {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                ui.set_uploader_live_status_label("Stopping".into());
+                ui.set_uploader_live_detail("Closing the live report on ESO Logs...".into());
+                return;
+            }
             ui.set_uploader_view(2);
             ui.set_uploader_live_status_label("Ready".into());
             ui.set_uploader_live_detail("Live handoff stopped in Kalpa. If the external uploader is still streaming, stop it there too.".into());
@@ -7374,6 +7387,29 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
             );
             return;
         };
+
+        // Signed in → stream fights to ESO Logs natively; else the external handoff.
+        if live_session.has_session() {
+            ui.set_uploader_view(3);
+            ui.set_uploader_report_code(String::new().into());
+            ui.set_uploader_live_status_label("Waiting".into());
+            ui.set_uploader_live_fight_label("0 fights".into());
+            ui.set_uploader_live_detail(
+                "Waiting for the logging session. Begin a fight (or /reloadui in ESO) to start streaming directly to ESO Logs."
+                    .into(),
+            );
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            *live_cancel_toggle.lock().unwrap() = Some(cancel.clone());
+            let session = live_session.clone();
+            let opts = native_upload_options_from_ui(&ui);
+            let slot = live_cancel_toggle.clone();
+            let ui_weak = ui.as_weak();
+            std::thread::spawn(move || {
+                start_native_live_stream(ui_weak, session, slot, path, opts, cancel);
+            });
+            return;
+        }
+
         ui.set_uploader_view(3);
         ui.set_uploader_live_status_label("Starting".into());
         ui.set_uploader_live_detail(
@@ -7548,6 +7584,197 @@ fn run_login_subprocess_capture() -> LoginResult {
         Some(2) => LoginResult::Cancelled,
         Some(3) => LoginResult::TimedOut,
         _ => LoginResult::Error("Sign-in did not complete.".to_string()),
+    }
+}
+
+/// Update the uploader modal from a live-driver event (called off the driver
+/// thread). Pushed to the Slint loop via the weak handle.
+fn live_ui_update(
+    ui_weak: &slint::Weak<KalpaWindow>,
+    apply: impl FnOnce(KalpaWindow) + Send + 'static,
+) {
+    let _ = ui_weak.upgrade_in_event_loop(apply);
+}
+
+/// Return the live UI to its idle (Ready) state with a final status line.
+fn finish_live_stream_ui(
+    ui_weak: &slint::Weak<KalpaWindow>,
+    cancel_slot: &Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
+    message: String,
+    clean: bool,
+) {
+    *cancel_slot.lock().unwrap() = None;
+    live_ui_update(ui_weak, move |ui| {
+        ui.set_uploader_view(2);
+        ui.set_uploader_live_status_label(if clean { "Ready" } else { "Stopped" }.into());
+        ui.set_uploader_live_detail(message.into());
+    });
+}
+
+/// Build the live event sink whose closures push driver lifecycle events into the
+/// Slint UI (report code, session anchored, per-fight advance, reauth).
+fn build_live_event_sink(
+    ui_weak: slint::Weak<KalpaWindow>,
+    fights: Arc<std::sync::atomic::AtomicUsize>,
+) -> uploader::native::live::LiveEventSink {
+    use std::sync::atomic::Ordering;
+
+    let report_weak = ui_weak.clone();
+    let anchored_weak = ui_weak.clone();
+    let fight_weak = ui_weak.clone();
+    let reauth_weak = ui_weak.clone();
+    let resolved_weak = ui_weak.clone();
+    let fight_counter = fights;
+
+    uploader::native::live::LiveEventSink {
+        on_report_open: Box::new(move |code: &str| {
+            let code = code.to_string();
+            live_ui_update(&report_weak, move |ui| {
+                ui.set_uploader_report_code(code.clone().into());
+                ui.set_uploader_live_status_label("Live".into());
+                ui.set_uploader_live_detail(
+                    format!("Report {code} is live on ESO Logs — streaming fights as they finish.")
+                        .into(),
+                );
+            });
+        }),
+        on_session_anchored: Box::new(move || {
+            live_ui_update(&anchored_weak, |ui| {
+                ui.set_uploader_live_status_label("Streaming".into());
+                ui.set_uploader_live_detail(
+                    "Anchored to the logging session — fights upload as they complete.".into(),
+                );
+            });
+        }),
+        on_fight_posted: Box::new(move |_index, duration_ms| {
+            let count = fight_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            live_ui_update(&fight_weak, move |ui| {
+                ui.set_uploader_live_fight_label(
+                    format!("{count} fight{}", if count == 1 { "" } else { "s" }).into(),
+                );
+                ui.set_uploader_live_detail(
+                    format!(
+                        "Streaming — {count} fight{} sent (last {}).",
+                        if count == 1 { "" } else { "s" },
+                        format_duration_ms(duration_ms)
+                    )
+                    .into(),
+                );
+            });
+        }),
+        on_reauth_required: Box::new(move || {
+            live_ui_update(&reauth_weak, |ui| {
+                ui.set_uploader_live_status_label("Sign in again".into());
+                ui.set_uploader_live_detail(
+                    "The ESO Logs session expired — sign in again to keep streaming.".into(),
+                );
+            });
+        }),
+        on_reauth_resolved: Box::new(move || {
+            live_ui_update(&resolved_weak, |ui| {
+                ui.set_uploader_live_status_label("Streaming".into());
+                ui.set_uploader_live_detail("Session restored — streaming resumed.".into());
+            });
+        }),
+    }
+}
+
+/// Drive a native in-process live upload: anchor to the current logging session,
+/// tail `Encounter.log`, and stream each finished fight to ESO Logs directly.
+/// Blocks the calling (worker) thread until Stop or the session ends.
+fn start_native_live_stream(
+    ui_weak: slint::Weak<KalpaWindow>,
+    session: Arc<uploader::native::session::StoredSessionProvider>,
+    cancel_slot: Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
+    path: String,
+    opts: uploader::types::UploadOptions,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let log_path = Path::new(&path);
+    let eof = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+
+    let anchor = match uploader::scanner::find_current_session_begin(log_path, eof) {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            finish_live_stream_ui(
+                &ui_weak,
+                &cancel_slot,
+                format!("Couldn't read the log to start live logging ({error})."),
+                false,
+            );
+            return;
+        }
+    };
+    let tail_start = match uploader::tail_io::last_line_boundary(log_path, eof) {
+        Some(boundary) => boundary,
+        None => {
+            finish_live_stream_ui(
+                &ui_weak,
+                &cancel_slot,
+                "The log's last line looks incomplete. Try again, or /reloadui in ESO.".into(),
+                false,
+            );
+            return;
+        }
+    };
+    // If a session is already open before the tail start, replay that prefix so the
+    // user streams without a fresh /reloadui.
+    let warmup = match anchor {
+        Some(a) if a.open_session && a.begin_log_offset < tail_start => {
+            Some(uploader::native::live::WarmupPrefix {
+                begin_log_offset: a.begin_log_offset,
+                eof: tail_start,
+            })
+        }
+        _ => None,
+    };
+    let mid_session = warmup.is_some();
+    let tail = match uploader::native::live::NotifyTail::new(log_path, tail_start, mid_session) {
+        Ok(tail) => tail,
+        Err(error) => {
+            finish_live_stream_ui(
+                &ui_weak,
+                &cancel_slot,
+                format!("Could not start the live tail: {error}"),
+                false,
+            );
+            return;
+        }
+    };
+
+    let fights = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let events = build_live_event_sink(ui_weak.clone(), fights);
+    let provider: Arc<dyn uploader::native::session::SessionProvider> = session;
+
+    let result = uploader::native::live::run_native_live(
+        &path,
+        provider,
+        &opts,
+        cancel,
+        &tail,
+        warmup,
+        &uploader::native::live::NoopOrphanSink,
+        Some(&events),
+    );
+
+    match result {
+        Ok((code, ended)) => finish_live_stream_ui(
+            &ui_weak,
+            &cancel_slot,
+            format!(
+                "Live report {} closed — {} fight{} streamed.",
+                code.0,
+                ended.fights_posted,
+                if ended.fights_posted == 1 { "" } else { "s" }
+            ),
+            true,
+        ),
+        Err(error) => finish_live_stream_ui(
+            &ui_weak,
+            &cancel_slot,
+            format!("Live streaming stopped: {error}"),
+            false,
+        ),
     }
 }
 

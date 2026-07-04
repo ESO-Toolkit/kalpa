@@ -8806,7 +8806,7 @@ component UploaderOverlay inherits Rectangle {
 
         Image { x: 28px; y: 26px; width: 18px; height: 18px; source: @image-url("../assets/icons/cloud-upload.svg"); image-fit: contain; colorize: Palette.gold; }
         Text { x: 58px; y: 21px; width: parent.width - 250px; text: "Upload to ESO Logs"; color: Palette.gold; font-size: 18px; font-weight: 900; overflow: elide; }
-        Text { x: 58px; y: 52px; width: parent.width - 210px; text: root.manual ? (root.native-route ? "Signed in — Upload sends the report directly to ESO Logs." : "Select a log, review detected fights, then hand off to the uploader.") : "Kalpa watches the live encounter log, then hands the session to the external uploader."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
+        Text { x: 58px; y: 52px; width: parent.width - 210px; text: root.manual ? (root.native-route ? "Signed in — Upload sends the report directly to ESO Logs." : "Select a log, review detected fights, then hand off to the uploader.") : (root.native-route ? "Signed in — Kalpa streams each fight straight to ESO Logs as it finishes." : "Kalpa watches the live encounter log, then hands the session to the external uploader."); color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
 
         Rectangle {
             x: parent.width - 184px;
