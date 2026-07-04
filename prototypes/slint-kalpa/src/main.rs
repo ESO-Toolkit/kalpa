@@ -201,6 +201,22 @@ mod safe_migration;
 #[path = "../../../src-tauri/src/saved_variables/mod.rs"]
 mod saved_variables;
 
+// Production ESO Logs uploader modules reused for the native split workbench.
+// Only the Tauri-free leaves are pulled in (scan + byte-range split); the upload
+// transport, login WebView, and live driver stay out (they need a Tauri runtime
+// and a Kalpa-owned WebView for ESO Logs sign-in — see PARITY-BACKLOG.md).
+#[allow(dead_code, unused_imports)]
+mod uploader {
+    #[path = "../../../../src-tauri/src/uploader/scanner.rs"]
+    pub mod scanner;
+    #[path = "../../../../src-tauri/src/uploader/splitter.rs"]
+    pub mod splitter;
+    #[path = "../../../../src-tauri/src/uploader/tail_io.rs"]
+    pub mod tail_io;
+    #[path = "../../../../src-tauri/src/uploader/types.rs"]
+    pub mod types;
+}
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use slint::{
@@ -6906,6 +6922,100 @@ fn format_relative_ms(ms: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
+/// Cached scan + per-mode selection backing the native split workbench.
+///
+/// Populated once when the workbench opens (a single `scanner::scan_file` pass)
+/// so mode switches and per-item toggles never re-read the log. The two
+/// `*_selected` vectors are index-aligned with `sessions` / `fights`.
+#[derive(Default)]
+struct UploaderSplitState {
+    source_path: Option<String>,
+    source_label: String,
+    sessions: Vec<uploader::types::LogSession>,
+    fights: Vec<uploader::types::FightSummary>,
+    session_selected: Vec<bool>,
+    fight_selected: Vec<bool>,
+}
+
+/// Where per-fight / per-session split files are written. Uses Kalpa's roaming
+/// app-data (never the ESO `Logs` folder under Documents) so Controlled Folder
+/// Access can't silently block the writes, mirroring the WebView app.
+fn uploader_split_output_root() -> Option<PathBuf> {
+    native_state_dir().map(|dir| dir.join("log-splits"))
+}
+
+fn uploader_split_fight_title(fight: &uploader::types::FightSummary) -> String {
+    let name = fight
+        .boss_name
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or_else(|| fight.zone_name.as_deref().filter(|value| !value.is_empty()));
+    match name {
+        Some(name) => format!("Fight {} - {name}", fight.index + 1),
+        None => format!("Fight {}", fight.index + 1),
+    }
+}
+
+/// Rebuild the split-item model for the currently selected mode (0 = fights,
+/// 1 = sessions) and refresh the summary + selected-count read-outs.
+fn rebuild_uploader_split_model(ui: &KalpaWindow, state: &UploaderSplitState) {
+    let sessions_mode = ui.get_uploader_split_mode() == 1;
+    let mut entries = Vec::new();
+    let mut selected_count = 0;
+
+    if sessions_mode {
+        for (i, session) in state.sessions.iter().enumerate() {
+            let selected = state.session_selected.get(i).copied().unwrap_or(false);
+            if selected {
+                selected_count += 1;
+            }
+            let realm = session.realm.as_deref().unwrap_or("Unknown realm");
+            entries.push(UploaderSplitEntry {
+                title: format!("Session {}", session.index + 1).into(),
+                meta: format!(
+                    "{} fight{}  -  {realm}",
+                    session.fight_count,
+                    if session.fight_count == 1 { "" } else { "s" }
+                )
+                .into(),
+                detail: format_size(session.size_bytes).into(),
+                selected,
+            });
+        }
+    } else {
+        for (i, fight) in state.fights.iter().enumerate() {
+            let selected = state.fight_selected.get(i).copied().unwrap_or(false);
+            if selected {
+                selected_count += 1;
+            }
+            let size = fight.end_offset.saturating_sub(fight.start_offset);
+            let zone = fight.zone_name.as_deref().unwrap_or("Unknown zone");
+            entries.push(UploaderSplitEntry {
+                title: uploader_split_fight_title(fight).into(),
+                meta: format!(
+                    "{zone}  -  {}",
+                    format_duration_ms(fight.end_ms.saturating_sub(fight.start_ms))
+                )
+                .into(),
+                detail: format_size(size).into(),
+                selected,
+            });
+        }
+    }
+
+    let count = entries.len();
+    ui.set_uploader_split_items(Rc::new(VecModel::from(entries)).into());
+    ui.set_uploader_split_selected_count(selected_count);
+    ui.set_uploader_split_summary(
+        if sessions_mode {
+            format!("{count} session{}", if count == 1 { "" } else { "s" })
+        } else {
+            format!("{count} fight{}", if count == 1 { "" } else { "s" })
+        }
+        .into(),
+    );
+}
+
 fn format_duration_ms(ms: u64) -> String {
     let seconds = ms / 1000;
     if seconds >= 60 {
@@ -7184,6 +7294,294 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
         };
         persist_native_settings(&native_settings_from_ui(&ui));
     });
+
+    wire_uploader_split_actions(ui);
+}
+
+/// Wire the native split workbench: scan the selected log once, let the user pick
+/// fights or whole sessions, and write self-contained `.log` files to app-data
+/// via the production splitter. The upload itself stays the external handoff.
+fn wire_uploader_split_actions(ui: &KalpaWindow) {
+    let split_state = Arc::new(Mutex::new(UploaderSplitState::default()));
+
+    let open_ui = ui.as_weak();
+    let open_state = split_state.clone();
+    ui.on_uploader_split_open_requested(move || {
+        let Some(ui) = open_ui.upgrade() else {
+            return;
+        };
+        let Some(path) = selected_uploader_path(&ui) else {
+            ui.set_status_error_message("Select a log before splitting.".into());
+            return;
+        };
+        let label = Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "the selected log".to_string());
+        ui.set_uploader_split_source_label(label.clone().into());
+        ui.set_uploader_split_status("Scanning log for sessions and fights...".into());
+        ui.set_uploader_split_busy(true);
+        ui.set_uploader_split_items(
+            Rc::new(VecModel::from(Vec::<UploaderSplitEntry>::new())).into(),
+        );
+        ui.set_uploader_split_selected_count(0);
+        ui.set_uploader_split_open(true);
+
+        let state = open_state.clone();
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = uploader::scanner::scan_file(&path);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                ui.set_uploader_split_busy(false);
+                match result {
+                    Ok(scan) => {
+                        let has_fights = !scan.fights.is_empty();
+                        let mut guard = state.lock().unwrap();
+                        guard.source_path = Some(path);
+                        guard.source_label = label;
+                        guard.session_selected = vec![true; scan.sessions.len()];
+                        guard.fight_selected = vec![true; scan.fights.len()];
+                        guard.sessions = scan.sessions;
+                        guard.fights = scan.fights;
+                        // Default to per-fight when the log has any completed fights
+                        // (the common case); otherwise per-session.
+                        ui.set_uploader_split_mode(if has_fights { 0 } else { 1 });
+                        ui.set_uploader_split_status(String::new().into());
+                        rebuild_uploader_split_model(&ui, &guard);
+                    }
+                    Err(error) => {
+                        ui.set_uploader_split_status(format!("Could not scan log: {error}").into());
+                    }
+                }
+            });
+        });
+    });
+
+    let mode_ui = ui.as_weak();
+    let mode_state = split_state.clone();
+    ui.on_uploader_split_mode_changed(move |mode| {
+        let Some(ui) = mode_ui.upgrade() else {
+            return;
+        };
+        ui.set_uploader_split_mode(mode);
+        let guard = mode_state.lock().unwrap();
+        rebuild_uploader_split_model(&ui, &guard);
+    });
+
+    let toggle_ui = ui.as_weak();
+    let toggle_state = split_state.clone();
+    ui.on_uploader_split_item_toggled(move |index| {
+        let Some(ui) = toggle_ui.upgrade() else {
+            return;
+        };
+        let index = index.max(0) as usize;
+        let mut guard = toggle_state.lock().unwrap();
+        let selected = if ui.get_uploader_split_mode() == 1 {
+            &mut guard.session_selected
+        } else {
+            &mut guard.fight_selected
+        };
+        if let Some(flag) = selected.get_mut(index) {
+            *flag = !*flag;
+        }
+        rebuild_uploader_split_model(&ui, &guard);
+    });
+
+    let all_ui = ui.as_weak();
+    let all_state = split_state.clone();
+    ui.on_uploader_split_select_all(move || {
+        let Some(ui) = all_ui.upgrade() else {
+            return;
+        };
+        let mut guard = all_state.lock().unwrap();
+        if ui.get_uploader_split_mode() == 1 {
+            guard
+                .session_selected
+                .iter_mut()
+                .for_each(|flag| *flag = true);
+        } else {
+            guard
+                .fight_selected
+                .iter_mut()
+                .for_each(|flag| *flag = true);
+        }
+        rebuild_uploader_split_model(&ui, &guard);
+    });
+
+    let none_ui = ui.as_weak();
+    let none_state = split_state.clone();
+    ui.on_uploader_split_select_none(move || {
+        let Some(ui) = none_ui.upgrade() else {
+            return;
+        };
+        let mut guard = none_state.lock().unwrap();
+        if ui.get_uploader_split_mode() == 1 {
+            guard
+                .session_selected
+                .iter_mut()
+                .for_each(|flag| *flag = false);
+        } else {
+            guard
+                .fight_selected
+                .iter_mut()
+                .for_each(|flag| *flag = false);
+        }
+        rebuild_uploader_split_model(&ui, &guard);
+    });
+
+    let run_ui = ui.as_weak();
+    let run_state = split_state.clone();
+    ui.on_uploader_split_run(move || {
+        let Some(ui) = run_ui.upgrade() else {
+            return;
+        };
+        let sessions_mode = ui.get_uploader_split_mode() == 1;
+
+        // Snapshot everything the off-thread split needs while holding the lock.
+        let plan = {
+            let guard = run_state.lock().unwrap();
+            let Some(source) = guard.source_path.clone() else {
+                ui.set_uploader_split_status("Select and scan a log first.".into());
+                return;
+            };
+            if sessions_mode {
+                let selections: Vec<uploader::splitter::SplitSelection> = guard
+                    .sessions
+                    .iter()
+                    .zip(guard.session_selected.iter())
+                    .filter(|(_, selected)| **selected)
+                    .map(|(session, _)| uploader::splitter::SplitSelection {
+                        index: session.index,
+                        name: None,
+                        start_time_ms: Some(session.start_time_ms),
+                    })
+                    .collect();
+                SplitPlan::Sessions {
+                    source,
+                    sessions: guard.sessions.clone(),
+                    selections,
+                }
+            } else {
+                let selections: Vec<uploader::splitter::FightSelection> = guard
+                    .fights
+                    .iter()
+                    .zip(guard.fight_selected.iter())
+                    .filter(|(_, selected)| **selected)
+                    .map(|(fight, _)| uploader::splitter::FightSelection {
+                        index: fight.index,
+                        name: None,
+                        start_ms: Some(fight.start_ms),
+                    })
+                    .collect();
+                SplitPlan::Fights {
+                    source,
+                    sessions: guard.sessions.clone(),
+                    fights: guard.fights.clone(),
+                    selections,
+                }
+            }
+        };
+
+        if plan.is_empty() {
+            ui.set_uploader_split_status(
+                "Select at least one item to split before writing.".into(),
+            );
+            return;
+        }
+
+        let Some(root) = uploader_split_output_root() else {
+            ui.set_uploader_split_status(
+                "Could not resolve an output folder for the split files.".into(),
+            );
+            return;
+        };
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let out_dir = root.join(format!("split-{stamp}"));
+        let out_str = out_dir.to_string_lossy().into_owned();
+
+        ui.set_uploader_split_busy(true);
+        ui.set_uploader_split_status("Writing split files...".into());
+
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = plan.run(&out_str);
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                ui.set_uploader_split_busy(false);
+                match result {
+                    Ok(written) => {
+                        ui.set_uploader_split_status(
+                            format!(
+                                "Wrote {} file{} to {out_str}",
+                                written.len(),
+                                if written.len() == 1 { "" } else { "s" }
+                            )
+                            .into(),
+                        );
+                    }
+                    Err(error) => {
+                        ui.set_uploader_split_status(format!("Split failed: {error}").into());
+                        ui.set_status_error_message(format!("Split failed: {error}").into());
+                    }
+                }
+            });
+        });
+    });
+}
+
+/// A resolved, `Send`-able plan for one split run, snapshotted from the workbench
+/// state so the actual (potentially multi-GB) copy happens off the UI thread.
+enum SplitPlan {
+    Fights {
+        source: String,
+        sessions: Vec<uploader::types::LogSession>,
+        fights: Vec<uploader::types::FightSummary>,
+        selections: Vec<uploader::splitter::FightSelection>,
+    },
+    Sessions {
+        source: String,
+        sessions: Vec<uploader::types::LogSession>,
+        selections: Vec<uploader::splitter::SplitSelection>,
+    },
+}
+
+impl SplitPlan {
+    fn is_empty(&self) -> bool {
+        match self {
+            SplitPlan::Fights { selections, .. } => selections.is_empty(),
+            SplitPlan::Sessions { selections, .. } => selections.is_empty(),
+        }
+    }
+
+    fn run(self, out_dir: &str) -> Result<Vec<String>, String> {
+        match self {
+            SplitPlan::Fights {
+                source,
+                sessions,
+                fights,
+                selections,
+            } => uploader::splitter::split_selected_fights(
+                &source,
+                out_dir,
+                Some(sessions),
+                Some(fights),
+                selections,
+            ),
+            SplitPlan::Sessions {
+                source,
+                sessions,
+                selections,
+            } => uploader::splitter::split_selected(&source, out_dir, Some(sessions), selections),
+        }
+    }
 }
 
 fn wire_settings_actions(ui: &KalpaWindow, models: AddonModels) {
@@ -17909,6 +18307,94 @@ mod tests {
         assert!(preflight.truncated);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uploader_split_fight_title_prefers_boss_then_zone_then_ordinal() {
+        let base = uploader::types::FightSummary {
+            index: 2,
+            start_offset: 0,
+            end_offset: 10,
+            start_ms: 0,
+            end_ms: 1000,
+            zone_name: None,
+            boss_name: None,
+        };
+        assert_eq!(uploader_split_fight_title(&base), "Fight 3");
+
+        let zoned = uploader::types::FightSummary {
+            zone_name: Some("Sunspire".to_string()),
+            ..base.clone()
+        };
+        assert_eq!(uploader_split_fight_title(&zoned), "Fight 3 - Sunspire");
+
+        let bossed = uploader::types::FightSummary {
+            zone_name: Some("Sunspire".to_string()),
+            boss_name: Some("Lokkestiiz".to_string()),
+            ..base
+        };
+        assert_eq!(uploader_split_fight_title(&bossed), "Fight 3 - Lokkestiiz");
+    }
+
+    #[test]
+    fn split_plan_writes_one_file_per_selected_fight() {
+        let root = test_temp_dir("split-plan-fights");
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("Encounter.log");
+        // Two fights inside one session, each with a preamble line before combat.
+        fs::write(
+            &path,
+            concat!(
+                "0,BEGIN_LOG,1780641553946,15,\"NA Megaserver\"\n",
+                "10,ZONE_CHANGED,1000,\"Sunspire\",VETERAN\n",
+                "1000,BEGIN_COMBAT\n",
+                "8000,END_COMBAT\n",
+                "9000,BEGIN_COMBAT\n",
+                "20000,END_COMBAT\n",
+                "21000,END_LOG\n",
+            ),
+        )
+        .expect("write log");
+
+        let source = path.to_string_lossy().into_owned();
+        let scan = uploader::scanner::scan_file(&source).expect("scan file");
+        assert_eq!(scan.sessions.len(), 1);
+        assert_eq!(scan.fights.len(), 2);
+
+        // Select only the second fight.
+        let plan = SplitPlan::Fights {
+            source: source.clone(),
+            sessions: scan.sessions.clone(),
+            fights: scan.fights.clone(),
+            selections: vec![uploader::splitter::FightSelection {
+                index: 1,
+                name: None,
+                start_ms: Some(scan.fights[1].start_ms),
+            }],
+        };
+        assert!(!plan.is_empty());
+
+        let out_dir = root.join("out");
+        let written = plan
+            .run(&out_dir.to_string_lossy())
+            .expect("split fights to disk");
+        assert_eq!(written.len(), 1);
+        let body = fs::read_to_string(&written[0]).expect("read split file");
+        // A valid single-fight session log: session header preserved + one combat block.
+        assert!(body.contains("BEGIN_LOG"), "missing header: {body}");
+        assert_eq!(body.matches("BEGIN_COMBAT").count(), 1, "body: {body}");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn split_plan_reports_empty_when_nothing_selected() {
+        let plan = SplitPlan::Sessions {
+            source: "unused".to_string(),
+            sessions: Vec::new(),
+            selections: Vec::new(),
+        };
+        assert!(plan.is_empty());
     }
 
     #[test]
