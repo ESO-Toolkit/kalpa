@@ -137,20 +137,33 @@ Anchors are `ui/kalpa.slint` and `src/main.rs` in this crate unless noted; React
   (`main.rs:15052`), file dropdown instead of cycle (`kalpa.slint:9803`), visual diff preview
   (data already computed, `main.rs:15229`).
 
-## ARCHITECTURE-GATED (needs a Kalpa-owned WebView, or a product decision)
+## NATIVE UPLOADER + PACK HUB — NOW SHIPPED (was "architecture-gated")
 
-- **Native ESO Logs upload / sign-in / live direct streaming.** CORRECTION to an earlier note in
-  this file: production *does* ship a native uploader (`src-tauri/src/uploader/native/*` +
-  `uploader_login_esologs` / `uploader_upload_log` / `uploader_start_live`), opt-in with the Archon
-  handoff as the default. It is NOT ToS-blocked. What the Slint prototype lacks is the **sign-in
-  surface**: `uploader_login_esologs` opens "a webview Kalpa owns" for ESO Logs' OAuth, and a
-  WebView-less Slint shell has none — so there is no session cookie, and `uploader_upload_log` /
-  `uploader_start_live` are gated downstream of it. The encoder + transport
-  (`native::{encode,events,format,client}`) are pure Rust and portable, but wiring them for a
-  "signed-in-elsewhere-only" path (reading the shared `StoredSessionProvider` cookie) is a large
-  port that yields a partial UX; do it only on a product decision. Until then the upload stays the
-  external Archon App handoff (`launch_external_uploader`, `main.rs`). The **split workbench above**
-  is the shipped ToS-safe slice of "uploader parity".
+The earlier "needs a Kalpa-owned WebView / product decision" note is **RESOLVED**. The full native
+ESO Logs uploader AND authenticated Pack Hub actions are now wired in the Slint shell:
+
+- **Native ESO Logs stack compiled in** — the production encoder + reqwest transport + session
+  provider + live driver are `#[path]`-included (`mod uploader::native::*`); only the sign-in
+  WebView and the orphan sweeper are omitted. A byte-compatible local `token_store` reads the SAME
+  Credential Manager cookie the main app writes. +202 encoder/live fidelity tests ride along.
+- **Native direct upload** — signed-in users Upload straight to ESO Logs (encode → `run_native_upload`),
+  with report code + View-report link; a dead session (401/419) invalidates and falls back to handoff.
+  Verified end-to-end against esologs.com.
+- **Native sign-in** — a wry (WebView2) login window loads the real ESO Logs page and captures the
+  `wcl_session` cookie. Run OUT-OF-PROCESS (`<exe> --esologs-login`) because a WebView2 loop
+  hard-faults alongside Slint's winit loop; the parent reads the cookie over stdout. Verified: the
+  login page loads, main app stays responsive.
+- **Native live streaming** — Go Live streams each finished fight via the production `run_native_live`
+  driver (anchor + tail + warmup + per-fight segments), Stop closes the report cleanly. Verified.
+- **Native Pack Hub sign-in / vote / delete** — reuses the production OAuth **loopback** flow
+  (`mod auth`, browser + localhost redirect, no WebView) for a Bearer token; the pack detail footer
+  offers Sign in / Upvote / two-step Delete against the worker's authenticated endpoints. Verified:
+  browse/detail render the controls.
+
+Still open (lower value; not regressions): richer Pack Hub "my packs" management UI (list owned
+packs + full edit form + publish/private/drafts — authoring already covered by native create-export;
+the worker enforces ownership on delete). Signed-OUT users still use the Archon handoff / WebView
+Pack Hub, which is correct.
 - **Authenticated Pack Hub mutations** — edit/delete ("Manage"), publish/draft, private
   share-codes, voting. These correctly defer to the signed-in WebView Pack Hub
   (`return_to_webview_shell`, `main.rs:4046,4138`). Local `.esopack` export stays native.
