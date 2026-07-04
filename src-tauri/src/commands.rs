@@ -8318,12 +8318,12 @@ fn native_shell_render_preset() -> String {
         .or_else(|_| std::env::var("KALPA_RENDER_PRESET"))
         .map(|value| {
             if value.trim().is_empty() {
-                "low-memory".to_string()
+                "standard".to_string()
             } else {
                 value
             }
         })
-        .unwrap_or_else(|_| "low-memory".to_string())
+        .unwrap_or_else(|_| "standard".to_string())
 }
 
 fn native_shell_backend_for_preset(render_preset: &str) -> String {
@@ -9487,7 +9487,7 @@ mod tests {
     }
 
     #[test]
-    fn native_shell_renderer_defaults_to_low_memory_software() {
+    fn native_shell_renderer_defaults_to_smooth_femtovg() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
         std::env::remove_var("KALPA_RENDER_PRESET");
@@ -9496,8 +9496,8 @@ mod tests {
 
         let preset = native_shell_render_preset();
 
-        assert_eq!(preset, "low-memory");
-        assert_eq!(native_shell_backend_for_preset(&preset), "winit-software");
+        assert_eq!(preset, "standard");
+        assert_eq!(native_shell_backend_for_preset(&preset), "winit-femtovg");
     }
 
     #[test]

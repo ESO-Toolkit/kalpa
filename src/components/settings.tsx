@@ -454,9 +454,9 @@ export function Settings({
                       />
                       <Gauge className="size-4 shrink-0 text-[#c4a44a]" />
                       <div>
-                        <p className="text-sm font-medium text-white/90">Low-memory native UI</p>
+                        <p className="text-sm font-medium text-white/90">Native performance UI</p>
                         <p className="text-xs text-muted-foreground">
-                          Switch Kalpa to the Slint shell and close the WebView process.
+                          Switch Kalpa to the smooth Slint shell and close the WebView process.
                         </p>
                       </div>
                     </label>

@@ -1131,7 +1131,7 @@ fn render_config_from_inputs(
 
 impl Default for NativeRenderPreset {
     fn default() -> Self {
-        Self::LowMemory
+        Self::Standard
     }
 }
 
@@ -17312,12 +17312,12 @@ mod tests {
     }
 
     #[test]
-    fn render_config_defaults_to_low_memory_software_preset() {
+    fn render_config_defaults_to_smooth_femtovg_preset() {
         assert_eq!(
             render_config_from_inputs(None, None, None),
             NativeRenderConfig {
-                backend: "winit-software".to_string(),
-                preset: NativeRenderPreset::LowMemory,
+                backend: "winit-femtovg".to_string(),
+                preset: NativeRenderPreset::Standard,
             }
         );
     }
