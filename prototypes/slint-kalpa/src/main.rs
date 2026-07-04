@@ -4684,7 +4684,12 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         match result {
             Ok(()) => {
                 apply_svm_editor_state(&ui, &svm_editor_save_state.borrow());
-                ui.set_status_error_message("Saved SavedVariables changes.".into());
+                let message = if addon_write_eso_running_warning_active(&ui) {
+                    "Saved - but ESO is running and will overwrite SavedVariables when it exits. Use /reloadui or restart ESO to keep this change."
+                } else {
+                    "Saved SavedVariables changes."
+                };
+                ui.set_status_error_message(message.into());
             }
             Err(error) => {
                 {
