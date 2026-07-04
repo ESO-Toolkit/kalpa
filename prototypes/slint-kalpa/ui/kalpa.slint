@@ -9399,6 +9399,9 @@ component SvmSettingRow inherits Rectangle {
         checked: root.checked;
     }
 
+    // String value: a real visible editable field. It commits on Enter or
+    // blur (not per keystroke), so `root.value` stays constant while typing
+    // and the caret never resets. See PARITY-BACKLOG.md item 1.
     if (root.kind == 1) : Rectangle {
         x: parent.width - 210px;
         y: 4px;
@@ -9406,37 +9409,33 @@ component SvmSettingRow inherits Rectangle {
         height: 30px;
         border-radius: 9px;
         border-width: 1px;
-        border-color: Palette.white-08;
+        border-color: str-input.has-focus ? Palette.sky : Palette.white-08;
         background: Palette.white-04;
         clip: true;
 
-        Text {
-            visible: root.value != "";
+        str-input := TextInput {
             x: 12px;
             y: 0px;
-            height: parent.height;
             width: parent.width - 24px;
+            height: parent.height;
             text: root.value;
             color: Palette.foreground;
             font-size: 13px;
-            font-weight: 750;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        TextEdit {
-            x: 12px;
-            y: 0px;
-            width: parent.width - 24px;
-            height: parent.height;
-            opacity: 0.01;
-            text: root.value;
-            font-size: 13px;
             font-family: "Geist";
-            edited(content) => { root.value-edited(content); }
+            font-weight: 750;
+            single-line: true;
+            vertical-alignment: center;
+            selection-background-color: Palette.sky-25;
+            accepted => { root.value-edited(self.text); }
+            changed has-focus => {
+                if (!self.has-focus && self.text != root.value) {
+                    root.value-edited(self.text);
+                }
+            }
         }
     }
 
+    // Number value: same commit-on-Enter/blur behaviour, right-aligned.
     if (root.kind == 2) : Rectangle {
         x: parent.width - 210px;
         y: 4px;
@@ -9444,22 +9443,30 @@ component SvmSettingRow inherits Rectangle {
         height: 30px;
         border-radius: 9px;
         border-width: 1px;
-        border-color: Palette.white-08;
+        border-color: num-input.has-focus ? Palette.sky : Palette.white-08;
         background: Palette.white-04;
         clip: true;
 
-        Text { x: 12px; width: parent.width - 24px; height: parent.height; text: root.value; color: Palette.foreground; font-size: 13px; font-weight: 800; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
-
-        TextEdit {
+        num-input := TextInput {
             x: 12px;
             y: 0px;
             width: parent.width - 24px;
             height: parent.height;
-            opacity: 0.01;
             text: root.value;
+            color: Palette.foreground;
             font-size: 13px;
             font-family: "Geist";
-            edited(content) => { root.value-edited(content); }
+            font-weight: 800;
+            single-line: true;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            selection-background-color: Palette.sky-25;
+            accepted => { root.value-edited(self.text); }
+            changed has-focus => {
+                if (!self.has-focus && self.text != root.value) {
+                    root.value-edited(self.text);
+                }
+            }
         }
     }
 }
