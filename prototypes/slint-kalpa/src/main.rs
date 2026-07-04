@@ -645,6 +645,7 @@ const BUILTIN_THEME_CATALOG: &str = include_str!("../assets/themes/builtin-theme
 
 thread_local! {
     static COLLAPSED_FILE_FOLDERS: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+    static FILE_ENTRY_CACHE: RefCell<HashMap<String, Vec<FileEntry>>> = RefCell::new(HashMap::new());
     static ORB_SKIN_CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
 }
 
@@ -7247,6 +7248,7 @@ fn reload_real_addon_models(ui: &KalpaWindow, models: &AddonModels) -> Result<()
         "AddOns folder was not found. Set KALPA_ADDONS_PATH or configure the ESO AddOns path."
             .to_string()
     })?;
+    clear_file_entry_cache();
     let addons = real_addon_entries(&addons_root)?;
     if addons.is_empty() {
         return Err("No addons were found in the configured AddOns folder.".into());
@@ -11908,6 +11910,10 @@ fn wire_file_browser(ui: &KalpaWindow) {
             if guard_unsaved_editor(&ui) {
                 return;
             }
+            if let Some(addons_root) = addons_source_root() {
+                let folder_name = selected_addon_folder(&ui);
+                invalidate_file_entry_cache(&addons_root, &folder_name);
+            }
             refresh_file_browser(&ui);
         }
     });
@@ -11936,6 +11942,7 @@ fn wire_file_browser(ui: &KalpaWindow) {
         let folder_name = selected_addon_folder(&ui);
         match restore_edit_backup_file(&addons_root, &folder_name, &backup) {
             Ok(()) => {
+                invalidate_file_entry_cache(&addons_root, &folder_name);
                 refresh_file_browser(&ui);
                 refresh_edit_backups(&ui);
                 open_file_in_editor(&ui, &folder_name, backup.relative_path.as_str());
@@ -11983,7 +11990,7 @@ fn refresh_file_browser(ui: &KalpaWindow) {
     let source = addons_source_root();
     let files = source
         .as_deref()
-        .and_then(|addons_root| real_file_entries(addons_root, &folder_name).ok())
+        .and_then(|addons_root| cached_file_entries(addons_root, &folder_name).ok())
         .unwrap_or_else(|| mock_file_entries(&folder_name));
     let collapsed = collapsed_file_folders();
     let files = apply_collapsed_file_folders(files, &folder_name, &collapsed);
@@ -12355,6 +12362,7 @@ fn save_file_from_editor(ui: &KalpaWindow, relative_path: &str, content: &str) {
         return;
     }
 
+    invalidate_file_entry_cache(&addons_root, &folder_name);
     ui.set_selected_original_content(content.into());
     ui.set_editor_line_numbers(line_numbers_for_content(content).into());
     ui.set_editor_error(false);
@@ -12730,6 +12738,38 @@ fn real_file_entries(addons_root: &Path, folder_name: &str) -> Result<Vec<FileEn
     let mut files = vec![folder_entry(folder_name, "", 0, true)];
     walk_file_entries(&addon_root, &addon_root, 1, &mut files)?;
     Ok(files)
+}
+
+fn cached_file_entries(addons_root: &Path, folder_name: &str) -> Result<Vec<FileEntry>, String> {
+    let key = file_entry_cache_key(addons_root, folder_name);
+    if let Some(files) = FILE_ENTRY_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        return Ok(files);
+    }
+
+    let files = real_file_entries(addons_root, folder_name)?;
+    FILE_ENTRY_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, files.clone());
+    });
+    Ok(files)
+}
+
+fn invalidate_file_entry_cache(addons_root: &Path, folder_name: &str) {
+    let key = file_entry_cache_key(addons_root, folder_name);
+    FILE_ENTRY_CACHE.with(|cache| {
+        cache.borrow_mut().remove(&key);
+    });
+}
+
+fn clear_file_entry_cache() {
+    FILE_ENTRY_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+fn file_entry_cache_key(addons_root: &Path, folder_name: &str) -> String {
+    format!(
+        "{}\n{}",
+        addons_root.to_string_lossy(),
+        folder_name.to_ascii_lowercase()
+    )
 }
 
 fn walk_file_entries(
