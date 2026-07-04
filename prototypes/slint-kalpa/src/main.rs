@@ -212,6 +212,12 @@ mod token_store;
 #[path = "uploader_login.rs"]
 mod uploader_login;
 
+// ESO Logs OAuth (loopback flow) reused for authenticated Pack Hub mutations.
+// Tauri-free: opens the browser + captures a localhost redirect, no WebView.
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/auth.rs"]
+mod auth;
+
 // Production ESO Logs uploader modules reused natively. The full encoder +
 // reqwest transport + session provider are Tauri-free and pulled in here; only
 // the sign-in WebView (`native::login`) and the crash-recovery orphan sweeper
@@ -3609,6 +3615,9 @@ fn wire_addon_filters(ui: &KalpaWindow, models: AddonModels) {
 }
 
 fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
+    // Pack Hub OAuth session (in-memory for the app run); drives edit/delete/vote.
+    let pack_auth: PackHubAuth = Arc::new(Mutex::new(None));
+
     let refresh_ui = ui.as_weak();
     let refresh_models = models.clone();
     ui.on_refresh_requested(move || {
@@ -4288,6 +4297,146 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                         ui.set_status_error_message(
                             format!("Pack Hub share export failed: {error}").into(),
                         );
+                    }
+                }
+            });
+        });
+    });
+
+    // ── Pack Hub authenticated actions (native OAuth + mutations) ─────────────
+    let signin_ui = ui.as_weak();
+    let signin_auth = pack_auth.clone();
+    ui.on_pack_hub_sign_in(move || {
+        let Some(ui) = signin_ui.upgrade() else {
+            return;
+        };
+        ui.set_pack_hub_detail_message(
+            "Opening ESO Logs sign-in in your browser — approve, then return to Kalpa.".into(),
+        );
+        let auth_state = signin_auth.clone();
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = auth::login();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(tokens) => {
+                        let name = tokens.user_name.clone();
+                        *auth_state.lock().unwrap() = Some(tokens);
+                        ui.set_pack_hub_signed_in(true);
+                        ui.set_pack_hub_user(name.clone().into());
+                        ui.set_pack_hub_detail_message(
+                            format!(
+                                "Signed in as {name}. You can now upvote or delete your packs."
+                            )
+                            .into(),
+                        );
+                    }
+                    Err(error) => {
+                        ui.set_pack_hub_detail_message(format!("Sign-in failed: {error}").into());
+                        ui.set_status_error_message(
+                            format!("Pack Hub sign-in failed: {error}").into(),
+                        );
+                    }
+                }
+            });
+        });
+    });
+
+    let signout_ui = ui.as_weak();
+    let signout_auth = pack_auth.clone();
+    ui.on_pack_hub_sign_out(move || {
+        let Some(ui) = signout_ui.upgrade() else {
+            return;
+        };
+        *signout_auth.lock().unwrap() = None;
+        ui.set_pack_hub_signed_in(false);
+        ui.set_pack_hub_user("".into());
+        ui.set_pack_hub_detail_delete_armed(false);
+        ui.set_pack_hub_detail_message("Signed out of Pack Hub.".into());
+    });
+
+    let vote_ui = ui.as_weak();
+    let vote_auth = pack_auth.clone();
+    ui.on_pack_hub_vote_detail(move || {
+        let Some(ui) = vote_ui.upgrade() else {
+            return;
+        };
+        let Some(id) = selected_pack_hub_id(&ui) else {
+            ui.set_pack_hub_detail_message("Select a pack first.".into());
+            return;
+        };
+        if vote_auth.lock().unwrap().is_none() {
+            ui.set_pack_hub_detail_message("Sign in to vote on packs.".into());
+            return;
+        }
+        ui.set_pack_hub_detail_message("Recording your vote...".into());
+        let auth_state = vote_auth.clone();
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = pack_hub_access_token(&auth_state)
+                .and_then(|token| pack_hub_vote_request(&token, &id));
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                match result {
+                    Ok(()) => ui.set_pack_hub_detail_message("Vote recorded on ESO Logs.".into()),
+                    Err(error) => {
+                        ui.set_pack_hub_detail_message(format!("Could not vote: {error}").into());
+                    }
+                }
+            });
+        });
+    });
+
+    let delete_ui = ui.as_weak();
+    let delete_auth = pack_auth.clone();
+    ui.on_pack_hub_delete_detail(move || {
+        let Some(ui) = delete_ui.upgrade() else {
+            return;
+        };
+        let Some(id) = selected_pack_hub_id(&ui) else {
+            ui.set_pack_hub_detail_message("Select a pack first.".into());
+            return;
+        };
+        if delete_auth.lock().unwrap().is_none() {
+            ui.set_pack_hub_detail_message("Sign in to delete your packs.".into());
+            return;
+        }
+        // First press arms; second press (armed) confirms and deletes.
+        if !ui.get_pack_hub_detail_delete_armed() {
+            ui.set_pack_hub_detail_delete_armed(true);
+            ui.set_pack_hub_detail_message(
+                "Delete this pack for everyone? Click Confirm delete to proceed.".into(),
+            );
+            return;
+        }
+        ui.set_pack_hub_detail_delete_armed(false);
+        ui.set_pack_hub_detail_busy(true);
+        ui.set_pack_hub_detail_message("Deleting pack from ESO Logs...".into());
+        let auth_state = delete_auth.clone();
+        let ui_weak = ui.as_weak();
+        std::thread::spawn(move || {
+            let result = pack_hub_access_token(&auth_state)
+                .and_then(|token| pack_hub_delete_request(&token, &id));
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = ui_weak.upgrade() else {
+                    return;
+                };
+                ui.set_pack_hub_detail_busy(false);
+                match result {
+                    Ok(()) => {
+                        ui.set_pack_hub_detail_message(
+                            "Pack deleted. Refresh the list to see the change.".into(),
+                        );
+                        ui.set_status_error_message("Pack deleted from Pack Hub.".into());
+                    }
+                    Err(error) => {
+                        ui.set_pack_hub_detail_message(format!("Could not delete: {error}").into());
+                        ui.set_status_error_message(format!("Pack delete failed: {error}").into());
                     }
                 }
             });
@@ -5545,6 +5694,72 @@ fn share_worker_url() -> &'static str {
             .or_else(|_| std::env::var("PACK_HUB_API_URL"))
             .unwrap_or_else(|_| "https://kalpa-pack-hub.eso-toolkit.workers.dev".to_string())
     })
+}
+
+/// Shared in-memory Pack Hub OAuth session (the access/refresh tokens from
+/// `auth::login`). Held for the app session; managing packs signs in once.
+type PackHubAuth = Arc<Mutex<Option<auth::AuthTokens>>>;
+
+/// Return a currently-valid access token, refreshing (and re-storing) if it
+/// expired. Clears the session on a hard refresh failure so the UI re-prompts.
+fn pack_hub_access_token(state: &PackHubAuth) -> Result<String, String> {
+    let tokens = state.lock().unwrap().clone();
+    let Some(tokens) = tokens else {
+        return Err("Sign in to manage packs.".to_string());
+    };
+    match auth::ensure_valid_token(&tokens) {
+        Ok(Some(refreshed)) => {
+            let token = refreshed.access_token.clone();
+            *state.lock().unwrap() = Some(refreshed);
+            Ok(token)
+        }
+        Ok(None) => Ok(tokens.access_token),
+        Err(error) => {
+            *state.lock().unwrap() = None;
+            Err(error)
+        }
+    }
+}
+
+/// DELETE a pack the signed-in user owns (the worker enforces ownership → 403).
+fn pack_hub_delete_request(token: &str, id: &str) -> Result<(), String> {
+    let url = format!("{}/packs/{}", pack_hub_url(), id);
+    let response = pack_hub_client()
+        .delete(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .map_err(pack_hub_network_error)?;
+    match response.status().as_u16() {
+        200 | 204 => Ok(()),
+        401 => Err("Session expired. Sign in again.".to_string()),
+        403 => Err("You can only delete packs you created.".to_string()),
+        404 => Err("Pack not found.".to_string()),
+        status => Err(format!("Pack Hub returned HTTP {status}.")),
+    }
+}
+
+/// Toggle a vote on a pack (requires sign-in; the worker records/removes it).
+fn pack_hub_vote_request(token: &str, id: &str) -> Result<(), String> {
+    let url = format!("{}/packs/{}/vote", pack_hub_url(), id);
+    let response = pack_hub_client()
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .map_err(pack_hub_network_error)?;
+    match response.status().as_u16() {
+        200 | 201 => Ok(()),
+        401 => Err("Sign in to vote on packs.".to_string()),
+        404 => Err("Pack not found.".to_string()),
+        status => Err(format!("Pack Hub returned HTTP {status}.")),
+    }
+}
+
+fn pack_hub_network_error(error: reqwest::Error) -> String {
+    if error.is_connect() || error.is_timeout() {
+        "Could not connect to Pack Hub. Check your internet connection.".to_string()
+    } else {
+        format!("Network error: {error}")
+    }
 }
 
 fn normalize_share_code(value: &str) -> String {

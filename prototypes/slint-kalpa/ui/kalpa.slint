@@ -7650,6 +7650,10 @@ component PackHubOverlay inherits Rectangle {
     in property <string> detail-message: "";
     in property <bool> detail-sharing: false;
     in property <string> detail-share-status: "";
+    in property <bool> signed-in: false;
+    in property <string> pack-user: "";
+    in property <bool> detail-delete-armed: false;
+    in property <bool> detail-busy: false;
     in property <string> install-label: "Install Addons";
     in property <bool> import-loading: false;
     in property <bool> import-has-settings: false;
@@ -7682,6 +7686,10 @@ component PackHubOverlay inherits Rectangle {
     callback install-detail;
     callback manage-pack-detail;
     callback share-pack-detail;
+    callback sign-in;
+    callback sign-out;
+    callback vote-detail;
+    callback delete-detail;
     visible: root.open;
     background: #000000c4;
     private property <length> modal-width: root.width < 760px ? root.width - 48px : 674px;
@@ -7899,6 +7907,43 @@ component PackHubOverlay inherits Rectangle {
                 background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 70%, #00000000 100%);
 
                 PackHubButton { x: parent.width - 302px; y: 18px; width: 74px; icon: @image-url("../assets/icons/arrow-left.svg"); label: "Back"; clicked => { root.view = 0; } }
+
+                // Signed-in status / sign-in-out on the left of the footer.
+                SmallAction {
+                    x: 20px;
+                    y: 22px;
+                    label: root.signed-in ? ("Signed in: " + root.pack-user) : "Sign in to manage";
+                    tone: root.signed-in ? Palette.emerald : Palette.sky;
+                    fill: root.signed-in ? Palette.emerald-04 : Palette.sky-10;
+                    fill-hover: root.signed-in ? Palette.emerald-20 : Palette.sky-16;
+                    fill-pressed: root.signed-in ? Palette.emerald-20 : Palette.sky-22;
+                    clicked => { if (root.signed-in) { root.sign-out(); } else { root.sign-in(); } }
+                }
+
+                // Vote (needs sign-in) + owner delete (armed → confirm).
+                SmallAction {
+                    x: 230px;
+                    y: 22px;
+                    label: "Upvote";
+                    tone: Palette.gold;
+                    fill: Palette.gold-04;
+                    fill-hover: Palette.gold-20;
+                    fill-pressed: Palette.gold-20;
+                    clicked => { root.vote-detail(); }
+                }
+
+                if (root.signed-in) : SmallAction {
+                    x: 316px;
+                    y: 22px;
+                    label: root.detail-busy ? "Deleting..." : (root.detail-delete-armed ? "Confirm delete" : "Delete");
+                    tone: Palette.red;
+                    fill: Palette.red-04;
+                    fill-hover: Palette.red-20;
+                    fill-pressed: Palette.red-20;
+                    line: Palette.red-25;
+                    clicked => { root.delete-detail(); }
+                }
+
                 PackHubButton { x: parent.width - 218px; y: 18px; width: 194px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: root.install-label; primary: true; disabled: root.detail-addons.length == 0 || root.install-label == "All Addons Installed" || root.install-label == "Select Addons to Install"; clicked => { root.install-detail(); } }
             }
         }
@@ -12649,6 +12694,10 @@ export component KalpaWindow inherits Window {
     in-out property <string> pack-hub-detail-message;
     in-out property <bool> pack-hub-detail-sharing: false;
     in-out property <string> pack-hub-detail-share-status;
+    in-out property <bool> pack-hub-signed-in: false;
+    in-out property <string> pack-hub-user;
+    in-out property <bool> pack-hub-detail-delete-armed: false;
+    in-out property <bool> pack-hub-detail-busy: false;
     in-out property <string> pack-hub-install-label: "Install Addons";
     in-out property <bool> pack-hub-import-loading: false;
     in-out property <bool> pack-hub-import-has-settings: false;
@@ -12899,6 +12948,10 @@ export component KalpaWindow inherits Window {
     callback pack-hub-install-detail;
     callback pack-hub-manage-detail;
     callback pack-hub-share-detail;
+    callback pack-hub-sign-in;
+    callback pack-hub-sign-out;
+    callback pack-hub-vote-detail;
+    callback pack-hub-delete-detail;
     callback open-uploader;
     callback uploader-refresh;
     callback uploader-select-log(int);
@@ -13249,6 +13302,10 @@ export component KalpaWindow inherits Window {
             detail-message: root.pack-hub-detail-message;
             detail-sharing: root.pack-hub-detail-sharing;
             detail-share-status: root.pack-hub-detail-share-status;
+            signed-in: root.pack-hub-signed-in;
+            pack-user: root.pack-hub-user;
+            detail-delete-armed: root.pack-hub-detail-delete-armed;
+            detail-busy: root.pack-hub-detail-busy;
             install-label: root.pack-hub-install-label;
             import-loading: root.pack-hub-import-loading;
             import-has-settings: root.pack-hub-import-has-settings;
@@ -13281,6 +13338,10 @@ export component KalpaWindow inherits Window {
             install-detail => { root.pack-hub-install-detail(); }
             manage-pack-detail => { root.pack-hub-manage-detail(); }
             share-pack-detail => { root.pack-hub-share-detail(); }
+            sign-in => { root.pack-hub-sign-in(); }
+            sign-out => { root.pack-hub-sign-out(); }
+            vote-detail => { root.pack-hub-vote-detail(); }
+            delete-detail => { root.pack-hub-delete-detail(); }
         }
 
         if (root.svm-open) : SavedVariablesOverlay {
