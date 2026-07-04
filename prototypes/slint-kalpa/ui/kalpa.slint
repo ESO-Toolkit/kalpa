@@ -5180,12 +5180,19 @@ component SafetyTabButton inherits Rectangle {
 
 component SafetySnapshotRow inherits Rectangle {
     in property <SafetySnapshotEntry> snapshot;
+    in property <bool> confirming-delete: false;
     callback restore-clicked;
     callback delete-clicked;
+    callback delete-confirmed;
+    callback delete-cancelled;
     height: 82px;
     border-radius: 12px;
     border-width: 0px;
     background: touch.has-hover ? Palette.white-04 : Palette.white-02;
+
+    // Declared first so the action buttons (later siblings) stay on top and
+    // remain clickable; this only provides the row hover state.
+    touch := TouchArea { width: root.width; height: root.height; }
 
     Text {
         x: 16px;
@@ -5220,10 +5227,12 @@ component SafetySnapshotRow inherits Rectangle {
         overflow: elide;
     }
 
-    PackHubButton { x: parent.width - 178px; y: 16px; width: 82px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; clicked => { root.restore-clicked(); } }
-    PackHubButton { x: parent.width - 88px; y: 16px; width: 72px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; clicked => { root.delete-clicked(); } }
+    if (!root.confirming-delete) : PackHubButton { x: parent.width - 178px; y: 16px; width: 82px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; clicked => { root.restore-clicked(); } }
+    if (!root.confirming-delete) : PackHubButton { x: parent.width - 88px; y: 16px; width: 72px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Delete"; danger: true; clicked => { root.delete-clicked(); } }
 
-    touch := TouchArea { width: root.width; height: root.height; }
+    if (root.confirming-delete) : Text { x: parent.width - 232px; y: 0px; width: 68px; height: parent.height; text: "Delete?"; color: Palette.amber; font-size: 12px; font-weight: 900; horizontal-alignment: right; vertical-alignment: center; }
+    if (root.confirming-delete) : PackHubButton { x: parent.width - 156px; y: 16px; width: 70px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Yes"; danger: true; clicked => { root.delete-confirmed(); } }
+    if (root.confirming-delete) : PackHubButton { x: parent.width - 78px; y: 16px; width: 58px; icon: @image-url("../assets/icons/x.svg"); label: "No"; clicked => { root.delete-cancelled(); } }
 }
 
 component SafetyIssueRow inherits Rectangle {
@@ -5282,6 +5291,7 @@ component SafetyCenterOverlay inherits Rectangle {
     private property <length> footer-height: 66px;
     private property <length> content-top: 166px;
     private property <length> content-height: max(160px, root.modal-height - root.footer-height - root.content-top - 12px);
+    private property <int> confirm-delete-index: -1;
 
     TouchArea { width: root.width; height: root.height; clicked => { root.open = false; } }
 
@@ -5360,8 +5370,17 @@ component SafetyCenterOverlay inherits Rectangle {
                         y: index * 92px;
                         width: parent.width;
                         snapshot: snapshot;
-                        restore-clicked => { root.restore-snapshot(index); }
-                        delete-clicked => { root.delete-snapshot(index); }
+                        confirming-delete: index == root.confirm-delete-index;
+                        restore-clicked => {
+                            root.confirm-delete-index = -1;
+                            root.restore-snapshot(index);
+                        }
+                        delete-clicked => { root.confirm-delete-index = index; }
+                        delete-confirmed => {
+                            root.confirm-delete-index = -1;
+                            root.delete-snapshot(index);
+                        }
+                        delete-cancelled => { root.confirm-delete-index = -1; }
                     }
                 }
             }
