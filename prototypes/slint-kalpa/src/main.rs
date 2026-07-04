@@ -809,6 +809,7 @@ struct SvmEditorState {
     stamp: Option<saved_variables::SvFileStamp>,
     selected_path: Vec<String>,
     tree_expanded_all: bool,
+    tree_filter: String,
     dirty: bool,
     message: String,
 }
@@ -4649,6 +4650,19 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             state.message.clear();
         }
         apply_svm_editor_state(&ui, &svm_editor_collapse_state.borrow());
+    });
+
+    let svm_editor_filter_ui = ui.as_weak();
+    let svm_editor_filter_state = svm_editor_state.clone();
+    ui.on_svm_editor_tree_filter_edited(move |value| {
+        let Some(ui) = svm_editor_filter_ui.upgrade() else {
+            return;
+        };
+        {
+            let mut state = svm_editor_filter_state.borrow_mut();
+            state.tree_filter = value.to_string();
+        }
+        apply_svm_editor_state(&ui, &svm_editor_filter_state.borrow());
     });
 
     let svm_editor_save_ui = ui.as_weak();
@@ -14873,7 +14887,14 @@ fn apply_svm_editor_state(ui: &KalpaWindow, state: &SvmEditorState) {
     let tree_entries = state
         .tree
         .as_ref()
-        .map(|tree| svm_editor_tree_entries(tree, &state.selected_path, state.tree_expanded_all))
+        .map(|tree| {
+            svm_editor_tree_entries(
+                tree,
+                &state.selected_path,
+                state.tree_expanded_all,
+                &state.tree_filter,
+            )
+        })
         .unwrap_or_default();
     let setting_entries = svm_editor_setting_entries(state);
     let path_label = if state.selected_path.is_empty() {
@@ -14937,13 +14958,27 @@ fn svm_editor_tree_entries(
     tree: &saved_variables::SvTreeNode,
     selected_path: &[String],
     expand_all: bool,
+    filter: &str,
 ) -> Vec<SvmEditorTreeEntry> {
+    let query = filter.trim().to_ascii_lowercase();
+
+    fn node_matches(node: &saved_variables::SvTreeNode, query: &str) -> bool {
+        if node.key.to_ascii_lowercase().contains(query) {
+            return true;
+        }
+        node.children
+            .as_ref()
+            .map(|children| children.iter().any(|child| node_matches(child, query)))
+            .unwrap_or(false)
+    }
+
     fn collect(
         node: &saved_variables::SvTreeNode,
         depth: i32,
         path: Vec<String>,
         selected_path: &[String],
         expand_all: bool,
+        query: &str,
         rows: &mut Vec<SvmEditorTreeEntry>,
     ) {
         if rows.len() >= 500 {
@@ -14957,11 +14992,19 @@ fn svm_editor_tree_entries(
             if rows.len() >= 500 {
                 return;
             }
+            // While filtering, drop branches that neither match nor contain a match.
+            if !query.is_empty() && !node_matches(child, query) {
+                continue;
+            }
             let mut child_path = path.clone();
             child_path.push(child.key.clone());
             let child_count = child.children.as_ref().map(Vec::len).unwrap_or(0);
+            // Filtering auto-expands surviving branches so matches are visible.
             let expanded = child_count > 0
-                && (expand_all || depth == 0 || path_is_prefix(&child_path, selected_path));
+                && (!query.is_empty()
+                    || expand_all
+                    || depth == 0
+                    || path_is_prefix(&child_path, selected_path));
             let path_json = serde_json::to_string(&child_path).unwrap_or_else(|_| "[]".to_string());
             rows.push(SvmEditorTreeEntry {
                 label: child.key.clone().into(),
@@ -14982,6 +15025,7 @@ fn svm_editor_tree_entries(
                     child_path,
                     selected_path,
                     expand_all,
+                    query,
                     rows,
                 );
             }
@@ -14989,7 +15033,15 @@ fn svm_editor_tree_entries(
     }
 
     let mut rows = Vec::new();
-    collect(tree, 0, Vec::new(), selected_path, expand_all, &mut rows);
+    collect(
+        tree,
+        0,
+        Vec::new(),
+        selected_path,
+        expand_all,
+        &query,
+        &mut rows,
+    );
     rows
 }
 
@@ -18935,16 +18987,18 @@ CombatMetrics_SavedVariables = {
             ]
         );
         assert!(
-            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path, false)
+            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path, false, "")
                 .iter()
                 .any(|entry| entry.active && entry.label.as_str() == "Main")
         );
         assert!(
-            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path, true).len()
+            svm_editor_tree_entries(state.tree.as_ref().unwrap(), &state.selected_path, true, "")
+                .len()
                 >= svm_editor_tree_entries(
                     state.tree.as_ref().unwrap(),
                     &state.selected_path,
-                    false
+                    false,
+                    ""
                 )
                 .len()
         );
