@@ -10135,6 +10135,7 @@ fn wire_discover(
 
         let input = ui.get_discover_url_input().to_string();
         if input.trim().is_empty() {
+            ui.set_discover_browse_message("".into());
             ui.set_status_error_message("".into());
             return;
         }
@@ -10178,12 +10179,17 @@ fn wire_discover(
                             screenshots,
                             screenshot_counter.clone(),
                         );
+                        ui.set_discover_browse_message("".into());
                         ui.set_status_error_message("".into());
                     }
                     Err(error) => {
-                        ui.set_status_error_message(
-                            format!("Could not resolve ESOUI addon: {error}").into(),
-                        );
+                        // Surface the failure inline in the Discover body (with a
+                        // retry), not just in the global status line, so a bad
+                        // URL/ID doesn't look like an empty search.
+                        let message = format!("Could not resolve ESOUI addon: {error}");
+                        ui.set_discover_results(Rc::new(VecModel::from(Vec::<DiscoverEntry>::new())).into());
+                        ui.set_discover_browse_message(message.clone().into());
+                        ui.set_status_error_message(message.into());
                     }
                 }
             });
