@@ -14903,7 +14903,7 @@ fn svm_editor_tree_entries(
         expand_all: bool,
         rows: &mut Vec<SvmEditorTreeEntry>,
     ) {
-        if rows.len() >= 80 {
+        if rows.len() >= 500 {
             return;
         }
         let Some(children) = node.children.as_ref() else {
@@ -14911,7 +14911,7 @@ fn svm_editor_tree_entries(
         };
 
         for child in children {
-            if rows.len() >= 80 {
+            if rows.len() >= 500 {
                 return;
             }
             let mut child_path = path.clone();
