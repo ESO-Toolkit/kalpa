@@ -18963,6 +18963,17 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual: writes the real cookie in KALPA_TEST_COOKIE to the credential store"]
+    fn inject_upload_session_from_env() {
+        let cookie = std::env::var("KALPA_TEST_COOKIE").expect("set KALPA_TEST_COOKIE");
+        assert!(token_store::save_upload_session(&cookie));
+        assert_eq!(
+            token_store::load_upload_session().as_deref(),
+            Some(cookie.as_str())
+        );
+    }
+
+    #[test]
     #[ignore = "touches the OS credential store; run manually for visual QA"]
     fn clear_fake_upload_session() {
         token_store::clear_upload_session();
