@@ -99,6 +99,12 @@ export interface KalpaScribedSkillEvidence {
   abilityId: number;
   name?: string | null;
   icon?: string | null;
+  /** Equipped Focus/Primary script (e.g. "Pull"). */
+  focusScript?: string | null;
+  /** Equipped Signature script (e.g. "Lingering Torment"). */
+  signatureScript?: string | null;
+  /** Equipped Affix script (e.g. "Defile"). */
+  affixScript?: string | null;
 }
 
 export interface KalpaBuildEvidence {
