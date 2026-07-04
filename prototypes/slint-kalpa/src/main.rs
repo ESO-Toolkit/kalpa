@@ -2170,6 +2170,60 @@ fn apply_addon_view_if_key_changed(ui: &KalpaWindow, models: &AddonModels) {
     apply_addon_view(ui, models);
 }
 
+fn toggle_visible_addon_selection(
+    ui: &KalpaWindow,
+    models: &AddonModels,
+    visible_index: usize,
+) -> bool {
+    let Some(mut addon) = models.visible.row_data(visible_index) else {
+        return false;
+    };
+
+    addon.selected = !addon.selected;
+    let folder_name = addon.folder_name.to_string();
+    let selected = addon.selected;
+    let mut updated_master = false;
+    {
+        let mut all = models.all.borrow_mut();
+        if let Some(master) = all
+            .iter_mut()
+            .find(|entry| entry.folder_name.as_str() == folder_name)
+        {
+            master.selected = selected;
+            updated_master = true;
+        }
+    }
+
+    if !updated_master {
+        return false;
+    }
+
+    models.visible.set_row_data(visible_index, addon);
+    set_batch_state(ui, models);
+    true
+}
+
+fn clear_addon_selection(ui: &KalpaWindow, models: &AddonModels) {
+    {
+        let mut all = models.all.borrow_mut();
+        for addon in all.iter_mut() {
+            addon.selected = false;
+        }
+    }
+
+    for index in 0..models.visible.row_count() {
+        let Some(mut addon) = models.visible.row_data(index) else {
+            continue;
+        };
+        if addon.selected {
+            addon.selected = false;
+            models.visible.set_row_data(index, addon);
+        }
+    }
+
+    set_batch_state(ui, models);
+}
+
 fn current_addon_view_key(ui: &KalpaWindow) -> AddonViewKey {
     AddonViewKey {
         query: ui.get_addon_search_query().trim().to_string(),
@@ -3228,9 +3282,18 @@ fn merge_discover_detail(
     entry
 }
 
+fn discover_entry_needs_detail(entry: &DiscoverEntry) -> bool {
+    entry.version.is_empty()
+        || entry.description.as_str() == "Select this addon to load its ESOUI description."
+}
+
 const DISCOVER_SCREENSHOT_LIMIT: usize = 4;
 
 fn clear_discover_screenshots(ui: &KalpaWindow) {
+    if ui.get_discover_screenshot_index() == 0 && ui.get_discover_screenshots().row_count() == 0 {
+        return;
+    }
+
     ui.set_discover_screenshot_index(0);
     ui.set_discover_screenshots(
         Rc::new(VecModel::from(Vec::<DiscoverScreenshotEntry>::new())).into(),
@@ -8364,25 +8427,14 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
         let Some(ui) = toggle_ui.upgrade() else {
             return;
         };
-        let Some(addon) = toggle_models.visible.row_data(index.max(0) as usize) else {
-            return;
-        };
-
-        let folder_name = addon.folder_name.to_string();
-        with_master_addon_mut(&toggle_models, &folder_name, |entry| {
-            entry.selected = !entry.selected;
-        });
-        apply_addon_view(&ui, &toggle_models);
+        let _ = toggle_visible_addon_selection(&ui, &toggle_models, index.max(0) as usize);
     });
 
     let clear_ui = ui.as_weak();
     let clear_models = models.clone();
     ui.on_batch_clear(move || {
         if let Some(ui) = clear_ui.upgrade() {
-            for addon in clear_models.all.borrow_mut().iter_mut() {
-                addon.selected = false;
-            }
-            apply_addon_view(&ui, &clear_models);
+            clear_addon_selection(&ui, &clear_models);
         }
     });
 
@@ -9950,13 +10002,18 @@ fn wire_discover(
         }
 
         let next_index = (index.max(0) as usize).min(row_count.saturating_sub(1));
+        let Some(entry) = model.row_data(next_index) else {
+            return;
+        };
+        let current_index = ui.get_selected_discover_index().max(0) as usize;
+        if next_index == current_index && !discover_entry_needs_detail(&entry) {
+            return;
+        }
+
         ui.set_selected_discover_index(next_index as i32);
         clear_discover_screenshots(&ui);
         screenshot_request_counter.fetch_add(1, Ordering::SeqCst);
 
-        let Some(entry) = model.row_data(next_index) else {
-            return;
-        };
         let Ok(esoui_id) = entry.esoui_id.parse::<u32>() else {
             return;
         };
@@ -20020,6 +20077,45 @@ CombatMetrics_SavedVariables = {
         assert_eq!(entry.category.as_str(), "Combat");
         assert_eq!(entry.rank, 4);
         assert!(entry.installed);
+    }
+
+    #[test]
+    fn discover_search_result_still_needs_first_click_detail_load() {
+        let installed = BTreeSet::new();
+        let search_entry = discover_entry_from_search_result(
+            esoui::EsouiSearchResult {
+                id: 1360,
+                title: "CombatMetrics".to_string(),
+                author: "Solinur".to_string(),
+                category: "Combat".to_string(),
+                downloads: "5.2M".to_string(),
+                updated: "3/3/2026".to_string(),
+            },
+            &installed,
+            1,
+        );
+
+        assert!(discover_entry_needs_detail(&search_entry));
+
+        let detailed_entry = discover_entry(
+            "1360",
+            "CombatMetrics",
+            "Solinur",
+            "Combat",
+            "1.7.7",
+            "5.2M",
+            "213K",
+            "8.8K",
+            "3/3/2026",
+            "8/5/2014",
+            "abc123",
+            "101048",
+            "Full detail",
+            1,
+            &installed,
+        );
+
+        assert!(!discover_entry_needs_detail(&detailed_entry));
     }
 
     #[test]

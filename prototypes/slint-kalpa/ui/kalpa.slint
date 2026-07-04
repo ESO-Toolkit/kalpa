@@ -1182,12 +1182,13 @@ component GhostIconButton inherits Rectangle {
 component Checkbox inherits Rectangle {
     in property <bool> checked: false;
     callback clicked;
+    private property <bool> hover-active: touch.has-hover && !Tokens.low-memory-preset;
     width: 16px;
     height: 16px;
     border-radius: 5px;
     border-width: 1px;
-    border-color: checked ? Palette.gold-20 : (touch.has-hover ? Palette.white-10 : Palette.white-08);
-    background: checked ? Palette.gold-25 : (touch.has-hover ? Palette.white-10 : Palette.white-08);
+    border-color: checked ? Palette.gold-20 : (touch.pressed || root.hover-active ? Palette.white-10 : Palette.white-08);
+    background: checked ? Palette.gold-25 : (touch.pressed || root.hover-active ? Palette.white-10 : Palette.white-08);
 
     animate background, border-color { duration: Tokens.low-memory-preset ? 0ms : 90ms; easing: ease-in-out; }
 
@@ -1214,7 +1215,11 @@ component Checkbox inherits Rectangle {
     touch := TouchArea {
         width: root.width;
         height: root.height;
-        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.clicked();
+            }
+        }
     }
 }
 
@@ -1266,8 +1271,10 @@ component AddonRow inherits Rectangle {
     callback context-toggle-disable;
     callback context-remove;
     private property <bool> hovered: touch.has-hover || select-touch.has-hover;
-    private property <bool> rail-open: root.selected || root.batch-active || root.hovered;
-    private property <length> content-x: root.rail-open ? 42px : 16px;
+    private property <bool> hover-affordance: root.hovered && !Tokens.low-memory-preset;
+    private property <bool> rail-open: root.selected || root.batch-active || root.hover-affordance;
+    private property <bool> checkbox-visible: Tokens.low-memory-preset || root.rail-open;
+    private property <length> content-x: Tokens.low-memory-preset ? 42px : (root.rail-open ? 42px : 16px);
     private property <bool> active-current: current && !root.batch-active;
     private property <color> state-rail: disabled ? #71717a : (state == 2 ? Palette.red : (state == 1 ? Palette.amber : (state == 3 ? Palette.violet : (state == 5 ? Palette.emerald : #00000000))));
     private property <color> state-wash: disabled ? #71717a0a : (state == 2 ? Palette.red-04 : (state == 1 ? Palette.amber-04 : (state == 3 ? Palette.violet-04 : (state == 5 ? Palette.emerald-04 : #00000000))));
@@ -1275,7 +1282,7 @@ component AddonRow inherits Rectangle {
     in-out property <length> menu-y: 18px;
 
     height: 52px;
-    background: root.active-current ? Palette.gold-06 : (root.selected ? Palette.gold-06 : (root.hovered ? Palette.white-04 : #00000000));
+    background: root.active-current ? Palette.gold-06 : (root.selected ? Palette.gold-06 : (root.hover-affordance ? Palette.white-04 : #00000000));
     inner-shadow-offset-y: 0px;
     inner-shadow-blur: 0px;
     inner-shadow-color: #00000000;
@@ -1304,7 +1311,7 @@ component AddonRow inherits Rectangle {
         x: 18px;
         y: 17px;
         checked: root.selected;
-        opacity: root.rail-open ? 1.0 : 0.0;
+        opacity: root.checkbox-visible ? 1.0 : 0.0;
         animate opacity { duration: Tokens.low-memory-preset ? 0ms : 90ms; easing: ease-in-out; }
         clicked => { root.selected-toggled(); }
     }
@@ -1392,9 +1399,10 @@ component AddonRow inherits Rectangle {
     select-touch := TouchArea {
         width: 40px;
         height: root.height;
-        clicked => { root.selected-toggled(); }
         pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.selected-toggled();
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                 root.menu-x = select-touch.mouse-x;
                 root.menu-y = select-touch.mouse-y;
                 context-popup.show();
@@ -1630,8 +1638,9 @@ component DiscoverResultRow inherits Rectangle {
     private property <length> action-reserve: 96px;
     private property <length> meta-y: 38px;
     private property <length> extra-y: 57px;
+    private property <bool> hover-affordance: touch.has-hover && !Tokens.low-memory-preset;
     height: root.show-extra-meta ? 78px : 62px;
-    background: root.selected ? Palette.gold-06 : (touch.has-hover ? Palette.white-04 : #00000000);
+    background: root.selected ? Palette.gold-06 : (root.hover-affordance ? Palette.white-04 : #00000000);
     border-radius: 0px;
     inner-shadow-offset-y: 0px;
     inner-shadow-blur: 0px;
@@ -1753,7 +1762,7 @@ component DiscoverResultRow inherits Rectangle {
     }
 
     SmallAction {
-        visible: root.installed || touch.has-hover;
+        visible: root.installed || root.selected || Tokens.low-memory-preset || root.hover-affordance;
         x: parent.width - self.width - 16px;
         y: (root.height - self.height) / 2;
         label: root.installed ? "Installed" : "Install";
@@ -2002,7 +2011,7 @@ component DiscoverModePanel inherits Rectangle {
     private property <length> list-y: root.tab == 1 ? 38px : (root.tab == 2 ? (root.category-filter-visible ? 120px : 82px) : 0px);
     private property <bool> footer-visible: (root.tab == 1 || root.tab == 2) && (root.loading || root.has-more);
     private property <length> footer-height: root.footer-visible ? 42px : 0px;
-    background: #00000000;
+    background: Tokens.low-memory-preset ? Tokens.background : #00000000;
     clip: true;
 
     if (root.tab == 1) : HorizontalLayout {
@@ -9820,13 +9829,13 @@ component Header inherits Rectangle {
     }
 
     spinner-timer := Timer {
-        interval: 16ms;
+        interval: Tokens.low-memory-preset ? 120ms : 16ms;
         running: (root.loading || root.checking-updates) && !Tokens.reduced-motion;
         triggered => {
             if (root.spinner-angle >= 354deg) {
                 root.spinner-angle = 0deg;
             } else {
-                root.spinner-angle += 6deg;
+                root.spinner-angle += Tokens.low-memory-preset ? 45deg : 6deg;
             }
         }
     }
@@ -9835,7 +9844,7 @@ component Header inherits Rectangle {
         interval: 33ms;
         running: root.displayed-addons-count != root.addons-count;
         triggered => {
-            if (Tokens.reduced-motion) {
+            if (Tokens.reduced-motion || Tokens.low-memory-preset) {
                 root.displayed-addons-count = root.addons-count;
             } else if (root.displayed-addons-count < root.addons-count) {
                 root.displayed-addons-count += min(8, root.addons-count - root.displayed-addons-count);
@@ -10047,7 +10056,7 @@ component Sidebar inherits Rectangle {
     private property <string> sort-label: sort-mode == 1 ? "Author" : (sort-mode == 2 ? "Recently Updated" : (sort-mode == 3 ? "Recently Downloaded" : "Name"));
     private property <bool> compact-discover-chrome: root.discover-active && (root.discover-tab == 1 || root.discover-tab == 2);
     private property <length> discover-panel-y: root.compact-discover-chrome ? 86px : 165px;
-    background: @linear-gradient(180deg, Tokens.bg-base-85 0%, Tokens.background 52%, Tokens.bg-base-85 100%);
+    background: Tokens.low-memory-preset ? Tokens.background : @linear-gradient(180deg, Tokens.bg-base-85 0%, Tokens.background 52%, Tokens.bg-base-85 100%);
 
     Hairline { x: root.width - 1px; width: 1px; height: root.height; opacity: 0.5; }
 
@@ -10056,6 +10065,7 @@ component Sidebar inherits Rectangle {
         y: 0px;
         width: root.width;
         height: 126px;
+        visible: !Tokens.low-memory-preset;
         background: @linear-gradient(180deg, Palette.white-04 0%, #00000000 100%);
     }
 
@@ -11171,7 +11181,7 @@ component DetailPane inherits Rectangle {
     callback conflict-view-diff(int);
     callback conflict-apply;
     callback conflict-skip;
-    background: #00000000;
+    background: Tokens.low-memory-preset ? Tokens.background : #00000000;
     clip: true;
 
     detail-scroll := ScrollView {
@@ -11467,7 +11477,7 @@ component DiscoverDetailPane inherits Rectangle {
     callback screenshot-select(int);
     private property <bool> show-screenshots: root.screenshots.length > 0;
     private property <int> safe-screenshot-index: min(max(root.screenshot-index, 0), max(root.screenshots.length - 1, 0));
-    background: #00000000;
+    background: Tokens.low-memory-preset ? Tokens.background : #00000000;
     clip: true;
 
     detail-scroll := ScrollView {
