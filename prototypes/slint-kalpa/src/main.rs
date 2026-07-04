@@ -201,10 +201,17 @@ mod safe_migration;
 #[path = "../../../src-tauri/src/saved_variables/mod.rs"]
 mod saved_variables;
 
-// Production ESO Logs uploader modules reused for the native split workbench.
-// Only the Tauri-free leaves are pulled in (scan + byte-range split); the upload
-// transport, login WebView, and live driver stay out (they need a Tauri runtime
-// and a Kalpa-owned WebView for ESO Logs sign-in — see PARITY-BACKLOG.md).
+// Upload-session cookie storage (Tauri-free subset of the production token_store,
+// byte-compatible so it reads the cookie the main app persisted).
+#[allow(dead_code)]
+#[path = "token_store.rs"]
+mod token_store;
+
+// Production ESO Logs uploader modules reused natively. The full encoder +
+// reqwest transport + session provider are Tauri-free and pulled in here; only
+// the sign-in WebView (`native::login`) and the crash-recovery orphan sweeper
+// (`native::orphans`) are omitted — the first needs a Kalpa-owned WebView (added
+// separately via wry), the second a Tauri AppHandle. See PARITY-BACKLOG.md.
 #[allow(dead_code, unused_imports)]
 mod uploader {
     #[path = "../../../../src-tauri/src/uploader/scanner.rs"]
@@ -213,8 +220,40 @@ mod uploader {
     pub mod splitter;
     #[path = "../../../../src-tauri/src/uploader/tail_io.rs"]
     pub mod tail_io;
+    #[path = "../../../../src-tauri/src/uploader/transport.rs"]
+    pub mod transport;
     #[path = "../../../../src-tauri/src/uploader/types.rs"]
     pub mod types;
+
+    #[allow(dead_code, unused_imports)]
+    pub mod native {
+        #[path = "../../../../../src-tauri/src/uploader/native/a_counter.rs"]
+        pub mod a_counter;
+        #[path = "../../../../../src-tauri/src/uploader/native/client.rs"]
+        pub mod client;
+        #[path = "../../../../../src-tauri/src/uploader/native/convert.rs"]
+        pub mod convert;
+        #[path = "../../../../../src-tauri/src/uploader/native/coverage.rs"]
+        pub mod coverage;
+        #[path = "../../../../../src-tauri/src/uploader/native/differential.rs"]
+        pub mod differential;
+        #[path = "../../../../../src-tauri/src/uploader/native/encode.rs"]
+        pub mod encode;
+        #[path = "../../../../../src-tauri/src/uploader/native/events.rs"]
+        pub mod events;
+        #[path = "../../../../../src-tauri/src/uploader/native/format.rs"]
+        pub mod format;
+        #[path = "../../../../../src-tauri/src/uploader/native/incremental.rs"]
+        pub mod incremental;
+        #[path = "../../../../../src-tauri/src/uploader/native/live.rs"]
+        pub mod live;
+        #[path = "../../../../../src-tauri/src/uploader/native/serialize.rs"]
+        pub mod serialize;
+        #[path = "../../../../../src-tauri/src/uploader/native/session.rs"]
+        pub mod session;
+        #[path = "../../../../../src-tauri/src/uploader/native/zip_segment.rs"]
+        pub mod zip_segment;
+    }
 }
 
 use serde::{Deserialize, Serialize};
