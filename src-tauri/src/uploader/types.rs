@@ -239,6 +239,11 @@ pub struct KalpaPlayerBuildEvidence {
     pub champion_point_passives: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub food: Option<KalpaFoodEvidence>,
+    /// The equipped Mundus stone boon. ESO Logs derives this from combat auras, but that
+    /// can be missed when the boon isn't re-applied in the analysis window; this is a
+    /// reliable fallback read straight from the raw PLAYER_INFO long-term effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mundus: Option<KalpaMundusEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scribed_skills: Vec<KalpaScribedSkillEvidence>,
     pub evidence: String,
@@ -248,6 +253,16 @@ pub struct KalpaPlayerBuildEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KalpaFoodEvidence {
+    pub ability_id: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KalpaMundusEvidence {
     pub ability_id: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

@@ -84,12 +84,20 @@ export interface KalpaPlayerBuildEvidence {
   classMasteryPassives?: number[];
   championPointPassives?: number[];
   food?: KalpaFoodEvidence | null;
+  /** Equipped Mundus stone boon, recovered from the raw PLAYER_INFO long-term effects. */
+  mundus?: KalpaMundusEvidence | null;
   scribedSkills?: KalpaScribedSkillEvidence[];
   evidence: string;
   confidence: string;
 }
 
 export interface KalpaFoodEvidence {
+  abilityId: number;
+  name?: string | null;
+  icon?: string | null;
+}
+
+export interface KalpaMundusEvidence {
   abilityId: number;
   name?: string | null;
   icon?: string | null;
