@@ -797,7 +797,11 @@ component DetailTabStrip inherits Rectangle {
         y: 4px;
         width: 82px;
         height: 28px;
-        clicked => { root.details-clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.details-clicked();
+            }
+        }
     }
 
     TouchArea {
@@ -805,7 +809,11 @@ component DetailTabStrip inherits Rectangle {
         y: 4px;
         width: 82px;
         height: 28px;
-        clicked => { root.files-clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.files-clicked();
+            }
+        }
     }
 }
 
@@ -1379,9 +1387,10 @@ component AddonRow inherits Rectangle {
         x: 40px;
         width: root.width - 40px;
         height: root.height;
-        clicked => { root.clicked(); }
         pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.clicked();
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                 root.menu-x = 40px + touch.mouse-x;
                 root.menu-y = touch.mouse-y;
                 context-popup.show();
@@ -1392,9 +1401,10 @@ component AddonRow inherits Rectangle {
     select-touch := TouchArea {
         width: 40px;
         height: root.height;
-        clicked => { root.selected-toggled(); }
         pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.selected-toggled();
+            } else if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
                 root.menu-x = select-touch.mouse-x;
                 root.menu-y = select-touch.mouse-y;
                 context-popup.show();
@@ -1642,7 +1652,11 @@ component DiscoverResultRow inherits Rectangle {
     touch := TouchArea {
         width: parent.width;
         height: parent.height;
-        clicked => { root.row-selected(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.row-selected();
+            }
+        }
     }
 
     Rectangle {
@@ -1815,7 +1829,11 @@ component DiscoverSortChip inherits Rectangle {
     touch := TouchArea {
         width: root.width;
         height: root.height;
-        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.clicked();
+            }
+        }
     }
 }
 
@@ -1871,7 +1889,11 @@ component DiscoverSelectChip inherits Rectangle {
     touch := TouchArea {
         width: root.width;
         height: root.height;
-        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.clicked();
+            }
+        }
     }
 }
 
@@ -1915,7 +1937,11 @@ component DiscoverSelectMenuRow inherits Rectangle {
     touch := TouchArea {
         width: root.width;
         height: root.height;
-        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.clicked();
+            }
+        }
     }
 }
 
@@ -1965,7 +1991,11 @@ component DiscoverSubTab inherits Rectangle {
     touch := TouchArea {
         width: root.width;
         height: root.height;
-        clicked => { root.clicked(); }
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                root.clicked();
+            }
+        }
     }
 }
 
@@ -1996,6 +2026,8 @@ component DiscoverModePanel inherits Rectangle {
     callback category-sort-selected(int);
     callback load-more;
     callback retry;
+    in-out property <int> pending-selected-index: root.selected-index;
+    in-out property <bool> selection-commit-pending: false;
     private property <bool> category-menu-open: false;
     private property <bool> category-sort-menu-open: false;
     private property <bool> category-filter-visible: root.tab == 2 && (root.entries.length > 0 || root.category-filter != "");
@@ -2004,6 +2036,16 @@ component DiscoverModePanel inherits Rectangle {
     private property <length> footer-height: root.footer-visible ? 42px : 0px;
     background: #00000000;
     clip: true;
+
+    selection-commit-timer := Timer {
+        interval: 16ms;
+        running: root.selection-commit-pending;
+        triggered => {
+            root.selection-commit-pending = false;
+            root.selected-index = root.pending-selected-index;
+            root.result-selected(root.pending-selected-index);
+        }
+    }
 
     if (root.tab == 1) : HorizontalLayout {
         x: 12px;
@@ -2186,7 +2228,7 @@ component DiscoverModePanel inherits Rectangle {
         for entry[index] in root.entries : DiscoverResultRow {
             width: parent.width;
             rank: root.tab == 1 ? entry.rank : 0;
-            selected: index == root.selected-index;
+            selected: index == (root.selection-commit-pending ? root.pending-selected-index : root.selected-index);
             title: entry.title;
             meta: entry.author == "" ? "" : "by " + entry.author;
             category: entry.category;
@@ -2195,8 +2237,8 @@ component DiscoverModePanel inherits Rectangle {
             show-extra-meta: root.tab == 1 || root.tab == 2;
             installed: entry.installed;
             row-selected => {
-                root.selected-index = index;
-                root.result-selected(index);
+                root.pending-selected-index = index;
+                root.selection-commit-pending = true;
             }
             install-clicked => { root.install-result(index); }
         }
@@ -10043,11 +10085,45 @@ component Sidebar inherits Rectangle {
     callback discover-category-sort-selected(int);
     callback discover-load-more;
     callback discover-browse-retry;
+    in-out property <int> pending-selected-index: root.selected-index;
+    in-out property <bool> selection-commit-pending: false;
+    in-out property <int> pending-filter-mode: root.filter-mode;
+    in-out property <bool> filter-commit-pending: false;
+    in-out property <int> pending-discover-tab: root.discover-tab;
+    in-out property <bool> discover-tab-commit-pending: false;
     private property <string> count-label: root.addons.length == 1 ? "1 ADDON" : root.addons.length + " ADDONS";
     private property <string> sort-label: sort-mode == 1 ? "Author" : (sort-mode == 2 ? "Recently Updated" : (sort-mode == 3 ? "Recently Downloaded" : "Name"));
     private property <bool> compact-discover-chrome: root.discover-active && (root.discover-tab == 1 || root.discover-tab == 2);
     private property <length> discover-panel-y: root.compact-discover-chrome ? 86px : 165px;
     background: @linear-gradient(180deg, Tokens.bg-base-85 0%, Tokens.background 52%, Tokens.bg-base-85 100%);
+
+    selection-commit-timer := Timer {
+        interval: 16ms;
+        running: root.selection-commit-pending;
+        triggered => {
+            root.selection-commit-pending = false;
+            root.selected-index = root.pending-selected-index;
+            root.addon-selected(root.pending-selected-index);
+        }
+    }
+
+    filter-commit-timer := Timer {
+        interval: 16ms;
+        running: root.filter-commit-pending;
+        triggered => {
+            root.filter-commit-pending = false;
+            root.filter-selected(root.pending-filter-mode);
+        }
+    }
+
+    discover-tab-commit-timer := Timer {
+        interval: 16ms;
+        running: root.discover-tab-commit-pending;
+        triggered => {
+            root.discover-tab-commit-pending = false;
+            root.discover-tab-selected(root.pending-discover-tab);
+        }
+    }
 
     Hairline { x: root.width - 1px; width: 1px; height: root.height; opacity: 0.5; }
 
@@ -10119,7 +10195,11 @@ component Sidebar inherits Rectangle {
             y: 0px;
             width: parent.width / 2;
             height: parent.height;
-            clicked => { root.discover-active = false; }
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    root.discover-active = false;
+                }
+            }
         }
 
         TouchArea {
@@ -10127,7 +10207,11 @@ component Sidebar inherits Rectangle {
             y: 0px;
             width: parent.width / 2;
             height: parent.height;
-            clicked => { root.discover-active = true; }
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                    root.discover-active = true;
+                }
+            }
         }
     }
 
@@ -10404,9 +10488,12 @@ component Sidebar inherits Rectangle {
             all-touch := TouchArea {
                 width: all-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 0;
-                    root.filter-selected(0);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 0;
+                        root.pending-filter-mode = 0;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10414,9 +10501,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.addons-x;
                 width: addons-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 1;
-                    root.filter-selected(1);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 1;
+                        root.pending-filter-mode = 1;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10424,9 +10514,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.libs-x;
                 width: libs-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 2;
-                    root.filter-selected(2);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 2;
+                        root.pending-filter-mode = 2;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10435,9 +10528,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.favorites-x;
                 width: favorites-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 3;
-                    root.filter-selected(3);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 3;
+                        root.pending-filter-mode = 3;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10446,9 +10542,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.outdated-x;
                 width: outdated-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 4;
-                    root.filter-selected(4);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 4;
+                        root.pending-filter-mode = 4;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10457,9 +10556,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.issues-x;
                 width: issues-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 5;
-                    root.filter-selected(5);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 5;
+                        root.pending-filter-mode = 5;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10468,9 +10570,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.disabled-x;
                 width: disabled-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 6;
-                    root.filter-selected(6);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 6;
+                        root.pending-filter-mode = 6;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10479,9 +10584,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.testing-x;
                 width: testing-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 7;
-                    root.filter-selected(7);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 7;
+                        root.pending-filter-mode = 7;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10490,9 +10598,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.broken-x;
                 width: broken-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 8;
-                    root.filter-selected(8);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 8;
+                        root.pending-filter-mode = 8;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10501,9 +10612,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.essential-x;
                 width: essential-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 9;
-                    root.filter-selected(9);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 9;
+                        root.pending-filter-mode = 9;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
 
@@ -10512,9 +10626,12 @@ component Sidebar inherits Rectangle {
                 x: filters-scroll.raid-x;
                 width: raid-filter.width;
                 height: parent.height;
-                clicked => {
-                    root.filter-mode = 10;
-                    root.filter-selected(10);
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                        root.filter-mode = 10;
+                        root.pending-filter-mode = 10;
+                        root.filter-commit-pending = true;
+                    }
                 }
             }
         }
@@ -10537,7 +10654,8 @@ component Sidebar inherits Rectangle {
             active: root.discover-tab == 0;
             clicked => {
                 root.discover-tab = 0;
-                root.discover-tab-selected(0);
+                root.pending-discover-tab = 0;
+                root.discover-tab-commit-pending = true;
             }
         }
 
@@ -10549,7 +10667,8 @@ component Sidebar inherits Rectangle {
             active: root.discover-tab == 1;
             clicked => {
                 root.discover-tab = 1;
-                root.discover-tab-selected(1);
+                root.pending-discover-tab = 1;
+                root.discover-tab-commit-pending = true;
             }
         }
 
@@ -10561,7 +10680,8 @@ component Sidebar inherits Rectangle {
             active: root.discover-tab == 2;
             clicked => {
                 root.discover-tab = 2;
-                root.discover-tab-selected(2);
+                root.pending-discover-tab = 2;
+                root.discover-tab-commit-pending = true;
             }
         }
 
@@ -10573,7 +10693,8 @@ component Sidebar inherits Rectangle {
             active: root.discover-tab == 3;
             clicked => {
                 root.discover-tab = 3;
-                root.discover-tab-selected(3);
+                root.pending-discover-tab = 3;
+                root.discover-tab-commit-pending = true;
             }
         }
     }
@@ -10691,7 +10812,7 @@ component Sidebar inherits Rectangle {
             width: parent.width;
             title: addon.title;
             meta: addon.meta;
-            current: index == root.selected-index;
+            current: index == (root.selection-commit-pending ? root.pending-selected-index : root.selected-index);
             favorite: addon.favorite;
             selected: addon.selected;
             batch-active: root.batch-active;
@@ -10705,8 +10826,8 @@ component Sidebar inherits Rectangle {
             badge3: addon.badge3;
             badge3-kind: addon.badge3-kind;
             clicked => {
-                root.selected-index = index;
-                root.addon-selected(index);
+                root.pending-selected-index = index;
+                root.selection-commit-pending = true;
             }
             selected-toggled => { root.addon-selection-toggled(index); }
             context-open-folder => {
