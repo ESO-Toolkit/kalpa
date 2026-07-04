@@ -237,6 +237,11 @@ pub struct KalpaPlayerBuildEvidence {
     pub class_mastery_passives: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub champion_point_passives: Vec<u32>,
+    /// The player's FULL long-term-effect ability ids (all passives, CP stars, etc.) from
+    /// the raw PLAYER_INFO. A regular ESO Logs upload exposes none of these; the consumer
+    /// classifies them (CP stars, class passives, …) against its own ability database.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passives: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub food: Option<KalpaFoodEvidence>,
     /// The equipped Mundus stone boon. ESO Logs derives this from combat auras, but that
