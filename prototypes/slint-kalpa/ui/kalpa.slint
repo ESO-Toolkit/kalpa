@@ -7906,12 +7906,16 @@ component PackHubOverlay inherits Rectangle {
                 height: 64px;
                 background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 70%, #00000000 100%);
 
-                PackHubButton { x: parent.width - 302px; y: 18px; width: 74px; icon: @image-url("../assets/icons/arrow-left.svg"); label: "Back"; clicked => { root.view = 0; } }
+                // No footer "Back" — the header already has a back arrow (top-left).
+                // Removing it keeps the destructive "Confirm delete" control from
+                // overlapping (and stealing clicks from) a cancel-intent Back button.
 
-                // Signed-in status / sign-in-out on the left of the footer.
+                // Signed-in status / sign-in-out on the left of the footer. Width is
+                // capped + elided so a long ESO Logs display name can't overrun Upvote.
                 SmallAction {
                     x: 20px;
                     y: 22px;
+                    width: 196px;
                     label: root.signed-in ? ("Signed in: " + root.pack-user) : "Sign in to manage";
                     tone: root.signed-in ? Palette.emerald : Palette.sky;
                     fill: root.signed-in ? Palette.emerald-04 : Palette.sky-10;
@@ -8799,6 +8803,7 @@ component UploaderOverlay inherits Rectangle {
     in property <string> route-label: "Archon App handoff";
     in property <bool> native-route: false;
     in property <bool> signed-in: false;
+    in property <bool> live-active: false;
     in property <string> report-code: "";
     in property <string> status-title: "No log selected";
     in property <string> status-detail: "Select a log file to inspect fights before uploading.";
@@ -8896,8 +8901,11 @@ component UploaderOverlay inherits Rectangle {
             border-width: 0px;
             background: Palette.white-03;
 
-            UploaderModeButton { x: 5px; y: 4px; width: (parent.width - 10px) / 2; label: "Manual Upload"; active: root.manual; clicked => { root.view = 0; } }
-            UploaderModeButton { x: 5px + (parent.width - 10px) / 2; y: 4px; width: (parent.width - 10px) / 2; label: "Live Logging"; active: !root.manual; clicked => { root.view = 2; } }
+            // Tabs are locked while a native live worker runs or a manual upload is
+            // in flight — switching away would orphan the in-process driver/upload
+            // (its Stop/Cancel lives in the current view). Stop/finish unlocks them.
+            UploaderModeButton { x: 5px; y: 4px; width: (parent.width - 10px) / 2; label: "Manual Upload"; active: root.manual; clicked => { if (!root.live-active && !root.uploading) { root.view = 0; } } }
+            UploaderModeButton { x: 5px + (parent.width - 10px) / 2; y: 4px; width: (parent.width - 10px) / 2; label: "Live Logging"; active: !root.manual; clicked => { if (!root.live-active && !root.uploading) { root.view = 2; } } }
         }
 
         Hairline { x: 0px; y: 152px; width: parent.width; height: 1px; opacity: 0.45; }
@@ -9157,7 +9165,7 @@ component UploaderOverlay inherits Rectangle {
                 clicked => { root.open-report(); }
             }
             PackHubButton { x: parent.width - 284px; y: 22px; width: 116px; icon: @image-url("../assets/icons/x.svg"); label: root.live-running ? "Stop" : "Cancel"; danger: root.live-running; clicked => { if (root.live-running) { root.live-toggle(); } else { root.open = false; } } }
-            PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? "Upload" : (root.live-running ? "Running" : "Go Live"); primary: true; disabled: root.manual ? root.logs.length == 0 : (!root.live-running && root.live-log-label != "Encounter.log"); clicked => { if (root.manual) { root.upload-requested(); } else { root.live-toggle(); } } }
+            PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? (root.uploading ? "Uploading" : "Upload") : (root.live-running ? "Running" : "Go Live"); primary: true; disabled: root.manual ? (root.logs.length == 0 || root.uploading) : (!root.live-running && root.live-log-label != "Encounter.log"); clicked => { if (root.manual) { root.upload-requested(); } else { root.live-toggle(); } } }
         }
     }
 }
@@ -12713,6 +12721,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> uploader-fight-count-label: "0 ready";
     in-out property <string> uploader-route-label: "Archon App handoff";
     in-out property <bool> uploader-native-route: false;
+    in-out property <bool> uploader-live-active: false;
     in-out property <bool> uploader-signed-in: false;
     in-out property <string> uploader-report-code: "";
     in-out property <string> uploader-status-title: "No log selected";
@@ -13411,6 +13420,7 @@ export component KalpaWindow inherits Window {
             selected-log-label: root.uploader-selected-log-label;
             fight-count-label: root.uploader-fight-count-label;
             route-label: root.uploader-route-label;
+            live-active: root.uploader-live-active;
             native-route: root.uploader-native-route;
             signed-in: root.uploader-signed-in;
             report-code: root.uploader-report-code;

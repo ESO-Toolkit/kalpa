@@ -4052,6 +4052,9 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_pack_hub_detail_message("".into());
         ui.set_pack_hub_detail_sharing(false);
         ui.set_pack_hub_detail_share_status("".into());
+        // Disarm any pending delete so an armed "Confirm delete" can't carry over to
+        // a different pack (a one-click destructive delete on the wrong pack).
+        ui.set_pack_hub_detail_delete_armed(false);
         apply_pack_hub_detail_model(&ui, Vec::new());
 
         let Some(pack) = ui.get_pack_hub_packs().row_data(index) else {
@@ -4091,6 +4094,7 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
         ui.set_pack_hub_detail_message("".into());
         ui.set_pack_hub_detail_sharing(false);
         ui.set_pack_hub_detail_share_status("".into());
+        ui.set_pack_hub_detail_delete_armed(false);
         apply_pack_hub_detail_model(&ui, Vec::new());
 
         let installed_ids = installed_discover_ids(&installed_pack_open_models.all.borrow());
@@ -4304,20 +4308,32 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
     });
 
     // ── Pack Hub authenticated actions (native OAuth + mutations) ─────────────
+    // In-flight guards so repeated clicks don't spawn duplicate OAuth browser flows
+    // or duplicate vote POSTs.
+    let pack_signin_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pack_vote_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let signin_ui = ui.as_weak();
     let signin_auth = pack_auth.clone();
+    let signin_busy = pack_signin_busy.clone();
     ui.on_pack_hub_sign_in(move || {
+        use std::sync::atomic::Ordering;
         let Some(ui) = signin_ui.upgrade() else {
             return;
         };
+        if signin_busy.swap(true, Ordering::SeqCst) {
+            return; // a sign-in is already in progress
+        }
         ui.set_pack_hub_detail_message(
             "Opening ESO Logs sign-in in your browser — approve, then return to Kalpa.".into(),
         );
         let auth_state = signin_auth.clone();
+        let busy = signin_busy.clone();
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = auth::login();
             let _ = slint::invoke_from_event_loop(move || {
+                busy.store(false, Ordering::SeqCst);
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
@@ -4360,7 +4376,9 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
 
     let vote_ui = ui.as_weak();
     let vote_auth = pack_auth.clone();
+    let vote_busy = pack_vote_busy.clone();
     ui.on_pack_hub_vote_detail(move || {
+        use std::sync::atomic::Ordering;
         let Some(ui) = vote_ui.upgrade() else {
             return;
         };
@@ -4372,13 +4390,18 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
             ui.set_pack_hub_detail_message("Sign in to vote on packs.".into());
             return;
         }
+        if vote_busy.swap(true, Ordering::SeqCst) {
+            return; // a vote is already in flight
+        }
         ui.set_pack_hub_detail_message("Recording your vote...".into());
         let auth_state = vote_auth.clone();
+        let busy = vote_busy.clone();
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
             let result = pack_hub_access_token(&auth_state)
                 .and_then(|token| pack_hub_vote_request(&token, &id));
             let _ = slint::invoke_from_event_loop(move || {
+                busy.store(false, Ordering::SeqCst);
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
@@ -7219,6 +7242,33 @@ fn uploader_split_output_root() -> Option<PathBuf> {
     native_state_dir().map(|dir| dir.join("log-splits"))
 }
 
+/// Delete old `split-*` folders under `root`, keeping the most recent `keep`
+/// (their `split-<ms>` names sort chronologically), so repeated splits don't grow
+/// app-data without bound.
+fn prune_uploader_split_folders(root: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut folders: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("split-"))
+        })
+        .collect();
+    if folders.len() <= keep {
+        return;
+    }
+    folders.sort();
+    let remove = folders.len() - keep;
+    for path in folders.into_iter().take(remove) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
 fn uploader_split_fight_title(fight: &uploader::types::FightSummary) -> String {
     let name = fight
         .boss_name
@@ -7478,7 +7528,11 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
 
     let upload_ui = ui.as_weak();
     let upload_session = session.clone();
+    // Test-and-set guard: refuse a second concurrent Upload while one is in flight
+    // (a double-click would otherwise create duplicate reports / double handoffs).
+    let upload_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     ui.on_uploader_upload(move || {
+        use std::sync::atomic::Ordering;
         let Some(ui) = upload_ui.upgrade() else {
             return;
         };
@@ -7486,87 +7540,102 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
             ui.set_status_error_message("Select a log before uploading.".into());
             return;
         };
-        ui.set_uploader_report_code(String::new().into());
-
-        // Signed in → upload the report directly to ESO Logs with the native
-        // encoder + transport. Signed out → the external uploader handoff.
-        if upload_session.has_session() {
-            ui.set_uploader_view(1);
-            ui.set_uploader_status_title("Uploading to ESO Logs...".into());
-            ui.set_uploader_status_detail(
-                "Encoding the log and sending the report directly — no external uploader.".into(),
-            );
-            let opts = native_upload_options_from_ui(&ui);
-            let session = upload_session.clone();
-            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let ui_weak = ui.as_weak();
-            std::thread::spawn(move || {
-                let result =
-                    uploader::transport::run_native_upload(&path, &opts, &*session, cancel);
-                let signed_in = session.has_session();
-                let _ = slint::invoke_from_event_loop(move || {
-                    let Some(ui) = ui_weak.upgrade() else {
-                        return;
-                    };
-                    ui.set_uploader_view(0);
-                    apply_uploader_native_state(&ui, signed_in);
-                    match result {
-                        Ok(uploader::transport::UploadOutcome::Completed { report_code }) => {
-                            match report_code {
-                                Some(code) => {
-                                    ui.set_uploader_report_code(code.clone().into());
-                                    ui.set_uploader_status_title("Report uploaded".into());
-                                    ui.set_uploader_status_detail(
-                                        format!("ESO Logs report {code} is ready.").into(),
-                                    );
-                                }
-                                None => {
-                                    ui.set_uploader_status_title("Report uploaded".into());
-                                    ui.set_uploader_status_detail(
-                                        "The report was uploaded to ESO Logs.".into(),
-                                    );
-                                }
-                            }
-                        }
-                        Ok(uploader::transport::UploadOutcome::HandedOff { detail }) => {
-                            ui.set_uploader_status_title("Handed off to uploader".into());
-                            ui.set_uploader_status_detail(detail.into());
-                        }
-                        Err(error) => {
-                            ui.set_uploader_status_title("Upload failed".into());
-                            ui.set_uploader_status_detail(error.clone().into());
-                            ui.set_status_error_message(error.into());
-                        }
-                    }
-                });
-            });
-            return;
+        if upload_in_flight.swap(true, Ordering::SeqCst) {
+            return; // an upload is already running
         }
-
+        ui.set_uploader_report_code(String::new().into());
         ui.set_uploader_view(1);
-        ui.set_uploader_status_title("Opening uploader...".into());
-        ui.set_uploader_status_detail(
-            "Launching the external ESO Logs uploader from the native Slint shell.".into(),
+
+        let has_session = upload_session.has_session();
+        ui.set_uploader_status_title(
+            if has_session {
+                "Uploading to ESO Logs..."
+            } else {
+                "Opening uploader..."
+            }
+            .into(),
         );
-        let options = uploader_launch_options_from_ui(&ui);
+        ui.set_uploader_status_detail(
+            if has_session {
+                "Encoding the log and sending the report directly — no external uploader."
+            } else {
+                "Launching the external ESO Logs uploader from the native Slint shell."
+            }
+            .into(),
+        );
+
+        let opts = native_upload_options_from_ui(&ui);
+        let launch_opts = uploader_launch_options_from_ui(&ui);
+        let session = upload_session.clone();
+        let in_flight = upload_in_flight.clone();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ui_weak = ui.as_weak();
         std::thread::spawn(move || {
-            let result = launch_external_uploader(Path::new(&path), false, options);
+            // Apply the SAME safety gate the production command uses: native only when
+            // signed in AND the log is fully within proven coverage (single session,
+            // proven events, valid UTF-8, not too large). A multi-session or unproven
+            // log falls back to the official uploader instead of POSTing a broken
+            // report to the user's real account.
+            let routing = if has_session {
+                uploader::transport::assess_native_routing(&path, true)
+            } else {
+                uploader::transport::NativeRouting::Fallback(
+                    uploader::transport::NativeFallbackReason::NotOptedIn,
+                )
+            };
+            let result = match routing {
+                uploader::transport::NativeRouting::Native => {
+                    match uploader::transport::run_native_upload(&path, &opts, &*session, cancel) {
+                        Ok(uploader::transport::UploadOutcome::Completed {
+                            report_code: Some(code),
+                        }) => UploadUi::report(
+                            "Report uploaded",
+                            format!("ESO Logs report {code} is ready."),
+                            Some(code),
+                        ),
+                        Ok(uploader::transport::UploadOutcome::Completed { report_code: None }) => {
+                            UploadUi::report(
+                                "Report uploaded",
+                                "The report was uploaded to ESO Logs.".into(),
+                                None,
+                            )
+                        }
+                        Ok(uploader::transport::UploadOutcome::HandedOff { detail }) => {
+                            UploadUi::report("Handed off to uploader", detail, None)
+                        }
+                        Err(error) => UploadUi::failure("Upload failed", error),
+                    }
+                }
+                uploader::transport::NativeRouting::Fallback(reason) => {
+                    // Signed out → a plain handoff; signed in but native declined → say why.
+                    let prefix = has_session.then(|| reason.explain());
+                    match launch_external_uploader(Path::new(&path), false, launch_opts) {
+                        Ok(detail) => UploadUi::report(
+                            "Uploader opened",
+                            match prefix {
+                                Some(reason) => format!("{reason} {detail}"),
+                                None => detail,
+                            },
+                            None,
+                        ),
+                        Err(error) => UploadUi::failure("Upload could not start", error),
+                    }
+                }
+            };
+
+            let signed_in = session.has_session();
             let _ = slint::invoke_from_event_loop(move || {
+                in_flight.store(false, Ordering::SeqCst);
                 let Some(ui) = ui_weak.upgrade() else {
                     return;
                 };
                 ui.set_uploader_view(0);
-                match result {
-                    Ok(detail) => {
-                        ui.set_uploader_status_title("Uploader opened".into());
-                        ui.set_uploader_status_detail(detail.into());
-                    }
-                    Err(error) => {
-                        ui.set_uploader_status_title("Upload could not start".into());
-                        ui.set_uploader_status_detail(error.clone().into());
-                        ui.set_status_error_message(error.into());
-                    }
+                apply_uploader_native_state(&ui, signed_in);
+                ui.set_uploader_report_code(result.report_code.unwrap_or_default().into());
+                ui.set_uploader_status_title(result.title.into());
+                ui.set_uploader_status_detail(result.detail.into());
+                if let Some(error) = result.error {
+                    ui.set_status_error_message(error.into());
                 }
             });
         });
@@ -7579,18 +7648,25 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
         Arc::new(Mutex::new(None));
     let live_cancel_toggle = live_cancel.clone();
     ui.on_uploader_live_toggle(move || {
+        use std::sync::atomic::Ordering;
         let Some(ui) = live_ui.upgrade() else {
             return;
         };
         if ui.get_uploader_view() == 3 {
-            // Stop a native session by signalling its driver (it terminates the
-            // report cleanly and returns the UI to Ready); else stop the handoff.
+            // STOP. A native worker owns the cancel slot: signal it and let its
+            // driver terminate the report cleanly (finish returns the UI to Ready).
+            // `take()` empties the slot so a repeat Stop while it terminates is a
+            // no-op (gated on live-active below), never a premature view reset.
             if let Some(flag) = live_cancel_toggle.lock().unwrap().take() {
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                flag.store(true, Ordering::SeqCst);
                 ui.set_uploader_live_status_label("Stopping".into());
                 ui.set_uploader_live_detail("Closing the live report on ESO Logs...".into());
                 return;
             }
+            if ui.get_uploader_live_active() {
+                return; // native worker already told to stop; still terminating
+            }
+            // No native worker — this is the external-handoff live session.
             ui.set_uploader_view(2);
             ui.set_uploader_live_status_label("Ready".into());
             ui.set_uploader_live_detail("Live handoff stopped in Kalpa. If the external uploader is still streaming, stop it there too.".into());
@@ -7605,7 +7681,13 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
 
         // Signed in → stream fights to ESO Logs natively; else the external handoff.
         if live_session.has_session() {
+            // Refuse a second native live run while one is active — two concurrent
+            // drivers would open duplicate reports and race the cancel slot.
+            if live_cancel_toggle.lock().unwrap().is_some() || ui.get_uploader_live_active() {
+                return;
+            }
             ui.set_uploader_view(3);
+            ui.set_uploader_live_active(true);
             ui.set_uploader_report_code(String::new().into());
             ui.set_uploader_live_status_label("Waiting".into());
             ui.set_uploader_live_fight_label("0 fights".into());
@@ -7695,11 +7777,13 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
 
     let signin_ui = ui.as_weak();
     let signin_session = session.clone();
+    // One sign-in subprocess at a time (each is a WebView2 window + 300s-blocked thread).
+    let signin_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     ui.on_uploader_sign_in(move || {
         let Some(ui) = signin_ui.upgrade() else {
             return;
         };
-        run_uploader_sign_in(ui.as_weak(), signin_session.clone());
+        run_uploader_sign_in(ui.as_weak(), signin_session.clone(), signin_busy.clone());
     });
 
     wire_uploader_split_actions(ui);
@@ -7707,11 +7791,17 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
 
 /// Open the in-app ESO Logs sign-in window (wry WebView2) on a worker thread,
 /// capture the website session cookie, persist it via the shared provider, and
-/// reflect the new signed-in state in the uploader modal.
+/// reflect the new signed-in state in the uploader modal. `in_flight` guards
+/// against spawning a second login subprocess while one is open.
 fn run_uploader_sign_in(
     ui: slint::Weak<KalpaWindow>,
     session: Arc<uploader::native::session::StoredSessionProvider>,
+    in_flight: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    use std::sync::atomic::Ordering;
+    if in_flight.swap(true, Ordering::SeqCst) {
+        return; // a sign-in window is already open
+    }
     if let Some(ui) = ui.upgrade() {
         ui.set_uploader_status_title("Opening ESO Logs sign-in...".into());
         ui.set_uploader_status_detail(
@@ -7722,6 +7812,7 @@ fn run_uploader_sign_in(
     std::thread::spawn(move || {
         let outcome = run_login_subprocess_capture();
         let _ = slint::invoke_from_event_loop(move || {
+            in_flight.store(false, Ordering::SeqCst);
             let Some(ui) = ui.upgrade() else {
                 return;
             };
@@ -7811,15 +7902,27 @@ fn live_ui_update(
     let _ = ui_weak.upgrade_in_event_loop(apply);
 }
 
-/// Return the live UI to its idle (Ready) state with a final status line.
+/// Return the live UI to its idle (Ready) state with a final status line. Only
+/// vacates the cancel slot if it still holds THIS run's flag (`run_flag`), so a
+/// finishing run can never clobber a different run's cancel handle.
 fn finish_live_stream_ui(
     ui_weak: &slint::Weak<KalpaWindow>,
     cancel_slot: &Arc<Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
+    run_flag: &Arc<std::sync::atomic::AtomicBool>,
     message: String,
     clean: bool,
 ) {
-    *cancel_slot.lock().unwrap() = None;
+    {
+        let mut slot = cancel_slot.lock().unwrap();
+        if slot
+            .as_ref()
+            .is_some_and(|flag| Arc::ptr_eq(flag, run_flag))
+        {
+            *slot = None;
+        }
+    }
     live_ui_update(ui_weak, move |ui| {
+        ui.set_uploader_live_active(false);
         ui.set_uploader_view(2);
         ui.set_uploader_live_status_label(if clean { "Ready" } else { "Stopped" }.into());
         ui.set_uploader_live_detail(message.into());
@@ -7905,6 +8008,9 @@ fn start_native_live_stream(
     opts: uploader::types::UploadOptions,
     cancel: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    // `run_native_live` consumes `cancel`; keep a clone so `finish_live_stream_ui`
+    // can prove slot ownership by pointer identity.
+    let run_flag = cancel.clone();
     let log_path = Path::new(&path);
     let eof = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
 
@@ -7914,6 +8020,7 @@ fn start_native_live_stream(
             finish_live_stream_ui(
                 &ui_weak,
                 &cancel_slot,
+                &run_flag,
                 format!("Couldn't read the log to start live logging ({error})."),
                 false,
             );
@@ -7926,6 +8033,7 @@ fn start_native_live_stream(
             finish_live_stream_ui(
                 &ui_weak,
                 &cancel_slot,
+                &run_flag,
                 "The log's last line looks incomplete. Try again, or /reloadui in ESO.".into(),
                 false,
             );
@@ -7950,6 +8058,7 @@ fn start_native_live_stream(
             finish_live_stream_ui(
                 &ui_weak,
                 &cancel_slot,
+                &run_flag,
                 format!("Could not start the live tail: {error}"),
                 false,
             );
@@ -7976,6 +8085,7 @@ fn start_native_live_stream(
         Ok((code, ended)) => finish_live_stream_ui(
             &ui_weak,
             &cancel_slot,
+            &run_flag,
             format!(
                 "Live report {} closed — {} fight{} streamed.",
                 code.0,
@@ -7987,9 +8097,39 @@ fn start_native_live_stream(
         Err(error) => finish_live_stream_ui(
             &ui_weak,
             &cancel_slot,
+            &run_flag,
             format!("Live streaming stopped: {error}"),
             false,
         ),
+    }
+}
+
+/// A resolved manual-upload result, computed off the UI thread and applied to the
+/// modal on the event loop.
+struct UploadUi {
+    title: String,
+    detail: String,
+    report_code: Option<String>,
+    error: Option<String>,
+}
+
+impl UploadUi {
+    fn report(title: &str, detail: String, report_code: Option<String>) -> Self {
+        Self {
+            title: title.into(),
+            detail,
+            report_code,
+            error: None,
+        }
+    }
+
+    fn failure(title: &str, error: String) -> Self {
+        Self {
+            title: title.into(),
+            detail: error.clone(),
+            report_code: None,
+            error: Some(error),
+        }
     }
 }
 
@@ -8241,7 +8381,11 @@ fn wire_uploader_split_actions(ui: &KalpaWindow) {
         ui.set_uploader_split_status("Writing split files...".into());
 
         let ui_weak = ui.as_weak();
+        let prune_root = root.clone();
         std::thread::spawn(move || {
+            // Keep app-data bounded: drop all but the most recent few split folders
+            // before writing this one (off the UI thread — a delete can be large).
+            prune_uploader_split_folders(&prune_root, 9);
             let result = plan.run(&out_str);
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui_weak.upgrade() else {
@@ -18949,13 +19093,22 @@ mod tests {
 
     // Manual visual-QA helpers for the signed-in uploader UI: write / clear a
     // throwaway upload-session cookie in Credential Manager so `has_session()`
-    // flips without a real ESO Logs login. Ignored so they never run in CI (they
-    // touch the OS keychain). Run explicitly:
-    //   cargo test inject_fake_upload_session -- --ignored
-    //   cargo test clear_fake_upload_session  -- --ignored
+    // flips without a real ESO Logs login. They operate on the SAME credential
+    // slot the shipped app uses, so a bare `cargo test -- --ignored` would clobber
+    // a dev's real ESO Logs session. Guard behind an explicit env opt-in so only a
+    // deliberate invocation touches the store. Run:
+    //   KALPA_QA_CREDENTIAL_OK=1 cargo test inject_fake_upload_session -- --ignored
+    //   KALPA_QA_CREDENTIAL_OK=1 cargo test clear_fake_upload_session  -- --ignored
+    fn qa_credential_opt_in() -> bool {
+        std::env::var("KALPA_QA_CREDENTIAL_OK").is_ok()
+    }
+
     #[test]
-    #[ignore = "touches the OS credential store; run manually for visual QA"]
+    #[ignore = "manual: set KALPA_QA_CREDENTIAL_OK to touch the OS credential store"]
     fn inject_fake_upload_session() {
+        if !qa_credential_opt_in() {
+            return; // no-op without the explicit opt-in — never clobber a real session
+        }
         assert!(token_store::save_upload_session(
             "wcl_session=visual-qa-placeholder"
         ));
@@ -18965,6 +19118,9 @@ mod tests {
     #[test]
     #[ignore = "manual: writes the real cookie in KALPA_TEST_COOKIE to the credential store"]
     fn inject_upload_session_from_env() {
+        if !qa_credential_opt_in() {
+            return;
+        }
         let cookie = std::env::var("KALPA_TEST_COOKIE").expect("set KALPA_TEST_COOKIE");
         assert!(token_store::save_upload_session(&cookie));
         assert_eq!(
@@ -18974,8 +19130,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "touches the OS credential store; run manually for visual QA"]
+    #[ignore = "manual: set KALPA_QA_CREDENTIAL_OK to touch the OS credential store"]
     fn clear_fake_upload_session() {
+        if !qa_credential_opt_in() {
+            return;
+        }
         token_store::clear_upload_session();
         assert!(token_store::load_upload_session().is_none());
     }
