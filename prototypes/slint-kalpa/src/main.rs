@@ -207,6 +207,11 @@ mod saved_variables;
 #[path = "token_store.rs"]
 mod token_store;
 
+// In-app ESO Logs sign-in (wry WebView2) that captures the upload-session cookie.
+#[allow(dead_code)]
+#[path = "uploader_login.rs"]
+mod uploader_login;
+
 // Production ESO Logs uploader modules reused natively. The full encoder +
 // reqwest transport + session provider are Tauri-free and pulled in here; only
 // the sign-in WebView (`native::login`) and the crash-recovery orphan sweeper
@@ -1088,6 +1093,16 @@ struct BackupManifestDraft {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    // Sign-in subprocess mode: run ONLY the ESO Logs login WebView on this
+    // process's main thread (where WebView2/COM is happy), print the captured
+    // cookie header to stdout, and exit. Kept out-of-process because a WebView2
+    // event loop cannot coexist with Slint's winit loop in one process (it
+    // hard-faults). The parent (`run_uploader_sign_in`) spawns this and reads the
+    // cookie back. Must run before any Slint backend init.
+    if std::env::args().any(|arg| arg == uploader_login::LOGIN_SUBPROCESS_FLAG) {
+        std::process::exit(uploader_login::run_login_subprocess());
+    }
+
     let render_config = native_render_config();
 
     slint::BackendSelector::new()
@@ -7439,20 +7454,100 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
     wire_uploader_split_actions(ui);
 }
 
-/// Placeholder ESO Logs sign-in. Phase 3 replaces this with a wry WebView2 login
-/// window that captures the website session cookie; until then it points the user
-/// at the main Kalpa app (whose stored cookie this shell already reuses).
-#[allow(unused_variables)]
+/// Open the in-app ESO Logs sign-in window (wry WebView2) on a worker thread,
+/// capture the website session cookie, persist it via the shared provider, and
+/// reflect the new signed-in state in the uploader modal.
 fn run_uploader_sign_in(
     ui: slint::Weak<KalpaWindow>,
     session: Arc<uploader::native::session::StoredSessionProvider>,
 ) {
     if let Some(ui) = ui.upgrade() {
-        ui.set_uploader_status_title("Sign-in".into());
+        ui.set_uploader_status_title("Opening ESO Logs sign-in...".into());
         ui.set_uploader_status_detail(
-            "Sign in to ESO Logs in the main Kalpa app, then press Refresh here to pick up the session."
+            "Complete the login in the ESO Logs window. Kalpa captures the session when you finish."
                 .into(),
         );
+    }
+    std::thread::spawn(move || {
+        let outcome = run_login_subprocess_capture();
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            match outcome {
+                LoginResult::Success(cookie_header) => {
+                    let persisted = session.store(cookie_header);
+                    apply_uploader_native_state(&ui, session.has_session());
+                    ui.set_uploader_status_title("Signed in to ESO Logs".into());
+                    ui.set_uploader_status_detail(
+                        if persisted {
+                            "Signed in — Upload now sends reports directly to ESO Logs."
+                        } else {
+                            "Signed in for this session (the login could not be saved; you may need to sign in again next launch)."
+                        }
+                        .into(),
+                    );
+                }
+                LoginResult::Cancelled => {
+                    ui.set_uploader_status_title("Sign-in cancelled".into());
+                    ui.set_uploader_status_detail(
+                        "The ESO Logs window closed before sign-in finished.".into(),
+                    );
+                }
+                LoginResult::TimedOut => {
+                    ui.set_uploader_status_title("Sign-in timed out".into());
+                    ui.set_uploader_status_detail("Open sign-in and try again.".into());
+                }
+                LoginResult::Error(error) => {
+                    ui.set_uploader_status_title("Sign-in failed".into());
+                    ui.set_uploader_status_detail(error.clone().into());
+                    ui.set_status_error_message(error.into());
+                }
+            }
+        });
+    });
+}
+
+/// Result of the out-of-process sign-in, decoded from the subprocess's exit code
+/// and stdout.
+enum LoginResult {
+    Success(String),
+    Cancelled,
+    TimedOut,
+    Error(String),
+}
+
+/// Spawn `<this exe> --esologs-login` and decode its outcome. The child runs the
+/// WebView2 sign-in on its own main thread (out-of-process so it can't fault the
+/// Slint event loop) and prints the cookie header prefixed with the marker.
+fn run_login_subprocess_capture() -> LoginResult {
+    let exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => return LoginResult::Error(format!("Could not locate Kalpa: {error}")),
+    };
+    let output = match std::process::Command::new(exe)
+        .arg(uploader_login::LOGIN_SUBPROCESS_FLAG)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => return LoginResult::Error(format!("Could not open sign-in: {error}")),
+    };
+    match output.status.code() {
+        Some(0) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(uploader_login::COOKIE_STDOUT_MARKER))
+            {
+                Some(cookie) if !cookie.trim().is_empty() => {
+                    LoginResult::Success(cookie.trim().to_string())
+                }
+                _ => LoginResult::Error("Sign-in did not return a session.".to_string()),
+            }
+        }
+        Some(2) => LoginResult::Cancelled,
+        Some(3) => LoginResult::TimedOut,
+        _ => LoginResult::Error("Sign-in did not complete.".to_string()),
     }
 }
 
