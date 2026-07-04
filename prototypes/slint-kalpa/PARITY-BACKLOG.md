@@ -16,6 +16,14 @@ Anchors are `ui/kalpa.slint` and `src/main.rs` in this crate unless noted; React
   rebuilt the Discover detail header; refresh spinner feedback.
 - **Parity polish** — PR #234 commit `78b0898a`. Uploader route-label honesty + wording;
   Pack Hub selected-card overlap, detail description width, author cap; main description wrap.
+- **Safety Center delete confirmation** — `5244c47d`. One-click snapshot delete now confirms.
+- **SavedVariables value editors** — `89134e36` (MUST-FIX #1 below, now DONE). Visible
+  `TextInput`s that commit on Enter/blur; no per-keystroke reset, no partial-number rejection.
+- **Theme skin picker** — the theme editor now exposes all 8 Elder Scrolls skins + None;
+  picking one live-applies and it persists on save/export (the "theme skin picker" feature
+  below, now DONE). Verified: picker renders, selection applies.
+- **Uploader fight note** — the preview no longer silently drops fights; an honest line
+  clarifies the uploader hands off the entire log.
 
 ## Ship-readiness (all green)
 

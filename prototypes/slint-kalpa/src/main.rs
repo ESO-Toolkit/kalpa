@@ -7794,6 +7794,7 @@ fn set_theme_draft(ui: &KalpaWindow, draft: &CatalogTheme, is_new: bool) {
     ui.set_draft_theme_name(draft.name.clone().into());
     ui.set_draft_theme_description(draft.description.clone().into());
     ui.set_draft_theme_new(is_new);
+    ui.set_draft_skin_id(draft.skin_id.clone().unwrap_or_default().into());
     set_theme_draft_color_fields(ui, &draft.colors);
     set_theme_draft_contrast(ui, &draft.colors);
 }
@@ -8204,9 +8205,11 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
         let next_colors = draft_colors_from_ui(&ui, &draft.colors);
         let next_name = ui.get_draft_theme_name().trim().to_string();
         let next_description = ui.get_draft_theme_description().trim().to_string();
+        let next_skin = normalize_skin_id(Some(ui.get_draft_skin_id().to_string()));
         let description_changed = next_description != draft.description;
         let name_changed = !next_name.is_empty() && next_name != draft.name;
-        if next_colors == draft.colors && !description_changed && !name_changed {
+        let skin_changed = next_skin != draft.skin_id;
+        if next_colors == draft.colors && !description_changed && !name_changed && !skin_changed {
             return;
         }
         if name_changed {
@@ -8216,6 +8219,7 @@ fn wire_theme_actions(ui: &KalpaWindow, custom_themes: Rc<RefCell<Vec<CatalogThe
             draft.description = next_description;
         }
         draft.colors = next_colors;
+        draft.skin_id = next_skin;
         *preview_draft.borrow_mut() = draft.clone();
         ui.set_draft_theme(theme_entry_from_catalog_theme(
             &draft,

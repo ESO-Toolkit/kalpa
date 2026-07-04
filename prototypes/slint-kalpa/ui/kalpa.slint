@@ -4040,6 +4040,7 @@ component AppearanceOverlay inherits Rectangle {
     in-out property <string> draft-orb1;
     in-out property <string> draft-orb2;
     in-out property <string> draft-orb3;
+    in-out property <string> draft-skin-id;
     in property <[ContrastEntry]> draft-contrast-checks;
     in-out property <string> draft-contrast-warning;
     in-out property <int> active-tab: 0;
@@ -4329,13 +4330,13 @@ component AppearanceOverlay inherits Rectangle {
             width: parent.width - 44px;
             height: parent.height - 196px;
             viewport-width: self.width;
-            viewport-height: 928px;
+            viewport-height: 1030px;
             vertical-scrollbar-policy: ScrollBarPolicy.always-on;
             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
             Rectangle {
                 width: parent.width;
-                height: 928px;
+                height: 1030px;
                 background: #00000000;
 
                 GhostIconButton { x: 0px; y: 0px; icon: @image-url("../assets/icons/arrow-left.svg"); clicked => { root.theme-delete-confirming = false; root.theme-editor-cancelled(); } }
@@ -4483,9 +4484,52 @@ component AppearanceOverlay inherits Rectangle {
                 ThemeEditorColorTile { x: 186px; y: 592px; label: "Glow two"; hint: "Orb color"; value: root.draft-theme.orb2; value-text <=> root.draft-orb2; edited => { root.theme-draft-updated(); } }
                 ThemeEditorColorTile { x: 372px; y: 592px; label: "Glow three"; hint: "Orb color"; value: root.draft-theme.orb3; value-text <=> root.draft-orb3; edited => { root.theme-draft-updated(); } }
 
+                DetailSectionTitle { x: 0px; y: 668px; width: parent.width; label: "ELDER SCROLLS SKIN"; }
+                for skin[i] in [
+                    { id: "", label: "None" },
+                    { id: "nordic-runestone", label: "Nordic" },
+                    { id: "daedric-obsidian", label: "Daedric" },
+                    { id: "dwemer-brass", label: "Dwemer" },
+                    { id: "ayleid-welkynd", label: "Ayleid" },
+                    { id: "sithis-brotherhood", label: "Sithis" },
+                    { id: "apocrypha-mora", label: "Apocrypha" },
+                    { id: "clockwork-city", label: "Clockwork" },
+                    { id: "elder-scroll-ancient-tome", label: "Tome" },
+                ] : Rectangle {
+                    x: mod(i, 5) * (parent.width / 5);
+                    y: 692px + floor(i / 5) * 34px;
+                    width: parent.width / 5 - 6px;
+                    height: 28px;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: root.draft-skin-id == skin.id ? Palette.gold-20 : Palette.white-10;
+                    background: root.draft-skin-id == skin.id ? Palette.gold-10 : (skin-touch.has-hover ? Palette.white-06 : Palette.white-03);
+
+                    Text {
+                        width: parent.width;
+                        height: parent.height;
+                        text: skin.label;
+                        color: root.draft-skin-id == skin.id ? Palette.gold : Palette.muted-strong;
+                        font-size: 11px;
+                        font-weight: 800;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    skin-touch := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            root.draft-skin-id = skin.id;
+                            root.theme-draft-updated();
+                        }
+                    }
+                }
+
                 Rectangle {
                     x: 0px;
-                    y: 684px;
+                    y: 784px;
                     width: parent.width;
                     height: 206px;
                     border-radius: 12px;
@@ -8938,6 +8982,17 @@ component UploaderOverlay inherits Rectangle {
                     result: fight.result;
                     live: fight.live;
                 }
+
+                if (root.fights.length > 0) : Text {
+                    x: 18px;
+                    y: (root.uploading ? 174px : 160px) + min(root.fights.length, 4) * 42px + 6px;
+                    width: parent.width - 36px;
+                    text: root.fights.length > 4 ? "+ " + (root.fights.length - 4) + " more — the uploader hands off the entire log." : "The uploader hands off the entire log, not just this preview.";
+                    color: Palette.muted-half;
+                    font-size: 11px;
+                    font-weight: 650;
+                    wrap: word-wrap;
+                }
             }
         }
 
@@ -12299,6 +12354,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> draft-orb1;
     in-out property <string> draft-orb2;
     in-out property <string> draft-orb3;
+    in-out property <string> draft-skin-id;
     in-out property <[ContrastEntry]> draft-contrast-checks;
     in-out property <string> draft-contrast-warning;
     in-out property <bool> settings-auto-update: false;
@@ -12979,6 +13035,7 @@ export component KalpaWindow inherits Window {
             draft-orb1 <=> root.draft-orb1;
             draft-orb2 <=> root.draft-orb2;
             draft-orb3 <=> root.draft-orb3;
+            draft-skin-id <=> root.draft-skin-id;
             draft-contrast-checks <=> root.draft-contrast-checks;
             draft-contrast-warning <=> root.draft-contrast-warning;
             auto-update <=> root.settings-auto-update;
