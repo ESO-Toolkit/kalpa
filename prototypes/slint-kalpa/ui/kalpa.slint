@@ -8752,6 +8752,9 @@ component UploaderOverlay inherits Rectangle {
     in property <string> selected-log-label: "No log selected";
     in property <string> fight-count-label: "0 ready";
     in property <string> route-label: "Archon App handoff";
+    in property <bool> native-route: false;
+    in property <bool> signed-in: false;
+    in property <string> report-code: "";
     in property <string> status-title: "No log selected";
     in property <string> status-detail: "Select a log file to inspect fights before uploading.";
     in property <string> live-status-label: "Ready";
@@ -8766,6 +8769,9 @@ component UploaderOverlay inherits Rectangle {
     callback live-toggle;
     callback options-changed;
     callback split-requested;
+    callback sign-in;
+    callback sign-out;
+    callback open-report;
     visible: root.open;
     background: #000000c4;
     private property <bool> manual: root.view < 2;
@@ -8800,7 +8806,7 @@ component UploaderOverlay inherits Rectangle {
 
         Image { x: 28px; y: 26px; width: 18px; height: 18px; source: @image-url("../assets/icons/cloud-upload.svg"); image-fit: contain; colorize: Palette.gold; }
         Text { x: 58px; y: 21px; width: parent.width - 250px; text: "Upload to ESO Logs"; color: Palette.gold; font-size: 18px; font-weight: 900; overflow: elide; }
-        Text { x: 58px; y: 52px; width: parent.width - 118px; text: root.manual ? "Select a log, review detected fights, then hand off to the uploader." : "Kalpa watches the live encounter log, then hands the session to the external uploader."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
+        Text { x: 58px; y: 52px; width: parent.width - 210px; text: root.manual ? (root.native-route ? "Signed in — Upload sends the report directly to ESO Logs." : "Select a log, review detected fights, then hand off to the uploader.") : "Kalpa watches the live encounter log, then hands the session to the external uploader."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
 
         Rectangle {
             x: parent.width - 184px;
@@ -8860,7 +8866,7 @@ component UploaderOverlay inherits Rectangle {
 
             UploaderInfoCard { x: 0px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/file-text.svg"); label: "SELECTED LOG"; value: root.selected-log-label; tone: Palette.gold; }
             UploaderInfoCard { x: (parent.width - 18px) / 3 + 9px; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/check.svg"); label: "FIGHTS"; value: root.fight-count-label; tone: Palette.emerald; }
-            UploaderInfoCard { x: ((parent.width - 18px) / 3 + 9px) * 2; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "ROUTE"; value: root.route-label; tone: Palette.sky; }
+            UploaderInfoCard { x: ((parent.width - 18px) / 3 + 9px) * 2; y: 0px; width: (parent.width - 18px) / 3; height: 74px; icon: @image-url("../assets/icons/cloud-upload.svg"); label: "ROUTE"; value: root.route-label; tone: root.native-route ? Palette.emerald : Palette.sky; }
 
             Rectangle {
                 x: 0px;
@@ -9085,6 +9091,26 @@ component UploaderOverlay inherits Rectangle {
 
             PackHubButton { x: 28px; y: 22px; width: 116px; icon: @image-url("../assets/icons/refresh-cw.svg"); label: "Refresh"; clicked => { root.refresh(); } }
             if (root.manual) : PackHubButton { x: 152px; y: 22px; width: 108px; icon: @image-url("../assets/icons/files.svg"); label: "Split"; disabled: root.logs.length == 0; clicked => { root.split-requested(); } }
+            SmallAction {
+                x: 272px;
+                y: 28px;
+                label: root.signed-in ? "Sign out of ESO Logs" : "Sign in to ESO Logs";
+                tone: root.signed-in ? Palette.muted-strong : Palette.sky;
+                fill: root.signed-in ? Palette.white-06 : Palette.sky-10;
+                fill-hover: root.signed-in ? Palette.white-08 : Palette.sky-16;
+                fill-pressed: root.signed-in ? Palette.white-10 : Palette.sky-22;
+                clicked => { if (root.signed-in) { root.sign-out(); } else { root.sign-in(); } }
+            }
+            if (root.manual && root.report-code != "") : SmallAction {
+                x: 272px;
+                y: 52px;
+                label: "View report " + root.report-code;
+                tone: Palette.emerald;
+                fill: Palette.emerald-04;
+                fill-hover: Palette.emerald-20;
+                fill-pressed: Palette.emerald-20;
+                clicked => { root.open-report(); }
+            }
             PackHubButton { x: parent.width - 284px; y: 22px; width: 116px; icon: @image-url("../assets/icons/x.svg"); label: root.live-running ? "Stop" : "Cancel"; danger: root.live-running; clicked => { if (root.live-running) { root.live-toggle(); } else { root.open = false; } } }
             PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? "Upload" : (root.live-running ? "Running" : "Go Live"); primary: true; disabled: root.manual ? root.logs.length == 0 : (!root.live-running && root.live-log-label != "Encounter.log"); clicked => { if (root.manual) { root.upload-requested(); } else { root.live-toggle(); } } }
         }
@@ -12637,6 +12663,9 @@ export component KalpaWindow inherits Window {
     in-out property <string> uploader-selected-log-label: "No log selected";
     in-out property <string> uploader-fight-count-label: "0 ready";
     in-out property <string> uploader-route-label: "Archon App handoff";
+    in-out property <bool> uploader-native-route: false;
+    in-out property <bool> uploader-signed-in: false;
+    in-out property <string> uploader-report-code: "";
     in-out property <string> uploader-status-title: "No log selected";
     in-out property <string> uploader-status-detail: "Select a log file to inspect fights before uploading.";
     in-out property <string> uploader-live-status-label: "Ready";
@@ -12876,6 +12905,9 @@ export component KalpaWindow inherits Window {
     callback uploader-upload;
     callback uploader-live-toggle;
     callback uploader-options-changed;
+    callback uploader-sign-in;
+    callback uploader-sign-out;
+    callback uploader-open-report;
     callback uploader-split-open-requested;
     callback uploader-split-mode-changed(int);
     callback uploader-split-item-toggled(int);
@@ -13318,6 +13350,9 @@ export component KalpaWindow inherits Window {
             selected-log-label: root.uploader-selected-log-label;
             fight-count-label: root.uploader-fight-count-label;
             route-label: root.uploader-route-label;
+            native-route: root.uploader-native-route;
+            signed-in: root.uploader-signed-in;
+            report-code: root.uploader-report-code;
             status-title: root.uploader-status-title;
             status-detail: root.uploader-status-detail;
             live-status-label: root.uploader-live-status-label;
@@ -13332,6 +13367,9 @@ export component KalpaWindow inherits Window {
             live-toggle => { root.uploader-live-toggle(); }
             options-changed => { root.uploader-options-changed(); }
             split-requested => { root.uploader-split-open-requested(); }
+            sign-in => { root.uploader-sign-in(); }
+            sign-out => { root.uploader-sign-out(); }
+            open-report => { root.uploader-open-report(); }
         }
 
         if (root.uploader-split-open) : SplitWorkbench {

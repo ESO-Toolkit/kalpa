@@ -6896,6 +6896,12 @@ fn apply_native_uploader_preflight(
                 format!(
                     "No completed fights found in {session_label}. Live mode can still watch for new fights."
                 )
+            } else if ui.get_uploader_native_route() {
+                format!(
+                    "{} completed fight{} across {session_label}. Signed in — Upload sends the report straight to ESO Logs from Kalpa, no external uploader.",
+                    preflight.total_fights,
+                    if preflight.total_fights == 1 { "" } else { "s" }
+                )
             } else {
                 format!(
                     "{} completed fight{} across {session_label}. Upload launches the external ESO Logs uploader from the native Slint shell, so Kalpa does not reopen the WebView for this flow.",
@@ -7185,21 +7191,19 @@ fn launch_external_uploader(
 
 fn wire_uploader_actions(ui: &KalpaWindow) {
     let preflight_counter = Arc::new(AtomicU64::new(0));
+    // Reads the upload-session cookie the main Kalpa app persisted (Credential
+    // Manager), so a user who signed in there can upload natively here.
+    let session = Arc::new(uploader::native::session::StoredSessionProvider::new());
 
     let open_ui = ui.as_weak();
     let open_counter = preflight_counter.clone();
+    let open_session = session.clone();
     ui.on_open_uploader(move || {
         let Some(ui) = open_ui.upgrade() else {
             return;
         };
-        ui.set_uploader_route_label(
-            if find_official_uploader().is_some() {
-                "Archon App handoff"
-            } else {
-                "Install uploader"
-            }
-            .into(),
-        );
+        apply_uploader_native_state(&ui, open_session.has_session());
+        ui.set_uploader_report_code(String::new().into());
         ui.set_uploader_live_status_label("Ready".into());
         ui.set_uploader_live_detail(
             "Upload and Go Live launch the external ESO Logs uploader directly, without reopening the WebView shell."
@@ -7210,8 +7214,10 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
 
     let refresh_ui = ui.as_weak();
     let refresh_counter = preflight_counter.clone();
+    let refresh_session = session.clone();
     ui.on_uploader_refresh(move || {
         if let Some(ui) = refresh_ui.upgrade() {
+            apply_uploader_native_state(&ui, refresh_session.has_session());
             refresh_native_uploader(&ui, refresh_counter.clone());
         }
     });
@@ -7241,6 +7247,7 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
     });
 
     let upload_ui = ui.as_weak();
+    let upload_session = session.clone();
     ui.on_uploader_upload(move || {
         let Some(ui) = upload_ui.upgrade() else {
             return;
@@ -7249,6 +7256,63 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
             ui.set_status_error_message("Select a log before uploading.".into());
             return;
         };
+        ui.set_uploader_report_code(String::new().into());
+
+        // Signed in → upload the report directly to ESO Logs with the native
+        // encoder + transport. Signed out → the external uploader handoff.
+        if upload_session.has_session() {
+            ui.set_uploader_view(1);
+            ui.set_uploader_status_title("Uploading to ESO Logs...".into());
+            ui.set_uploader_status_detail(
+                "Encoding the log and sending the report directly — no external uploader.".into(),
+            );
+            let opts = native_upload_options_from_ui(&ui);
+            let session = upload_session.clone();
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let ui_weak = ui.as_weak();
+            std::thread::spawn(move || {
+                let result =
+                    uploader::transport::run_native_upload(&path, &opts, &*session, cancel);
+                let signed_in = session.has_session();
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = ui_weak.upgrade() else {
+                        return;
+                    };
+                    ui.set_uploader_view(0);
+                    apply_uploader_native_state(&ui, signed_in);
+                    match result {
+                        Ok(uploader::transport::UploadOutcome::Completed { report_code }) => {
+                            match report_code {
+                                Some(code) => {
+                                    ui.set_uploader_report_code(code.clone().into());
+                                    ui.set_uploader_status_title("Report uploaded".into());
+                                    ui.set_uploader_status_detail(
+                                        format!("ESO Logs report {code} is ready.").into(),
+                                    );
+                                }
+                                None => {
+                                    ui.set_uploader_status_title("Report uploaded".into());
+                                    ui.set_uploader_status_detail(
+                                        "The report was uploaded to ESO Logs.".into(),
+                                    );
+                                }
+                            }
+                        }
+                        Ok(uploader::transport::UploadOutcome::HandedOff { detail }) => {
+                            ui.set_uploader_status_title("Handed off to uploader".into());
+                            ui.set_uploader_status_detail(detail.into());
+                        }
+                        Err(error) => {
+                            ui.set_uploader_status_title("Upload failed".into());
+                            ui.set_uploader_status_detail(error.clone().into());
+                            ui.set_status_error_message(error.into());
+                        }
+                    }
+                });
+            });
+            return;
+        }
+
         ui.set_uploader_view(1);
         ui.set_uploader_status_title("Opening uploader...".into());
         ui.set_uploader_status_detail(
@@ -7334,7 +7398,99 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
         persist_native_settings(&native_settings_from_ui(&ui));
     });
 
+    let signout_ui = ui.as_weak();
+    let signout_session = session.clone();
+    ui.on_uploader_sign_out(move || {
+        let Some(ui) = signout_ui.upgrade() else {
+            return;
+        };
+        use uploader::native::session::SessionProvider;
+        signout_session.invalidate();
+        ui.set_uploader_report_code(String::new().into());
+        apply_uploader_native_state(&ui, false);
+        ui.set_uploader_status_title("Signed out".into());
+        ui.set_uploader_status_detail(
+            "Signed out of ESO Logs. Uploads will use the external uploader until you sign in again."
+                .into(),
+        );
+    });
+
+    let report_ui = ui.as_weak();
+    ui.on_uploader_open_report(move || {
+        let Some(ui) = report_ui.upgrade() else {
+            return;
+        };
+        let code = ui.get_uploader_report_code().to_string();
+        if code.is_empty() {
+            return;
+        }
+        open_url(&format!("https://www.esologs.com/reports/{code}"));
+    });
+
+    let signin_ui = ui.as_weak();
+    let signin_session = session.clone();
+    ui.on_uploader_sign_in(move || {
+        let Some(ui) = signin_ui.upgrade() else {
+            return;
+        };
+        run_uploader_sign_in(ui.as_weak(), signin_session.clone());
+    });
+
     wire_uploader_split_actions(ui);
+}
+
+/// Placeholder ESO Logs sign-in. Phase 3 replaces this with a wry WebView2 login
+/// window that captures the website session cookie; until then it points the user
+/// at the main Kalpa app (whose stored cookie this shell already reuses).
+#[allow(unused_variables)]
+fn run_uploader_sign_in(
+    ui: slint::Weak<KalpaWindow>,
+    session: Arc<uploader::native::session::StoredSessionProvider>,
+) {
+    if let Some(ui) = ui.upgrade() {
+        ui.set_uploader_status_title("Sign-in".into());
+        ui.set_uploader_status_detail(
+            "Sign in to ESO Logs in the main Kalpa app, then press Refresh here to pick up the session."
+                .into(),
+        );
+    }
+}
+
+/// Build the encoder's [`UploadOptions`] from the modal's region/visibility
+/// controls (guild + description default to Personal Logs / none).
+fn native_upload_options_from_ui(ui: &KalpaWindow) -> uploader::types::UploadOptions {
+    use uploader::types::Visibility;
+    uploader::types::UploadOptions {
+        region: if ui.get_uploader_region() == 2 { 2 } else { 1 },
+        guild_id: None,
+        visibility: match ui.get_uploader_visibility() {
+            0 => Visibility::Public,
+            1 => Visibility::Private,
+            _ => Visibility::Unlisted,
+        },
+        description: None,
+        real_time: false,
+        include_entire_file: false,
+    }
+}
+
+/// Reflect the ESO Logs sign-in state in the uploader modal: when signed in (and
+/// the native format is confirmed) the Upload button routes to native direct
+/// upload; otherwise it hands off to the external uploader.
+fn apply_uploader_native_state(ui: &KalpaWindow, signed_in: bool) {
+    ui.set_uploader_signed_in(signed_in);
+    let native = signed_in && uploader::native::format::FORMAT_VERSION_CONFIRMED;
+    ui.set_uploader_native_route(native);
+    ui.set_uploader_route_label(
+        if native {
+            "Direct upload"
+        } else if find_official_uploader().is_some() {
+            "Archon App handoff"
+        } else {
+            "Install uploader"
+        }
+        .into(),
+    );
 }
 
 /// Wire the native split workbench: scan the selected log once, let the user pick
@@ -18252,6 +18408,28 @@ mod tests {
         assert!(logs[0].active);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    // Manual visual-QA helpers for the signed-in uploader UI: write / clear a
+    // throwaway upload-session cookie in Credential Manager so `has_session()`
+    // flips without a real ESO Logs login. Ignored so they never run in CI (they
+    // touch the OS keychain). Run explicitly:
+    //   cargo test inject_fake_upload_session -- --ignored
+    //   cargo test clear_fake_upload_session  -- --ignored
+    #[test]
+    #[ignore = "touches the OS credential store; run manually for visual QA"]
+    fn inject_fake_upload_session() {
+        assert!(token_store::save_upload_session(
+            "wcl_session=visual-qa-placeholder"
+        ));
+        assert!(token_store::load_upload_session().is_some());
+    }
+
+    #[test]
+    #[ignore = "touches the OS credential store; run manually for visual QA"]
+    fn clear_fake_upload_session() {
+        token_store::clear_upload_session();
+        assert!(token_store::load_upload_session().is_none());
     }
 
     #[test]
