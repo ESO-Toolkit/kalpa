@@ -2612,12 +2612,14 @@ component DetailDescriptionSection inherits Rectangle {
 
         Text {
             x: 16px;
-            y: 17px;
+            y: 12px;
             width: parent.width - 32px;
+            height: parent.height - 20px;
             text: root.description;
             color: Palette.text-soft;
             font-size: 14px;
             font-weight: 400;
+            wrap: word-wrap;
             overflow: elide;
         }
     }
@@ -6359,7 +6361,7 @@ component PackHubSelectedCard inherits Rectangle {
     Text {
         x: 12px;
         y: 8px;
-        width: parent.width - 24px;
+        width: parent.width - 44px;
         text: root.title;
         color: Palette.foreground;
         font-size: 12px;
@@ -6923,7 +6925,7 @@ component PackHubInstallView inherits Rectangle {
     Text {
         x: 0px;
         y: 0px;
-        width: parent.width - 300px;
+        width: parent.width - 24px;
         text: root.pack.description;
         color: Palette.muted-strong;
         font-size: 14px;
@@ -6933,8 +6935,8 @@ component PackHubInstallView inherits Rectangle {
 
     Pill { x: 0px; y: 40px; label: root.pack.pack-type-label; tone: Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
     Pill { x: 108px; y: 40px; label: root.pack.tag; tone: root.pack.trial ? Palette.red : Palette.muted-strong; fill: Palette.white-04; pill-height: 24px; }
-    Text { x: 190px; y: 44px; width: 78px; text: "by " + root.pack.author; color: Palette.muted-half; font-size: 11px; font-weight: 600; overflow: elide; }
-    Text { x: 274px; y: 44px; width: 120px; text: root.pack.updated-label; color: Palette.muted-half; font-size: 10px; font-weight: 600; overflow: elide; }
+    Text { x: 190px; y: 44px; width: 132px; text: "by " + root.pack.author; color: Palette.muted-half; font-size: 11px; font-weight: 600; overflow: elide; }
+    Text { x: 330px; y: 44px; width: 150px; text: root.pack.updated-label; color: Palette.muted-half; font-size: 10px; font-weight: 600; overflow: elide; }
     PackHubButton { x: parent.width - 216px; y: 36px; width: 104px; icon: @image-url("../assets/icons/external-link.svg"); label: "Manage"; clicked => { root.edit-requested(); } }
     PackHubButton { x: parent.width - 100px; y: 36px; width: 100px; icon: @image-url("../assets/icons/copy.svg"); label: root.sharing ? "Sharing" : "Share"; disabled: root.sharing || root.addons.length == 0; clicked => { root.share-requested(); } }
 
@@ -8679,7 +8681,7 @@ component UploaderOverlay inherits Rectangle {
     in property <string> logs-summary: "No log folder detected";
     in property <string> selected-log-label: "No log selected";
     in property <string> fight-count-label: "0 ready";
-    in property <string> route-label: "Direct from Kalpa";
+    in property <string> route-label: "Archon App handoff";
     in property <string> status-title: "No log selected";
     in property <string> status-detail: "Select a log file to inspect fights before uploading.";
     in property <string> live-status-label: "Ready";
@@ -8727,7 +8729,7 @@ component UploaderOverlay inherits Rectangle {
 
         Image { x: 28px; y: 26px; width: 18px; height: 18px; source: @image-url("../assets/icons/cloud-upload.svg"); image-fit: contain; colorize: Palette.gold; }
         Text { x: 58px; y: 21px; width: parent.width - 250px; text: "Upload to ESO Logs"; color: Palette.gold; font-size: 18px; font-weight: 900; overflow: elide; }
-        Text { x: 58px; y: 52px; width: parent.width - 118px; text: root.manual ? "Select a log, review detected fights, then upload." : "Stream fights while ESO writes Combat Metrics data."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
+        Text { x: 58px; y: 52px; width: parent.width - 118px; text: root.manual ? "Select a log, review detected fights, then hand off to the uploader." : "Kalpa watches the live encounter log, then hands the session to the external uploader."; color: Palette.muted-strong; font-size: 13px; font-weight: 600; overflow: elide; }
 
         Rectangle {
             x: parent.width - 184px;
@@ -12184,7 +12186,7 @@ export component KalpaWindow inherits Window {
     in-out property <string> uploader-logs-summary: "No log folder detected";
     in-out property <string> uploader-selected-log-label: "No log selected";
     in-out property <string> uploader-fight-count-label: "0 ready";
-    in-out property <string> uploader-route-label: "Direct from Kalpa";
+    in-out property <string> uploader-route-label: "Archon App handoff";
     in-out property <string> uploader-status-title: "No log selected";
     in-out property <string> uploader-status-detail: "Select a log file to inspect fights before uploading.";
     in-out property <string> uploader-live-status-label: "Ready";
