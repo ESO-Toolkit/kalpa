@@ -9582,11 +9582,20 @@ component SavedVariablesOverlay inherits Rectangle {
     background: #000000c4;
     private property <length> modal-width: root.width < 980px ? root.width - 48px : 900px;
     private property <length> modal-height: root.height < 738px ? root.height - 48px : 690px;
+    private property <bool> confirm-discard: false;
+    private property <int> discard-intent: 0;
 
     TouchArea {
         width: root.width;
         height: root.height;
-        clicked => { root.open = false; }
+        clicked => {
+            if (root.editor-dirty && root.view == 3) {
+                root.discard-intent = 1;
+                root.confirm-discard = true;
+            } else {
+                root.open = false;
+            }
+        }
     }
 
     panel := Rectangle {
@@ -9622,7 +9631,14 @@ component SavedVariablesOverlay inherits Rectangle {
             width: 36px;
             height: 36px;
             icon: @image-url("../assets/icons/x.svg");
-            clicked => { root.open = false; }
+            clicked => {
+                if (root.editor-dirty && root.view == 3) {
+                    root.discard-intent = 1;
+                    root.confirm-discard = true;
+                } else {
+                    root.open = false;
+                }
+            }
         }
 
         Hairline { x: 0px; y: 72px; width: parent.width; height: 1px; opacity: 0.5; }
@@ -9885,7 +9901,14 @@ component SavedVariablesOverlay inherits Rectangle {
             height: parent.height - 196px;
             background: #00000000;
 
-            SvmSelectField { x: 0px; y: 0px; width: 320px; label: root.editor-file-label; disabled: !root.editor-has-file; clicked => { root.editor-select-file(); } }
+            SvmSelectField { x: 0px; y: 0px; width: 320px; label: root.editor-file-label; disabled: !root.editor-has-file; clicked => {
+                if (root.editor-dirty) {
+                    root.discard-intent = 2;
+                    root.confirm-discard = true;
+                } else {
+                    root.editor-select-file();
+                }
+            } }
             PackHubButton { x: 328px; y: 0px; width: 116px; icon: @image-url("../assets/icons/save.svg"); label: "Save Changes"; primary: true; disabled: !root.editor-dirty; clicked => { root.editor-save(); } }
             PackHubButton { x: 452px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Preview"; disabled: !root.editor-dirty; clicked => { root.editor-preview(); } }
             PackHubButton { x: 538px; y: 0px; width: 76px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: !root.editor-dirty; clicked => { root.editor-discard(); } }
@@ -10042,7 +10065,53 @@ component SavedVariablesOverlay inherits Rectangle {
             height: 76px;
             background: @linear-gradient(0deg, Tokens.surface 0%, Tokens.surface-84 72%, #00000000 100%);
 
-            PackHubButton { x: parent.width - 96px; y: 22px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => { root.open = false; } }
+            PackHubButton { x: parent.width - 96px; y: 22px; width: 68px; icon: @image-url("../assets/icons/x.svg"); label: "Close"; show-icon: false; clicked => {
+                if (root.editor-dirty && root.view == 3) {
+                    root.discard-intent = 1;
+                    root.confirm-discard = true;
+                } else {
+                    root.open = false;
+                }
+            } }
+        }
+
+        if (root.confirm-discard) : Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: #000000b4;
+
+            TouchArea { width: parent.width; height: parent.height; clicked => { } }
+
+            Rectangle {
+                width: 372px;
+                height: 172px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Palette.border-strong;
+                background: Tokens.surface;
+                drop-shadow-blur: 26px;
+                drop-shadow-offset-y: 10px;
+                drop-shadow-color: #00000099;
+
+                Text { x: 24px; y: 24px; width: parent.width - 48px; text: "Discard unsaved changes?"; color: Palette.foreground; font-size: 15px; font-weight: 900; }
+                Text { x: 24px; y: 54px; width: parent.width - 48px; height: 44px; text: "Your edits to this file have not been saved. Discarding will lose them."; color: Palette.muted-strong; font-size: 12px; font-weight: 600; wrap: word-wrap; }
+
+                PackHubButton { x: 24px; y: parent.height - 52px; width: 158px; icon: @image-url("../assets/icons/trash-2.svg"); label: "Discard"; danger: true; clicked => {
+                    root.confirm-discard = false;
+                    if (root.discard-intent == 2) {
+                        root.editor-select-file();
+                    } else {
+                        root.open = false;
+                    }
+                    root.discard-intent = 0;
+                } }
+                PackHubButton { x: parent.width - 182px; y: parent.height - 52px; width: 158px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Keep editing"; primary: true; clicked => {
+                    root.confirm-discard = false;
+                    root.discard-intent = 0;
+                } }
+            }
         }
     }
 }
