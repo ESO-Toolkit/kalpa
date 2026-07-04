@@ -2859,6 +2859,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "dirs",
+ "i-slint-backend-winit",
  "md-5",
  "rayon",
  "regex",

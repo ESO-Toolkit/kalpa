@@ -3369,7 +3369,10 @@ fn download_discover_screenshot(
     index: usize,
     url: &str,
 ) -> Result<PathBuf, String> {
-    if !url.starts_with("https://cdn.esoui.com/") && !url.starts_with("https://www.esoui.com/") {
+    if !url.starts_with("https://cdn.esoui.com/")
+        && !url.starts_with("https://www.esoui.com/")
+        && !url.starts_with("https://cdn-eso.mmoui.com/")
+    {
         return Err("Ignoring screenshot from an untrusted host.".to_string());
     }
 
@@ -3550,6 +3553,19 @@ fn wire_header_actions(ui: &KalpaWindow, models: AddonModels) {
                 apply_saved_variables_model(&ui, &refresh_models.all.borrow());
                 ui.set_status_error_message(error.into());
             }
+        }
+
+        // Acknowledge the refresh even when the reloaded data is unchanged:
+        // spin the header refresh icon for a short beat so the click clearly
+        // does something instead of appearing inert.
+        if !ui.get_checking_updates() {
+            ui.set_checking_updates(true);
+            let spinner_ui = ui.as_weak();
+            slint::Timer::single_shot(Duration::from_millis(650), move || {
+                if let Some(ui) = spinner_ui.upgrade() {
+                    ui.set_checking_updates(false);
+                }
+            });
         }
     });
 
@@ -11961,6 +11977,19 @@ fn wire_window_controls(ui: &KalpaWindow) {
         if let Some(ui) = maximize_ui.upgrade() {
             let next = !ui.window().is_maximized();
             ui.window().set_maximized(next);
+        }
+    });
+
+    // Frameless window: initiate a native OS-level window move when the user
+    // presses the header drag region. Without this the borderless window can
+    // not be repositioned at all.
+    let drag_ui = ui.as_weak();
+    ui.on_window_drag_requested(move || {
+        if let Some(ui) = drag_ui.upgrade() {
+            use i_slint_backend_winit::WinitWindowAccessor;
+            ui.window().with_winit_window(|winit_window| {
+                let _ = winit_window.drag_window();
+            });
         }
     });
 
