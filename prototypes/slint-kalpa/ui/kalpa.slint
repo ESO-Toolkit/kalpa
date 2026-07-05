@@ -3207,64 +3207,42 @@ component DetailFilesPanel inherits Rectangle {
                 }
             }
 
-            if (!root.editor-binary && !root.editor-error) : Rectangle {
+            if (!root.editor-binary && !root.editor-error) : ScrollView {
                 width: parent.width;
                 height: parent.height;
-                background: #00000000;
+                viewport-width: self.width;
+                // Grow the scroll region to the full text height so long files
+                // scroll (wheel + scrollbar) instead of clipping at the box height.
+                viewport-height: max(self.height, editor-input.preferred-height + 20px);
 
-                Rectangle {
-                    x: 44px;
-                    y: 9px;
-                    width: parent.width - 56px;
-                    height: 20px;
-                    background: Palette.gold-06;
-                }
-
+                // Gutter background, full content height.
                 Rectangle {
                     x: 0px;
                     y: 0px;
                     width: 56px;
-                    height: parent.height;
+                    height: max(parent.height, editor-input.preferred-height + 20px);
                     background: #00000021;
                 }
 
-                Image {
-                    x: 8px;
-                    y: 14px;
-                    width: 10px;
-                    height: 10px;
-                    source: @image-url("../assets/icons/chevron-down.svg");
-                    image-fit: contain;
-                    colorize: Palette.muted-soft;
-                }
-
-                Image {
-                    x: 8px;
-                    y: 94px;
-                    width: 10px;
-                    height: 10px;
-                    source: @image-url("../assets/icons/chevron-right.svg");
-                    image-fit: contain;
-                    colorize: Palette.muted-soft;
-                }
-
+                // Line numbers — same Consolas metrics as the code so rows stay
+                // aligned, and the same height so they scroll together.
                 Text {
                     x: 18px;
-                    y: 11px;
+                    y: 10px;
                     width: 28px;
-                    height: parent.height - 22px;
+                    height: editor-input.preferred-height;
                     text: root.editor-line-numbers;
                     color: Palette.muted-soft;
                     font-size: 12px;
-                    font-family: "Space Grotesk Light";
+                    font-family: "Consolas";
                     horizontal-alignment: right;
                 }
 
-                TextInput {
+                editor-input := TextInput {
                     x: 66px;
                     y: 10px;
-                    width: parent.width - 78px;
-                    height: parent.height - 20px;
+                    width: parent.viewport-width - 78px;
+                    height: self.preferred-height;
                     text: root.selected-file-content;
                     color: Palette.foreground;
                     read-only: !root.editor-editable;
