@@ -2579,6 +2579,19 @@ component DetailTagsSection inherits Rectangle {
     // the clipped overflow region, where clicks silently did nothing.) Reserve the
     // input's max width up front so its position never shifts as the draft grows.
     property <length> input-reserve: 118px; // 112px max TagInput width + 6px gap
+    // Newly added custom tags append to the RIGHT end of the chips, which is
+    // scrolled off-view when the row overflows — so the tag you just added looks
+    // like it never appeared. When the editor submits, scroll the chips to the end
+    // so the new chip is revealed (next to the pinned editor). `pending-reveal`
+    // gates this to user submits only, so reloads / addon switches don't jump.
+    property <bool> pending-reveal: false;
+    property <length> chips-width: tags-row.preferred-width;
+    changed chips-width => {
+        if (root.pending-reveal) {
+            tags-scroll.viewport-x = -max(0px, tags-scroll.viewport-width - tags-scroll.width);
+            root.pending-reveal = false;
+        }
+    }
     // Grow to fit a scrollbar row only when the chips exceed the visible area;
     // otherwise stay compact. (Slint has no wrap layout, so overflow scrolls.)
     height: root.overflowing ? 34px : 22px;
@@ -2611,7 +2624,10 @@ component DetailTagsSection inherits Rectangle {
         x: tags-scroll.x + tags-scroll.width + 6px;
         y: 0px;
         draft <=> root.custom-tag-draft;
-        submit(value) => { root.custom-tag-submitted(value); }
+        submit(value) => {
+            root.pending-reveal = true;
+            root.custom-tag-submitted(value);
+        }
     }
 
     // Draggable scrollbar for overflow — the chip TouchAreas swallow drag/wheel,
