@@ -13049,6 +13049,9 @@ export component KalpaWindow inherits Window {
     // Frameless windows have no OS resize handles; a non-zero resize border tells
     // the winit backend to enable edge/corner drag-resize (with resize cursors).
     resize-border-width: 8px;
+    // Driven from Rust so the edge overlay can drop its rounded corners when the
+    // OS squares the window (maximize / snap), matching DWM's corner clipping.
+    in-out property <bool> window-maximized;
     preferred-width: 1462px;
     preferred-height: 822px;
     min-width: 1180px;
@@ -13637,9 +13640,13 @@ export component KalpaWindow inherits Window {
             height: root.height;
             background: transparent;
             border-width: 1px;
-            // Slightly stronger than the internal divider token so the window
-            // edge reads as a distinct frame against the desktop.
-            border-color: #ffffff2b;
+            // Match the native DWMWCP_ROUND radius (~8px) so the stroke follows
+            // the rounded window clip; square it when the OS squares the window
+            // (maximize / snap) so a rounded stroke never floats in square corners.
+            border-radius: root.window-maximized ? 0px : 8px;
+            // Faint light inner hairline just inside the native gold edge; also the
+            // guaranteed-visible fallback if the DWM border color does not paint.
+            border-color: #ffffff33;
         }
     }
 }

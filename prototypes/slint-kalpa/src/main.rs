@@ -13360,6 +13360,9 @@ fn wire_window_controls(ui: &KalpaWindow) {
         if let Some(ui) = maximize_ui.upgrade() {
             let next = !ui.window().is_maximized();
             ui.window().set_maximized(next);
+            // Keep the edge overlay's rounded corners in sync: the OS squares the
+            // window when maximized, so the rounded stroke must square too.
+            ui.set_window_maximized(next);
         }
     });
 
@@ -13388,9 +13391,36 @@ fn wire_window_controls(ui: &KalpaWindow) {
     // (which resizes the GL surface); `PreventDefault` would letterbox content.
     {
         use i_slint_backend_winit::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
-        ui.window().on_winit_window_event(|window, event| {
+        let ev_ui = ui.as_weak();
+        ui.window().on_winit_window_event(move |window, event| {
+            // One-time native Windows 11 frame: DWM clips the window to ~8px
+            // rounded corners and draws a crisp ESO-gold border that follows the
+            // rounded arc. The HWND is guaranteed to exist by the first winit
+            // event; the Once guard keeps this off the resize hot path.
+            #[cfg(windows)]
+            {
+                use std::sync::Once;
+                static DWM_INIT: Once = Once::new();
+                DWM_INIT.call_once(|| {
+                    use i_slint_backend_winit::winit::platform::windows::{
+                        Color, CornerPreference, WindowExtWindows,
+                    };
+                    window.with_winit_window(|winit_window| {
+                        winit_window.set_corner_preference(CornerPreference::Round);
+                        winit_window.set_border_color(Some(Color::from_rgb(0xc4, 0xa4, 0x4a)));
+                    });
+                });
+            }
             if matches!(event, WindowEvent::Resized(_)) {
                 window.with_winit_window(|winit_window| winit_window.request_redraw());
+                // Sync the maximized flag for OS snap / Win+Up (which bypass
+                // on_maximize_requested) so the edge overlay squares its corners.
+                if let Some(ui) = ev_ui.upgrade() {
+                    let maxed = window.is_maximized();
+                    if ui.get_window_maximized() != maxed {
+                        ui.set_window_maximized(maxed);
+                    }
+                }
             }
             EventResult::Propagate
         });
