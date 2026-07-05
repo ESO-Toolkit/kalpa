@@ -13046,6 +13046,9 @@ export component KalpaWindow inherits Window {
     callback svm-editor-tree-filter-edited(string);
     callback review-conflicts;
     no-frame: true;
+    // Frameless windows have no OS resize handles; a non-zero resize border tells
+    // the winit backend to enable edge/corner drag-resize (with resize cursors).
+    resize-border-width: 8px;
     preferred-width: 1462px;
     preferred-height: 822px;
     min-width: 1180px;
