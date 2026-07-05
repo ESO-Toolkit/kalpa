@@ -869,17 +869,17 @@ component TagInput inherits Rectangle {
     height: 22px;
     border-radius: 6px;
     border-width: 1px;
-    border-color: touch.has-hover ? Palette.white-10 : Palette.white-06;
-    background: touch.has-hover ? Palette.white-06 : Palette.white-03;
+    border-color: tag-input.has-focus ? Palette.white-10 : Palette.white-06;
+    background: tag-input.has-focus ? Palette.white-06 : Palette.white-03;
 
     animate background, border-color { duration: Tokens.low-memory-preset ? 0ms : 90ms; easing: ease-in-out; }
 
     Text {
-        visible: root.draft == "";
+        visible: root.draft == "" && !tag-input.has-focus;
         x: 10px;
         height: root.height;
         text: "+ tag";
-        color: touch.has-hover ? Palette.foreground : Palette.muted-half;
+        color: Palette.muted-half;
         font-size: 12px;
         font-weight: 500;
         vertical-alignment: center;
@@ -887,28 +887,25 @@ component TagInput inherits Rectangle {
         animate color { duration: Tokens.low-memory-preset ? 0ms : 150ms; easing: ease-in-out; }
     }
 
-    TextEdit {
+    tag-input := TextInput {
         x: 10px;
-        y: 2px;
+        y: 0px;
         width: root.draft == "" ? root.width - 20px : root.width - 38px;
-        height: root.height - 4px;
-        text: root.draft;
-        font-size: 12px;
-        font-family: "Geist";
-        edited(content) => { root.draft = content; }
-    }
-
-    Text {
-        visible: root.draft != "";
-        x: 10px;
-        width: root.width - 38px;
         height: root.height;
         text: root.draft;
         color: Palette.foreground;
         font-size: 12px;
-        font-weight: 500;
+        font-family: "Geist";
+        single-line: true;
         vertical-alignment: center;
-        overflow: elide;
+        selection-background-color: Palette.sky-25;
+        edited => { root.draft = self.text; }
+        accepted => {
+            if (root.draft != "") {
+                root.submit(root.draft);
+                root.draft = "";
+            }
+        }
     }
 
     if (root.draft != "") : Rectangle {
@@ -940,11 +937,6 @@ component TagInput inherits Rectangle {
         }
     }
 
-    touch := TouchArea {
-        visible: false;
-        width: root.width;
-        height: root.height;
-    }
 }
 
 component SmallAction inherits Rectangle {
@@ -1159,7 +1151,7 @@ component DetailRemoveAction inherits Rectangle {
 
 component GhostIconButton inherits Rectangle {
     in property <image> icon;
-    in property <color> tone: Palette.muted-faint;
+    in property <color> tone: Palette.muted-strong;
     in property <bool> danger: false;
     callback clicked;
     width: 28px;
@@ -1754,7 +1746,7 @@ component DiscoverResultRow inherits Rectangle {
         y: root.extra-y;
         width: 78px;
         text: root.downloads;
-        color: Palette.muted-dim;
+        color: Palette.muted-half;
         font-size: 10px;
         font-weight: 600;
         overflow: elide;
@@ -1766,7 +1758,7 @@ component DiscoverResultRow inherits Rectangle {
         y: root.extra-y;
         width: parent.width - root.body-x - root.action-reserve - 96px;
         text: root.updated;
-        color: Palette.muted-dim;
+        color: Palette.muted-half;
         font-size: 10px;
         font-weight: 600;
         overflow: elide;
@@ -2102,23 +2094,7 @@ component DiscoverModePanel inherits Rectangle {
             overflow: elide;
         }
 
-        TextEdit {
-            x: 31px;
-            y: 0px;
-            width: parent.width - 42px;
-            height: parent.height;
-            opacity: 0.01;
-            text: root.category-filter;
-            font-size: 13px;
-            font-family: "Geist";
-            edited(content) => {
-                root.category-filter = content;
-                root.category-filter-edited(content);
-            }
-        }
-
-        Text {
-            visible: root.category-filter != "";
+        TextInput {
             x: 31px;
             y: 0px;
             width: parent.width - 42px;
@@ -2127,8 +2103,13 @@ component DiscoverModePanel inherits Rectangle {
             color: Palette.foreground;
             font-size: 13px;
             font-family: "Geist";
+            single-line: true;
             vertical-alignment: center;
-            overflow: elide;
+            selection-background-color: Palette.sky-25;
+            edited => {
+                root.category-filter = self.text;
+                root.category-filter-edited(self.text);
+            }
         }
     }
 
@@ -2604,12 +2585,14 @@ component DetailTagsSection inherits Rectangle {
 
 component DetailDescriptionSection inherits Rectangle {
     in property <string> description;
-    height: 56px;
+    // Grow with the wrapped description so the full text is reachable once the pane
+    // scrolls (was a fixed 56px box that elided everything past ~2 lines).
+    height: max(56px, desc-text.preferred-height + 24px);
     background: #00000000;
 
     Rectangle {
         width: parent.width;
-        height: 56px;
+        height: parent.height;
         border-radius: 12px;
         border-width: 0px;
         background: Palette.white-02;
@@ -2617,17 +2600,15 @@ component DetailDescriptionSection inherits Rectangle {
         drop-shadow-offset-y: 0px;
         drop-shadow-color: #00000000;
 
-        Text {
+        desc-text := Text {
             x: 16px;
             y: 12px;
             width: parent.width - 32px;
-            height: parent.height - 20px;
             text: root.description;
             color: Palette.text-soft;
             font-size: 14px;
             font-weight: 400;
             wrap: word-wrap;
-            overflow: elide;
         }
     }
 }
@@ -3273,18 +3254,21 @@ component DetailFilesPanel inherits Rectangle {
                     horizontal-alignment: right;
                 }
 
-                TextEdit {
+                TextInput {
                     x: 66px;
-                    y: 9px;
+                    y: 10px;
                     width: parent.width - 78px;
-                    height: parent.height - 18px;
+                    height: parent.height - 20px;
                     text: root.selected-file-content;
+                    color: Palette.foreground;
                     read-only: !root.editor-editable;
                     font-size: 12px;
                     font-family: "Consolas";
-                    edited(content) => {
-                        root.selected-file-content = content;
-                        root.file-content-edited(content);
+                    wrap: word-wrap;
+                    selection-background-color: Palette.sky-25;
+                    edited => {
+                        root.selected-file-content = self.text;
+                        root.file-content-edited(self.text);
                     }
                 }
             }
@@ -4010,16 +3994,20 @@ component ThemeEditorColorTile inherits Rectangle {
         background: field-touch.has-hover ? #ffffff08 : #00000024;
         clip: true;
 
-        TextEdit {
-            x: 5px;
-            y: 1px;
-            width: parent.width - 10px;
+        TextInput {
+            x: 6px;
+            y: 0px;
+            width: parent.width - 12px;
             height: parent.height;
             text: root.value-text;
+            color: Palette.foreground;
             font-size: 10px;
             font-family: "Consolas";
-            edited(content) => {
-                root.value-text = content;
+            single-line: true;
+            vertical-alignment: center;
+            selection-background-color: Palette.sky-25;
+            edited => {
+                root.value-text = self.text;
                 root.edited();
             }
         }
@@ -4359,30 +4347,21 @@ component AppearanceOverlay inherits Rectangle {
                     background: Palette.white-04;
                     clip: true;
 
-                    Text {
-                        visible: root.draft-theme-name != "";
+                    TextInput {
                         x: 12px;
+                        y: 0px;
                         width: parent.width - 24px;
                         height: parent.height;
                         text: root.draft-theme-name;
                         color: Palette.foreground;
                         font-size: 13px;
                         font-weight: 700;
-                        vertical-alignment: center;
-                        overflow: elide;
-                    }
-
-                    TextEdit {
-                        x: 12px;
-                        y: 0px;
-                        width: parent.width - 24px;
-                        height: parent.height;
-                        opacity: 0.01;
-                        text: root.draft-theme-name;
-                        font-size: 13px;
                         font-family: "Geist";
-                        edited(content) => {
-                            root.draft-theme-name = content;
+                        single-line: true;
+                        vertical-alignment: center;
+                        selection-background-color: Palette.sky-25;
+                        edited => {
+                            root.draft-theme-name = self.text;
                             root.theme-draft-updated();
                         }
                     }
@@ -4446,16 +4425,19 @@ component AppearanceOverlay inherits Rectangle {
                             wrap: word-wrap;
                         }
 
-                        TextEdit {
+                        TextInput {
                             x: 10px;
-                            y: 5px;
+                            y: 6px;
                             width: parent.width - 20px;
-                            height: parent.height - 10px;
+                            height: parent.height - 12px;
                             text: root.draft-theme-description;
+                            color: Palette.foreground;
                             font-size: 12px;
                             font-family: "Geist";
-                            edited(content) => {
-                                root.draft-theme-description = content;
+                            wrap: word-wrap;
+                            selection-background-color: Palette.sky-25;
+                            edited => {
+                                root.draft-theme-description = self.text;
                                 root.theme-draft-updated();
                             }
                         }
@@ -4817,8 +4799,10 @@ component PackHubButton inherits Rectangle {
         height: root.icon-size;
         source: root.icon;
         image-fit: contain;
-        colorize: root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground);
-        opacity: root.disabled ? 0.35 : 1.0;
+        // Disabled must win over `primary` — a disabled primary button has a DARK
+        // background, so the dark `#111827` primary ink would be invisible on it.
+        colorize: root.disabled ? Palette.muted-dim : (root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground));
+        opacity: root.disabled ? 0.55 : 1.0;
     }
 
     button-label := Text {
@@ -4827,7 +4811,7 @@ component PackHubButton inherits Rectangle {
         width: root.label-width;
         height: root.height;
         text: root.label;
-        color: root.primary ? #111827 : (root.danger ? Palette.red : (root.disabled ? Palette.muted-dim : Palette.foreground));
+        color: root.disabled ? Palette.muted-dim : (root.primary ? #111827 : (root.danger ? Palette.red : Palette.foreground));
         font-size: 12px;
         font-weight: root.primary ? 800 : 700;
         vertical-alignment: center;
@@ -4894,25 +4878,32 @@ component PackHubField inherits Rectangle {
         width: parent.width - (root.search ? 48px : 28px);
         height: parent.height;
         text: root.placeholder;
-        color: root.focused ? Palette.foreground : Palette.muted-half;
+        color: Palette.muted-half;
         font-size: 13px;
         font-weight: 600;
         vertical-alignment: center;
         overflow: elide;
     }
 
-    TextEdit {
+    // Low-level TextInput (NOT the std TextEdit widget, which renders dark default
+    // text + its own padding on the dark field). Explicit light ink, inset padding.
+    TextInput {
         visible: root.editable;
         x: root.search ? 36px : 14px;
-        y: 2px;
+        y: 0px;
         width: parent.width - (root.search ? 48px : 28px);
-        height: parent.height - 4px;
+        height: parent.height;
         text: root.value;
+        color: Palette.foreground;
         font-size: 13px;
         font-family: "Geist";
-        edited(content) => {
-            root.value = content;
-            root.edited(content);
+        font-weight: 600;
+        single-line: true;
+        vertical-alignment: center;
+        selection-background-color: Palette.sky-25;
+        edited => {
+            root.value = self.text;
+            root.edited(self.text);
         }
     }
 
@@ -5215,7 +5206,7 @@ component SafetyTabButton inherits Rectangle {
         width: parent.width;
         height: parent.height;
         text: root.label;
-        color: root.active ? Palette.foreground : Palette.muted-half;
+        color: root.active ? Palette.foreground : (touch.has-hover ? Palette.muted-strong : Palette.muted-half);
         font-size: 12px;
         font-weight: 850;
         horizontal-alignment: center;
@@ -6762,7 +6753,7 @@ component PackHubCreateDetailsView inherits Rectangle {
     background: #00000000;
 
     Text { x: 0px; y: 0px; text: "Creating a pack"; color: Palette.muted-half; font-size: 12px; font-weight: 700; }
-    Text { x: parent.width - 260px; y: 0px; width: 260px; text: "Sign in in full Pack Hub to publish"; color: Palette.muted-half; font-size: 12px; font-weight: 600; horizontal-alignment: right; overflow: elide; }
+    Text { x: parent.width - 260px; y: 0px; width: 260px; text: "Sign in to the full Pack Hub to publish"; color: Palette.muted-half; font-size: 12px; font-weight: 600; horizontal-alignment: right; overflow: elide; }
 
     PackHubStep { x: 0px; y: 30px; number: "1"; label: "Details"; active: true; }
     Image { x: 82px; y: 36px; width: 12px; height: 12px; source: @image-url("../assets/icons/chevron-right.svg"); image-fit: contain; colorize: Palette.muted-half; }
@@ -6805,15 +6796,19 @@ component PackHubCreateDetailsView inherits Rectangle {
             font-weight: 600;
         }
 
-        TextEdit {
+        TextInput {
             x: 14px;
-            y: 8px;
+            y: 10px;
             width: parent.width - 28px;
-            height: parent.height - 16px;
+            height: parent.height - 20px;
             text: root.description;
+            color: Palette.foreground;
             font-size: 13px;
             font-family: "Geist";
-            edited(content) => { root.description = content; }
+            font-weight: 600;
+            wrap: word-wrap;
+            selection-background-color: Palette.sky-25;
+            edited => { root.description = self.text; }
         }
     }
     Text { x: parent.width - 74px; y: 282px; width: 74px; text: "max 500"; color: Palette.muted-half; font-size: 10px; font-weight: 600; horizontal-alignment: right; }
@@ -6823,19 +6818,12 @@ component PackHubCreateDetailsView inherits Rectangle {
     PackHubTypeCard { x: (parent.width - 16px) / 3 + 8px; y: 338px; width: (parent.width - 16px) / 3; title: "Build Pack"; description: "A skill build or loadout"; tone: Tokens.accent; active: root.pack-type == 1; clicked => { root.pack-type = 1; } }
     PackHubTypeCard { x: ((parent.width - 16px) / 3 + 8px) * 2; y: 338px; width: (parent.width - 16px) / 3; title: "Roster Pack"; description: "A group or raid roster"; tone: Palette.violet; active: root.pack-type == 2; clicked => { root.pack-type = 2; } }
 
-    DetailSectionTitle { x: 0px; y: 418px; width: parent.width; label: "TAGS"; }
-    Text { x: parent.width - 22px; y: 418px; width: 22px; text: "0/5"; color: Palette.muted-half; font-size: 10px; font-weight: 600; horizontal-alignment: right; }
-    PackHubTag { x: 0px; y: 444px; label: "trial"; }
-    PackHubTag { x: 58px; y: 444px; label: "pvp"; }
-    PackHubTag { x: 112px; y: 444px; label: "beginner"; }
-    PackHubTag { x: 198px; y: 444px; label: "healer"; }
-    PackHubTag { x: 268px; y: 444px; label: "tank"; }
-    PackHubTag { x: 326px; y: 444px; label: "dps"; }
-    PackHubTag { x: 384px; y: 444px; label: "utility"; }
+    // (Tag selection isn't implemented on the create path yet — the dead chips +
+    // fake "0/5" counter were removed rather than advertise a non-existent feature.)
 
     PackHubButton {
         x: 0px;
-        y: 490px;
+        y: 430px;
         width: parent.width;
         icon: @image-url("../assets/icons/chevron-right.svg");
         label: "Next: Add Addons";
@@ -6860,7 +6848,7 @@ component PackHubCreateAddonsView inherits Rectangle {
     background: #00000000;
 
     Text { x: 0px; y: 0px; text: "Creating a pack"; color: Palette.muted-half; font-size: 12px; font-weight: 700; }
-    Text { x: parent.width - 260px; y: 0px; width: 260px; text: "Sign in in full Pack Hub to publish"; color: Palette.muted-half; font-size: 12px; font-weight: 600; horizontal-alignment: right; overflow: elide; }
+    Text { x: parent.width - 260px; y: 0px; width: 260px; text: "Sign in to the full Pack Hub to publish"; color: Palette.muted-half; font-size: 12px; font-weight: 600; horizontal-alignment: right; overflow: elide; }
 
     PackHubStep { x: 0px; y: 30px; number: "1"; label: "Details"; }
     Image { x: 82px; y: 36px; width: 12px; height: 12px; source: @image-url("../assets/icons/chevron-right.svg"); image-fit: contain; colorize: Palette.muted-half; }
@@ -6996,10 +6984,12 @@ component PackHubInstallView inherits Rectangle {
         x: 0px;
         y: 0px;
         width: parent.width - 24px;
+        height: 34px;
         text: root.pack.description;
         color: Palette.muted-strong;
         font-size: 14px;
         font-weight: 600;
+        wrap: word-wrap;
         overflow: elide;
     }
 
@@ -7319,10 +7309,12 @@ component PackHubImportView inherits Rectangle {
             x: 0px;
             y: 28px;
             width: parent.width;
+            height: 30px;
             text: root.pack.description;
             color: Palette.muted-strong;
             font-size: 13px;
             font-weight: 600;
+            wrap: word-wrap;
             overflow: elide;
         }
 
@@ -8208,15 +8200,20 @@ component BackupCreateCard inherits Rectangle {
         focused: true;
     }
 
-    if (root.label-open) : TextEdit {
+    if (root.label-open) : TextInput {
         x: 32px;
         y: 92px;
         width: parent.width - 150px;
         height: 28px;
         text: root.label-draft;
+        color: Palette.foreground;
         font-size: 13px;
         font-family: "Geist";
-        edited(content) => { root.label-draft = content; }
+        font-weight: 600;
+        single-line: true;
+        vertical-alignment: center;
+        selection-background-color: Palette.sky-25;
+        edited => { root.label-draft = self.text; }
     }
 
     if (root.label-open) : PackHubButton {
@@ -8249,24 +8246,17 @@ component BackupCreateCard inherits Rectangle {
         }
     }
 
+    // Informational line only — the chevron (which implied an expandable disclosure
+    // with no handler) was removed so it doesn't read as a dead control.
     Text {
         x: 42px;
         y: root.label-open ? 126px : 104px;
         width: parent.width - 86px;
-        text: "What gets backed up?";
+        text: "Your SavedVariables, AddOns list, and character settings are backed up.";
         color: Palette.muted-strong;
         font-size: 13px;
         font-weight: 600;
-    }
-
-    Image {
-        x: 210px;
-        y: root.label-open ? 130px : 108px;
-        width: 13px;
-        height: 13px;
-        source: @image-url("../assets/icons/chevron-down.svg");
-        image-fit: contain;
-        colorize: Palette.muted-strong;
+        overflow: elide;
     }
 }
 
@@ -8549,17 +8539,19 @@ component BackupRestoreOverlay inherits Rectangle {
 component UploaderModeButton inherits Rectangle {
     in property <string> label;
     in property <bool> active: false;
+    in property <bool> locked: false;
     callback clicked;
     height: 32px;
     border-radius: 8px;
     border-width: 0px;
-    background: root.active ? Palette.white-08 : (touch.has-hover ? Palette.white-03 : #00000000);
+    background: root.active ? Palette.white-08 : (root.locked ? #00000000 : (touch.has-hover ? Palette.white-03 : #00000000));
 
     Text {
         width: parent.width;
         height: parent.height;
         text: root.label;
-        color: root.active ? Palette.foreground : Palette.muted-half;
+        color: root.active ? Palette.foreground : (root.locked ? Palette.muted-dim : (touch.has-hover ? Palette.muted-strong : Palette.muted-half));
+        opacity: root.locked && !root.active ? 0.6 : 1.0;
         font-size: 12px;
         font-weight: 850;
         horizontal-alignment: center;
@@ -8569,6 +8561,7 @@ component UploaderModeButton inherits Rectangle {
     touch := TouchArea {
         width: root.width;
         height: root.height;
+        mouse-cursor: root.locked && !root.active ? MouseCursor.not-allowed : MouseCursor.pointer;
         clicked => { root.clicked(); }
     }
 }
@@ -8832,10 +8825,15 @@ component UploaderOverlay inherits Rectangle {
     private property <string> region-label: root.region == 2 ? "EU" : "NA";
     private property <string> visibility-label: root.visibility-mode == 0 ? "Public" : (root.visibility-mode == 1 ? "Private" : "Unlisted");
 
+    // Don't let a stray backdrop click dismiss the modal mid-upload / mid-live-stream.
     TouchArea {
         width: root.width;
         height: root.height;
-        clicked => { root.open = false; }
+        clicked => {
+            if (!root.uploading && !root.live-running) {
+                root.open = false;
+            }
+        }
     }
 
     panel := Rectangle {
@@ -8904,8 +8902,8 @@ component UploaderOverlay inherits Rectangle {
             // Tabs are locked while a native live worker runs or a manual upload is
             // in flight — switching away would orphan the in-process driver/upload
             // (its Stop/Cancel lives in the current view). Stop/finish unlocks them.
-            UploaderModeButton { x: 5px; y: 4px; width: (parent.width - 10px) / 2; label: "Manual Upload"; active: root.manual; clicked => { if (!root.live-active && !root.uploading) { root.view = 0; } } }
-            UploaderModeButton { x: 5px + (parent.width - 10px) / 2; y: 4px; width: (parent.width - 10px) / 2; label: "Live Logging"; active: !root.manual; clicked => { if (!root.live-active && !root.uploading) { root.view = 2; } } }
+            UploaderModeButton { x: 5px; y: 4px; width: (parent.width - 10px) / 2; label: "Manual Upload"; active: root.manual; locked: root.live-active || root.uploading; clicked => { if (!root.live-active && !root.uploading) { root.view = 0; } } }
+            UploaderModeButton { x: 5px + (parent.width - 10px) / 2; y: 4px; width: (parent.width - 10px) / 2; label: "Live Logging"; active: !root.manual; locked: root.live-active || root.uploading; clicked => { if (!root.live-active && !root.uploading) { root.view = 2; } } }
         }
 
         Hairline { x: 0px; y: 152px; width: parent.width; height: 1px; opacity: 0.45; }
@@ -8925,11 +8923,12 @@ component UploaderOverlay inherits Rectangle {
                 x: 0px;
                 y: 96px;
                 width: (parent.width - 18px) * 0.42;
-                height: 260px;
+                height: parent.height - 108px;
                 border-radius: 12px;
                 border-width: 1px;
                 border-color: Palette.border;
                 background: Palette.white-02;
+                clip: true;
 
                 DetailSectionTitle { x: 18px; y: 16px; width: parent.width - 36px; label: "LOG FILES"; }
 
@@ -8949,7 +8948,7 @@ component UploaderOverlay inherits Rectangle {
                     x: 18px;
                     y: 46px;
                     width: parent.width - 36px;
-                    height: 194px;
+                    height: parent.height - 64px;
                     viewport-width: self.width;
                     viewport-height: root.logs.length * 64px;
                     vertical-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -8978,11 +8977,12 @@ component UploaderOverlay inherits Rectangle {
                 x: (parent.width - 18px) * 0.42 + 18px;
                 y: 96px;
                 width: parent.width - self.x;
-                height: 260px;
+                height: parent.height - 108px;
                 border-radius: 12px;
                 border-width: 1px;
                 border-color: Palette.border;
                 background: Palette.white-02;
+                clip: true;
 
                 Text { x: 18px; y: 16px; width: parent.width - 36px; text: root.status-title; color: Palette.foreground; font-size: 15px; font-weight: 900; overflow: elide; }
                 Text { x: 18px; y: 44px; width: parent.width - 36px; height: 34px; text: root.status-detail; color: Palette.muted-strong; font-size: 12px; font-weight: 600; wrap: word-wrap; overflow: elide; }
@@ -9022,7 +9022,7 @@ component UploaderOverlay inherits Rectangle {
                     background: Palette.sky-04;
 
                     Image { x: 14px; y: 13px; width: 16px; height: 16px; source: @image-url("../assets/icons/cloud-upload.svg"); image-fit: contain; colorize: Palette.sky; }
-                    Text { x: 42px; y: 0px; width: parent.width - 56px; height: parent.height; text: "Opening the ESO Logs uploader..."; color: Palette.foreground; font-size: 12px; font-weight: 850; vertical-alignment: center; overflow: elide; }
+                    Text { x: 42px; y: 0px; width: parent.width - 56px; height: parent.height; text: root.native-route ? "Uploading to ESO Logs..." : "Opening the ESO Logs uploader..."; color: Palette.foreground; font-size: 12px; font-weight: 850; vertical-alignment: center; overflow: elide; }
                 }
 
                 DetailSectionTitle { x: 18px; y: root.uploading ? 146px : 132px; width: parent.width - 36px; label: "FIGHTS"; }
@@ -9039,20 +9039,36 @@ component UploaderOverlay inherits Rectangle {
                     wrap: word-wrap;
                 }
 
-                for fight[index] in root.fights : UploaderFightRow {
-                    visible: index < 6;
+                if (root.fights.length > 0) : ScrollView {
                     x: 18px;
-                    y: (root.uploading ? 174px : 160px) + index * 42px;
+                    y: root.uploading ? 174px : 160px;
                     width: parent.width - 36px;
-                    title: fight.title;
-                    meta: fight.meta;
-                    result: fight.result;
-                    live: fight.live;
+                    height: parent.height - (root.uploading ? 174px : 160px) - 44px;
+                    viewport-width: self.width;
+                    viewport-height: root.fights.length * 42px;
+                    vertical-scrollbar-policy: ScrollBarPolicy.always-on;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                    Rectangle {
+                        width: parent.width;
+                        height: root.fights.length * 42px;
+                        background: #00000000;
+
+                        for fight[index] in root.fights : UploaderFightRow {
+                            x: 0px;
+                            y: index * 42px;
+                            width: parent.width - 12px;
+                            title: fight.title;
+                            meta: fight.meta;
+                            result: fight.result;
+                            live: fight.live;
+                        }
+                    }
                 }
 
                 if (root.fights.length > 0) : Text {
                     x: 18px;
-                    y: (root.uploading ? 174px : 160px) + min(root.fights.length, 6) * 42px + 6px;
+                    y: parent.height - 34px;
                     width: parent.width - 36px;
                     text: "Preview of recent fights - the uploader hands off the entire log, not just what is shown here.";
                     color: Palette.muted-half;
@@ -9164,8 +9180,9 @@ component UploaderOverlay inherits Rectangle {
                 fill-pressed: Palette.emerald-20;
                 clicked => { root.open-report(); }
             }
-            PackHubButton { x: parent.width - 284px; y: 22px; width: 116px; icon: @image-url("../assets/icons/x.svg"); label: root.live-running ? "Stop" : "Cancel"; danger: root.live-running; clicked => { if (root.live-running) { root.live-toggle(); } else { root.open = false; } } }
-            PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? (root.uploading ? "Uploading" : "Upload") : (root.live-running ? "Running" : "Go Live"); primary: true; disabled: root.manual ? (root.logs.length == 0 || root.uploading) : (!root.live-running && root.live-log-label != "Encounter.log"); clicked => { if (root.manual) { root.upload-requested(); } else { root.live-toggle(); } } }
+            PackHubButton { x: parent.width - 284px; y: 22px; width: 116px; icon: @image-url("../assets/icons/x.svg"); label: root.live-running ? "Stop" : "Cancel"; danger: root.live-running; disabled: root.uploading; clicked => { if (root.live-running) { root.live-toggle(); } else if (!root.uploading) { root.open = false; } } }
+            // "Running" is a status only — the red Stop button is the sole stop control (was a hidden duplicate-stop).
+            PackHubButton { x: parent.width - 156px; y: 22px; width: 128px; icon: root.manual ? @image-url("../assets/icons/cloud-upload.svg") : @image-url("../assets/icons/power.svg"); label: root.manual ? (root.uploading ? "Uploading" : "Upload") : (root.live-running ? "Running" : "Go Live"); primary: true; disabled: root.manual ? (root.logs.length == 0 || root.uploading) : (root.live-running || root.live-log-label != "Encounter.log"); clicked => { if (root.manual) { root.upload-requested(); } else if (!root.live-running) { root.live-toggle(); } } }
         }
     }
 }
@@ -9727,7 +9744,9 @@ component SvmSettingRow inherits Rectangle {
     Text {
         x: 12px;
         y: 8px;
-        width: parent.width - 250px;
+        // Cap so the label ends before the key-name column at x:190 (was
+        // parent.width-250, which overran and overlapped the key name).
+        width: 170px;
         text: root.label;
         color: Palette.foreground;
         font-size: 13px;
@@ -10845,69 +10864,49 @@ component Sidebar inherits Rectangle {
             vertical-alignment: center;
         }
 
-        TextEdit {
+        // Visible TextInput (draws its own caret) — replaces the opacity:0.01
+        // invisible-TextEdit + separate display-Text hack.
+        TextInput {
             visible: !root.discover-active;
             x: 36px;
             y: 0px;
             width: parent.width - 48px;
             height: parent.height;
-            opacity: 0.01;
-            text: root.addon-search-query;
-            font-size: 14px;
-            font-family: "Geist";
-            edited(content) => {
-                root.addon-search-query = content;
-                root.addon-search-edited(content);
-            }
-        }
-
-        Text {
-            visible: !root.discover-active && root.addon-search-query != "";
-            x: 36px;
-            y: 0px;
-            width: parent.width - 48px;
-            height: parent.height;
             text: root.addon-search-query;
             color: Palette.foreground;
             font-size: 14px;
             font-family: "Geist";
+            single-line: true;
             vertical-alignment: center;
-            overflow: elide;
+            selection-background-color: Palette.sky-25;
+            edited => {
+                root.addon-search-query = self.text;
+                root.addon-search-edited(self.text);
+            }
         }
 
-        TextEdit {
+        TextInput {
             visible: root.discover-active && (root.discover-tab == 0 || root.discover-tab == 3);
             x: 36px;
             y: 0px;
             width: parent.width - 48px;
             height: parent.height;
-            opacity: 0.01;
-            text: root.discover-tab == 3 ? root.discover-url-input : root.discover-query;
-            font-size: 14px;
-            font-family: "Geist";
-            edited(content) => {
-                if (root.discover-tab == 3) {
-                    root.discover-url-input = content;
-                    root.discover-url-edited(content);
-                } else {
-                    root.discover-query = content;
-                    root.discover-query-edited(content);
-                }
-            }
-        }
-
-        Text {
-            visible: root.discover-active && (root.discover-tab == 0 ? root.discover-query != "" : (root.discover-tab == 3 ? root.discover-url-input != "" : false));
-            x: 36px;
-            y: 0px;
-            width: parent.width - 48px;
-            height: parent.height;
             text: root.discover-tab == 3 ? root.discover-url-input : root.discover-query;
             color: Palette.foreground;
             font-size: 14px;
             font-family: "Geist";
+            single-line: true;
             vertical-alignment: center;
-            overflow: elide;
+            selection-background-color: Palette.sky-25;
+            edited => {
+                if (root.discover-tab == 3) {
+                    root.discover-url-input = self.text;
+                    root.discover-url-edited(self.text);
+                } else {
+                    root.discover-query = self.text;
+                    root.discover-query-edited(self.text);
+                }
+            }
         }
 
     }
@@ -11546,7 +11545,7 @@ component Sidebar inherits Rectangle {
         sort-install := SortMenuRow {
             y: 92px;
             width: parent.width;
-            label: "Install Folder";
+            label: "Downloaded";
             active: root.sort-mode == 3;
             clicked => {
                 root.sort-mode = 3;
@@ -11864,7 +11863,9 @@ component DetailPane inherits Rectangle {
         width: root.width;
         height: root.height;
         viewport-width: root.width;
-        viewport-height: root.files-active ? 750px : (root.has-selected-conflicts ? 1518px : root.height);
+        // Follow the real content height so a long description / extra dependencies
+        // scroll instead of being clipped at the fixed pane height.
+        viewport-height: detail-content.preferred-height + 58px;
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
@@ -11872,7 +11873,6 @@ component DetailPane inherits Rectangle {
             x: 24px;
             y: 29px;
             width: root.width - 48px;
-            height: root.files-active ? 730px : (root.has-selected-conflicts ? 1458px : root.height - 58px);
             spacing: 0px;
 
             GradientHeading {
@@ -12219,7 +12219,9 @@ component DiscoverDetailPane inherits Rectangle {
         width: root.pane-width;
         height: root.height;
         viewport-width: root.pane-width;
-        viewport-height: root.show-screenshots ? 1240px : 760px;
+        // Follow the real content height so a long description is fully scrollable
+        // (was hardcoded, which clipped anything past the fixed layout).
+        viewport-height: content.preferred-height + 58px;
         vertical-scrollbar-policy: ScrollBarPolicy.always-off;
         horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
@@ -12227,7 +12229,6 @@ component DiscoverDetailPane inherits Rectangle {
             x: 24px;
             y: 29px;
             width: root.pane-width - 48px;
-            height: root.show-screenshots ? 1220px : 740px;
             spacing: 0px;
 
             Rectangle {
@@ -12567,22 +12568,22 @@ component DiscoverDetailPane inherits Rectangle {
 
             Rectangle {
                 width: parent.width;
-                height: 178px;
+                // Grow with the wrapped description so the whole thing is reachable by
+                // scrolling (was a fixed 178px box that elided long descriptions).
+                height: max(178px, description-text.preferred-height + 30px);
                 border-radius: 12px;
                 border-width: 0px;
                 background: @linear-gradient(180deg, Palette.white-03 0%, Palette.white-02 100%);
 
-                Text {
+                description-text := Text {
                     x: 16px;
                     y: 15px;
                     width: parent.width - 32px;
-                    height: parent.height - 30px;
                     text: root.entry.description;
                     color: Palette.text-soft;
                     font-size: 14px;
                     font-weight: 500;
                     wrap: word-wrap;
-                    overflow: elide;
                 }
             }
 
