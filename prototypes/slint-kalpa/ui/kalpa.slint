@@ -612,6 +612,8 @@ component GradientHeading inherits Rectangle {
     Text {
         x: 0px;
         y: 0px;
+        width: parent.width;
+        overflow: elide;
         text: root.label;
         color: Palette.gold;
         font-family: "Space Grotesk Light";
@@ -622,6 +624,8 @@ component GradientHeading inherits Rectangle {
     Text {
         x: 0px;
         y: 0px;
+        width: parent.width;
+        overflow: elide;
         text: root.label;
         color: Palette.gold-hot;
         opacity: 0.34;
@@ -2454,8 +2458,10 @@ component DependencyRow inherits Rectangle {
         clicked => { root.remove-clicked(); }
     }
 
+    // Stop before the Install/Remove action column (starts at root.width - 76px)
+    // so this row-hover TouchArea does not cover and swallow the buttons' clicks.
     touch := TouchArea {
-        width: root.width;
+        width: root.width - 84px;
         height: root.height;
     }
 }
@@ -4995,8 +5001,10 @@ component CharacterListRow inherits Rectangle {
         clicked => { root.backup-clicked(); }
     }
 
+    // Stop before the Backup button (at parent.width - 138px) so this row-hover
+    // TouchArea does not sit on top of it and swallow its clicks.
     touch := TouchArea {
-        width: root.width;
+        width: root.width - 148px;
         height: root.height;
     }
 }
@@ -11509,7 +11517,9 @@ component Sidebar inherits Rectangle {
         width: 6px;
         height: 360px;
         border-radius: 6px;
-        background: #38bdf84f;
+        // Follow the active theme accent like the other scrollbar thumbs, instead
+        // of a hardcoded sky-blue that stays blue on non-default themes.
+        background: Palette.sky-scroll-thumb;
     }
 
     Rectangle {
