@@ -18,6 +18,8 @@
 // halo with no visible boundary.
 import { useEffect, useRef, useState } from "react";
 
+import { AMBIENT_CHANGE_EVENT } from "@/lib/ambient-animations";
+
 const orbGradient = (color: string, corePct: number) =>
   `radial-gradient(circle closest-side at center, ${color} 0%, ${color} ${corePct}%, transparent 100%)`;
 
@@ -69,13 +71,29 @@ export function AppBackground() {
       anims = root.getAnimations({ subtree: true });
       for (const a of anims) a.pause();
     };
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
     const tick = () => {
       const now = performance.now();
       const dt = now - last;
       last = now;
       // Re-collect if the styled animations were replaced (a canceled
-      // CSSAnimation reports currentTime === null), not just on empty.
-      if (anims.length === 0 || anims.every((a) => a.currentTime === null)) collect();
+      // CSSAnimation reports currentTime === null), not just on empty. If
+      // there is still nothing to drive — the ambient-animations toggle or
+      // prefers-reduced-motion zeroed the animations — stop the timer
+      // entirely rather than waking 10×/s for nothing; the ambient-change /
+      // focus / reduced-motion listeners restart it.
+      if (anims.length === 0 || anims.every((a) => a.currentTime === null)) {
+        collect();
+        if (anims.length === 0) {
+          stop();
+          return;
+        }
+      }
       for (const a of anims) {
         const t = a.currentTime;
         if (typeof t === "number") a.currentTime = t + dt;
@@ -85,14 +103,11 @@ export function AppBackground() {
       // Honor prefers-reduced-motion by never seeking: the ambient layer holds
       // still, which is exactly what a reduced-motion user asked for.
       if (timer !== null || reduceMotion.matches) return;
+      // Nothing to drive (ambient-animations off) = no timer at all.
+      if (anims.length === 0 || anims.every((a) => a.currentTime === null)) collect();
+      if (anims.length === 0) return;
       last = performance.now();
       timer = window.setInterval(tick, DRIFT_TICK_MS);
-    };
-    const stop = () => {
-      if (timer !== null) {
-        window.clearInterval(timer);
-        timer = null;
-      }
     };
 
     // Drive the root `.app-hidden` class (window hidden: tray/minimized) and
@@ -122,6 +137,7 @@ export function AppBackground() {
     window.addEventListener("blur", update);
     document.addEventListener("visibilitychange", update);
     reduceMotion.addEventListener("change", update);
+    window.addEventListener(AMBIENT_CHANGE_EVENT, update);
     return () => {
       stop();
       // If the orbs stay mounted (HMR/StrictMode re-run), hand the timelines
@@ -137,6 +153,7 @@ export function AppBackground() {
       window.removeEventListener("blur", update);
       document.removeEventListener("visibilitychange", update);
       reduceMotion.removeEventListener("change", update);
+      window.removeEventListener(AMBIENT_CHANGE_EVENT, update);
       document.documentElement.classList.remove("app-hidden");
       document.documentElement.classList.remove("app-unfocused");
     };

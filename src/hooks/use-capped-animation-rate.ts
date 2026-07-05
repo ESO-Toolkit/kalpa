@@ -1,5 +1,7 @@
 import { useEffect, type RefObject } from "react";
 
+import { AMBIENT_CHANGE_EVENT } from "@/lib/ambient-animations";
+
 /**
  * Drives an element's CSS animations by seeking them from a low-rate timer
  * instead of letting them free-run on the compositor.
@@ -29,15 +31,30 @@ export function useCappedAnimationRate(ref: RefObject<HTMLElement | null>, inter
 
     let last = performance.now();
     let timer: number | null = null;
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const collect = () => {
+      anims = el.getAnimations();
+      for (const a of anims) a.pause();
+    };
     const tick = () => {
       const now = performance.now();
       const dt = now - last;
       last = now;
       // Re-collect if the styled animations were replaced or removed (a
-      // canceled CSSAnimation reports currentTime === null).
+      // canceled CSSAnimation reports currentTime === null). If there is
+      // still nothing to drive — ambient-animations toggle / reduced motion
+      // zeroed them — stop waking entirely; the change listeners restart us.
       if (anims.length === 0 || anims.every((a) => a.currentTime === null)) {
-        anims = el.getAnimations();
-        for (const a of anims) a.pause();
+        collect();
+        if (anims.length === 0) {
+          stop();
+          return;
+        }
       }
       for (const a of anims) {
         const t = a.currentTime;
@@ -45,31 +62,31 @@ export function useCappedAnimationRate(ref: RefObject<HTMLElement | null>, inter
       }
     };
     const start = () => {
-      if (timer === null && !document.hidden && document.hasFocus()) {
-        last = performance.now();
-        timer = window.setInterval(tick, intervalMs);
-      }
-    };
-    const stop = () => {
-      if (timer !== null) {
-        window.clearInterval(timer);
-        timer = null;
-      }
+      if (timer !== null || document.hidden || !document.hasFocus()) return;
+      if (anims.length === 0 || anims.every((a) => a.currentTime === null)) collect();
+      if (anims.length === 0) return; // nothing to drive = no timer at all
+      last = performance.now();
+      timer = window.setInterval(tick, intervalMs);
     };
     const onStateChange = () => {
       if (document.hidden || !document.hasFocus()) stop();
       else start();
     };
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
     start();
     document.addEventListener("visibilitychange", onStateChange);
     window.addEventListener("focus", onStateChange);
     window.addEventListener("blur", onStateChange);
+    window.addEventListener(AMBIENT_CHANGE_EVENT, onStateChange);
+    reduceMotion.addEventListener("change", onStateChange);
     return () => {
       stop();
       document.removeEventListener("visibilitychange", onStateChange);
       window.removeEventListener("focus", onStateChange);
       window.removeEventListener("blur", onStateChange);
+      window.removeEventListener(AMBIENT_CHANGE_EVENT, onStateChange);
+      reduceMotion.removeEventListener("change", onStateChange);
       // If the element stays mounted (HMR/StrictMode re-run), hand the
       // timelines back to CSS. If it is being unmounted, CANCEL instead: a
       // played animation on a detached target keeps Blink requesting a main
