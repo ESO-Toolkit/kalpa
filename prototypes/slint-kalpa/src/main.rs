@@ -13376,6 +13376,26 @@ fn wire_window_controls(ui: &KalpaWindow) {
         }
     });
 
+    // Smooth frameless resize. Dragging an edge enters the Windows OS modal
+    // resize loop, during which winit's outer event pump is suspended — so
+    // Slint's frame-throttle timer never ticks and the window only repaints on
+    // sporadic OS `WM_PAINT` messages (which fire while growing but are largely
+    // absent while shrinking). The result is content that freezes mid-drag and
+    // snaps to the final size on mouse-release. Forcing a redraw on every winit
+    // `Resized` event restores a steady one-paint-per-step cadence, because the
+    // modal loop still dispatches `WM_PAINT` -> `RedrawRequested` synchronously.
+    // We MUST return `Propagate` so Slint still runs its own resize handling
+    // (which resizes the GL surface); `PreventDefault` would letterbox content.
+    {
+        use i_slint_backend_winit::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
+        ui.window().on_winit_window_event(|window, event| {
+            if matches!(event, WindowEvent::Resized(_)) {
+                window.with_winit_window(|winit_window| winit_window.request_redraw());
+            }
+            EventResult::Propagate
+        });
+    }
+
     let close_ui = ui.as_weak();
     ui.on_close_requested(move || {
         if let Some(ui) = close_ui.upgrade() {
