@@ -10916,16 +10916,17 @@ component Sidebar inherits Rectangle {
     if (!root.discover-active) : Rectangle {
         x: 12px;
         y: 100px;
+        // 24px tab row + a thin scrollbar beneath it; still clears the y:134 hairline.
         width: root.width - 24px;
-        height: 24px;
+        height: 33px;
         background: #00000000;
         clip: true;
 
         filters-scroll := ScrollView {
             width: parent.width;
-            height: parent.height;
+            height: 24px;
             viewport-width: raid-filter.x + (root.raid-tag-count > 0 ? raid-filter.width : 0px);
-            viewport-height: parent.height;
+            viewport-height: 24px;
             // Scrollbar off — an as-needed bar overlaps the 24px tab row. Overflowed
             // tag filters remain reachable by dragging the strip.
             horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
@@ -11182,6 +11183,55 @@ component Sidebar inherits Rectangle {
                 clicked => {
                     root.filter-mode = 10;
                     root.filter-selected(10);
+                }
+            }
+        }
+
+        // Thin draggable scrollbar for the filter strip. The tab TouchAreas swallow
+        // drag and wheel gestures, so overflowing filters (broken, essential, raid…)
+        // are otherwise unreachable — this exposes them without covering the tab row.
+        if (filters-scroll.viewport-width > filters-scroll.width) : Rectangle {
+            x: 0px;
+            y: 25px;
+            width: parent.width;
+            // 8px hit zone so the thin bar is easy to grab; the visible bar is 3px.
+            height: 8px;
+            background: transparent;
+
+            Rectangle {
+                y: 2px;
+                width: parent.width;
+                height: 3px;
+                border-radius: 1.5px;
+                background: Palette.white-04;
+            }
+
+            filter-thumb := Rectangle {
+                y: 2px;
+                height: 3px;
+                width: max(28px, parent.width * filters-scroll.width / filters-scroll.viewport-width);
+                x: (parent.width - self.width) * (-filters-scroll.viewport-x / max(1px, filters-scroll.viewport-width - filters-scroll.width));
+                border-radius: 1.5px;
+                background: Tokens.primary.with-alpha(0.65);
+            }
+
+            TouchArea {
+                property <length> anchor-vp;
+                property <length> anchor-mouse;
+                mouse-cursor: pointer;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        self.anchor-vp = filters-scroll.viewport-x;
+                        self.anchor-mouse = self.mouse-x;
+                    }
+                }
+                moved => {
+                    if (self.pressed) {
+                        filters-scroll.viewport-x = min(0px, max(
+                            -(filters-scroll.viewport-width - filters-scroll.width),
+                            self.anchor-vp - (self.mouse-x - self.anchor-mouse) * (filters-scroll.viewport-width - filters-scroll.width) / max(1px, parent.width - filter-thumb.width)
+                        ));
+                    }
                 }
             }
         }
