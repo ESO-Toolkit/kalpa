@@ -2571,20 +2571,82 @@ component DetailTagsSection inherits Rectangle {
     callback tag-clicked(string);
     callback add-tag-clicked;
     callback custom-tag-submitted(string);
-    height: 22px;
+    property <bool> overflowing: tags-scroll.viewport-width > tags-scroll.width + 1px;
+    // Grow to fit a scrollbar row only when the tags exceed the width; otherwise
+    // stay compact. (Slint has no wrap layout, so overflow scrolls horizontally.)
+    height: root.overflowing ? 34px : 22px;
     background: #00000000;
+    clip: true;
 
-    HorizontalLayout {
-        spacing: 6px;
-        for tag[index] in root.tags : TagChip {
-            label: tag.label;
-            kind: tag.kind;
-            active: tag.active;
-            clicked => { root.tag-clicked(tag.id); }
+    tags-scroll := ScrollView {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 22px;
+        viewport-width: max(self.width, tags-row.preferred-width);
+        viewport-height: 22px;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+
+        tags-row := HorizontalLayout {
+            spacing: 6px;
+            for tag[index] in root.tags : TagChip {
+                label: tag.label;
+                kind: tag.kind;
+                active: tag.active;
+                clicked => { root.tag-clicked(tag.id); }
+            }
+            TagInput {
+                draft <=> root.custom-tag-draft;
+                submit(value) => { root.custom-tag-submitted(value); }
+            }
         }
-        TagInput {
-            draft <=> root.custom-tag-draft;
-            submit(value) => { root.custom-tag-submitted(value); }
+    }
+
+    // Draggable scrollbar for overflow — the chip TouchAreas swallow drag/wheel,
+    // so without this the trailing tags and the "+ tag" input become unreachable.
+    if (root.overflowing) : Rectangle {
+        x: 0px;
+        y: 26px;
+        width: parent.width;
+        height: 8px;
+        background: transparent;
+
+        Rectangle {
+            y: 2px;
+            width: parent.width;
+            height: 3px;
+            border-radius: 1.5px;
+            background: Palette.white-04;
+        }
+
+        tags-thumb := Rectangle {
+            y: 2px;
+            height: 3px;
+            width: max(28px, parent.width * tags-scroll.width / tags-scroll.viewport-width);
+            x: (parent.width - self.width) * (-tags-scroll.viewport-x / max(1px, tags-scroll.viewport-width - tags-scroll.width));
+            border-radius: 1.5px;
+            background: Tokens.primary.with-alpha(0.65);
+        }
+
+        TouchArea {
+            property <length> anchor-vp;
+            property <length> anchor-mouse;
+            mouse-cursor: pointer;
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.down) {
+                    self.anchor-vp = tags-scroll.viewport-x;
+                    self.anchor-mouse = self.mouse-x;
+                }
+            }
+            moved => {
+                if (self.pressed) {
+                    tags-scroll.viewport-x = min(0px, max(
+                        -(tags-scroll.viewport-width - tags-scroll.width),
+                        self.anchor-vp - (self.mouse-x - self.anchor-mouse) * (tags-scroll.viewport-width - tags-scroll.width) / max(1px, parent.width - tags-thumb.width)
+                    ));
+                }
+            }
         }
     }
 }
@@ -9990,7 +10052,7 @@ component SavedVariablesOverlay inherits Rectangle {
                 x: 0px;
                 y: 176px;
                 width: parent.width;
-                height: 312px;
+                height: max(132px, parent.height - 176px);
                 border-radius: 12px;
                 background: Palette.white-02;
                 clip: true;
@@ -10002,7 +10064,7 @@ component SavedVariablesOverlay inherits Rectangle {
                 x: 0px;
                 y: 176px;
                 width: parent.width;
-                height: 312px;
+                height: max(132px, parent.height - 176px);
                 viewport-width: self.width;
                 viewport-height: root.files.length * 62px;
                 vertical-scrollbar-policy: ScrollBarPolicy.always-off;
