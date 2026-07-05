@@ -10218,7 +10218,7 @@ component SavedVariablesOverlay inherits Rectangle {
             height: parent.height - 196px;
             background: #00000000;
 
-            SvmSelectField { x: 0px; y: 0px; width: 320px; label: root.editor-file-label; disabled: !root.editor-has-file; clicked => {
+            SvmSelectField { x: 0px; y: 0px; width: 236px; label: root.editor-file-label; disabled: !root.editor-has-file; clicked => {
                 if (root.editor-dirty) {
                     root.discard-intent = 2;
                     root.confirm-discard = true;
@@ -10226,12 +10226,13 @@ component SavedVariablesOverlay inherits Rectangle {
                     root.editor-select-file();
                 }
             } }
-            PackHubButton { x: 328px; y: 0px; width: 116px; icon: @image-url("../assets/icons/save.svg"); label: "Save Changes"; primary: true; disabled: !root.editor-dirty; clicked => { root.editor-save(); } }
-            PackHubButton { x: 452px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Preview"; disabled: !root.editor-dirty; clicked => { root.editor-preview(); } }
-            PackHubButton { x: 538px; y: 0px; width: 76px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: !root.editor-dirty; clicked => { root.editor-discard(); } }
-            // Right-anchored so they never clip off the panel edge on narrow windows.
-            PackHubButton { x: parent.width - 170px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; disabled: !root.editor-has-file; clicked => { root.editor-restore(); } }
-            PackHubButton { x: parent.width - 78px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; disabled: !root.editor-has-file; clicked => { root.editor-copy-raw(); } }
+            // Tightened + narrower file field so all five actions fit the toolbar
+            // even at reduced (high-DPI) modal widths (was clipping "Raw" off the edge).
+            PackHubButton { x: 244px; y: 0px; width: 116px; icon: @image-url("../assets/icons/save.svg"); label: "Save Changes"; primary: true; disabled: !root.editor-dirty; clicked => { root.editor-save(); } }
+            PackHubButton { x: 368px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Preview"; disabled: !root.editor-dirty; clicked => { root.editor-preview(); } }
+            PackHubButton { x: 454px; y: 0px; width: 78px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: !root.editor-dirty; clicked => { root.editor-discard(); } }
+            PackHubButton { x: 540px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; disabled: !root.editor-has-file; clicked => { root.editor-restore(); } }
+            PackHubButton { x: 632px; y: 0px; width: 72px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; disabled: !root.editor-has-file; clicked => { root.editor-copy-raw(); } }
 
             Rectangle {
                 x: 0px;
