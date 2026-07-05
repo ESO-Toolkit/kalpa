@@ -73,7 +73,9 @@ export function AppBackground() {
       const now = performance.now();
       const dt = now - last;
       last = now;
-      if (anims.length === 0) collect();
+      // Re-collect if the styled animations were replaced (a canceled
+      // CSSAnimation reports currentTime === null), not just on empty.
+      if (anims.length === 0 || anims.every((a) => a.currentTime === null)) collect();
       for (const a of anims) {
         const t = a.currentTime;
         if (typeof t === "number") a.currentTime = t + dt;

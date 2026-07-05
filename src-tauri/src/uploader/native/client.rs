@@ -1012,6 +1012,11 @@ fn upload_client() -> &'static reqwest::blocking::Client {
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            // Idle connections are dropped before typical server keep-alive
+            // windows close them: the one-shot path has no retry, so a pooled
+            // connection the server already closed during an encoding gap
+            // between segments must not be handed back to it.
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("failed to build native upload HTTP client")
     })

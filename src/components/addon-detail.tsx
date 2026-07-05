@@ -107,22 +107,29 @@ function AddonDetailBase({
     // Extraction events can burst far faster than the label can usefully
     // change. Coalesce to at most one setState per animation frame: keep only
     // the latest payload and flush it from a single scheduled rAF, so a large
-    // addon's event flood can't queue up hundreds of renders.
-    let pendingProgress: { done: number; total: number } | null = null;
+    // addon's event flood can't queue up hundreds of renders. The flush
+    // re-checks the operation id: a rAF can fire after `endOperation` already
+    // reset the UI (completion resolving in the same frame, or the rAF frozen
+    // while the window was hidden) and must not resurrect stale progress.
+    let pendingProgress: { done: number; total: number; opId: string } | null = null;
     let rafId: number | null = null;
     const flush = () => {
       rafId = null;
-      if (pendingProgress !== null) {
+      if (pendingProgress !== null && pendingProgress.opId === operationIdRef.current) {
         setCanStopUpdate(true);
-        setExtractProgress(pendingProgress);
-        pendingProgress = null;
+        setExtractProgress({ done: pendingProgress.done, total: pendingProgress.total });
       }
+      pendingProgress = null;
     };
     void listen<{ operationId: string; fileIndex: number; fileTotal: number }>(
       "update-progress",
       (event) => {
         if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
-          pendingProgress = { done: event.payload.fileIndex, total: event.payload.fileTotal };
+          pendingProgress = {
+            done: event.payload.fileIndex,
+            total: event.payload.fileTotal,
+            opId: event.payload.operationId,
+          };
           rafId ??= requestAnimationFrame(flush);
         }
       }
