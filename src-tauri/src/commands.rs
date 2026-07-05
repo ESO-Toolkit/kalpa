@@ -938,11 +938,20 @@ fn scan_installed_addons_blocking(
     // - Remove entries for addon folders that no longer exist on disk
     // - Deduplicate entries with the same esoui_id (keep the one that exists)
     let mut store = metadata::load_metadata(addons_dir);
+    // The directory scan above already enumerated every top-level folder (enabled
+    // or .disabled) into `top_dirs`, so a metadata key matching one of those base
+    // names is known-present without touching the filesystem again. Keys that miss
+    // the set still get the original stat checks — a metadata key can differ from
+    // the on-disk name in case (Windows is case-insensitive) or carry an unusual
+    // suffix, and those must keep pruning exactly as before.
+    let on_disk: HashSet<&str> = top_dirs.iter().map(|(name, _, _)| name.as_str()).collect();
     let stale: Vec<String> = store
         .addons
         .keys()
         .filter(|name| {
-            !addons_dir.join(name).is_dir() && !addons_dir.join(format!("{name}.disabled")).is_dir()
+            !on_disk.contains(name.as_str())
+                && !addons_dir.join(name).is_dir()
+                && !addons_dir.join(format!("{name}.disabled")).is_dir()
         })
         .cloned()
         .collect();
@@ -954,6 +963,18 @@ fn scan_installed_addons_blocking(
             eprintln!("Warning: failed to prune stale metadata: {e}");
         }
     }
+
+    // Modified-file counts live in one JSON manifest per addon under
+    // .kalpa-hashes; each read is independent disk I/O, so collect them in
+    // parallel (mirroring the manifest parsing above) instead of paying one
+    // sequential read per addon inside the enrichment loop.
+    let modified_counts: HashMap<String, u32> = addons
+        .par_iter()
+        .filter_map(|addon| {
+            file_hashes::load_modified_file_count(addons_dir, &addon.folder_name)
+                .map(|count| (addon.folder_name.clone(), count))
+        })
+        .collect();
 
     // Check for missing/outdated dependencies and enrich with ESOUI ID.
     // All lookups normalize the dependency name so resolution is
@@ -1001,12 +1022,14 @@ fn scan_installed_addons_blocking(
             addon.installed_at = meta.installed_at.clone();
         }
 
-        if let Some(count) = file_hashes::load_modified_file_count(addons_dir, &addon.folder_name) {
-            addon.modified_file_count = count;
+        if let Some(count) = modified_counts.get(&addon.folder_name) {
+            addon.modified_file_count = *count;
         }
     }
 
-    addons.sort_by_key(|a| a.title.to_lowercase());
+    // Cached keys: comparison-time lowercasing allocates a String per compare
+    // (O(n log n) allocations); the key itself is unchanged.
+    addons.sort_by_cached_key(|a| a.title.to_lowercase());
 
     Ok(addons)
 }
@@ -1375,7 +1398,7 @@ struct UpdatePending {
 /// lookup table. Must be called under the metadata lock.
 fn check_for_updates_metadata(
     addons_dir: &Path,
-    api_lookup: &HashMap<String, esoui::ApiAddonLookup>,
+    api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
 ) -> Result<Vec<UpdatePending>, String> {
     let mut store = metadata::load_metadata(addons_dir);
     let mut metadata_changed = false;
@@ -3445,7 +3468,7 @@ pub async fn auto_link_addons(
 
 fn auto_link_addons_blocking(
     addons_dir: &Path,
-    api_lookup: &HashMap<String, esoui::ApiAddonLookup>,
+    api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
 ) -> Result<AutoLinkResult, String> {
     let mut store = metadata::load_metadata(addons_dir);
 

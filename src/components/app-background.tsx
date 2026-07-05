@@ -16,7 +16,7 @@
 // no mid-canvas ring. A small flat core out to `corePct` keeps a saturated
 // center, then a long gradual fall to transparent mimics the former Gaussian
 // halo with no visible boundary.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const orbGradient = (color: string, corePct: number) =>
   `radial-gradient(circle closest-side at center, ${color} 0%, ${color} ${corePct}%, transparent 100%)`;
@@ -24,48 +24,122 @@ const orbGradient = (color: string, corePct: number) =>
 const isVisibleAndFocused = () =>
   typeof document === "undefined" ? true : !document.hidden && document.hasFocus();
 
+const prefersReducedMotion = () =>
+  typeof window === "undefined"
+    ? false
+    : window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// The drift is driven by seeking the (paused) CSS animations from ONE shared
+// low-rate timer instead of letting them free-run on the compositor. A running
+// compositor animation forces the compositor to produce a frame every vsync for
+// the app's whole lifetime — measured 238 DrawFrames/s and ~0.9 CPU cores while
+// the app sat idle-focused on a 240 Hz display, because every presented frame
+// also re-executes each overlapping glass panel's backdrop-blur. A PAUSED
+// animation cancels the compositor keyframe model entirely, so between seeks
+// the pipeline is fully idle (zero frames, zero backdrop re-blurs); each seek
+// costs one small style commit + ONE presented frame. At 10 Hz the orbs'
+// worst-case step is ~1.5px of a glow whose falloff spans hundreds of pixels —
+// visually indistinguishable from the vsync-rate drift, for ~1/24th of the
+// frames. The eased trajectory is untouched (we seek the timeline, we don't
+// re-time the keyframes).
+const DRIFT_TICK_MS = 100;
+
 export function AppBackground() {
-  // Pause the ambient orb drift when Kalpa isn't visible/focused. The three
-  // infinite compositor animations otherwise keep the GPU compositing at ~60fps
-  // for the app's whole lifetime (measured ~260 DrawFrames/s while idle) — a
-  // real battery/power drain when Kalpa sits minimized, occluded, or unfocused
-  // on a second monitor during a raid. `animation-play-state: paused` freezes
-  // the orbs in place (no reset) and they resume instantly on focus, so the
-  // drift is imperceptible while you're not looking — purely a power win.
+  // Pause the ambient orb drift when Kalpa isn't visible/focused: the drift is
+  // imperceptible while you're not looking — purely a power win. Freezing is
+  // just "stop seeking"; the orbs hold position and resume on focus.
   // Initial value is derived lazily (not via a setState-in-effect) so the repo's
   // react-hooks/set-state-in-effect lint stays green.
-  const [running, setRunning] = useState(isVisibleAndFocused);
+  const [active, setActive] = useState(() => isVisibleAndFocused() && !prefersReducedMotion());
+  const rootRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+    let anims: Animation[] = [];
+    let timer: number | null = null;
+    let last = 0;
+
+    // Pause the natively-running CSS animations and take ownership of their
+    // timelines. Collected lazily again on tick in case style recalc replaced
+    // them (e.g. dev HMR); pausing an already-paused animation is a no-op.
+    const collect = () => {
+      anims = root.getAnimations({ subtree: true });
+      for (const a of anims) a.pause();
+    };
+    const tick = () => {
+      const now = performance.now();
+      const dt = now - last;
+      last = now;
+      if (anims.length === 0) collect();
+      for (const a of anims) {
+        const t = a.currentTime;
+        if (typeof t === "number") a.currentTime = t + dt;
+      }
+    };
+    const start = () => {
+      // Honor prefers-reduced-motion by never seeking: the ambient layer holds
+      // still, which is exactly what a reduced-motion user asked for.
+      if (timer !== null || reduceMotion.matches) return;
+      last = performance.now();
+      timer = window.setInterval(tick, DRIFT_TICK_MS);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+
     // Drive the root `.app-hidden` class, which CSS uses to pause every
     // animation under the background AND the dialog-header shimmer while the
     // window is hidden (tray/minimized). That class tracks visibility only —
     // not focus — so a visible-but-unfocused window keeps the shimmer alive;
-    // the orbs still pause via the focus-aware inline state below.
+    // the orbs still freeze via the focus-aware ticker below.
     const syncHidden = () =>
       document.documentElement.classList.toggle("app-hidden", document.hidden);
     const update = () => {
-      setRunning(isVisibleAndFocused());
+      const on = isVisibleAndFocused() && !reduceMotion.matches;
+      setActive(on);
       syncHidden();
+      if (on) start();
+      else stop();
     };
+
+    collect();
     syncHidden(); // set the class from the current state without a mount setState
+    if (isVisibleAndFocused() && !reduceMotion.matches) start();
+
     window.addEventListener("focus", update);
     window.addEventListener("blur", update);
     document.addEventListener("visibilitychange", update);
+    reduceMotion.addEventListener("change", update);
     return () => {
+      stop();
+      // Hand the timelines back to CSS so a remount starts from clean state.
+      for (const a of anims) a.play();
       window.removeEventListener("focus", update);
       window.removeEventListener("blur", update);
       document.removeEventListener("visibilitychange", update);
+      reduceMotion.removeEventListener("change", update);
       document.documentElement.classList.remove("app-hidden");
     };
   }, []);
-  const animationPlayState = running ? "running" : "paused";
-  // Only pin the orb layers to their own GPU textures WHILE they animate. When
-  // paused (unfocused/hidden) drop will-change so the 3 large backing textures
-  // are released — the drift can't jank if it isn't running.
-  const willChange = running ? "transform" : "auto";
+
+  // Only pin the orb layers to their own GPU textures WHILE they're being
+  // seeked. When frozen (unfocused/hidden/reduced-motion) drop will-change so
+  // the 3 large backing textures are released — the drift can't jank if it
+  // isn't advancing.
+  const willChange = active ? "transform" : "auto";
 
   return (
-    <div data-slot="app-background" className="fixed inset-0 -z-10 overflow-hidden bg-bg-base">
+    <div
+      ref={rootRef}
+      data-slot="app-background"
+      className="fixed inset-0 -z-10 overflow-hidden bg-bg-base"
+    >
       {/* Material texture (art themes only; "none" by default) */}
       <div
         className="absolute inset-0"
@@ -80,7 +154,6 @@ export function AppBackground() {
           width: "1160px",
           height: "1160px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-1) 22%, transparent)", 34),
-          animationPlayState,
           willChange,
         }}
       />
@@ -93,7 +166,6 @@ export function AppBackground() {
           width: "1060px",
           height: "1060px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-2) 17%, transparent)", 32),
-          animationPlayState,
           willChange,
         }}
       />
@@ -106,7 +178,6 @@ export function AppBackground() {
           width: "860px",
           height: "860px",
           backgroundImage: orbGradient("color-mix(in oklab, var(--orb-3) 11%, transparent)", 32),
-          animationPlayState,
           willChange,
         }}
       />

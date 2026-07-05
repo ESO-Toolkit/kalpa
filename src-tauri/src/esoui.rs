@@ -1111,7 +1111,7 @@ pub struct ApiAddonLookup {
 
 struct FilelistCache {
     entries: Vec<ApiFileEntry>,
-    lookup: Arc<HashMap<String, ApiAddonLookup>>,
+    lookup: Arc<HashMap<String, Arc<ApiAddonLookup>>>,
     fetched_at: Instant,
 }
 
@@ -1153,7 +1153,7 @@ fn ensure_filelist_cache() -> Result<(), String> {
 /// Single HTTP request returns ~4000 addons with all their folder paths,
 /// versions, and last-updated timestamps. Result is cached in-memory for
 /// `FILELIST_TTL` so repeated update checks within a session don't re-fetch.
-pub fn fetch_filelist_lookup() -> Result<Arc<HashMap<String, ApiAddonLookup>>, String> {
+pub fn fetch_filelist_lookup() -> Result<Arc<HashMap<String, Arc<ApiAddonLookup>>>, String> {
     ensure_filelist_cache()?;
     let guard = filelist_cache().lock().unwrap_or_else(|e| e.into_inner());
     Ok(Arc::clone(&guard.as_ref().unwrap().lookup))
@@ -1176,24 +1176,27 @@ fn fetch_filelist_entries() -> Result<Vec<ApiFileEntry>, String> {
         .map_err(|e| format!("Failed to parse ESOUI API response: {e}"))
 }
 
-fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<HashMap<String, ApiAddonLookup>> {
+fn build_filelist_lookup(entries: &[ApiFileEntry]) -> Arc<HashMap<String, Arc<ApiAddonLookup>>> {
     let mut map = HashMap::new();
     for entry in entries {
-        let lookup = ApiAddonLookup {
+        // One shared allocation per file entry: an entry can map many folder
+        // paths, and the cache retains every value for the full TTL — cloning
+        // the Arc per folder avoids duplicating the four strings each time.
+        let lookup = Arc::new(ApiAddonLookup {
             esoui_id: entry.id,
             title: entry.title.clone(),
             version: entry.version.clone(),
             author: entry.author.clone(),
             last_update: entry.last_update,
             file_info_uri: entry.file_info_uri.clone(),
-        };
+        });
         // Map each addon folder path to its parent file entry
         for addon in &entry.addons {
             // Only use the top-level folder name (before any '/')
             let folder = addon.path.split('/').next().unwrap_or(&addon.path);
             // Don't overwrite if already mapped (first match wins — the primary entry)
             map.entry(folder.to_string())
-                .or_insert_with(|| lookup.clone());
+                .or_insert_with(|| Arc::clone(&lookup));
         }
     }
 

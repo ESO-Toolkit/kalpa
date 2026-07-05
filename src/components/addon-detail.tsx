@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, lazy, Suspense } from "react";
+import { memo, useState, useMemo, useRef, useEffect, lazy, Suspense } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -60,7 +60,7 @@ interface AddonDetailProps {
   onConflictResolved?: (folderName: string) => void;
 }
 
-export function AddonDetail({
+function AddonDetailBase({
   addon,
   installedAddons,
   addonsPath,
@@ -104,12 +104,26 @@ export function AddonDetail({
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    // Extraction events can burst far faster than the label can usefully
+    // change. Coalesce to at most one setState per animation frame: keep only
+    // the latest payload and flush it from a single scheduled rAF, so a large
+    // addon's event flood can't queue up hundreds of renders.
+    let pendingProgress: { done: number; total: number } | null = null;
+    let rafId: number | null = null;
+    const flush = () => {
+      rafId = null;
+      if (pendingProgress !== null) {
+        setCanStopUpdate(true);
+        setExtractProgress(pendingProgress);
+        pendingProgress = null;
+      }
+    };
     void listen<{ operationId: string; fileIndex: number; fileTotal: number }>(
       "update-progress",
       (event) => {
         if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
-          setCanStopUpdate(true);
-          setExtractProgress({ done: event.payload.fileIndex, total: event.payload.fileTotal });
+          pendingProgress = { done: event.payload.fileIndex, total: event.payload.fileTotal };
+          rafId ??= requestAnimationFrame(flush);
         }
       }
     )
@@ -120,6 +134,7 @@ export function AddonDetail({
       .catch((e) => console.error("[tauri:update-progress]", e));
     return () => {
       disposed = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
       unlisten?.();
     };
   }, []);
@@ -940,3 +955,7 @@ export function AddonDetail({
     </div>
   );
 }
+
+// Memoized: bails out of App re-renders it doesn't consume (search keystrokes,
+// update-progress events, dialog toggles).
+export const AddonDetail = memo(AddonDetailBase);

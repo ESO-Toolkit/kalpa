@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -335,11 +335,22 @@ fn extract_tokens_from_request(request: &str, body: &[u8]) -> Option<CallbackTok
 
 // ── User Validation ──────────────────────────────────────────────────────
 
+/// Shared HTTP client for token validation and refresh. Both endpoints use the
+/// same flat timeout, so it lives on the client; reusing one client avoids a
+/// fresh connection pool + TLS handshake for every auth call (refresh always
+/// validates right after, so the calls come in pairs).
+fn auth_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("failed to build auth HTTP client")
+    })
+}
+
 pub fn validate_token(access_token: &str) -> Result<(String, String), String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let client = auth_client();
 
     let query = r#"{ "query": "{ userData { currentUser { id name } } }" }"#;
 
@@ -432,10 +443,7 @@ pub fn ensure_valid_token(tokens: &AuthTokens) -> Result<Option<AuthTokens>, Str
 /// Token refresh — this calls ESO Logs directly since refresh doesn't
 /// require a registered redirect_uri.
 fn refresh_token_request(refresh_token: &str) -> Result<CallbackTokens, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
+    let client = auth_client();
 
     let params = [
         ("grant_type", "refresh_token"),

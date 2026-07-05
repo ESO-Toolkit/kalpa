@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { memo, useState, useEffect, useRef } from "react";
 import { Alert, AlertAction } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { AppUpdateBanner, useAppUpdate } from "./app-update";
@@ -13,7 +13,7 @@ interface StatusBannersProps {
   onOpenSettings?: () => void;
 }
 
-export function StatusBanners({
+function StatusBannersBase({
   error,
   isOffline,
   appUpdateState,
@@ -66,3 +66,7 @@ export function StatusBanners({
     </>
   );
 }
+
+// Memoized: banner props change rarely (error/offline/app-update transitions),
+// so this bails out of App's keystroke- and progress-driven renders.
+export const StatusBanners = memo(StatusBannersBase);

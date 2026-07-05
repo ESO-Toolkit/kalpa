@@ -201,8 +201,19 @@ export function formatElapsed(ms: number): string {
 export function SessionTimer({ startMs, className }: { startMs: number; className?: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
+    // Skip ticks while the window is hidden (tray/minimized during a raid —
+    // most of a live session): nobody can see the clock, and elapsed derives
+    // from the fixed startMs, so one resync on reveal shows the exact right
+    // time with zero drift. Saves a wakeup+render per second for hours.
+    const tick = () => {
+      if (!document.hidden) setNow(Date.now());
+    };
+    const id = setInterval(tick, 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, []);
   // Fold the value INTO the label: the timer is now rendered in a non-aria-hidden
   // place (the live core), so a bare "Session elapsed time" label would mask the

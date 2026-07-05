@@ -380,7 +380,16 @@
 :root.app-hidden [data-slot="app-background"] * {
   animation-play-state: paused !important;
 }
-:root.app-hidden [data-slot="dialog-header"]::before {
+:root.app-hidden .dialog-accent-sweep {
+  animation-play-state: paused !important;
+}
+/* A hidden window renders nothing, so every remaining looping indicator —
+ * live-session pings/pulses, spinners, progress shimmers, arbitrary
+ * animate-[...] utilities — can pause too. Without this they keep the
+ * compositor producing frames for the entire hidden lifetime of a live
+ * session or Update All run. All of these freeze/resume in place. */
+:root.app-hidden
+  :is(.animate-ping, .animate-pulse, .animate-spin, .animate-shimmer, [class*="animate-["]) {
   animation-play-state: paused !important;
 }
 
@@ -423,16 +432,21 @@
 }
 
 /* === Dialog Header Accent Shimmer (follows the active theme's primary) === */
+/* The sweep is a 200%-wide child translating inside a 2px overflow-hidden strip
+ * (see DialogHeader). transform keeps the animation compositor-only — animating
+ * background-position instead costs a main-thread repaint every frame while any
+ * dialog is open. translateX(±100%) of the double-width child covers the exact
+ * same offsets as the former background-position -200%→200% at size 200%. */
 @keyframes accent-shimmer {
   0% {
-    background-position: -200% 0;
+    transform: translateX(100%);
   }
   100% {
-    background-position: 200% 0;
+    transform: translateX(-100%);
   }
 }
 
-[data-slot="dialog-header"]::before {
+.dialog-accent-sweep {
   background: linear-gradient(
     90deg,
     color-mix(in oklab, var(--primary) 0%, transparent) 0%,
@@ -442,8 +456,7 @@
     color-mix(in oklab, var(--primary) 90%, transparent) 60%,
     color-mix(in oklab, var(--primary-hover) 60%, transparent) 80%,
     color-mix(in oklab, var(--primary) 0%, transparent) 100%
-  ) !important;
-  background-size: 200% 100%;
+  );
   animation: accent-shimmer 4s ease-in-out infinite;
 }
 
