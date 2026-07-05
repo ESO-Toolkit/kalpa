@@ -95,13 +95,17 @@ export function AppBackground() {
       }
     };
 
-    // Drive the root `.app-hidden` class, which CSS uses to pause every
-    // animation under the background AND the dialog-header shimmer while the
-    // window is hidden (tray/minimized). That class tracks visibility only —
-    // not focus — so a visible-but-unfocused window keeps the shimmer alive;
-    // the orbs still freeze via the focus-aware ticker below.
-    const syncHidden = () =>
+    // Drive the root `.app-hidden` class (window hidden: tray/minimized) and
+    // `.app-unfocused` (visible on a second monitor while the game has focus).
+    // CSS pauses the looping decorative animations under each; spinners stay
+    // exempt from the unfocused pause so progress never looks hung mid-game.
+    const syncHidden = () => {
       document.documentElement.classList.toggle("app-hidden", document.hidden);
+      document.documentElement.classList.toggle(
+        "app-unfocused",
+        !document.hidden && !document.hasFocus()
+      );
+    };
     const update = () => {
       const on = isVisibleAndFocused() && !reduceMotion.matches;
       setActive(on);
@@ -123,8 +127,10 @@ export function AppBackground() {
       // If the orbs stay mounted (HMR/StrictMode re-run), hand the timelines
       // back to CSS; if they're being detached, cancel — a played animation on
       // a detached target leaks per-vsync main-frame scheduling forever.
+      // Canceled animations (playState "idle") must not be play()ed either:
+      // that would restart drift the ambient-animations toggle removed.
       for (const a of anims) {
-        if (root.isConnected) a.play();
+        if (root.isConnected && a.playState !== "idle") a.play();
         else a.cancel();
       }
       window.removeEventListener("focus", update);
@@ -132,6 +138,7 @@ export function AppBackground() {
       document.removeEventListener("visibilitychange", update);
       reduceMotion.removeEventListener("change", update);
       document.documentElement.classList.remove("app-hidden");
+      document.documentElement.classList.remove("app-unfocused");
     };
   }, []);
 

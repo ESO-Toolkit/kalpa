@@ -393,6 +393,38 @@
   animation-play-state: paused !important;
 }
 
+/* Visible but unfocused = Kalpa is on a second monitor while the game has
+ * focus. Every produced frame can re-execute glass-panel backdrop blurs, so
+ * decorative loops (pings, pulses, shimmers, the dialog accent sweep) freeze
+ * in place until the window is focused again. animate-spin is deliberately
+ * exempt: a frozen spinner reads as "hung" when glancing at update progress
+ * mid-game. The root class is driven by AppBackground's focus listeners. */
+:root.app-unfocused :is(.animate-ping, .animate-pulse, .animate-shimmer, .dialog-accent-sweep) {
+  animation-play-state: paused !important;
+}
+
+/* "Ambient animations" appearance toggle (root class set by
+ * lib/ambient-animations.ts). Off = the decorative layer goes fully static:
+ * the orbs hold their base positions and the dialog accent becomes the same
+ * static bar reduced-motion users get, so the app produces zero animation
+ * frames at rest. */
+:root.ambient-off [data-slot="app-background"] * {
+  animation: none !important;
+  /* Static orbs need no compositor layers; !important beats the inline
+   * will-change the ticker sets while focused. */
+  will-change: auto !important;
+}
+:root.ambient-off .dialog-accent-sweep {
+  animation: none;
+  width: 100%;
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--primary) 0%, transparent) 0%,
+    color-mix(in oklab, var(--primary-hover) 80%, transparent) 50%,
+    color-mix(in oklab, var(--primary) 0%, transparent) 100%
+  );
+}
+
 /* === Noise Texture Overlay === */
 #root::after {
   content: "";
