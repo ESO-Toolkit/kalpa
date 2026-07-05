@@ -10925,9 +10925,9 @@ component Sidebar inherits Rectangle {
             height: parent.height;
             viewport-width: raid-filter.x + (root.raid-tag-count > 0 ? raid-filter.width : 0px);
             viewport-height: parent.height;
-            // Show a scrollbar when the tag filters overflow — a horizontal strip
-            // won't wheel-scroll, so always-off hid the overflowed tabs entirely.
-            horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+            // Scrollbar off — an as-needed bar overlaps the 24px tab row. Overflowed
+            // tag filters remain reachable by dragging the strip.
+            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
             private property <length> gap: 4px;

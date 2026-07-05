@@ -16415,7 +16415,20 @@ fn select_svm_editor_tree_path(state: &mut SvmEditorState, path_json: &str) -> R
     let node = sv_node_at_path(tree, &path)
         .ok_or_else(|| "SavedVariables branch not found.".to_string())?;
     if !matches!(node.value_type, saved_variables::types::SvValueType::Table) {
-        return Err("Select a table branch to inspect its settings.".to_string());
+        // A leaf/scalar row was clicked. Rather than error, select its containing
+        // table so its settings (including this value) show in the right panel.
+        let mut parent = path.clone();
+        parent.pop();
+        let parent_is_table = !parent.is_empty()
+            && sv_node_at_path(tree, &parent).is_some_and(|parent_node| {
+                matches!(
+                    parent_node.value_type,
+                    saved_variables::types::SvValueType::Table
+                )
+            });
+        state.selected_path = if parent_is_table { parent } else { path };
+        state.message.clear();
+        return Ok(());
     }
     state.selected_path = path;
     state.message.clear();
