@@ -5469,16 +5469,18 @@ fn pack_hub_detail_export_addon(row: &PackHubAddonEntry) -> Result<NativePackAdd
 }
 
 fn default_pack_export_dir() -> PathBuf {
-    user_documents_dir()
+    // Downloads is where users look for shareable exports and, unlike Documents,
+    // is not blocked by Controlled Folder Access.
+    user_downloads_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("Kalpa")
         .join("Exports")
 }
 
-fn user_documents_dir() -> Option<PathBuf> {
+fn user_downloads_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
-        .map(|home| PathBuf::from(home).join("Documents"))
+        .map(|home| PathBuf::from(home).join("Downloads"))
 }
 
 fn safe_pack_file_stem(title: &str) -> String {
@@ -13086,9 +13088,14 @@ fn remove_addon_from_disk(addons_root: &Path, folder_name: &str) -> Result<(), S
         return Err(format!("Addon folder not found: {folder_name}"));
     }
 
+    // The folder is already deleted — removal has succeeded. Treat the kalpa.json
+    // metadata cleanup as best-effort so a transient lock (OneDrive/AV) or a CFA
+    // block doesn't report "Remove failed" for an addon that is actually gone.
     let mut store = metadata::load_metadata(addons_root);
     metadata::remove_entry(&mut store, folder_name);
-    metadata::save_metadata(addons_root, &store)
+    let _ = metadata::save_metadata(addons_root, &store);
+    let _ = save_prototype_tags(addons_root, folder_name, &[]);
+    Ok(())
 }
 
 fn active_tag_ids(tags: &ModelRc<TagEntry>) -> Vec<String> {
