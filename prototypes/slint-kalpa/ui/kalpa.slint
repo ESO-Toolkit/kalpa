@@ -13626,5 +13626,20 @@ export component KalpaWindow inherits Window {
             }
         }
 
+        // Frameless window edge: a subtle hairline drawn above all content so the
+        // borderless window reads as a distinct surface against the desktop and
+        // the resizable edges are visible. Non-interactive (no TouchArea), so it
+        // never intercepts clicks or the winit edge-resize hit-testing.
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            background: transparent;
+            border-width: 1px;
+            // Slightly stronger than the internal divider token so the window
+            // edge reads as a distinct frame against the desktop.
+            border-color: #ffffff2b;
+        }
     }
 }
