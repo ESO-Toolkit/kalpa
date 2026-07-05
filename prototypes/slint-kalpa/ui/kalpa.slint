@@ -9671,10 +9671,12 @@ component SvmEditorTreeRow inherits Rectangle {
     }
 
     Text {
-        x: 24px + root.indent * 18px;
+        // Cap the visual indent (deeper nodes stop indenting) and keep a minimum
+        // label width so deeply-nested key names don't collapse to nothing.
+        x: 24px + min(root.indent, 6) * 18px;
         y: 0px;
         height: parent.height;
-        width: parent.width - 76px - root.indent * 18px;
+        width: max(52px, parent.width - 76px - min(root.indent, 6) * 18px);
         text: root.label;
         color: root.active ? Palette.foreground : Palette.muted-strong;
         font-size: 12px;
