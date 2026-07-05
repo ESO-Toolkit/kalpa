@@ -3,6 +3,7 @@ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { useCappedAnimationRate } from "@/hooks/use-capped-animation-rate";
 import { XIcon } from "lucide-react";
 
 import {
@@ -73,6 +74,13 @@ function DialogContent({
 }
 
 function DialogHeader({ className, children, ...props }: React.ComponentProps<"div">) {
+  // Cap the sweep at ~60 updates/s: on high-refresh displays a free-running
+  // compositor animation presents at every vsync and re-executes the popup's
+  // backdrop-blur each frame (measured ~42% of a core at 240 Hz for this one
+  // strip). 60 Hz is the cadence the design has always rendered at on
+  // standard displays, so nothing is visually lost.
+  const sweepRef = React.useRef<HTMLSpanElement>(null);
+  useCappedAnimationRate(sweepRef, 16);
   return (
     <div
       data-slot="dialog-header"
@@ -93,7 +101,7 @@ function DialogHeader({ className, children, ...props }: React.ComponentProps<"d
         data-slot="dialog-header-accent"
         className="pointer-events-none absolute inset-x-0 top-0 h-[2px] overflow-hidden"
       >
-        <span className="dialog-accent-sweep block h-full w-[200%]" />
+        <span ref={sweepRef} className="dialog-accent-sweep block h-full w-[200%]" />
       </span>
       {children}
     </div>

@@ -120,8 +120,13 @@ export function AppBackground() {
     reduceMotion.addEventListener("change", update);
     return () => {
       stop();
-      // Hand the timelines back to CSS so a remount starts from clean state.
-      for (const a of anims) a.play();
+      // If the orbs stay mounted (HMR/StrictMode re-run), hand the timelines
+      // back to CSS; if they're being detached, cancel — a played animation on
+      // a detached target leaks per-vsync main-frame scheduling forever.
+      for (const a of anims) {
+        if (root.isConnected) a.play();
+        else a.cancel();
+      }
       window.removeEventListener("focus", update);
       window.removeEventListener("blur", update);
       document.removeEventListener("visibilitychange", update);

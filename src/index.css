@@ -460,6 +460,24 @@
   animation: accent-shimmer 4s ease-in-out infinite;
 }
 
+/* Reduced motion: hold a static accent bar (the sweep's symmetric resting
+ * look) instead of animating. With animation: none the rate-capping hook is a
+ * no-op, and at the animation's phase 0 the moving gradient would sit fully
+ * outside the strip — leaving the header without its accent — so pin a
+ * full-width symmetric gradient instead. */
+@media (prefers-reduced-motion: reduce) {
+  .dialog-accent-sweep {
+    animation: none;
+    width: 100%;
+    background: linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--primary) 0%, transparent) 0%,
+      color-mix(in oklab, var(--primary-hover) 80%, transparent) 50%,
+      color-mix(in oklab, var(--primary) 0%, transparent) 100%
+    );
+  }
+}
+
 /* === Dialog Content Entrance Stagger === */
 [data-slot="dialog-content"] > [data-slot="dialog-header"] ~ * {
   animation: dialog-child-enter 0.25s cubic-bezier(0, 0, 0.2, 1) both;
