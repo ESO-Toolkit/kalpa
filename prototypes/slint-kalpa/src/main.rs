@@ -9968,33 +9968,36 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
     let tag_models = models.clone();
     ui.on_batch_tag(move || {
         if let Some(ui) = tag_ui.upgrade() {
+            // Apply the tag to every selected addon in-memory first, collecting the
+            // work to persist. A single failed disk write must not abort the batch
+            // or leave the view unrefreshed for the addons that were tagged.
+            let mut to_persist: Vec<(String, ModelRc<TagEntry>)> = Vec::new();
             for addon in tag_models
                 .all
                 .borrow_mut()
                 .iter_mut()
                 .filter(|addon| addon.selected)
             {
-                let next_tags = set_tag_active(&addon.tags, "testing", true);
-                if let Some(addons_root) = disk_root_for_addon(addon.folder_name.as_str()) {
-                    if let Err(error) = persist_addon_tag_model(
-                        &addons_root,
-                        addon.folder_name.as_str(),
-                        &next_tags,
-                    ) {
-                        ui.set_status_error_message(
-                            format!(
-                                "Failed to save tags for {}: {error}",
-                                addon.folder_name.as_str()
-                            )
-                            .into(),
-                        );
-                        return;
-                    }
-                }
-                addon.tags = next_tags;
+                addon.tags = set_tag_active(&addon.tags, "testing", true);
+                to_persist.push((addon.folder_name.to_string(), addon.tags.clone()));
             }
             apply_addon_view(&ui, &tag_models);
-            ui.set_status_error_message("Tagged selected addons as testing.".into());
+
+            let count = to_persist.len();
+            let mut failed = 0usize;
+            for (folder_name, tags) in &to_persist {
+                if let Some(addons_root) = disk_root_for_addon(folder_name) {
+                    if persist_addon_tag_model(&addons_root, folder_name, tags).is_err() {
+                        failed += 1;
+                    }
+                }
+            }
+            let message = if failed == 0 {
+                format!("Tagged {count} selected addons as testing.")
+            } else {
+                format!("Tagged {count} addons as testing; {failed} couldn't be saved to disk.")
+            };
+            ui.set_status_error_message(message.into());
         }
     });
 
@@ -10126,16 +10129,9 @@ fn wire_context_actions(ui: &KalpaWindow, models: AddonModels) {
         let next_favorite = !addon.favorite;
         addon.favorite = next_favorite;
         addon.tags = set_tag_active(&addon.tags, "favorite", next_favorite);
-        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
-            if let Err(error) = persist_addon_tag_model(&addons_root, &folder_name, &addon.tags) {
-                ui.set_status_error_message(
-                    format!("Failed to save tags for {folder_name}: {error}").into(),
-                );
-                return;
-            }
-        }
-        update_master_addon(&favorite_models, &folder_name, addon);
+        update_master_addon(&favorite_models, &folder_name, addon.clone());
         apply_addon_view(&ui, &favorite_models);
+        persist_addon_tags_best_effort(&ui, &folder_name, &addon.tags);
     });
 
     let disable_ui = ui.as_weak();
