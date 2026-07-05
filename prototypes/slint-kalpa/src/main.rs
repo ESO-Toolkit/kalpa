@@ -10240,17 +10240,13 @@ fn wire_tag_editor(ui: &KalpaWindow, models: AddonModels) {
         addon.favorite = tag_is_active(&next_tags, "favorite");
         addon.tags = tag_model_from_entries(next_tags);
         let folder_name = addon.folder_name.to_string();
-        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
-            if let Err(error) = persist_addon_tag_model(&addons_root, &folder_name, &addon.tags) {
-                ui.set_status_error_message(
-                    format!("Failed to save tags for {folder_name}: {error}").into(),
-                );
-                return;
-            }
-        }
+        // Apply the toggle in-memory first so it is always visible, then persist
+        // best-effort — a blocked disk write (e.g. Controlled Folder Access) must
+        // not swallow the tag change.
         tag_models.visible.set_row_data(index, addon.clone());
-        update_master_addon(&tag_models, &folder_name, addon);
+        update_master_addon(&tag_models, &folder_name, addon.clone());
         apply_addon_view(&ui, &tag_models);
+        persist_addon_tags_best_effort(&ui, &folder_name, &addon.tags);
     });
 
     let add_ui = ui.as_weak();
@@ -10271,17 +10267,10 @@ fn wire_tag_editor(ui: &KalpaWindow, models: AddonModels) {
         addon.favorite = tag_model_has_active(&next_tags, "favorite");
         addon.tags = next_tags;
         let folder_name = addon.folder_name.to_string();
-        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
-            if let Err(error) = persist_addon_tag_model(&addons_root, &folder_name, &addon.tags) {
-                ui.set_status_error_message(
-                    format!("Failed to save tags for {folder_name}: {error}").into(),
-                );
-                return;
-            }
-        }
         add_models.visible.set_row_data(index, addon.clone());
-        update_master_addon(&add_models, &folder_name, addon);
+        update_master_addon(&add_models, &folder_name, addon.clone());
         apply_addon_view(&ui, &add_models);
+        persist_addon_tags_best_effort(&ui, &folder_name, &addon.tags);
     });
 
     let custom_ui = ui.as_weak();
@@ -10302,18 +10291,11 @@ fn wire_tag_editor(ui: &KalpaWindow, models: AddonModels) {
         addon.favorite = tag_model_has_active(&next_tags, "favorite");
         addon.tags = next_tags;
         let folder_name = addon.folder_name.to_string();
-        if let Some(addons_root) = disk_root_for_addon(&folder_name) {
-            if let Err(error) = persist_addon_tag_model(&addons_root, &folder_name, &addon.tags) {
-                ui.set_status_error_message(
-                    format!("Failed to save tags for {folder_name}: {error}").into(),
-                );
-                return;
-            }
-        }
         custom_models.visible.set_row_data(index, addon.clone());
-        update_master_addon(&custom_models, &folder_name, addon);
+        update_master_addon(&custom_models, &folder_name, addon.clone());
         ui.set_custom_tag_draft("".into());
         apply_addon_view(&ui, &custom_models);
+        persist_addon_tags_best_effort(&ui, &folder_name, &addon.tags);
     });
 }
 
@@ -13143,6 +13125,25 @@ fn persist_addon_tag_model(
     tags: &ModelRc<TagEntry>,
 ) -> Result<(), String> {
     persist_addon_tags(addons_root, folder_name, active_tag_ids(tags))
+}
+
+/// Persist the addon's tags to disk without blocking the in-memory change.
+///
+/// The caller has already applied the tag to the model and refreshed the view,
+/// so a failed write here must never revert it. When the addon has no resolvable
+/// on-disk folder (demo data, unconfigured path) there is nothing to persist and
+/// we stay silent. When a real write fails (e.g. Controlled Folder Access blocks
+/// the ESO AddOns directory) we surface a concise, non-fatal notice that makes
+/// clear the tag still applied for this session.
+fn persist_addon_tags_best_effort(ui: &KalpaWindow, folder_name: &str, tags: &ModelRc<TagEntry>) {
+    let Some(addons_root) = disk_root_for_addon(folder_name) else {
+        return;
+    };
+    if let Err(error) = persist_addon_tag_model(&addons_root, folder_name, tags) {
+        ui.set_status_error_message(
+            format!("Tag applied, but couldn't be saved to disk: {error}").into(),
+        );
+    }
 }
 
 fn disk_root_for_addon(folder_name: &str) -> Option<PathBuf> {
