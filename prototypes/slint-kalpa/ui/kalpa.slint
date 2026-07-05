@@ -11199,7 +11199,7 @@ component Sidebar inherits Rectangle {
             background: transparent;
 
             Rectangle {
-                y: 2px;
+                y: 5px;
                 width: parent.width;
                 height: 3px;
                 border-radius: 1.5px;
@@ -11207,7 +11207,7 @@ component Sidebar inherits Rectangle {
             }
 
             filter-thumb := Rectangle {
-                y: 2px;
+                y: 5px;
                 height: 3px;
                 width: max(28px, parent.width * filters-scroll.width / filters-scroll.viewport-width);
                 x: (parent.width - self.width) * (-filters-scroll.viewport-x / max(1px, filters-scroll.viewport-width - filters-scroll.width));
