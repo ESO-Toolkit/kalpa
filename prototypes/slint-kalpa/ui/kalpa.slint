@@ -10229,8 +10229,9 @@ component SavedVariablesOverlay inherits Rectangle {
             PackHubButton { x: 328px; y: 0px; width: 116px; icon: @image-url("../assets/icons/save.svg"); label: "Save Changes"; primary: true; disabled: !root.editor-dirty; clicked => { root.editor-save(); } }
             PackHubButton { x: 452px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Preview"; disabled: !root.editor-dirty; clicked => { root.editor-preview(); } }
             PackHubButton { x: 538px; y: 0px; width: 76px; icon: @image-url("../assets/icons/x.svg"); label: "Discard"; disabled: !root.editor-dirty; clicked => { root.editor-discard(); } }
-            PackHubButton { x: 622px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; disabled: !root.editor-has-file; clicked => { root.editor-restore(); } }
-            PackHubButton { x: 714px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; disabled: !root.editor-has-file; clicked => { root.editor-copy-raw(); } }
+            // Right-anchored so they never clip off the panel edge on narrow windows.
+            PackHubButton { x: parent.width - 170px; y: 0px; width: 84px; icon: @image-url("../assets/icons/undo-2.svg"); label: "Restore"; disabled: !root.editor-has-file; clicked => { root.editor-restore(); } }
+            PackHubButton { x: parent.width - 78px; y: 0px; width: 78px; icon: @image-url("../assets/icons/file-text.svg"); label: "Raw"; disabled: !root.editor-has-file; clicked => { root.editor-copy-raw(); } }
 
             Rectangle {
                 x: 0px;
@@ -10924,7 +10925,9 @@ component Sidebar inherits Rectangle {
             height: parent.height;
             viewport-width: raid-filter.x + (root.raid-tag-count > 0 ? raid-filter.width : 0px);
             viewport-height: parent.height;
-            horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+            // Show a scrollbar when the tag filters overflow — a horizontal strip
+            // won't wheel-scroll, so always-off hid the overflowed tabs entirely.
+            horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
             vertical-scrollbar-policy: ScrollBarPolicy.always-off;
 
             private property <length> gap: 4px;
