@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { memo, useState, useRef, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -42,7 +42,7 @@ interface AppHeaderProps {
   onRefresh: () => void;
 }
 
-export function AppHeader({
+function AppHeaderBase({
   addonsCount,
   batchMode,
   batchDisabling,
@@ -309,3 +309,7 @@ export function AppHeader({
     </header>
   );
 }
+
+// Memoized: App re-renders on every keystroke and update-progress event; the
+// header's props are primitives and stable callbacks, so it bails out of those.
+export const AppHeader = memo(AppHeaderBase);

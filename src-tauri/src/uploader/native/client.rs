@@ -25,7 +25,7 @@
 //! native transport is enabled by default.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::session::{Session, SessionError, SessionProvider};
 use crate::uploader::types::UploadOptions;
@@ -457,23 +457,17 @@ impl<'a> NativeUpload<'a> {
         // C4: scale the total request timeout with the multipart body size — a large
         // segment/master-table upload on a slow uplink must finish inside ONE timeout
         // (the one-shot path has no retry); create/terminate carry no body → the flat
-        // floor. C3: disable redirect-following so an expired-session bounce to /login
-        // is classified as an auth rejection (see `classify_status`) instead of being
-        // followed POST→GET and misread as a fatal server error.
+        // floor. Applied per request because it varies with the payload; the C3
+        // no-redirect policy rides on the shared client (see `upload_client`).
         let payload_len = match kind {
             RequestKind::AddSegment { bytes, .. } | RequestKind::MasterTable { bytes, .. } => {
                 bytes.len()
             }
             RequestKind::CreateReport | RequestKind::Terminate => 0,
         };
-        let client = reqwest::blocking::Client::builder()
-            .timeout(request_timeout_for(payload_len))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| format!("HTTP client error: {e}"))?;
-
-        let req = client
+        let req = upload_client()
             .post(url)
+            .timeout(request_timeout_for(payload_len))
             .header(reqwest::header::COOKIE, session.cookie_header())
             .header(reqwest::header::ACCEPT, "application/json");
 
@@ -864,23 +858,20 @@ fn live_send_once(
     url: &str,
     req: &OwnedLiveRequest,
 ) -> Result<SendResult, String> {
-    // Same C3/C4 hardening as the one-shot `send_once`: a size-scaled timeout for the
-    // (small, live) segment/master bodies, and redirects disabled so an auth bounce is
-    // classified for re-auth rather than followed and misread. Live payloads are small,
-    // so the timeout formula naturally yields ~120s here.
+    // Same C3/C4 hardening as the one-shot `send_once`: a size-scaled per-request
+    // timeout for the (small, live) segment/master bodies, and redirects disabled on
+    // the shared `upload_client` so an auth bounce is classified for re-auth rather
+    // than followed and misread. Live payloads are small, so the timeout formula
+    // naturally yields ~120s here.
     let payload_len = match req {
         OwnedLiveRequest::AddSegment { bytes, .. }
         | OwnedLiveRequest::MasterTable { bytes, .. } => bytes.len(),
         OwnedLiveRequest::CreateReport { body } => body.len(),
         OwnedLiveRequest::Terminate => 0,
     };
-    let client = reqwest::blocking::Client::builder()
-        .timeout(request_timeout_for(payload_len))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-    let base = client
+    let base = upload_client()
         .post(url)
+        .timeout(request_timeout_for(payload_len))
         .header(reqwest::header::COOKIE, session.cookie_header())
         .header(reqwest::header::ACCEPT, "application/json");
 
@@ -1005,6 +996,30 @@ fn redirect_is_auth_related(headers: &reqwest::header::HeaderMap) -> bool {
         // No Location on a 3xx: unusual for these endpoints — fail toward re-auth.
         None => true,
     }
+}
+
+/// Shared blocking client for every desktop-client POST (one-shot and live paths).
+/// Reusing one client keeps the connection pool — and its TLS session — alive across
+/// the many per-segment uploads of a report, instead of paying a fresh handshake and
+/// client runtime per request. Built WITHOUT a client-level timeout: the C4
+/// size-scaled timeout varies per request and is applied via
+/// `RequestBuilder::timeout` at each call site (which overrides any client default).
+/// C3 lives here: redirect-following is disabled so an expired-session bounce to
+/// /login is classified as an auth rejection (see `classify_status`) instead of being
+/// followed POST→GET and misread as a fatal server error.
+fn upload_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            // Idle connections are dropped before typical server keep-alive
+            // windows close them: the one-shot path has no retry, so a pooled
+            // connection the server already closed during an encoding gap
+            // between segments must not be handed back to it.
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed to build native upload HTTP client")
+    })
 }
 
 /// Total per-request timeout for a POST carrying a `payload_bytes` multipart body (C4).

@@ -280,7 +280,7 @@ const FILTERS: [FilterMode, string][] = [
   ["disabled", "Disabled"],
 ];
 
-export function AddonList({
+function AddonListBase({
   addons,
   allAddons,
   selectedAddon,
@@ -833,3 +833,7 @@ export function AddonList({
     </div>
   );
 }
+
+// Memoized: bails out of App re-renders whose props it doesn't consume
+// (dialog toggles, banner/progress state, detail-only changes).
+export const AddonList = memo(AddonListBase);

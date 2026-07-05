@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, memo, Suspense, useState } from "react";
 import type { AddonManifest, AuthUser, GameInstance } from "@/types";
 import {
   Dialog,
@@ -95,7 +95,7 @@ function DialogLoadingFallback({ title, onClose }: { title: string; onClose: () 
   );
 }
 
-export function AppDialogs({
+function AppDialogsBase({
   activeDialog,
   addons,
   addonsPath,
@@ -201,3 +201,7 @@ export function AppDialogs({
     </Suspense>
   );
 }
+
+// Memoized: with activeDialog=null this renders nothing but would otherwise
+// still re-render (and re-diff its lazy chunks) on every App state change.
+export const AppDialogs = memo(AppDialogsBase);

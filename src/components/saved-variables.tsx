@@ -2238,12 +2238,20 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   useEffect(() => {
     // Refresh periodically while the dialog is open so the editor's "ESO is
     // running" warning stays truthful if the game is launched or exited.
+    // Skip the backend process-enumeration while the window is hidden — the
+    // warning can't be seen — and re-check the moment it becomes visible, so
+    // what the user sees on reveal is fresher than the 30s cadence, not staler.
     const check = () => {
+      if (document.hidden) return;
       invokeOrThrow<boolean>("is_eso_running").then(setEsoRunning).catch(console.error);
     };
     check();
     const id = setInterval(check, 30000);
-    return () => clearInterval(id);
+    document.addEventListener("visibilitychange", check);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", check);
+    };
   }, []);
 
   const handleSelectFile = useCallback((f: SavedVariableFile) => {

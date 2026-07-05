@@ -204,16 +204,22 @@ fn clear_webview_cache_on_upgrade() {
 }
 
 fn cleanup_orphaned_pending_zips() {
-    let temp_dir = std::env::temp_dir();
-    if let Ok(entries) = std::fs::read_dir(&temp_dir) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("kalpa-pending-") && name.ends_with(".zip") {
-                    let _ = std::fs::remove_file(entry.path());
+    // Fire-and-forget: enumerating %TEMP% can take a while on cluttered
+    // machines and nothing in the launch path depends on the sweep having
+    // finished (no current code produces matching names during startup), so
+    // keep it off the critical path to window creation.
+    std::thread::spawn(|| {
+        let temp_dir = std::env::temp_dir();
+        if let Ok(entries) = std::fs::read_dir(&temp_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with("kalpa-pending-") && name.ends_with(".zip") {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
                 }
             }
         }
-    }
+    });
 }
 
 /// Windows-only WebView2 power management: shrink the renderer's memory while
@@ -372,11 +378,23 @@ mod webview_power {
 }
 
 pub fn run() {
-    // Enable Chrome DevTools Protocol in debug builds only
+    // msWebView2CodeCache: V8 bytecode caching for the app bundle. wry serves
+    // the frontend through WebView2's WebResourceRequested interception, which
+    // bypasses the HTTP-cache-backed code cache — without this feature the JS
+    // bundle is re-parsed and re-compiled on every launch. The env var is
+    // documented to APPEND to the environment's AdditionalBrowserArguments, so
+    // wry's default args are preserved, and an unknown feature name is simply
+    // ignored by the runtime, so this degrades gracefully if the flag ever
+    // changes. (Debug builds also enable the Chrome DevTools Protocol here.)
     #[cfg(debug_assertions)]
     std::env::set_var(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        "--remote-debugging-port=9222",
+        "--remote-debugging-port=9222 --enable-features=msWebView2CodeCache",
+    );
+    #[cfg(not(debug_assertions))]
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--enable-features=msWebView2CodeCache",
     );
 
     clear_webview_cache_on_upgrade();

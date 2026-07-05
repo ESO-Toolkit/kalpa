@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { memo, useState, useEffect, useRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import type { EsouiSearchResult, EsouiAddonDetail, InstallResult } from "../types";
@@ -36,7 +36,7 @@ interface DiscoverDetailProps {
   isOffline?: boolean;
 }
 
-export function DiscoverDetail({
+function DiscoverDetailBase({
   result,
   addonsPath,
   onInstalled,
@@ -395,6 +395,7 @@ export function DiscoverDetail({
                 alt={`Screenshot ${safeIdx + 1}`}
                 className="w-full max-h-[300px] object-contain"
                 loading="lazy"
+                decoding="async"
               />
               {detail.screenshots.length > 1 && (
                 <>
@@ -464,6 +465,7 @@ export function DiscoverDetail({
                       alt={`Thumb ${i + 1}`}
                       className="h-14 w-24 object-cover"
                       loading="lazy"
+                      decoding="async"
                     />
                   </button>
                 ))}
@@ -521,3 +523,7 @@ function StatCard({
     </SimpleTooltip>
   );
 }
+
+// Memoized: bails out of App re-renders it doesn't consume (search keystrokes,
+// update-progress events, dialog toggles).
+export const DiscoverDetail = memo(DiscoverDetailBase);
