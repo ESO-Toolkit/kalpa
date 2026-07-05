@@ -13644,9 +13644,11 @@ export component KalpaWindow inherits Window {
             // the rounded window clip; square it when the OS squares the window
             // (maximize / snap) so a rounded stroke never floats in square corners.
             border-radius: root.window-maximized ? 0px : 8px;
-            // Faint light inner hairline just inside the native gold edge; also the
-            // guaranteed-visible fallback if the DWM border color does not paint.
-            border-color: #ffffff33;
+            // Theme-adaptive accent at half intensity: follows the active theme's
+            // primary color (kept in sync by apply_theme_selection) so the frame
+            // recolors per theme, muted to ~50% so it reads as a defined edge
+            // without the brightness of a full accent border.
+            border-color: Tokens.primary.with-alpha(0.5);
         }
     }
 }

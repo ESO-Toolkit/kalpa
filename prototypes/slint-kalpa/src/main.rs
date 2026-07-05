@@ -13403,11 +13403,13 @@ fn wire_window_controls(ui: &KalpaWindow) {
                 static DWM_INIT: Once = Once::new();
                 DWM_INIT.call_once(|| {
                     use i_slint_backend_winit::winit::platform::windows::{
-                        Color, CornerPreference, WindowExtWindows,
+                        CornerPreference, WindowExtWindows,
                     };
                     window.with_winit_window(|winit_window| {
                         winit_window.set_corner_preference(CornerPreference::Round);
-                        winit_window.set_border_color(Some(Color::from_rgb(0xc4, 0xa4, 0x4a)));
+                        // No native accent edge — the visible border is drawn by the
+                        // Slint overlay so it can follow the active theme's color.
+                        winit_window.set_border_color(None);
                     });
                 });
             }
