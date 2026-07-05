@@ -2572,8 +2572,15 @@ component DetailTagsSection inherits Rectangle {
     callback add-tag-clicked;
     callback custom-tag-submitted(string);
     property <bool> overflowing: tags-scroll.viewport-width > tags-scroll.width + 1px;
-    // Grow to fit a scrollbar row only when the tags exceed the width; otherwise
-    // stay compact. (Slint has no wrap layout, so overflow scrolls horizontally.)
+    // The '+ tag' editor is pinned OUTSIDE the horizontal scroll so it — and its
+    // "+" submit button — stay fully visible and clickable no matter how many tags
+    // there are. Only the chips scroll. (Previously the input was the last item
+    // INSIDE the scroll, so typing grew it 56->112px and pushed the "+" button into
+    // the clipped overflow region, where clicks silently did nothing.) Reserve the
+    // input's max width up front so its position never shifts as the draft grows.
+    property <length> input-reserve: 118px; // 112px max TagInput width + 6px gap
+    // Grow to fit a scrollbar row only when the chips exceed the visible area;
+    // otherwise stay compact. (Slint has no wrap layout, so overflow scrolls.)
     height: root.overflowing ? 34px : 22px;
     background: #00000000;
     clip: true;
@@ -2581,7 +2588,7 @@ component DetailTagsSection inherits Rectangle {
     tags-scroll := ScrollView {
         x: 0px;
         y: 0px;
-        width: parent.width;
+        width: max(0px, min(root.width - root.input-reserve, tags-row.preferred-width));
         height: 22px;
         viewport-width: max(self.width, tags-row.preferred-width);
         viewport-height: 22px;
@@ -2596,19 +2603,24 @@ component DetailTagsSection inherits Rectangle {
                 active: tag.active;
                 clicked => { root.tag-clicked(tag.id); }
             }
-            TagInput {
-                draft <=> root.custom-tag-draft;
-                submit(value) => { root.custom-tag-submitted(value); }
-            }
         }
     }
 
+    // Pinned, always-visible tag editor — never inside the scroll/clip region.
+    TagInput {
+        x: tags-scroll.x + tags-scroll.width + 6px;
+        y: 0px;
+        draft <=> root.custom-tag-draft;
+        submit(value) => { root.custom-tag-submitted(value); }
+    }
+
     // Draggable scrollbar for overflow — the chip TouchAreas swallow drag/wheel,
-    // so without this the trailing tags and the "+ tag" input become unreachable.
+    // so without this the trailing chips become unreachable. Spans only the chip
+    // scroll area (the '+ tag' editor is pinned to its right, outside the scroll).
     if (root.overflowing) : Rectangle {
         x: 0px;
         y: 26px;
-        width: parent.width;
+        width: tags-scroll.width;
         height: 8px;
         background: transparent;
 
