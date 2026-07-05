@@ -1901,11 +1901,21 @@ fn real_addon_entries(addons_root: &Path) -> Result<Vec<AddonEntry>, String> {
             .cmp(&right.entry.title.to_ascii_lowercase())
     });
 
+    let proto_tags = load_prototype_tags_map();
     let addons = drafts
         .into_iter()
         .map(|mut draft| {
             if let Some(meta) = store.addons.get(draft.entry.folder_name.as_str()) {
                 hydrate_addon_from_metadata(&mut draft.entry, meta);
+            }
+            // Overlay tags from the CFA-safe app-data store (they take precedence,
+            // since the AddOns-folder kalpa.json write may be blocked by CFA).
+            if let Some(tags) = proto_tags.get(&prototype_tag_key(
+                addons_root,
+                draft.entry.folder_name.as_str(),
+            )) {
+                draft.entry.tags = tag_model_from_ids(tags);
+                draft.entry.favorite = tag_model_has_active(&draft.entry.tags, "favorite");
             }
             draft.entry.required_dependencies =
                 dependency_model_from_specs(draft.required_dependencies, &folder_names);
@@ -9987,7 +9997,7 @@ fn wire_batch_actions(ui: &KalpaWindow, models: AddonModels) {
             let mut failed = 0usize;
             for (folder_name, tags) in &to_persist {
                 if let Some(addons_root) = disk_root_for_addon(folder_name) {
-                    if persist_addon_tag_model(&addons_root, folder_name, tags).is_err() {
+                    if !persist_addon_tags_dual(&addons_root, folder_name, tags) {
                         failed += 1;
                     }
                 }
@@ -13131,13 +13141,71 @@ fn persist_addon_tag_model(
 /// we stay silent. When a real write fails (e.g. Controlled Folder Access blocks
 /// the ESO AddOns directory) we surface a concise, non-fatal notice that makes
 /// clear the tag still applied for this session.
+/// Path to the CFA-safe app-data tag store (`%APPDATA%\Kalpa\...`). The ESO AddOns
+/// folder lives under Documents, which Controlled Folder Access can block for a
+/// non-allowlisted exe like this prototype — writing tags here always works and
+/// mirrors how themes/settings already persist.
+fn prototype_tags_store_path() -> Option<PathBuf> {
+    let filename = if std::env::var("KALPA_NATIVE_STATE_DIR").is_ok() {
+        "addon-tags.json"
+    } else {
+        "native-addon-tags.json"
+    };
+    native_state_dir().map(|dir| dir.join(filename))
+}
+
+fn prototype_tag_key(addons_root: &Path, folder_name: &str) -> String {
+    format!("{}\u{1f}{}", addons_root.display(), folder_name)
+}
+
+fn load_prototype_tags_map() -> std::collections::HashMap<String, Vec<String>> {
+    prototype_tags_store_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+fn save_prototype_tags(
+    addons_root: &Path,
+    folder_name: &str,
+    tags: &[String],
+) -> Result<(), String> {
+    let path = prototype_tags_store_path().ok_or("No app-data directory available")?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut map = load_prototype_tags_map();
+    let key = prototype_tag_key(addons_root, folder_name);
+    if tags.is_empty() {
+        map.remove(&key);
+    } else {
+        map.insert(key, tags.to_vec());
+    }
+    let json = serde_json::to_string_pretty(&map).map_err(|error| error.to_string())?;
+    std::fs::write(&path, json).map_err(|error| error.to_string())
+}
+
+/// Persist tags to the CFA-safe app-data store (primary) and mirror them into the
+/// AddOns folder best-effort (so the production app sees them too). Returns whether
+/// the app-data write — the one that reliably works — succeeded.
+fn persist_addon_tags_dual(
+    addons_root: &Path,
+    folder_name: &str,
+    tags: &ModelRc<TagEntry>,
+) -> bool {
+    let active = active_tag_ids(tags);
+    let app_data_ok = save_prototype_tags(addons_root, folder_name, &active).is_ok();
+    let _ = persist_addon_tag_model(addons_root, folder_name, tags);
+    app_data_ok
+}
+
 fn persist_addon_tags_best_effort(ui: &KalpaWindow, folder_name: &str, tags: &ModelRc<TagEntry>) {
     let Some(addons_root) = disk_root_for_addon(folder_name) else {
         return;
     };
-    if let Err(error) = persist_addon_tag_model(&addons_root, folder_name, tags) {
+    if !persist_addon_tags_dual(&addons_root, folder_name, tags) {
         ui.set_status_error_message(
-            format!("Tag applied, but couldn't be saved to disk: {error}").into(),
+            format!("Tag applied, but couldn't be saved for {folder_name}.").into(),
         );
     }
 }
