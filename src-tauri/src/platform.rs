@@ -55,8 +55,13 @@ pub fn steam_root_candidates() -> Vec<PathBuf> {
         ".steam/steam",
         ".steam/root",
         ".local/share/Steam",
-        ".var/app/com.valvesoftware.Steam/data/Steam", // Flatpak
-        "snap/steam/common/.local/share/Steam",        // Snap
+        // Flatpak Steam's internal layout has varied across releases; probe
+        // every known variant — nonexistent ones are filtered out below and
+        // the caller's canonical-path dedupe collapses any overlap.
+        ".var/app/com.valvesoftware.Steam/data/Steam",
+        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+        ".var/app/com.valvesoftware.Steam/.steam/steam",
+        "snap/steam/common/.local/share/Steam", // Snap
     ]
     .iter()
     .map(|rel| home.join(rel))

@@ -235,7 +235,7 @@ ESO runs on Linux through Steam Proton; Kalpa automatically finds your AddOns fo
 **Linux (Debian/Ubuntu — adjust for your distro):**
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-  librsvg2-dev patchelf libssl-dev build-essential curl wget file
+  librsvg2-dev patchelf libssl-dev libxdo-dev build-essential curl wget file
 ```
 
 ```bash

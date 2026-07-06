@@ -33,7 +33,7 @@ The Vite dev server runs on port **1430** (configured in `.env.local` and `src-t
 - [Node.js](https://nodejs.org/) 22+
 - On Windows: Visual Studio Build Tools with "Desktop development with C++" and the [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (pre-installed on Windows 11)
 - On macOS: Xcode Command Line Tools (`xcode-select --install`)
-- On Linux (Debian/Ubuntu): `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev build-essential`
+- On Linux (Debian/Ubuntu): `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev libxdo-dev build-essential`
 
 Run `npm run check:env` to verify your prerequisites are properly configured.
 
