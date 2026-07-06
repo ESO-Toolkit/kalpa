@@ -919,6 +919,7 @@ struct AddonViewKey {
     query: String,
     filter_mode: i32,
     sort_mode: i32,
+    active_tag_filter: String,
 }
 
 struct AddonFilterCounts {
@@ -2202,7 +2203,32 @@ fn set_addon_counts(ui: &KalpaWindow, addons: &[AddonEntry]) -> AddonFilterCount
     ui.set_broken_tag_count(counts.broken);
     ui.set_essential_tag_count(counts.essential);
     ui.set_raid_tag_count(counts.raid);
+    ui.set_tag_filters(Rc::new(VecModel::from(compute_tag_filters(addons))).into());
     counts
+}
+
+/// Every distinct non-favorite tag in use across the library, with the number of
+/// addons carrying it, sorted alphabetically. Each becomes a dynamic filter tab
+/// (mirrors the WebView's `tagCounts`). Presets (testing/broken/…) are included
+/// here too when in use — they are no longer special-cased in the filter strip.
+fn compute_tag_filters(addons: &[AddonEntry]) -> Vec<TagFilterEntry> {
+    let mut counts: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
+    for addon in addons {
+        for index in 0..addon.tags.row_count() {
+            if let Some(tag) = addon.tags.row_data(index) {
+                if tag.active && tag.id.as_str() != "favorite" {
+                    *counts.entry(tag.id.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(name, count)| TagFilterEntry {
+            name: name.into(),
+            count,
+        })
+        .collect()
 }
 
 fn apply_addon_view(ui: &KalpaWindow, models: &AddonModels) {
@@ -2214,16 +2240,19 @@ fn apply_addon_view(ui: &KalpaWindow, models: &AddonModels) {
         ui.set_filter_mode(filter_mode);
     }
 
+    let active_tag_filter = ui.get_active_tag_filter().to_string();
     let rows = visible_addons(
         &all,
         ui.get_addon_search_query().as_str(),
         filter_mode,
         ui.get_sort_mode(),
+        &active_tag_filter,
     );
     *models.view_key.borrow_mut() = Some(AddonViewKey {
         query: ui.get_addon_search_query().trim().to_string(),
         filter_mode,
         sort_mode: ui.get_sort_mode(),
+        active_tag_filter,
     });
 
     let next_index = selected_folder
@@ -2319,6 +2348,7 @@ fn current_addon_view_key(ui: &KalpaWindow) -> AddonViewKey {
         query: ui.get_addon_search_query().trim().to_string(),
         filter_mode: ui.get_filter_mode(),
         sort_mode: ui.get_sort_mode(),
+        active_tag_filter: ui.get_active_tag_filter().to_string(),
     }
 }
 
@@ -2327,6 +2357,7 @@ fn visible_addons(
     search_query: &str,
     filter_mode: i32,
     sort_mode: i32,
+    active_tag_filter: &str,
 ) -> Vec<AddonEntry> {
     let query = search_query.trim().to_ascii_lowercase();
     let mut rows = addons
@@ -2334,6 +2365,13 @@ fn visible_addons(
         .filter(|addon| {
             if !query.is_empty() && !addon_matches_search(addon, &query) {
                 return false;
+            }
+
+            // A dynamic tag filter (any non-favorite tag) takes precedence and
+            // matches the WebView, where selecting a tag tab sets filter="all"
+            // and filters purely by that tag.
+            if !active_tag_filter.is_empty() {
+                return addon_has_tag(addon, active_tag_filter);
             }
 
             match filter_mode {
@@ -3612,7 +3650,20 @@ fn wire_addon_filters(ui: &KalpaWindow, models: AddonModels) {
     let filter_models = models.clone();
     ui.on_filter_selected(move |_| {
         if let Some(ui) = filter_ui.upgrade() {
+            // Selecting a built-in filter clears any active tag filter (they are
+            // mutually exclusive, matching the WebView).
+            ui.set_active_tag_filter("".into());
             apply_addon_view_if_key_changed(&ui, &filter_models);
+        }
+    });
+
+    let tag_filter_ui = ui.as_weak();
+    let tag_filter_models = models.clone();
+    ui.on_tag_filter_selected(move |name| {
+        if let Some(ui) = tag_filter_ui.upgrade() {
+            ui.set_active_tag_filter(name);
+            ui.set_filter_mode(0);
+            apply_addon_view_if_key_changed(&ui, &tag_filter_models);
         }
     });
 
@@ -20132,11 +20183,11 @@ mod tests {
         addons[2].badge_kind = 1;
         addons[2].disabled = true;
 
-        let search = visible_addons(&addons, "dolgubon", 0, 0);
+        let search = visible_addons(&addons, "dolgubon", 0, 0, "");
         assert_eq!(search.len(), 1);
         assert_eq!(search[0].folder_name.as_str(), "WizardsWardrobe");
 
-        let tag_search = visible_addons(&addons, "raid", 0, 0);
+        let tag_search = visible_addons(&addons, "raid", 0, 0, "");
         assert_eq!(tag_search.len(), 2);
         assert!(tag_search
             .iter()
@@ -20145,32 +20196,39 @@ mod tests {
             .iter()
             .any(|addon| addon.folder_name.as_str() == "CombatMetrics"));
 
-        let libraries = visible_addons(&addons, "", 2, 0);
+        let libraries = visible_addons(&addons, "", 2, 0, "");
         assert_eq!(libraries.len(), 1);
         assert!(libraries[0].is_library);
 
-        let favorites = visible_addons(&addons, "", 3, 0);
+        let favorites = visible_addons(&addons, "", 3, 0, "");
         assert_eq!(favorites.len(), 1);
         assert!(favorites[0].favorite);
 
-        let outdated = visible_addons(&addons, "", 4, 0);
+        let outdated = visible_addons(&addons, "", 4, 0, "");
         assert_eq!(outdated.len(), 1);
         assert_eq!(outdated[0].folder_name.as_str(), "WizardsWardrobe");
 
-        let issues = visible_addons(&addons, "", 5, 0);
+        let issues = visible_addons(&addons, "", 5, 0, "");
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].folder_name.as_str(), "CombatMetrics");
 
-        let disabled = visible_addons(&addons, "", 6, 0);
+        let disabled = visible_addons(&addons, "", 6, 0, "");
         assert_eq!(disabled.len(), 1);
         assert_eq!(disabled[0].folder_name.as_str(), "WizardsWardrobe");
 
-        let essential = visible_addons(&addons, "", 9, 0);
+        let essential = visible_addons(&addons, "", 9, 0, "");
         assert_eq!(essential.len(), 1);
         assert_eq!(essential[0].folder_name.as_str(), "LibCombat");
 
-        let raid = visible_addons(&addons, "", 10, 0);
+        let raid = visible_addons(&addons, "", 10, 0, "");
         assert_eq!(raid.len(), 2);
+
+        // Dynamic tag filter (the WebView path): filter="all" + active tag name.
+        let raid_tag = visible_addons(&addons, "", 0, 0, "raid");
+        assert_eq!(raid_tag.len(), 2);
+        let essential_tag = visible_addons(&addons, "", 0, 0, "essential");
+        assert_eq!(essential_tag.len(), 1);
+        assert_eq!(essential_tag[0].folder_name.as_str(), "LibCombat");
 
         let counts = addon_filter_counts(&addons);
         assert_eq!(counts.favorites, 1);
@@ -21174,7 +21232,7 @@ CombatMetrics_SavedVariables = {
         )];
         addons[0].selected = true;
 
-        let visible = visible_addons(&addons, "combat", 0, 0);
+        let visible = visible_addons(&addons, "combat", 0, 0, "");
         assert_eq!(visible.len(), 1);
         assert!(visible[0].selected);
     }
@@ -21213,7 +21271,7 @@ CombatMetrics_SavedVariables = {
             ),
         ];
 
-        let sorted = visible_addons(&addons, "", 0, 2);
+        let sorted = visible_addons(&addons, "", 0, 2, "");
         assert_eq!(sorted[0].title.as_str(), "Newer");
         assert_eq!(date_sort_key("3/1/2026"), 20260301);
     }
@@ -21238,7 +21296,7 @@ CombatMetrics_SavedVariables = {
         );
         newer.installed_at = "3/1/2026".into();
 
-        let sorted = visible_addons(&[older, newer], "", 0, 3);
+        let sorted = visible_addons(&[older, newer], "", 0, 3, "");
         assert_eq!(sorted[0].title.as_str(), "Newer");
     }
 
