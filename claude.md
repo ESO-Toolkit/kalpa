@@ -23,7 +23,7 @@ Your job is to improve this app without breaking existing functionality or the b
 
 - **Desktop client**: Tauri v2 + React 19 + TypeScript + Tailwind v4 + shadcn-ui
 - **Backend**: Cloudflare Workers + KV (Pack Hub)
-- **CI/CD**: GitHub Actions with tag-triggered release builds (Windows NSIS/MSI)
+- **CI/CD**: GitHub Actions with tag-triggered release builds (Windows NSIS, macOS universal dmg, Linux AppImage/deb/rpm)
 
 When in doubt, prefer solutions that fit naturally into this stack.
 
@@ -157,7 +157,14 @@ When preparing a new release:
    - `Cargo.toml`
    - `package.json`
 2. Push a tag `v*` (for example `v0.3.0`).
-3. `.github/workflows/release.yml` builds Windows NSIS/MSI installers and attaches them to GitHub Releases.
+3. `.github/workflows/release.yml` builds installers for all three platforms (Windows NSIS `.exe`, macOS universal `.dmg`, Linux `.AppImage`/`.deb`/`.rpm`) via a tauri-action matrix and attaches them — plus updater `.sig` files and a merged multi-platform `latest.json` — to one GitHub Release.
+
+### Cross-Platform Notes
+
+- Platform-divergent Rust helpers live in `src-tauri/src/platform.rs` (Steam root discovery, Proton prefix scanning, `open_url`, `pgrep`-based process detection). ESO detection injects Proton/CrossOver documents roots through `documents_candidates()` in `src-tauri/src/commands.rs`, which feeds every detection consumer (instances, addons dirs, log discovery).
+- Frontend OS branching goes through `src/lib/platform.ts` (`osType()`, `isMac()`, `modKeyLabel()`, `isModKey()`) backed by `@tauri-apps/plugin-os`.
+- Per-platform bundle/window overrides live in `src-tauri/tauri.macos.conf.json` (native traffic lights via `titleBarStyle: Overlay`) and `src-tauri/tauri.linux.conf.json`; the base `tauri.conf.json` stays Windows-shaped (`decorations: false` + custom buttons, also used on Linux).
+- Token storage uses the OS credential store on every platform (Credential Manager / Keychain / Secret Service) through the same chunked layout in `src-tauri/src/token_store.rs`.
 
 ---
 

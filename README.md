@@ -191,21 +191,52 @@ Configure your addons folder, access tools like backups and API compatibility ch
 
 ## Install
 
-> **Windows only** — Kalpa requires Windows 10 (version 1803+) or Windows 11. WebView2 is required at runtime and is pre-installed on Windows 11; on Windows 10, the installer will bootstrap it automatically. macOS and Linux are planned but not yet supported.
+> **Platform support**
+>
+> | Platform | Status | Download | Notes |
+> |---|---|---|---|
+> | **Windows** 10 (1803+) / 11 | Stable | `.exe` (NSIS) | WebView2 pre-installed on Win 11, bootstrapped automatically on Win 10 |
+> | **macOS** 10.15+ | Beta | `.dmg` (universal) | Intel & Apple Silicon; see [macOS first launch](#macos-first-launch) below |
+> | **Linux** x86_64 | Beta | `.AppImage` / `.deb` / `.rpm` | AppImage recommended (it self-updates); detects ESO under Steam Proton |
 >
 > **Verifying your download:** every release ships the installer alongside a `.sig` (auto-updater signature) and `latest.json`. See [Verify your download](docs/verify-download.md) to check the integrity of the file you downloaded.
 
 ### Pre-built (recommended)
 
-Download the latest installer from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. Kalpa auto-updates after install — you'll see a banner when a new version is available.
+Download the latest installer from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page. Kalpa auto-updates after install — you'll see a banner when a new version is available. (`.deb`/`.rpm` installs are the exception: they don't self-update, so grab new versions from the Releases page or your package manager.)
+
+#### macOS first launch
+
+macOS builds are not yet notarized with Apple, so Gatekeeper needs a nudge the first time: **right-click Kalpa.app → Open → Open**. If macOS reports the app as "damaged", clear the quarantine flag instead:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Kalpa.app
+```
+
+ESO's native Mac client stores addons in `~/Documents/Elder Scrolls Online/live/AddOns`, which Kalpa detects automatically (CrossOver bottles are scanned too).
+
+#### Linux notes
+
+ESO runs on Linux through Steam Proton; Kalpa automatically finds your AddOns folder inside the Proton prefix (`steamapps/compatdata/306130/pfx/...`), including Flatpak/Snap Steam installs and secondary Steam libraries. Staying logged in to ESO Logs requires a Secret Service keyring (GNOME Keyring or KWallet — present on stock GNOME/KDE); without one, Kalpa still works but asks you to log in each launch.
 
 ### Build from source
 
-**Prerequisites:**
-- [Rust](https://rustup.rs/) (stable, **MSVC** toolchain)
+**Prerequisites (all platforms):**
+- [Rust](https://rustup.rs/) (stable)
 - [Node.js](https://nodejs.org/) 22+
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **"Desktop development with C++"** workload
+
+**Windows:**
+- **MSVC** toolchain, [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **"Desktop development with C++"** workload
 - [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (pre-installed on Windows 11)
+
+**macOS:**
+- Xcode Command Line Tools: `xcode-select --install`
+
+**Linux (Debian/Ubuntu — adjust for your distro):**
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+  librsvg2-dev patchelf libssl-dev build-essential curl wget file
+```
 
 ```bash
 git clone https://github.com/ESO-Toolkit/kalpa.git
@@ -216,7 +247,7 @@ npm run tauri dev       # development mode
 npm run tauri build     # production build
 ```
 
-The production build outputs an NSIS installer to `src-tauri/target/release/bundle/`.
+The production build outputs installers to `src-tauri/target/release/bundle/` — NSIS `.exe` on Windows, `.app`/`.dmg` on macOS, `.AppImage`/`.deb`/`.rpm` on Linux.
 
 ### Troubleshooting
 
@@ -227,6 +258,9 @@ The production build outputs an NSIS installer to `src-tauri/target/release/bund
 | **WebView2 not found at runtime** | Download the [Evergreen Bootstrapper](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) and run it |
 | **App blocked by antivirus** | Add an exception for `kalpa.exe` or the install directory in your antivirus software |
 | **npm run tauri dev fails** | Run `npm run check:env` to identify which prerequisite is missing |
+| **macOS: "Kalpa is damaged and can't be opened"** | The build isn't notarized yet — run `xattr -dr com.apple.quarantine /Applications/Kalpa.app` |
+| **Linux: login doesn't persist between launches** | Install/enable a Secret Service keyring (GNOME Keyring or KWallet) |
+| **Linux: ESO install not detected** | Kalpa scans Steam Proton prefixes (native, Flatpak, Snap Steam). Launch ESO once so the prefix exists, or set the AddOns path manually in Settings |
 | **White screen on launch** | Ensure WebView2 is installed and up to date; try reinstalling it |
 
 ---

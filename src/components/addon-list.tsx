@@ -40,6 +40,7 @@ import {
 import { Tabs, TabsList, TabsIndicator, TabsTrigger } from "@/components/ui/tabs";
 import { DiscoverPanel } from "@/components/discover-panel";
 import { cn, formatRelativeMs, formatRelativeDate } from "@/lib/utils";
+import { modKeyLabel } from "@/lib/platform";
 import { motion, AnimatePresence } from "motion/react";
 
 interface AddonListProps {
@@ -754,7 +755,7 @@ function AddonListBase({
                             </button>
                           </div>
                           <p className="text-[10px] text-muted-foreground/30 tabular-nums">
-                            Ctrl+B to browse &middot; Ctrl+I to install by URL
+                            {modKeyLabel()}+B to browse &middot; {modKeyLabel()}+I to install by URL
                           </p>
                         </div>
                       </GlassPanel>

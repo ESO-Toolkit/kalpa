@@ -31,10 +31,13 @@ The Vite dev server runs on port **1430** (configured in `.env.local` and `src-t
 
 - [Rust](https://rustup.rs/) (stable, MSVC toolchain on Windows)
 - [Node.js](https://nodejs.org/) 22+
-- On Windows: Visual Studio Build Tools with "Desktop development with C++"
-- [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (pre-installed on Windows 11)
+- On Windows: Visual Studio Build Tools with "Desktop development with C++" and the [WebView2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) runtime (pre-installed on Windows 11)
+- On macOS: Xcode Command Line Tools (`xcode-select --install`)
+- On Linux (Debian/Ubuntu): `libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev build-essential`
 
 Run `npm run check:env` to verify your prerequisites are properly configured.
+
+Note: the Playwright E2E suite is currently Windows-only (it drives the app over CDP, which only WebView2 exposes — see `playwright.config.ts`). Unit tests (`npx vitest run`, `cargo test`) run on all platforms.
 
 ## Development Workflow
 

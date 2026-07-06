@@ -165,20 +165,7 @@ pub fn run_oauth_flow() -> Result<CallbackTokens, String> {
     // Open browser to the website's app-auth page
     let auth_url = format!("{APP_AUTH_URL}?port={port}");
 
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &auth_url])
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&auth_url)
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {}", e))?;
-    }
+    crate::platform::open_url(&auth_url)?;
 
     // Wait for callback (120s timeout)
     let timeout = Duration::from_secs(120);

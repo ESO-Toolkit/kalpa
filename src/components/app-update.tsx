@@ -12,8 +12,23 @@ type AppUpdateState =
   | { status: "downloading"; progress: number }
   | { status: "ready" };
 
+const RELEASES_URL = "https://github.com/ESO-Toolkit/kalpa/releases/latest";
+
 export function useAppUpdate() {
   const [state, setState] = useState<AppUpdateState>({ status: "idle" });
+  // deb/rpm installs can't self-update; they get pointed at the release page.
+  const [selfUpdatable, setSelfUpdatable] = useState(true);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        setSelfUpdatable(await invoke<boolean>("is_portable_update_supported"));
+      } catch {
+        // keep the self-update default if the probe fails
+      }
+    })();
+  }, []);
 
   const checkForAppUpdate = useCallback(async (silent = true) => {
     try {
@@ -33,6 +48,18 @@ export function useAppUpdate() {
   const downloadAndInstall = useCallback(async () => {
     if (state.status !== "available") return;
     const { update } = state;
+
+    if (!selfUpdatable) {
+      // Package-manager install (deb/rpm): open the release page instead of
+      // attempting an in-place update the updater can't perform.
+      try {
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        await openUrl(RELEASES_URL);
+      } catch (e) {
+        toast.error(`Could not open the releases page: ${e}`);
+      }
+      return;
+    }
 
     setState({ status: "downloading", progress: 0 });
 
@@ -71,7 +98,7 @@ export function useAppUpdate() {
       setState({ status: "available", update });
       toast.error(`Update failed: ${e}`);
     }
-  }, [state]);
+  }, [state, selfUpdatable]);
 
   const restartApp = useCallback(async () => {
     await relaunch();
