@@ -21,7 +21,9 @@ const SCHEMA_VERSION: u8 = 1;
 //   2 -> 3: scribed-skill Focus/Signature/Affix scripts (from the raw ABILITY_INFO line).
 //   3 -> 4: Mundus stone boon (from the raw PLAYER_INFO long-term effects).
 //   4 -> 5: full passives list (all long-term-effect ability ids; consumer classifies).
-const EXTRACTOR_VERSION: u16 = 5;
+//   5 -> 6: ESOTK Companion snapshots (the `companion` block; read from SavedVariables at
+//           publish time, not from the log — see uploader::native::companion).
+const EXTRACTOR_VERSION: u16 = 6;
 const SOURCE: &str = "kalpa-native-player-info";
 const CLASS_MASTERY_MAX_PICKS: usize = 2;
 const MAX_SCRIBED_SKILLS: usize = 12;
@@ -324,6 +326,8 @@ impl BuildEvidenceAccumulator {
             source: SOURCE.to_string(),
             report_code,
             players,
+            // Populated at the publish site from SavedVariables (the log doesn't carry it).
+            companion: None,
         }
     }
 }

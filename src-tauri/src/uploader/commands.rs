@@ -1259,7 +1259,13 @@ pub async fn uploader_upload_log(
                         &safe,
                         Some(report.code.clone()),
                     ) {
-                        Ok(evidence) if !evidence.players.is_empty() => Some(evidence),
+                        Ok(mut evidence) if !evidence.players.is_empty() => {
+                            // Best-effort: attach the logging player's ESOTK Companion
+                            // snapshots (read from SavedVariables). Never blocks the sidecar.
+                            evidence.companion =
+                                super::native::companion::read_for_upload(&evidence);
+                            Some(evidence)
+                        }
                         Ok(_) => None,
                         Err(e) => {
                             eprintln!("[uploader] native build evidence unavailable: {e}");
@@ -1393,7 +1399,11 @@ fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) 
             job.start_offset,
             Some(job.report_code.clone()),
         ) {
-            Ok(evidence) if !evidence.players.is_empty() => evidence,
+            Ok(mut evidence) if !evidence.players.is_empty() => {
+                // Best-effort: attach the logging player's ESOTK Companion snapshots.
+                evidence.companion = super::native::companion::read_for_upload(&evidence);
+                evidence
+            }
             Ok(_) => return,
             Err(e) => {
                 eprintln!(

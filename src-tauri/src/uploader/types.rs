@@ -198,7 +198,9 @@ pub struct ReportRef {
 
 /// Exact build hints recovered from Kalpa's native raw-log path and handed to
 /// ESO Log Aggregator through the analysis link.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// Not `Eq`: the optional `companion` block carries raw `serde_json::Value` snapshots (which
+// contain floats), so the whole struct is `PartialEq` only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct KalpaBuildEvidence {
     pub schema_version: u8,
@@ -209,6 +211,23 @@ pub struct KalpaBuildEvidence {
     pub report_code: Option<String>,
     #[serde(default)]
     pub players: Vec<KalpaPlayerBuildEvidence>,
+    /// ESOTK Companion snapshots for the logging player, read from
+    /// `SavedVariables/ESOTKCompanion.lua` after the upload. Additive (schemaVersion stays 1;
+    /// consumers that don't know it simply ignore it). Logger-own-character only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion: Option<KalpaCompanionEvidence>,
+}
+
+/// ESOTK Companion snapshots forwarded alongside the build-evidence sidecar. Each snapshot is
+/// the raw parsed companion table (the shape esotk's `esotkCompanionParser` normalizes), so
+/// the consumer matches it to a fight and renders the champion-point allocation ESO Logs
+/// can't carry. Forwarded as-is; Kalpa does no companion-specific normalization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KalpaCompanionEvidence {
+    /// Raw companion snapshot tables (newest first), each a JSON object mirroring the Lua
+    /// snapshot (`ts`, `char`, `server`, `cp`, `stats`, `attrs`, `effects`, `bars`, …).
+    pub snapshots: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
