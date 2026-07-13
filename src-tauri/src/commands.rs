@@ -5066,12 +5066,92 @@ fn profiles_path(addons_dir: &std::path::Path) -> PathBuf {
     addons_dir.join("kalpa-profiles.json")
 }
 
+/// Stable FNV-1a 64-bit hash for deriving mirror file names from paths.
+/// `DefaultHasher` is seeded per-process and would scatter one instance's
+/// mirror across many files over time, so a fixed algorithm is required.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Where the app-data mirror of one instance's profile store lives:
+/// `<data dir>/kalpa/profile-mirrors/<path hash>.json`. Keyed by the
+/// canonicalized, lowercased AddOns path so live/EU/PTS each get their own
+/// mirror and Windows path-casing differences can't split one instance in two.
+fn default_profile_mirror_path(addons_dir: &std::path::Path) -> Option<PathBuf> {
+    let canonical = addons_dir
+        .canonicalize()
+        .unwrap_or_else(|_| addons_dir.to_path_buf());
+    let key = canonical.to_string_lossy().to_lowercase();
+    let name = format!("{:016x}.json", fnv1a64(key.as_bytes()));
+    Some(
+        dirs::data_dir()?
+            .join("kalpa")
+            .join("profile-mirrors")
+            .join(name),
+    )
+}
+
+fn load_profiles_with_mirror(
+    addons_dir: &std::path::Path,
+    mirror: Option<&std::path::Path>,
+) -> ProfileStore {
+    let primary = profiles_path(addons_dir);
+    // The store lives inside the AddOns folder (which is what scopes profiles
+    // per instance), but that folder gets wiped by reinstalls and PTS cleanups.
+    // When the primary AND its crash-recovery artifacts are all gone, fall back
+    // to the app-data mirror so profiles survive the wipe.
+    let primary_gone = !primary.exists()
+        && !primary.with_extension("json.tmp").exists()
+        && !primary.with_extension("json.bak").exists();
+    if primary_gone {
+        if let Some(mirror) = mirror {
+            if let Ok(content) = fs::read_to_string(mirror) {
+                if let Ok(store) = serde_json::from_str::<ProfileStore>(&content) {
+                    return store;
+                }
+            }
+        }
+    }
+    metadata::load_json_with_backup(&primary)
+}
+
+fn save_profiles_with_mirror(
+    addons_dir: &std::path::Path,
+    mirror: Option<&std::path::Path>,
+    store: &ProfileStore,
+) -> Result<(), String> {
+    metadata::save_json_with_backup(&profiles_path(addons_dir), store)?;
+    // Best-effort: the mirror is a recovery copy, so its write never fails the
+    // save — a full data dir or blocked path just means no fallback this time.
+    if let Some(mirror) = mirror {
+        if let Some(parent) = mirror.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(store) {
+            let _ = fs::write(mirror, json);
+        }
+    }
+    Ok(())
+}
+
 fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
-    metadata::load_json_with_backup(&profiles_path(addons_dir))
+    load_profiles_with_mirror(
+        addons_dir,
+        default_profile_mirror_path(addons_dir).as_deref(),
+    )
 }
 
 fn save_profiles(addons_dir: &std::path::Path, store: &ProfileStore) -> Result<(), String> {
-    metadata::save_json_with_backup(&profiles_path(addons_dir), store)
+    save_profiles_with_mirror(
+        addons_dir,
+        default_profile_mirror_path(addons_dir).as_deref(),
+        store,
+    )
 }
 
 #[tauri::command]
@@ -5082,6 +5162,39 @@ pub fn list_profiles(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let store = load_profiles(&addons_dir);
     Ok((store.profiles, store.active_profile))
+}
+
+/// Snapshot the currently enabled addons: top-level folders that carry a
+/// matching manifest (the same gate ESO applies when loading).
+fn snapshot_enabled_addons(addons_dir: &std::path::Path) -> Vec<String> {
+    let mut enabled: Vec<String> = Vec::new();
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            // Only include folders with manifests (actual addons)
+            if find_manifest(addons_dir, &folder_name).is_some() {
+                enabled.push(folder_name);
+            }
+        }
+    }
+    enabled.sort();
+    enabled
+}
+
+fn now_timestamp() -> String {
+    metadata::format_timestamp(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
 }
 
 #[tauri::command]
@@ -5098,35 +5211,10 @@ pub fn create_profile(
         return Err(format!("Profile '{profile_name}' already exists."));
     }
 
-    // Snapshot currently enabled addons (those with manifests in the AddOns folder)
-    let mut enabled: Vec<String> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&addons_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-            // Only include folders with manifests (actual addons)
-            if find_manifest(&addons_dir, &folder_name).is_some() {
-                enabled.push(folder_name);
-            }
-        }
-    }
-    enabled.sort();
-
     let profile = AddonProfile {
         name: profile_name,
-        enabled_addons: enabled,
-        created_at: metadata::format_timestamp(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        ),
+        enabled_addons: snapshot_enabled_addons(&addons_dir),
+        created_at: now_timestamp(),
     };
 
     store.profiles.push(profile.clone());
@@ -5148,6 +5236,22 @@ pub struct ActivateProfileResult {
     pub kept_dependencies: Vec<String>,
 }
 
+/// The read-only rename plan for activating a profile — what WOULD change.
+/// Powers the pre-activation preview in the UI; `apply_profile` recomputes it
+/// at activation time so a stale preview can never rename the wrong folders.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfilePlan {
+    pub to_enable: Vec<String>,
+    pub to_disable: Vec<String>,
+    /// See [`ActivateProfileResult::kept_dependencies`].
+    pub kept_dependencies: Vec<String>,
+    pub missing: Vec<String>,
+    /// Addons the plan wants disabled but cannot: both `Foo/` and
+    /// `Foo.disabled/` exist, so the rename would collide.
+    pub blocked: Vec<String>,
+}
+
 /// On-disk copies of one addon base name: `Foo/` and/or `Foo.disabled/`.
 #[derive(Default)]
 struct FolderCopies {
@@ -5163,11 +5267,12 @@ impl FolderCopies {
     }
 }
 
-/// Apply a profile's enabled-addon snapshot to the AddOns directory.
+/// Compute the rename plan for activating a profile WITHOUT touching disk.
 ///
-/// Extracted from the `activate_profile` command so the rename planning is
-/// unit-testable without Tauri state. Two behaviors go beyond the raw
-/// snapshot:
+/// Extracted from the `activate_profile` command so the planning is
+/// unit-testable without Tauri state, and exposed via `preview_profile` so
+/// the UI can show what will change before anything is renamed. Two behaviors
+/// go beyond the raw snapshot:
 ///
 /// - **Dependency retention**: any installed addon that a profile addon
 ///   (transitively) requires via `## DependsOn` is kept enabled — or
@@ -5178,12 +5283,9 @@ impl FolderCopies {
 ///   folder (ESO's nested-addon resolution) trigger no retention.
 /// - **Duplicate tolerance**: when both `Foo/` and `Foo.disabled/` exist the
 ///   enabled copy wins (matching the scanner), so an "enable" is already
-///   satisfied and reports no failure; a "disable" cannot be expressed by
-///   rename and fails with an actionable message instead of a raw OS error.
-pub(crate) fn apply_profile(
-    addons_dir: &std::path::Path,
-    profile: &AddonProfile,
-) -> ActivateProfileResult {
+///   satisfied and plans no rename; a "disable" cannot be expressed by
+///   rename and is reported as `blocked` instead of attempted.
+pub(crate) fn plan_profile(addons_dir: &std::path::Path, profile: &AddonProfile) -> ProfilePlan {
     // Group every top-level directory by base name so both copies of a
     // duplicated addon are visible to one decision below.
     let mut copies: HashMap<String, FolderCopies> = HashMap::new();
@@ -5298,9 +5400,9 @@ pub(crate) fn apply_profile(
         }
     }
 
-    let mut enabled: Vec<String> = Vec::new();
-    let mut disabled: Vec<String> = Vec::new();
-    let mut failed: Vec<String> = Vec::new();
+    let mut to_enable: Vec<String> = Vec::new();
+    let mut to_disable: Vec<String> = Vec::new();
+    let mut blocked: Vec<String> = Vec::new();
 
     for (base, c) in &copies {
         let want_enabled = desired.contains(base);
@@ -5310,29 +5412,19 @@ pub(crate) fn apply_profile(
                 // enabled is already satisfied; wanting it disabled cannot be
                 // done by rename without a collision.
                 if !want_enabled && find_manifest_in(enabled_path, base).is_some() {
-                    failed.push(format!(
-                        "{base} (disable: both '{base}' and '{base}.disabled' exist — remove the stale copy, then re-activate)"
-                    ));
+                    blocked.push(base.clone());
                 }
             }
             (Some(path), None) => {
                 // Only disable folders that carry a manifest (real addons) —
                 // never wrapper directories like `Libs/`.
                 if !want_enabled && find_manifest_in(path, base).is_some() {
-                    let new_path = addons_dir.join(format!("{base}.disabled"));
-                    match fs::rename(path, &new_path) {
-                        Ok(_) => disabled.push(base.clone()),
-                        Err(e) => failed.push(format!("{base} (disable: {e})")),
-                    }
+                    to_disable.push(base.clone());
                 }
             }
-            (None, Some(path)) => {
+            (None, Some(_)) => {
                 if want_enabled {
-                    let new_path = addons_dir.join(base);
-                    match fs::rename(path, &new_path) {
-                        Ok(_) => enabled.push(base.clone()),
-                        Err(e) => failed.push(format!("{base} (enable: {e})")),
-                    }
+                    to_enable.push(base.clone());
                 }
             }
             (None, None) => {}
@@ -5348,18 +5440,62 @@ pub(crate) fn apply_profile(
         .collect();
 
     // Deterministic output for the UI and tests regardless of dir order.
-    enabled.sort();
-    disabled.sort();
-    failed.sort();
+    to_enable.sort();
+    to_disable.sort();
+    blocked.sort();
     missing.sort();
     kept_dependencies.sort();
+
+    ProfilePlan {
+        to_enable,
+        to_disable,
+        kept_dependencies,
+        missing,
+        blocked,
+    }
+}
+
+/// Execute a profile activation: recompute the plan against the CURRENT disk
+/// state, then perform the renames it calls for.
+pub(crate) fn apply_profile(
+    addons_dir: &std::path::Path,
+    profile: &AddonProfile,
+) -> ActivateProfileResult {
+    let plan = plan_profile(addons_dir, profile);
+
+    let mut enabled: Vec<String> = Vec::new();
+    let mut disabled: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+
+    for base in &plan.to_enable {
+        let src = addons_dir.join(format!("{base}.disabled"));
+        let dst = addons_dir.join(base);
+        match fs::rename(&src, &dst) {
+            Ok(_) => enabled.push(base.clone()),
+            Err(e) => failed.push(format!("{base} (enable: {e})")),
+        }
+    }
+    for base in &plan.to_disable {
+        let src = addons_dir.join(base);
+        let dst = addons_dir.join(format!("{base}.disabled"));
+        match fs::rename(&src, &dst) {
+            Ok(_) => disabled.push(base.clone()),
+            Err(e) => failed.push(format!("{base} (disable: {e})")),
+        }
+    }
+    for base in &plan.blocked {
+        failed.push(format!(
+            "{base} (disable: both '{base}' and '{base}.disabled' exist — remove the stale copy, then re-activate)"
+        ));
+    }
+    failed.sort();
 
     ActivateProfileResult {
         enabled,
         disabled,
         failed,
-        missing,
-        kept_dependencies,
+        missing: plan.missing,
+        kept_dependencies: plan.kept_dependencies,
     }
 }
 
@@ -5392,6 +5528,87 @@ pub async fn activate_profile(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Dry-run of `activate_profile`: what would be enabled/disabled/kept, with
+/// no renames performed. The UI shows this as a confirmation step.
+#[tauri::command]
+pub async fn preview_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    profile_name: String,
+) -> Result<ProfilePlan, String> {
+    validate_name(&profile_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        let store = load_profiles(&addons_dir);
+        let profile = store
+            .profiles
+            .iter()
+            .find(|p| p.name == profile_name)
+            .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
+        Ok(plan_profile(&addons_dir, profile))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Re-snapshot the currently enabled addons into an existing profile,
+/// refreshing its timestamp — "update profile from current state".
+#[tauri::command]
+pub fn update_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    profile_name: String,
+) -> Result<AddonProfile, String> {
+    validate_name(&profile_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let mut store = load_profiles(&addons_dir);
+
+    let profile = store
+        .profiles
+        .iter_mut()
+        .find(|p| p.name == profile_name)
+        .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
+
+    profile.enabled_addons = snapshot_enabled_addons(&addons_dir);
+    profile.created_at = now_timestamp();
+    let updated = profile.clone();
+
+    save_profiles(&addons_dir, &store)?;
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn rename_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    old_name: String,
+    new_name: String,
+) -> Result<(), String> {
+    validate_name(&old_name)?;
+    validate_name(&new_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let mut store = load_profiles(&addons_dir);
+
+    if old_name == new_name {
+        return Ok(());
+    }
+    if store.profiles.iter().any(|p| p.name == new_name) {
+        return Err(format!("Profile '{new_name}' already exists."));
+    }
+    let profile = store
+        .profiles
+        .iter_mut()
+        .find(|p| p.name == old_name)
+        .ok_or_else(|| format!("Profile '{old_name}' not found."))?;
+
+    profile.name = new_name.clone();
+    if store.active_profile.as_deref() == Some(&old_name) {
+        store.active_profile = Some(new_name);
+    }
+
+    save_profiles(&addons_dir, &store)
+}
+
 #[tauri::command]
 pub fn delete_profile(
     state: tauri::State<'_, AllowedAddonsPath>,
@@ -5408,6 +5625,128 @@ pub fn delete_profile(
     }
 
     save_profiles(&addons_dir, &store)
+}
+
+// ─── Cross-instance addon copy ───────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyAddonsResult {
+    pub copied: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// Recursively copy a directory. On any error the partially-written
+/// destination is removed so a failed copy can't leave a half-addon that a
+/// later scan would mistake for a real install.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    fn walk(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                walk(&from, &to)?;
+            } else {
+                fs::copy(&from, &to)?;
+            }
+        }
+        Ok(())
+    }
+    walk(src, dst).map_err(|e| {
+        let _ = fs::remove_dir_all(dst);
+        format!("{e}")
+    })
+}
+
+/// Copy every enabled addon folder (manifest-gated) from `source` into
+/// `target`, skipping addons the target already has (enabled OR disabled —
+/// never overwrite another instance's state). Metadata entries (ESOUI id,
+/// tags, version) ride along for the copied addons so the target instance
+/// can check updates for them immediately.
+pub(crate) fn copy_addons_between(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> CopyAddonsResult {
+    let mut copied: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+
+    for folder in snapshot_enabled_addons(source) {
+        let dst = target.join(&folder);
+        let dst_disabled = target.join(format!("{folder}.disabled"));
+        if dst.exists() || dst_disabled.exists() {
+            skipped.push(folder);
+            continue;
+        }
+        match copy_dir_recursive(&source.join(&folder), &dst) {
+            Ok(_) => copied.push(folder),
+            Err(e) => failed.push(format!("{folder}: {e}")),
+        }
+    }
+
+    if !copied.is_empty() {
+        let src_store = metadata::load_metadata(source);
+        let mut dst_store = metadata::load_metadata(target);
+        let mut changed = false;
+        for name in &copied {
+            if let Some(entry) = src_store.addons.get(name) {
+                dst_store.addons.insert(name.clone(), entry.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(e) = metadata::save_metadata(target, &dst_store) {
+                failed.push(format!("metadata: {e}"));
+            }
+        }
+    }
+
+    copied.sort();
+    skipped.sort();
+    failed.sort();
+    CopyAddonsResult {
+        copied,
+        skipped,
+        failed,
+    }
+}
+
+/// Copy the active instance's enabled addons into another DETECTED game
+/// instance (e.g. set up PTS from the live loadout). The target is validated
+/// against the freshly detected instance list — an arbitrary directory is
+/// rejected so this command can't be used to write outside ESO's folders.
+#[tauri::command]
+pub async fn copy_addons_to_instance(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    target_addons_path: String,
+) -> Result<CopyAddonsResult, String> {
+    let source = require_allowed_path(&state, &addons_path)?;
+    let target = PathBuf::from(&target_addons_path);
+    let target_canonical = target
+        .canonicalize()
+        .map_err(|e| format!("Target AddOns folder is not accessible: {e}"))?;
+
+    let is_detected_instance = crate::game_instances::detect_all_game_instances()
+        .iter()
+        .any(|inst| {
+            PathBuf::from(&inst.addons_path)
+                .canonicalize()
+                .is_ok_and(|p| p == target_canonical)
+        });
+    if !is_detected_instance {
+        return Err("Target folder is not a detected ESO game instance.".to_string());
+    }
+    if source.canonicalize().is_ok_and(|p| p == target_canonical) {
+        return Err("Source and target are the same instance.".to_string());
+    }
+
+    tokio::task::spawn_blocking(move || Ok(copy_addons_between(&source, &target_canonical)))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── Multi-Character SavedVariables ──────────────────────────
@@ -9257,6 +9596,157 @@ mod tests {
         assert_eq!(result.missing, vec!["Uninstalled"]);
         assert!(tmp.path().join("Libs").is_dir());
         assert!(tmp.path().join("kalpa-backups").is_dir());
+    }
+
+    #[test]
+    fn plan_profile_is_read_only_and_reports_all_buckets() {
+        // The preview must describe every pending change without renaming
+        // anything — otherwise "preview" would silently BE the activation.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "");
+        write_addon(tmp.path(), "AddonB.disabled", "");
+        write_addon(tmp.path(), "Dup", "");
+        write_addon(tmp.path(), "Dup.disabled", "");
+
+        let plan = plan_profile(tmp.path(), &profile_of(&["AddonB", "Gone"]));
+
+        assert_eq!(plan.to_enable, vec!["AddonB"]);
+        assert_eq!(plan.to_disable, vec!["AddonA"]);
+        assert_eq!(plan.blocked, vec!["Dup"]);
+        assert_eq!(plan.missing, vec!["Gone"]);
+        // Disk untouched: still the original four folders.
+        assert!(tmp.path().join("AddonA").is_dir());
+        assert!(tmp.path().join("AddonB.disabled").is_dir());
+        assert!(tmp.path().join("Dup").is_dir());
+        assert!(tmp.path().join("Dup.disabled").is_dir());
+    }
+
+    #[test]
+    fn profile_store_mirror_survives_addons_folder_wipe() {
+        let addons = tempfile::tempdir().unwrap();
+        let mirror_root = tempfile::tempdir().unwrap();
+        let mirror = mirror_root.path().join("mirror.json");
+
+        let store = ProfileStore {
+            profiles: vec![profile_of(&["AddonA"])],
+            active_profile: Some("test".to_string()),
+        };
+        save_profiles_with_mirror(addons.path(), Some(&mirror), &store).unwrap();
+
+        // Simulate an AddOns-folder wipe (reinstall / PTS cleanup): the
+        // primary store and its recovery artifacts are gone, the mirror isn't.
+        fs::remove_file(profiles_path(addons.path())).unwrap();
+        let bak = profiles_path(addons.path()).with_extension("json.bak");
+        if bak.exists() {
+            fs::remove_file(&bak).unwrap();
+        }
+
+        let loaded = load_profiles_with_mirror(addons.path(), Some(&mirror));
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].name, "test");
+        assert_eq!(loaded.active_profile.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn profile_store_primary_wins_over_mirror_when_present() {
+        // The mirror is a fallback, not a sync source: a present primary must
+        // never be shadowed by a stale mirror from an earlier save.
+        let addons = tempfile::tempdir().unwrap();
+        let mirror_root = tempfile::tempdir().unwrap();
+        let mirror = mirror_root.path().join("mirror.json");
+
+        let old = ProfileStore {
+            profiles: vec![profile_of(&["Old"])],
+            active_profile: None,
+        };
+        save_profiles_with_mirror(addons.path(), Some(&mirror), &old).unwrap();
+        // Newer save without the mirror (e.g. data dir temporarily unwritable).
+        let mut newer = ProfileStore {
+            profiles: vec![profile_of(&["New"])],
+            active_profile: None,
+        };
+        newer.profiles[0].name = "newer".to_string();
+        metadata::save_json_with_backup(&profiles_path(addons.path()), &newer).unwrap();
+
+        let loaded = load_profiles_with_mirror(addons.path(), Some(&mirror));
+        assert_eq!(loaded.profiles[0].name, "newer");
+    }
+
+    #[test]
+    fn copy_addons_between_copies_enabled_skips_existing_and_disabled() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        write_addon(src.path(), "AddonA", "");
+        // Nested content must arrive too.
+        let nested = src.path().join("AddonA").join("libs").join("inner");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("inner.lua"), "-- lua").unwrap();
+        write_addon(src.path(), "AddonB", "");
+        write_addon(src.path(), "Disabled.disabled", "");
+        write_addon(dst.path(), "AddonB", "");
+
+        let result = copy_addons_between(src.path(), dst.path());
+
+        assert_eq!(result.copied, vec!["AddonA"]);
+        assert_eq!(result.skipped, vec!["AddonB"]);
+        assert!(result.failed.is_empty());
+        assert!(dst.path().join("AddonA").join("AddonA.txt").is_file());
+        assert!(dst
+            .path()
+            .join("AddonA")
+            .join("libs")
+            .join("inner")
+            .join("inner.lua")
+            .is_file());
+        // Disabled addons are part of the source's OFF state — not copied.
+        assert!(!dst.path().join("Disabled").exists());
+        assert!(!dst.path().join("Disabled.disabled").exists());
+    }
+
+    #[test]
+    fn copy_addons_between_never_overwrites_target_disabled_copy() {
+        // Target has the addon disabled by choice; copying must not resurrect
+        // or duplicate it.
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        write_addon(src.path(), "AddonA", "");
+        write_addon(dst.path(), "AddonA.disabled", "");
+
+        let result = copy_addons_between(src.path(), dst.path());
+
+        assert_eq!(result.skipped, vec!["AddonA"]);
+        assert!(!dst.path().join("AddonA").exists());
+        assert!(dst.path().join("AddonA.disabled").is_dir());
+    }
+
+    #[test]
+    fn copy_addons_between_carries_metadata_for_copied_addons() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        write_addon(src.path(), "AddonA", "");
+
+        let mut store = metadata::MetadataStore::default();
+        store.addons.insert(
+            "AddonA".to_string(),
+            metadata::AddonMetadata {
+                esoui_id: 1234,
+                installed_version: "1.0".to_string(),
+                download_url: String::new(),
+                installed_at: String::new(),
+                tags: vec!["favorite".to_string()],
+                esoui_last_update: 0,
+            },
+        );
+        metadata::save_metadata(src.path(), &store).unwrap();
+
+        let result = copy_addons_between(src.path(), dst.path());
+        assert_eq!(result.copied, vec!["AddonA"]);
+
+        let dst_store = metadata::load_metadata(dst.path());
+        let entry = dst_store.addons.get("AddonA").expect("metadata copied");
+        assert_eq!(entry.esoui_id, 1234);
+        assert_eq!(entry.tags, vec!["favorite"]);
     }
 
     #[test]

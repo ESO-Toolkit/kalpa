@@ -1459,6 +1459,9 @@ function App() {
           selectedCount={selectedFolders.size}
           updatingAll={updatingAll}
           isOffline={isOffline}
+          instances={knownInstances}
+          activeAddonsPath={addonsPath}
+          onSwitchInstance={handlePathChangeClick}
           onBatchCancel={handleBatchCancel}
           onBatchDisable={handleBatchDisableClick}
           onBatchRemove={handleBatchRemoveClick}
@@ -1586,6 +1589,7 @@ function App() {
           onAuthChange={setAuthUser}
           onCheckForAppUpdate={handleCheckForAppUpdateClick}
           onCloseDialog={handleCloseDialog}
+          onInstancesDetected={setKnownInstances}
           onPathChange={handlePathChangeClick}
           onRefresh={handleRefresh}
           onShowDialog={handleOpenDialog}

@@ -188,6 +188,23 @@ export interface ActivateProfileResult {
   keptDependencies: string[];
 }
 
+/** Read-only preview of what activating a profile would change. */
+export interface ProfilePlan {
+  toEnable: string[];
+  toDisable: string[];
+  keptDependencies: string[];
+  missing: string[];
+  /** Addons that cannot be disabled because both `Foo` and `Foo.disabled`
+   * folders exist on disk. */
+  blocked: string[];
+}
+
+export interface CopyAddonsResult {
+  copied: string[];
+  skipped: string[];
+  failed: string[];
+}
+
 export interface CharacterInfo {
   server: string;
   name: string;
