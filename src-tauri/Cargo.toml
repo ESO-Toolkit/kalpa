@@ -68,7 +68,7 @@ keyring = { version = "3", features = ["windows-native"] }
 # pull transitively (currently webview2-com 0.38.2 / windows 0.61.x) — a
 # duplicate windows-core would make `.controller()`/`.cast()` type-mismatch. If a
 # tauri/wry bump moves webview2-com to a new minor, bump these two in lockstep.
-webview2-com = "0.38"
+webview2-com = "0.39"
 windows = "0.61"
 
 [profile.dev]
