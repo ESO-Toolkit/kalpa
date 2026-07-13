@@ -1883,10 +1883,14 @@ function EditorTab({
 
             {/* Right panel — Detail / Form (or search results while searching) */}
             <div className="flex flex-1 flex-col overflow-hidden p-3">
-              {searchQuery.trim() ? (
+              {searchQuery.trim() && debouncedQuery.trim() ? (
                 <SettingsSearchResults
                   tree={tree}
-                  query={searchQuery}
+                  // The debounced query drives the full-tree walk (same rationale
+                  // as the nav filter: per-keystroke DFS janks large SV files).
+                  // Gating the swap on searchQuery too makes clearing the box
+                  // return to the detail panel instantly.
+                  query={debouncedQuery}
                   overlay={overlay}
                   lamHints={lamHints}
                   knownCharacters={knownCharacters}
