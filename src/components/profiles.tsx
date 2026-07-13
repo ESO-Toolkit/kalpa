@@ -79,11 +79,16 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   };
 
   const handleActivate = async (name: string) => {
-    // Same gate as install/update/remove: renaming addon folders while ESO
-    // runs desyncs disk state from what the game loaded, so warn first.
-    if (!(await ensureEsoNotBlocking())) return;
+    // Re-entry guard + busy state must land BEFORE the first await: the
+    // buttons disable off `activating`, but a second click during the async
+    // ESO check below would otherwise start a concurrent activation whose
+    // interleaved renames leave disk state timing-dependent.
+    if (activating !== null) return;
     setActivating(name);
     try {
+      // Same gate as install/update/remove: renaming addon folders while ESO
+      // runs desyncs disk state from what the game loaded, so warn first.
+      if (!(await ensureEsoNotBlocking())) return;
       const result = await invokeOrThrow<ActivateProfileResult>("activate_profile", {
         addonsPath,
         profileName: name,
