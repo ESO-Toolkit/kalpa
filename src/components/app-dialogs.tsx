@@ -66,6 +66,7 @@ interface AppDialogsProps {
   onAuthChange: (user: AuthUser | null) => void;
   onCheckForAppUpdate: () => void;
   onCloseDialog: () => void;
+  onInstancesDetected: (instances: GameInstance[]) => void;
   onPathChange: (path: string) => void;
   onRefresh: () => void;
   onShowDialog: (dialog: Exclude<ActiveDialog, null>) => void;
@@ -106,6 +107,7 @@ function AppDialogsBase({
   onAuthChange,
   onCheckForAppUpdate,
   onCloseDialog,
+  onInstancesDetected,
   onPathChange,
   onRefresh,
   onShowDialog,
@@ -136,7 +138,15 @@ function AppDialogsBase({
       )}
 
       {activeDialog === "profiles" && (
-        <Profiles addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
+        <Profiles
+          addonsPath={addonsPath}
+          instanceLabel={
+            knownInstances.find((inst) => inst.addonsPath === addonsPath)?.displayLabel ?? null
+          }
+          enabledFolders={addons.filter((a) => !a.disabled).map((a) => a.folderName)}
+          onClose={onCloseDialog}
+          onRefresh={onRefresh}
+        />
       )}
 
       {activeDialog === "backups" && (
@@ -171,6 +181,7 @@ function AppDialogsBase({
           authUser={authUser}
           knownInstances={knownInstances}
           onAuthChange={onAuthChange}
+          onInstancesDetected={onInstancesDetected}
           onPathChange={onPathChange}
           onClose={onCloseDialog}
           onRefresh={onRefresh}

@@ -2,9 +2,12 @@ import { memo, useState, useRef, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
+  Check,
+  ChevronDown,
   CloudUpload,
   FileSliders,
   MinusIcon,
+  Monitor,
   PackageIcon,
   Plus,
   Power,
@@ -17,7 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/ui/logo";
 import { SimpleTooltip } from "@/components/ui/tooltip";
-import { PRESET_TAGS } from "@/types";
+import { PRESET_TAGS, type GameInstance } from "@/types";
 import { cn } from "@/lib/utils";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 
@@ -30,6 +33,10 @@ interface AppHeaderProps {
   selectedCount: number;
   updatingAll: boolean;
   isOffline?: boolean;
+  /** Detected ESO instances; the badge renders when at least one is known. */
+  instances: GameInstance[];
+  /** The AddOns path currently being managed (identifies the active instance). */
+  activeAddonsPath: string;
   onBatchCancel: () => void;
   onBatchDisable: () => void;
   onBatchRemove: () => void;
@@ -40,6 +47,95 @@ interface AppHeaderProps {
   onOpenSettings: () => void;
   onOpenLogUpload: () => void;
   onRefresh: () => void;
+  onSwitchInstance: (path: string) => void;
+}
+
+/** Header badge showing which ESO install is being managed, with a
+ * quick-switch menu when more than one instance exists. A user running
+ * live + PTS can otherwise silently install into the wrong game. */
+function InstanceBadge({
+  instances,
+  activeAddonsPath,
+  onSwitchInstance,
+}: {
+  instances: GameInstance[];
+  activeAddonsPath: string;
+  onSwitchInstance: (path: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  if (instances.length === 0 || !activeAddonsPath) return null;
+
+  const active = instances.find((inst) => inst.addonsPath === activeAddonsPath);
+  // A manually-browsed folder won't match any detected instance; still show
+  // where installs are going rather than guessing a region label.
+  const label = active?.displayLabel ?? "Custom folder";
+  const switchable = instances.length > 1;
+
+  return (
+    <div className="relative" ref={menuRef}>
+      <SimpleTooltip content={switchable ? "Switch ESO instance" : activeAddonsPath} side="bottom">
+        <button
+          type="button"
+          onClick={() => switchable && setOpen((v) => !v)}
+          aria-label={`Managing ${label}${switchable ? " — switch instance" : ""}`}
+          aria-expanded={open}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 font-mono text-[10px] font-medium tracking-wider text-white/50 backdrop-blur-sm transition-colors duration-300",
+            switchable
+              ? "cursor-pointer hover:border-accent-sky/20 hover:text-white/70"
+              : "cursor-default"
+          )}
+        >
+          <Monitor className="size-3" />
+          {label}
+          {switchable && (
+            <ChevronDown className={cn("size-2.5 transition-transform", open && "rotate-180")} />
+          )}
+        </button>
+      </SimpleTooltip>
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-[200px] rounded-xl border border-white/[0.06] bg-surface-overlay p-1 shadow-lg backdrop-blur-xl">
+          {instances.map((inst) => {
+            const isActive = inst.addonsPath === activeAddonsPath;
+            return (
+              <button
+                key={inst.id}
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  if (!isActive) onSwitchInstance(inst.addonsPath);
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs font-medium transition-colors hover:bg-white/[0.06]",
+                  isActive ? "text-sky-300" : "text-white/80"
+                )}
+              >
+                <Monitor className="size-3 shrink-0 text-muted-foreground" />
+                <span className="flex-1 truncate">{inst.displayLabel}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
+                </span>
+                {isActive && <Check className="size-3 shrink-0 text-sky-400" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function AppHeaderBase({
@@ -51,6 +147,9 @@ function AppHeaderBase({
   selectedCount,
   updatingAll,
   isOffline,
+  instances,
+  activeAddonsPath,
+  onSwitchInstance,
   onBatchCancel,
   onBatchDisable,
   onBatchRemove,
@@ -108,6 +207,11 @@ function AppHeaderBase({
           >
             esotk.com
           </button>
+          <InstanceBadge
+            instances={instances}
+            activeAddonsPath={activeAddonsPath}
+            onSwitchInstance={onSwitchInstance}
+          />
         </div>
       </div>
       <div className="flex-1" data-tauri-drag-region />
