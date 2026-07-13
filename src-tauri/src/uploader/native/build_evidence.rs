@@ -10,17 +10,27 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::uploader::types::{
-    KalpaBuildEvidence, KalpaFoodEvidence, KalpaPlayerBuildEvidence, KalpaScribedSkillEvidence,
+    KalpaBuildEvidence, KalpaFoodEvidence, KalpaMundusEvidence, KalpaPlayerBuildEvidence,
+    KalpaScribedSkillEvidence,
 };
 
 use super::encode::split_csv_quoted_pub;
 
 const SCHEMA_VERSION: u8 = 1;
-const EXTRACTOR_VERSION: u16 = 2;
+// Extractor-version history (schemaVersion stays 1 — all additive/wire-compatible):
+//   2 -> 3: scribed-skill Focus/Signature/Affix scripts (from the raw ABILITY_INFO line).
+//   3 -> 4: Mundus stone boon (from the raw PLAYER_INFO long-term effects).
+//   4 -> 5: full passives list (all long-term-effect ability ids; consumer classifies).
+//   5 -> 6: ESOTK Companion snapshots (the `companion` block; read from SavedVariables at
+//           publish time, not from the log — see uploader::native::companion).
+const EXTRACTOR_VERSION: u16 = 6;
 const SOURCE: &str = "kalpa-native-player-info";
 const CLASS_MASTERY_MAX_PICKS: usize = 2;
 const MAX_SCRIBED_SKILLS: usize = 12;
 const MAX_CHAMPION_POINT_PASSIVES: usize = 12;
+// Bound the full passives list. A build carries ~40-60 long-term effects; 256 leaves
+// generous headroom while keeping the payload small.
+const MAX_PASSIVES: usize = 256;
 
 const CHAMPION_POINT_PASSIVE_IDS: &[u32] = &[
     5857, 30923, 38963, 45546, 63663, 63880, 64079, 92134, 141899, 141942, 141991, 141993, 141997,
@@ -55,6 +65,11 @@ struct PlayerBuilder {
     champion_point_passives: Vec<u32>,
     passive_ability_ids: Vec<u32>,
     slotted_skill_ids: Vec<u32>,
+    /// This unit's scribing scripts, keyed by the scribed ability id. Persistent across
+    /// the unit's repeated `PLAYER_INFO` snapshots: a scribed ability id is shared across
+    /// players (only the Focus changes it), so scripts MUST be tracked per unit rather
+    /// than in the global ability map. Filled from `pending_scribing` at each `PLAYER_INFO`.
+    scribed_scripts: BTreeMap<u32, ScribedScripts>,
     saw_player_info: bool,
 }
 
@@ -63,6 +78,15 @@ struct AbilityEvidenceInfo {
     ability_id: u32,
     name: Option<String>,
     icon: Option<String>,
+}
+
+/// The three equipped scripts of a scribed ability, read verbatim from the extra
+/// fields of a scribed `ABILITY_INFO` line (focus, signature, affix in that order).
+#[derive(Debug, Clone, Default)]
+struct ScribedScripts {
+    focus: Option<String>,
+    signature: Option<String>,
+    affix: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -205,15 +229,34 @@ fn extract_from_lines(lines: &[&str], report_code: Option<String>) -> KalpaBuild
 struct BuildEvidenceAccumulator {
     players: PlayerAccumulator,
     ability_infos: BTreeMap<u32, AbilityEvidenceInfo>,
+    /// Scribing scripts seen since the last `PLAYER_INFO`. The log emits a player's
+    /// scribed `ABILITY_INFO` block immediately before that player's `PLAYER_INFO`, so
+    /// this buffer is flushed onto the next player and cleared.
+    pending_scribing: BTreeMap<u32, ScribedScripts>,
 }
 
 impl BuildEvidenceAccumulator {
     fn ingest_line(&mut self, line: &str) {
         let fields = split_csv_quoted_pub(line);
         match fields.get(1).map(|s| s.trim()) {
-            Some("ABILITY_INFO") => ingest_ability_info(&mut self.ability_infos, &fields),
+            Some("ABILITY_INFO") => {
+                ingest_ability_info(&mut self.ability_infos, &mut self.pending_scribing, &fields)
+            }
             Some("UNIT_ADDED") => ingest_unit_added(&mut self.players, &fields),
-            Some("PLAYER_INFO") => ingest_player_info(&mut self.players, &fields, line),
+            Some("PLAYER_INFO") => {
+                ingest_player_info(&mut self.players, &fields, line);
+                // Attribute the pending scribed-ability block to this player. Merge (not
+                // replace) so a repeated PLAYER_INFO that only re-emits some scribed
+                // abilities keeps the unit's earlier scripts for the untouched ones.
+                if let Some(unit_id) = fields.get(2).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    if !self.pending_scribing.is_empty() {
+                        let player = self.players.active_player_mut(unit_id);
+                        for (ability_id, scripts) in std::mem::take(&mut self.pending_scribing) {
+                            player.scribed_scripts.insert(ability_id, scripts);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -247,7 +290,13 @@ impl BuildEvidenceAccumulator {
                     "raw-unit-added"
                 };
                 let food = resolve_food(&p.passive_ability_ids, &ability_infos);
-                let scribed_skills = resolve_scribed_skills(&p.slotted_skill_ids, &ability_infos);
+                let mundus = resolve_mundus(&p.passive_ability_ids, &ability_infos);
+                let passives = dedup_capped(&p.passive_ability_ids, MAX_PASSIVES);
+                let scribed_skills = resolve_scribed_skills(
+                    &p.slotted_skill_ids,
+                    &p.scribed_scripts,
+                    &ability_infos,
+                );
                 KalpaPlayerBuildEvidence {
                     unit_id: p.unit_id,
                     unit_occurrence_id: Some(p.unit_occurrence_id),
@@ -261,7 +310,9 @@ impl BuildEvidenceAccumulator {
                     class_name,
                     class_mastery_passives: p.class_mastery_passives,
                     champion_point_passives: p.champion_point_passives,
+                    passives,
                     food,
+                    mundus,
                     scribed_skills,
                     evidence: evidence.to_string(),
                     confidence: "exact".to_string(),
@@ -275,11 +326,17 @@ impl BuildEvidenceAccumulator {
             source: SOURCE.to_string(),
             report_code,
             players,
+            // Populated at the publish site from SavedVariables (the log doesn't carry it).
+            companion: None,
         }
     }
 }
 
-fn ingest_ability_info(ability_infos: &mut BTreeMap<u32, AbilityEvidenceInfo>, fields: &[&str]) {
+fn ingest_ability_info(
+    ability_infos: &mut BTreeMap<u32, AbilityEvidenceInfo>,
+    pending_scribing: &mut BTreeMap<u32, ScribedScripts>,
+    fields: &[&str],
+) {
     let Some(ability_id) = fields.get(2).and_then(|s| parse_u32(s)) else {
         return;
     };
@@ -293,6 +350,18 @@ fn ingest_ability_info(ability_infos: &mut BTreeMap<u32, AbilityEvidenceInfo>, f
             name,
             icon,
         });
+
+    // A scribed ABILITY_INFO carries three extra fields — focus, signature, affix — that
+    // ESO Logs strips from its API. Buffer them for the next PLAYER_INFO to attribute to
+    // the owning player (the same ability id recurs per player with different scripts).
+    let scripts = ScribedScripts {
+        focus: fields.get(7).and_then(|s| non_empty_string(unquote(s))),
+        signature: fields.get(8).and_then(|s| non_empty_string(unquote(s))),
+        affix: fields.get(9).and_then(|s| non_empty_string(unquote(s))),
+    };
+    if scripts.focus.is_some() || scripts.signature.is_some() || scripts.affix.is_some() {
+        pending_scribing.insert(ability_id, scripts);
+    }
 }
 
 fn ingest_unit_added(players: &mut PlayerAccumulator, fields: &[&str]) {
@@ -395,6 +464,7 @@ fn ingest_player_info(players: &mut PlayerAccumulator, fields: &[&str], line: &s
 
 fn resolve_scribed_skills(
     slotted_skill_ids: &[u32],
+    scribed_scripts: &BTreeMap<u32, ScribedScripts>,
     ability_infos: &BTreeMap<u32, AbilityEvidenceInfo>,
 ) -> Vec<KalpaScribedSkillEvidence> {
     let mut seen = std::collections::BTreeSet::<u32>::new();
@@ -409,10 +479,14 @@ fn resolve_scribed_skills(
         if !info.icon.as_deref().is_some_and(is_grimoire_icon_slug) {
             continue;
         }
+        let scripts = scribed_scripts.get(ability_id);
         result.push(KalpaScribedSkillEvidence {
             ability_id: info.ability_id,
             name: info.name.clone(),
             icon: info.icon.clone(),
+            focus_script: scripts.and_then(|s| s.focus.clone()),
+            signature_script: scripts.and_then(|s| s.signature.clone()),
+            affix_script: scripts.and_then(|s| s.affix.clone()),
         });
         if result.len() >= MAX_SCRIBED_SKILLS {
             break;
@@ -432,6 +506,25 @@ fn resolve_food(
                 ability_id: *ability_id,
                 name: info.and_then(|value| value.name.clone()),
                 icon: info.and_then(|value| value.icon.clone()),
+            });
+        }
+    }
+    None
+}
+
+fn resolve_mundus(
+    passive_ability_ids: &[u32],
+    ability_infos: &BTreeMap<u32, AbilityEvidenceInfo>,
+) -> Option<KalpaMundusEvidence> {
+    for ability_id in passive_ability_ids {
+        let Some(info) = ability_infos.get(ability_id) else {
+            continue;
+        };
+        if info.icon.as_deref().is_some_and(is_mundus_icon_slug) {
+            return Some(KalpaMundusEvidence {
+                ability_id: *ability_id,
+                name: info.name.clone(),
+                icon: info.icon.clone(),
             });
         }
     }
@@ -619,6 +712,25 @@ fn ability_icon_slug(input: &str) -> Option<String> {
 
 fn is_grimoire_icon_slug(input: &str) -> bool {
     input.starts_with("ability_grimoire_")
+}
+
+fn is_mundus_icon_slug(input: &str) -> bool {
+    input.starts_with("ability_mundusstones_")
+}
+
+/// First-seen-order de-duplication of ability ids, bounded to `max` entries.
+fn dedup_capped(ability_ids: &[u32], max: usize) -> Vec<u32> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut result = Vec::new();
+    for &id in ability_ids {
+        if id > 0 && seen.insert(id) {
+            result.push(id);
+            if result.len() >= max {
+                break;
+            }
+        }
+    }
+    result
 }
 
 fn is_champion_point_passive(ability_id: u32) -> bool {
@@ -855,6 +967,57 @@ mod tests {
     }
 
     #[test]
+    fn extracts_mundus_from_player_info_long_term_effects() {
+        // The Mundus boon rides in the PLAYER_INFO long-term-effects array (index 0) with a
+        // distinctive `ability_mundusstones_*` icon — detected generically, no id list.
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "1,ABILITY_INFO,13984,\"Boon: The Shadow\",\"/esoui/art/icons/ability_mundusstones_012.dds\",F,T",
+            "1,ABILITY_INFO,45301,\"Feline Ambush\",\"/esoui/art/icons/ability_armor_006.dds\",F,T",
+            "2,PLAYER_INFO,1,[45301,13984,99999],[1,1,1],[],[63046],[40382]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+        let mundus = evidence.players[0]
+            .mundus
+            .as_ref()
+            .expect("mundus boon should be recovered");
+        assert_eq!(mundus.ability_id, 13984);
+        assert_eq!(mundus.name.as_deref(), Some("Boon: The Shadow"));
+        assert_eq!(mundus.icon.as_deref(), Some("ability_mundusstones_012"));
+    }
+
+    #[test]
+    fn forwards_the_full_passive_list_including_ids_the_cp_allowlist_drops() {
+        // The consumer (esotk) classifies passives against its own ability database, so
+        // Kalpa forwards the WHOLE long-term-effects array verbatim (deduped) — not just
+        // the CP subset. 999999 is not in CHAMPION_POINT_PASSIVE_IDS but must still ride.
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "2,PLAYER_INFO,1,[142079,999999,45301,142079],[1,1,1,1],[],[63046],[40382]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+        // Full list, first-seen order, deduped (the repeated 142079 appears once).
+        assert_eq!(evidence.players[0].passives, vec![142079, 999999, 45301]);
+        // The CP subset is still filtered to the allowlist (142079 is a CP star; the
+        // others are not), proving `passives` is the additive superset.
+        assert_eq!(evidence.players[0].champion_point_passives, vec![142079]);
+    }
+
+    #[test]
+    fn no_mundus_when_no_mundusstones_icon_present() {
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "1,ABILITY_INFO,45301,\"Feline Ambush\",\"/esoui/art/icons/ability_armor_006.dds\",F,T",
+            "2,PLAYER_INFO,1,[45301],[1],[],[63046],[40382]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+        assert!(evidence.players[0].mundus.is_none());
+    }
+
+    #[test]
     fn extracts_only_scribed_skills_from_player_bars() {
         let lines = [
             "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
@@ -870,6 +1033,77 @@ mod tests {
         assert_eq!(skills[0].ability_id, 220543);
         assert_eq!(skills[0].name.as_deref(), Some("Dazing Trample"));
         assert_eq!(skills[0].icon.as_deref(), Some("ability_grimoire_assault"));
+    }
+
+    #[test]
+    fn scribed_skills_carry_per_player_scripts_with_carry_over_and_respec() {
+        // Real capture shape: two players share the SAME scribed ability ids (217460
+        // Warding Burst, 217784 Leashing Soul) but with DIFFERENT scripts. The log emits
+        // each player's scribed ABILITY_INFO block immediately before that player's
+        // PLAYER_INFO, so scripts must be attributed per unit. At ts 55698 player 1
+        // respecs 217784, while 217460 is NOT re-emitted and must carry over player 1's
+        // OWN earlier scripts — never player 23's variant of the shared id.
+        let lines = [
+            "6,UNIT_ADDED,1,PLAYER,T,3,0,F,1,5,\"Uro\",\"@TheMrPancake\",1800204486173734503,50,1874,0,PLAYER_ALLY,T",
+            "6,UNIT_ADDED,23,PLAYER,F,4,0,F,117,4,\"Ally\",\"@Ally\",1000000,50,2318,0,PLAYER_ALLY,T",
+            "2408,ABILITY_INFO,217460,\"Warding Burst\",\"/esoui/art/icons/ability_grimoire_soulmagic2.dds\",F,T,\"Damage Shield\",\"Class Mastery\",\"Intellect and Endurance\"",
+            "2408,ABILITY_INFO,217784,\"Leashing Soul\",\"/esoui/art/icons/ability_grimoire_soulmagic1.dds\",F,T,\"Pull\",\"Druid's Resurgence\",\"Maim\"",
+            "2409,PLAYER_INFO,1,[],[],[],[217460,217784],[217460,217784]",
+            "2409,ABILITY_INFO,217460,\"Warding Burst\",\"/esoui/art/icons/ability_grimoire_soulmagic2.dds\",F,T,\"Damage Shield\",\"Crusader's Defiance\",\"Savagery and Prophecy\"",
+            "2409,ABILITY_INFO,217784,\"Leashing Soul\",\"/esoui/art/icons/ability_grimoire_soulmagic1.dds\",F,T,\"Pull\",\"Anchorite's Potency\",\"Resolve\"",
+            "2409,PLAYER_INFO,23,[],[],[],[186366,182977,38901,63044,40195,36514],[22095,39011,217460,217784,25267,189867]",
+            "55698,ABILITY_INFO,217784,\"Leashing Soul\",\"/esoui/art/icons/ability_grimoire_soulmagic1.dds\",F,T,\"Pull\",\"Lingering Torment\",\"Defile\"",
+            "55698,PLAYER_INFO,1,[],[],[],[217460,217784],[217460,217784]",
+            "55698,PLAYER_INFO,23,[],[],[],[186366,182977,38901,63044,40195,36514],[22095,39011,217460,217784,25267,189867]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+        let script_of = |unit: &str, ability: u32| -> KalpaScribedSkillEvidence {
+            evidence
+                .players
+                .iter()
+                .find(|p| p.unit_id == unit)
+                .unwrap_or_else(|| panic!("missing player unit {unit}"))
+                .scribed_skills
+                .iter()
+                .find(|s| s.ability_id == ability)
+                .unwrap_or_else(|| panic!("missing scribed ability {ability} for unit {unit}"))
+                .clone()
+        };
+
+        // Player 1: 217784 reflects the LATER respec (Lingering Torment / Defile) ...
+        let p1_soul = script_of("1", 217784);
+        assert_eq!(p1_soul.focus_script.as_deref(), Some("Pull"));
+        assert_eq!(
+            p1_soul.signature_script.as_deref(),
+            Some("Lingering Torment")
+        );
+        assert_eq!(p1_soul.affix_script.as_deref(), Some("Defile"));
+        // ... while 217460 (not re-emitted at 55698) carries over player 1's own earlier
+        // scripts, NOT player 23's variant of the same shared ability id.
+        let p1_ward = script_of("1", 217460);
+        assert_eq!(p1_ward.signature_script.as_deref(), Some("Class Mastery"));
+        assert_eq!(
+            p1_ward.affix_script.as_deref(),
+            Some("Intellect and Endurance")
+        );
+
+        // Player 23 keeps its own distinct scripts for the same shared ability ids.
+        let p23_soul = script_of("23", 217784);
+        assert_eq!(
+            p23_soul.signature_script.as_deref(),
+            Some("Anchorite's Potency")
+        );
+        assert_eq!(p23_soul.affix_script.as_deref(), Some("Resolve"));
+        let p23_ward = script_of("23", 217460);
+        assert_eq!(
+            p23_ward.signature_script.as_deref(),
+            Some("Crusader's Defiance")
+        );
+        assert_eq!(
+            p23_ward.affix_script.as_deref(),
+            Some("Savagery and Prophecy")
+        );
     }
 
     #[test]

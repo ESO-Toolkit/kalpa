@@ -27,6 +27,7 @@ use crate::AllowedAddonsPath;
 /// so the caller can report it as cancelled rather than an error. Not shown to
 /// the user — the caller maps it to a friendly message.
 const LIVE_CANCELLED_BEFORE_LAUNCH: &str = "__live_cancelled_before_launch__";
+const MAX_SHIPPED_FIGHTS: usize = 500;
 
 /// A live session slot. A session is registered as `Starting` *before* the
 /// (blocking) uploader handoff so a concurrent stop/unmount during that window
@@ -482,26 +483,61 @@ pub async fn uploader_preflight(
         let size_bytes = std::fs::metadata(&safe)
             .map_err(|e| format!("Failed to read file: {e}"))?
             .len();
-        let scan = scanner::scan_file(&safe)?;
-        let total_fights = scan.fights.len();
         let recommend_split = size_bytes > scanner::SPLIT_RECOMMEND_BYTES;
+        let fight_collect_limit = if recommend_split {
+            Some(0)
+        } else {
+            Some(MAX_SHIPPED_FIGHTS)
+        };
+        let scan = scanner::scan_file_with_fight_limit(&safe, fight_collect_limit)?;
+        let total_fights = scan.total_fights;
         // Don't ship a huge fight list over IPC: bound by fight COUNT (a dense
         // sub-512-MiB log can still hold thousands of fights, which would be a
         // ~MB payload + thousands of DOM rows). `total_fights` still drives the
         // count pills, so omitting the list is safe.
-        const MAX_SHIPPED_FIGHTS: usize = 500;
-        let fights = if recommend_split || total_fights > MAX_SHIPPED_FIGHTS {
-            Vec::new()
-        } else {
-            scan.fights
-        };
+        let fights_omitted = scan.fights.len() < total_fights;
         Ok::<_, String>(LogPreflight {
             path: file_path,
             size_bytes,
             sessions: scan.sessions,
             total_fights,
-            fights,
+            fights: scan.fights,
+            fights_omitted,
             recommend_split,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Preflight only the latest/current logging session. This gives the split
+/// workbench a per-fight list for the common "just this instance" workflow
+/// without scanning older sessions in a multi-GB log.
+#[tauri::command]
+pub async fn uploader_preflight_latest_session(
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<LogPreflight, String> {
+    let safe = confine_log_path(&allowed, &file_path)?;
+    let safe = safe.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let (scan, file_size_bytes) =
+            scanner::scan_latest_session_with_fight_limit(&safe, Some(MAX_SHIPPED_FIGHTS))?;
+        let total_fights = scan.total_fights;
+        let latest_size = scan
+            .sessions
+            .first()
+            .map(|s| s.size_bytes)
+            .unwrap_or(file_size_bytes);
+        let fights_omitted = scan.fights.len() < total_fights;
+        Ok::<_, String>(LogPreflight {
+            path: file_path,
+            size_bytes: latest_size,
+            sessions: scan.sessions,
+            total_fights,
+            fights: scan.fights,
+            fights_omitted,
+            recommend_split: latest_size > scanner::SPLIT_RECOMMEND_BYTES,
         })
     })
     .await
@@ -610,6 +646,27 @@ pub async fn uploader_split_to_disk(
     // Reuse the preflight's sessions (the UI passes them) to avoid a second full
     // scan of a multi-GB file; fall back to scanning when not supplied.
     tokio::task::spawn_blocking(move || splitter::split_by_session(&safe, &out_str, sessions))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Fast path for the common case: split only the latest/current session from a
+/// large log without preflight-scanning the whole file. Uses the same app-owned
+/// destination and confinement as the full split workbench.
+#[tauri::command]
+pub async fn uploader_split_latest_session_to_disk(
+    app: tauri::AppHandle,
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<Vec<String>, String> {
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
+    let out_root = split_output_root(&app)?;
+    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_dir = out_root.join(format!("split-{}", now_ms()));
+    let out_str = out_dir.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || splitter::split_latest_session(&safe, &out_str))
         .await
         .map_err(|e| format!("Task failed: {e}"))?
 }
@@ -1028,7 +1085,6 @@ pub struct UploadDispatch {
 pub async fn uploader_upload_log(
     app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
-    auth_state: State<'_, AuthState>,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
     file_path: String,
     options: UploadOptions,
@@ -1074,7 +1130,7 @@ pub async fn uploader_upload_log(
                 .await
                 .map_err(|e| format!("Fight-count task failed: {e}"))
                 .and_then(|r| r)
-                .map(|s| s.fights.len())
+                .map(|s| s.total_fights)
                 .unwrap_or_else(|e| {
                     eprintln!("[uploader] fight count scan failed: {e}");
                     0
@@ -1128,7 +1184,20 @@ pub async fn uploader_upload_log(
     // uploader. The native path itself also self-checks the built segment and
     // falls back if it is ever malformed (see `run_native_upload`).
     let native_opt_in = native_opt_in.unwrap_or(false);
-    let routing = transport::assess_native_routing(&dispatch_path, native_opt_in);
+    // C1: pass the current sign-in state so an opted-in-but-signed-out upload routes to
+    // the official uploader instead of a native attempt that would hard-fail "Not signed
+    // in" and settle the record Failed. The routing scan also streams up to
+    // MAX_NATIVE_BYTES off disk, so run it on a blocking thread (mirrors the fight-count
+    // and native-upload scans) to keep it off the async executor.
+    let has_session = session.has_session();
+    let routing = {
+        let scan_path = dispatch_path.clone();
+        tokio::task::spawn_blocking(move || {
+            transport::assess_native_routing(&scan_path, native_opt_in, has_session)
+        })
+        .await
+        .map_err(|e| format!("Routing scan task failed: {e}"))?
+    };
     let use_native = matches!(routing, transport::NativeRouting::Native);
     if let transport::NativeRouting::Fallback(reason) = &routing {
         // Honest diagnostics: why native wasn't used. Logged only (not user-facing
@@ -1196,53 +1265,85 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
+            // Extraction re-parses the whole (possibly multi-GB) log, so run it on a
+            // blocking thread instead of the async executor. build_evidence stays
+            // synchronous here so it can still ride back in the record + UploadDispatch.
             let build_evidence = if use_native {
-                report.as_ref().and_then(|report| {
-                    match super::native::build_evidence::extract_from_file(
-                        &safe,
-                        Some(report.code.clone()),
-                    ) {
-                        Ok(evidence) if !evidence.players.is_empty() => Some(evidence),
-                        Ok(_) => None,
-                        Err(e) => {
-                            eprintln!("[uploader] native build evidence unavailable: {e}");
-                            None
+                match report.as_ref() {
+                    Some(report) => {
+                        let safe = safe.clone();
+                        let code = report.code.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            super::native::build_evidence::extract_from_file(&safe, Some(code)).map(
+                                |mut evidence| {
+                                    if !evidence.players.is_empty() {
+                                        // Best-effort: attach the logging player's ESOTK
+                                        // Companion snapshots (read from SavedVariables).
+                                        // Never blocks the sidecar; stays on this blocking
+                                        // thread because it reads files too.
+                                        evidence.companion =
+                                            super::native::companion::read_for_upload(&evidence);
+                                    }
+                                    evidence
+                                },
+                            )
+                        })
+                        .await
+                        {
+                            Ok(Ok(evidence)) if !evidence.players.is_empty() => Some(evidence),
+                            Ok(Ok(_)) => None,
+                            Ok(Err(e)) => {
+                                eprintln!("[uploader] native build evidence unavailable: {e}");
+                                None
+                            }
+                            Err(e) => {
+                                eprintln!("[uploader] native build evidence task failed: {e}");
+                                None
+                            }
                         }
                     }
-                })
+                    None => None,
+                }
             } else {
                 None
             };
+            // Publish the sidecar off the async executor: get_valid_token can make
+            // blocking OAuth round-trips and the PUT is blocking, so both run on a
+            // detached thread that re-fetches AuthState via the AppHandle (State can't
+            // cross threads) — mirrors spawn_native_live_build_evidence_sidecar.
             if use_native {
                 if let (Some(report), Some(evidence)) = (&report, &build_evidence) {
-                    match auth_state.get_valid_token() {
-                        Ok(Some(token)) => {
-                            let report_code = report.code.clone();
-                            let evidence = evidence.clone();
-                            let visibility = options.visibility;
-                            std::thread::spawn(move || {
-                                if let Err(e) = super::sidecar::publish_build_evidence(
-                                    &report_code,
-                                    &evidence,
-                                    visibility,
-                                    &token,
-                                ) {
+                    if super::sidecar::should_publish_build_evidence(options.visibility) {
+                        let app = app.clone();
+                        let report_code = report.code.clone();
+                        let evidence = evidence.clone();
+                        let visibility = options.visibility;
+                        std::thread::spawn(move || {
+                            match app.state::<AuthState>().get_valid_token() {
+                                Ok(Some(token)) => {
+                                    if let Err(e) = super::sidecar::publish_build_evidence(
+                                        &report_code,
+                                        &evidence,
+                                        visibility,
+                                        &token,
+                                    ) {
+                                        eprintln!(
+                                            "[uploader] native build evidence sidecar skipped: {e}"
+                                        );
+                                    }
+                                }
+                                Ok(None) => {
                                     eprintln!(
-                                        "[uploader] native build evidence sidecar skipped: {e}"
+                                        "[uploader] native build evidence sidecar skipped: no ESO Logs OAuth token available"
                                     );
                                 }
-                            });
-                        }
-                        Ok(None) => {
-                            eprintln!(
-                                "[uploader] native build evidence sidecar skipped: no ESO Logs OAuth token available"
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[uploader] native build evidence sidecar skipped: auth unavailable: {e}"
-                            );
-                        }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[uploader] native build evidence sidecar skipped: auth unavailable: {e}"
+                                    );
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -1336,7 +1437,11 @@ fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) 
             job.start_offset,
             Some(job.report_code.clone()),
         ) {
-            Ok(evidence) if !evidence.players.is_empty() => evidence,
+            Ok(mut evidence) if !evidence.players.is_empty() => {
+                // Best-effort: attach the logging player's ESOTK Companion snapshots.
+                evidence.companion = super::native::companion::read_for_upload(&evidence);
+                evidence
+            }
             Ok(_) => return,
             Err(e) => {
                 eprintln!(
@@ -1366,11 +1471,12 @@ fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) 
 
         match job.app.state::<AuthState>().get_valid_token() {
             Ok(Some(token)) => {
-                if let Err(e) = super::sidecar::publish_build_evidence(
+                if let Err(e) = super::sidecar::publish_build_evidence_unless(
                     &job.report_code,
                     &evidence,
                     job.visibility,
                     &token,
+                    || job.latest_generation.load(Ordering::SeqCst) != job.generation,
                 ) {
                     eprintln!(
                         "[uploader] native live build evidence sidecar skipped ({}): {e}",
