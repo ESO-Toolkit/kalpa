@@ -107,14 +107,7 @@ type Mode = "manual" | "live";
  *  order (highest first): a running live session (armed→live), an in-flight manual
  *  upload, an in-progress scan, a scanned-ready selection, else idle. */
 type HeaderPhase =
-  | "idle"
-  | "scanning"
-  | "ready"
-  | "uploading"
-  | "armed"
-  | "live"
-  | "attention"
-  | "signedOut";
+  "idle" | "scanning" | "ready" | "uploading" | "armed" | "live" | "attention" | "signedOut";
 
 const DEFAULT_OPTIONS: UploadOptions = {
   region: 1,
