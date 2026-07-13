@@ -10,20 +10,27 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::uploader::types::{
-    KalpaBuildEvidence, KalpaFoodEvidence, KalpaPlayerBuildEvidence, KalpaScribedSkillEvidence,
+    KalpaBuildEvidence, KalpaFoodEvidence, KalpaMundusEvidence, KalpaPlayerBuildEvidence,
+    KalpaScribedSkillEvidence,
 };
 
 use super::encode::split_csv_quoted_pub;
 
 const SCHEMA_VERSION: u8 = 1;
-// Bumped 2 -> 3: scribed-skill evidence now carries the equipped Focus/Signature/Affix
-// scripts (recovered from the raw `ABILITY_INFO` line, which ESO Logs strips from its
-// API). Wire-compatible additive change — schemaVersion stays 1.
-const EXTRACTOR_VERSION: u16 = 3;
+// Extractor-version history (schemaVersion stays 1 — all additive/wire-compatible):
+//   2 -> 3: scribed-skill Focus/Signature/Affix scripts (from the raw ABILITY_INFO line).
+//   3 -> 4: Mundus stone boon (from the raw PLAYER_INFO long-term effects).
+//   4 -> 5: full passives list (all long-term-effect ability ids; consumer classifies).
+//   5 -> 6: ESOTK Companion snapshots (the `companion` block; read from SavedVariables at
+//           publish time, not from the log — see uploader::native::companion).
+const EXTRACTOR_VERSION: u16 = 6;
 const SOURCE: &str = "kalpa-native-player-info";
 const CLASS_MASTERY_MAX_PICKS: usize = 2;
 const MAX_SCRIBED_SKILLS: usize = 12;
 const MAX_CHAMPION_POINT_PASSIVES: usize = 12;
+// Bound the full passives list. A build carries ~40-60 long-term effects; 256 leaves
+// generous headroom while keeping the payload small.
+const MAX_PASSIVES: usize = 256;
 
 const CHAMPION_POINT_PASSIVE_IDS: &[u32] = &[
     5857, 30923, 38963, 45546, 63663, 63880, 64079, 92134, 141899, 141942, 141991, 141993, 141997,
@@ -283,6 +290,8 @@ impl BuildEvidenceAccumulator {
                     "raw-unit-added"
                 };
                 let food = resolve_food(&p.passive_ability_ids, &ability_infos);
+                let mundus = resolve_mundus(&p.passive_ability_ids, &ability_infos);
+                let passives = dedup_capped(&p.passive_ability_ids, MAX_PASSIVES);
                 let scribed_skills = resolve_scribed_skills(
                     &p.slotted_skill_ids,
                     &p.scribed_scripts,
@@ -301,7 +310,9 @@ impl BuildEvidenceAccumulator {
                     class_name,
                     class_mastery_passives: p.class_mastery_passives,
                     champion_point_passives: p.champion_point_passives,
+                    passives,
                     food,
+                    mundus,
                     scribed_skills,
                     evidence: evidence.to_string(),
                     confidence: "exact".to_string(),
@@ -315,6 +326,8 @@ impl BuildEvidenceAccumulator {
             source: SOURCE.to_string(),
             report_code,
             players,
+            // Populated at the publish site from SavedVariables (the log doesn't carry it).
+            companion: None,
         }
     }
 }
@@ -493,6 +506,25 @@ fn resolve_food(
                 ability_id: *ability_id,
                 name: info.and_then(|value| value.name.clone()),
                 icon: info.and_then(|value| value.icon.clone()),
+            });
+        }
+    }
+    None
+}
+
+fn resolve_mundus(
+    passive_ability_ids: &[u32],
+    ability_infos: &BTreeMap<u32, AbilityEvidenceInfo>,
+) -> Option<KalpaMundusEvidence> {
+    for ability_id in passive_ability_ids {
+        let Some(info) = ability_infos.get(ability_id) else {
+            continue;
+        };
+        if info.icon.as_deref().is_some_and(is_mundus_icon_slug) {
+            return Some(KalpaMundusEvidence {
+                ability_id: *ability_id,
+                name: info.name.clone(),
+                icon: info.icon.clone(),
             });
         }
     }
@@ -680,6 +712,25 @@ fn ability_icon_slug(input: &str) -> Option<String> {
 
 fn is_grimoire_icon_slug(input: &str) -> bool {
     input.starts_with("ability_grimoire_")
+}
+
+fn is_mundus_icon_slug(input: &str) -> bool {
+    input.starts_with("ability_mundusstones_")
+}
+
+/// First-seen-order de-duplication of ability ids, bounded to `max` entries.
+fn dedup_capped(ability_ids: &[u32], max: usize) -> Vec<u32> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut result = Vec::new();
+    for &id in ability_ids {
+        if id > 0 && seen.insert(id) {
+            result.push(id);
+            if result.len() >= max {
+                break;
+            }
+        }
+    }
+    result
 }
 
 fn is_champion_point_passive(ability_id: u32) -> bool {
@@ -913,6 +964,57 @@ mod tests {
             evidence.players[0].class_mastery_passives,
             vec![263603, 263604]
         );
+    }
+
+    #[test]
+    fn extracts_mundus_from_player_info_long_term_effects() {
+        // The Mundus boon rides in the PLAYER_INFO long-term-effects array (index 0) with a
+        // distinctive `ability_mundusstones_*` icon — detected generically, no id list.
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "1,ABILITY_INFO,13984,\"Boon: The Shadow\",\"/esoui/art/icons/ability_mundusstones_012.dds\",F,T",
+            "1,ABILITY_INFO,45301,\"Feline Ambush\",\"/esoui/art/icons/ability_armor_006.dds\",F,T",
+            "2,PLAYER_INFO,1,[45301,13984,99999],[1,1,1],[],[63046],[40382]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+        let mundus = evidence.players[0]
+            .mundus
+            .as_ref()
+            .expect("mundus boon should be recovered");
+        assert_eq!(mundus.ability_id, 13984);
+        assert_eq!(mundus.name.as_deref(), Some("Boon: The Shadow"));
+        assert_eq!(mundus.icon.as_deref(), Some("ability_mundusstones_012"));
+    }
+
+    #[test]
+    fn forwards_the_full_passive_list_including_ids_the_cp_allowlist_drops() {
+        // The consumer (esotk) classifies passives against its own ability database, so
+        // Kalpa forwards the WHOLE long-term-effects array verbatim (deduped) — not just
+        // the CP subset. 999999 is not in CHAMPION_POINT_PASSIVE_IDS but must still ride.
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "2,PLAYER_INFO,1,[142079,999999,45301,142079],[1,1,1,1],[],[63046],[40382]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+        // Full list, first-seen order, deduped (the repeated 142079 appears once).
+        assert_eq!(evidence.players[0].passives, vec![142079, 999999, 45301]);
+        // The CP subset is still filtered to the allowlist (142079 is a CP star; the
+        // others are not), proving `passives` is the additive superset.
+        assert_eq!(evidence.players[0].champion_point_passives, vec![142079]);
+    }
+
+    #[test]
+    fn no_mundus_when_no_mundusstones_icon_present() {
+        let lines = [
+            "0,UNIT_ADDED,1,PLAYER,T,1,0,F,2,9,\"Arc Spark\",\"@tester\",111,50,1700,0,PLAYER_ALLY,T",
+            "1,ABILITY_INFO,45301,\"Feline Ambush\",\"/esoui/art/icons/ability_armor_006.dds\",F,T",
+            "2,PLAYER_INFO,1,[45301],[1],[],[63046],[40382]",
+        ];
+
+        let evidence = extract_from_lines(&lines, None);
+        assert!(evidence.players[0].mundus.is_none());
     }
 
     #[test]

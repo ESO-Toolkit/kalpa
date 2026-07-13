@@ -687,6 +687,7 @@ mod tests {
             source: "kalpa-native-raw-log".into(),
             report_code: Some("ABC123".into()),
             players: vec![],
+            companion: None,
         };
 
         assert!(apply_attach_build_evidence(

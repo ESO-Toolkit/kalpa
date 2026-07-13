@@ -23,6 +23,20 @@ pub(crate) fn publish_build_evidence(
     visibility: Visibility,
     access_token: &str,
 ) -> Result<(), String> {
+    publish_build_evidence_unless(report_code, evidence, visibility, access_token, || false)
+}
+
+/// Like [`publish_build_evidence`], but `superseded` is re-checked between retry attempts.
+/// Live uploads publish successive evidence generations (report-open, first-fight,
+/// finished); without this, an older generation stuck in the transient-retry loop could
+/// PUT stale evidence after a newer generation already published.
+pub(crate) fn publish_build_evidence_unless(
+    report_code: &str,
+    evidence: &KalpaBuildEvidence,
+    visibility: Visibility,
+    access_token: &str,
+    superseded: impl Fn() -> bool,
+) -> Result<(), String> {
     if !should_publish_build_evidence(visibility) {
         return Ok(());
     }
@@ -89,6 +103,11 @@ pub(crate) fn publish_build_evidence(
         std::thread::sleep(std::time::Duration::from_millis(
             500 * (1u64 << (attempt - 1)),
         ));
+        // A newer evidence generation may have published while we backed off —
+        // retrying now would overwrite it with stale data.
+        if superseded() {
+            return Err("Build-evidence sidecar publish superseded by a newer generation.".into());
+        }
     }
 }
 
