@@ -1080,8 +1080,14 @@ fn unescape_lua(s: &str) -> String {
                     i = j;
                 }
                 _ => {
-                    out.push(c as char);
-                    i += 2;
+                    // Unknown escape: ESO's Lua 5.1 yields the escaped char itself.
+                    // The byte after the backslash can start a multi-byte UTF-8
+                    // char — decode it as a char; advancing 2 bytes would land
+                    // mid-character and the next `s[i..]` slice would panic
+                    // (release builds abort on panic).
+                    let ch = s[i + 1..].chars().next().unwrap_or('\\');
+                    out.push(ch);
+                    i += 1 + ch.len_utf8();
                 }
             }
         } else {
@@ -1139,6 +1145,20 @@ mod tests {
         key: &str,
     ) -> Option<&'a Vec<LamDropdownChoice>> {
         hits.iter().find(|(k, _)| k == key).map(|(_, c)| c)
+    }
+
+    #[test]
+    fn unescape_backslash_before_multibyte_char_does_not_panic() {
+        // `\é` etc. — legal in ESO's Lua 5.1 (unknown escapes yield the char).
+        // Regression: the fallback arm advanced 2 bytes past a multi-byte char,
+        // landing mid-character and panicking on the next slice.
+        assert_eq!(unescape_lua(r"\é"), "é");
+        assert_eq!(unescape_lua(r"a\éb"), "aéb");
+        assert_eq!(unescape_lua(r"\日本"), "日本");
+        // Trailing lone backslash keeps the old pass-through behaviour.
+        assert_eq!(unescape_lua(r"a\"), "a\\");
+        // Known escapes are unaffected.
+        assert_eq!(unescape_lua(r"a\nb\t\\"), "a\nb\t\\");
     }
 
     #[test]

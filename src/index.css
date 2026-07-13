@@ -373,6 +373,17 @@
   }
 }
 
+/* Pause the ambient orb layer and the dialog shimmer while the window is hidden
+ * (tray/minimized). The root .app-hidden class is toggled from AppBackground on
+ * document visibilitychange. animation-play-state freezes the animations in place
+ * so they resume identically — no visible change while the window is shown. */
+:root.app-hidden [data-slot="app-background"] * {
+  animation-play-state: paused !important;
+}
+:root.app-hidden [data-slot="dialog-header"]::before {
+  animation-play-state: paused !important;
+}
+
 /* === Noise Texture Overlay === */
 #root::after {
   content: "";
@@ -384,6 +395,20 @@
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   background-repeat: repeat;
   background-size: 256px 256px;
+}
+
+/* === Redundant backdrop-blur inside opaque overlays ===
+ * GlassPanels rendered inside a dialog/select popup sit on the ~95%-opaque
+ * surface-overlay surface, so their backdrop-blur blurs an almost-flat backdrop
+ * = no perceptible effect, while each still forces its own GPU backdrop-snapshot
+ * texture + compositor layer. Drop just the filter for those nested panels
+ * (tint, border, and shadow are kept) to shed a handful of GPU layers at peak
+ * (e.g. the uploader dialog open). The popup's OWN backdrop-blur — which frosts
+ * the app content behind the modal — is deliberately left intact. */
+[data-slot="dialog-popup"] [data-slot="glass-panel"],
+[data-slot="select-content"] [data-slot="glass-panel"] {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* === Button Base Transitions === */
