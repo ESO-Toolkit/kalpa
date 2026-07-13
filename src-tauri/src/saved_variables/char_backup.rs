@@ -47,6 +47,21 @@ pub struct CharBlock {
     pub value: Vec<u8>,
 }
 
+impl CharBlock {
+    /// The distinct world-layer key this block was captured under (e.g.
+    /// `b"NA Megaserver"`), if any. `None` for an account-keyed block, which
+    /// carries no world layer at all. Used to detect when an Unknown-server
+    /// backup (which takes world-scoped subtrees from every megaserver, since
+    /// it has no single world to filter to) has silently spanned more than one
+    /// megaserver — i.e. bundled a same-named twin from another server.
+    pub fn world_layer(&self) -> Option<&[u8]> {
+        self.path
+            .iter()
+            .find(|k| is_world_layer(k.as_slice()))
+            .map(|k| k.as_slice())
+    }
+}
+
 #[inline]
 fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\r' | b'\n')

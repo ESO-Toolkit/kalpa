@@ -22,12 +22,7 @@ import type {
 } from "@/types";
 
 type MigrationPhase =
-  | "preconditions"
-  | "snapshot"
-  | "dry-run"
-  | "confirm"
-  | "migrating"
-  | "complete";
+  "preconditions" | "snapshot" | "dry-run" | "confirm" | "migrating" | "complete";
 
 interface MigrationWizardProps {
   addonsPath: string;

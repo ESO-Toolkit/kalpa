@@ -20,6 +20,11 @@ export function isSortMode(value: string): value is SortMode {
   return (VALID_SORT_MODES as readonly string[]).includes(value);
 }
 
+// Shared collator: `a.localeCompare(b)` constructs collation state per call,
+// which multiplies across the O(n log n) comparisons of every list sort. One
+// default-locale, default-options Collator is semantically identical.
+const collator = new Intl.Collator();
+
 export function filterAddons(
   addons: AddonManifest[],
   opts: {
@@ -60,19 +65,27 @@ export function filterAddons(
           return true;
       }
     })
+    .map((addon) => ({
+      // Decorate-sort-undecorate: lowercase once per element instead of once
+      // per comparison (the sort would otherwise allocate two fresh strings
+      // per comparison, ~2·n·log n allocations per keystroke/recompute).
+      addon,
+      titleKey: addon.title.toLowerCase(),
+      authorKey: addon.author.toLowerCase(),
+    }))
     .sort((left, right) => {
-      const byName = () => left.title.toLowerCase().localeCompare(right.title.toLowerCase());
+      const byName = () => collator.compare(left.titleKey, right.titleKey);
       switch (opts.sortMode) {
         case "author": {
-          const byAuthor = left.author.toLowerCase().localeCompare(right.author.toLowerCase());
+          const byAuthor = collator.compare(left.authorKey, right.authorKey);
           return byAuthor !== 0 ? byAuthor : byName();
         }
         case "updated": {
           // Most recently updated upstream (ESOUI) first. Addons with no known
           // update time (0 — not on ESOUI or never update-checked) sort last,
           // then ties break by name so the order stays stable and legible.
-          const lu = left.esouiLastUpdate || 0;
-          const ru = right.esouiLastUpdate || 0;
+          const lu = left.addon.esouiLastUpdate || 0;
+          const ru = right.addon.esouiLastUpdate || 0;
           if (lu !== ru) {
             if (lu === 0) return 1;
             if (ru === 0) return -1;
@@ -85,8 +98,8 @@ export function filterAddons(
           // install/update). The timestamp is an ISO 8601 UTC string, so
           // lexicographic comparison is chronological. Addons Kalpa never
           // downloaded (empty string) sort last, ties break by name.
-          const li = left.installedAt || "";
-          const ri = right.installedAt || "";
+          const li = left.addon.installedAt || "";
+          const ri = right.addon.installedAt || "";
           if (li !== ri) {
             if (!li) return 1;
             if (!ri) return -1;
@@ -98,7 +111,8 @@ export function filterAddons(
         default:
           return byName();
       }
-    });
+    })
+    .map((entry) => entry.addon);
 }
 
 export function computeFilterCounts(

@@ -591,7 +591,8 @@ pub fn restore_backup_file(addons_dir: &Path, file_name: &str) -> Result<SvFileS
         return Err(format!("No backup found for {file_name}"));
     }
 
-    fs::copy(&bak_path, &file_path).map_err(|e| format!("Failed to restore backup: {e}"))?;
+    let bytes = fs::read(&bak_path).map_err(|e| format!("Failed to restore backup: {e}"))?;
+    write_raw_bytes(&sv_dir, file_name, &bytes)?;
 
     file_stamp(&file_path)
 }

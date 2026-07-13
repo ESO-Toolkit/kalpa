@@ -19,14 +19,28 @@ import { UNKNOWN_SERVER, defaultCharacterBackupName } from "@/lib/character-back
 interface CharactersProps {
   addonsPath: string;
   onClose: () => void;
+  /** True when a create/restore/delete/character-backup is in flight anywhere
+   * in the app (Backups or Characters dialog), so destructive actions here
+   * stay gated even if the user switches dialogs mid-operation. */
+  sharedOpInFlight: boolean;
+  onSharedOpInFlightChange: (busy: boolean) => void;
 }
 
-export function Characters({ addonsPath, onClose }: CharactersProps) {
+export function Characters({
+  addonsPath,
+  onClose,
+  sharedOpInFlight,
+  onSharedOpInFlightChange,
+}: CharactersProps) {
   const [characters, setCharacters] = useState<CharacterInfo[]>([]);
   const [skippedFiles, setSkippedFiles] = useState(0);
   const [loading, setLoading] = useState(true);
   const [backupName, setBackupName] = useState("");
   const [backingUp, setBackingUp] = useState<string | null>(null);
+
+  // Gates the Backup Settings button: local ops here, or an in-flight op on
+  // the other backup surface (Backups) after a dialog switch.
+  const anyBackupOpInFlight = sharedOpInFlight || backingUp !== null;
 
   useEffect(() => {
     async function load() {
@@ -53,20 +67,35 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
     // same-name twins don't overwrite each other's backup.
     const name = backupName.trim() || defaultCharacterBackupName(char.name, char.server);
     setBackingUp(`${char.server}-${char.name}`);
+    onSharedOpInFlightChange(true);
     try {
-      const count = await invokeOrThrow<number>("backup_character_settings", {
+      const { restoredFiles, worldsSpanned } = await invokeOrThrow<{
+        restoredFiles: number;
+        worldsSpanned: number;
+      }>("backup_character_settings", {
         addonsPath,
         characterName: char.name,
         server: char.server,
         backupName: name,
       });
       toast.success(
-        `Backed up ${char.name}'s settings (${count} addon file${count !== 1 ? "s" : ""})`
+        `Backed up ${char.name}'s settings (${restoredFiles} addon file${
+          restoredFiles !== 1 ? "s" : ""
+        })`
       );
+      if (worldsSpanned > 1) {
+        toast.warning(
+          `Heads up: ${char.name} exists on more than one server, so this backup captured data ` +
+            `for all of them. Restoring it will overwrite each same-named character. Set the ` +
+            `character's server to back up just one.`,
+          { duration: 9000 }
+        );
+      }
     } catch (e) {
       toast.error(getTauriErrorMessage(e));
     } finally {
       setBackingUp(null);
+      onSharedOpInFlightChange(false);
     }
   };
 
@@ -164,7 +193,7 @@ export function Characters({ addonsPath, onClose }: CharactersProps) {
                                 size="sm"
                                 variant="outline"
                                 onClick={() => handleBackup(char)}
-                                disabled={backingUp === `${char.server}-${char.name}`}
+                                disabled={anyBackupOpInFlight}
                               >
                                 {backingUp === `${char.server}-${char.name}`
                                   ? "Backing up..."

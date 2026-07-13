@@ -147,7 +147,22 @@ pub fn restore_backup_file(
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
     }
 
-    fs::copy(&backup_file, &dest).map_err(|e| format!("Failed to restore file: {e}"))?;
+    // Atomic temp-file + rename to avoid a truncation window on the live addon
+    // file if the app crashes or Controlled Folder Access blocks the write mid-copy.
+    let bytes = fs::read(&backup_file).map_err(|e| format!("Failed to restore file: {e}"))?;
+    let tmp_name = format!(
+        "{}.kalpa-restore-tmp",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+    );
+    let tmp_path = dest
+        .parent()
+        .map(|p| p.join(&tmp_name))
+        .unwrap_or_else(|| std::path::PathBuf::from(&tmp_name));
+    fs::write(&tmp_path, &bytes).map_err(|e| format!("Failed to write temp file: {e}"))?;
+    fs::rename(&tmp_path, &dest).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        format!("Failed to restore file: {e}")
+    })?;
 
     Ok(())
 }
