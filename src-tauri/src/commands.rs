@@ -8596,6 +8596,21 @@ pub async fn list_saved_variables(
 }
 
 #[tauri::command]
+pub async fn scan_lam_dropdowns(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    sv_name: String,
+) -> Result<crate::saved_variables::lam_scan::LamScanResponse, String> {
+    validate_name(&sv_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        crate::saved_variables::lam_scan::scan_lam_dropdowns_blocking(&addons_dir, &sv_name)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
 pub async fn read_saved_variable(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,

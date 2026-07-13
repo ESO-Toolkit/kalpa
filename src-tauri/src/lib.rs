@@ -669,6 +669,7 @@ pub fn run() {
             commands::fetch_roster_pack,
             commands::get_saved_variables_path,
             commands::list_saved_variables,
+            commands::scan_lam_dropdowns,
             commands::read_saved_variable,
             commands::write_saved_variable,
             commands::copy_sv_profile,
