@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Last updated:** 2026-05-25
+**Last updated:** 2026-07-03
 
 Kalpa is an open-source desktop application for managing Elder Scrolls Online (ESO) addons. This policy explains what data Kalpa collects, how it is used, and your rights.
 
@@ -58,7 +58,30 @@ The Pack Hub (`kalpa-pack-hub.eso-toolkit.workers.dev`) powers community addon c
 
 ### Data sent to ESO Logs
 
-Sign-in uses OAuth via [esotk.com](https://esotk.com), which handles the authentication flow with ESO Logs. The only data retrieved from ESO Logs is your **numeric user ID** and **display name**. No combat logs, guild data, character stats, or other game data is accessed.
+Sign-in uses OAuth via [esotk.com](https://esotk.com), which handles the authentication flow with ESO Logs. During sign-in, the only data retrieved from ESO Logs is your **numeric user ID** and **display name**.
+
+**Uploading logs:** Kalpa also includes an opt-in log uploader. When you choose to upload an ESO encounter log, that log is sent to **ESO Logs** (esologs.com) — either through the official ESO Logs uploader or, if you enable direct upload, straight from Kalpa. This only happens for logs you explicitly upload; Kalpa never uploads combat logs in the background.
+
+### Data sent to the ESO Log Aggregator (build evidence)
+
+When you upload a log using Kalpa's **direct (in-app) uploader** and that ESO Logs report is **public or unlisted**, Kalpa also publishes a small "build evidence" record to the ESO Log Aggregator (`roster-hub-api.eso-toolkit.workers.dev`, the backend for [esotk.com](https://esotk.com)). ESO Logs does not retain these facts as report data, so this sidecar lets the Aggregator show richer build details next to your report.
+
+**What is published** — recovered from the same encounter log you are uploading to ESO Logs, for every player in that log:
+
+- Character name, `@account` name, and character ID
+- Class, race, level, and champion-point total
+- Champion-point passives and class-mastery choices
+- Food/drink buff and scribed-skill abilities
+
+**When it is published:**
+
+- Only for **public or unlisted** reports uploaded via the direct uploader. **Private reports never publish build evidence.**
+- The upload is authenticated with your ESO Logs OAuth token, and the Aggregator verifies you own the report before storing anything.
+
+**Current limitations you should know about:**
+
+- Publishing is keyed to the ESO Logs report code and is **not tied to ESO Logs' anonymization** — if you upload a public/unlisted report, the identities of everyone in your group are included in the build evidence.
+- There is currently **no automatic deletion**: making the report private or deleting it on ESO Logs later does **not** automatically remove the stored build-evidence record. See *Your Rights* below for removal.
 
 ### Data sent to GitHub
 
@@ -71,7 +94,7 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 - **No analytics or telemetry** — Kalpa contains zero tracking, analytics libraries, or usage metrics
 - **No crash reporting** — no error data is sent to any server
 - **No addon file contents** — your addon source code (.lua, .xml) is never uploaded
-- **No ESO game data** — no combat logs, character stats, guild info, or inventory data
+- **No background game-data collection** — Kalpa never reads or transmits your inventory, guild data, or gameplay on its own. The only game data that leaves your machine is a combat log **you** choose to upload (to ESO Logs), plus the build-evidence summary described above for public/unlisted direct uploads
 - **No machine fingerprinting** — no hardware IDs, OS version telemetry, or device identifiers
 
 ---
@@ -85,6 +108,7 @@ Kalpa checks for app updates by fetching a public JSON file from GitHub Releases
 | Share codes | 7 days (auto-deleted) |
 | Install rate-limit keys (IP) | 1 hour (auto-deleted) |
 | Pack Hub daily backups | 90 days (auto-deleted) |
+| Build-evidence records (ESO Log Aggregator) | Indefinite — no automatic deletion yet (see *Your Rights*) |
 | Local backups | Until you delete them manually |
 
 ---
@@ -101,6 +125,10 @@ You can delete all your data from the Pack Hub at any time:
 
 This permanently removes all your packs, votes, and share codes from our servers.
 
+### Remove build-evidence records
+
+Build-evidence records published to the ESO Log Aggregator are keyed to the ESO Logs report code. In-app deletion is planned but not yet available; until then, to have a build-evidence record removed, contact us (see *Contact* below) with the report code. Note that build evidence is only ever published for reports you made **public or unlisted** on ESO Logs.
+
 ### Sign out
 
 Signing out removes your auth tokens from the Windows Credential Manager. No tokens are retained after sign-out.
@@ -116,8 +144,9 @@ All local data (addon metadata, backups, profiles, cache) is stored on your comp
 | Service | Purpose | Their Privacy Policy |
 |---------|---------|---------------------|
 | ESOUI | Addon catalog and downloads | [esoui.com](https://www.esoui.com) |
-| ESO Logs | Authentication (OAuth) | [esologs.com](https://www.esologs.com) |
-| Cloudflare | Pack Hub hosting and rate limiting | [cloudflare.com/privacypolicy](https://www.cloudflare.com/privacypolicy/) |
+| ESO Logs | Authentication (OAuth) and log uploads | [esologs.com](https://www.esologs.com) |
+| ESO Log Aggregator (esotk.com) | Build-evidence sidecar for public/unlisted direct uploads | [esotk.com](https://esotk.com) |
+| Cloudflare | Pack Hub and ESO Log Aggregator hosting, rate limiting | [cloudflare.com/privacypolicy](https://www.cloudflare.com/privacypolicy/) |
 | GitHub | App update distribution | [github.com/privacy](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement) |
 
 ---

@@ -671,12 +671,15 @@ pub fn assess_native_live_routing(opt_in: bool, has_session: bool) -> NativeRout
 ///    ([`super::native::format::FORMAT_VERSION_CONFIRMED`]).
 /// 3. **Every** event type in the log must be within proven coverage
 ///    ([`super::native::coverage::assess`]).
+/// 4. A captured ESO Logs session must exist (`has_session`) — without it the native
+///    client hard-fails "Not signed in" and would settle the record **Failed**, where
+///    the design (and the live gate) hand off to the official uploader instead.
 ///
 /// Any failure routes to the official uploader. This is intentionally
 /// conservative: native upload only runs when we can guarantee a report
 /// identical to the official uploader's. The actual line scan streams the file
 /// so it stays cheap on multi-GB logs.
-pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
+pub fn assess_native_routing(log_path: &str, opt_in: bool, has_session: bool) -> NativeRouting {
     use super::native::{coverage, format};
 
     if !opt_in {
@@ -684,6 +687,13 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool) -> NativeRouting {
     }
     if !format::FORMAT_VERSION_CONFIRMED {
         return NativeRouting::Fallback(NativeFallbackReason::FormatUnconfirmed);
+    }
+    if !has_session {
+        // No captured session → the native client would hard-fail "Not signed in" and
+        // settle the record Failed. Route to the official uploader instead (mirrors
+        // assess_native_live_routing). Reuse the honest "direct upload isn't enabled"
+        // effect: the user-facing outcome (handoff) and remedy (sign in) are the same.
+        return NativeRouting::Fallback(NativeFallbackReason::NotOptedIn);
     }
 
     // The native path reads the whole file into memory, so it refuses files over
@@ -873,8 +883,24 @@ mod routing_tests {
     fn not_opted_in_always_falls_back() {
         let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
         assert_eq!(
-            assess_native_routing(&path, false),
+            assess_native_routing(&path, false, true),
             NativeRouting::Fallback(NativeFallbackReason::NotOptedIn)
+        );
+    }
+
+    // C1: opted in + all-proven log but NO captured session must route to the official
+    // uploader (a Fallback), NEVER Native — the native client would hard-fail "Not
+    // signed in" and settle the record Failed. Holds regardless of the format gate.
+    #[test]
+    fn opted_in_without_session_falls_back_not_native() {
+        let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
+        assert!(matches!(
+            assess_native_routing(&path, true, false),
+            NativeRouting::Fallback(_)
+        ));
+        assert_ne!(
+            assess_native_routing(&path, true, false),
+            NativeRouting::Native
         );
     }
 
@@ -887,9 +913,15 @@ mod routing_tests {
         // is all-proven, so the gate is the only thing deciding native vs fallback.
         let (_d, path) = temp_log("4,ZONE_CHANGED,1129,x\n");
         if super::super::native::format::FORMAT_VERSION_CONFIRMED {
-            assert_eq!(assess_native_routing(&path, true), NativeRouting::Native);
+            assert_eq!(
+                assess_native_routing(&path, true, true),
+                NativeRouting::Native
+            );
         } else {
-            assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
+            assert_ne!(
+                assess_native_routing(&path, true, true),
+                NativeRouting::Native
+            );
         }
     }
 
@@ -912,7 +944,10 @@ mod routing_tests {
     #[test]
     fn opted_in_with_unproven_type_falls_back() {
         let (_d, path) = temp_log("0,BEGIN_LOG,1,15\n100,SOME_FUTURE_EVENT,1,2\n");
-        assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
+        assert_ne!(
+            assess_native_routing(&path, true, true),
+            NativeRouting::Native
+        );
     }
 
     #[test]
@@ -921,11 +956,14 @@ mod routing_tests {
             temp_log_bytes(b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n5,ZONE_CHANGED,\xff\n");
         if super::super::native::format::FORMAT_VERSION_CONFIRMED {
             assert_eq!(
-                assess_native_routing(&path, true),
+                assess_native_routing(&path, true, true),
                 NativeRouting::Fallback(NativeFallbackReason::InvalidEncoding)
             );
         } else {
-            assert_ne!(assess_native_routing(&path, true), NativeRouting::Native);
+            assert_ne!(
+                assess_native_routing(&path, true, true),
+                NativeRouting::Native
+            );
         }
     }
 
@@ -1001,7 +1039,10 @@ mod routing_tests {
              10,BEGIN_COMBAT\n20,END_COMBAT\n5,END_LOG\n",
         );
         assert!(
-            matches!(assess_native_routing(&path, true), NativeRouting::Native),
+            matches!(
+                assess_native_routing(&path, true, true),
+                NativeRouting::Native
+            ),
             "single-session proven log should route native"
         );
     }
@@ -1020,7 +1061,7 @@ mod routing_tests {
         );
         assert!(
             matches!(
-                assess_native_routing(&path, true),
+                assess_native_routing(&path, true, true),
                 NativeRouting::Fallback(NativeFallbackReason::MultiSession)
             ),
             "multi-session log must route to the official uploader"

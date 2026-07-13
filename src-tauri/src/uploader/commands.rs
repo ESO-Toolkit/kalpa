@@ -1085,7 +1085,6 @@ pub struct UploadDispatch {
 pub async fn uploader_upload_log(
     app: tauri::AppHandle,
     allowed: State<'_, AllowedAddonsPath>,
-    auth_state: State<'_, AuthState>,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
     file_path: String,
     options: UploadOptions,
@@ -1185,7 +1184,20 @@ pub async fn uploader_upload_log(
     // uploader. The native path itself also self-checks the built segment and
     // falls back if it is ever malformed (see `run_native_upload`).
     let native_opt_in = native_opt_in.unwrap_or(false);
-    let routing = transport::assess_native_routing(&dispatch_path, native_opt_in);
+    // C1: pass the current sign-in state so an opted-in-but-signed-out upload routes to
+    // the official uploader instead of a native attempt that would hard-fail "Not signed
+    // in" and settle the record Failed. The routing scan also streams up to
+    // MAX_NATIVE_BYTES off disk, so run it on a blocking thread (mirrors the fight-count
+    // and native-upload scans) to keep it off the async executor.
+    let has_session = session.has_session();
+    let routing = {
+        let scan_path = dispatch_path.clone();
+        tokio::task::spawn_blocking(move || {
+            transport::assess_native_routing(&scan_path, native_opt_in, has_session)
+        })
+        .await
+        .map_err(|e| format!("Routing scan task failed: {e}"))?
+    };
     let use_native = matches!(routing, transport::NativeRouting::Native);
     if let transport::NativeRouting::Fallback(reason) = &routing {
         // Honest diagnostics: why native wasn't used. Logged only (not user-facing
@@ -1253,59 +1265,84 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
+            // Extraction re-parses the whole (possibly multi-GB) log, so run it on a
+            // blocking thread instead of the async executor. build_evidence stays
+            // synchronous here so it can still ride back in the record + UploadDispatch.
             let build_evidence = if use_native {
-                report.as_ref().and_then(|report| {
-                    match super::native::build_evidence::extract_from_file(
-                        &safe,
-                        Some(report.code.clone()),
-                    ) {
-                        Ok(mut evidence) if !evidence.players.is_empty() => {
-                            // Best-effort: attach the logging player's ESOTK Companion
-                            // snapshots (read from SavedVariables). Never blocks the sidecar.
-                            evidence.companion =
-                                super::native::companion::read_for_upload(&evidence);
-                            Some(evidence)
-                        }
-                        Ok(_) => None,
-                        Err(e) => {
-                            eprintln!("[uploader] native build evidence unavailable: {e}");
-                            None
+                match report.as_ref() {
+                    Some(report) => {
+                        let safe = safe.clone();
+                        let code = report.code.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            super::native::build_evidence::extract_from_file(&safe, Some(code))
+                                .map(|mut evidence| {
+                                    if !evidence.players.is_empty() {
+                                        // Best-effort: attach the logging player's ESOTK
+                                        // Companion snapshots (read from SavedVariables).
+                                        // Never blocks the sidecar; stays on this blocking
+                                        // thread because it reads files too.
+                                        evidence.companion =
+                                            super::native::companion::read_for_upload(&evidence);
+                                    }
+                                    evidence
+                                })
+                        })
+                        .await
+                        {
+                            Ok(Ok(evidence)) if !evidence.players.is_empty() => Some(evidence),
+                            Ok(Ok(_)) => None,
+                            Ok(Err(e)) => {
+                                eprintln!("[uploader] native build evidence unavailable: {e}");
+                                None
+                            }
+                            Err(e) => {
+                                eprintln!("[uploader] native build evidence task failed: {e}");
+                                None
+                            }
                         }
                     }
-                })
+                    None => None,
+                }
             } else {
                 None
             };
+            // Publish the sidecar off the async executor: get_valid_token can make
+            // blocking OAuth round-trips and the PUT is blocking, so both run on a
+            // detached thread that re-fetches AuthState via the AppHandle (State can't
+            // cross threads) — mirrors spawn_native_live_build_evidence_sidecar.
             if use_native {
                 if let (Some(report), Some(evidence)) = (&report, &build_evidence) {
-                    match auth_state.get_valid_token() {
-                        Ok(Some(token)) => {
-                            let report_code = report.code.clone();
-                            let evidence = evidence.clone();
-                            let visibility = options.visibility;
-                            std::thread::spawn(move || {
-                                if let Err(e) = super::sidecar::publish_build_evidence(
-                                    &report_code,
-                                    &evidence,
-                                    visibility,
-                                    &token,
-                                ) {
+                    if super::sidecar::should_publish_build_evidence(options.visibility) {
+                        let app = app.clone();
+                        let report_code = report.code.clone();
+                        let evidence = evidence.clone();
+                        let visibility = options.visibility;
+                        std::thread::spawn(move || {
+                            match app.state::<AuthState>().get_valid_token() {
+                                Ok(Some(token)) => {
+                                    if let Err(e) = super::sidecar::publish_build_evidence(
+                                        &report_code,
+                                        &evidence,
+                                        visibility,
+                                        &token,
+                                    ) {
+                                        eprintln!(
+                                            "[uploader] native build evidence sidecar skipped: {e}"
+                                        );
+                                    }
+                                }
+                                Ok(None) => {
                                     eprintln!(
-                                        "[uploader] native build evidence sidecar skipped: {e}"
+                                        "[uploader] native build evidence sidecar skipped: no ESO Logs OAuth token available"
                                     );
                                 }
-                            });
-                        }
-                        Ok(None) => {
-                            eprintln!(
-                                "[uploader] native build evidence sidecar skipped: no ESO Logs OAuth token available"
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[uploader] native build evidence sidecar skipped: auth unavailable: {e}"
-                            );
-                        }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[uploader] native build evidence sidecar skipped: auth unavailable: {e}"
+                                    );
+                                }
+                            }
+                        });
                     }
                 }
             }

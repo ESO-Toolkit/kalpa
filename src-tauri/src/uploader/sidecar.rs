@@ -48,23 +48,48 @@ pub(crate) fn publish_build_evidence(
         esotk_api_url().trim_end_matches('/'),
         report_code
     );
-    let response = http_client()
-        .put(url)
-        .bearer_auth(access_token)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(evidence)
-        .send()
-        .map_err(|e| format!("Build-evidence sidecar publish failed: {e}"))?;
 
-    if response.status().is_success() {
-        return Ok(());
+    // Best-effort bounded retry. The sidecar always runs on a detached thread (never the
+    // async executor), so briefly blocking here is fine. Retry ONLY transient failures —
+    // a transport error or a 5xx/429 — never a 4xx: a bad token, malformed payload, or
+    // not-the-owner won't succeed on retry. The two error-string shapes are preserved
+    // verbatim for any caller that logs them.
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let err = match http_client()
+            .put(url.as_str())
+            .bearer_auth(access_token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(evidence)
+            .send()
+        {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(());
+                }
+                let retryable = status.is_server_error() || status.as_u16() == 429;
+                let body = response.text().unwrap_or_default();
+                let message =
+                    format!("Build-evidence sidecar publish returned HTTP {status}: {body}");
+                if !retryable {
+                    return Err(message);
+                }
+                message
+            }
+            Err(e) => format!("Build-evidence sidecar publish failed: {e}"),
+        };
+        if attempt >= MAX_ATTEMPTS {
+            return Err(err);
+        }
+        // Exponential backoff: 500ms, then 1s (each attempt is still bounded by the
+        // client's own 10s per-request timeout).
+        std::thread::sleep(std::time::Duration::from_millis(
+            500 * (1u64 << (attempt - 1)),
+        ));
     }
-
-    let status = response.status();
-    let body = response.text().unwrap_or_default();
-    Err(format!(
-        "Build-evidence sidecar publish returned HTTP {status}: {body}"
-    ))
 }
 
 fn valid_report_code(report_code: &str) -> bool {
