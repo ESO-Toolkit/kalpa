@@ -5142,6 +5142,225 @@ pub struct ActivateProfileResult {
     pub disabled: Vec<String>,
     pub failed: Vec<String>,
     pub missing: Vec<String>,
+    /// Addons kept (or re-)enabled because an addon in the profile requires
+    /// them via `## DependsOn`, even though they are not in the snapshot —
+    /// typically libraries installed after the profile was created.
+    pub kept_dependencies: Vec<String>,
+}
+
+/// On-disk copies of one addon base name: `Foo/` and/or `Foo.disabled/`.
+#[derive(Default)]
+struct FolderCopies {
+    enabled: Option<PathBuf>,
+    disabled: Option<PathBuf>,
+}
+
+impl FolderCopies {
+    /// The copy ESO would load after activation. When both exist the enabled
+    /// copy wins — the same duplicate policy the scanner applies.
+    fn winning_path(&self) -> Option<&PathBuf> {
+        self.enabled.as_ref().or(self.disabled.as_ref())
+    }
+}
+
+/// Apply a profile's enabled-addon snapshot to the AddOns directory.
+///
+/// Extracted from the `activate_profile` command so the rename planning is
+/// unit-testable without Tauri state. Two behaviors go beyond the raw
+/// snapshot:
+///
+/// - **Dependency retention**: any installed addon that a profile addon
+///   (transitively) requires via `## DependsOn` is kept enabled — or
+///   re-enabled — even when absent from the snapshot. Profiles are created
+///   before later updates can pull in new libraries, so activating an old
+///   snapshot must not disable a library its own addons need at load time.
+///   Dependencies already satisfied by a bundled copy inside an enabled
+///   folder (ESO's nested-addon resolution) trigger no retention.
+/// - **Duplicate tolerance**: when both `Foo/` and `Foo.disabled/` exist the
+///   enabled copy wins (matching the scanner), so an "enable" is already
+///   satisfied and reports no failure; a "disable" cannot be expressed by
+///   rename and fails with an actionable message instead of a raw OS error.
+pub(crate) fn apply_profile(
+    addons_dir: &std::path::Path,
+    profile: &AddonProfile,
+) -> ActivateProfileResult {
+    // Group every top-level directory by base name so both copies of a
+    // duplicated addon are visible to one decision below.
+    let mut copies: HashMap<String, FolderCopies> = HashMap::new();
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+
+            // Skip non-addon folders and our own files
+            if folder_name.starts_with("kalpa-") {
+                continue;
+            }
+
+            match folder_name.strip_suffix(".disabled") {
+                Some(base) => copies.entry(base.to_string()).or_default().disabled = Some(path),
+                None => copies.entry(folder_name).or_default().enabled = Some(path),
+            }
+        }
+    }
+
+    // Names each top-level folder makes loadable: its own manifest name plus
+    // bundled libraries at ESO's nested-addon resolution depth (normalized,
+    // see `normalize_addon_name`).
+    let provides: HashMap<String, HashSet<String>> = copies
+        .iter()
+        .filter_map(|(base, c)| {
+            let path = c.winning_path()?;
+            let mut names = HashSet::new();
+            if find_manifest_in(path, base).is_some() {
+                names.insert(normalize_addon_name(base));
+            }
+            collect_subfolder_names(path, &mut names);
+            Some((base.clone(), names))
+        })
+        .collect();
+
+    // The target enabled set: the snapshot itself, expanded below with the
+    // installed dependencies of its addons.
+    let mut desired: HashSet<String> = profile
+        .enabled_addons
+        .iter()
+        .filter(|name| copies.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+
+    // Everything loadable after activation without further action: names
+    // provided by desired folders, plus by manifest-less wrapper folders
+    // (e.g. `Libs/`) — those carry bundled libraries but are never renamed
+    // by profiles, so their contents always stay available.
+    let mut satisfied: HashSet<String> = HashSet::new();
+    for (base, c) in &copies {
+        let untouched_wrapper = c
+            .enabled
+            .as_ref()
+            .is_some_and(|path| find_manifest_in(path, base).is_none());
+        if desired.contains(base) || untouched_wrapper {
+            if let Some(names) = provides.get(base) {
+                satisfied.extend(names.iter().cloned());
+            }
+        }
+    }
+
+    let mut kept_dependencies: Vec<String> = Vec::new();
+    let mut queue: Vec<String> = desired.iter().cloned().collect();
+    while let Some(base) = queue.pop() {
+        let Some(manifest_path) = copies
+            .get(&base)
+            .and_then(|c| c.winning_path())
+            .and_then(|path| find_manifest_in(path, &base))
+        else {
+            continue;
+        };
+        let Some(manifest) = manifest::parse_manifest(&base, &manifest_path) else {
+            continue;
+        };
+        for dep in &manifest.depends_on {
+            let key = normalize_addon_name(&dep.name);
+            if satisfied.contains(&key) {
+                continue;
+            }
+            // Find an installed top-level folder that provides this
+            // dependency. Prefer an exact folder-name match over a wrapper
+            // that merely bundles it, then a currently-enabled copy, then
+            // lexicographic order for determinism.
+            let mut candidates: Vec<&String> = provides
+                .iter()
+                .filter(|(b, names)| !desired.contains(*b) && names.contains(&key))
+                .map(|(b, _)| b)
+                .collect();
+            candidates.sort_by_key(|b| {
+                (
+                    normalize_addon_name(b) != key,
+                    copies.get(*b).is_none_or(|c| c.enabled.is_none()),
+                    (*b).clone(),
+                )
+            });
+            let Some(provider) = candidates.first().map(|b| (*b).clone()) else {
+                continue; // genuinely missing — the scanner will flag it
+            };
+            desired.insert(provider.clone());
+            if let Some(names) = provides.get(&provider) {
+                satisfied.extend(names.iter().cloned());
+            }
+            kept_dependencies.push(provider.clone());
+            queue.push(provider);
+        }
+    }
+
+    let mut enabled: Vec<String> = Vec::new();
+    let mut disabled: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+
+    for (base, c) in &copies {
+        let want_enabled = desired.contains(base);
+        match (&c.enabled, &c.disabled) {
+            (Some(enabled_path), Some(_)) => {
+                // Duplicate folders. Enabled copy wins, so wanting the addon
+                // enabled is already satisfied; wanting it disabled cannot be
+                // done by rename without a collision.
+                if !want_enabled && find_manifest_in(enabled_path, base).is_some() {
+                    failed.push(format!(
+                        "{base} (disable: both '{base}' and '{base}.disabled' exist — remove the stale copy, then re-activate)"
+                    ));
+                }
+            }
+            (Some(path), None) => {
+                // Only disable folders that carry a manifest (real addons) —
+                // never wrapper directories like `Libs/`.
+                if !want_enabled && find_manifest_in(path, base).is_some() {
+                    let new_path = addons_dir.join(format!("{base}.disabled"));
+                    match fs::rename(path, &new_path) {
+                        Ok(_) => disabled.push(base.clone()),
+                        Err(e) => failed.push(format!("{base} (disable: {e})")),
+                    }
+                }
+            }
+            (None, Some(path)) => {
+                if want_enabled {
+                    let new_path = addons_dir.join(base);
+                    match fs::rename(path, &new_path) {
+                        Ok(_) => enabled.push(base.clone()),
+                        Err(e) => failed.push(format!("{base} (enable: {e})")),
+                    }
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    // Report addons referenced in the profile that no longer exist on disk
+    let mut missing: Vec<String> = profile
+        .enabled_addons
+        .iter()
+        .filter(|name| !copies.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+
+    // Deterministic output for the UI and tests regardless of dir order.
+    enabled.sort();
+    disabled.sort();
+    failed.sort();
+    missing.sort();
+    kept_dependencies.sort();
+
+    ActivateProfileResult {
+        enabled,
+        disabled,
+        failed,
+        missing,
+        kept_dependencies,
+    }
 }
 
 #[tauri::command]
@@ -5162,76 +5381,12 @@ pub async fn activate_profile(
             .cloned()
             .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
 
-        let enabled_set: HashSet<String> = profile.enabled_addons.iter().cloned().collect();
-
-        let mut disabled: Vec<String> = Vec::new();
-        let mut enabled: Vec<String> = Vec::new();
-        let mut failed: Vec<String> = Vec::new();
-        let mut seen_on_disk: HashSet<String> = HashSet::new();
-
-        if let Ok(entries) = fs::read_dir(&addons_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let folder_name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(name) => name.to_string(),
-                    None => continue,
-                };
-
-                // Skip non-addon folders and our own files
-                if folder_name.starts_with("kalpa-") {
-                    continue;
-                }
-
-                let is_disabled = folder_name.ends_with(".disabled");
-                let base_name = folder_name
-                    .strip_suffix(".disabled")
-                    .unwrap_or(&folder_name)
-                    .to_string();
-
-                seen_on_disk.insert(base_name.clone());
-
-                if enabled_set.contains(&base_name) {
-                    // Should be enabled
-                    if is_disabled {
-                        let new_path = addons_dir.join(&base_name);
-                        match fs::rename(&path, &new_path) {
-                            Ok(_) => enabled.push(base_name),
-                            Err(e) => failed.push(format!("{base_name} (enable: {e})")),
-                        }
-                    }
-                } else {
-                    // Should be disabled
-                    if !is_disabled && find_manifest(&addons_dir, &folder_name).is_some() {
-                        let new_path = addons_dir.join(format!("{folder_name}.disabled"));
-                        match fs::rename(&path, &new_path) {
-                            Ok(_) => disabled.push(folder_name),
-                            Err(e) => failed.push(format!("{folder_name} (disable: {e})")),
-                        }
-                    }
-                }
-            }
-        }
-
-        // Report addons referenced in the profile that no longer exist on disk
-        let missing: Vec<String> = profile
-            .enabled_addons
-            .iter()
-            .filter(|name| !seen_on_disk.contains(name.as_str()))
-            .cloned()
-            .collect();
+        let result = apply_profile(&addons_dir, &profile);
 
         store.active_profile = Some(profile_name);
         save_profiles(&addons_dir, &store)?;
 
-        Ok(ActivateProfileResult {
-            enabled,
-            disabled,
-            failed,
-            missing,
-        })
+        Ok(result)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -8937,6 +9092,188 @@ mod tests {
             normalize_addon_name("Lui\u{200B}Media"),
             normalize_addon_name("LuiMedia")
         );
+    }
+
+    // ── Addon profile activation ─────────────────────────────────────────
+
+    /// Write a top-level addon folder with a manifest. `folder` may carry a
+    /// `.disabled` suffix; the manifest name inside always uses the base name
+    /// (matching what a rename-disable produces on real installs).
+    fn write_addon(addons_dir: &Path, folder: &str, depends_on: &str) {
+        let base = folder.strip_suffix(".disabled").unwrap_or(folder);
+        let dir = addons_dir.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        let mut manifest = format!("## Title: {base}\n");
+        if !depends_on.is_empty() {
+            manifest.push_str(&format!("## DependsOn: {depends_on}\n"));
+        }
+        fs::write(dir.join(format!("{base}.txt")), manifest).unwrap();
+    }
+
+    fn profile_of(names: &[&str]) -> AddonProfile {
+        AddonProfile {
+            name: "test".to_string(),
+            enabled_addons: names.iter().map(|s| s.to_string()).collect(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn apply_profile_enables_and_disables_by_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "");
+        write_addon(tmp.path(), "AddonB.disabled", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonB"]));
+
+        assert_eq!(result.enabled, vec!["AddonB"]);
+        assert_eq!(result.disabled, vec!["AddonA"]);
+        assert!(result.failed.is_empty());
+        assert!(result.missing.is_empty());
+        assert!(tmp.path().join("AddonA.disabled").is_dir());
+        assert!(tmp.path().join("AddonB").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_keeps_required_dependency_enabled() {
+        // LibX was installed (e.g. auto-resolved) after the profile snapshot,
+        // so it is not in the snapshot — but AddonA requires it at load time.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        write_addon(tmp.path(), "LibX", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert!(result.disabled.is_empty(), "LibX must not be disabled");
+        assert_eq!(result.kept_dependencies, vec!["LibX"]);
+        assert!(tmp.path().join("LibX").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_reenables_disabled_dependency() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        write_addon(tmp.path(), "LibX.disabled", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert_eq!(result.enabled, vec!["LibX"]);
+        assert_eq!(result.kept_dependencies, vec!["LibX"]);
+        assert!(tmp.path().join("LibX").is_dir());
+        assert!(!tmp.path().join("LibX.disabled").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_keeps_transitive_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        write_addon(tmp.path(), "LibX", "LibY");
+        write_addon(tmp.path(), "LibY", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert!(result.disabled.is_empty());
+        assert_eq!(result.kept_dependencies, vec!["LibX", "LibY"]);
+    }
+
+    #[test]
+    fn apply_profile_dependency_matching_is_case_insensitive() {
+        // ESO resolves dependency names case-insensitively; retention must too.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "libstub");
+        write_addon(tmp.path(), "LibStub", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert!(result.disabled.is_empty());
+        assert_eq!(result.kept_dependencies, vec!["LibStub"]);
+    }
+
+    #[test]
+    fn apply_profile_embedded_dependency_needs_no_retention() {
+        // AddonA bundles its own copy of LibX; the standalone top-level LibX
+        // is NOT required and must still be disabled per the snapshot.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        let embedded = tmp.path().join("AddonA").join("LibX");
+        fs::create_dir_all(&embedded).unwrap();
+        fs::write(embedded.join("LibX.txt"), "## Title: LibX\n").unwrap();
+        write_addon(tmp.path(), "LibX", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert_eq!(result.disabled, vec!["LibX"]);
+        assert!(result.kept_dependencies.is_empty());
+    }
+
+    #[test]
+    fn apply_profile_duplicate_folders_enable_is_noop() {
+        // Both Foo/ and Foo.disabled/ exist. The scanner's policy is "enabled
+        // copy wins", so a profile wanting Foo enabled is already satisfied —
+        // no rename, no spurious failure.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "Foo", "");
+        write_addon(tmp.path(), "Foo.disabled", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["Foo"]));
+
+        assert!(result.enabled.is_empty());
+        assert!(result.failed.is_empty());
+        assert!(tmp.path().join("Foo").is_dir());
+        assert!(tmp.path().join("Foo.disabled").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_duplicate_folders_disable_fails_actionably() {
+        // Disabling Foo can't be expressed by rename while Foo.disabled
+        // already exists; the failure must say so instead of surfacing a raw
+        // OS collision error.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "Foo", "");
+        write_addon(tmp.path(), "Foo.disabled", "");
+        write_addon(tmp.path(), "Bar", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["Bar"]));
+
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.failed[0].contains("remove the stale copy"));
+        // Both copies untouched — nothing was renamed or deleted.
+        assert!(tmp.path().join("Foo").is_dir());
+        assert!(tmp.path().join("Foo.disabled").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_reports_missing_and_skips_wrappers_and_kalpa_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "");
+        // Manifest-less wrapper folder (like `Libs/`) must never be renamed.
+        fs::create_dir_all(tmp.path().join("Libs")).unwrap();
+        // Kalpa's own folders are ignored entirely.
+        fs::create_dir_all(tmp.path().join("kalpa-backups")).unwrap();
+
+        let result = apply_profile(tmp.path(), &profile_of(&["Uninstalled"]));
+
+        assert_eq!(result.disabled, vec!["AddonA"]);
+        assert_eq!(result.missing, vec!["Uninstalled"]);
+        assert!(tmp.path().join("Libs").is_dir());
+        assert!(tmp.path().join("kalpa-backups").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_wrapper_bundled_library_satisfies_dependency() {
+        // A dependency provided by a manifest-less wrapper folder's bundled
+        // library is always loadable, so no standalone copy is retained.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        let bundled = tmp.path().join("Libs").join("LibX");
+        fs::create_dir_all(&bundled).unwrap();
+        fs::write(bundled.join("LibX.txt"), "## Title: LibX\n").unwrap();
+        write_addon(tmp.path(), "LibX", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert_eq!(result.disabled, vec!["LibX"]);
+        assert!(result.kept_dependencies.is_empty());
     }
 
     #[test]

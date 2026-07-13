@@ -183,6 +183,9 @@ export interface ActivateProfileResult {
   disabled: string[];
   failed: string[];
   missing: string[];
+  /** Addons kept enabled because a profile addon requires them via
+   * DependsOn, even though they are not part of the snapshot. */
+  keptDependencies: string[];
 }
 
 export interface CharacterInfo {

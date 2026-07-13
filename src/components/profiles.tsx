@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { InfoPill } from "@/components/ui/info-pill";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
+import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 
 interface ProfilesProps {
@@ -32,6 +33,7 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
 
   const loadProfiles = async () => {
     try {
@@ -57,7 +59,9 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   }, []);
 
   const handleCreate = async () => {
-    if (!newName.trim()) return;
+    // `creating` guard: the button disables itself, but the input's Enter
+    // handler calls this directly and must not double-submit.
+    if (creating || !newName.trim()) return;
     setCreating(true);
     try {
       await invokeOrThrow<AddonProfile>("create_profile", {
@@ -75,6 +79,9 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
   };
 
   const handleActivate = async (name: string) => {
+    // Same gate as install/update/remove: renaming addon folders while ESO
+    // runs desyncs disk state from what the game loaded, so warn first.
+    if (!(await ensureEsoNotBlocking())) return;
     setActivating(name);
     try {
       const result = await invokeOrThrow<ActivateProfileResult>("activate_profile", {
@@ -95,6 +102,11 @@ export function Profiles({ addonsPath, onClose, onRefresh }: ProfilesProps) {
       if (result.missing.length > 0) {
         toast.info(
           `${result.missing.length} addon(s) from this profile are no longer installed: ${result.missing.join(", ")}`
+        );
+      }
+      if (result.keptDependencies.length > 0) {
+        toast.info(
+          `Kept ${result.keptDependencies.length} required librar${result.keptDependencies.length === 1 ? "y" : "ies"} enabled: ${result.keptDependencies.join(", ")}`
         );
       }
       setActiveProfile(name);
