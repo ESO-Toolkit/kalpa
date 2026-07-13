@@ -69,7 +69,7 @@ keyring = { version = "3", features = ["windows-native"] }
 # duplicate windows-core would make `.controller()`/`.cast()` type-mismatch. If a
 # tauri/wry bump moves webview2-com to a new minor, bump these two in lockstep.
 webview2-com = "0.38"
-windows = "0.61"
+windows = "0.62"
 
 [profile.dev]
 # Reduced debug info: the full dependency graph (reqwest/rustls/aws-lc/tauri/…)
