@@ -1,5 +1,11 @@
 # Log Uploader Audit — Findings & Implementation Plan
 
+> **Status (2026-07-13): all 25 findings implemented.** PR #220 (merged
+> 2026-07-02) shipped every fix in this plan. The document is retained as a
+> historical record — for the "verified sound" list, the must-not-change
+> invariants, and the test-gap catalog. `file:line` references target commit
+> `4fcfe19` and no longer match the current tree.
+
 Audit of the ESO Logs uploader workspace (added in `4fcfe19`, PR #157): the core
 Rust uploader (`src-tauri/src/uploader/`), the native direct-upload path
 (`src-tauri/src/uploader/native/`), and the React frontend
