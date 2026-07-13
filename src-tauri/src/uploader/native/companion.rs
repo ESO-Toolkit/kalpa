@@ -29,19 +29,46 @@ const MAX_SNAPSHOTS: usize = 24;
 
 /// Read the ESOTK Companion snapshots for the players in `evidence` and return them for the
 /// sidecar, or `None` when there's no companion file, nothing usable, or anything fails.
+///
+/// A user can have several companion files (live + liveeu + pts), and the first readable
+/// one isn't necessarily the one for the uploaded report. Prefer the first file whose
+/// snapshots actually name-match this report's players; only when no file matches, fall
+/// back to the first file that yielded any snapshots at all (esotk still matches by
+/// character + time, so an unfiltered forward is safe).
 pub(crate) fn read_for_upload(evidence: &KalpaBuildEvidence) -> Option<KalpaCompanionEvidence> {
-    let content = read_companion_file()?;
     let logger_chars = logger_character_names(evidence);
-    let snapshots = select_snapshots(&content, &logger_chars);
-    if snapshots.is_empty() {
-        None
-    } else {
-        Some(KalpaCompanionEvidence { snapshots })
-    }
+    pick_evidence(
+        read_companion_files().iter().map(String::as_str),
+        &logger_chars,
+    )
 }
 
-/// Locate + read `SavedVariables/ESOTKCompanion.lua` across the standard ESO environments.
-fn read_companion_file() -> Option<String> {
+/// Rank candidate companion-file contents: the first file whose snapshots name-match this
+/// report's players wins; otherwise the first file with any snapshots at all.
+fn pick_evidence<'a>(
+    contents: impl Iterator<Item = &'a str>,
+    logger_chars: &[String],
+) -> Option<KalpaCompanionEvidence> {
+    let mut fallback: Option<Vec<serde_json::Value>> = None;
+    for content in contents {
+        let (snapshots, matched) = select_snapshots(content, logger_chars);
+        if snapshots.is_empty() {
+            continue;
+        }
+        if matched {
+            return Some(KalpaCompanionEvidence { snapshots });
+        }
+        if fallback.is_none() {
+            fallback = Some(snapshots);
+        }
+    }
+    fallback.map(|snapshots| KalpaCompanionEvidence { snapshots })
+}
+
+/// Locate + read every `SavedVariables/ESOTKCompanion.lua` across the standard ESO
+/// environments, in candidate order.
+fn read_companion_files() -> Vec<String> {
+    let mut contents = Vec::new();
     for base in documents_candidates() {
         for env in ESO_ENVS {
             let path: PathBuf = base
@@ -50,11 +77,11 @@ fn read_companion_file() -> Option<String> {
                 .join("SavedVariables")
                 .join(COMPANION_FILE);
             if let Ok(content) = std::fs::read_to_string(&path) {
-                return Some(content);
+                contents.push(content);
             }
         }
     }
-    None
+    contents
 }
 
 /// Lower-cased character names from the report's players — used to keep only the logger's
@@ -71,16 +98,17 @@ fn logger_character_names(evidence: &KalpaBuildEvidence) -> Vec<String> {
 
 /// Parse the companion file and return the newest snapshots (raw JSON), preferring the
 /// logger's characters but falling back to all snapshots if none match by name (esotk still
-/// matches by character + time, so an unfiltered forward is safe).
-fn select_snapshots(content: &str, logger_chars: &[String]) -> Vec<serde_json::Value> {
+/// matches by character + time, so an unfiltered forward is safe). The second tuple field
+/// reports whether any snapshot name-matched, so callers can rank multiple files.
+fn select_snapshots(content: &str, logger_chars: &[String]) -> (Vec<serde_json::Value>, bool) {
     let Ok(root) = parse_sv_file(content, SV_TABLE) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let Some(sv) = child(&root, SV_TABLE) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let Some(default) = child(sv, "Default") else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
 
     // (ts, matched-by-char, snapshot-json)
@@ -106,7 +134,10 @@ fn select_snapshots(content: &str, logger_chars: &[String]) -> Vec<serde_json::V
     // Newest first, capped.
     items.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     items.truncate(MAX_SNAPSHOTS);
-    items.into_iter().map(|(_, _, value)| value).collect()
+    (
+        items.into_iter().map(|(_, _, value)| value).collect(),
+        any_matched,
+    )
 }
 
 /// Whether a snapshot's `char` is one of the logger's report characters. An empty logger set
@@ -182,7 +213,8 @@ ESOTKCompanionSV = {
 
     #[test]
     fn selects_logger_char_snapshots_newest_first() {
-        let snaps = select_snapshots(SAMPLE, &["grappa'ko'laid".to_string()]);
+        let (snaps, matched) = select_snapshots(SAMPLE, &["grappa'ko'laid".to_string()]);
+        assert!(matched);
         assert_eq!(
             snaps.len(),
             2,
@@ -211,7 +243,8 @@ ESOTKCompanionSV = {
 
     #[test]
     fn falls_back_to_all_snapshots_when_no_name_matches() {
-        let snaps = select_snapshots(SAMPLE, &["nonexistent-character".to_string()]);
+        let (snaps, matched) = select_snapshots(SAMPLE, &["nonexistent-character".to_string()]);
+        assert!(!matched);
         assert_eq!(
             snaps.len(),
             3,
@@ -221,7 +254,7 @@ ESOTKCompanionSV = {
 
     #[test]
     fn empty_logger_set_forwards_all() {
-        let snaps = select_snapshots(SAMPLE, &[]);
+        let (snaps, _) = select_snapshots(SAMPLE, &[]);
         assert_eq!(snaps.len(), 3);
     }
 
@@ -237,13 +270,46 @@ ESOTKCompanionSV = {
             ));
         }
         body.push_str("}}}}\n}\n");
-        let snaps = select_snapshots(&body, &["zed".to_string()]);
+        let (snaps, _) = select_snapshots(&body, &["zed".to_string()]);
         assert_eq!(snaps.len(), MAX_SNAPSHOTS);
     }
 
     #[test]
+    fn prefers_name_matched_file_over_first_readable() {
+        // A stale wrong-region file (no matching chars) must not shadow the
+        // right-region file that names the logger's character.
+        let stale = "ESOTKCompanionSV = {
+[\"Default\"]={[\"@a\"]={[\"$AccountWide\"]={[\"snapshots\"]={
+[1]={[\"ts\"]=1,[\"char\"]=\"WrongRegionAlt\"},
+}}}}
+}
+";
+        let matching = "ESOTKCompanionSV = {
+[\"Default\"]={[\"@a\"]={[\"$AccountWide\"]={[\"snapshots\"]={
+[1]={[\"ts\"]=2,[\"char\"]=\"Zed\"},
+}}}}
+}
+";
+        let chars = vec!["zed".to_string()];
+        let picked = pick_evidence([stale, matching].into_iter(), &chars).unwrap();
+        assert_eq!(picked.snapshots.len(), 1);
+        assert_eq!(
+            picked.snapshots[0].get("char").and_then(|c| c.as_str()),
+            Some("Zed")
+        );
+        // With no match anywhere, the first readable file still wins.
+        let picked = pick_evidence([stale].into_iter(), &chars).unwrap();
+        assert_eq!(
+            picked.snapshots[0].get("char").and_then(|c| c.as_str()),
+            Some("WrongRegionAlt")
+        );
+    }
+
+    #[test]
     fn garbage_content_yields_empty() {
-        assert!(select_snapshots("not a savedvars file at all", &[]).is_empty());
-        assert!(select_snapshots("", &[]).is_empty());
+        assert!(select_snapshots("not a savedvars file at all", &[])
+            .0
+            .is_empty());
+        assert!(select_snapshots("", &[]).0.is_empty());
     }
 }

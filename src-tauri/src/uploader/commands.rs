@@ -1274,8 +1274,8 @@ pub async fn uploader_upload_log(
                         let safe = safe.clone();
                         let code = report.code.clone();
                         match tokio::task::spawn_blocking(move || {
-                            super::native::build_evidence::extract_from_file(&safe, Some(code))
-                                .map(|mut evidence| {
+                            super::native::build_evidence::extract_from_file(&safe, Some(code)).map(
+                                |mut evidence| {
                                     if !evidence.players.is_empty() {
                                         // Best-effort: attach the logging player's ESOTK
                                         // Companion snapshots (read from SavedVariables).
@@ -1285,7 +1285,8 @@ pub async fn uploader_upload_log(
                                             super::native::companion::read_for_upload(&evidence);
                                     }
                                     evidence
-                                })
+                                },
+                            )
                         })
                         .await
                         {
@@ -1470,11 +1471,12 @@ fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) 
 
         match job.app.state::<AuthState>().get_valid_token() {
             Ok(Some(token)) => {
-                if let Err(e) = super::sidecar::publish_build_evidence(
+                if let Err(e) = super::sidecar::publish_build_evidence_unless(
                     &job.report_code,
                     &evidence,
                     job.visibility,
                     &token,
+                    || job.latest_generation.load(Ordering::SeqCst) != job.generation,
                 ) {
                     eprintln!(
                         "[uploader] native live build evidence sidecar skipped ({}): {e}",
