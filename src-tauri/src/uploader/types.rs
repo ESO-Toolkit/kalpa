@@ -263,6 +263,16 @@ pub struct KalpaScribedSkillEvidence {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// The equipped Focus/Primary script (e.g. "Pull"). Recovered directly from the
+    /// scribed `ABILITY_INFO` line's extra fields, which ESO Logs strips from the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_script: Option<String>,
+    /// The equipped Signature script (e.g. "Lingering Torment").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_script: Option<String>,
+    /// The equipped Affix script (e.g. "Defile").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affix_script: Option<String>,
 }
 
 /// A persisted record of an upload Kalpa initiated, shown in the history panel.
