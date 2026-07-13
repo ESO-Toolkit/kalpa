@@ -140,6 +140,9 @@ function AppDialogsBase({
       {activeDialog === "profiles" && (
         <Profiles
           addonsPath={addonsPath}
+          instanceLabel={
+            knownInstances.find((inst) => inst.addonsPath === addonsPath)?.displayLabel ?? null
+          }
           enabledFolders={addons.filter((a) => !a.disabled).map((a) => a.folderName)}
           onClose={onCloseDialog}
           onRefresh={onRefresh}

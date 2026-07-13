@@ -22,6 +22,11 @@ import { cn } from "@/lib/utils";
 
 interface ProfilesProps {
   addonsPath: string;
+  /** Display label of the instance being managed (e.g. "Native · PTS"), or
+   * null when the AddOns path doesn't match a detected instance. Profiles are
+   * per-instance, so the dialog must say WHOSE profiles these are — a user
+   * running live and PTS side by side can otherwise activate on the wrong one. */
+  instanceLabel: string | null;
   /** Folder names of currently ENABLED addons, from the latest scan. Used to
    * flag the active profile as "modified" when the setup has drifted. */
   enabledFolders: string[];
@@ -44,7 +49,13 @@ function PreviewNameList({ names }: { names: string[] }) {
   );
 }
 
-export function Profiles({ addonsPath, enabledFolders, onClose, onRefresh }: ProfilesProps) {
+export function Profiles({
+  addonsPath,
+  instanceLabel,
+  enabledFolders,
+  onClose,
+  onRefresh,
+}: ProfilesProps) {
   const [profiles, setProfiles] = useState<AddonProfile[]>([]);
   const [activeProfile, setActiveProfile] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
@@ -234,10 +245,21 @@ export function Profiles({ addonsPath, enabledFolders, onClose, onRefresh }: Pro
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Addon Profiles</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            Addon Profiles
+            {instanceLabel && <InfoPill color="sky">{instanceLabel}</InfoPill>}
+          </DialogTitle>
           <DialogDescription>
-            Save and switch between addon configurations. Activating a profile enables/disables
-            addons by renaming folders.
+            Save and switch between addon configurations
+            {instanceLabel ? (
+              <>
+                {" "}
+                for <span className="text-white/70">{instanceLabel}</span>. Each ESO instance keeps
+                its own profiles — switch instances from the header to manage another one.
+              </>
+            ) : (
+              ". Each ESO instance keeps its own profiles."
+            )}
           </DialogDescription>
         </DialogHeader>
 
