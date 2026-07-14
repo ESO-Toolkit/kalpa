@@ -57,7 +57,13 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          workspaces: src-tauri
+          # prototypes/slint-kalpa is compiled by the Windows job's
+          # beforeBuildCommand (build:release-assets → Slint sidecar); caching
+          # it saves ~15-25 min of slint/skia compile per release. Harmless on
+          # macOS/Linux, which never build the sidecar.
+          workspaces: |
+            src-tauri
+            prototypes/slint-kalpa
 
       - name: Install Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'

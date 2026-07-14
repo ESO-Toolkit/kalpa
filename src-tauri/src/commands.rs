@@ -9028,6 +9028,410 @@ pub fn settings_tainted() -> bool {
     crate::settings_store::is_tainted()
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePerformanceLaunch {
+    pub exe_path: String,
+}
+
+fn native_shell_names() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &[
+            "kalpa-slint.exe",
+            "kalpa-native.exe",
+            "kalpa-slint-prototype.exe",
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        &["kalpa-slint", "kalpa-native", "kalpa-slint-prototype"]
+    }
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    let a = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+    let b = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+    a == b
+}
+
+fn push_native_shell_candidates(out: &mut Vec<PathBuf>, root: &Path) {
+    for name in native_shell_names() {
+        out.push(root.join(name));
+        out.push(root.join("bin").join(name));
+        out.push(root.join("sidecars").join(name));
+        out.push(root.join("binaries").join(name));
+    }
+    push_target_suffixed_native_shell_candidates(out, root);
+    push_target_suffixed_native_shell_candidates(out, &root.join("bin"));
+    push_target_suffixed_native_shell_candidates(out, &root.join("sidecars"));
+    push_target_suffixed_native_shell_candidates(out, &root.join("binaries"));
+    out.push(
+        root.join("prototypes")
+            .join("slint-kalpa")
+            .join("target")
+            .join("debug")
+            .join(native_shell_names()[2]),
+    );
+    out.push(
+        root.join("prototypes")
+            .join("slint-kalpa")
+            .join("target")
+            .join("release")
+            .join(native_shell_names()[2]),
+    );
+}
+
+fn push_target_suffixed_native_shell_candidates(out: &mut Vec<PathBuf>, dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        #[cfg(windows)]
+        let matches_name = name.starts_with("kalpa-slint-") && name.ends_with(".exe");
+        #[cfg(not(windows))]
+        let matches_name = name.starts_with("kalpa-slint-");
+
+        if matches_name {
+            out.push(path);
+        }
+    }
+}
+
+fn resolve_native_shell_executable_from(
+    explicit: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+    resource_dir: Option<PathBuf>,
+    current_dir: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Some(path) = explicit {
+        candidates.push(path);
+    }
+    if let Some(path) = resource_dir {
+        push_native_shell_candidates(&mut candidates, &path);
+    }
+    if let Some(path) = current_exe.as_ref().and_then(|path| path.parent()) {
+        push_native_shell_candidates(&mut candidates, path);
+    }
+    if let Some(path) = current_dir {
+        push_native_shell_candidates(&mut candidates, &path);
+        if let Some(parent) = path.parent() {
+            push_native_shell_candidates(&mut candidates, parent);
+        }
+    }
+
+    for candidate in candidates {
+        if current_exe
+            .as_ref()
+            .map(|exe| same_path(&candidate, exe))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(
+        "Native performance UI is not available. Build or bundle the Slint shell first."
+            .to_string(),
+    )
+}
+
+fn resolve_native_shell_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // The env override and the CWD scan are DEV conveniences only. In release
+    // they would let any process that can set an env var or start Kalpa from a
+    // chosen working directory redirect the sidecar launch to an arbitrary
+    // binary (untrusted search path, CWE-427) — release builds resolve strictly
+    // from the install locations (resource dir + next to kalpa.exe).
+    let explicit = if cfg!(debug_assertions) {
+        std::env::var_os("KALPA_SLINT_EXE").map(PathBuf::from)
+    } else {
+        None
+    };
+    let current_exe = std::env::current_exe().ok();
+    let resource_dir = app.path().resource_dir().ok();
+    let current_dir = if cfg!(debug_assertions) {
+        std::env::current_dir().ok()
+    } else {
+        None
+    };
+    resolve_native_shell_executable_from(explicit, current_exe, resource_dir, current_dir)
+}
+
+/// Name of the "a native boot is in flight and not yet confirmed" marker in
+/// the app data dir. Written just before spawning the sidecar; deleted by the
+/// sidecar once its event loop is up. A surviving marker on the NEXT launch
+/// means the last native boot died before showing a window — the startup gate
+/// then reverts to the WebView UI instead of crash-looping with no UI at all.
+const NATIVE_BOOT_PENDING: &str = "native-boot.pending";
+/// One-shot note the fallback leaves for the WebView frontend so it can tell
+/// the user native mode was turned off (read + cleared by
+/// [`native_boot_failure_pending`]).
+const NATIVE_BOOT_FAILED: &str = "native-boot-failed";
+
+fn launch_native_shell_process(
+    exe_path: &Path,
+    app_data_dir: Option<PathBuf>,
+    webview_exe: Option<PathBuf>,
+) -> Result<(), String> {
+    let render_preset = native_shell_render_preset();
+    let render_backend = native_shell_backend_for_preset(&render_preset);
+    let mut command = std::process::Command::new(exe_path);
+    // This process may itself carry re-entry flags from the launch that
+    // created it (children inherit the full environment); never let them leak
+    // into the sidecar and from there back into the next webview launch.
+    for stale in [
+        "KALPA_START_APP_UPDATE",
+        "KALPA_START_LOG_UPLOADER",
+        "KALPA_START_PACK_HUB",
+        "KALPA_START_PACK_HUB_ID",
+        "KALPA_FORCE_WEBVIEW",
+    ] {
+        command.env_remove(stale);
+    }
+    command
+        .env("KALPA_RENDER_PRESET", render_preset)
+        .env("KALPA_SLINT_BACKEND", render_backend)
+        .env("KALPA_NATIVE_AUTO_PLACE", "0");
+
+    if let Some(path) = &app_data_dir {
+        command.env("KALPA_NATIVE_STATE_DIR", path);
+        // Boot handshake: the sidecar deletes this once its UI is really up.
+        let _ = fs::create_dir_all(path);
+        let _ = fs::write(path.join(NATIVE_BOOT_PENDING), b"1");
+    }
+    if let Some(path) = webview_exe {
+        command.env("KALPA_WEBVIEW_EXE", path);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to launch native performance UI: {error}"))?;
+
+    std::thread::sleep(Duration::from_millis(200));
+    match child.try_wait() {
+        Ok(Some(status)) => Err(format!(
+            "Native performance UI exited immediately: {status}"
+        )),
+        Ok(None) => Ok(()),
+        Err(error) => Err(format!(
+            "Failed to verify native performance UI launch: {error}"
+        )),
+    }
+}
+
+fn native_shell_render_preset() -> String {
+    std::env::var("KALPA_NATIVE_RENDER_PRESET")
+        .or_else(|_| std::env::var("KALPA_RENDER_PRESET"))
+        .map(|value| {
+            if value.trim().is_empty() {
+                "standard".to_string()
+            } else {
+                value
+            }
+        })
+        .unwrap_or_else(|_| "standard".to_string())
+}
+
+fn native_shell_backend_for_preset(render_preset: &str) -> String {
+    std::env::var("KALPA_NATIVE_SLINT_BACKEND")
+        .or_else(|_| std::env::var("KALPA_SLINT_BACKEND"))
+        .map(|value| {
+            if value.trim().is_empty() {
+                native_shell_default_backend(render_preset).to_string()
+            } else {
+                value
+            }
+        })
+        .unwrap_or_else(|_| native_shell_default_backend(render_preset).to_string())
+}
+
+fn native_shell_default_backend(render_preset: &str) -> &'static str {
+    match render_preset.trim().to_ascii_lowercase().as_str() {
+        "standard" | "fidelity" | "quality" | "femtovg" | "skia" => "winit-femtovg",
+        _ => "winit-software",
+    }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn native_performance_mode_enabled_from_value(value: &serde_json::Value) -> Option<bool> {
+    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "native-slint" | "slint" | "native" | "low-memory" => Some(true),
+        "webview" | "web" | "standard" => Some(false),
+        _ => None,
+    }
+}
+
+fn native_performance_mode_enabled_from_path(path: &Path) -> Result<bool, String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Failed to read performance setting: {error}")),
+    };
+    let value: serde_json::Value = serde_json::from_str(content.trim_start_matches('\u{feff}'))
+        .map_err(|error| format!("Failed to parse performance setting: {error}"))?;
+    Ok(value
+        .as_object()
+        .and_then(|object| object.get("performanceMode"))
+        .and_then(native_performance_mode_enabled_from_value)
+        .unwrap_or(false))
+}
+
+/// Rewrite `performanceMode` to `"webview"` in settings.json (atomic
+/// temp+rename, preserving every other key) so a broken native mode can never
+/// trap the user in a no-UI crash loop. Best-effort: an unreadable settings
+/// file simply leaves the gate to fail open into the webview next launch.
+fn revert_performance_mode_to_webview(settings_path: &Path) {
+    let Ok(content) = fs::read_to_string(settings_path) else {
+        return;
+    };
+    let Ok(mut value) =
+        serde_json::from_str::<serde_json::Value>(content.trim_start_matches('\u{feff}'))
+    else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "performanceMode".to_string(),
+        serde_json::Value::String("webview".to_string()),
+    );
+    let Ok(serialized) = serde_json::to_string_pretty(&value) else {
+        return;
+    };
+    let temp = settings_path.with_extension("json.native-revert.tmp");
+    if fs::write(&temp, serialized).is_ok() {
+        let _ = fs::rename(&temp, settings_path);
+    }
+}
+
+/// One-shot query for the WebView frontend: did the last launch auto-revert
+/// out of native mode because the sidecar never came up? Reading clears the
+/// note, so the toast fires exactly once.
+#[tauri::command]
+pub fn native_boot_failure_pending(app: tauri::AppHandle) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return false;
+    };
+    let note = dir.join(NATIVE_BOOT_FAILED);
+    if note.is_file() {
+        let _ = fs::remove_file(&note);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn try_launch_native_performance_mode_on_startup(
+    app: &tauri::AppHandle,
+) -> Result<Option<PathBuf>, String> {
+    if env_flag_enabled("KALPA_FORCE_WEBVIEW") {
+        return Ok(None);
+    }
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+    let settings_path = app_data_dir.join("settings.json");
+
+    // Boot-handshake check: a surviving marker means the LAST native launch
+    // spawned a sidecar that died before its UI came up (GPU/driver failure,
+    // panic during state load, AV interference). Without this, the user is
+    // locked in a windowless crash loop that even reinstalling doesn't clear
+    // (app data survives uninstall). A young marker (<10s) is a boot still in
+    // flight — another activation racing the sidecar's startup — and proceeds
+    // native; the sidecar's single-instance lock collapses the duplicate.
+    let marker = app_data_dir.join(NATIVE_BOOT_PENDING);
+    if let Ok(meta) = fs::metadata(&marker) {
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .map(|age| age > Duration::from_secs(10))
+            // An unreadable mtime counts as stale: failing into the webview is
+            // always recoverable, a crash loop is not.
+            .unwrap_or(true);
+        if stale {
+            revert_performance_mode_to_webview(&settings_path);
+            let _ = fs::remove_file(&marker);
+            let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+            eprintln!(
+                "Native performance UI never finished starting last launch; \
+                 reverting to the WebView UI."
+            );
+            return Ok(None);
+        }
+    }
+
+    if !native_performance_mode_enabled_from_path(&settings_path)? {
+        return Ok(None);
+    }
+
+    let exe_path = resolve_native_shell_executable(app)?;
+    if let Err(error) = launch_native_shell_process(
+        &exe_path,
+        Some(app_data_dir.clone()),
+        std::env::current_exe().ok(),
+    ) {
+        // The sidecar could not even spawn (or died <200ms in): revert NOW so
+        // this launch continues into the webview and the next one doesn't
+        // retry a known-broken native mode.
+        revert_performance_mode_to_webview(&settings_path);
+        let _ = fs::remove_file(app_data_dir.join(NATIVE_BOOT_PENDING));
+        let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+        return Err(error);
+    }
+    Ok(Some(exe_path))
+}
+
+#[tauri::command]
+pub async fn launch_native_performance_mode(
+    app: tauri::AppHandle,
+) -> Result<NativePerformanceLaunch, String> {
+    let exe_path = resolve_native_shell_executable(&app)?;
+    let app_data_dir = app.path().app_data_dir().ok();
+    let webview_exe = std::env::current_exe().ok();
+    let launch_path = exe_path.clone();
+    tokio::task::spawn_blocking(move || {
+        launch_native_shell_process(&launch_path, app_data_dir, webview_exe)
+    })
+    .await
+    .map_err(|error| format!("Task failed: {error}"))??;
+
+    let exit_app = app.clone();
+    std::thread::spawn(move || {
+        // Free the WebView process after the Slint shell has spawned; keeping both
+        // alive would defeat the memory-mode toggle.
+        std::thread::sleep(Duration::from_millis(300));
+        exit_app.exit(0);
+    });
+
+    Ok(NativePerformanceLaunch {
+        exe_path: exe_path.to_string_lossy().into_owned(),
+    })
+}
+
 // ── Controlled Folder Access / write-access detection ──────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -9150,6 +9554,8 @@ pub fn open_ransomware_protection_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn should_emit_progress_first_stride_and_completion() {
@@ -10386,5 +10792,146 @@ mod tests {
         };
         assert!(export_pack_file(pack.clone(), "C:\\test.json".to_string()).is_err());
         assert!(export_pack_file(pack, "C:\\test.exe".to_string()).is_err());
+    }
+
+    #[test]
+    fn native_shell_resolver_finds_dev_slint_binary() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root
+            .path()
+            .join("prototypes")
+            .join("slint-kalpa")
+            .join("target")
+            .join("debug")
+            .join(native_shell_names()[2]);
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"native").unwrap();
+
+        let resolved = resolve_native_shell_executable_from(
+            None,
+            Some(
+                root.path()
+                    .join("src-tauri")
+                    .join("target")
+                    .join("debug")
+                    .join("kalpa.exe"),
+            ),
+            None,
+            Some(root.path().to_path_buf()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, exe);
+    }
+
+    #[test]
+    fn native_shell_resolver_rejects_current_exe_override() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join(native_shell_names()[0]);
+        fs::write(&exe, b"webview").unwrap();
+
+        let resolved = resolve_native_shell_executable_from(
+            Some(exe.clone()),
+            Some(exe),
+            None,
+            Some(root.path().to_path_buf()),
+        );
+
+        assert!(resolved.is_err());
+    }
+
+    #[test]
+    fn native_shell_resolver_finds_packaged_target_suffixed_binary() {
+        let root = tempfile::tempdir().unwrap();
+        let binaries = root.path().join("binaries");
+        fs::create_dir_all(&binaries).unwrap();
+
+        #[cfg(windows)]
+        let sidecar = binaries.join("kalpa-slint-x86_64-pc-windows-msvc.exe");
+        #[cfg(not(windows))]
+        let sidecar = binaries.join("kalpa-slint-x86_64-unknown-linux-gnu");
+
+        fs::write(&sidecar, b"native").unwrap();
+
+        let resolved =
+            resolve_native_shell_executable_from(None, None, Some(root.path().to_path_buf()), None)
+                .unwrap();
+
+        assert_eq!(resolved, sidecar);
+    }
+
+    #[test]
+    fn native_performance_mode_startup_reads_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = root.path().join("settings.json");
+
+        for enabled_value in ["native-slint", "slint", "native", "low-memory"] {
+            fs::write(
+                &settings,
+                format!(r#"{{"performanceMode":"{enabled_value}"}}"#),
+            )
+            .unwrap();
+            assert!(
+                native_performance_mode_enabled_from_path(&settings).unwrap(),
+                "{enabled_value} should enable the native startup gate"
+            );
+        }
+
+        for disabled_value in ["webview", "web", "standard"] {
+            fs::write(
+                &settings,
+                format!(r#"{{"performanceMode":"{disabled_value}"}}"#),
+            )
+            .unwrap();
+            assert!(
+                !native_performance_mode_enabled_from_path(&settings).unwrap(),
+                "{disabled_value} should keep the WebView startup path"
+            );
+        }
+    }
+
+    #[test]
+    fn native_shell_renderer_defaults_to_smooth_femtovg() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
+        std::env::remove_var("KALPA_RENDER_PRESET");
+        std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+
+        let preset = native_shell_render_preset();
+
+        assert_eq!(preset, "standard");
+        assert_eq!(native_shell_backend_for_preset(&preset), "winit-femtovg");
+    }
+
+    #[test]
+    fn native_shell_renderer_allows_standard_diagnostics() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("KALPA_NATIVE_RENDER_PRESET", "standard");
+        std::env::remove_var("KALPA_RENDER_PRESET");
+        std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+
+        let preset = native_shell_render_preset();
+
+        assert_eq!(preset, "standard");
+        assert_eq!(native_shell_backend_for_preset(&preset), "winit-femtovg");
+        std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
+    }
+
+    #[test]
+    fn native_shell_renderer_backend_override_wins() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("KALPA_NATIVE_RENDER_PRESET", "low-memory");
+        std::env::set_var("KALPA_NATIVE_SLINT_BACKEND", "winit-femtovg");
+        std::env::remove_var("KALPA_RENDER_PRESET");
+        std::env::remove_var("KALPA_SLINT_BACKEND");
+
+        let preset = native_shell_render_preset();
+
+        assert_eq!(preset, "low-memory");
+        assert_eq!(native_shell_backend_for_preset(&preset), "winit-femtovg");
+        std::env::remove_var("KALPA_NATIVE_RENDER_PRESET");
+        std::env::remove_var("KALPA_NATIVE_SLINT_BACKEND");
     }
 }

@@ -1,0 +1,70 @@
+name: Slint Prototype CI
+
+# The Slint native UI ships as a Windows sidecar of the main app (see
+# src-tauri/tauri.windows.conf.json + scripts/build-native-slint-sidecar.mjs),
+# so its tree must stay green — but it is a full separate Rust workspace that
+# would roughly double CI time if built on every PR. Path-filter it instead:
+# any PR touching the prototype or its packaging wiring gets the full gate.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "prototypes/slint-kalpa/**"
+      - "scripts/build-native-slint-sidecar.mjs"
+      - ".github/workflows/slint-ci.yml"
+  # Also run on main pushes: GitHub Actions caches saved on PR branches are
+  # not visible to tag refs, so without a main-scope run the release job would
+  # compile slint/skia cold (~20 min) on every tag. Main-branch caches ARE
+  # inherited by tags.
+  push:
+    branches: [main]
+    paths:
+      - "prototypes/slint-kalpa/**"
+      - "scripts/build-native-slint-sidecar.mjs"
+      - ".github/workflows/slint-ci.yml"
+
+concurrency:
+  group: slint-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-slint:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.94.0"
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: prototypes/slint-kalpa
+
+      - name: Rust format check
+        run: cargo fmt --check --manifest-path prototypes/slint-kalpa/Cargo.toml
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path prototypes/slint-kalpa/Cargo.toml -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path prototypes/slint-kalpa/Cargo.toml
+
+      # Run the REAL packaging script (release build + copy into
+      # src-tauri/binaries with the target-triple name the bundler expects), so
+      # the first end-to-end execution is never the release tag itself.
+      - name: Build + package the sidecar exactly as a release does
+        run: node scripts/build-native-slint-sidecar.mjs
+
+      - name: Verify the sidecar artifact the bundler will look for
+        shell: bash
+        run: |
+          set -euo pipefail
+          triple=$(rustc --print host-tuple)
+          artifact="src-tauri/binaries/kalpa-slint-${triple}.exe"
+          [ -s "$artifact" ] || { echo "::error::${artifact} missing or empty"; exit 1; }
+          echo "sidecar artifact OK: $artifact ($(stat -c%s "$artifact") bytes)"

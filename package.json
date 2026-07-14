@@ -24,6 +24,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:native-slint": "node scripts/build-native-slint-sidecar.mjs",
+    "build:release-assets": "npm run build && npm run build:native-slint",
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint src/",
@@ -32,6 +34,9 @@
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\"",
     "check": "tsc --noEmit && eslint src/ && prettier --check \"src/**/*.{ts,tsx,css}\"",
     "check:env": "node scripts/check-env.js",
+    "export:native-themes": "node prototypes/slint-kalpa/tools/export-native-themes.mjs",
+    "export:native-skins": "node prototypes/slint-kalpa/tools/export-native-skins.mjs",
+    "export:native-assets": "npm run export:native-themes && npm run export:native-skins",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

@@ -1,0 +1,35 @@
+[package]
+name = "kalpa-slint-prototype"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+arboard = "3"
+base64 = "0.22"
+dirs = "6"
+i-slint-backend-winit = "1.17.0"
+keyring = { version = "3", features = ["windows-native"] }
+md-5 = "0.11"
+notify = "8"
+regex = "1"
+reqwest = { version = "0.13", features = ["blocking", "json", "query", "form", "multipart"] }
+# Used by the #[path]-included src-tauri sources (events.rs/encode.rs hot maps,
+# installer.rs Windows path handling); keep versions in lockstep with src-tauri.
+rustc-hash = "2"
+rayon = "1.12"
+scraper = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+slint = { version = "1.17.0", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-femtovg", "renderer-software"] }
+tao = "0.35"
+tempfile = "3"
+typed-path = "0.12"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+url = "2"
+wry = "0.55"
+zip = "8"
+
+[build-dependencies]
+slint-build = "1.17.0"
