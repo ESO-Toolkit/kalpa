@@ -4,22 +4,17 @@
 // first-run wizard. Uploads use the official ESO Logs uploader by default, with
 // an opt-in native direct route when the backend proves the log/session is safe.
 
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-  type Ref,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { Channel } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import {
   CloudUpload,
   FileText,
+  FolderSearch,
+  Link as LinkIcon,
   Radio,
+  RefreshCw,
   Scissors,
   Upload,
   ExternalLink,
@@ -30,12 +25,18 @@ import {
   AlertTriangle,
   ChevronRight,
   Swords,
+  Search,
+  ArrowDownUp,
+  FolderOpen,
   CheckCircle2,
   LogIn,
   Trash2,
+  FolderInput,
+  ClipboardCopy,
   UserRound,
   CircleDashed,
   Loader2,
+  RotateCcw,
 } from "lucide-react";
 import {
   Dialog,
@@ -45,17 +46,19 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SimpleTooltip } from "@/components/ui/tooltip";
 import { getTauriErrorMessage, invokeOrThrow, warnIfSessionNotPersisted } from "@/lib/tauri";
-import { getSettingChecked, setSettings } from "@/lib/store";
+import { getSetting, getSettingChecked, setSettings, settingsWritesSettled } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import type { AuthUser } from "@/types";
 import {
   REGION_OPTIONS,
   type FightSummary,
+  type LiveEvent,
   type LiveFight,
   type LiveReadiness,
   type LogFileInfo,
@@ -63,6 +66,7 @@ import {
   type LogPreflight,
   type ReportRef,
   type TransportInfo,
+  type UploaderStatus,
   type UploadDispatch,
   type UploadOptions,
   type UploadRecord,
@@ -71,50 +75,37 @@ import {
 import {
   SessionTimer,
   WhatGetsUploaded,
-  attachRaceSafe,
   compactBytes,
-  deriveNativeState,
   fightLabel,
   formatDuration,
-  liveExitConfirmCopy,
+  formatElapsed,
+  parseReportCode,
   primaryReportUrl,
+  primaryReportUrlForOpen,
   relativeFromMs,
-  shouldConfirmLiveExit,
 } from "./uploader-shared";
 import { UploadOptionsControl } from "./upload-options";
 import { FightList, rowsFromLive, rowsFromSummaries } from "./fight-list";
 import { SplitWorkbench } from "./split-workbench";
-import { dominantZone } from "./naming";
-import {
-  WORK_PANEL,
-  maybeAutoOpenAnalysis,
-  openReportUrl,
-  usesOfficialUploader,
-} from "./uploader-actions";
-import { LogPicker } from "./log-picker";
-import { HistoryPanel } from "./history-panel";
-import { useLiveSession } from "./use-live-session";
+import { dominantZone, shortDate } from "./naming";
 
 interface UploaderWorkspaceProps {
+  open: boolean;
   authUser: AuthUser | null;
   onAuthChange: (user: AuthUser | null) => void;
   onClose: () => void;
+  onOpen: () => void;
 }
 
 type Mode = "manual" | "live";
+type WorkbenchGranularity = "session" | "fight";
+type WorkbenchScope = "full" | "latest";
 
 /** The phase the pinned header's single adaptive status pill reflects. Priority
  *  order (highest first): a running live session (armed→live), an in-flight manual
  *  upload, an in-progress scan, a scanned-ready selection, else idle. */
 type HeaderPhase =
-  | "idle"
-  | "scanning"
-  | "ready"
-  | "uploading"
-  | "armed"
-  | "live"
-  | "attention"
-  | "signedOut";
+  "idle" | "scanning" | "ready" | "uploading" | "armed" | "live" | "attention" | "signedOut";
 
 const DEFAULT_OPTIONS: UploadOptions = {
   region: 1,
@@ -126,6 +117,78 @@ const DEFAULT_OPTIONS: UploadOptions = {
 };
 
 const OPTIONS_KEY = "kalpa.uploader.options";
+
+/** A mid-tier "raised work panel" — sits clearly above the dark canvas but
+ *  quieter than the primary picker/action. Used for fights, options, history so
+ *  the elevation order reads: canvas < these < picker/action. */
+const WORK_PANEL =
+  "rounded-2xl border border-white/[0.08] bg-gradient-to-b from-white/[0.045] to-white/[0.015] shadow-[0_8px_28px_-14px_rgba(0,0,0,0.65),inset_0_1px_0_rgba(255,255,255,0.05)]";
+
+/** Open a report URL in the user's browser, surfacing failures instead of
+ *  swallowing them. The opener plugin rejects a URL outside the capability's
+ *  allow-scope (now includes esologs.com/reports/*); a rejection should toast,
+ *  not vanish into an unhandled promise. */
+async function openReportUrl(url: string): Promise<void> {
+  try {
+    const m = await import("@tauri-apps/plugin-opener");
+    await m.openUrl(url);
+  } catch {
+    toast.error("Couldn't open the report — copy the link and open it manually.");
+  }
+}
+
+/** Open the ESO Log Aggregator analysis for `code` IFF the user enabled auto-open
+ *  (the `autoOpenAnalysis` setting, default off). Best-effort: a disabled setting,
+ *  a read failure, or an opener-scope rejection is silent — the always-present
+ *  "View analysis" button covers the manual case. `live` opens raw ESO Logs with
+ *  fight=last for an in-progress native session. */
+/** The effective "use the official ESO Logs uploader" opt-out, read FAIL-CLOSED.
+ *  Returns true (use official) if EITHER opt-out key is set OR a store read fails —
+ *  the native path speaks ESO Logs' private endpoints, so a degraded store that
+ *  can't confirm the opt-out must NOT silently route there against the user. The two
+ *  keys are written as one unit (the unified Settings toggle), so either set ⇒
+ *  opted out. Used by both manual and live routing so they can never disagree. */
+async function usesOfficialUploader(): Promise<boolean> {
+  // Order this read AFTER any pending settings write: the Settings toggle writes the
+  // opt-out fire-and-forget, so reading the store immediately could see stale values
+  // and route native against a just-set opt-out.
+  await settingsWritesSettled();
+  // A TAINTED settings store (opened empty over an unreadable settings file) returns
+  // default values WITHOUT error, so getSettingChecked's `ok` can't catch it. Consult
+  // the backend taint flag and fail closed; a failed taint check also fails closed.
+  const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
+  if (tainted) return true;
+  const [manual, live] = await Promise.all([
+    getSettingChecked<boolean>("manualUseOfficialUploader", false),
+    getSettingChecked<boolean>("liveUseOfficialUploader", false),
+  ]);
+  return !manual.ok || !live.ok || manual.value || live.value;
+}
+
+async function maybeAutoOpenAnalysis(
+  report: ReportRef,
+  visibility: Visibility,
+  opts?: { live?: boolean; buildEvidence?: UploadDispatch["buildEvidence"] }
+): Promise<void> {
+  try {
+    const auto = await getSetting<boolean>("autoOpenAnalysis", false);
+    if (!auto) return;
+    // Open directly (not via openReportUrl) so a failure stays SILENT: the user
+    // didn't click anything, so an opener-scope rejection or read error must not
+    // pop a "couldn't open" toast. The always-present "View analysis" button covers
+    // the manual path.
+    const m = await import("@tauri-apps/plugin-opener");
+    await m.openUrl(await primaryReportUrlForOpen(report, visibility, opts));
+  } catch {
+    /* best-effort — the manual button still works */
+  }
+}
+
+/** Max live fights kept in React state / the DOM at once. A long raid night can
+ *  produce hundreds of fights; we keep a rolling window of the most recent ones
+ *  (full history lives on esologs.com) and report the true total separately. */
+const MAX_LIVE_FIGHTS = 150;
+const DEFER_FULL_PREFLIGHT_BYTES = 256 * 1024 * 1024;
 
 const VALID_REGIONS = new Set(REGION_OPTIONS.map((r) => r.id));
 const VALID_VISIBILITY = new Set<Visibility>(["public", "unlisted", "private"]);
@@ -156,7 +219,13 @@ function loadSavedOptions(): UploadOptions {
   }
 }
 
-export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderWorkspaceProps) {
+export function UploaderWorkspace({
+  open,
+  authUser,
+  onAuthChange,
+  onClose,
+  onOpen,
+}: UploaderWorkspaceProps) {
   const [mode, setMode] = useState<Mode>("manual");
   const [detection, setDetection] = useState<LogPathDetection | null>(null);
   const [logsDir, setLogsDir] = useState<string | null>(null);
@@ -168,14 +237,23 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   const [preflight, setPreflight] = useState<LogPreflight | null>(null);
   const [fights, setFights] = useState<FightSummary[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [preflightDeferred, setPreflightDeferred] = useState(false);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
   // Monotonic token guarding against an out-of-order async scan result
   // overwriting the currently-selected log's fights.
   const selectTokenRef = useRef(0);
+  const latestActionTokenRef = useRef(0);
   const [options, setOptions] = useState<UploadOptions>(loadSavedOptions);
   const [transport, setTransport] = useState<TransportInfo | null>(null);
   const [history, setHistory] = useState<UploadRecord[]>([]);
   const [uploading, setUploading] = useState(false);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [workbenchPreflight, setWorkbenchPreflight] = useState<LogPreflight | null>(null);
+  const [workbenchInitialGranularity, setWorkbenchInitialGranularity] =
+    useState<WorkbenchGranularity>("session");
+  const [workbenchScope, setWorkbenchScope] = useState<WorkbenchScope>("full");
+  const [latestSplitting, setLatestSplitting] = useState(false);
+  const [latestFightsLoading, setLatestFightsLoading] = useState(false);
   // True while a file is dragged over the window — drives the picker drop-zone
   // visual. `importing` covers the copy-in of a dropped out-of-folder log.
   const [dragOver, setDragOver] = useState(false);
@@ -226,10 +304,67 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // chip / report-name field contradict the (mode-aware) header.
   const activeWillUseNative = mode === "live" ? liveWillUseNative : willUseNative;
 
-  // A pending confirm for an action that would end a RUNNING live session — closing
-  // the dialog ("close") or leaving Live for Manual ("manual"). Gated so an accidental
-  // Esc/backdrop/X/tab-switch can't silently stop a native upload and close its report.
-  const [pendingLiveExit, setPendingLiveExit] = useState<"close" | "manual" | null>(null);
+  // Live-mode state
+  const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
+  // Rendered fights are capped to a rolling window (most-recent MAX_LIVE_FIGHTS)
+  // so a multi-hour raid can't grow this array / the DOM without bound. The
+  // truthful "N detected" count lives in `liveFightCount`, which only counts up.
+  const [liveFights, setLiveFights] = useState<LiveFight[]>([]);
+  const [liveFightCount, setLiveFightCount] = useState(0);
+  // Mirror of the count so the empty-deps unmount cleanup can report the true
+  // fight total to the backend without re-subscribing on every fight.
+  const liveFightCountRef = useRef(0);
+  // Fight indices already counted this session. Used to dedup re-delivered fight
+  // events in the EVENT HANDLER (not inside a setState updater): incrementing the
+  // count inside the setLiveFights updater double-fires under React StrictMode (which
+  // invokes updaters twice), which over-counted every fight (e.g. "2 fights" for 1).
+  const seenFightIndicesRef = useRef<Set<number>>(new Set());
+  const [liveReport, setLiveReport] = useState<ReportRef | null>(null);
+  const [liveVisibility, setLiveVisibility] = useState<Visibility>(options.visibility);
+  const [liveStatus, setLiveStatus] = useState<UploaderStatus>("idle");
+  // Which path this live session actually took: true = handed off to the official
+  // uploader (a separate app keeps streaming); false = native in-process (Kalpa IS
+  // the uploader, Stop ends it). Drives the live dashboard's callout/copy so it's
+  // accurate per session, since the same session can route either way depending on
+  // opt-in + sign-in. Set from the start dispatch's `handedOff`.
+  const [liveHandedOff, setLiveHandedOff] = useState(false);
+  // (Native path) whether a logging session has anchored yet — i.e. the driver saw
+  // its first BEGIN_LOG and is now streaming. Until then the native path is "armed but
+  // waiting" (the encoder needs a session header). Flips on the SessionAnchored event,
+  // instantly (no timeout). Drives the waiting↔streaming UI.
+  const [sessionAnchored, setSessionAnchored] = useState(false);
+  // The pre-Go-Live readiness probe result (native only) — seeds which "waiting"
+  // guidance to show first; SessionAnchored then takes over as ground truth.
+  const [liveReadiness, setLiveReadiness] = useState<LiveReadiness | null>(null);
+  // Wall-clock start of the current live session, for the elapsed timer. Stored
+  // as state (drives the timer's mount) and set alongside the session id in
+  // handleStartLive. Kept separate from the `live-${ts}` id string so the timer
+  // never depends on the id format the session guards key off.
+  const [liveStartMs, setLiveStartMs] = useState<number | null>(null);
+  const [starting, setStarting] = useState(false);
+  // Synchronous re-entry guard for start-live (state updates lag a frame).
+  const startingRef = useRef(false);
+  // Holds the in-flight live session id from before the start await resolves, so
+  // unmounting mid-await still stops the backend watcher (state hasn't landed).
+  const liveSessionIdRef = useRef<string | null>(null);
+  // Mirrors "a session was actually running (handed off to the uploader)" for the
+  // empty-deps unmount cleanup, which can't read `liveSessionId` state (stale
+  // closure). Lets the close path show the same handoff reminder as Stop.
+  const liveWasRunningRef = useRef(false);
+  // Mirror of `liveHandedOff` for the empty-deps unmount cleanup (which can't read
+  // the state value — stale closure), so the close toast is path-aware too: native
+  // close ends the upload + closes the report, handoff leaves the official uploader
+  // streaming.
+  const liveHandedOffRef = useRef(false);
+  // Gate for the live channel handler: late events queued during the ~poll
+  // shutdown window must not fire setState/toast after stop or unmount.
+  const liveActiveRef = useRef(false);
+  // Native live creates the report before any fight segment exists. Keep the code
+  // available for auto-open, but wait until the first accepted fight so raw ESO Logs
+  // doesn't open on an intentionally empty report.
+  const liveReportRef = useRef<ReportRef | null>(null);
+  const liveAutoOpenedRef = useRef(false);
+  const backgroundNoticeShownRef = useRef(false);
 
   // Current selection, mirrored to a ref so loadLogs can reconcile it without
   // being re-created on every selection change.
@@ -240,40 +375,26 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
 
   const clearSelection = useCallback(() => {
     selectTokenRef.current++; // drop any in-flight scan result
+    latestActionTokenRef.current++;
     setSelectedLog(null);
     setPreflight(null);
     setFights([]);
     setScanning(false);
+    setPreflightDeferred(false);
+    setPreflightError(null);
+    setWorkbenchOpen(false);
+    setWorkbenchPreflight(null);
+    setWorkbenchScope("full");
   }, []);
 
-  // Persist options, DEBOUNCED (~300ms). Typing the report name updates `options`
-  // per keystroke; without the debounce that hit localStorage (a sync main-thread
-  // write) on every character. A ref holds the latest value so the unmount flush
-  // below can't lose an edit made inside the debounce window.
-  const optionsRef = useRef(options);
+  // Persist options whenever they change.
   useEffect(() => {
-    optionsRef.current = options;
-    const id = setTimeout(() => {
-      try {
-        localStorage.setItem(OPTIONS_KEY, JSON.stringify(options));
-      } catch {
-        /* ignore */
-      }
-    }, 300);
-    return () => clearTimeout(id);
+    try {
+      localStorage.setItem(OPTIONS_KEY, JSON.stringify(options));
+    } catch {
+      /* ignore */
+    }
   }, [options]);
-
-  // Flush the latest options on unmount so closing within the debounce window still
-  // persists the final choice.
-  useEffect(() => {
-    return () => {
-      try {
-        localStorage.setItem(OPTIONS_KEY, JSON.stringify(optionsRef.current));
-      } catch {
-        /* ignore */
-      }
-    };
-  }, []);
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -364,35 +485,88 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         // store error presents as opted-out, never claiming "direct" in the readout
         // against an opt-out it couldn't confirm (matches routing's usesOfficialUploader).
         getSettingChecked<boolean>("manualUseOfficialUploader", false),
-        // Fail closed on a session-check error too: a rejection must NOT abort the
-        // whole refresh (it used to throw here and skip every setState), it means
-        // "no session".
-        invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+        invokeOrThrow<boolean>("uploader_has_session"),
         getSettingChecked<boolean>("liveUseOfficialUploader", false),
       ]);
       // Treat a tainted (untrusted-empty) store as a read failure too.
       const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
-      const next = deriveNativeState({ manual, live, session, tainted });
-      setNativeOptIn(next.nativeOptIn);
-      setHasNativeSession(next.hasNativeSession);
-      setLiveUseOfficial(next.liveUseOfficial);
+      const readFailed = !manual.ok || !live.ok || tainted;
+      setNativeOptIn(!manual.value && !readFailed);
+      setHasNativeSession(session);
+      setLiveUseOfficial(live.value || readFailed);
     } catch {
       /* best-effort — the upload path still reads the setting fresh per upload */
     }
   }, []);
 
-  // Read the direct-upload opt-in + session on mount. Reuses refreshNativeState (no
-  // drifted copy): it's a stable empty-deps callback, so this runs once. Wrapped in an
-  // async IIFE so its (post-await) setStates aren't flagged as synchronous-in-effect.
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
-      await refreshNativeState();
+      const [manual, session, live] = await Promise.all([
+        getSettingChecked<boolean>("manualUseOfficialUploader", false),
+        invokeOrThrow<boolean>("uploader_has_session").catch(() => false),
+        getSettingChecked<boolean>("liveUseOfficialUploader", false),
+      ]);
+      if (cancelled) return;
+      // Fail closed on a store read error OR a tainted store (see refreshNativeState).
+      const tainted = await invokeOrThrow<boolean>("settings_tainted").catch(() => true);
+      if (cancelled) return;
+      const readFailed = !manual.ok || !live.ok || tainted;
+      setNativeOptIn(!manual.value && !readFailed);
+      setHasNativeSession(session);
+      setLiveUseOfficial(live.value || readFailed);
     })();
-  }, [refreshNativeState]);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  // Stable (useCallback) so the memoized LogPicker doesn't re-render on unrelated
-  // state changes (e.g. typing the report name).
-  const handlePickFolder = useCallback(async () => {
+  // Stop any live session only when the workspace itself unmounts (app shutdown,
+  // hot reload, or another real teardown). Closing the uploader dialog no longer
+  // unmounts this component, so a live upload keeps running in the background.
+  // Reads the ref (set before the start await) so a session started but not yet
+  // reflected in state is still torn down. Empty deps: this must run only on
+  // final unmount.
+  //
+  // `liveWasRunningRef` tracks whether a session was actually running (handed off
+  // to the official uploader). This unmount path bypasses handleStopLive, so it
+  // must carry the same honest reminder itself. Sonner's <Toaster> is mounted
+  // globally (main.tsx), so a toast survives non-app teardown.
+  useEffect(() => {
+    return () => {
+      liveActiveRef.current = false; // drop any late channel events
+      const id = liveSessionIdRef.current;
+      // Clear the refs AFTER capturing the id. This is load-bearing for an
+      // in-flight start: handleStartLive's success/error arms gate on
+      // `liveSessionIdRef.current === sessionId`, so leaving the ref set would let
+      // a start that resolves after this unmount pass its guard and run its
+      // success arm (setState + a "live started" toast) on an unmounted
+      // component. Nulling it makes that stale start drop silently.
+      liveSessionIdRef.current = null;
+      liveWasRunningRef.current = false;
+      if (id) {
+        // Warn whenever a live session is active during a real component teardown,
+        // including an in-flight start (`id` set but not yet promoted). Path-aware via
+        // the ref mirror (the state isn't readable in this empty-deps closure): native
+        // teardown stops the upload + closes the report; a handoff teardown leaves the
+        // official uploader streaming. For an in-flight start that hasn't resolved
+        // handedOff yet, the ref defaults to false (native), which is the honest
+        // default because the official uploader has not launched yet.
+        toast.info(
+          liveHandedOffRef.current
+            ? "Kalpa stopped tracking this live session. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
+            : "Kalpa stopped the direct live upload and closed its report.",
+          { duration: 8000 }
+        );
+        void invokeOrThrow("uploader_stop_live", {
+          sessionId: id,
+          fightCount: liveFightCountRef.current,
+        }).catch(() => {});
+      }
+    };
+  }, []);
+
+  const handlePickFolder = async () => {
     // The folder picker is the documented manual recovery when auto-detection
     // fails; an OS dialog error must surface, not silently no-op.
     try {
@@ -405,7 +579,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     } catch (e) {
       toast.error(`Couldn't open the folder picker: ${getTauriErrorMessage(e)}`);
     }
-  }, [logsDir, clearSelection, loadLogs]);
+  };
 
   // Switch back to the auto-detected Logs folder after the user manually picked a
   // different one. Mirrors handlePickFolder's folder-switch body (minus the OS
@@ -523,39 +697,96 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     }
   }, [deleteTarget, restoreLog, logsDir, loadLogs, clearSelection]);
 
-  const handleSelectLog = useCallback(async (path: string) => {
-    // Guard against a slow scan of a previously-selected log resolving after a
-    // newer selection and overwriting its results.
-    const token = ++selectTokenRef.current;
-    setSelectedLog(path);
-    setPreflight(null);
-    setFights([]);
-    setScanning(true);
-    try {
-      // A single preflight scan returns both the counts and (unless the log is
-      // huge) the fight list — no second scan needed.
-      const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
-      if (selectTokenRef.current !== token) return;
-      setPreflight(pre);
-      setFights(pre.fights);
-      // Keyboard continuity: a slow scan can blur the row (re-renders, the
-      // "Scanning" pill swap). Once this scan is still the current one, restore
-      // focus to the selected row so keyboard users aren't stranded. Deferred a
-      // tick so it runs after the post-setState re-render.
-      if (selectTokenRef.current === token) {
+  const handleSelectLog = useCallback(
+    async (path: string) => {
+      // Guard against a slow scan of a previously-selected log resolving after a
+      // newer selection and overwriting its results.
+      const token = ++selectTokenRef.current;
+      latestActionTokenRef.current++;
+      const log = logs.find((l) => l.path === path);
+      const deferFullScan = (log?.sizeBytes ?? 0) > DEFER_FULL_PREFLIGHT_BYTES;
+      setSelectedLog(path);
+      setPreflight(null);
+      setFights([]);
+      setScanning(!deferFullScan);
+      setPreflightDeferred(deferFullScan);
+      setPreflightError(null);
+      setWorkbenchOpen(false);
+      setWorkbenchPreflight(null);
+      setWorkbenchScope("full");
+      setLatestFightsLoading(false);
+      setLatestSplitting(false);
+      if (deferFullScan) {
         const sel = CSS.escape(path);
         setTimeout(() => {
           if (selectTokenRef.current !== token) return;
           document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
         }, 0);
+        return;
       }
+      try {
+        // A single preflight scan returns both the counts and (unless the log is
+        // huge) the fight list — no second scan needed.
+        const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
+        if (selectTokenRef.current !== token) return;
+        setPreflight(pre);
+        setFights(pre.fights);
+        setPreflightError(null);
+        // Keyboard continuity: a slow scan can blur the row (re-renders, the
+        // "Scanning" pill swap). Once this scan is still the current one, restore
+        // focus to the selected row so keyboard users aren't stranded. Deferred a
+        // tick so it runs after the post-setState re-render.
+        if (selectTokenRef.current === token) {
+          const sel = CSS.escape(path);
+          setTimeout(() => {
+            if (selectTokenRef.current !== token) return;
+            document.querySelector<HTMLButtonElement>(`[data-log-path="${sel}"]`)?.focus();
+          }, 0);
+        }
+      } catch (e) {
+        if (selectTokenRef.current !== token) return;
+        const message = getTauriErrorMessage(e);
+        setPreflightError(message);
+        setPreflightDeferred(true);
+        toast.error(`Couldn't read that log: ${message}`);
+      } finally {
+        if (selectTokenRef.current === token) setScanning(false);
+      }
+    },
+    [logs]
+  );
+
+  const handleScanFullLog = useCallback(async () => {
+    if (!selectedLog) return;
+    const path = selectedLog;
+    const token = ++selectTokenRef.current;
+    latestActionTokenRef.current++;
+    setPreflight(null);
+    setFights([]);
+    setScanning(true);
+    setPreflightDeferred(false);
+    setPreflightError(null);
+    setWorkbenchOpen(false);
+    setWorkbenchPreflight(null);
+    setWorkbenchScope("full");
+    setLatestFightsLoading(false);
+    setLatestSplitting(false);
+    try {
+      const pre = await invokeOrThrow<LogPreflight>("uploader_preflight", { filePath: path });
+      if (selectTokenRef.current !== token) return;
+      setPreflight(pre);
+      setFights(pre.fights);
+      setPreflightError(null);
     } catch (e) {
       if (selectTokenRef.current !== token) return;
-      toast.error(`Couldn't read that log: ${getTauriErrorMessage(e)}`);
+      const message = getTauriErrorMessage(e);
+      setPreflightError(message);
+      setPreflightDeferred(true);
+      toast.error(`Couldn't read that log: ${message}`);
     } finally {
       if (selectTokenRef.current === token) setScanning(false);
     }
-  }, []);
+  }, [selectedLog]);
 
   // Import a dropped .log: the backend copies it into the Logs folder (or uses it
   // in place if already there), then we refresh the list and select the result so
@@ -620,61 +851,38 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     return null;
   }, [logs, handleSelectLog]);
 
-  // The live-session engine: all live-mode state + the ref-based session-ownership
-  // protocol, the start/stop/force-handoff handlers, and the last-resort unmount
-  // teardown. It reads the current selection/options context and drives the refresh
-  // callbacks; the render below consumes its returned state/refs unchanged.
-  const {
-    liveSessionId,
-    liveFights,
-    liveFightCount,
-    liveReport,
-    liveVisibility,
-    liveNeedsAttention,
-    liveHandedOff,
-    sessionAnchored,
-    liveReadiness,
-    liveStartMs,
-    starting,
-    liveSessionIdRef,
-    startingRef,
-    handleStartLive,
-    handleStopLive,
-    handleForceHandoffLive,
-  } = useLiveSession({
-    selectedLog,
-    logs,
-    options,
-    fights,
-    autoSelectActiveLog,
-    refreshNativeState,
-    refreshHistory,
-  });
-
   // Native file drag-drop over the window. Tauri delivers real OS paths (unlike
   // HTML5 drag-drop in a webview), which the backend then copy-confines. We only
   // act on a single dropped .log; the drag-over state drives the picker visual.
-  // attachRaceSafe tears the listener down even if this effect is cleaned up
-  // (StrictMode double-mount / logsDir change) before onDragDropEvent resolves —
-  // otherwise the listener would leak.
   useEffect(() => {
-    return attachRaceSafe(async () => {
-      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-      return getCurrentWebview().onDragDropEvent((event) => {
-        const t = event.payload.type;
-        if (t === "over") {
-          setDragOver(true);
-        } else if (t === "leave") {
-          setDragOver(false);
-        } else if (t === "drop") {
-          setDragOver(false);
-          const paths = event.payload.paths ?? [];
-          const log = paths.find((p) => /\.log$/i.test(p));
-          if (log) void handleImportLog(log);
-          else if (paths.length > 0) toast.error("Drop a .log file to add it.");
-        }
-      });
-    });
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        unlisten = await getCurrentWebview().onDragDropEvent((event) => {
+          if (!active) return;
+          const t = event.payload.type;
+          if (t === "over") {
+            setDragOver(true);
+          } else if (t === "leave") {
+            setDragOver(false);
+          } else if (t === "drop") {
+            setDragOver(false);
+            const paths = event.payload.paths ?? [];
+            const log = paths.find((p) => /\.log$/i.test(p));
+            if (log) void handleImportLog(log);
+            else if (paths.length > 0) toast.error("Drop a .log file to add it.");
+          }
+        });
+      } catch {
+        /* drag-drop is an enhancement; ignore if the webview API is unavailable */
+      }
+    })();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, [handleImportLog]);
 
   const handleManualUpload = async () => {
@@ -708,7 +916,9 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         toast.success("Upload complete — report ready.");
         // Native upload produced a report code; offer to jump straight to the richer
         // ESO Log Aggregator analysis if the user opted into auto-open.
-        void maybeAutoOpenAnalysis(dispatch.report, options.visibility);
+        void maybeAutoOpenAnalysis(dispatch.report, options.visibility, {
+          buildEvidence: dispatch.buildEvidence,
+        });
       } else {
         toast.success(dispatch.detail, { duration: 7000 });
       }
@@ -722,12 +932,489 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
 
   // Opening the split workbench: the rich modal authors the per-session plan and
   // performs the named split itself (uploader_split_to_disk_named). Requires the
-  // preflight to be loaded so the workbench has sessions to show. Stable (useCallback)
-  // so the memoized Preflight doesn't re-render on unrelated state changes.
-  const handleSplit = useCallback(() => {
+  // preflight to be loaded so the workbench has sessions to show.
+  const handleSplit = () => {
     if (!selectedLog || !preflight) return;
+    setWorkbenchPreflight(preflight);
+    setWorkbenchInitialGranularity("session");
+    setWorkbenchScope("full");
     setWorkbenchOpen(true);
-  }, [selectedLog, preflight]);
+  };
+
+  const handleWorkbenchOpenChange = useCallback((nextOpen: boolean) => {
+    setWorkbenchOpen(nextOpen);
+    if (!nextOpen) setWorkbenchPreflight(null);
+  }, []);
+
+  const handleSplitLatest = useCallback(async () => {
+    if (!selectedLog) return;
+    const path = selectedLog;
+    const actionToken = ++latestActionTokenRef.current;
+    setLatestSplitting(true);
+    try {
+      const written = await invokeOrThrow<string[]>("uploader_split_latest_session_to_disk", {
+        filePath: path,
+      });
+      if (latestActionTokenRef.current !== actionToken || selectedLogRef.current !== path) return;
+      toast.success(
+        `Latest session split into ${written.length} file${written.length === 1 ? "" : "s"}.`,
+        { duration: 6000 }
+      );
+      try {
+        const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+        if (written[0]) await revealItemInDir(written[0]);
+      } catch {
+        /* reveal is best-effort */
+      }
+    } catch (e) {
+      if (latestActionTokenRef.current !== actionToken || selectedLogRef.current !== path) return;
+      toast.error(`Couldn't split latest session: ${getTauriErrorMessage(e)}`);
+    } finally {
+      if (latestActionTokenRef.current === actionToken) setLatestSplitting(false);
+    }
+  }, [selectedLog]);
+
+  const handleOpenLatestFights = useCallback(async () => {
+    if (!selectedLog) return;
+    const path = selectedLog;
+    const selectionToken = selectTokenRef.current;
+    const actionToken = ++latestActionTokenRef.current;
+    setLatestFightsLoading(true);
+    try {
+      const latest = await invokeOrThrow<LogPreflight>("uploader_preflight_latest_session", {
+        filePath: path,
+      });
+      if (
+        latestActionTokenRef.current !== actionToken ||
+        selectTokenRef.current !== selectionToken ||
+        selectedLogRef.current !== path
+      ) {
+        return;
+      }
+      setWorkbenchPreflight(latest);
+      setWorkbenchInitialGranularity(latest.fights.length > 0 ? "fight" : "session");
+      setWorkbenchScope("latest");
+      setWorkbenchOpen(true);
+    } catch (e) {
+      if (
+        latestActionTokenRef.current !== actionToken ||
+        selectTokenRef.current !== selectionToken ||
+        selectedLogRef.current !== path
+      ) {
+        return;
+      }
+      toast.error(`Couldn't scan latest session fights: ${getTauriErrorMessage(e)}`);
+    } finally {
+      if (latestActionTokenRef.current === actionToken) setLatestFightsLoading(false);
+    }
+  }, [selectedLog]);
+
+  const handleStartLive = async (forceHandoffArg: boolean = false) => {
+    // Harden against an event accidentally being passed (e.g. onClick={handleStartLive}
+    // instead of a wrapper): coerce to a real boolean so a leaked PointerEvent can never
+    // read as a truthy `forceHandoff` and silently route to the official uploader.
+    const forceHandoff = forceHandoffArg === true;
+    // Resolve a target if none is selected (e.g. logs finished loading after the Live
+    // tab was clicked): auto-pick the active Encounter.log. `handleSelectLog` is async
+    // and won't have updated `selectedLog` state by this tick, so use the path it
+    // returns directly for this start.
+    let target = selectedLog;
+    if (!target) target = autoSelectActiveLog();
+    if (!target) {
+      // autoSelectActiveLog returns null when there's no *encounter* log to stream.
+      // Distinguish "the folder has logs but none are an Encounter.log" (e.g. only
+      // Interface.log so far — combat logging was never turned on) from "no logs at
+      // all"; both want the same /encounterlog nudge, not a "pick a file" message
+      // (there's nothing valid to pick).
+      const hasEncounterLog = logs.some((l) => /encounter.*\.log$/i.test(l.fileName));
+      toast.error(
+        hasEncounterLog
+          ? "Pick the Encounter.log to stream first."
+          : "No Encounter.log found yet — enable combat logging in ESO (/encounterlog), then try again."
+      );
+      return;
+    }
+    // Guard re-entry SYNCHRONOUSLY via a ref: `starting`/`liveSessionId` state
+    // doesn't update until the next render, so two clicks in one frame would
+    // both pass a state-only check and start two backend watchers (orphaning
+    // one). The ref flips immediately.
+    // Re-entry guard keyed on the REF, not the render-captured `liveSessionId` state:
+    // `handleForceHandoffLive` calls this right after `await handleStopLive()`, which
+    // clears `liveSessionIdRef.current` synchronously but won't have re-rendered
+    // `liveSessionId` to null yet in this call stack — so a state check here would
+    // wrongly no-op the restart and leave nothing running.
+    if (startingRef.current || liveSessionIdRef.current) return;
+    startingRef.current = true;
+    setStarting(true);
+    const startedAt = Date.now();
+    const sessionId = `live-${startedAt}`;
+    const reportVisibility = options.visibility;
+    backgroundNoticeShownRef.current = false;
+    // Record the id before the await so final unmount cleanup can stop the
+    // backend watcher if the app tears down before the await resolves.
+    liveSessionIdRef.current = sessionId;
+    const channel = new Channel<LiveEvent>();
+    setLiveFights([]);
+    setLiveFightCount(0);
+    liveFightCountRef.current = 0;
+    seenFightIndicesRef.current = new Set();
+    liveReportRef.current = null;
+    setLiveVisibility(reportVisibility);
+    liveAutoOpenedRef.current = false;
+    setLiveReport(null);
+    setSessionAnchored(false); // native: not anchored until the first BEGIN_LOG
+    // Reset the handoff path indicator (state + its unmount-toast ref mirror) so this
+    // new session doesn't inherit the previous session's path for its copy/toast until
+    // the start dispatch resolves the real value.
+    setLiveHandedOff(false);
+    liveHandedOffRef.current = false;
+    setLiveStartMs(startedAt);
+    setLiveStatus("watching");
+    liveActiveRef.current = true;
+
+    const autoOpenLiveAnalysisOnce = (report: ReportRef) => {
+      if (liveAutoOpenedRef.current || liveHandedOffRef.current) return;
+      liveAutoOpenedRef.current = true;
+      void maybeAutoOpenAnalysis(report, reportVisibility, { live: true });
+    };
+
+    // Live events come from either the native direct uploader or the official
+    // handoff watcher. Both feed the same session timeline and status UI.
+    channel.onmessage = (ev) => {
+      // Drop events that don't belong to the CURRENT session. The global
+      // liveActiveRef alone is not enough: a previous session's queued event
+      // (e.g. the watcher's trailing `Stopped`, delivery to React lagging) can
+      // arrive after a NEW session already set liveActiveRef=true and a new
+      // liveSessionIdRef. Without this per-session check, that stale event would
+      // contaminate the new session — clearing its timeline or, in the `stopped`
+      // arm, calling uploader_stop_live for the new id. This closure captures its
+      // own `sessionId`, so gate on it (which also covers the stopped/closed case
+      // the liveActiveRef check used to handle, since the ref is nulled on stop).
+      if (!liveActiveRef.current || liveSessionIdRef.current !== sessionId) return;
+      switch (ev.type) {
+        case "started":
+          setLiveStatus("watching");
+          break;
+        case "reportOpened":
+          // Native live only: the report now has a code (create-report returned),
+          // before any fight has posted. Surface it immediately so the user can open
+          // the live analysis in the ESO Log Aggregator while the raid is streaming —
+          // previously the live code only appeared after the session settled.
+          liveReportRef.current = { code: ev.code, url: ev.url };
+          setLiveReport(liveReportRef.current);
+          if (liveFightCountRef.current > 0) autoOpenLiveAnalysisOnce(liveReportRef.current);
+          break;
+        case "sessionAnchored":
+          // Native: the first BEGIN_LOG landed — flip waiting→streaming instantly.
+          setSessionAnchored(true);
+          break;
+        case "fightDetected": {
+          // A fight implies the session anchored, even if the anchored event was
+          // missed/coalesced — keep the UI honest.
+          setSessionAnchored(true);
+          const detected = ev;
+          // Dedup + count in the EVENT-HANDLER body (runs once per event), NOT inside a
+          // setState updater. React StrictMode double-invokes updaters in dev, so the old
+          // nested `setLiveFightCount` inside the `setLiveFights` updater fired twice and
+          // double-counted every fight ("2 fights" for 1). The ref Set dedups re-delivered
+          // events; both setStates below use PURE updaters (StrictMode-safe).
+          if (seenFightIndicesRef.current.has(detected.index)) break;
+          seenFightIndicesRef.current.add(detected.index);
+          if (liveReportRef.current) autoOpenLiveAnalysisOnce(liveReportRef.current);
+          liveFightCountRef.current += 1;
+          setLiveFightCount((c) => c + 1);
+          setLiveFights((prev) => {
+            const next = [
+              ...prev,
+              {
+                index: detected.index,
+                zoneName: detected.zoneName,
+                bossName: detected.bossName,
+                durationMs: detected.durationMs,
+              },
+            ];
+            // Keep only the most recent MAX_LIVE_FIGHTS so a long session can't
+            // grow state/DOM without bound.
+            return next.length > MAX_LIVE_FIGHTS ? next.slice(-MAX_LIVE_FIGHTS) : next;
+          });
+          break;
+        }
+        case "sessionReset":
+          toast.info("A new logging session started — continuing to watch.");
+          setLiveFights([]);
+          setLiveFightCount(0);
+          liveFightCountRef.current = 0;
+          seenFightIndicesRef.current = new Set();
+          break;
+        case "fightSkipped":
+          // A genuinely oversized fight; surface once. The full log still uploads.
+          toast.info(ev.reason);
+          break;
+        case "warning":
+          // Transient (e.g. a read retry) — log but don't toast, as these recur.
+          console.warn("[uploader] live watcher:", ev.message);
+          break;
+        case "reauthRequired":
+          // Native live only: the ESO Logs session expired mid-stream. Posting is
+          // paused (the report stays open) until the user re-signs-in. Prompt them;
+          // the driver resumes automatically once a fresh session is stored.
+          setLiveStatus("attention");
+          toast.warning(ev.message, { duration: 12000 });
+          break;
+        case "reauthResolved":
+          // A fresh session was captured; the driver resumed posting.
+          setLiveStatus("watching");
+          toast.success("Signed back in — resuming the live upload.");
+          break;
+        case "stopped": {
+          // A `stopped` event that passes the session guard above means THIS
+          // session ended outside the user's Stop button path: either the watcher
+          // failed, or native live finished by END_LOG / idle / server end. The backend
+          // may still hold the now-dead `Running` slot, so drive the existing stop path
+          // to evict it. Use this closure's own `sessionId` (the guard proved it is the
+          // current one) so we never settle another session.
+          const stoppedFightCount = liveFightCountRef.current;
+          liveActiveRef.current = false;
+          liveSessionIdRef.current = null;
+          liveWasRunningRef.current = false; // settled; don't re-warn on close
+          backgroundNoticeShownRef.current = false;
+          setLiveSessionId(null);
+          setLiveStatus(ev.clean ? "upToDate" : "attention");
+          if (!ev.clean && ev.reason) toast.error(ev.reason);
+          // Best-effort: evicts the dead `Running` slot (stop_slot_in_map) and
+          // settles the official-handoff record. Native live self-settles by exact id;
+          // this call is still idempotent and removes the finished slot if it remains.
+          void invokeOrThrow("uploader_stop_live", {
+            sessionId,
+            fightCount: stoppedFightCount,
+          }).catch(() => {});
+          break;
+        }
+      }
+    };
+
+    // Native direct-streaming is the DEFAULT live path: it's faster and keeps the
+    // report in-app. The only ways off it are (a) `forceHandoff` — the explicit "go
+    // live via the official uploader instead" escape hatch — or (b) the UNIFIED opt-out.
+    // `usesOfficialUploader` honours EITHER opt-out key and fails closed on a store read
+    // error, identical to the manual routing — so live can't diverge from manual or from
+    // the readouts in any split/degraded state.
+    const preferOfficial = forceHandoff || (await usesOfficialUploader());
+
+    // Native needs the in-app ESO Logs upload session (the wcl_session cookie), which
+    // is SEPARATE from the profile login that gates this dialog (authUser/isLoggedIn).
+    // A user can be "signed in" to the dialog yet have no upload session — the old
+    // behaviour then silently handed off to the official uploader, which is exactly the
+    // surprise we're fixing. So when native is wanted but there's no session, prompt the
+    // capture inline and proceed native once it lands; only fall back to handoff if the
+    // user cancels/the capture fails.
+    let liveHasSession = await invokeOrThrow<boolean>("uploader_has_session").catch(() => false);
+    if (!preferOfficial && !liveHasSession) {
+      // Bail if the start was superseded while we were checking (mirror of the
+      // pre-start abort check below) before opening a sign-in window.
+      if (liveSessionIdRef.current !== sessionId) {
+        startingRef.current = false;
+        setStarting(false);
+        return;
+      }
+      setLiveStatus("attention");
+      const signedIn = await invokeOrThrow<{ sessionPersisted?: boolean }>("uploader_login_esologs")
+        .then((r) => {
+          warnIfSessionNotPersisted(r);
+          return true;
+        })
+        .catch(() => false);
+      // Re-read the session: the capture either populated the cookie or it didn't.
+      liveHasSession = signedIn
+        ? await invokeOrThrow<boolean>("uploader_has_session").catch(() => false)
+        : false;
+      // Keep the lifted state in sync so the header readout/Direct Upload section
+      // reflect the freshly captured (or still-missing) session.
+      void refreshNativeState();
+      // A Stop or final teardown could have landed during the sign-in window.
+      if (liveSessionIdRef.current !== sessionId) {
+        startingRef.current = false;
+        setStarting(false);
+        return;
+      }
+      // Toast AFTER the abort re-check (and only for the still-current session) so a
+      // Stop-during-sign-in doesn't emit a "streaming via the official uploader"
+      // message for a start that's about to be abandoned.
+      if (!liveHasSession) {
+        toast.info(
+          "Streaming via the official ESO Logs uploader (sign in to ESO Logs for the faster path)."
+        );
+      }
+      setLiveStatus("watching");
+    }
+
+    // Final native decision: wanted AND we have a session (either pre-existing or just
+    // captured). Without a session even after prompting, fall back to the handoff.
+    const nativeOptIn = !preferOfficial && liveHasSession;
+
+    // Native only: peek whether a fresh logging session is coming, so the waiting
+    // state opens with the right guidance (/encounterlog on vs /reloadui). Best-effort
+    // — on error we just show generic guidance; SessionAnchored is the ground truth.
+    if (nativeOptIn) {
+      const readiness = await invokeOrThrow<LiveReadiness>("uploader_probe_live_readiness", {
+        filePath: target,
+      }).catch(() => null);
+      setLiveReadiness(readiness);
+    } else {
+      setLiveReadiness(null);
+    }
+
+    // PRE-START ABORT CHECK. The settings/has_session reads and the readiness probe
+    // above are awaited BEFORE `uploader_start_live` registers a backend `Starting`
+    // slot — so an explicit stop or final teardown landing during them runs
+    // `uploader_stop_live` against a slot that doesn't exist yet (a no-op), and without
+    // this guard the start would then resume and launch an ORPHAN backend session the
+    // UI already asked to stop. If we lost ownership (the ref was cleared/replaced),
+    // bail before touching the backend. Once `uploader_start_live` runs, the backend's
+    // own Starting-slot cancellation-race protocol takes over.
+    if (liveSessionIdRef.current !== sessionId) {
+      startingRef.current = false;
+      setStarting(false);
+      return;
+    }
+
+    try {
+      const dispatch = await invokeOrThrow<UploadDispatch>("uploader_start_live", {
+        sessionId,
+        filePath: target,
+        options,
+        channel,
+        nativeOptIn,
+        // Best-effort content label from the pre-live preflight (live streams new
+        // fights, but the session usually continues in the same content).
+        zone: dominantZone(fights),
+      });
+      // The start can resolve Ok AFTER a stop / switch-to-Manual / superseding
+      // start ran during the await (handleStopLive already fired
+      // uploader_stop_live for this id and cleared the ref). If this start is no
+      // longer the current one, do NOT resurrect it: applying the result would
+      // set liveSessionId (showing a LIVE session) while liveSessionIdRef is null,
+      // so the visible Stop button — which keys off the ref — would no-op, leaving
+      // an unclearable phantom session. The backend stop already cancelled/will
+      // settle it, so just drop the stale result silently.
+      if (liveSessionIdRef.current !== sessionId) return;
+      liveWasRunningRef.current = true; // running (handed off OR native); don't re-warn on close
+      setLiveSessionId(sessionId);
+      const handed = dispatch?.handedOff ?? true; // default to the safe handoff wording
+      setLiveHandedOff(handed);
+      liveHandedOffRef.current = handed; // mirror for the unmount-cleanup toast
+      if (dispatch?.report) {
+        liveReportRef.current = dispatch.report;
+        setLiveReport(dispatch.report);
+      }
+      toast.success(
+        dispatch?.handedOff
+          ? "Live logging started in the official ESO Logs uploader."
+          : nativeOptIn
+            ? "Live logging started — uploading directly to ESO Logs."
+            : "Live logging started."
+      );
+    } catch (e) {
+      // Only act on the failure if THIS start is still current. If a stop /
+      // unmount / superseding start replaced us during the await, clearing the
+      // refs/status here would clobber that newer session (and toast on an
+      // unmounted component); mirror the success arm's guard.
+      if (liveSessionIdRef.current !== sessionId) return;
+      // Start failed (e.g. uploader not installed): reset the gate and refs so a
+      // trailing event can't be processed and the next attempt starts clean.
+      liveActiveRef.current = false;
+      liveSessionIdRef.current = null;
+      setLiveStatus("attention");
+      toast.error(`Couldn't start live logging: ${getTauriErrorMessage(e)}`);
+    } finally {
+      startingRef.current = false;
+      setStarting(false);
+    }
+  };
+
+  const handleStopLive = async () => {
+    // Read the session id from the REF, not state: a start sets the ref before
+    // the start await resolves but sets `liveSessionId` state only after. Using
+    // the ref lets us stop a session that is still starting. The backend turns this
+    // into a cancel of the in-flight Starting slot, so the start aborts instead of
+    // orphaning a Running watcher with no visible Stop control.
+    const id = liveSessionIdRef.current;
+    if (!id) return;
+    // Clear the ownership refs SYNCHRONOUSLY, before any await. A caller that stops
+    // then immediately starts (handleForceHandoffLive) must see "no session" instantly — the
+    // backend stop is awaited below, but a synchronous follow-on (handleStartLive's
+    // re-entry guard, the pre-start abort re-check, the Live-tab auto-select) reads
+    // these refs and would otherwise act on the just-stopped session. The post-await
+    // cleanup below re-checks `=== id` so it won't clobber a newer session.
+    liveSessionIdRef.current = null;
+    liveActiveRef.current = false;
+    // Was this session actually running (handed off to the uploader), vs still
+    // starting? Only a running session left the official uploader streaming, so
+    // only then do we remind the user it keeps going.
+    const wasRunning = liveWasRunningRef.current;
+    const wasHandedOff = liveHandedOffRef.current;
+    liveWasRunningRef.current = false;
+    liveHandedOffRef.current = false;
+    backgroundNoticeShownRef.current = false;
+
+    // Snapshot the session stats NOW (before any state clears) so we can show a
+    // calm end-of-session summary: how long, how many fights, what content.
+    const sessionFightCount = liveFightCountRef.current;
+    const sessionDurationMs = liveStartMs ? Date.now() - liveStartMs : 0;
+    const sessionZones = Array.from(
+      new Set(liveFights.map((f) => f.bossName || f.zoneName).filter((z): z is string => !!z))
+    ).slice(0, 3);
+    try {
+      await invokeOrThrow("uploader_stop_live", {
+        sessionId: id,
+        fightCount: sessionFightCount,
+      });
+    } catch {
+      /* best-effort */
+    }
+    // Clear the live UI STATE unless a NEWER session took over during the await. We
+    // already nulled the refs synchronously up top; the await can take a while (it
+    // joins the driver/watcher + settles history), during which the user could start a
+    // NEW session (which sets liveSessionIdRef to a new id). Only skip the state reset
+    // in that case — otherwise clear it. `null` means no newer session claimed it, so
+    // it's ours to reset.
+    if (liveSessionIdRef.current === null) {
+      setLiveSessionId(null);
+      setLiveStatus(sessionFightCount > 0 ? "upToDate" : "idle");
+    }
+    if (wasRunning) {
+      // Path-aware: on the HANDOFF path Kalpa can't stop the separate official
+      // uploader (it may still be streaming); on the NATIVE path Kalpa IS the uploader,
+      // so Stop genuinely ended the upload and closed the report.
+      toast.info(
+        wasHandedOff
+          ? "Stopped tracking in Kalpa. The ESO Logs uploader keeps streaming in its own window — stop it there to end the live report."
+          : "Stopped the live upload and closed the report on ESO Logs.",
+        { duration: 8000 }
+      );
+    }
+    // A calm end-of-session recap when we actually tracked fights — what the
+    // night amounted to, at a glance.
+    if (sessionFightCount > 0) {
+      const dur = sessionDurationMs > 0 ? ` over ${formatElapsed(sessionDurationMs)}` : "";
+      const where = sessionZones.length ? ` — ${sessionZones.join(", ")}` : "";
+      toast.success(
+        `Session recap: ${sessionFightCount} fight${sessionFightCount === 1 ? "" : "s"}${dur}${where}.`,
+        { duration: 7000 }
+      );
+    }
+    await refreshHistory();
+  };
+
+  // The "go live anyway via the official uploader" escape hatch from the native
+  // waiting state (logging already running, no fresh BEGIN_LOG coming). Stop the
+  // armed-but-waiting native session and immediately restart it forcing the handoff
+  // path — which CAN pick up an in-progress session. Explicit, user-chosen, disclosed
+  // (the running callout then shows the handoff copy) — never a silent downgrade.
+  const handleForceHandoffLive = async () => {
+    await handleStopLive();
+    await handleStartLive(true);
+  };
 
   const copyLink = useCallback(async (url: string) => {
     // Await the write and gate the toast on success: a rejected clipboard write
@@ -783,7 +1470,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
     if (liveSessionId) {
       // A live session that needs the user's attention (e.g. the ESO Logs session
       // expired mid-stream and posting is paused) outranks the healthy live state.
-      if (liveNeedsAttention) return "attention";
+      if (liveStatus === "attention") return "attention";
       return sessionAnchored || liveHandedOff ? "live" : "armed";
     }
     if (uploading) return "uploading";
@@ -793,7 +1480,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   }, [
     isLoggedIn,
     liveSessionId,
-    liveNeedsAttention,
+    liveStatus,
     sessionAnchored,
     liveHandedOff,
     uploading,
@@ -818,36 +1505,48 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
   // leads with when a log is scanned and ready.
   const headerZone = useMemo(() => dominantZone(fights), [fights]);
 
-  // Preflight fight rows (up to 500), memoized so re-rendering the workspace for an
-  // unrelated reason (e.g. typing the report name) doesn't re-map them — and so the
-  // memoized FightList sees a stable `fights` reference and can skip its re-render.
-  const fightRows = useMemo(() => rowsFromSummaries(fights), [fights]);
-
-  // Stable refresh handler for the memoized LogPicker.
-  const handleRefreshLogsClick = useCallback(() => void handleRefreshLogs(), [handleRefreshLogs]);
-
   // Initial dialog focus: land on the first meaningful control (the Manual mode
   // tab) rather than the close button, so keyboard users start in the flow. When
   // logged out this ref is null and the dialog falls back to default focus (the
   // sign-in button).
   const firstTabRef = useRef<HTMLButtonElement>(null);
 
+  const livePhase: "armed" | "live" | "attention" =
+    liveStatus === "attention" ? "attention" : sessionAnchored || liveHandedOff ? "live" : "armed";
+
+  const openLiveWorkspace = useCallback(() => {
+    setMode("live");
+    onOpen();
+  }, [onOpen]);
+
+  const handleDialogOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (nextOpen) {
+        openLiveWorkspace();
+        return;
+      }
+      if (liveSessionIdRef.current && !backgroundNoticeShownRef.current) {
+        backgroundNoticeShownRef.current = true;
+        toast.info(
+          `${
+            liveHandedOffRef.current ? "Live tracking" : "Live upload"
+          } continues in the background.`,
+          {
+            duration: 7000,
+            action: {
+              label: "Open",
+              onClick: openLiveWorkspace,
+            },
+          }
+        );
+      }
+      onClose();
+    },
+    [onClose, openLiveWorkspace]
+  );
+
   return (
-    <Dialog
-      open
-      onOpenChange={(o) => {
-        if (o) return;
-        // A3: never let an accidental Esc/backdrop/X close a running (or still-
-        // starting) live session out from under the user — on the native path that
-        // stops the upload and closes its ESO Logs report. Confirm first; the unmount
-        // cleanup (kept as-is) performs the actual teardown once we onClose().
-        if (shouldConfirmLiveExit(liveSessionIdRef.current !== null)) {
-          setPendingLiveExit("close");
-          return;
-        }
-        onClose();
-      }}
-    >
+    <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       {/* Cap height to the viewport and lay the dialog out as a flex column so the
           header stays pinned while the body scrolls. Without this the shared
           DialogContent (overflow-hidden, no max-height, vertically centered)
@@ -921,6 +1620,21 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
             <div className="space-y-3.5">
               <WhatGetsUploaded />
 
+              {liveSessionId && mode !== "live" && (
+                <LiveSessionMiniBar
+                  phase={livePhase}
+                  startMs={liveStartMs}
+                  fightCount={liveFightCount}
+                  report={liveReport}
+                  handedOff={liveHandedOff}
+                  visibility={liveVisibility}
+                  sessionAnchored={sessionAnchored}
+                  onOpen={() => setMode("live")}
+                  onStop={handleStopLive}
+                  onCopyLink={copyLink}
+                />
+              )}
+
               {/* Mode tabs — a segmented control sitting in a recessed track, so
                   the active tab reads as raised out of the well, not as two equal
                   panels. */}
@@ -929,17 +1643,6 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   buttonRef={firstTabRef}
                   active={mode === "manual"}
                   onClick={() => {
-                    // A3: leaving Live unmounts its only Stop control and stops the
-                    // session — on the native path that closes its ESO Logs report —
-                    // so confirm first rather than ending it on a stray click. Check
-                    // the REF (not `liveSessionId` state): a session still starting has
-                    // its id in the ref before state lands, and handleStopLive keys off
-                    // the ref too, so the confirm's proceed path also cancels an
-                    // in-flight start.
-                    if (shouldConfirmLiveExit(liveSessionIdRef.current !== null)) {
-                      setPendingLiveExit("manual");
-                      return;
-                    }
                     setMode("manual");
                   }}
                   Icon={Upload}
@@ -977,7 +1680,7 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 dragOver={dragOver}
                 importing={importing}
                 onSelect={handleSelectLog}
-                onRefresh={handleRefreshLogsClick}
+                onRefresh={() => void handleRefreshLogs()}
                 onPickFolder={handlePickFolder}
                 onResetFolder={handleResetFolder}
                 onOpenFolder={handleOpenLogsFolder}
@@ -1002,8 +1705,15 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 <Preflight
                   preflight={preflight}
                   scanning={scanning}
+                  deferred={preflightDeferred}
+                  preflightError={preflightError}
                   scanningSizeBytes={logs.find((l) => l.path === selectedLog)?.sizeBytes ?? null}
                   onSplit={handleSplit}
+                  onSplitLatest={handleSplitLatest}
+                  onOpenLatestFights={handleOpenLatestFights}
+                  onScanFull={handleScanFullLog}
+                  latestSplitting={latestSplitting}
+                  latestFightsLoading={latestFightsLoading}
                 />
               )}
 
@@ -1012,9 +1722,17 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                   <div className={cn(WORK_PANEL, "p-3.5")}>
                     <SectionHeader className="mb-2">Fights</SectionHeader>
                     <FightList
-                      fights={fightRows}
+                      fights={rowsFromSummaries(fights)}
                       emptyHint={
-                        scanning ? "Scanning the log…" : "No fights found in this log yet."
+                        scanning
+                          ? "Scanning the log..."
+                          : preflightError
+                            ? "Full log scan failed."
+                            : preflightDeferred
+                              ? "Full log scan deferred."
+                              : preflight?.fightsOmitted
+                                ? "Fight list omitted for this log."
+                                : "No fights found in this log yet."
                       }
                     />
                   </div>
@@ -1063,10 +1781,8 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
                 />
               )}
 
-              {/* Action area. Keyed on `mode` so switching cross-fades the panel
-                (content opacity only — never the glass blur). The mode-switch
-                handler already stops a live session before setMode, so this
-                remount never bypasses the watcher teardown. */}
+              {/* Action area. Keyed on `mode` so switching cross-fades the panel.
+                Live sessions keep running until the explicit Stop control is used. */}
               <div key={mode} className="animate-[fade-in_0.2s_ease-out]">
                 {mode === "manual" ? (
                   <ManualActions
@@ -1142,12 +1858,16 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         // resetting its per-session drafts (include/name) — otherwise a new log
         // with the same session indices would inherit the previous log's choices.
         <SplitWorkbench
-          key={selectedLog}
+          key={`${selectedLog}:${workbenchInitialGranularity}:${workbenchScope}:${
+            workbenchPreflight?.sessions.map((s) => s.startOffset).join("-") ?? "none"
+          }`}
           open={workbenchOpen}
-          onOpenChange={setWorkbenchOpen}
+          onOpenChange={handleWorkbenchOpenChange}
           filePath={selectedLog}
           fileName={selectedLog.split(/[/\\]/).pop() ?? selectedLog}
-          preflight={preflight}
+          preflight={workbenchPreflight}
+          initialGranularity={workbenchInitialGranularity}
+          scope={workbenchScope}
         />
       )}
 
@@ -1158,62 +1878,170 @@ export function UploaderWorkspace({ authUser, onAuthChange, onClose }: UploaderW
         onCancel={() => setDeleteTarget(null)}
         onConfirm={handleConfirmDelete}
       />
-
-      {/* A3: confirm before an accidental close / Manual-switch ends a running live
-          session (native stop closes the ESO Logs report). */}
-      <LiveExitConfirm
-        open={pendingLiveExit !== null}
-        handedOff={liveHandedOff}
-        onCancel={() => setPendingLiveExit(null)}
-        onConfirm={() => {
-          const action = pendingLiveExit;
-          setPendingLiveExit(null);
-          if (action === "close") {
-            // The unmount cleanup stops the session + closes the report.
-            onClose();
-          } else if (action === "manual") {
-            void handleStopLive();
-            setMode("manual");
-          }
-        }}
-      />
+      {liveSessionId && !open && (
+        <LiveSessionMiniBar
+          floating
+          phase={livePhase}
+          startMs={liveStartMs}
+          fightCount={liveFightCount}
+          report={liveReport}
+          handedOff={liveHandedOff}
+          visibility={liveVisibility}
+          sessionAnchored={sessionAnchored}
+          onOpen={openLiveWorkspace}
+          onStop={handleStopLive}
+          onCopyLink={copyLink}
+        />
+      )}
     </Dialog>
   );
 }
 
-// Confirmation before an action that would end a RUNNING live session — closing the
-// dialog or leaving Live for Manual. On the native path Stop closes the report on ESO
-// Logs, so this can't be a stray Esc/backdrop/click. Copy is path-aware (native vs
-// handoff); mirrors DeleteLogConfirm's glass styling.
-function LiveExitConfirm({
-  open,
+// Compact control surface for a live session that continues while the full
+// uploader workspace is hidden or while the user is looking at the manual tab.
+function LiveSessionMiniBar({
+  floating = false,
+  phase,
+  startMs,
+  fightCount,
+  report,
   handedOff,
-  onCancel,
-  onConfirm,
+  visibility,
+  sessionAnchored,
+  onOpen,
+  onStop,
+  onCopyLink,
 }: {
-  open: boolean;
+  floating?: boolean;
+  phase: "armed" | "live" | "attention";
+  startMs: number | null;
+  fightCount: number;
+  report: ReportRef | null;
   handedOff: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
+  visibility: Visibility;
+  sessionAnchored: boolean;
+  onOpen: () => void;
+  onStop: () => void;
+  onCopyLink: (url: string) => void | Promise<void>;
 }) {
-  const copy = liveExitConfirmCopy(handedOff);
+  const tone = phase === "live" ? "emerald" : "amber";
+  const isNative = !handedOff;
+  const title =
+    phase === "attention"
+      ? "Live upload needs attention"
+      : handedOff
+        ? "Live tracking continues"
+        : phase === "armed"
+          ? "Live upload armed"
+          : "Live upload continues";
+  const detail = handedOff
+    ? "Kalpa keeps the timeline here; the ESO Logs uploader keeps streaming in its own window."
+    : phase === "attention"
+      ? "Posting is paused until the ESO Logs session is refreshed."
+      : sessionAnchored
+        ? "Kalpa keeps streaming while the uploader is hidden. Keep Kalpa running until you stop."
+        : "Kalpa is waiting for ESO to start a logging session. Keep Kalpa running until you stop.";
+
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{copy.title}</DialogTitle>
-          <DialogDescription>{copy.description}</DialogDescription>
-        </DialogHeader>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel}>
-            Keep streaming
-          </Button>
-          <Button variant="destructive" onClick={onConfirm}>
-            {copy.confirmLabel}
-          </Button>
+    <div
+      className={cn(
+        floating &&
+          "fixed right-4 bottom-4 left-4 z-40 sm:left-auto sm:w-[min(420px,calc(100vw-2rem))]"
+      )}
+    >
+      <GlassPanel
+        variant="primary"
+        className={cn(
+          "border p-3.5 shadow-[0_18px_48px_-18px_rgba(0,0,0,0.85),inset_0_1px_0_rgba(255,255,255,0.06)]",
+          tone === "emerald"
+            ? "border-emerald-400/20 bg-gradient-to-b from-emerald-400/[0.08] to-white/[0.015]"
+            : "border-amber-400/20 bg-gradient-to-b from-amber-400/[0.08] to-white/[0.015]"
+        )}
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <span
+              className={cn(
+                "flex size-9 shrink-0 items-center justify-center rounded-lg border",
+                tone === "emerald"
+                  ? "border-emerald-400/20 bg-emerald-400/[0.08]"
+                  : "border-amber-400/20 bg-amber-400/[0.08]"
+              )}
+            >
+              {phase === "attention" ? (
+                <AlertTriangle className="size-4 text-amber-300" aria-hidden />
+              ) : (
+                <PulseDot tone={tone} />
+              )}
+            </span>
+            <div className="min-w-0">
+              <div className="truncate font-heading text-sm font-semibold text-foreground/95">
+                {title}
+              </div>
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+                {startMs !== null && <SessionTimer startMs={startMs} />}
+                <span>
+                  {fightCount} fight{fightCount === 1 ? "" : "s"}
+                </span>
+                {report && (
+                  <span className="max-w-[120px] truncate font-mono text-foreground/70">
+                    {report.code}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+            {report && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => void onCopyLink(report.url)}
+                  aria-label="Copy report link"
+                >
+                  <Copy className="size-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    void openReportUrl(primaryReportUrl(report, visibility, { live: isNative }))
+                  }
+                >
+                  {isNative && visibility !== "private" ? (
+                    <Zap className="size-3.5" />
+                  ) : (
+                    <ExternalLink className="size-3.5" />
+                  )}
+                  {isNative && visibility !== "private" ? "Watch" : "Open"}
+                </Button>
+              </>
+            )}
+            <Button variant="outline" size="sm" onClick={onOpen}>
+              <Radio className="size-3.5" />
+              {floating ? "Open" : "Show live"}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onStop}
+              className={
+                handedOff
+                  ? "border-amber-400/25 text-amber-200 hover:bg-amber-500/10"
+                  : "border-red-400/25 text-red-200 hover:bg-red-500/10"
+              }
+            >
+              {handedOff ? "Stop tracking" : "Stop upload"}
+            </Button>
+          </div>
         </div>
-      </DialogContent>
-    </Dialog>
+        <p className="mt-2 border-t border-white/[0.06] pt-2 text-xs text-muted-foreground">
+          {detail}
+        </p>
+      </GlassPanel>
+    </div>
   );
 }
 
@@ -2281,16 +3109,450 @@ function ModeTab({
   );
 }
 
-const Preflight = memo(function Preflight({
+type LogFilter = "all" | "active" | "archives";
+type LogSort = "newest" | "largest";
+
+function LogPicker({
+  detection,
+  logsDir,
+  logs,
+  listError,
+  selectedLog,
+  scanning,
+  dragOver,
+  importing,
+  onSelect,
+  onRefresh,
+  onPickFolder,
+  onResetFolder,
+  onOpenFolder,
+  onReveal,
+  onCopyPath,
+  onRequestDelete,
+}: {
+  detection: LogPathDetection | null;
+  logsDir: string | null;
+  logs: LogFileInfo[];
+  listError: string | null;
+  selectedLog: string | null;
+  scanning: boolean;
+  dragOver: boolean;
+  importing: boolean;
+  onSelect: (path: string) => void;
+  onRefresh: () => void;
+  onPickFolder: () => void;
+  onResetFolder: () => void;
+  onOpenFolder: () => void;
+  onReveal: (path: string) => void;
+  onCopyPath: (path: string) => void;
+  onRequestDelete: (log: LogFileInfo) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<LogFilter>("all");
+  const [sort, setSort] = useState<LogSort>("newest");
+
+  // Only show the controls once the folder has enough logs to be worth filtering.
+  const showControls = logs.length > 1;
+  const totalBytes = logs.reduce((sum, l) => sum + l.sizeBytes, 0);
+
+  // The user has navigated away from the auto-detected folder iff a detected path
+  // exists AND differs from the current one. Gates BOTH the line-1 "Custom" tag
+  // and the line-2 "Back to detected" reset so they appear/disappear as a pair.
+  const detectedPath = detection?.path ?? null;
+  const isCustomFolder = detectedPath != null && logsDir != null && logsDir !== detectedPath;
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let out = logs.filter((l) => {
+      if (q && !l.fileName.toLowerCase().includes(q)) return false;
+      if (filter === "active") return l.isActive;
+      if (filter === "archives") return /^archive/i.test(l.fileName);
+      return true;
+    });
+    out = [...out].sort((a, b) =>
+      sort === "largest" ? b.sizeBytes - a.sizeBytes : b.modifiedAtMs - a.modifiedAtMs
+    );
+    return out;
+  }, [logs, query, filter, sort]);
+
+  return (
+    // The picker is the primary work surface, so it RISES off the dark canvas:
+    // a lighter fill, a luminous top edge (inset highlight), and a real outer
+    // shadow. This is the one place the eye should land first.
+    <div
+      className={cn(
+        "relative rounded-2xl border border-white/[0.1] bg-gradient-to-b from-white/[0.07] to-white/[0.025] p-3.5 transition-colors duration-150",
+        "shadow-[0_12px_40px_-16px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.08)]",
+        dragOver && "border-accent-sky/60 from-accent-sky/[0.1] to-accent-sky/[0.03]"
+      )}
+    >
+      {/* Drag-over overlay: a clear drop target appears while a file is dragged
+          over the window. The actual import (copy-into-Logs) runs on drop. */}
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-accent-sky/50 bg-surface-overlay text-center">
+          <CloudUpload className="size-7 text-accent-sky" aria-hidden />
+          <span className="text-sm font-medium text-accent-sky">Drop your .log to add it</span>
+        </div>
+      )}
+      {importing && (
+        <div className="pointer-events-none absolute inset-1 z-10 flex flex-col items-center justify-center gap-2 rounded-lg bg-surface-overlay text-center">
+          <span className="size-5 animate-spin rounded-full border-2 border-white/[0.1] border-t-accent-sky" />
+          <span className="text-sm text-muted-foreground">Adding log to your folder…</span>
+        </div>
+      )}
+      {/* Folder identity row: a sky folder-icon chip + the source path make it
+          unmistakable that this is your on-disk Logs folder, not a generic
+          panel. The path reads as a path; the count anchors "what's in here". */}
+      <div className="mb-2.5 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-accent-sky/20 bg-accent-sky/[0.08] text-accent-sky">
+            <FolderOpen className="size-4" aria-hidden />
+          </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground/90">Logs folder</span>
+              {/* A neutral state tag (NOT sky — it's informational, not a control)
+                  marking that this isn't the auto-detected folder. The default
+                  state stays badge-free, so absence reads as "the folder Kalpa
+                  found". */}
+              {isCustomFolder && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  <FolderSearch className="size-2.5" aria-hidden />
+                  Custom
+                </span>
+              )}
+              {logsDir && (
+                <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground tabular-nums">
+                  {logs.length} {logs.length === 1 ? "file" : "files"}
+                  {totalBytes > 0 && ` · ${compactBytes(totalBytes)}`}
+                </span>
+              )}
+              {totalBytes > 5 * 1024 * 1024 * 1024 && (
+                <InfoPill color="amber" className="text-[10px]">
+                  Folder large — delete old archives
+                </InfoPill>
+              )}
+            </div>
+            {logsDir ? (
+              <div className="flex items-center gap-2">
+                <span
+                  className="min-w-0 truncate font-mono text-[11px] text-muted-foreground"
+                  title={logsDir}
+                >
+                  {logsDir}
+                </span>
+                {/* One-tap, non-destructive return to the detected folder — sky
+                    (interactive recovery), gated on the same isCustomFolder flag. */}
+                {isCustomFolder && (
+                  <SimpleTooltip content={`Detected: ${detectedPath}`} side="bottom">
+                    <button
+                      type="button"
+                      onClick={onResetFolder}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent-sky/30 bg-accent-sky/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-accent-sky transition-colors duration-150 hover:bg-accent-sky/[0.12] focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none animate-[fade-in_0.2s_ease-out]"
+                      aria-label="Switch back to the auto-detected Logs folder"
+                    >
+                      <RotateCcw className="size-3" aria-hidden />
+                      Back to detected
+                    </button>
+                  </SimpleTooltip>
+                )}
+              </div>
+            ) : (
+              <div className="text-[11px] text-amber-400/90">{detection?.message}</div>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-1">
+          <SimpleTooltip content="Refresh logs" side="bottom">
+            <Button variant="ghost" size="icon-sm" onClick={onRefresh} aria-label="Refresh logs">
+              <RefreshCw className="size-3.5" />
+            </Button>
+          </SimpleTooltip>
+          <SimpleTooltip content="Open Logs folder in File Explorer" side="bottom">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onOpenFolder}
+              aria-label="Open Logs folder"
+            >
+              <FolderOpen className="size-3.5" />
+            </Button>
+          </SimpleTooltip>
+          <SimpleTooltip content="Choose a different Logs folder" side="bottom">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={onPickFolder}
+              aria-label="Choose folder"
+            >
+              <FolderSearch className="size-3.5" />
+            </Button>
+          </SimpleTooltip>
+        </div>
+      </div>
+
+      {/* Search + filter + sort, shown only when the folder is busy enough. */}
+      {showControls && !listError && (
+        <div className="mb-2 space-y-2">
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/60"
+              aria-hidden
+            />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search logs…"
+              aria-label="Search logs"
+              className="h-8 pl-8 text-xs"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex gap-1" role="group" aria-label="Filter logs">
+              {(
+                [
+                  { id: "all", label: "All" },
+                  { id: "active", label: "Active" },
+                  { id: "archives", label: "Archives" },
+                ] as { id: LogFilter; label: string }[]
+              ).map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  aria-pressed={filter === f.id}
+                  onClick={() => setFilter(f.id)}
+                  className={cn(
+                    "rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors",
+                    "focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none",
+                    filter === f.id
+                      ? "border-accent-sky/40 bg-accent-sky/[0.06] text-accent-sky"
+                      : "border-white/[0.08] bg-white/[0.02] text-muted-foreground hover:text-foreground/80"
+                  )}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setSort((s) => (s === "newest" ? "largest" : "newest"))}
+              className="inline-flex items-center gap-1 rounded-md border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground/80 focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none"
+              aria-label={`Sorted by ${sort === "newest" ? "newest" : "largest"} first — tap to sort by ${sort === "newest" ? "largest" : "newest"}`}
+            >
+              <ArrowDownUp className="size-3" aria-hidden />
+              {sort === "newest" ? "Newest" : "Largest"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {listError ? (
+        // On-brand error card: 3px red left-accent, icon + headline + raw detail,
+        // so a folder-access failure reads as an intentional state, not a glitch.
+        <div className="rounded-lg border border-red-500/15 border-l-[3px] border-l-red-500 bg-red-500/[0.04] p-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-red-300/90">
+            <AlertTriangle className="size-4 shrink-0" aria-hidden />
+            Couldn't read this folder
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Check it's accessible and try Refresh.
+          </p>
+          <p className="mt-1 text-xs break-words text-muted-foreground/70">{listError}</p>
+        </div>
+      ) : logs.length === 0 ? (
+        // Unified empty state matching the FightList dashed pattern.
+        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-white/[0.08] p-5 text-center">
+          <FileText className="size-6 text-muted-foreground/40" aria-hidden />
+          <p className="text-sm text-muted-foreground">
+            {detection && !detection.encounterLogExists
+              ? "No Encounter.log yet. Type /encounterlog in chat (or use a logging addon) to start recording."
+              : "No log files found in this folder."}
+          </p>
+        </div>
+      ) : (
+        <ul
+          className="max-h-52 space-y-1 overflow-y-auto rounded-xl border border-black/40 bg-black/25 p-1.5 shadow-[inset_0_2px_8px_-2px_rgba(0,0,0,0.6)]"
+          aria-label="Log files"
+          // Lightweight roving navigation: Up/Down/Home/End move focus between
+          // log rows so a long folder isn't N Tab presses. Tab still works as a
+          // fallback; we deliberately keep the aria-pressed button model (not a
+          // listbox) for consistency with the rest of the uploader's selectors.
+          onKeyDown={(e) => {
+            const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+            if (!keys.includes(e.key)) return;
+            const buttons = Array.from(
+              e.currentTarget.querySelectorAll<HTMLButtonElement>("button")
+            );
+            if (buttons.length === 0) return;
+            const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+            e.preventDefault();
+            let next: number;
+            if (e.key === "Home") next = 0;
+            else if (e.key === "End") next = buttons.length - 1;
+            else if (e.key === "ArrowDown") next = current < 0 ? 0 : (current + 1) % buttons.length;
+            else next = current <= 0 ? buttons.length - 1 : current - 1;
+            buttons[next]?.focus();
+          }}
+        >
+          {visible.length === 0 ? (
+            <li className="rounded-lg border border-dashed border-white/[0.08] px-3 py-4 text-center text-xs text-muted-foreground">
+              No logs match — clear the search or filter.
+            </li>
+          ) : null}
+          {visible.map((log) => {
+            const isSelected = selectedLog === log.path;
+            return (
+              // The row is a group container so the per-file actions can sit as
+              // SIBLINGS of the select button (buttons can't nest in buttons) and
+              // reveal on hover / keyboard focus-within.
+              <li key={log.path} className="group/row relative">
+                <button
+                  type="button"
+                  data-log-path={log.path}
+                  onClick={() => onSelect(log.path)}
+                  className={cn(
+                    "flex w-full items-center justify-between gap-3 rounded-lg border py-2 pr-24 pl-3 text-left transition-all duration-150",
+                    "focus-visible:border-accent-sky/40 focus-visible:ring-2 focus-visible:ring-accent-sky/30 focus-visible:outline-none",
+                    isSelected
+                      ? // Selected row pops OFF the recessed list: lit sky fill, a
+                        // left accent bar, and a glow so the current choice is loud.
+                        "border-accent-sky/50 border-l-[3px] border-l-accent-sky bg-accent-sky/[0.12] shadow-[0_2px_12px_-2px_color-mix(in_oklab,var(--accent-sky)_35%,transparent)]"
+                      : "border-transparent bg-white/[0.03] hover:bg-white/[0.06]"
+                  )}
+                  aria-pressed={isSelected}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <FileText
+                      className={cn(
+                        "size-4 shrink-0",
+                        isSelected ? "text-accent-sky" : "text-muted-foreground"
+                      )}
+                      aria-hidden
+                    />
+                    <div className="min-w-0">
+                      <div className="truncate text-sm text-foreground/90">{log.fileName}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {compactBytes(log.sizeBytes)} · {relativeFromMs(log.modifiedAtMs)}
+                      </div>
+                    </div>
+                  </div>
+                  {/* Scanning / active status, co-located with its row. Hidden
+                      when the action cluster is showing so they don't overlap. */}
+                  {isSelected && scanning ? (
+                    <InfoPill color="sky" className="shrink-0 gap-1">
+                      <span className="size-2.5 animate-spin rounded-full border-2 border-accent-sky/30 border-t-accent-sky" />
+                      Scanning
+                    </InfoPill>
+                  ) : (
+                    log.isActive && (
+                      <InfoPill
+                        color="sky"
+                        className="shrink-0 gap-1 transition-opacity group-hover/row:opacity-0 group-focus-within/row:opacity-0"
+                      >
+                        <Radio className="size-3 animate-pulse" aria-hidden /> Active
+                      </InfoPill>
+                    )
+                  )}
+                </button>
+
+                {/* Per-file actions — reveal, copy path, delete. Sit over the row's
+                    right edge; appear on hover/focus, always present for keyboard.
+                    stopPropagation so they never trigger row selection. */}
+                <div className="absolute top-1/2 right-2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100 group-focus-within/row:opacity-100">
+                  <SimpleTooltip content="Reveal in Explorer" side="top">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-7 text-muted-foreground/70 hover:text-foreground"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onReveal(log.path);
+                      }}
+                      aria-label={`Reveal ${log.fileName} in Explorer`}
+                    >
+                      <FolderInput className="size-3.5" />
+                    </Button>
+                  </SimpleTooltip>
+                  <SimpleTooltip content="Copy file path" side="top">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-7 text-muted-foreground/70 hover:text-foreground"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCopyPath(log.path);
+                      }}
+                      aria-label={`Copy path of ${log.fileName}`}
+                    >
+                      <ClipboardCopy className="size-3.5" />
+                    </Button>
+                  </SimpleTooltip>
+                  <SimpleTooltip
+                    content={
+                      log.isActive ? "Can't delete — this log is still being written" : "Delete log"
+                    }
+                    side="top"
+                  >
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-7 text-muted-foreground/70 hover:text-red-400"
+                      disabled={log.isActive}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!log.isActive) onRequestDelete(log);
+                      }}
+                      aria-label={
+                        log.isActive
+                          ? `${log.fileName} is active and can't be deleted`
+                          : `Delete ${log.fileName}`
+                      }
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </SimpleTooltip>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {/* Discoverability for drag-drop — a quiet hint that you can drop a log
+          from anywhere; the backend copies it into this folder first. */}
+      {!listError && (
+        <p className="mt-2 text-center text-[11px] text-muted-foreground/60">
+          or drop a <code className="text-muted-foreground/80">.log</code> file here from anywhere
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Preflight({
   preflight,
   scanning,
+  deferred,
+  preflightError,
   scanningSizeBytes,
   onSplit,
+  onSplitLatest,
+  onOpenLatestFights,
+  onScanFull,
+  latestSplitting,
+  latestFightsLoading,
 }: {
   preflight: LogPreflight | null;
   scanning: boolean;
+  deferred: boolean;
+  preflightError: string | null;
   scanningSizeBytes: number | null;
   onSplit: () => void;
+  onSplitLatest: () => void;
+  onOpenLatestFights: () => void;
+  onScanFull: () => void;
+  latestSplitting: boolean;
+  latestFightsLoading: boolean;
 }) {
   if (scanning && !preflight) {
     // Surface the known file size so a long scan of a multi-GB log reads as
@@ -2300,14 +3562,112 @@ const Preflight = memo(function Preflight({
     const big = (scanningSizeBytes ?? 0) > 256 * 1024 * 1024;
     return (
       <div className="space-y-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
-          Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span className="size-3.5 animate-spin rounded-full border-2 border-white/[0.1] border-t-primary" />
+            Scanning the log{sizeHint}…{big ? " this may take a moment." : ""}
+          </div>
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onOpenLatestFights}
+              disabled={latestFightsLoading || latestSplitting}
+              className="min-w-0 flex-1 border-accent-sky/30 bg-accent-sky/[0.05] text-accent-sky hover:bg-accent-sky/[0.12] sm:flex-none"
+            >
+              {latestFightsLoading ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Swords className="size-3.5" aria-hidden />
+              )}
+              Latest fights
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onSplitLatest}
+              disabled={latestSplitting || latestFightsLoading}
+              className="min-w-0 flex-1 border-accent-sky/30 bg-accent-sky/[0.05] text-accent-sky hover:bg-accent-sky/[0.12] sm:flex-none"
+            >
+              {latestSplitting ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Scissors className="size-3.5" aria-hidden />
+              )}
+              Latest session
+            </Button>
+          </div>
         </div>
         <div className="flex gap-2" aria-hidden>
           <span className="h-5 w-16 animate-pulse rounded-lg bg-white/[0.05]" />
           <span className="h-5 w-20 animate-pulse rounded-lg bg-white/[0.05]" />
           <span className="h-5 w-20 animate-pulse rounded-lg bg-white/[0.05]" />
+        </div>
+      </div>
+    );
+  }
+  if (!preflight && (deferred || preflightError)) {
+    const sizeHint = scanningSizeBytes ? compactBytes(scanningSizeBytes) : null;
+    const hasError = Boolean(preflightError);
+    return (
+      <div className="rounded-xl border border-accent-sky/20 bg-accent-sky/[0.04] p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <span
+            className={cn(
+              "flex size-9 shrink-0 items-center justify-center rounded-lg",
+              hasError ? "bg-destructive/10 text-destructive" : "bg-accent-sky/12 text-accent-sky"
+            )}
+          >
+            {hasError ? (
+              <AlertCircle className="size-4" aria-hidden />
+            ) : (
+              <Search className="size-4" aria-hidden />
+            )}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold text-foreground/90">
+              {hasError ? "Full log scan failed" : "Large log selected"}
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              {hasError
+                ? preflightError
+                : `Full scan is deferred${sizeHint ? ` for ${sizeHint}` : ""}. Latest-session actions stay fast.`}
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onOpenLatestFights}
+              disabled={latestFightsLoading || latestSplitting}
+              className="border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
+            >
+              {latestFightsLoading ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Swords className="size-3.5" aria-hidden />
+              )}
+              Latest fights
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onSplitLatest}
+              disabled={latestSplitting || latestFightsLoading}
+              className="border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
+            >
+              {latestSplitting ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <Scissors className="size-3.5" aria-hidden />
+              )}
+              Latest session
+            </Button>
+            <Button variant="outline" size="sm" onClick={onScanFull}>
+              <Search className="size-3.5" aria-hidden />
+              Scan full log
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -2324,6 +3684,7 @@ const Preflight = memo(function Preflight({
   // Per-fight split needs the parsed fight list, which the backend omits for very
   // large logs — so don't promise it in the card when the workbench can't offer it.
   const perFightAvailable = preflight.fights.length > 0;
+  const fightsOmitted = preflight.fightsOmitted;
   const counts =
     sessionCount > 0
       ? `${sessionCount} session${sessionCount === 1 ? "" : "s"}` +
@@ -2342,7 +3703,7 @@ const Preflight = memo(function Preflight({
           : "border-accent-sky/20 border-l-accent-sky/70 bg-accent-sky/[0.04]"
       )}
     >
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <span
           className={cn(
             "flex size-9 shrink-0 items-center justify-center rounded-lg",
@@ -2358,24 +3719,66 @@ const Preflight = memo(function Preflight({
           <div className="mt-0.5 text-xs text-muted-foreground">
             {perFightAvailable
               ? "Carve it into per-session or per-fight files — upload a single fight or a whole night on its own."
-              : "Carve it into per-session files so each uploads cleanly (per-fight split is available on smaller logs)."}
+              : fightsOmitted
+                ? "Fight rows were omitted to keep this log responsive. Split by session, or scan just the latest session for fights."
+                : "Carve it into per-session files so each uploads cleanly."}
             {counts && <span className="text-muted-foreground/70"> {counts}.</span>}
           </div>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onSplit}
-          className={cn(
-            "shrink-0",
-            urgent
-              ? "border-amber-400/40 bg-amber-400/[0.08] text-amber-200 hover:bg-amber-400/[0.16]"
-              : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
-          )}
-        >
-          <Scissors className="size-3.5" />
-          Split log…
-        </Button>
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onOpenLatestFights}
+            disabled={latestFightsLoading || latestSplitting}
+            className={cn(
+              "shrink-0",
+              urgent
+                ? "border-amber-400/35 bg-amber-400/[0.06] text-amber-200 hover:bg-amber-400/[0.14]"
+                : "border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
+            )}
+          >
+            {latestFightsLoading ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Swords className="size-3.5" aria-hidden />
+            )}
+            Latest fights
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onSplitLatest}
+            disabled={latestSplitting || latestFightsLoading}
+            className={cn(
+              "shrink-0",
+              urgent
+                ? "border-amber-400/35 bg-amber-400/[0.06] text-amber-200 hover:bg-amber-400/[0.14]"
+                : "border-accent-sky/30 bg-accent-sky/[0.04] text-accent-sky hover:bg-accent-sky/[0.1]"
+            )}
+          >
+            {latestSplitting ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Scissors className="size-3.5" aria-hidden />
+            )}
+            Latest session
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onSplit}
+            className={cn(
+              "shrink-0",
+              urgent
+                ? "border-amber-400/40 bg-amber-400/[0.08] text-amber-200 hover:bg-amber-400/[0.16]"
+                : "border-accent-sky/30 bg-accent-sky/[0.06] text-accent-sky hover:bg-accent-sky/[0.12]"
+            )}
+          >
+            <Scissors className="size-3.5" aria-hidden />
+            Split log…
+          </Button>
+        </div>
       </div>
 
       {/* Fight peek — the first few fights with their durations, so the content is
@@ -2401,7 +3804,7 @@ const Preflight = memo(function Preflight({
       )}
     </div>
   );
-});
+}
 
 function LiveToggles({
   options,
@@ -2736,7 +4139,9 @@ function LiveDashboard({
                 <span className="text-emerald-400/90">Stop</span> ends the upload and closes the
                 report on esologs.com.
               </li>
-              <li className="list-disc">Keep Kalpa open until you stop or finish the raid.</li>
+              <li className="list-disc">
+                You can close this dialog; keep Kalpa running until you stop or finish the raid.
+              </li>
             </ul>
           </div>
         ))}
@@ -2841,4 +4246,387 @@ function LiveDashboard({
       />
     </GlassPanel>
   );
+}
+
+/** A scannable label for an upload history row. ESO archive logs carry long,
+ *  machine-generated names (`Archive-2025-06-20__03_46_03-Encounter-session02-
+ *  1750394097660.log`); strip that noise to the part a human recognizes, while
+ *  leaving ordinary names (and user-named splits) intact. */
+function tidyLogLabel(fileName: string): string {
+  const base = fileName.replace(/\.log$/i, "");
+  // Archive pattern with a session number → keep the readable "session NN".
+  const sess = base.match(/-session(\d+)/i);
+  if (/^Archive-/i.test(base) && sess) {
+    const datePart = base.match(/Archive-(\d{4}-\d{2}-\d{2})/);
+    return datePart
+      ? `Archive ${datePart[1]} · session ${Number(sess[1])}`
+      : `Session ${Number(sess[1])}`;
+  }
+  // ISO-stamped archive (Archive-20260614T190354Z-Encounter) → "Archive Jun 14".
+  const iso = base.match(/^Archive-(\d{4})(\d{2})(\d{2})T\d+Z?/i);
+  if (iso) {
+    const [, y, m, d] = iso;
+    const dt = new Date(Number(y), Number(m) - 1, Number(d));
+    return `Archive · ${dt.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+  }
+  // Drop a trailing epoch-ms id some names carry.
+  return base.replace(/-\d{13,}$/, "");
+}
+
+/** Split a stored source path into its immediate parent folder (for the row's
+ *  provenance line) and the full directory (for the tooltip). Handles Windows
+ *  (`\`) and POSIX (`/`) separators so the same record reads correctly on both. */
+function sourceLocation(sourcePath: string): { folder: string; dir: string } {
+  const sepIdx = Math.max(sourcePath.lastIndexOf("/"), sourcePath.lastIndexOf("\\"));
+  const dir = sepIdx > 0 ? sourcePath.slice(0, sepIdx) : sourcePath;
+  const dirParts = dir.split(/[/\\]/).filter(Boolean);
+  const folder = dirParts[dirParts.length - 1] ?? dir;
+  return { folder, dir };
+}
+
+/** The 3px status-accent left-border color per upload status (the app's signature
+ *  card idiom). Color encodes status REDUNDANTLY with the badge text — never color
+ *  alone. Emerald for `live` (a healthy in-progress session); red is reserved for
+ *  real failures only. */
+const STATUS_ACCENT: Record<UploadRecord["status"], string> = {
+  completed: "before:bg-emerald-400/70",
+  queued: "before:bg-accent-sky/70",
+  uploading: "before:bg-accent-sky/70",
+  live: "before:bg-emerald-400/70",
+  paused: "before:bg-amber-400/70",
+  handedOff: "before:bg-amber-400/70",
+  failed: "before:bg-red-400/80",
+  cancelled: "before:bg-white/15",
+};
+
+function HistoryPanel({
+  history,
+  onCopyLink,
+  onRefresh,
+  onAttachReport,
+  onDelete,
+}: {
+  history: UploadRecord[];
+  onCopyLink: (url: string) => void | Promise<void>;
+  onRefresh: () => void;
+  onAttachReport: (id: string, url: string) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}) {
+  const [attachingId, setAttachingId] = useState<string | null>(null);
+  const [linkDraft, setLinkDraft] = useState("");
+  // Inline two-step confirm: clicking trash arms the row; a second click on the
+  // revealed "Remove" confirms. Removing a history record never touches the file.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  // Only the first 8 records are rendered.
+  const visibleHistory = useMemo(() => history.slice(0, 8), [history]);
+
+  const submitLink = async (id: string) => {
+    const code = parseReportCode(linkDraft);
+    if (!code) {
+      toast.error("That doesn't look like an ESO Logs report link or code.");
+      return;
+    }
+    // Always rebuild the canonical URL from the parsed code, so neither a full URL
+    // nor a bare code can forward anything but a well-formed report link.
+    await onAttachReport(id, `https://www.esologs.com/reports/${code}`);
+    setAttachingId(null);
+    setLinkDraft("");
+  };
+
+  return (
+    <div className={cn(WORK_PANEL, "p-3.5")}>
+      <div className="mb-2.5 flex items-center justify-between">
+        <SectionHeader>Recent Uploads</SectionHeader>
+        <SimpleTooltip content="Refresh history" side="bottom">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => void onRefresh()}
+            aria-label="Refresh history"
+          >
+            <RefreshCw className="size-3.5" />
+          </Button>
+        </SimpleTooltip>
+      </div>
+
+      {history.length === 0 ? (
+        <div className="px-1 py-6 text-center">
+          <FileText className="mx-auto mb-2 size-5 text-muted-foreground/30" aria-hidden />
+          <p className="text-xs text-muted-foreground/70">
+            No uploads yet. Reports you create will appear here.
+          </p>
+        </div>
+      ) : (
+        <ul className="space-y-1.5">
+          {visibleHistory.map((r) => {
+            const loc = sourceLocation(r.sourcePath);
+            // Lead with a content name the raider recognizes: the derived zone +
+            // date, falling back to the report title, then a tidied file label.
+            const date = shortDate(r.createdAtMs);
+            const content = r.zone?.trim() ? `${r.zone.trim()}${date ? ` · ${date}` : ""}` : null;
+            const title = r.title?.trim() || null;
+            const lead = content ?? title ?? tidyLogLabel(r.fileName);
+            // Show the report title as a secondary line only when it actually adds
+            // something. Normalize separators + case so the COMMON suggested name
+            // ("Zone — date") isn't echoed as a near-duplicate of the lead
+            // ("Zone · date"), and a description that just repeats the zone is hidden.
+            const norm = (s: string) =>
+              s
+                .toLowerCase()
+                .replace(/[·—–-]+/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+            const showTitle =
+              title !== null &&
+              norm(title) !== norm(lead) &&
+              (r.zone ? norm(title) !== norm(r.zone) : true);
+            const handedOffNeedsLink = r.status === "handedOff" && !r.report;
+            return (
+              <li
+                key={r.id}
+                className={cn(
+                  "relative overflow-hidden rounded-lg border border-white/[0.06] bg-white/[0.02] py-2 pr-3 pl-3.5 transition-colors hover:bg-white/[0.04]",
+                  "before:absolute before:top-2 before:bottom-2 before:left-0 before:w-[3px] before:rounded-full before:content-['']",
+                  STATUS_ACCENT[r.status]
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    {/* Lead: the content name (zone · date), or the report title, or
+                        a tidied file label — what the raider recognizes at a glance. */}
+                    <div className="truncate text-sm font-semibold text-foreground/90">{lead}</div>
+                    {/* The ESO Logs report title, only when distinct from the lead. */}
+                    {showTitle && (
+                      <div
+                        className="truncate text-xs text-foreground/65"
+                        title={title ?? undefined}
+                      >
+                        {title}
+                      </div>
+                    )}
+                    {/* Quiet provenance: the exact file name (mono, so two
+                        "Encounter.log" uploads stay distinguishable) + hard facts.
+                        The full source folder lives on the file name's tooltip. */}
+                    <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                      <SimpleTooltip content={loc.dir} side="top">
+                        <span
+                          className="truncate font-mono text-[11px] text-muted-foreground/70"
+                          title={loc.dir}
+                        >
+                          {r.fileName}
+                        </span>
+                      </SimpleTooltip>
+                      {/* The source folder is now visual-tooltip-only; expose it to
+                          screen readers so two same-named logs stay distinguishable. */}
+                      <span className="sr-only"> in {loc.dir}</span>
+                      <span className="text-muted-foreground/40">·</span>
+                      <span>
+                        {r.fightCount} fight{r.fightCount === 1 ? "" : "s"}
+                      </span>
+                      <span className="text-muted-foreground/40">·</span>
+                      <span className="capitalize">{r.visibility}</span>
+                      <span className="text-muted-foreground/40">·</span>
+                      <span>{relativeFromMs(r.createdAtMs)}</span>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <StatusBadge status={r.status} hasReport={!!r.report} />
+                    {r.report && (
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => void onCopyLink(r.report!.url)}
+                          aria-label="Copy report link"
+                        >
+                          <Copy className="size-3.5" />
+                        </Button>
+                        <SimpleTooltip content="Open the raw report on ESO Logs" side="top">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => void openReportUrl(r.report!.url)}
+                            aria-label="Open report on ESO Logs"
+                          >
+                            <ExternalLink className="size-3.5" />
+                          </Button>
+                        </SimpleTooltip>
+                        {/* The richer analysis (fight detection, rotation, scribing,
+                            replay) lives in the ESO Log Aggregator — the primary view. */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-emerald-300/90 hover:bg-emerald-500/15 hover:text-emerald-200"
+                          onClick={() =>
+                            void primaryReportUrlForOpen(r.report!, r.visibility, {
+                              buildEvidence: r.buildEvidence,
+                            }).then((url) => openReportUrl(url))
+                          }
+                          aria-label={
+                            r.visibility === "private"
+                              ? "Open private report on ESO Logs"
+                              : "Open analysis in ESO Log Aggregator"
+                          }
+                        >
+                          {r.visibility === "private" ? (
+                            <ExternalLink className="size-3.5" />
+                          ) : (
+                            <Zap className="size-3.5" />
+                          )}
+                          {r.visibility === "private" ? "ESO Logs" : "Analysis"}
+                        </Button>
+                      </>
+                    )}
+                    <SimpleTooltip
+                      content="Remove from history (your log file stays on disk)"
+                      side="top"
+                    >
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="text-muted-foreground/70 hover:text-red-400"
+                        onClick={() => setConfirmDeleteId(confirmDeleteId === r.id ? null : r.id)}
+                        aria-label="Remove this upload from history"
+                      >
+                        <Trash2 className="size-3.5" />
+                      </Button>
+                    </SimpleTooltip>
+                  </div>
+                </div>
+
+                {/* Handed-off explainer + paste affordance, replacing the old
+                    context-free "Add link". ALWAYS visible (no hover) so the state
+                    is self-explanatory; clicking reveals the inline input in-place,
+                    with the prose still showing so the "why" never disappears. */}
+                {handedOffNeedsLink && (
+                  <div className="mt-2 rounded-lg border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2">
+                    <div className="flex items-start gap-2">
+                      <ExternalLink
+                        className="mt-0.5 size-3.5 shrink-0 text-amber-400/80"
+                        aria-hidden
+                      />
+                      <p className="text-xs leading-relaxed text-amber-100/80">
+                        Finished in the official ESO Logs uploader, so Kalpa doesn't have the report
+                        link yet. Paste it to open the analysis.
+                      </p>
+                    </div>
+                    {attachingId === r.id ? (
+                      <div className="mt-2 flex items-center gap-2">
+                        <Input
+                          value={linkDraft}
+                          onChange={(e) => setLinkDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void submitLink(r.id);
+                            if (e.key === "Escape") setAttachingId(null);
+                          }}
+                          placeholder="Paste esologs.com link or report code"
+                          aria-label="ESO Logs report link or code"
+                          autoFocus
+                          className="h-8 flex-1 text-xs"
+                        />
+                        <Button
+                          size="sm"
+                          onClick={() => void submitLink(r.id)}
+                          disabled={!linkDraft.trim()}
+                        >
+                          Attach
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setAttachingId(null)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="mt-1.5 -ml-1.5 gap-1.5 text-amber-200/90 hover:bg-amber-400/10 hover:text-amber-100"
+                        onClick={() => {
+                          setAttachingId(r.id);
+                          setLinkDraft("");
+                        }}
+                      >
+                        <LinkIcon className="size-3.5" />
+                        Paste report link
+                      </Button>
+                    )}
+                  </div>
+                )}
+
+                {confirmDeleteId === r.id && (
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-red-500/20 bg-red-500/[0.05] px-3 py-2">
+                    <span className="text-xs text-red-200/90">
+                      Remove this record? Your log file stays on disk.
+                    </span>
+                    <div className="flex shrink-0 gap-1.5">
+                      <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteId(null)}>
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => {
+                          setConfirmDeleteId(null);
+                          void onDelete(r.id);
+                        }}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function StatusBadge({
+  status,
+  hasReport,
+}: {
+  status: UploadRecord["status"];
+  hasReport: boolean;
+}) {
+  switch (status) {
+    case "completed":
+      return <InfoPill color="emerald">Done</InfoPill>;
+    case "uploading":
+    case "queued":
+      return <InfoPill color="sky">Uploading</InfoPill>;
+    case "live":
+      // Emerald + pulse — a healthy in-progress live session (red is reserved for
+      // real errors). Matches the header / LiveDashboard live treatment.
+      return (
+        <InfoPill color="emerald" className="gap-1.5">
+          <span className="relative flex size-2" aria-hidden>
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/70" />
+            <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+          </span>
+          Live
+        </InfoPill>
+      );
+    case "paused":
+      return <InfoPill color="amber">Paused</InfoPill>;
+    case "handedOff":
+      // Once a link is attached, the report is observable → "Done". Until then it's
+      // "Link needed" (amber), paired with the row's always-visible explainer strip
+      // so the badge is never jargon standing alone.
+      return hasReport ? (
+        <InfoPill color="emerald">Done</InfoPill>
+      ) : (
+        <InfoPill color="amber" className="gap-1">
+          <LinkIcon className="size-2.5" aria-hidden /> Link needed
+        </InfoPill>
+      );
+    case "failed":
+      return <InfoPill color="red">Failed</InfoPill>;
+    case "cancelled":
+      return <InfoPill color="muted">Cancelled</InfoPill>;
+    default:
+      return <InfoPill color="muted">{status}</InfoPill>;
+  }
 }

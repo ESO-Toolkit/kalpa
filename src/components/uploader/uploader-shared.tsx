@@ -2,9 +2,22 @@
 // status pill, the "what gets uploaded" privacy summary, and small helpers.
 
 import { useEffect, useState } from "react";
-import { ChevronDown, ShieldQuestion, Swords, Lock, Zap } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  CircleDashed,
+  Loader2,
+  RefreshCw,
+  ShieldQuestion,
+  Swords,
+  Lock,
+  Zap,
+} from "lucide-react";
+import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
-import type { ReportRef, Visibility } from "@/types/uploader";
+import type { KalpaBuildEvidence, ReportRef, UploaderStatus, Visibility } from "@/types/uploader";
 
 /** Whether an exit action — closing the dialog, or leaving Live for Manual — needs
  *  a confirm first. Only while a live session is running (or still starting): on the
@@ -81,6 +94,35 @@ export function deriveNativeState(input: {
   };
 }
 
+/** Map the uploader status to its pill color, label, and icon. */
+export function StatusPill({ status }: { status: UploaderStatus }) {
+  const map: Record<
+    UploaderStatus,
+    {
+      color: "muted" | "sky" | "emerald" | "amber" | "red";
+      label: string;
+      Icon: typeof Activity;
+      spin?: boolean;
+    }
+  > = {
+    idle: { color: "muted", label: "Idle", Icon: CircleDashed },
+    watching: { color: "sky", label: "Watching", Icon: Activity },
+    uploading: { color: "sky", label: "Uploading", Icon: Loader2, spin: true },
+    upToDate: { color: "emerald", label: "Up to date", Icon: CheckCircle2 },
+    retrying: { color: "amber", label: "Retrying", Icon: RefreshCw, spin: true },
+    attention: { color: "red", label: "Needs attention", Icon: AlertTriangle },
+  };
+  const { color, label, Icon, spin } = map[status];
+  return (
+    // role=status so screen readers announce status changes (text + icon, not
+    // color alone — the app is always dark).
+    <InfoPill color={color} role="status" aria-live="polite" className="gap-1.5 px-2.5 py-1">
+      <Icon className={cn("size-3.5", spin && "animate-spin")} aria-hidden />
+      {label}
+    </InfoPill>
+  );
+}
+
 /** Format a byte-count compactly (kept local to avoid import churn). */
 export function compactBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -104,9 +146,106 @@ export function compactBytes(bytes: number): string {
  *  fight — the right link to open while a raid is still streaming. The code is always
  *  server-issued alphanumeric, but encode it defensively so a malformed value can't
  *  break out of the fragment path. */
-export function esotkReportUrl(code: string, opts?: { live?: boolean }): string {
-  const base = `https://esotk.com/#/report/${encodeURIComponent(code)}`;
-  return opts?.live ? `${base}/live` : base;
+export const KALPA_BUILD_EVIDENCE_PARAM = "kalpaBuildEvidence";
+export const KALPA_BUILD_EVIDENCE_DEFLATE_PARAM = "kalpaBuildEvidenceDeflate";
+const MAX_INLINE_RAW_BUILD_EVIDENCE_QUERY_LENGTH = 8_000;
+
+function encodeJsonBase64Url(value: unknown): string {
+  const json = JSON.stringify(value);
+  const binary = encodeURIComponent(json).replace(/%([0-9A-F]{2})/g, (_match, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16))
+  );
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+async function readAllChunks(readable: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = readable.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.length;
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+async function encodeJsonDeflateBase64Url(value: unknown): Promise<string | null> {
+  if (typeof CompressionStream === "undefined") return null;
+
+  try {
+    const input = new TextEncoder().encode(JSON.stringify(value));
+    const stream = new CompressionStream("deflate-raw") as unknown as TransformStream<
+      Uint8Array,
+      Uint8Array
+    >;
+    const writer = stream.writable.getWriter();
+    const writeAndClose = writer.write(input).then(() => writer.close());
+    const [, readResult] = await Promise.allSettled([
+      writeAndClose,
+      readAllChunks(stream.readable),
+    ]);
+    if (readResult.status === "rejected") return null;
+    return bytesToBase64Url(readResult.value);
+  } catch {
+    return null;
+  }
+}
+
+function buildEvidenceQuery(code: string, evidence?: KalpaBuildEvidence | null): string {
+  if (!evidence?.players?.length) return "";
+  if (evidence.reportCode && evidence.reportCode !== code) return "";
+  return `?${KALPA_BUILD_EVIDENCE_PARAM}=${encodeURIComponent(encodeJsonBase64Url(evidence))}`;
+}
+
+async function buildEvidenceQueryForOpen(
+  code: string,
+  evidence?: KalpaBuildEvidence | null
+): Promise<string> {
+  if (!evidence?.players?.length) return "";
+  if (evidence.reportCode && evidence.reportCode !== code) return "";
+
+  const compressed = await encodeJsonDeflateBase64Url(evidence);
+  if (compressed) {
+    return `?${KALPA_BUILD_EVIDENCE_DEFLATE_PARAM}=${encodeURIComponent(compressed)}`;
+  }
+
+  const raw = buildEvidenceQuery(code, evidence);
+  return raw.length <= MAX_INLINE_RAW_BUILD_EVIDENCE_QUERY_LENGTH ? raw : "";
+}
+
+export function esotkReportUrl(
+  code: string,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): string {
+  const path = `/report/${encodeURIComponent(code)}${opts?.live ? "/live" : ""}`;
+  const query = opts?.live ? "" : buildEvidenceQuery(code, opts?.buildEvidence);
+  return `https://esotk.com/#${path}${query}`;
+}
+
+export async function esotkReportUrlForOpen(
+  code: string,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): Promise<string> {
+  const path = `/report/${encodeURIComponent(code)}${opts?.live ? "/live" : ""}`;
+  const query = opts?.live ? "" : await buildEvidenceQueryForOpen(code, opts?.buildEvidence);
+  return `https://esotk.com/#${path}${query}`;
 }
 
 /** Raw ESO Logs report URL. During live streaming, `fight=last` follows the newest
@@ -130,10 +269,19 @@ export function esoLogsReportUrl(report: ReportRef, opts?: { live?: boolean }): 
 export function primaryReportUrl(
   report: ReportRef,
   visibility: Visibility,
-  opts?: { live?: boolean }
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
 ): string {
   if (opts?.live || visibility === "private") return esoLogsReportUrl(report, opts);
-  return esotkReportUrl(report.code);
+  return esotkReportUrl(report.code, { buildEvidence: opts?.buildEvidence });
+}
+
+export async function primaryReportUrlForOpen(
+  report: ReportRef,
+  visibility: Visibility,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): Promise<string> {
+  if (opts?.live || visibility === "private") return esoLogsReportUrl(report, opts);
+  return esotkReportUrlForOpen(report.code, { buildEvidence: opts?.buildEvidence });
 }
 
 /** Extract an ESO Logs report code from a pasted URL or bare code, or null if the

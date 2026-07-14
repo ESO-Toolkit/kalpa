@@ -303,6 +303,94 @@ describe("GET /packs/:id", () => {
   });
 });
 
+// ── Anonymity enforcement ─────────────────────────────────────────
+
+describe("anonymous pack redaction", () => {
+  const anon = () =>
+    makePack("anon-pack", { is_anonymous: true, title: "Secret Pack" });
+  const named = () => makePack("named-pack");
+
+  it("redacts author fields of anonymous packs in the list", async () => {
+    await putPackIndex(e, { packs: [anon(), named()] });
+
+    // sort=updated is a non-default view, so the worker cache never interferes.
+    const res = await call(new Request(`${BASE}/packs?sort=updated`));
+    const body = await res.json<{
+      packs: Array<{ id: string; author_name: string; author_id: string }>;
+    }>();
+    const anonOut = body.packs.find((p) => p.id === "anon-pack")!;
+    const namedOut = body.packs.find((p) => p.id === "named-pack")!;
+    expect(anonOut.author_name).toBe("Anonymous");
+    expect(anonOut.author_id).toBe("");
+    expect(namedOut.author_name).toBe(TEST_USER.name);
+    expect(namedOut.author_id).toBe(String(TEST_USER.id));
+  });
+
+  it("excludes anonymous packs from ?author= for unauthenticated callers", async () => {
+    await putPackIndex(e, { packs: [anon(), named()] });
+
+    const res = await call(
+      new Request(`${BASE}/packs?author=${TEST_USER.id}`),
+    );
+    const body = await res.json<{ packs: Array<{ id: string }> }>();
+    expect(body.packs.map((p) => p.id)).toEqual(["named-pack"]);
+  });
+
+  it("excludes anonymous packs from ?author= for a different authenticated user", async () => {
+    await putPackIndex(e, { packs: [anon(), named()] });
+
+    fetchSpy.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("esologs.com")) return Promise.resolve(esoLogsResponse(OTHER_USER));
+      return originalFetch(input);
+    });
+
+    const res = await call(
+      authedRequest(`${BASE}/packs?author=${TEST_USER.id}`),
+    );
+    const body = await res.json<{ packs: Array<{ id: string }> }>();
+    expect(body.packs.map((p) => p.id)).toEqual(["named-pack"]);
+  });
+
+  it("shows the author their own anonymous packs with real fields via ?author=", async () => {
+    await putPackIndex(e, { packs: [anon(), named()] });
+
+    const res = await call(
+      authedRequest(`${BASE}/packs?author=${TEST_USER.id}`),
+    );
+    const body = await res.json<{
+      packs: Array<{ id: string; author_name: string; author_id: string }>;
+    }>();
+    const anonOut = body.packs.find((p) => p.id === "anon-pack")!;
+    expect(anonOut.author_name).toBe(TEST_USER.name);
+    expect(anonOut.author_id).toBe(String(TEST_USER.id));
+  });
+
+  it("redacts an anonymous pack's detail for unauthenticated callers and keeps it cacheable", async () => {
+    await putPack(e, anon());
+    const res = await call(new Request(`${BASE}/packs/anon-pack`));
+    expect(res.status).toBe(200);
+    const body = await res.json<{
+      pack: { author_name: string; author_id: string };
+    }>();
+    expect(body.pack.author_name).toBe("Anonymous");
+    expect(body.pack.author_id).toBe("");
+    expect(res.headers.get("Cache-Control")).toContain("max-age=300");
+  });
+
+  it("returns real fields to the author on detail, uncached", async () => {
+    await putPack(e, anon());
+    const res = await call(authedRequest(`${BASE}/packs/anon-pack`));
+    expect(res.status).toBe(200);
+    const body = await res.json<{
+      pack: { author_name: string; author_id: string };
+    }>();
+    expect(body.pack.author_name).toBe(TEST_USER.name);
+    expect(body.pack.author_id).toBe(String(TEST_USER.id));
+    expect(res.headers.get("Cache-Control")).toBeNull();
+  });
+});
+
 // ── PUT /packs/:id ────────────────────────────────────────────────
 
 describe("PUT /packs/:id", () => {

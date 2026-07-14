@@ -48,6 +48,9 @@ export interface LogPreflight {
   /** Per-fight summaries from the single preflight scan. Empty for very large
    *  logs (see recommendSplit) to bound the IPC payload. */
   fights: FightSummary[];
+  /** True when fights was intentionally omitted to bound IPC/DOM work. False
+   *  with an empty fights list means the scan really found no fights. */
+  fightsOmitted: boolean;
   recommendSplit: boolean;
 }
 
@@ -65,6 +68,61 @@ export interface UploadOptions {
 export interface ReportRef {
   code: string;
   url: string;
+}
+
+export interface KalpaPlayerBuildEvidence {
+  unitId: string;
+  unitOccurrenceId?: string | null;
+  characterName?: string | null;
+  accountName?: string | null;
+  characterId?: string | null;
+  classId?: number | null;
+  raceId?: number | null;
+  level?: number | null;
+  championPoints?: number | null;
+  className?: string | null;
+  classMasteryPassives?: number[];
+  championPointPassives?: number[];
+  /** The player's full long-term-effect ability ids (all passives, CP stars, etc.). */
+  passives?: number[];
+  food?: KalpaFoodEvidence | null;
+  /** Equipped Mundus stone boon, recovered from the raw PLAYER_INFO long-term effects. */
+  mundus?: KalpaMundusEvidence | null;
+  scribedSkills?: KalpaScribedSkillEvidence[];
+  evidence: string;
+  confidence: string;
+}
+
+export interface KalpaFoodEvidence {
+  abilityId: number;
+  name?: string | null;
+  icon?: string | null;
+}
+
+export interface KalpaMundusEvidence {
+  abilityId: number;
+  name?: string | null;
+  icon?: string | null;
+}
+
+export interface KalpaScribedSkillEvidence {
+  abilityId: number;
+  name?: string | null;
+  icon?: string | null;
+  /** Equipped Focus/Primary script (e.g. "Pull"). */
+  focusScript?: string | null;
+  /** Equipped Signature script (e.g. "Lingering Torment"). */
+  signatureScript?: string | null;
+  /** Equipped Affix script (e.g. "Defile"). */
+  affixScript?: string | null;
+}
+
+export interface KalpaBuildEvidence {
+  schemaVersion: number;
+  extractorVersion?: number | null;
+  source: string;
+  reportCode?: string | null;
+  players: KalpaPlayerBuildEvidence[];
 }
 
 export type UploadStatus =
@@ -103,6 +161,8 @@ export interface UploadRecord {
    *  history reads "Lucent Citadel" rather than a bare file name. Null when no
    *  zone could be derived or for pre-existing records. */
   zone: string | null;
+  /** Exact native raw-log build evidence for ESO Log Aggregator links. */
+  buildEvidence: KalpaBuildEvidence | null;
 }
 
 export interface TransportInfo {
@@ -114,6 +174,7 @@ export interface UploadDispatch {
   handedOff: boolean;
   detail: string;
   report: ReportRef | null;
+  buildEvidence: KalpaBuildEvidence | null;
 }
 
 // Live event stream (tagged union mirroring the Rust `LiveEvent` enum).
@@ -160,6 +221,10 @@ export interface LiveReadiness {
   grew: boolean;
 }
 
+/** The display-level status of the whole uploader, for the glanceable pill. */
+export type UploaderStatus =
+  "idle" | "watching" | "uploading" | "upToDate" | "attention" | "retrying";
+
 /** A single fight detected during a live session (UI timeline entry). Detection
  *  means the live path accepted a completed fight for the session timeline; it is
  *  not a separate per-fight upload status. */
@@ -176,6 +241,9 @@ export interface LiveFight {
 export interface SplitSelection {
   index: number;
   name: string | null;
+  /** Absolute BEGIN_LOG byte offset; preferred by the backend when present so
+   *  latest-session-only preflights can survive a full rescan. */
+  startOffset: number | null;
   /** The session's startTimeMs at selection time; the backend verifies it still
    *  matches after any rescan so a shifted index can't mislabel a split. */
   startTimeMs: number | null;
@@ -188,6 +256,9 @@ export interface SplitSelection {
 export interface FightSelection {
   index: number;
   name: string | null;
+  /** Absolute BEGIN_COMBAT byte offset; preferred by the backend when present so
+   *  latest-session-only preflights can survive a full rescan. */
+  startOffset: number | null;
   /** The fight's startMs at selection time; the backend verifies it still matches
    *  after any rescan so a shifted index can't extract/mislabel the wrong fight. */
   startMs: number | null;

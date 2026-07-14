@@ -16,6 +16,12 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      # Serialize the matrix: tauri-action merges each platform's entry into the
+      # shared latest.json with a read-merge-delete-reupload cycle, so parallel
+      # jobs can clobber each other's platform entry (and race the draft-release
+      # creation). One job at a time makes the merge deterministic; the publish
+      # job below still verifies the result before anything goes live.
+      max-parallel: 1
       matrix:
         include:
           - platform: windows-latest
@@ -107,9 +113,71 @@ jobs:
             ---
 
             🐛 **Found a bug or have feedback?** Use the [Beta Feedback template](https://github.com/ESO-Toolkit/kalpa/issues/new?template=beta_feedback.md) so it's tagged `beta` for triage. Security issues: see [SECURITY.md](https://github.com/ESO-Toolkit/kalpa/blob/main/SECURITY.md).
-          # Draft while the multi-platform pipeline is new: inspect the artifact
-          # set (exe/dmg/AppImage/deb/rpm + .sig + merged latest.json) before
-          # publishing. Flip back to false once a cross-platform release has
-          # shipped cleanly.
+          # Draft during the build so users never see a partially-assembled
+          # release: the updater endpoint (releases/latest/download/latest.json)
+          # cannot see drafts, and `releases/latest` never points at one. The
+          # `publish` job below verifies the merged latest.json and flips the
+          # draft to published — a tagged release is NOT done until that job is
+          # green. If it fails, the draft is left in place for inspection.
           releaseDraft: true
           prerelease: false
+
+  # Gate + publish: a release only goes live after every platform built and the
+  # merged latest.json provably contains all updater entries. Auto-update is
+  # dead until this runs — the updater reads releases/latest/download/latest.json,
+  # which drafts are invisible to — so a red publish job means the release DID
+  # NOT ship, even though all three build jobs are green.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Verify latest.json covers every platform
+        run: |
+          set -euo pipefail
+          # Drafts are not addressable by tag via releases/tags/<tag>; list and
+          # match tag_name the same way tauri-action locates the draft.
+          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name==\"${TAG}\")")
+          [ -n "$release" ] || { echo "::error::No release found for ${TAG}"; exit 1; }
+          release_id=$(echo "$release" | jq -r '.id')
+
+          asset_id=$(echo "$release" | jq -r '.assets[] | select(.name=="latest.json") | .id')
+          [ -n "$asset_id" ] || { echo "::error::latest.json missing from release assets"; exit 1; }
+          gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+            -H "Accept: application/octet-stream" > latest.json
+
+          echo "--- latest.json platforms ---"
+          jq '.platforms | keys' latest.json
+
+          version=$(jq -r '.version' latest.json)
+          [ "v${version}" = "${TAG}" ] || { echo "::error::latest.json version ${version} != tag ${TAG}"; exit 1; }
+
+          # tauri-action@v1 keys: the universal macOS build fills BOTH darwin
+          # arches; windows/linux use their native arch.
+          for platform in windows-x86_64 darwin-x86_64 darwin-aarch64 linux-x86_64; do
+            jq -e --arg p "$platform" \
+              '.platforms[$p] | (.url | length > 0) and (.signature | length > 0)' \
+              latest.json > /dev/null \
+              || { echo "::error::latest.json is missing a valid ${platform} entry — a build job's updater merge was lost"; exit 1; }
+          done
+
+          # The installers users download by hand must exist alongside the
+          # updater artifacts.
+          assets=$(echo "$release" | jq -r '.assets[].name')
+          for pattern in '\.exe$' '\.dmg$' '\.AppImage$' '\.deb$' '\.rpm$'; do
+            echo "$assets" | grep -qE "$pattern" \
+              || { echo "::error::No release asset matches ${pattern}"; exit 1; }
+          done
+
+          echo "release_id=${release_id}" >> "$GITHUB_ENV"
+
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false > /dev/null
+          echo "Release ${TAG} published with a complete latest.json."

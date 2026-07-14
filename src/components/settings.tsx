@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
 import { exampleAddonsPath } from "@/lib/platform";
-import type { AuthUser, GameInstance, ImportResult } from "../types";
+import type { AuthUser, CopyAddonsResult, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -43,6 +43,7 @@ interface SettingsProps {
   authUser: AuthUser | null;
   knownInstances: GameInstance[];
   onAuthChange: (user: AuthUser | null) => void;
+  onInstancesDetected: (instances: GameInstance[]) => void;
   onPathChange: (path: string) => void;
   onClose: () => void;
   onRefresh: () => void;
@@ -66,6 +67,7 @@ export function Settings({
   authUser,
   knownInstances,
   onAuthChange,
+  onInstancesDetected,
   onPathChange,
   onClose,
   onRefresh,
@@ -87,6 +89,8 @@ export function Settings({
   const [minionDetected, setMinionDetected] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
   const [redetectedInstances, setRedetectedInstances] = useState<GameInstance[] | null>(null);
+  const [copyTarget, setCopyTarget] = useState<GameInstance | null>(null);
+  const [copying, setCopying] = useState(false);
   const [conflictPolicy, setConflictPolicy] = useState<"ask" | "keep_mine" | "take_update">("ask");
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
@@ -117,6 +121,41 @@ export function Settings({
       }
     });
   }, []);
+
+  // Silently refresh the detected-instance list every time Settings opens, so
+  // a PTS install created after app startup shows up in the switcher without
+  // requiring a manual Re-detect.
+  useEffect(() => {
+    invokeOrThrow<GameInstance[]>("detect_game_instances")
+      .then(onInstancesDetected)
+      .catch(console.error);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleCopyToInstance = async (target: GameInstance) => {
+    setCopying(true);
+    try {
+      const result = await invokeOrThrow<CopyAddonsResult>("copy_addons_to_instance", {
+        addonsPath,
+        targetAddonsPath: target.addonsPath,
+      });
+      const parts: string[] = [];
+      if (result.copied.length > 0) parts.push(`${result.copied.length} copied`);
+      if (result.skipped.length > 0) parts.push(`${result.skipped.length} already there`);
+      if (result.copied.length === 0 && result.skipped.length === 0) {
+        parts.push("no enabled addons to copy");
+      }
+      toast.success(`Addons → ${target.displayLabel}: ${parts.join(", ")}`);
+      if (result.failed.length > 0) {
+        toast.error(`Failed to copy ${result.failed.length} item(s): ${result.failed.join(", ")}`);
+      }
+    } catch (e) {
+      toast.error(getTauriErrorMessage(e));
+    } finally {
+      setCopying(false);
+      setCopyTarget(null);
+    }
+  };
 
   const handleSave = () => {
     if (path.trim()) {
@@ -343,40 +382,92 @@ export function Settings({
                       </Fade>
                     )}
 
-                    {/* Quick-switch between already-known instances */}
+                    {/* Quick-switch between already-known instances.
+                        Clicking a row applies the switch immediately — no
+                        separate Save step — and rescans that instance. */}
                     {knownInstances.length > 1 && !redetectedInstances && (
                       <div className="space-y-1.5">
-                        <p className="text-xs text-muted-foreground">Switch instance:</p>
+                        <p className="text-xs text-muted-foreground">
+                          Switch instance (applies immediately):
+                        </p>
                         {knownInstances.map((inst) => {
                           const isActive = inst.addonsPath === addonsPath;
                           return (
-                            <button
-                              key={inst.id}
-                              type="button"
-                              className={`flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
-                                isActive
-                                  ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
-                                  : "border-white/[0.06] bg-white/[0.02] text-white/80 hover:border-white/[0.12] hover:bg-white/[0.04]"
-                              }`}
-                              onClick={() => {
-                                if (!isActive) {
-                                  setPath(inst.addonsPath);
-                                }
-                              }}
-                            >
-                              <Monitor className="size-3.5 shrink-0 text-muted-foreground" />
-                              <span className="font-medium">{inst.displayLabel}</span>
-                              <span className="text-muted-foreground">
-                                {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
-                              </span>
-                              {isActive && (
-                                <span className="ml-auto text-[10px] font-semibold uppercase tracking-wider text-sky-400">
-                                  active
+                            <div key={inst.id} className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all duration-150 ${
+                                  isActive
+                                    ? "border-sky-400/30 bg-sky-400/[0.06] text-sky-300"
+                                    : "border-white/[0.06] bg-white/[0.02] text-white/80 hover:border-white/[0.12] hover:bg-white/[0.04]"
+                                }`}
+                                onClick={() => {
+                                  if (!isActive) {
+                                    setPath(inst.addonsPath);
+                                    onPathChange(inst.addonsPath);
+                                    toast.success(`Switched to ${inst.displayLabel}`);
+                                  }
+                                }}
+                              >
+                                <Monitor className="size-3.5 shrink-0 text-muted-foreground" />
+                                <span className="font-medium">{inst.displayLabel}</span>
+                                <span className="text-muted-foreground">
+                                  {inst.addonCount} addon{inst.addonCount !== 1 ? "s" : ""}
                                 </span>
+                                {isActive && (
+                                  <span className="ml-auto text-[10px] font-semibold uppercase tracking-wider text-sky-400">
+                                    active
+                                  </span>
+                                )}
+                              </button>
+                              {!isActive && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="shrink-0 px-2"
+                                  disabled={copying}
+                                  title={`Copy this instance's missing addons from the active instance`}
+                                  onClick={() => setCopyTarget(inst)}
+                                >
+                                  <ClipboardCopy className="size-3.5" />
+                                </Button>
                               )}
-                            </button>
+                            </div>
                           );
                         })}
+
+                        {/* Cross-instance copy confirm */}
+                        {copyTarget && (
+                          <Fade>
+                            <div className="space-y-2 rounded-lg border border-primary/25 bg-primary/[0.04] px-3 py-2">
+                              <p className="text-xs text-white/80">
+                                Copy all enabled addons from the active instance into{" "}
+                                <span className="font-medium text-primary">
+                                  {copyTarget.displayLabel}
+                                </span>
+                                ? Addons that instance already has (enabled or disabled) are left
+                                untouched.
+                              </p>
+                              <div className="flex justify-end gap-2">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={copying}
+                                  onClick={() => setCopyTarget(null)}
+                                >
+                                  Cancel
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  disabled={copying}
+                                  onClick={() => void handleCopyToInstance(copyTarget)}
+                                >
+                                  {copying ? "Copying..." : "Copy addons"}
+                                </Button>
+                              </div>
+                            </div>
+                          </Fade>
+                        )}
                       </div>
                     )}
                   </GlassPanel>
