@@ -77,7 +77,9 @@ pub struct GameInstance {
 /// 2. Collect all library folders by parsing `steamapps/libraryfolders.vdf`.
 /// 3. Look for `steamapps/appmanifest_306130.acf` in any library.
 ///
-/// Non-Windows builds always return `false`.
+/// Linux probes known Steam roots instead of the registry; macOS has no
+/// Steam ESO (the native Mac client ships via the ZOS launcher) and returns
+/// `false`.
 #[cfg(target_os = "windows")]
 fn is_steam_eso_installed() -> bool {
     use winreg::enums::HKEY_LOCAL_MACHINE;
@@ -96,7 +98,7 @@ fn is_steam_eso_installed() -> bool {
         Err(_) => return false,
     };
 
-    for library in steam_library_paths(&steam_root) {
+    for library in crate::platform::steam_library_paths(&steam_root) {
         if library
             .join("steamapps")
             .join("appmanifest_306130.acf")
@@ -109,36 +111,30 @@ fn is_steam_eso_installed() -> bool {
     false
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Linux: no registry — probe the known Steam roots (native/Flatpak/Snap) and
+/// every library in `libraryfolders.vdf` for ESO's appmanifest.
+#[cfg(target_os = "linux")]
 fn is_steam_eso_installed() -> bool {
+    for root in crate::platform::steam_root_candidates() {
+        for library in crate::platform::steam_library_paths(&root) {
+            if library
+                .join("steamapps")
+                .join(format!(
+                    "appmanifest_{}.acf",
+                    crate::platform::ESO_STEAM_APP_ID
+                ))
+                .is_file()
+            {
+                return true;
+            }
+        }
+    }
     false
 }
 
-/// Collect all Steam library root paths (including the default one inside the
-/// Steam install dir) by scanning `steamapps/libraryfolders.vdf`.
-///
-/// The VDF format is a simple key-value text file; we use a regex to extract
-/// all `"path"  "..."` entries rather than a full parser.
-#[cfg(target_os = "windows")]
-fn steam_library_paths(steam_root: &std::path::Path) -> Vec<PathBuf> {
-    let mut paths = vec![steam_root.to_path_buf()];
-
-    let vdf_path = steam_root.join("steamapps").join("libraryfolders.vdf");
-    let Ok(contents) = std::fs::read_to_string(&vdf_path) else {
-        return paths;
-    };
-
-    // Match lines like:  "path"    "D:\\SteamLibrary"
-    // We rely on the `regex` crate already in Cargo.toml.
-    let re = regex::Regex::new(r#""path"\s+"([^"]+)""#).expect("static regex");
-    for cap in re.captures_iter(&contents) {
-        let lib = PathBuf::from(cap[1].replace("\\\\", "\\"));
-        if lib.is_dir() && !paths.contains(&lib) {
-            paths.push(lib);
-        }
-    }
-
-    paths
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn is_steam_eso_installed() -> bool {
+    false
 }
 
 /// Returns `true` if the standalone ZOS/Bethesda launcher has written its
@@ -288,4 +284,48 @@ fn instance_score(inst: &GameInstance) -> i32 {
         score -= 10; // cloud-synced copies are less reliable
     }
     score
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_detection_tests {
+    use super::*;
+
+    /// End-to-end Proton detection against a fabricated Steam install under a
+    /// fake $HOME. Ignored by default because it mutates HOME (process-global);
+    /// run explicitly, alone:
+    /// `cargo test -- --ignored --test-threads=1 detects_eso_in_proton_prefix`
+    #[test]
+    #[ignore]
+    fn detects_eso_in_proton_prefix_under_fake_home() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path();
+
+        let steamapps = home.join(".steam/steam/steamapps");
+        let addons = steamapps
+            .join("compatdata/306130/pfx/drive_c/users/steamuser/Documents")
+            .join("Elder Scrolls Online/live/AddOns");
+        std::fs::create_dir_all(addons.join("SomeAddon")).expect("create prefix");
+        std::fs::write(
+            addons.join("SomeAddon/SomeAddon.txt"),
+            "## Title: Some Addon\n## APIVersion: 101041\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            steamapps.join("appmanifest_306130.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"306130\"\n}\n",
+        )
+        .expect("write appmanifest");
+
+        std::env::set_var("HOME", home);
+        std::env::remove_var("XDG_DOCUMENTS_DIR");
+
+        let instances = detect_all_game_instances();
+        let inst = instances
+            .iter()
+            .find(|i| i.addons_path.contains("compatdata/306130"))
+            .expect("Proton-prefix instance detected");
+        assert_eq!(inst.client_type, ClientType::Steam);
+        assert_eq!(inst.region, ServerRegion::Na);
+        assert_eq!(inst.id, "live");
+    }
 }

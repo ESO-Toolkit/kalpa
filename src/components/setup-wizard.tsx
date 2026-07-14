@@ -2,6 +2,7 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { GlassPanel } from "@/components/ui/glass-panel";
+import { exampleAddonsPath } from "@/lib/platform";
 import { InfoPill } from "@/components/ui/info-pill";
 import { SectionHeader } from "@/components/ui/section-header";
 import { Button } from "@/components/ui/button";
@@ -117,8 +118,8 @@ function NoCandidates({ onSelect }: { onSelect: (path: string) => void }) {
       <p className="text-sm text-muted-foreground">
         We couldn&apos;t automatically detect your ESO AddOns folder. It&apos;s usually located at:
       </p>
-      <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 font-mono text-xs text-muted-foreground">
-        Documents\Elder Scrolls Online\live\AddOns
+      <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 font-mono text-xs text-muted-foreground break-all">
+        {exampleAddonsPath()}
       </div>
       <p className="text-xs text-muted-foreground">
         Use the button below to browse to your AddOns folder manually.

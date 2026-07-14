@@ -13,6 +13,11 @@ import { defineConfig } from "@playwright/test";
  *
  * IMPORTANT: Tests run serially (workers: 1) because they share a single
  * Tauri webview instance via CDP. Parallel execution causes state leaks.
+ *
+ * PLATFORM: E2E is Windows-only for now. The CDP endpoint is exposed through
+ * WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS (WebView2-specific). WebKitGTK/WKWebView
+ * expose the WebKit inspector protocol instead of CDP, so porting E2E to
+ * macOS/Linux needs a different driver and is tracked as follow-up work.
  */
 export default defineConfig({
   testDir: "./e2e",

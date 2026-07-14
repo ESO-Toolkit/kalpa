@@ -76,6 +76,7 @@ const KNOWN_UPLOADERS: [(&str, &str); 3] = [
 /// being the only match. A planting attacker already has user-level code
 /// execution; full hardening (Authenticode/publisher verification before
 /// spawning) is a possible future improvement.
+#[cfg(target_os = "windows")]
 fn app_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
@@ -87,13 +88,44 @@ fn app_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// macOS install roots: the system Applications folder before the per-user one.
+#[cfg(target_os = "macos")]
+fn app_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
+    }
+    roots
+}
+
 /// Expand the known `(dir, exe)` pairs across the given roots, **product-major**:
 /// every root for the first (newest) product before any path for the next. Pure
 /// (no I/O), so it is unit-testable without touching the environment.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn candidates_for_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     KNOWN_UPLOADERS
         .iter()
         .flat_map(|(dir, exe)| roots.iter().map(move |root| root.join(dir).join(exe)))
+        .collect()
+}
+
+/// macOS variant: the same product list expanded to app-bundle executables —
+/// `<root>/<dir>.app/Contents/MacOS/<dir>` (electron-builder sets
+/// `CFBundleExecutable` to the productName, verified from the Archon App's
+/// bundle). Same product-major ordering and exact-pair-only guarantees as the
+/// Windows expansion.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_candidates_for_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    KNOWN_UPLOADERS
+        .iter()
+        .flat_map(|(dir, _exe)| {
+            roots.iter().map(move |root| {
+                root.join(format!("{dir}.app"))
+                    .join("Contents")
+                    .join("MacOS")
+                    .join(dir)
+            })
+        })
         .collect()
 }
 
@@ -107,7 +139,20 @@ fn candidates_for_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// single product the admin-writable Program Files roots still come first — the
 /// order [`app_roots`] yields.
 fn official_uploader_candidates() -> Vec<PathBuf> {
-    candidates_for_roots(&app_roots())
+    #[cfg(target_os = "windows")]
+    {
+        candidates_for_roots(&app_roots())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_candidates_for_roots(&app_roots())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // No Linux build of the Archon App exists; the GUI handoff gracefully
+        // falls back to opening the download page.
+        Vec::new()
+    }
 }
 
 /// Find the official uploader executable, if installed.
@@ -172,23 +217,9 @@ impl LogUploadTransport for GuiHandoffTransport {
     }
 }
 
-/// Open a URL in the default browser (Windows shell `start`).
+/// Open a URL in the default browser.
 fn open_url(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map_err(|e| format!("Failed to open browser: {e}"))?;
-    }
-    Ok(())
+    crate::platform::open_url(url)
 }
 
 // ── CLI transport (automated, when the official CLI is present) ───────────────

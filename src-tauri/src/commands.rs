@@ -582,6 +582,29 @@ pub(crate) fn documents_candidates() -> Vec<PathBuf> {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        // ESO on Linux runs under Steam Proton: the game's "Documents" folder
+        // lives inside the Wine prefix at
+        // steamapps/compatdata/306130/pfx/drive_c/users/steamuser/Documents.
+        for docs in crate::platform::proton_documents_roots() {
+            if !bases.iter().any(|b| b == &docs) {
+                bases.push(docs);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // The native Mac client uses ~/Documents (already covered above), but
+        // Apple Silicon players run the Windows client via CrossOver bottles.
+        for docs in crate::platform::crossover_documents_roots() {
+            if !bases.iter().any(|b| b == &docs) {
+                bases.push(docs);
+            }
+        }
+    }
+
     bases
 }
 
@@ -8775,6 +8798,23 @@ pub async fn copy_sv_profile(
     .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Whether the in-app updater can actually install updates for this build.
+/// The Tauri updater self-updates NSIS (Windows), .app bundles (macOS), and
+/// AppImage (Linux) — but not deb/rpm installs, which update through the
+/// package manager or a fresh installer download.
+#[tauri::command]
+pub fn is_portable_update_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // AppImage runtimes export APPIMAGE=<path to the .AppImage>.
+        std::env::var_os("APPIMAGE").is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 #[tauri::command]
 pub async fn is_eso_running() -> Result<bool, String> {
     tokio::task::spawn_blocking(|| {
@@ -8785,7 +8825,10 @@ pub async fn is_eso_running() -> Result<bool, String> {
 
         #[cfg(not(target_os = "windows"))]
         {
-            Ok(false)
+            // Proton/Wine runs the Windows binary, so `eso64.exe` shows up in
+            // the wine loader's command line; the native Mac client's binary
+            // is `eso64`. `pgrep -if` matches both case-insensitively.
+            Ok(crate::platform::unix_process_running("eso64"))
         }
     })
     .await

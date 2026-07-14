@@ -41,6 +41,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2.5.3"
 tauri-plugin-notification = "2"
+tauri-plugin-os = "2"
 rayon = "1.12"
 # Fast non-cryptographic hasher (FxHashMap) for the uploader's per-event hot maps.
 # Already present transitively in the lock file, so this adds no new compilation.
@@ -75,6 +76,19 @@ keyring = { version = "3", features = ["windows-native"] }
 # ignored in .github/dependabot.yml; drop those rules when tauri/wry move.
 webview2-com = "0.38"
 windows = "0.61"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS Keychain for token storage (same chunked layout as Windows).
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Secret Service (GNOME Keyring / KWallet over D-Bus) for token storage.
+# `linux-native` (kernel keyutils) is intentionally NOT used — keyutils does not
+# persist across reboots, which would silently log users out on every boot.
+# `crypto-rust` picks the pure-Rust crypto backend so we avoid an openssl-sys
+# build dependency. Without a running Secret Service daemon, operations fail
+# soft (user logs in each launch).
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [profile.dev]
 # Reduced debug info: the full dependency graph (reqwest/rustls/aws-lc/tauri/…)

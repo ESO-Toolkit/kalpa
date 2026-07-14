@@ -5,6 +5,7 @@
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-unlisten",
+    "core:path:default",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
@@ -34,10 +35,14 @@
         },
         {
           "url": "https://esologs.com/reports/*"
+        },
+        {
+          "url": "https://github.com/ESO-Toolkit/kalpa/releases/*"
         }
       ]
     },
     "opener:allow-reveal-item-in-dir",
-    "notification:default"
+    "notification:default",
+    "os:allow-platform"
   ]
 }

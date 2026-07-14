@@ -12,6 +12,8 @@ import { execSync } from "node:child_process";
 import { platform } from "node:os";
 
 const isWindows = platform() === "win32";
+const isMac = platform() === "darwin";
+const isLinux = platform() === "linux";
 let passed = 0;
 let failed = 0;
 
@@ -120,10 +122,42 @@ if (isWindows) {
         "not detected — required at runtime. Get it from https://developer.microsoft.com/en-us/microsoft-edge/webview2/",
     };
   });
-} else {
-  console.log(
-    "  ⓘ Non-Windows OS detected. Kalpa targets Windows only; cross-compilation may require extra setup."
-  );
+} else if (isMac) {
+  check("Xcode Command Line Tools", () => {
+    const path = run("xcode-select -p");
+    if (!path)
+      return {
+        ok: false,
+        detail: "not found — run: xcode-select --install",
+      };
+    return { ok: true, detail: path };
+  });
+} else if (isLinux) {
+  // Tauri v2 on Linux builds against WebKitGTK 4.1 + GTK3; the appindicator
+  // library backs the tray icon and librsvg the bundler's icon pipeline.
+  const pkgs = [
+    ["webkit2gtk-4.1", "libwebkit2gtk-4.1-dev"],
+    ["gtk+-3.0", "libgtk-3-dev"],
+    ["ayatana-appindicator3-0.1", "libayatana-appindicator3-dev"],
+    ["librsvg-2.0", "librsvg2-dev"],
+  ];
+  for (const [pcName, aptName] of pkgs) {
+    check(pcName, () => {
+      const version = run(`pkg-config --modversion ${pcName}`);
+      if (!version)
+        return {
+          ok: false,
+          detail: `not found — install ${aptName} (Debian/Ubuntu) or the equivalent for your distro`,
+        };
+      return { ok: true, detail: `v${version}` };
+    });
+  }
+  check("patchelf", () => {
+    const version = run("patchelf --version");
+    if (!version)
+      return { ok: false, detail: "not found — needed for AppImage bundling (apt: patchelf)" };
+    return { ok: true, detail: version };
+  });
 }
 
 // Summary

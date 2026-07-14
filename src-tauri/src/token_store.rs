@@ -1,9 +1,16 @@
-//! Secure token storage using Windows Credential Manager.
+//! Secure token storage in the OS credential store — Windows Credential
+//! Manager, macOS Keychain, or the Linux Secret Service (GNOME Keyring /
+//! KWallet via D-Bus), selected by the per-target `keyring` features in
+//! Cargo.toml.
 //!
 //! Auth tokens (access_token, refresh_token, expires_at, user_id, user_name)
 //! are stored as a JSON string in the OS credential store instead of plaintext
 //! in the tauri-plugin-store settings file. Non-sensitive settings remain in the
 //! store.
+//!
+//! On Linux systems without a running Secret Service daemon every operation
+//! returns an error, which this module maps to `false`/`None` — the app still
+//! works but the user must log in again each launch.
 
 use crate::auth::AuthTokens;
 
@@ -12,8 +19,10 @@ const SERVICE: &str = "kalpa";
 /// by the chunked format. New data uses `auth_tokens.count` + `auth_tokens.{N}`.
 const USER: &str = "auth_tokens";
 
-// ── Windows implementation (real credential manager) ────────────────────
+// ── Chunked credential-store implementation ─────────────────────────────
 //
+// The chunking below exists for Windows but is used on every platform so the
+// storage layout stays identical everywhere (one code path, one set of tests):
 // Windows Credential Manager caps a credential blob at 2560 bytes of UTF-16
 // (≈1280 ASCII chars). An ESO Logs access+refresh JWT pair serialized to JSON
 // far exceeds that, so a single `set_password` of the whole token JSON fails —
@@ -22,21 +31,16 @@ const USER: &str = "auth_tokens";
 // bytes per char) and split it into fixed-size chunks across multiple
 // credential entries, well under the limit.
 
-#[cfg(windows)]
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Blob key prefix for the auth tokens: count sentinel at `auth_tokens.count`,
 /// chunk N at `auth_tokens.{N}` (the historical layout, preserved exactly).
-#[cfg(windows)]
 const CHUNK_PREFIX: &str = "auth_tokens";
 /// Upper bound on chunks read/swept (sanity cap; ~64 KB of base64 max).
-#[cfg(windows)]
 const MAX_CHUNKS: usize = 64;
 /// Base64 chars per chunk → 2000 UTF-16 bytes, a ~28% margin under 2560.
-#[cfg(windows)]
 const CHUNK_LEN: usize = 1000;
 
-#[cfg(windows)]
 fn entry(user: &str) -> Option<keyring::Entry> {
     keyring::Entry::new(SERVICE, user).ok()
 }
@@ -52,7 +56,6 @@ fn entry(user: &str) -> Option<keyring::Entry> {
 /// chunked scheme. Returns false (after logging) if any chunk write failed; on
 /// failure the count sentinel is left cleared so a reader fails closed rather
 /// than reading a half-written blob.
-#[cfg(windows)]
 fn save_chunked(key: &str, data: &[u8]) -> bool {
     let count_key = format!("{key}.count");
     // base64 → pure ASCII so each char is exactly 2 UTF-16 bytes; chunk by byte
@@ -141,7 +144,6 @@ fn save_chunked(key: &str, data: &[u8]) -> bool {
 
 /// Read a chunked blob written under `key`. Returns the raw bytes, or `None` if
 /// the count sentinel is missing/invalid or any chunk is missing (fail closed).
-#[cfg(windows)]
 fn load_chunked(key: &str) -> Option<Vec<u8>> {
     let count_entry = entry(&format!("{key}.count"))?;
     let count_str = count_entry.get_password().ok()?;
@@ -159,7 +161,6 @@ fn load_chunked(key: &str) -> Option<Vec<u8>> {
 }
 
 /// Remove all chunks + the count sentinel for `key` (best-effort).
-#[cfg(windows)]
 fn clear_chunked(key: &str) {
     for i in 0..MAX_CHUNKS {
         if let Some(e) = entry(&format!("{key}.{i}")) {
@@ -174,7 +175,6 @@ fn clear_chunked(key: &str) {
 /// Persist the auth tokens. Returns `true` only if they were actually committed
 /// to the credential store (so callers — notably migration — can verify rather
 /// than assume). The fail-closed chunked write never leaves a corrupt blob.
-#[cfg(windows)]
 pub fn save_tokens(tokens: &AuthTokens) -> bool {
     let json = match serde_json::to_string(tokens) {
         Ok(j) => j,
@@ -200,14 +200,12 @@ pub fn save_tokens(tokens: &AuthTokens) -> bool {
 /// actually committed — `load_tokens` would otherwise satisfy a verify by
 /// falling back to the very legacy plaintext entry the migration is about to
 /// delete, even when the chunked write failed.
-#[cfg(windows)]
 fn load_chunked_tokens() -> Option<AuthTokens> {
     let bytes = load_chunked(CHUNK_PREFIX)?;
     let json = String::from_utf8(bytes).ok()?;
     serde_json::from_str(&json).ok()
 }
 
-#[cfg(windows)]
 pub fn load_tokens() -> Option<AuthTokens> {
     // New chunked format: keyed on the presence of the count sentinel.
     if let Some(tokens) = load_chunked_tokens() {
@@ -220,7 +218,6 @@ pub fn load_tokens() -> Option<AuthTokens> {
     serde_json::from_str(&json).ok()
 }
 
-#[cfg(windows)]
 pub fn clear_tokens() {
     // Best-effort sweep regardless of the recorded count, so orphan chunks from
     // a previously-larger token set are removed too. delete_credential on a
@@ -242,7 +239,6 @@ pub fn clear_tokens() {
 // independently of the auth tokens (clearing one never touches the other).
 
 /// Credential key prefix for the upload-session cookie blob.
-#[cfg(windows)]
 const UPLOAD_SESSION_KEY: &str = "upload_session";
 
 /// Persist the upload-session cookie header (the `Cookie:` value for esologs).
@@ -250,25 +246,21 @@ const UPLOAD_SESSION_KEY: &str = "upload_session";
 /// store; `false` means the caller must treat the session as non-durable (it
 /// will not survive a restart). The fail-closed write never leaves a corrupt
 /// blob, so a `false` here is safe — it just is not persisted.
-#[cfg(windows)]
 pub fn save_upload_session(cookie_header: &str) -> bool {
     save_chunked(UPLOAD_SESSION_KEY, cookie_header.as_bytes())
 }
 
 /// Load the persisted upload-session cookie header, if any.
-#[cfg(windows)]
 pub fn load_upload_session() -> Option<String> {
     let bytes = load_chunked(UPLOAD_SESSION_KEY)?;
     String::from_utf8(bytes).ok()
 }
 
 /// Remove the persisted upload-session cookie (e.g. on sign-out or `401`).
-#[cfg(windows)]
 pub fn clear_upload_session() {
     clear_chunked(UPLOAD_SESSION_KEY);
 }
 
-#[cfg(windows)]
 pub fn migrate_from_store(app: &tauri::AppHandle) {
     use tauri_plugin_store::StoreExt;
 
@@ -324,35 +316,3 @@ pub fn migrate_from_store(app: &tauri::AppHandle) {
         );
     }
 }
-
-// ── Non-Windows stubs ───────────────────────────────────────────────────
-// Kalpa is Windows-only; implement platform keychain here if needed.
-
-#[cfg(not(windows))]
-pub fn save_tokens(_tokens: &AuthTokens) -> bool {
-    false
-}
-
-#[cfg(not(windows))]
-pub fn load_tokens() -> Option<AuthTokens> {
-    None
-}
-
-#[cfg(not(windows))]
-pub fn clear_tokens() {}
-
-#[cfg(not(windows))]
-pub fn migrate_from_store(_app: &tauri::AppHandle) {}
-
-#[cfg(not(windows))]
-pub fn save_upload_session(_cookie_header: &str) -> bool {
-    false
-}
-
-#[cfg(not(windows))]
-pub fn load_upload_session() -> Option<String> {
-    None
-}
-
-#[cfg(not(windows))]
-pub fn clear_upload_session() {}

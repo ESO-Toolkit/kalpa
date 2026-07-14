@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { getSetting, setSetting, setSettings } from "@/lib/store";
 import { getTauriErrorMessage, invokeOrThrow, invokeResult } from "@/lib/tauri";
+import { exampleAddonsPath } from "@/lib/platform";
 import type { AuthUser, CopyAddonsResult, GameInstance, ImportResult } from "../types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -327,7 +328,7 @@ export function Settings({
                       id="addons-path"
                       value={path}
                       onChange={(e) => setPath(e.target.value)}
-                      placeholder="C:\Users\...\Elder Scrolls Online\live\AddOns"
+                      placeholder={exampleAddonsPath()}
                       autoFocus
                       onKeyDown={(e) => {
                         if (e.key === "Enter") handleSave();

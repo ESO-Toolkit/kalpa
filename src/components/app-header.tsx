@@ -20,6 +20,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/ui/logo";
 import { SimpleTooltip } from "@/components/ui/tooltip";
+import { isMac, modKeyLabel } from "@/lib/platform";
 import { PRESET_TAGS, type GameInstance } from "@/types";
 import { cn } from "@/lib/utils";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
@@ -191,7 +192,10 @@ function AppHeaderBase({
         if ((e.target as HTMLElement).closest('button, a, input, [role="button"]')) return;
         void getCurrentWindow().toggleMaximize();
       }}
-      className="relative z-20 flex items-center border-b border-white/[0.06] bg-[color-mix(in_oklab,var(--bg-base)_85%,transparent)] px-4 py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2]"
+      className={`relative z-20 flex items-center border-b border-white/[0.06] bg-[color-mix(in_oklab,var(--bg-base)_85%,transparent)] py-2 select-none shadow-[0_4px_24px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl backdrop-saturate-[1.2] ${
+        // Clear the macOS traffic-light overlay on the left.
+        isMac() ? "pr-4 pl-20" : "px-4"
+      }`}
     >
       <div className="absolute right-0 bottom-0 left-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
       <div className="flex items-center gap-2.5">
@@ -337,7 +341,7 @@ function AppHeaderBase({
                 </span>
               )}
             </span>
-            <SimpleTooltip content="Refresh (Ctrl+R)" side="bottom">
+            <SimpleTooltip content={`Refresh (${modKeyLabel()}+R)`} side="bottom">
               <Button
                 variant="ghost"
                 size="icon-sm"
@@ -381,35 +385,39 @@ function AppHeaderBase({
           </>
         )}
       </div>
-      <div className="ml-3 -mr-2 flex items-center">
-        <SimpleTooltip content="Minimize" side="bottom">
-          <button
-            onClick={() => void getCurrentWindow().minimize()}
-            className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
-            aria-label="Minimize"
-          >
-            <MinusIcon className="size-3.5" />
-          </button>
-        </SimpleTooltip>
-        <SimpleTooltip content="Maximize" side="bottom">
-          <button
-            onClick={() => void getCurrentWindow().toggleMaximize()}
-            className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
-            aria-label="Maximize"
-          >
-            <SquareIcon className="size-3" />
-          </button>
-        </SimpleTooltip>
-        <SimpleTooltip content="Close" side="bottom">
-          <button
-            onClick={() => void getCurrentWindow().close()}
-            className="flex h-8 w-8 items-center justify-center rounded-tr-sm text-muted-foreground/60 transition-colors hover:bg-red-500/20 hover:text-foreground"
-            aria-label="Close"
-          >
-            <XIcon className="size-3.5" />
-          </button>
-        </SimpleTooltip>
-      </div>
+      {/* macOS renders native traffic-light controls (titleBarStyle: Overlay),
+          so the custom Windows/Linux window buttons are hidden there. */}
+      {!isMac() && (
+        <div className="ml-3 -mr-2 flex items-center">
+          <SimpleTooltip content="Minimize" side="bottom">
+            <button
+              onClick={() => void getCurrentWindow().minimize()}
+              className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
+              aria-label="Minimize"
+            >
+              <MinusIcon className="size-3.5" />
+            </button>
+          </SimpleTooltip>
+          <SimpleTooltip content="Maximize" side="bottom">
+            <button
+              onClick={() => void getCurrentWindow().toggleMaximize()}
+              className="flex h-8 w-8 items-center justify-center text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
+              aria-label="Maximize"
+            >
+              <SquareIcon className="size-3" />
+            </button>
+          </SimpleTooltip>
+          <SimpleTooltip content="Close" side="bottom">
+            <button
+              onClick={() => void getCurrentWindow().close()}
+              className="flex h-8 w-8 items-center justify-center rounded-tr-sm text-muted-foreground/60 transition-colors hover:bg-red-500/20 hover:text-foreground"
+              aria-label="Close"
+            >
+              <XIcon className="size-3.5" />
+            </button>
+          </SimpleTooltip>
+        </div>
+      )}
     </header>
   );
 }

@@ -4,7 +4,13 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
-_Nothing yet._
+### Features
+
+- **macOS and Linux support (beta).** Kalpa now builds, packages, and auto-updates on all three desktop platforms. macOS ships as a universal `.dmg` (Intel & Apple Silicon, macOS 10.15+) with native traffic-light window controls, ⌘-based shortcuts, Keychain-backed login persistence, and detection of both the native Mac client (`~/Documents/Elder Scrolls Online`) and CrossOver bottles. Linux ships as `.AppImage` (self-updating), `.deb`, and `.rpm`, stores your login in the Secret Service keyring, and automatically finds ESO under Steam Proton — including Flatpak/Snap Steam and secondary Steam libraries. Windows behavior is unchanged.
+
+### Bug Fixes
+
+- **"Show in folder" now works with any path separator.** Two spots joined paths with a hard-coded backslash, which produced invalid paths on macOS and Linux; they now use the platform-correct separator everywhere.
 
 ## [0.1.0-beta.10] — 2026-07-13
 

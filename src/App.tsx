@@ -23,6 +23,7 @@ import {
   warnIfSessionNotPersisted,
 } from "@/lib/tauri";
 import { filterAddons, isFilterMode, isSortMode } from "@/lib/addon-helpers";
+import { isModKey, isWindows } from "@/lib/platform";
 import type {
   AddonManifest,
   AuthUser,
@@ -508,20 +509,20 @@ function App() {
     const handler = (event: KeyboardEvent) => {
       if (event.isComposing) return;
 
-      if (event.ctrlKey && event.key === "r") {
+      if (isModKey(event) && event.key === "r") {
         event.preventDefault();
         if (addonsPathRef.current && !updatingAllRef.current) {
           void scanAndCheck(addonsPathRef.current, true);
         }
       }
 
-      if (event.ctrlKey && event.key === "i") {
+      if (isModKey(event) && event.key === "i") {
         event.preventDefault();
         setViewMode("discover");
         setDiscoverTab("url");
       }
 
-      if (event.ctrlKey && event.key === "b") {
+      if (isModKey(event) && event.key === "b") {
         event.preventDefault();
         setViewMode("discover");
         setDiscoverTab("search");
@@ -674,7 +675,8 @@ function App() {
     async (folderName: string) => {
       try {
         const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-        await revealItemInDir(`${addonsPath}\\${folderName}`);
+        const { join } = await import("@tauri-apps/api/path");
+        await revealItemInDir(await join(addonsPath, folderName));
       } catch (e) {
         toast.error(`Could not open folder: ${getTauriErrorMessage(e)}`);
       }
@@ -910,10 +912,18 @@ function App() {
       });
       if (access.ok && access.data.blocked) {
         batchPreflightRef.current = false;
-        setCfaDialog({
-          exePath: access.data.exePath,
-          permissionDenied: access.data.permissionDenied,
-        });
+        if (isWindows()) {
+          setCfaDialog({
+            exePath: access.data.exePath,
+            permissionDenied: access.data.permissionDenied,
+          });
+        } else {
+          // The CFA dialog is Windows Security-specific; elsewhere a write
+          // block is a plain permissions problem.
+          toast.error("Kalpa can't write to your AddOns folder.", {
+            description: "Check that the folder is writable by your user account.",
+          });
+        }
         return;
       }
 
@@ -1053,7 +1063,7 @@ function App() {
           const hasCfaFailure = [...failureReasons.values()].some((r) =>
             /controlled folder access/i.test(r)
           );
-          if (hasCfaFailure) {
+          if (hasCfaFailure && isWindows()) {
             const access = await invokeResult<WriteAccessStatus>("check_addons_write_access", {
               addonsPath: path,
             });
