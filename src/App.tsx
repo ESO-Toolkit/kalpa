@@ -1395,6 +1395,7 @@ function App() {
   const handleBatchRemoveClick = useCallback(() => void handleBatchRemove(), [handleBatchRemove]);
   const handleBatchUpdateClick = useCallback(() => void handleBatchUpdate(), [handleBatchUpdate]);
   const handleOpenPacks = useCallback(() => setActiveDialog("packs"), []);
+  const handleOpenProfiles = useCallback(() => setActiveDialog("profiles"), []);
   const handleOpenSavedVars = useCallback(() => setActiveDialog("saved-variables"), []);
   const handleOpenSettings = useCallback(() => setActiveDialog("settings"), []);
   const handleOpenLogUpload = useCallback(() => {
@@ -1483,6 +1484,7 @@ function App() {
           onBatchTag={handleBatchTag}
           onBatchUpdate={handleBatchUpdateClick}
           onOpenPacks={handleOpenPacks}
+          onOpenProfiles={handleOpenProfiles}
           onOpenSavedVars={handleOpenSavedVars}
           onOpenSettings={handleOpenSettings}
           onOpenLogUpload={handleOpenLogUpload}
