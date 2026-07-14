@@ -4,13 +4,24 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0-beta.11] — 2026-07-14
+
+Kalpa goes cross-platform: this release ships native **macOS** and **Linux** builds (beta) alongside Windows, plus a real progress bar for manual log uploads.
+
 ### Features
 
-- **macOS and Linux support (beta).** Kalpa now builds, packages, and auto-updates on all three desktop platforms. macOS ships as a universal `.dmg` (Intel & Apple Silicon, macOS 10.15+) with native traffic-light window controls, ⌘-based shortcuts, Keychain-backed login persistence, and detection of both the native Mac client (`~/Documents/Elder Scrolls Online`) and CrossOver bottles. Linux ships as `.AppImage` (self-updating), `.deb`, and `.rpm`, stores your login in the Secret Service keyring, and automatically finds ESO under Steam Proton — including Flatpak/Snap Steam and secondary Steam libraries. Windows behavior is unchanged.
+- **macOS and Linux support (beta).** Kalpa now builds, packages, and auto-updates on all three desktop platforms. macOS ships as a universal `.dmg` (Intel & Apple Silicon, macOS 10.15+) with native traffic-light window controls, ⌘-based shortcuts, Keychain-backed login persistence, and detection of both the native Mac client (`~/Documents/Elder Scrolls Online`) and CrossOver bottles. Linux ships as `.AppImage` (self-updating), `.deb`, and `.rpm`, stores your login in the Secret Service keyring, and automatically finds ESO under Steam Proton — including Flatpak/Snap Steam and secondary Steam libraries. Windows behavior is unchanged. ([#239](https://github.com/ESO-Toolkit/kalpa/pull/239))
+- **Manual uploads now show real progress and a time estimate.** Uploading a log to ESO Logs displays a determinate progress bar driven by the actual backend lifecycle — Prepare → Upload → Finalize → Done — with a percentage, a phase stepper, and a live "about Xs left" estimate. Shown only for direct uploads (work Kalpa can actually observe); the official-uploader handoff keeps its existing behavior. ([#215](https://github.com/ESO-Toolkit/kalpa/pull/215))
 
 ### Bug Fixes
 
-- **"Show in folder" now works with any path separator.** Two spots joined paths with a hard-coded backslash, which produced invalid paths on macOS and Linux; they now use the platform-correct separator everywhere.
+- **"Show in folder" now works with any path separator.** Two spots joined paths with a hard-coded backslash, which produced invalid paths on macOS and Linux; they now use the platform-correct separator everywhere. ([#239](https://github.com/ESO-Toolkit/kalpa/pull/239))
+
+### Under the Hood
+
+- Releases are now built per-platform in a serialized pipeline and published only after an automated check confirms the auto-updater manifest covers Windows, macOS, and Linux — a release can never go live with a platform missing. ([#239](https://github.com/ESO-Toolkit/kalpa/pull/239))
 
 ## [0.1.0-beta.10] — 2026-07-13
 
