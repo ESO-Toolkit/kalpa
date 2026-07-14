@@ -17,6 +17,7 @@ Kalpa goes cross-platform: this release ships native **macOS** and **Linux** bui
 
 ### Bug Fixes
 
+- **The Addon Profiles dialog is reachable again.** beta.10 shipped the profiles overhaul with no way to open it — the button was lost in a refactor. Profiles now live behind a dedicated header button (the layers icon, next to Saved Vars). ([#271](https://github.com/ESO-Toolkit/kalpa/pull/271))
 - **"Show in folder" now works with any path separator.** Two spots joined paths with a hard-coded backslash, which produced invalid paths on macOS and Linux; they now use the platform-correct separator everywhere. ([#239](https://github.com/ESO-Toolkit/kalpa/pull/239))
 
 ### Under the Hood
