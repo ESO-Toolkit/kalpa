@@ -15,6 +15,8 @@ import type {
   WidgetType,
   WidgetOverride,
   WidgetProps,
+  LamHintMap,
+  LamScanResponse,
 } from "../types";
 import {
   Dialog,
@@ -50,6 +52,7 @@ import { getSetting, setSetting } from "@/lib/store";
 import { classifyContext, humanizeKey, getTableChildren, getLeafChildren } from "@/lib/sv-nodes";
 import { resolveEffectiveField } from "@/lib/sv-widgets";
 import { classifyFile, sizeCategory, updateTreeNode, type SizeCategory } from "@/lib/sv-helpers";
+import { searchSvSettings } from "@/lib/sv-settings-search";
 import {
   ToggleControl,
   NumberControl,
@@ -876,7 +879,11 @@ function WidgetCustomizer({
             className="mt-0.5 w-full rounded border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-xs text-foreground outline-none"
             value={options}
             onChange={(e) => setOptions(e.target.value)}
-            placeholder="option1, option2, option3"
+            placeholder={
+              field.props.optionItems?.length && !existing?.props?.options?.length
+                ? field.props.optionItems.map((o) => o.label).join(", ")
+                : "option1, option2, option3"
+            }
           />
         </div>
       )}
@@ -1079,6 +1086,7 @@ function DetailPanel({
   selectedPath,
   tree,
   overlay,
+  lamHints,
   knownCharacters,
   onNavigate,
   onEdit,
@@ -1089,6 +1097,7 @@ function DetailPanel({
   selectedPath: string[];
   tree: SvTreeNode | null;
   overlay: SvSchemaOverlay;
+  lamHints: LamHintMap | null;
   knownCharacters: Set<string>;
   onNavigate: (depth: number) => void;
   onEdit: (path: string[], value: string | number | boolean | null) => void;
@@ -1110,9 +1119,17 @@ function DetailPanel({
     return leafChildren.map((child) => {
       const childPath = [...selectedPath, child.key];
       const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
-      return resolveEffectiveField(child, childPath, ctx, overlay, addonName, knownCharacters);
+      return resolveEffectiveField(
+        child,
+        childPath,
+        ctx,
+        overlay,
+        addonName,
+        knownCharacters,
+        lamHints ?? undefined
+      );
     });
-  }, [leafChildren, selectedPath, knownCharacters, overlay, addonName]);
+  }, [leafChildren, selectedPath, knownCharacters, overlay, addonName, lamHints]);
 
   // Color table children also get form rendering
   const colorTableFields = useMemo(() => {
@@ -1126,11 +1143,19 @@ function DetailPanel({
         const childPath = [...selectedPath, child.key];
         const ctx = classifyContext(child.key, selectedPath.length, knownCharacters);
         return {
-          field: resolveEffectiveField(child, childPath, ctx, overlay, addonName, knownCharacters),
+          field: resolveEffectiveField(
+            child,
+            childPath,
+            ctx,
+            overlay,
+            addonName,
+            knownCharacters,
+            lamHints ?? undefined
+          ),
           node: child,
         };
       });
-  }, [tableChildren, selectedPath, knownCharacters, overlay, addonName]);
+  }, [tableChildren, selectedPath, knownCharacters, overlay, addonName, lamHints]);
 
   if (!selectedNode || !tree) {
     return (
@@ -1264,7 +1289,108 @@ function DetailPanel({
   );
 }
 
+// ── Search Results Panel (right side, while searching) ───────
+
+function SettingsSearchResults({
+  tree,
+  query,
+  overlay,
+  lamHints,
+  knownCharacters,
+  onEdit,
+  onOverlayChange,
+  onJumpTo,
+}: {
+  tree: SvTreeNode;
+  query: string;
+  overlay: SvSchemaOverlay;
+  lamHints: LamHintMap | null;
+  knownCharacters: Set<string>;
+  onEdit: (path: string[], value: string | number | boolean | null) => void;
+  onOverlayChange: (overlay: SvSchemaOverlay) => void;
+  onJumpTo: (parentPath: string[]) => void;
+}) {
+  const { results, total } = useMemo(() => searchSvSettings(tree, query), [tree, query]);
+
+  // Resolve each result to an effective field, mirroring DetailPanel's logic:
+  // structural depth = parent path length (path excludes the tree root).
+  const resolved = useMemo(() => {
+    return results
+      .map((r) => {
+        const addonName = r.path[0] ?? "";
+        const ctx = classifyContext(r.node.key, r.path.length - 1, knownCharacters);
+        const field = resolveEffectiveField(
+          r.node,
+          r.path,
+          ctx,
+          overlay,
+          addonName,
+          knownCharacters,
+          lamHints ?? undefined
+        );
+        return { r, field, addonName };
+      })
+      .filter(({ field }) => !field.hidden);
+  }, [results, overlay, knownCharacters, lamHints]);
+
+  if (total === 0) {
+    return (
+      <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
+        <div className="flex flex-1 items-center justify-center py-8 text-center">
+          <div>
+            <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-xl bg-white/[0.04] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <SearchIcon className="size-5 text-muted-foreground/40" />
+            </div>
+            <p className="text-xs text-muted-foreground">No settings match &quot;{query}&quot;.</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
+      <div className="mb-1.5 text-[10px] font-heading font-bold uppercase tracking-[0.05em] text-muted-foreground">
+        {total} matching setting{total !== 1 ? "s" : ""}
+        {total > results.length && (
+          <span className="ml-1 font-normal text-muted-foreground/50">
+            · showing first {results.length}
+          </span>
+        )}
+      </div>
+      <div className="flex-1 overflow-y-auto space-y-0.5">
+        {resolved.map(({ r, field, addonName }) => {
+          const breadcrumb = r.path.slice(0, -1).join(" › ") || addonName;
+          return (
+            <div key={field.nodeId} className="pt-1 first:pt-0">
+              <button
+                onClick={() => onJumpTo(r.path.slice(0, -1))}
+                title="Go to group"
+                className="block w-full truncate px-2.5 text-left text-[10px] text-muted-foreground/50 transition-colors hover:text-accent-sky"
+              >
+                {breadcrumb}
+              </button>
+              <FieldRow
+                field={field}
+                originalNode={r.node}
+                overlay={overlay}
+                addonName={addonName}
+                onEdit={onEdit}
+                onOverlayChange={onOverlayChange}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── Editor Tab ──────────────────────────────────────────────
+
+// Session cache of LAM dropdown scan results, keyed `${addonsPath}|${svName}`.
+// Persists across file switches within a session so we scan each addon once.
+const lamHintCache = new Map<string, LamHintMap | null>();
 
 function EditorTab({
   files,
@@ -1289,6 +1415,7 @@ function EditorTab({
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [overlay, setOverlay] = useState<SvSchemaOverlay>({});
   const [rawMode, setRawMode] = useState(false);
+  const [lamHints, setLamHints] = useState<LamHintMap | null>(null);
 
   // Navigation state
   const [selectedPath, setSelectedPath] = useState<string[]>([]);
@@ -1367,6 +1494,26 @@ function EditorTab({
       setDirty(false);
       setSelectedPath([]);
       setSelectedNode(null);
+      // LAM dropdown scan (fire-and-forget, silent on failure). Keyed by the
+      // SV file's base name, which matches the addon's SavedVariables account.
+      const svName = fileName.replace(/\.lua$/i, "");
+      const cacheKey = `${addonsPath}|${svName}`;
+      if (lamHintCache.has(cacheKey)) {
+        setLamHints(lamHintCache.get(cacheKey) ?? null);
+      } else {
+        setLamHints(null);
+        void invokeOrThrow<LamScanResponse>("scan_lam_dropdowns", { addonsPath, svName })
+          .then((res) => {
+            const map: LamHintMap = {};
+            for (const h of res.hints) map[h.settingKey.toLowerCase()] = h.choices;
+            const value = Object.keys(map).length ? map : null;
+            lamHintCache.set(cacheKey, value);
+            if (!signal?.cancelled) setLamHints(value);
+          })
+          .catch(() => {
+            /* silent — scan failure must never surface */
+          });
+      }
       try {
         const result = await invokeOrThrow<SvReadResponse>("read_saved_variable", {
           addonsPath,
@@ -1475,6 +1622,40 @@ function EditorTab({
     setSelectedPath(path);
     setSelectedNode(node);
   }, []);
+
+  const handleJumpToSearchResult = useCallback(
+    (parentPath: string[]) => {
+      if (parentPath.length === 0) {
+        setSelectedPath([]);
+        setSelectedNode(null);
+        setSearchQuery("");
+        return;
+      }
+      let current: SvTreeNode | null = tree;
+      for (const segment of parentPath) {
+        current = current?.children?.find((c) => c.key === segment) ?? null;
+        if (!current) break;
+      }
+      if (current) {
+        setSelectedPath(parentPath);
+        setSelectedNode(current);
+        // Expand every ancestor so the nav tree reveals the target location.
+        setExpandedPaths((prev) => {
+          const next = new Set(prev);
+          for (let i = 1; i <= parentPath.length; i++) {
+            const key = parentPath
+              .slice(0, i)
+              .map((s) => s.replace(/\0/g, "\\0"))
+              .join("\0");
+            next.add(key);
+          }
+          return next;
+        });
+      }
+      setSearchQuery("");
+    },
+    [tree]
+  );
 
   const handleBreadcrumbNavigate = useCallback(
     (depth: number) => {
@@ -1659,7 +1840,7 @@ function EditorTab({
                   <SearchIcon className="absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground/50" />
                   <input
                     type="text"
-                    placeholder="Search..."
+                    placeholder="Search settings..."
                     className="w-full rounded-lg border border-white/[0.1] bg-white/[0.04] py-1 pl-7 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground/40 shadow-[inset_0_1px_2px_rgba(0,0,0,0.15)] focus:border-accent-sky/50 focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--accent-sky)_10%,transparent),inset_0_1px_2px_rgba(0,0,0,0.1)]"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
@@ -1700,19 +1881,37 @@ function EditorTab({
               </div>
             </div>
 
-            {/* Right panel — Detail / Form */}
+            {/* Right panel — Detail / Form (or search results while searching) */}
             <div className="flex flex-1 flex-col overflow-hidden p-3">
-              <DetailPanel
-                selectedNode={selectedNode}
-                selectedPath={selectedPath}
-                tree={tree}
-                overlay={overlay}
-                knownCharacters={knownCharacters}
-                onNavigate={handleBreadcrumbNavigate}
-                onEdit={handleEdit}
-                onOverlayChange={handleOverlayChange}
-                onSelectPath={handleSelectPath}
-              />
+              {searchQuery.trim() && debouncedQuery.trim() ? (
+                <SettingsSearchResults
+                  tree={tree}
+                  // The debounced query drives the full-tree walk (same rationale
+                  // as the nav filter: per-keystroke DFS janks large SV files).
+                  // Gating the swap on searchQuery too makes clearing the box
+                  // return to the detail panel instantly.
+                  query={debouncedQuery}
+                  overlay={overlay}
+                  lamHints={lamHints}
+                  knownCharacters={knownCharacters}
+                  onEdit={handleEdit}
+                  onOverlayChange={handleOverlayChange}
+                  onJumpTo={handleJumpToSearchResult}
+                />
+              ) : (
+                <DetailPanel
+                  selectedNode={selectedNode}
+                  selectedPath={selectedPath}
+                  tree={tree}
+                  overlay={overlay}
+                  lamHints={lamHints}
+                  knownCharacters={knownCharacters}
+                  onNavigate={handleBreadcrumbNavigate}
+                  onEdit={handleEdit}
+                  onOverlayChange={handleOverlayChange}
+                  onSelectPath={handleSelectPath}
+                />
+              )}
             </div>
           </>
         )}
@@ -1805,7 +2004,6 @@ function CopyProfileTab({
   const [destKey, setDestKey] = useState<string>("");
   const [customDest, setCustomDest] = useState<string>("");
   const [copying, setCopying] = useState(false);
-  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 
   const currentFile = useMemo(
     () => files.find((f) => f.fileName === selectedFile),
@@ -2002,18 +2200,7 @@ function CopyProfileTab({
           <Button
             className="mt-2"
             size="sm"
-            onClick={() => {
-              if (destExists) {
-                setConfirmState({
-                  title: "Overwrite existing profile",
-                  description: `"${actualDest}" already has settings in ${currentFile?.addonName}.lua. Copying "${sourceKey}" will overwrite them. A .bak is kept and can be restored from the Editor tab.`,
-                  confirmLabel: "Overwrite",
-                  onConfirm: () => void handleCopy(),
-                });
-              } else {
-                void handleCopy();
-              }
-            }}
+            onClick={() => void handleCopy()}
             disabled={copying || !actualDest.trim() || !!customError}
           >
             <CopyIcon className="mr-1 size-3" />
@@ -2021,8 +2208,6 @@ function CopyProfileTab({
           </Button>
         </div>
       )}
-
-      <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
     </div>
   );
 }
@@ -2238,20 +2423,12 @@ export function SavedVariables({ addonsPath, installedAddons, onClose }: SavedVa
   useEffect(() => {
     // Refresh periodically while the dialog is open so the editor's "ESO is
     // running" warning stays truthful if the game is launched or exited.
-    // Skip the backend process-enumeration while the window is hidden — the
-    // warning can't be seen — and re-check the moment it becomes visible, so
-    // what the user sees on reveal is fresher than the 30s cadence, not staler.
     const check = () => {
-      if (document.hidden) return;
       invokeOrThrow<boolean>("is_eso_running").then(setEsoRunning).catch(console.error);
     };
     check();
     const id = setInterval(check, 30000);
-    document.addEventListener("visibilitychange", check);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", check);
-    };
+    return () => clearInterval(id);
   }, []);
 
   const handleSelectFile = useCallback((f: SavedVariableFile) => {

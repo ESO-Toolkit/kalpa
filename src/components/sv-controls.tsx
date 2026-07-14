@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { EffectiveField, SvTreeNode } from "../types";
+import type { DropdownOptionItem, EffectiveField, SvTreeNode } from "../types";
 import {
   Select,
   SelectContent,
@@ -7,7 +7,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { MinusIcon, PlusIcon } from "lucide-react";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+  ComboboxStatus,
+  ComboboxTrigger,
+  ComboboxValue,
+} from "@/components/ui/combobox";
+import { dropdownSearchEnabled, filterDropdownItems } from "../lib/sv-dropdown-filter";
+import { MinusIcon, PlusIcon, SearchIcon } from "lucide-react";
 import { motion } from "motion/react";
 
 export function ToggleControl({
@@ -286,21 +298,60 @@ export function TextControl({
   );
 }
 
+/**
+ * Build the list of dropdown items for a field, sourcing typed optionItems when
+ * available (LAM-inferred), else the manual comma-separated `options`. Dedupes
+ * by stringified value and prepends the current value if it isn't already an
+ * option so the active selection is always representable.
+ */
+export function buildDropdownItems(field: EffectiveField): DropdownOptionItem[] {
+  const source: DropdownOptionItem[] =
+    field.props.optionItems && field.props.optionItems.length > 0
+      ? field.props.optionItems
+      : (field.props.options ?? []).map((o) => ({ label: o, value: o }));
+
+  // Dedupe by String(value), first occurrence wins.
+  const seen = new Set<string>();
+  const items: DropdownOptionItem[] = [];
+  for (const item of source) {
+    const key = String(item.value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(item);
+  }
+
+  // Prepend the current value if it isn't already present.
+  const currentKey = String(field.value ?? "");
+  if (!items.some((item) => String(item.value) === currentKey)) {
+    items.unshift({ label: currentKey, value: field.value ?? "" });
+  }
+
+  return items;
+}
+
 export function DropdownControl({
   field,
   onChange,
 }: {
   field: EffectiveField;
-  onChange: (val: string | number) => void;
+  onChange: (val: string | number | boolean) => void;
 }) {
-  const options = field.props.options ?? [];
-  const currentVal = String(field.value ?? "");
-  const allOptions = options.includes(currentVal) ? options : [currentVal, ...options];
+  // Search input state must be declared unconditionally (React hook rules) even
+  // though it's only used by the searchable branch below.
+  const [query, setQuery] = useState("");
+
+  const items = buildDropdownItems(field);
 
   const commit = (v: string | null) => {
     if (!v) return;
-    // Preserve numeric type when the field is currently a number and the
-    // chosen option parses cleanly as a finite number.
+    const match = items.find((item) => String(item.value) === v);
+    // Typed source (LAM optionItems): preserve the exact value type.
+    if (match && field.props.optionItems?.length) {
+      onChange(match.value);
+      return;
+    }
+    // Otherwise preserve numeric type when the field is currently a number and
+    // the chosen option parses cleanly as a finite number.
     if (typeof field.value === "number") {
       const num = Number(v);
       if (v.trim() !== "" && Number.isFinite(num)) {
@@ -311,19 +362,74 @@ export function DropdownControl({
     onChange(v);
   };
 
+  // Large dropdowns (> 10 options, e.g. LAM font/sound/texture lists) get a
+  // type-to-filter combobox; smaller ones keep the plain Select.
+  const searchable = dropdownSearchEnabled(items.length);
+
+  if (!searchable) {
+    return (
+      <Select value={String(field.value ?? "")} onValueChange={commit} disabled={field.readOnly}>
+        <SelectTrigger className="h-7 w-40 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {items.map((item) => (
+            <SelectItem key={String(item.value)} value={String(item.value)}>
+              {item.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    );
+  }
+
+  const filtered = filterDropdownItems(items, query);
+  // buildDropdownItems prepends the current value, so a match always exists; the
+  // ?? null is only a type-level guard.
+  const selected = items.find((item) => String(item.value) === String(field.value ?? "")) ?? null;
+
   return (
-    <Select value={currentVal} onValueChange={commit} disabled={field.readOnly}>
-      <SelectTrigger className="h-7 w-40 text-xs">
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {allOptions.map((opt) => (
-          <SelectItem key={opt} value={opt}>
-            {opt}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <Combobox
+      items={items}
+      filteredItems={filtered}
+      value={selected}
+      onValueChange={(item: DropdownOptionItem | null) => {
+        if (item) commit(String(item.value));
+      }}
+      isItemEqualToValue={(a: DropdownOptionItem, b: DropdownOptionItem) =>
+        String(a.value) === String(b.value)
+      }
+      inputValue={query}
+      onInputValueChange={setQuery}
+      onOpenChange={(open: boolean) => {
+        if (!open) setQuery("");
+      }}
+      autoHighlight
+      disabled={field.readOnly}
+    >
+      <ComboboxTrigger className="h-7 w-40 text-xs">
+        <ComboboxValue />
+      </ComboboxTrigger>
+      <ComboboxContent>
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-white/[0.06] px-2">
+          <SearchIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
+          <ComboboxInput placeholder="Search options…" />
+        </div>
+        <ComboboxStatus>
+          {query.trim() && filtered.length > 0
+            ? `${filtered.length} of ${items.length} options`
+            : null}
+        </ComboboxStatus>
+        <ComboboxEmpty>{filtered.length === 0 ? "No matching options" : null}</ComboboxEmpty>
+        <ComboboxList>
+          {(item: DropdownOptionItem) => (
+            <ComboboxItem key={String(item.value)} value={item}>
+              {item.label}
+            </ComboboxItem>
+          )}
+        </ComboboxList>
+      </ComboboxContent>
+    </Combobox>
   );
 }
 

@@ -11,6 +11,7 @@ import {
   listAllVotes,
 } from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
+import { redactAnonymousPack, ANONYMOUS_AUTHOR_NAME } from "./redact";
 import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
@@ -48,7 +49,10 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
         .bind(
           pack.id,
           pack.author_id,
-          pack.author_name,
+          // The D1 mirror feeds the ESO Toolkit website; never hand it the
+          // real display name of an anonymous pack's author. author_id stays
+          // for ownership joins but is not rendered there.
+          pack.is_anonymous ? ANONYMOUS_AUTHOR_NAME : pack.author_name,
           pack.is_anonymous ? 1 : 0,
           pack.title,
           pack.description,
@@ -189,28 +193,40 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 
   let packs = index.packs;
 
-  // Status filter — default to "published"; draft/all require auth + ownership
+  // Resolve the viewer once: draft/all filtering, the author filter, and
+  // anonymity redaction all key off it. Free when no Authorization header is
+  // present (validateBearerToken returns null without an upstream call).
   const statusFilter = url.searchParams.get("status");
+  const authorFilter = url.searchParams.get("author");
+  const needsViewer =
+    statusFilter === "all" || statusFilter === "draft" || authorFilter !== null;
+  const viewer = needsViewer ? await validateBearerToken(request) : null;
+  const viewerId = viewer ? String(viewer.id) : undefined;
+
+  // Status filter — default to "published"; draft/all require auth + ownership
   if (statusFilter === "all" || statusFilter === "draft") {
-    const user = await validateBearerToken(request);
-    if (!user) {
+    if (viewerId === undefined) {
       packs = packs.filter((p) => (p.status ?? "published") === "published");
+    } else if (statusFilter === "draft") {
+      packs = packs.filter(
+        (p) => p.author_id === viewerId && (p.status ?? "published") === "draft",
+      );
     } else {
-      const userId = String(user.id);
-      if (statusFilter === "draft") {
-        packs = packs.filter((p) => p.author_id === userId && (p.status ?? "published") === "draft");
-      } else {
-        packs = packs.filter((p) => (p.status ?? "published") === "published" || p.author_id === userId);
-      }
+      packs = packs.filter(
+        (p) => (p.status ?? "published") === "published" || p.author_id === viewerId,
+      );
     }
   } else {
     const target = statusFilter ?? "published";
     packs = packs.filter((p) => (p.status ?? "published") === target);
   }
 
-  const authorFilter = url.searchParams.get("author");
   if (authorFilter) {
-    packs = packs.filter((p) => p.author_id === authorFilter);
+    // Anonymous packs must not be discoverable by author — that filter is a
+    // de-anonymization vector. Only the author themselves (authed) sees them.
+    packs = packs.filter(
+      (p) => p.author_id === authorFilter && (!p.is_anonymous || viewerId === authorFilter),
+    );
   }
 
   const typeFilter = url.searchParams.get("type");
@@ -251,7 +267,14 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const start = (page - 1) * PACKS_PER_PAGE;
   const paginated = packs.slice(start, start + PACKS_PER_PAGE);
 
-  const response = json(request, { packs: paginated, page, sort }, 200, 30);
+  // Enforce anonymity at the edge. The default view is cached and shared, so
+  // it is always fully redacted regardless of who populated the cache; the
+  // owner exception only applies to uncached (filtered) views.
+  const visible = paginated.map((p) =>
+    redactAnonymousPack(p, isDefaultView ? undefined : viewerId),
+  );
+
+  const response = json(request, { packs: visible, page, sort }, 200, 30);
 
   if (isDefaultView && request.method === "GET") {
     cache.put(request, response.clone()).catch(console.error);
@@ -272,6 +295,16 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
       return notFound(request);
     }
     return json(request, { pack }, 200, 0);
+  }
+  if (pack.is_anonymous) {
+    // The author gets their real fields back (pack management needs them) but
+    // that response must never be cacheable; everyone else gets the redacted
+    // pack, which stays safe to cache.
+    const user = await validateBearerToken(request);
+    if (user && String(user.id) === pack.author_id) {
+      return json(request, { pack }, 200, 0);
+    }
+    return json(request, { pack: redactAnonymousPack(pack) }, 200, 300, "public");
   }
   return json(request, { pack }, 200, 300, "public");
 }

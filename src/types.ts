@@ -285,11 +285,17 @@ export type WidgetType =
 export type WidgetConfidence = "certain" | "inferred" | "ambiguous";
 export type NodeContext = "account-wide" | "per-character" | "setting";
 
+export interface DropdownOptionItem {
+  label: string;
+  value: string | number | boolean;
+}
+
 export interface WidgetProps {
   min?: number;
   max?: number;
   step?: number;
   options?: string[];
+  optionItems?: DropdownOptionItem[];
   multiline?: boolean;
 }
 
@@ -306,6 +312,26 @@ export interface SvSchemaOverlay {
     [stablePathId: string]: WidgetOverride;
   };
 }
+
+// ── LibAddonMenu dropdown inference (never persisted) ───────────────────
+export interface LamDropdownChoice {
+  label: string;
+  value: string | number | boolean;
+}
+
+export interface LamDropdownHint {
+  settingKey: string;
+  choices: LamDropdownChoice[];
+}
+
+export interface LamScanResponse {
+  hints: LamDropdownHint[];
+  scannedFiles: number;
+  matchedFolders: string[];
+}
+
+/** Map of LOWERCASED settingKey → detected dropdown option items. */
+export type LamHintMap = Record<string, DropdownOptionItem[]>;
 
 export interface EffectiveField {
   nodeId: string;

@@ -1,13 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { resolveEffectiveField } from "../sv-widgets";
-import type { SvTreeNode, SvSchemaOverlay } from "../../types";
+import type { SvTreeNode, SvSchemaOverlay, LamHintMap } from "../../types";
 
 const noOverlay: SvSchemaOverlay = {};
 const noChars = new Set<string>();
 
 function resolve(
   node: SvTreeNode,
-  opts?: { path?: string[]; overlay?: SvSchemaOverlay; addon?: string }
+  opts?: { path?: string[]; overlay?: SvSchemaOverlay; addon?: string; lamHints?: LamHintMap }
 ) {
   return resolveEffectiveField(
     node,
@@ -15,7 +15,8 @@ function resolve(
     "setting",
     opts?.overlay ?? noOverlay,
     opts?.addon ?? "TestAddon",
-    noChars
+    noChars,
+    opts?.lamHints
   );
 }
 
@@ -270,5 +271,129 @@ describe("resolveEffectiveField — recursive children", () => {
     expect(field.children![2]!.widget).toBe("group");
     expect(field.children![2]!.children).toHaveLength(1);
     expect(field.children![2]!.children![0]!.widget).toBe("number");
+  });
+});
+
+describe("resolveEffectiveField — LAM-inferred dropdowns", () => {
+  it("upgrades a string leaf to dropdown when a matching hint exists (case-insensitive)", () => {
+    const lamHints: LamHintMap = {
+      theme: [
+        { label: "Dark", value: "dark" },
+        { label: "Light", value: "light" },
+      ],
+    };
+    // Node key differs in case from the (lowercased) hint key.
+    const field = resolve({ key: "Theme", valueType: "string", value: "dark" }, { lamHints });
+    expect(field.widget).toBe("dropdown");
+    expect(field.confidence).toBe("inferred");
+    expect(field.props.optionItems).toEqual(lamHints.theme);
+  });
+
+  it("upgrades a number leaf when the hint has numeric values", () => {
+    const lamHints: LamHintMap = {
+      size: [
+        { label: "Small", value: 1 },
+        { label: "Large", value: 2 },
+      ],
+    };
+    const field = resolve({ key: "size", valueType: "number", value: 1 }, { lamHints });
+    expect(field.widget).toBe("dropdown");
+    expect(field.confidence).toBe("inferred");
+    expect(field.props.optionItems).toEqual(lamHints.size);
+  });
+
+  it("leaves a number leaf as number when the hint has only string values", () => {
+    const lamHints: LamHintMap = {
+      size: [
+        { label: "Small", value: "small" },
+        { label: "Large", value: "large" },
+      ],
+    };
+    const field = resolve({ key: "size", valueType: "number", value: 1 }, { lamHints });
+    expect(field.widget).toBe("number");
+    expect(field.props.optionItems).toBeUndefined();
+  });
+
+  it("never upgrades a boolean leaf even with a matching hint", () => {
+    const lamHints: LamHintMap = {
+      enabled: [
+        { label: "On", value: true },
+        { label: "Off", value: false },
+      ],
+    };
+    const field = resolve({ key: "enabled", valueType: "boolean", value: true }, { lamHints });
+    expect(field.widget).toBe("toggle");
+    expect(field.props.optionItems).toBeUndefined();
+  });
+
+  it("threads hints into nested branches (recursion)", () => {
+    const lamHints: LamHintMap = {
+      theme: [
+        { label: "Dark", value: "dark" },
+        { label: "Light", value: "light" },
+      ],
+    };
+    const node: SvTreeNode = {
+      key: "root",
+      valueType: "table",
+      children: [
+        { key: "theme", valueType: "string", value: "dark" },
+        {
+          key: "nested",
+          valueType: "table",
+          children: [{ key: "theme", valueType: "string", value: "light" }],
+        },
+      ],
+    };
+    const field = resolve(node, { path: ["TestAddon", "root"], lamHints });
+    expect(field.children![0]!.widget).toBe("dropdown");
+    expect(field.children![1]!.children![0]!.widget).toBe("dropdown");
+  });
+
+  it("overlay widget override beats the hint (widget text, confidence certain)", () => {
+    const lamHints: LamHintMap = {
+      theme: [{ label: "Dark", value: "dark" }],
+    };
+    const overlay: SvSchemaOverlay = {
+      TestAddon: {
+        "TestAddon\0theme": { widget: "text" },
+      },
+    };
+    const field = resolve(
+      { key: "theme", valueType: "string", value: "dark" },
+      { overlay, lamHints }
+    );
+    expect(field.widget).toBe("text");
+    expect(field.confidence).toBe("certain");
+  });
+
+  it("manual overlay options beat LAM optionItems", () => {
+    const lamHints: LamHintMap = {
+      theme: [{ label: "Dark", value: "dark" }],
+    };
+    const overlay: SvSchemaOverlay = {
+      TestAddon: {
+        "TestAddon\0theme": { widget: "dropdown", props: { options: ["a", "b"] } },
+      },
+    };
+    const field = resolve(
+      { key: "theme", valueType: "string", value: "dark" },
+      { overlay, lamHints }
+    );
+    expect(field.widget).toBe("dropdown");
+    expect(field.props.optionItems).toBeUndefined();
+    expect(field.props.options).toEqual(["a", "b"]);
+  });
+
+  it("is a no-op when lamHints is undefined", () => {
+    const field = resolve({ key: "theme", valueType: "string", value: "dark" });
+    expect(field.widget).toBe("text");
+    expect(field.props.optionItems).toBeUndefined();
+  });
+
+  it("is a no-op when lamHints is an empty map", () => {
+    const field = resolve({ key: "theme", valueType: "string", value: "dark" }, { lamHints: {} });
+    expect(field.widget).toBe("text");
+    expect(field.props.optionItems).toBeUndefined();
   });
 });
