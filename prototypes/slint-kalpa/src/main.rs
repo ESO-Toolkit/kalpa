@@ -218,6 +218,14 @@ mod uploader_login;
 #[path = "../../../src-tauri/src/auth.rs"]
 mod auth;
 
+// Cross-platform helpers (#239): `open_url` + Steam/Proton discovery. The
+// included auth.rs and uploader/transport.rs call `crate::platform::open_url`,
+// so this include must exist under the same crate-root path here as in the
+// main app.
+#[allow(dead_code)]
+#[path = "../../../src-tauri/src/platform.rs"]
+mod platform;
+
 // Production ESO Logs uploader modules reused natively. The full encoder +
 // reqwest transport + session provider are Tauri-free and pulled in here; only
 // the sign-in WebView (`native::login`) and the crash-recovery orphan sweeper
@@ -7588,16 +7596,25 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
             // proven events, valid UTF-8, not too large). A multi-session or unproven
             // log falls back to the official uploader instead of POSTing a broken
             // report to the user's real account.
-            let routing = if has_session {
-                uploader::transport::assess_native_routing(&path, true)
-            } else {
-                uploader::transport::NativeRouting::Fallback(
-                    uploader::transport::NativeFallbackReason::NotOptedIn,
-                )
-            };
+            // assess_native_routing owns the session-presence gate since #220
+            // (has_session is its third argument), mirroring the production
+            // command in src-tauri/src/uploader/commands.rs.
+            let routing = uploader::transport::assess_native_routing(&path, true, has_session);
             let result = match routing {
                 uploader::transport::NativeRouting::Native => {
-                    match uploader::transport::run_native_upload(&path, &opts, &*session, cancel) {
+                    // NoopOrphanSink preserves this app's pre-#220 behavior: the
+                    // crash-recovery breadcrumb store lives behind a Tauri
+                    // AppHandle the sidecar doesn't have (see PARITY-BACKLOG.md).
+                    // The progress callback is unused here — the Slint UI shows
+                    // its own indeterminate state.
+                    match uploader::transport::run_native_upload(
+                        &path,
+                        &opts,
+                        &*session,
+                        cancel,
+                        &uploader::native::live::NoopOrphanSink,
+                        &|_| {},
+                    ) {
                         Ok(uploader::transport::UploadOutcome::Completed {
                             report_code: Some(code),
                         }) => UploadUi::report(
@@ -8064,7 +8081,12 @@ fn start_native_live_stream(
         _ => None,
     };
     let mid_session = warmup.is_some();
-    let tail = match uploader::native::live::NotifyTail::new(log_path, tail_start, mid_session) {
+    let tail = match uploader::native::live::NotifyTail::new(
+        log_path,
+        tail_start,
+        mid_session,
+        cancel.clone(),
+    ) {
         Ok(tail) => tail,
         Err(error) => {
             finish_live_stream_ui(
@@ -8340,6 +8362,10 @@ fn wire_uploader_split_actions(ui: &KalpaWindow) {
                     .map(|(session, _)| uploader::splitter::SplitSelection {
                         index: session.index,
                         name: None,
+                        // Byte-offset anchor so the selection survives a rescan
+                        // whose indices shifted (log rotated between preflight
+                        // and split) — mirrors the production workspace.
+                        start_offset: Some(session.start_offset),
                         start_time_ms: Some(session.start_time_ms),
                     })
                     .collect();
@@ -8357,6 +8383,8 @@ fn wire_uploader_split_actions(ui: &KalpaWindow) {
                     .map(|(fight, _)| uploader::splitter::FightSelection {
                         index: fight.index,
                         name: None,
+                        // Same rescan-survival anchor as the session selections.
+                        start_offset: Some(fight.start_offset),
                         start_ms: Some(fight.start_ms),
                     })
                     .collect();
