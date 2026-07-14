@@ -170,6 +170,19 @@ export interface TransportInfo {
   activeTransport: string;
 }
 
+/** Coarse lifecycle phase of a manual (native direct) upload. Mirrors the Rust
+ *  `UploadPhase`. Streamed over a per-upload Channel so the progress bar reflects
+ *  real backend steps; the official-uploader handoff path emits none of these. */
+export type UploadPhase = "preparing" | "uploading" | "finalizing" | "done";
+
+/** One progress tick for a manual native upload (mirrors the Rust
+ *  `UploadProgressEvent`). `segmentsTotal` is 0 until the payload is built. */
+export interface UploadProgressEvent {
+  phase: UploadPhase;
+  segmentsDone: number;
+  segmentsTotal: number;
+}
+
 export interface UploadDispatch {
   handedOff: boolean;
   detail: string;

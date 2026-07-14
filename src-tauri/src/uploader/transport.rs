@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::types::UploadOptions;
+use super::types::{UploadOptions, UploadPhase, UploadProgressEvent};
 
 /// How a transport reports the disposition of an upload request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -822,12 +822,19 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool, has_session: bool) ->
 /// recoverable `{code}`. Callers that don't need breadcrumbs pass a
 /// [`super::native::live::NoopOrphanSink`]; the manual-upload path passes an
 /// AppHandle-backed sink so a one-shot upload gets the same L2 protection as live.
+///
+/// `progress` is invoked with [`UploadProgressEvent`]s as the upload moves through
+/// its real lifecycle (build payload → POST segments → finalize) so the UI can show
+/// a true progress bar. It fires ONLY on the native path: if this function falls back
+/// to the official uploader (no session / non-UTF-8 / a malformed payload), it emits
+/// nothing further and the handoff is reflected by the returned `HandedOff` outcome.
 pub fn run_native_upload(
     log_path: &str,
     opts: &UploadOptions,
     session: &dyn super::native::session::SessionProvider,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     sink: &dyn super::native::live::OrphanSink,
+    progress: &(dyn Fn(UploadProgressEvent) + Send + Sync),
 ) -> Result<UploadOutcome, String> {
     use super::native::{client::NativeUpload, events};
 
@@ -887,13 +894,46 @@ pub fn run_native_upload(
         }
     };
     let (segment, master) = payload;
+    let segments = [segment];
+    let masters = [master];
+
+    // Payload is built and validated: announce the upload phase with the real
+    // segment count so the UI can show a true fraction (0 of N done). Derived
+    // from the slice actually uploaded, never hardcoded — it must stay honest
+    // if this path ever ships more than one segment.
+    let segments_total = segments.len();
+    progress(UploadProgressEvent {
+        phase: UploadPhase::Uploading,
+        segments_done: 0,
+        segments_total,
+    });
 
     let upload = NativeUpload::new(session, opts, cancel);
-    let no_progress = |_p: super::native::client::UploadProgress| {};
-    match upload.upload_finished_with_orphans(&[segment], &[master], &no_progress, sink) {
-        Ok(code) => Ok(UploadOutcome::Completed {
-            report_code: Some(code.0),
-        }),
+    // Forward the client's per-segment ticks. When the last segment is accepted the
+    // only step left is `terminate-report`, so surface that as the Finalizing phase.
+    let on_segment = |p: super::native::client::UploadProgress| {
+        let done = p.segments_done >= p.segments_total;
+        progress(UploadProgressEvent {
+            phase: if done {
+                UploadPhase::Finalizing
+            } else {
+                UploadPhase::Uploading
+            },
+            segments_done: p.segments_done,
+            segments_total: p.segments_total,
+        });
+    };
+    match upload.upload_finished_with_orphans(&segments, &masters, &on_segment, sink) {
+        Ok(code) => {
+            progress(UploadProgressEvent {
+                phase: UploadPhase::Done,
+                segments_done: segments_total,
+                segments_total,
+            });
+            Ok(UploadOutcome::Completed {
+                report_code: Some(code.0),
+            })
+        }
         Err(e) => Err(e.to_string()),
     }
 }
@@ -1050,6 +1090,7 @@ mod routing_tests {
             &FixedSession,
             cancel,
             &super::super::native::live::NoopOrphanSink,
+            &|_| {},
         )
         .unwrap_err();
         assert!(err.contains("not found"));

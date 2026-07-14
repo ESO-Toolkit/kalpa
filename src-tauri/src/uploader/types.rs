@@ -381,6 +381,36 @@ pub enum UploadMode {
     SplitOnly,
 }
 
+/// A coarse lifecycle phase for a manual (native direct) upload, streamed to the UI
+/// over a [`tauri::ipc::Channel`] so the progress bar reflects REAL backend steps
+/// rather than a faked timer. The official-uploader handoff path emits none of these
+/// (its work happens in a separate process Kalpa can't observe), so the UI keeps its
+/// indeterminate "preparing" state until that path returns `HandedOff`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum UploadPhase {
+    /// Reading the log and building the (zipped) segment + master-table payload.
+    Preparing,
+    /// Payload built; POSTing the segment(s) to ESO Logs (`segments_done`/`total`).
+    Uploading,
+    /// All segments accepted; terminating (finalizing) the report.
+    Finalizing,
+    /// The report was created and terminated successfully.
+    Done,
+}
+
+/// One progress tick for a manual native upload, sent over the per-upload
+/// `Channel<UploadProgressEvent>`. `segments_total` is 0 until the payload is built
+/// (during `Preparing`); after that it is the real count so the UI can show a true
+/// fraction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadProgressEvent {
+    pub phase: UploadPhase,
+    pub segments_done: usize,
+    pub segments_total: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
