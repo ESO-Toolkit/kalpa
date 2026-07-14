@@ -102,6 +102,20 @@ fn url_is_authenticated_view(current_url: &str) -> bool {
     !in_auth_flow
 }
 
+/// Dedicated WebView2 profile for the sign-in window — the SAME
+/// `<app data>/login-webview` directory the main app's login window uses (its
+/// B1 isolation), so both UIs keep the esologs.com browser session in one
+/// known place and sign-out in either can actually destroy it. Without this
+/// the login window would use the machine-default WebView2 profile, where the
+/// authenticated browser session survives sign-out forever and "Sign in"
+/// silently re-captures a cookie without ever asking for credentials.
+pub fn login_profile_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(dirs::data_dir()?.join("com.kalpa.desktop")))?;
+    Some(base.join("login-webview"))
+}
+
 /// Open the sign-in window and block until the user authenticates, closes the
 /// window, or the timeout elapses. Runs its own tao event loop, so it must own
 /// the thread's message pump — call it on the (sub)process main thread, never
@@ -126,7 +140,20 @@ pub fn run_login_blocking() -> LoginOutcome {
         Err(e) => return LoginOutcome::Error(format!("window: {e}")),
     };
 
-    let webview = match WebViewBuilder::new().with_url(LOGIN_URL).build(&window) {
+    // Must outlive the webview (the builder borrows it); declared first so it
+    // drops last.
+    let mut web_context = login_profile_dir().map(|dir| {
+        let _ = std::fs::create_dir_all(&dir);
+        wry::WebContext::new(Some(dir))
+    });
+    let builder = match web_context.as_mut() {
+        Some(context) => WebViewBuilder::new_with_web_context(context),
+        // No resolvable profile dir: fall back to the default profile so
+        // sign-in still works; sign-out then skips the profile clear (same
+        // degraded-mode contract as the main app's login window).
+        None => WebViewBuilder::new(),
+    };
+    let webview = match builder.with_url(LOGIN_URL).build(&window) {
         Ok(w) => w,
         Err(e) => return LoginOutcome::Error(format!("webview: {e}")),
     };

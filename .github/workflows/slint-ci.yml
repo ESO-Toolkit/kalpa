@@ -12,6 +12,16 @@ on:
       - "prototypes/slint-kalpa/**"
       - "scripts/build-native-slint-sidecar.mjs"
       - ".github/workflows/slint-ci.yml"
+  # Also run on main pushes: GitHub Actions caches saved on PR branches are
+  # not visible to tag refs, so without a main-scope run the release job would
+  # compile slint/skia cold (~20 min) on every tag. Main-branch caches ARE
+  # inherited by tags.
+  push:
+    branches: [main]
+    paths:
+      - "prototypes/slint-kalpa/**"
+      - "scripts/build-native-slint-sidecar.mjs"
+      - ".github/workflows/slint-ci.yml"
 
 concurrency:
   group: slint-ci-${{ github.ref }}
@@ -44,5 +54,17 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path prototypes/slint-kalpa/Cargo.toml
 
-      - name: Release build (the artifact the sidecar ships)
-        run: cargo build --release --manifest-path prototypes/slint-kalpa/Cargo.toml
+      # Run the REAL packaging script (release build + copy into
+      # src-tauri/binaries with the target-triple name the bundler expects), so
+      # the first end-to-end execution is never the release tag itself.
+      - name: Build + package the sidecar exactly as a release does
+        run: node scripts/build-native-slint-sidecar.mjs
+
+      - name: Verify the sidecar artifact the bundler will look for
+        shell: bash
+        run: |
+          set -euo pipefail
+          triple=$(rustc --print host-tuple)
+          artifact="src-tauri/binaries/kalpa-slint-${triple}.exe"
+          [ -s "$artifact" ] || { echo "::error::${artifact} missing or empty"; exit 1; }
+          echo "sidecar artifact OK: $artifact ($(stat -c%s "$artifact") bytes)"

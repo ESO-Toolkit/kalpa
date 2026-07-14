@@ -467,22 +467,35 @@ pub fn run() {
             // is opened, so this is the only recovery pass that always runs.
             settings_store::recover(app.handle());
 
-            match commands::try_launch_native_performance_mode_on_startup(app.handle()) {
-                Ok(Some(_)) => {
-                    app.handle().exit(0);
-                    return Ok(());
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    eprintln!("Failed to start native performance UI: {error}");
+            // Parse any startup deep link BEFORE the native-mode gate: kalpa://
+            // flows (pack installs from the browser) are WebView features, so a
+            // deep-link activation boots the WebView UI even when native mode is
+            // on. Gating after parsing would spawn a sidecar that can't handle
+            // the link and silently drop it.
+            let startup_deep_link = std::env::args().find_map(|arg| parse_deep_link(&arg));
+            if let Some(action) = &startup_deep_link {
+                if let Ok(mut pending) = app.state::<PendingDeepLink>().0.lock() {
+                    *pending = pending_deep_link_payload(action);
                 }
             }
 
-            if let Some(action) = std::env::args().find_map(|arg| parse_deep_link(&arg)) {
-                if let Ok(mut pending) = app.state::<PendingDeepLink>().0.lock() {
-                    *pending = pending_deep_link_payload(&action);
+            if startup_deep_link.is_none() {
+                match commands::try_launch_native_performance_mode_on_startup(app.handle()) {
+                    Ok(Some(_)) => {
+                        app.handle().exit(0);
+                        return Ok(());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("Failed to start native performance UI: {error}");
+                    }
                 }
             }
+
+            // Consume the sidecar's re-entry flags, then scrub them from this
+            // process's environment: children (including a sidecar launched by
+            // a later toggle) inherit the environment, and a stale flag would
+            // re-fire a dialog the user never asked for on some future launch.
             if std::env::var("KALPA_START_APP_UPDATE")
                 .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
                 .unwrap_or(false)
@@ -515,6 +528,15 @@ pub fn run() {
                         pending.pack_id = Some(pack_id.to_string());
                     }
                 }
+            }
+            for consumed in [
+                "KALPA_START_APP_UPDATE",
+                "KALPA_START_LOG_UPLOADER",
+                "KALPA_START_PACK_HUB",
+                "KALPA_START_PACK_HUB_ID",
+                "KALPA_FORCE_WEBVIEW",
+            ] {
+                std::env::remove_var(consumed);
             }
 
             // Register the deep link scheme at runtime (for dev / non-installer builds)
@@ -764,6 +786,7 @@ pub fn run() {
             uploader::commands::uploader_import_log,
             uploader::commands::uploader_delete_log,
             uploader::commands::uploader_restore_log,
+            uploader::commands::uploader_live_active,
             uploader::commands::uploader_transport_info,
             uploader::commands::uploader_login_esologs,
             uploader::commands::uploader_has_session,
@@ -779,6 +802,7 @@ pub fn run() {
             commands::flush_settings,
             commands::settings_tainted,
             commands::launch_native_performance_mode,
+            commands::native_boot_failure_pending,
             #[cfg(debug_assertions)]
             commands::dev_scrub_saved_variable,
         ])

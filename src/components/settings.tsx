@@ -274,6 +274,30 @@ export function Settings({
   const handlePerformanceModeChange = async (checked: boolean) => {
     if (switchingPerformanceMode) return;
 
+    if (checked) {
+      // Switching to the native shell exits this process. A live-logging
+      // session streaming right now would be killed mid-report with no
+      // recovery path from the native side — refuse instead of orphaning it.
+      const liveActive = await invokeResult<boolean>("uploader_live_active");
+      if (liveActive.ok && liveActive.data) {
+        toast.error("A live log upload is running.", {
+          description: "Stop live logging (or let the session finish) before switching UI modes.",
+        });
+        return;
+      }
+      // The consequence is drastic (this window closes immediately); make the
+      // user say it twice.
+      if (
+        !window.confirm(
+          "Switch to the native performance UI?\n\n" +
+            "Kalpa will close this window and relaunch as the native app. " +
+            "You can switch back anytime from the native app's Settings."
+        )
+      ) {
+        return;
+      }
+    }
+
     const next: PerformanceMode = checked ? "native-slint" : "webview";
     const previous = performanceMode;
     setPerformanceMode(next);
@@ -548,7 +572,9 @@ export function Settings({
                       <div>
                         <p className="text-sm font-medium text-white/90">Native performance UI</p>
                         <p className="text-xs text-muted-foreground">
-                          Switch Kalpa to the smooth Slint shell and close the WebView process.
+                          Relaunches Kalpa as the lightweight native app — this window closes
+                          immediately, and future launches start the native UI. Switch back from the
+                          native app&apos;s Settings.
                         </p>
                       </div>
                     </label>

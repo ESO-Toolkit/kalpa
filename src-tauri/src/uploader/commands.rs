@@ -1063,6 +1063,15 @@ pub struct TransportInfo {
 
 /// Report which upload transport is available (drives the UI's upload button
 /// copy: "Upload to ESO Logs" vs "Open the ESO Logs uploader").
+/// Whether any live-logging session is currently tracked. Lets UI flows that
+/// would kill this process (e.g. switching to the native performance shell)
+/// refuse while a live upload is streaming — killing the webview mid-session
+/// orphans the report with no recovery path in native mode.
+#[tauri::command]
+pub fn uploader_live_active(state: State<'_, UploaderState>) -> bool {
+    state.has_active_live_session()
+}
+
 #[tauri::command]
 pub fn uploader_transport_info() -> TransportInfo {
     let installed = transport::find_official_uploader().is_some();

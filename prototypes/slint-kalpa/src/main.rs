@@ -682,9 +682,10 @@ struct NativeContrastCheck {
     level: ContrastLevel,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum NativeRenderPreset {
     LowMemory,
+    #[default]
     Standard,
 }
 
@@ -1107,6 +1108,60 @@ struct BackupManifestDraft {
     files: Vec<String>,
 }
 
+/// Outcome of trying to become the one live native-shell instance.
+enum NativeShellLock {
+    /// This process holds the lock; keep the handle alive for the process
+    /// lifetime (the OS releases it on ANY exit, including crashes, so no
+    /// stale-lock sweeping is ever needed).
+    Held(#[allow(dead_code)] std::fs::File),
+    /// Another sidecar already holds the lock.
+    AlreadyRunning,
+    /// The lock could not be evaluated (IO error); run unguarded rather than
+    /// refusing to start over a bookkeeping failure.
+    Unavailable,
+}
+
+fn acquire_native_shell_lock() -> NativeShellLock {
+    let dir = std::env::var_os("KALPA_NATIVE_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("native-shell.lock");
+    #[cfg(windows)]
+    let attempt = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // share_mode(0): while this handle lives, any second open fails with
+        // ERROR_SHARING_VIOLATION — the exact "already running" signal.
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+    };
+    #[cfg(not(windows))]
+    let attempt = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&path);
+    match attempt {
+        Ok(file) => NativeShellLock::Held(file),
+        Err(error) if error.raw_os_error() == Some(32) => NativeShellLock::AlreadyRunning,
+        Err(_) => NativeShellLock::Unavailable,
+    }
+}
+
+/// The launcher (kalpa.exe) writes `native-boot.pending` into the state dir
+/// before exiting in favor of this process. Deleting it is the "native mode
+/// booted OK" acknowledgement: if this process dies before its event loop
+/// starts, the marker survives and the next kalpa.exe launch auto-falls back
+/// to the WebView UI instead of crash-looping with no window at all.
+fn confirm_native_boot_marker() {
+    if let Some(dir) = std::env::var_os("KALPA_NATIVE_STATE_DIR").map(PathBuf::from) {
+        let _ = std::fs::remove_file(dir.join("native-boot.pending"));
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     // Sign-in subprocess mode: run ONLY the ESO Logs login WebView on this
     // process's main thread (where WebView2/COM is happy), print the captured
@@ -1118,10 +1173,22 @@ fn main() -> Result<(), slint::PlatformError> {
         std::process::exit(uploader_login::run_login_subprocess());
     }
 
+    // Single-instance: a second activation (Start Menu / taskbar / deep link
+    // while the shell is up) must not stack another full window. The running
+    // instance is living proof native mode works, so this activation also
+    // acknowledges the boot marker before bowing out.
+    let _instance_lock = match acquire_native_shell_lock() {
+        NativeShellLock::AlreadyRunning => {
+            confirm_native_boot_marker();
+            return Ok(());
+        }
+        held_or_unavailable => held_or_unavailable,
+    };
+
     let render_config = native_render_config();
 
     slint::BackendSelector::new()
-        .backend_name(render_config.backend.clone().into())
+        .backend_name(render_config.backend.clone())
         .select()?;
 
     let ui = KalpaWindow::new()?;
@@ -1191,6 +1258,11 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.invoke_open_migration();
     }
     start_native_app_update_check(ui.as_weak(), true);
+    // Everything is constructed and the event loop is about to take over:
+    // acknowledge the launcher's boot marker so future launches keep native
+    // mode. Anything that dies before this line leaves the marker in place,
+    // and the next kalpa.exe start falls back to the WebView UI.
+    confirm_native_boot_marker();
     ui.run()
 }
 
@@ -1215,12 +1287,6 @@ fn render_config_from_inputs(
     let preset = explicit_preset.unwrap_or_else(|| render_preset_for_backend(&backend));
 
     NativeRenderConfig { backend, preset }
-}
-
-impl Default for NativeRenderPreset {
-    fn default() -> Self {
-        Self::Standard
-    }
 }
 
 fn parse_render_preset(value: &str) -> Option<NativeRenderPreset> {
@@ -1385,6 +1451,14 @@ fn apply_mock_data(ui: &KalpaWindow) -> AddonModels {
                 return addon_models_from_entries(ui, addons);
             }
         }
+    }
+
+    // Never fabricate addons for real users: an unreadable or empty AddOns
+    // folder renders the honest empty list, exactly like the WebView UI. The
+    // hardcoded demo dataset below is a dev/showcase aid only, opt-in via
+    // KALPA_DEMO_DATA=1.
+    if !env_flag("KALPA_DEMO_DATA") {
+        return addon_models_from_entries(ui, Vec::new());
     }
 
     let mut addons = vec![
@@ -2127,7 +2201,6 @@ fn dependency_specs(field: &Option<String>) -> Vec<(String, String)> {
             let (name, version) = raw
                 .split_once(">=")
                 .or_else(|| raw.split_once('='))
-                .map(|(name, version)| (name, version))
                 .unwrap_or((raw, ""));
             let name = name.trim_matches([',', ';']).trim();
             (!name.is_empty()).then(|| (name.to_string(), version.trim().to_string()))
@@ -3285,6 +3358,7 @@ fn esoui_id_from_input(input: &str) -> Option<String> {
     (!digits.is_empty()).then_some(digits)
 }
 
+#[allow(clippy::too_many_arguments)] // demo-data constructor, mirrors the UI struct
 fn discover_entry(
     esoui_id: &str,
     title: &str,
@@ -3594,6 +3668,7 @@ fn addon_meta(version: &str, author: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // demo-data constructor, mirrors the UI struct
 fn addon_entry(
     title: &str,
     folder_name: &str,
@@ -7834,6 +7909,14 @@ fn wire_uploader_actions(ui: &KalpaWindow) {
         };
         use uploader::native::session::SessionProvider;
         signout_session.invalidate();
+        // Destroy the login window's WebView2 profile too (cookie jar +
+        // storage): invalidate() only clears OUR stored copy of the session
+        // cookie, but the browser profile stays authenticated with esologs.com
+        // — a later "Sign in" would silently complete without credentials.
+        // Best-effort; the sign-in subprocess is never alive at this point.
+        if let Some(profile) = uploader_login::login_profile_dir() {
+            let _ = std::fs::remove_dir_all(profile);
+        }
         ui.set_uploader_report_code(String::new().into());
         apply_uploader_native_state(&ui, false);
         ui.set_uploader_status_title("Signed out".into());
@@ -12409,7 +12492,8 @@ fn text_preview(text: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeSingleUpdateOutcome {
     Applied,
-    Pending(NativePendingConflict),
+    // Boxed: the conflict payload is ~288 bytes vs the empty Applied arm.
+    Pending(Box<NativePendingConflict>),
 }
 
 fn apply_native_addon_updates_blocking(
@@ -12442,7 +12526,7 @@ fn apply_native_addon_updates_blocking(
                 completed_set.insert(target.folder_name.clone());
                 result.completed.push(target.folder_name);
             }
-            Ok(NativeSingleUpdateOutcome::Pending(conflict)) => result.conflicts.push(conflict),
+            Ok(NativeSingleUpdateOutcome::Pending(conflict)) => result.conflicts.push(*conflict),
             Err(error) => {
                 result.failed.push(target.folder_name.clone());
                 result
@@ -12476,35 +12560,39 @@ fn apply_native_single_addon_update(
         let (_, zip_path) = zip
             .keep()
             .map_err(|error| format!("Failed to preserve update ZIP: {error}"))?;
-        return Ok(NativeSingleUpdateOutcome::Pending(NativePendingConflict {
-            folder_name: target.folder_name.clone(),
-            esoui_id: target.esoui_id,
-            update_version: remote_version.to_string(),
-            title: info.title,
-            download_url: info.download_url,
-            safe_file_count: report.safe_file_count,
-            auto_kept_files: report.auto_kept_files,
-            conflicts: report.conflicts,
-            decisions: HashMap::new(),
-            zip_path,
-            zip_hashes,
-        }));
+        return Ok(NativeSingleUpdateOutcome::Pending(Box::new(
+            NativePendingConflict {
+                folder_name: target.folder_name.clone(),
+                esoui_id: target.esoui_id,
+                update_version: remote_version.to_string(),
+                title: info.title,
+                download_url: info.download_url,
+                safe_file_count: report.safe_file_count,
+                auto_kept_files: report.auto_kept_files,
+                conflicts: report.conflicts,
+                decisions: HashMap::new(),
+                zip_path,
+                zip_hashes,
+            },
+        )));
     }
 
     let Some(kept_files) = native_kept_files_for_policy(&report, conflict_policy) else {
-        return Ok(NativeSingleUpdateOutcome::Pending(NativePendingConflict {
-            folder_name: target.folder_name.clone(),
-            esoui_id: target.esoui_id,
-            update_version: remote_version.to_string(),
-            title: info.title,
-            download_url: info.download_url,
-            safe_file_count: report.safe_file_count,
-            auto_kept_files: report.auto_kept_files,
-            conflicts: report.conflicts,
-            decisions: HashMap::new(),
-            zip_path: PathBuf::new(),
-            zip_hashes,
-        }));
+        return Ok(NativeSingleUpdateOutcome::Pending(Box::new(
+            NativePendingConflict {
+                folder_name: target.folder_name.clone(),
+                esoui_id: target.esoui_id,
+                update_version: remote_version.to_string(),
+                title: info.title,
+                download_url: info.download_url,
+                safe_file_count: report.safe_file_count,
+                auto_kept_files: report.auto_kept_files,
+                conflicts: report.conflicts,
+                decisions: HashMap::new(),
+                zip_path: PathBuf::new(),
+                zip_hashes,
+            },
+        )));
     };
     if !report.conflicts.is_empty() && conflict_policy == 2 {
         backup_native_conflicting_files(addons_dir, target, remote_version, &report.conflicts)?;
@@ -17469,6 +17557,18 @@ fn return_to_webview_shell(
     }
 
     let mut command = std::process::Command::new(&exe);
+    // Children inherit this process's environment, and THIS process may itself
+    // carry KALPA_START_* from the launch that created it. Clear every re-entry
+    // flag first so only the flags for THIS handoff reach the webview — a stale
+    // inherited flag would re-fire a dialog the user never asked for.
+    for stale in [
+        "KALPA_START_APP_UPDATE",
+        "KALPA_START_LOG_UPLOADER",
+        "KALPA_START_PACK_HUB",
+        "KALPA_START_PACK_HUB_ID",
+    ] {
+        command.env_remove(stale);
+    }
     command.env("KALPA_FORCE_WEBVIEW", "1");
     if start_app_update {
         command.env("KALPA_START_APP_UPDATE", "1");
@@ -19242,7 +19342,23 @@ mod tests {
 
     #[test]
     fn current_app_version_comes_from_tauri_config() {
-        assert_eq!(current_app_version(), "0.1.0-beta.9");
+        // Compare against the embedded config itself rather than a hardcoded
+        // literal — a literal breaks on every release bump (it already had:
+        // it still said beta.9 two releases later).
+        let expected = serde_json::from_str::<serde_json::Value>(TAURI_CONF_JSON)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .expect("tauri.conf.json embeds a version");
+        assert_eq!(current_app_version(), expected);
+        assert!(
+            expected.starts_with("0.")
+                || expected.chars().next().is_some_and(|c| c.is_ascii_digit())
+        );
     }
 
     #[test]
@@ -19509,6 +19625,7 @@ mod tests {
             selections: vec![uploader::splitter::FightSelection {
                 index: 1,
                 name: None,
+                start_offset: Some(scan.fights[1].start_offset),
                 start_ms: Some(scan.fights[1].start_ms),
             }],
         };

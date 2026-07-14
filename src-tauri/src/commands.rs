@@ -9147,12 +9147,36 @@ fn resolve_native_shell_executable_from(
 }
 
 fn resolve_native_shell_executable(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let explicit = std::env::var_os("KALPA_SLINT_EXE").map(PathBuf::from);
+    // The env override and the CWD scan are DEV conveniences only. In release
+    // they would let any process that can set an env var or start Kalpa from a
+    // chosen working directory redirect the sidecar launch to an arbitrary
+    // binary (untrusted search path, CWE-427) — release builds resolve strictly
+    // from the install locations (resource dir + next to kalpa.exe).
+    let explicit = if cfg!(debug_assertions) {
+        std::env::var_os("KALPA_SLINT_EXE").map(PathBuf::from)
+    } else {
+        None
+    };
     let current_exe = std::env::current_exe().ok();
     let resource_dir = app.path().resource_dir().ok();
-    let current_dir = std::env::current_dir().ok();
+    let current_dir = if cfg!(debug_assertions) {
+        std::env::current_dir().ok()
+    } else {
+        None
+    };
     resolve_native_shell_executable_from(explicit, current_exe, resource_dir, current_dir)
 }
+
+/// Name of the "a native boot is in flight and not yet confirmed" marker in
+/// the app data dir. Written just before spawning the sidecar; deleted by the
+/// sidecar once its event loop is up. A surviving marker on the NEXT launch
+/// means the last native boot died before showing a window — the startup gate
+/// then reverts to the WebView UI instead of crash-looping with no UI at all.
+const NATIVE_BOOT_PENDING: &str = "native-boot.pending";
+/// One-shot note the fallback leaves for the WebView frontend so it can tell
+/// the user native mode was turned off (read + cleared by
+/// [`native_boot_failure_pending`]).
+const NATIVE_BOOT_FAILED: &str = "native-boot-failed";
 
 fn launch_native_shell_process(
     exe_path: &Path,
@@ -9162,13 +9186,28 @@ fn launch_native_shell_process(
     let render_preset = native_shell_render_preset();
     let render_backend = native_shell_backend_for_preset(&render_preset);
     let mut command = std::process::Command::new(exe_path);
+    // This process may itself carry re-entry flags from the launch that
+    // created it (children inherit the full environment); never let them leak
+    // into the sidecar and from there back into the next webview launch.
+    for stale in [
+        "KALPA_START_APP_UPDATE",
+        "KALPA_START_LOG_UPLOADER",
+        "KALPA_START_PACK_HUB",
+        "KALPA_START_PACK_HUB_ID",
+        "KALPA_FORCE_WEBVIEW",
+    ] {
+        command.env_remove(stale);
+    }
     command
         .env("KALPA_RENDER_PRESET", render_preset)
         .env("KALPA_SLINT_BACKEND", render_backend)
         .env("KALPA_NATIVE_AUTO_PLACE", "0");
 
-    if let Some(path) = app_data_dir {
+    if let Some(path) = &app_data_dir {
         command.env("KALPA_NATIVE_STATE_DIR", path);
+        // Boot handshake: the sidecar deletes this once its UI is really up.
+        let _ = fs::create_dir_all(path);
+        let _ = fs::write(path.join(NATIVE_BOOT_PENDING), b"1");
     }
     if let Some(path) = webview_exe {
         command.env("KALPA_WEBVIEW_EXE", path);
@@ -9257,6 +9296,52 @@ fn native_performance_mode_enabled_from_path(path: &Path) -> Result<bool, String
         .unwrap_or(false))
 }
 
+/// Rewrite `performanceMode` to `"webview"` in settings.json (atomic
+/// temp+rename, preserving every other key) so a broken native mode can never
+/// trap the user in a no-UI crash loop. Best-effort: an unreadable settings
+/// file simply leaves the gate to fail open into the webview next launch.
+fn revert_performance_mode_to_webview(settings_path: &Path) {
+    let Ok(content) = fs::read_to_string(settings_path) else {
+        return;
+    };
+    let Ok(mut value) =
+        serde_json::from_str::<serde_json::Value>(content.trim_start_matches('\u{feff}'))
+    else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "performanceMode".to_string(),
+        serde_json::Value::String("webview".to_string()),
+    );
+    let Ok(serialized) = serde_json::to_string_pretty(&value) else {
+        return;
+    };
+    let temp = settings_path.with_extension("json.native-revert.tmp");
+    if fs::write(&temp, serialized).is_ok() {
+        let _ = fs::rename(&temp, settings_path);
+    }
+}
+
+/// One-shot query for the WebView frontend: did the last launch auto-revert
+/// out of native mode because the sidecar never came up? Reading clears the
+/// note, so the toast fires exactly once.
+#[tauri::command]
+pub fn native_boot_failure_pending(app: tauri::AppHandle) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return false;
+    };
+    let note = dir.join(NATIVE_BOOT_FAILED);
+    if note.is_file() {
+        let _ = fs::remove_file(&note);
+        true
+    } else {
+        false
+    }
+}
+
 pub fn try_launch_native_performance_mode_on_startup(
     app: &tauri::AppHandle,
 ) -> Result<Option<PathBuf>, String> {
@@ -9269,12 +9354,54 @@ pub fn try_launch_native_performance_mode_on_startup(
         .app_data_dir()
         .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
     let settings_path = app_data_dir.join("settings.json");
+
+    // Boot-handshake check: a surviving marker means the LAST native launch
+    // spawned a sidecar that died before its UI came up (GPU/driver failure,
+    // panic during state load, AV interference). Without this, the user is
+    // locked in a windowless crash loop that even reinstalling doesn't clear
+    // (app data survives uninstall). A young marker (<10s) is a boot still in
+    // flight — another activation racing the sidecar's startup — and proceeds
+    // native; the sidecar's single-instance lock collapses the duplicate.
+    let marker = app_data_dir.join(NATIVE_BOOT_PENDING);
+    if let Ok(meta) = fs::metadata(&marker) {
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .map(|age| age > Duration::from_secs(10))
+            // An unreadable mtime counts as stale: failing into the webview is
+            // always recoverable, a crash loop is not.
+            .unwrap_or(true);
+        if stale {
+            revert_performance_mode_to_webview(&settings_path);
+            let _ = fs::remove_file(&marker);
+            let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+            eprintln!(
+                "Native performance UI never finished starting last launch; \
+                 reverting to the WebView UI."
+            );
+            return Ok(None);
+        }
+    }
+
     if !native_performance_mode_enabled_from_path(&settings_path)? {
         return Ok(None);
     }
 
     let exe_path = resolve_native_shell_executable(app)?;
-    launch_native_shell_process(&exe_path, Some(app_data_dir), std::env::current_exe().ok())?;
+    if let Err(error) = launch_native_shell_process(
+        &exe_path,
+        Some(app_data_dir.clone()),
+        std::env::current_exe().ok(),
+    ) {
+        // The sidecar could not even spawn (or died <200ms in): revert NOW so
+        // this launch continues into the webview and the next one doesn't
+        // retry a known-broken native mode.
+        revert_performance_mode_to_webview(&settings_path);
+        let _ = fs::remove_file(app_data_dir.join(NATIVE_BOOT_PENDING));
+        let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+        return Err(error);
+    }
     Ok(Some(exe_path))
 }
 

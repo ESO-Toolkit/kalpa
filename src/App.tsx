@@ -279,6 +279,21 @@ function App() {
         console.error("[tauri:consume_initial_deep_link]", invokeError);
       });
 
+    // One-shot: the startup gate reverted out of native mode because the
+    // native shell never finished booting. Reading clears the note.
+    void invokeOrThrow<boolean>("native_boot_failure_pending")
+      .then((failed) => {
+        if (disposed || !failed) return;
+        toast.error("The native performance UI couldn't start.", {
+          duration: 10000,
+          description:
+            "Kalpa switched back to the standard UI. You can try native mode again from Settings.",
+        });
+      })
+      .catch((invokeError) => {
+        console.error("[tauri:native_boot_failure_pending]", invokeError);
+      });
+
     return () => {
       disposed = true;
       for (const fn of cleanups) fn();

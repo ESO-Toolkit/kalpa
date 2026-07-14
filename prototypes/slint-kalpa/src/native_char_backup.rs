@@ -18,7 +18,7 @@ fn skip_long_bracket(chars: &[u8], pos: usize) -> Option<usize> {
     i += 1;
 
     let mut close = vec![b']'];
-    close.extend(std::iter::repeat(b'=').take(level));
+    close.extend(std::iter::repeat_n(b'=', level));
     close.push(b']');
 
     while i + close.len() <= chars.len() {
