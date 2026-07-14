@@ -4,19 +4,44 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0-beta.10] — 2026-07-13
+
+The biggest release since launch, headlined by a full **ESO Logs uploader** built into Kalpa, a **profiles & multi-instance overhaul**, major **SavedVariables editor** upgrades, and deep **performance work** that cuts idle CPU and memory dramatically.
+
 ### Features
 
+- **Upload combat logs to ESO Logs without leaving Kalpa.** The new uploader workspace (Logs button in the header) uploads past sessions or individual fights, live-streams a running session so your report fills in as you play, and can split a multi-session `Encounter.log` into separate files. Sign in with your ESO Logs account to upload directly from Kalpa, or hand off to the official uploader if you prefer — either way you choose report visibility (Unlisted/Public/Private) before anything is sent, and an upload history keeps links to every report. ([#157](https://github.com/ESO-Toolkit/kalpa/pull/157), [#202](https://github.com/ESO-Toolkit/kalpa/pull/202), [#256](https://github.com/ESO-Toolkit/kalpa/pull/256))
+- **Huge log files no longer make the uploader crawl.** For multi-GB `Encounter.log` files, "Latest fights" and "Latest session" now anchor to the newest session instead of scanning the whole file — on a 3.7 GB archive that's ~0.1s instead of ~9s — and the full scan is deferred behind an explicit action for logs over 256 MiB. ([#256](https://github.com/ESO-Toolkit/kalpa/pull/256))
+- **Richer player cards on the ESO Log Aggregator.** After a direct upload, Kalpa forwards a small "build evidence" sidecar that the raw log contains but ESO Logs doesn't keep: exact scribing scripts (deterministic, not inferred), Mundus stone, champion-point stars and passives, and — if you run the ESOTK Companion addon — its live-client snapshots. What's sent and how to remove it is documented in PRIVACY.md. ([#256](https://github.com/ESO-Toolkit/kalpa/pull/256))
 - **See exactly what a profile switch will do before it happens.** Activating a profile now shows a preview first: which addons will be enabled, which will be disabled, which required libraries outside the profile stay on, and anything that can't be changed — so an older snapshot can never silently turn off addons you installed since. If nothing needs to change, the profile activates directly with no extra step. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
 - **The app header now shows which ESO install you're managing.** A badge next to the logo displays the active instance (e.g. "Native · NA"), and when you have more than one install — live, EU, or PTS — it opens a quick-switch menu so you always know (and can change) where installs and updates are going. Switching instances in Settings now also applies in one click instead of requiring a separate Save, and newly installed instances are picked up automatically whenever Settings opens. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
 - **Copy your addon setup to another instance.** Next to each other instance in Settings there's now a copy action that installs all of your enabled addons into that instance (e.g. set up PTS from your live loadout), including their update metadata and tags. Addons the target already has — enabled or disabled — are never touched. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
 - **Profiles can be updated, renamed, and inspected.** Each profile row now has an update action that overwrites the snapshot with your current setup (no more delete-and-recreate), an inline rename, and an expandable list of the addons it contains. The active profile is marked "modified" when your current setup has drifted from its snapshot. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
 - **Profiles survive an AddOns folder wipe.** Kalpa now keeps a mirror copy of each instance's profiles in its app data folder and restores from it automatically if the AddOns folder is deleted or reset (a common troubleshooting step, and routine on PTS). ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+- **The SavedVariables editor now knows what your addon settings mean.** Kalpa scans installed addons' LibAddonMenu source and turns raw settings values into proper dropdowns with the addon's own labels — no more guessing that `2` means "Large". Nothing is executed: the scan is purely textual and capped for safety. ([#227](https://github.com/ESO-Toolkit/kalpa/pull/227))
+- **Search every setting in the SavedVariables editor.** A search box finds settings anywhere in an addon's tree (with jump-to-group), and large dropdowns get type-to-filter. ([#229](https://github.com/ESO-Toolkit/kalpa/pull/229))
+- **Sort addons by Recently Updated or Recently Installed.** Two new sort options put your latest changes on top, and the installed date now tracks the last download rather than freezing at first install. ([#201](https://github.com/ESO-Toolkit/kalpa/pull/201))
+- **Pick exactly which addons to update.** The update banner now has a chooser to update a subset instead of all-or-nothing. ([#194](https://github.com/ESO-Toolkit/kalpa/pull/194))
+- **Pack Hub cards got a visual identity.** Each pack shows a distinct monogram so collections are recognizable at a glance. ([#197](https://github.com/ESO-Toolkit/kalpa/pull/197))
+- **Nordic Runestone is the default theme for new installs.** ([#193](https://github.com/ESO-Toolkit/kalpa/pull/193))
 
 ### Bug Fixes
 
 - **Activating a profile no longer disables libraries its addons need.** A profile is a snapshot of your enabled addons at creation time, but addon updates can pull in new required libraries afterward — and activating an older profile would disable those libraries, leaving the profile's own addons erroring at the login screen. Activation now keeps required dependencies enabled (re-enabling them if needed), including libraries required indirectly through other libraries, matched case-insensitively the way ESO resolves them. A toast tells you which libraries were kept. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
 - **Profile activation handles leftover duplicate addon folders gracefully.** If both `Foo` and `Foo.disabled` exist (e.g. left behind by another tool), activating a profile no longer shows a raw rename error: enabling such an addon is recognized as already done (the enabled copy is what the game loads), and disabling one now explains that the stale copy must be removed first. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
 - **Profile activation now warns when ESO is running,** the same as installing, updating, or removing addons, since the game won't see the change until a relog or /reloadui. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+- **Anonymous packs are now anonymous at the API level.** The Pack Hub worker redacts the author's name and id from anonymous packs in every public response and excludes them from author searches — previously the real identity was visible to anyone querying the API directly. ([#254](https://github.com/ESO-Toolkit/kalpa/pull/254))
+- **Backups, restore & snapshots hardened.** Character backups are now scoped to the right server (same-named characters on different servers no longer share a backup), writes are crash-safe, and a batch of edge cases found by a full audit were fixed. ([#230](https://github.com/ESO-Toolkit/kalpa/pull/230))
+- **Settings can't be lost to a crash mid-save.** `settings.json` persistence is now atomic (temp file + rename), so a crash or power loss during save can't truncate your settings. ([#198](https://github.com/ESO-Toolkit/kalpa/pull/198))
+- **SavedVariables copy-profile no longer risks data loss** on odd file formats, and a batch of editor audit findings were fixed. ([#224](https://github.com/ESO-Toolkit/kalpa/pull/224), [#223](https://github.com/ESO-Toolkit/kalpa/pull/223))
+- **Large-addon updates are fast and stoppable.** Updating a big addon no longer hangs for minutes on single-threaded hashing; updates hash in parallel, show progress, and can be stopped. ([#183](https://github.com/ESO-Toolkit/kalpa/pull/183), [#184](https://github.com/ESO-Toolkit/kalpa/pull/184))
+
+### Performance
+
+- **Idle CPU cut from ~89% of a core to ~4%, memory from ~530 MB to ~142 MB** when the app sits focused but idle: ambient animations pause and resample instead of running the compositor at full rate, the webview deep-suspends when hidden, and V8 code caching speeds startup. ([#217](https://github.com/ESO-Toolkit/kalpa/pull/217), [#236](https://github.com/ESO-Toolkit/kalpa/pull/236))
+- **Lower peak memory and CPU across the backend, uploader, and SavedVariables parsing.** ([#226](https://github.com/ESO-Toolkit/kalpa/pull/226))
 
 ## [0.1.0-beta.9] — 2026-06-21
 
