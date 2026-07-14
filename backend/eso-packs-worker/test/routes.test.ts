@@ -476,3 +476,64 @@ describe("POST /admin/seed", () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ── POST /admin/restore ─────────────────────────────────────────────
+
+describe("POST /admin/restore", () => {
+  it("rejects without API key", async () => {
+    const res = await call(
+      new Request(`${BASE}/admin/restore`, { method: "POST" }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("404s when the requested backup snapshot doesn't exist", async () => {
+    await e.ESO_PACKS.delete("backup:latest");
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("restores packs and index from a backup snapshot", async () => {
+    const pack = makePack("restore-me");
+    const snapshot = {
+      created_at: new Date().toISOString(),
+      packs: [pack],
+      packBodies: { [pack.id]: pack },
+      votes: {
+        [`${pack.id}:${TEST_USER.id}`]: {
+          userId: String(TEST_USER.id),
+          packId: pack.id,
+          votedAt: "2025-01-01T00:00:00.000Z",
+        },
+      },
+    };
+    await e.ESO_PACKS.put("backup:latest", JSON.stringify(snapshot));
+
+    // Wipe current state so the test proves restore repopulates it.
+    await e.ESO_PACKS.delete(`pack:${pack.id}`);
+    await putPackIndex(e, { packs: [] });
+
+    const res = await call(
+      apiKeyRequest(`${BASE}/admin/restore`, { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json<{
+      ok: boolean;
+      restored_packs: number;
+      restored_votes: number;
+    }>();
+    expect(body.ok).toBe(true);
+    expect(body.restored_packs).toBe(1);
+    expect(body.restored_votes).toBe(1);
+
+    const restoredPack = await e.ESO_PACKS.get(`pack:${pack.id}`, "json");
+    expect(restoredPack).toEqual(pack);
+
+    const restoredVote = await e.ESO_PACKS.get(
+      `vote:${pack.id}:${TEST_USER.id}`,
+    );
+    expect(restoredVote).toBeTruthy();
+  });
+});

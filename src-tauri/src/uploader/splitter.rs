@@ -367,13 +367,19 @@ pub fn split_by_session(
         .unwrap_or("Encounter");
 
     let last_index = sessions.len() - 1;
+    // Track used names so two sessions with a duplicate (index, start_time) — which
+    // map to the SAME auto name — don't silently overwrite each other (`File::create`
+    // truncates). Route every name through `unique_name` (as split_selected does) so a
+    // collision gets a `-2`, `-3`, … suffix instead of clobbering the earlier file.
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut written = Vec::with_capacity(sessions.len());
     for (i, session) in sessions.iter().enumerate() {
         let end = clamped_session_end(session, i == last_index, snapshot_len);
         if end <= session.start_offset {
             continue; // session lies entirely past the snapshot (shouldn't happen)
         }
-        let dst = out.join(session_file_name(stem, session));
+        let name = unique_name(&mut used, session_file_name(stem, session));
+        let dst = out.join(&name);
         copy_range(src, &dst, session.start_offset, end)?;
         written.push(dst.to_string_lossy().into_owned());
     }
@@ -392,6 +398,14 @@ fn resolve_sessions(
 ) -> Result<(Vec<LogSession>, u64), String> {
     let sessions = match sessions {
         Some(s) if !s.is_empty() => {
+            // Bound the caller-supplied list BEFORE any trust work: a real log has at
+            // most a few dozen sessions. A list far larger than that is a bug or a
+            // compromised webview trying to make us copy unbounded multi-GB ranges into
+            // app data — refuse it (mirrors split_selected's MAX_SELECTIONS cap).
+            const MAX_SESSIONS: usize = 256;
+            if s.len() > MAX_SESSIONS {
+                return Err("Too many sessions.".into());
+            }
             // Caller-supplied offsets are from preflight time. They're only safe
             // to trust if the file hasn't been rewritten since:
             //  - shorter than the sessions' max end  → it shrank/rotated; OR
@@ -650,6 +664,18 @@ fn resolve_scan(
     fights: Option<Vec<FightSummary>>,
     snapshot_len: u64,
 ) -> Result<(Vec<LogSession>, Vec<FightSummary>, u64), String> {
+    // Bound the caller-supplied lists before any trust/scan work. A real night has at
+    // most a few dozen sessions and a few hundred fights; a list far larger than that
+    // is a bug or a compromised webview — reject it rather than trust it into the
+    // O(selections × fights) enclosing-session match loop over unbounded input.
+    const MAX_SESSIONS: usize = 256;
+    const MAX_FIGHTS: usize = 100_000;
+    if sessions.as_ref().is_some_and(|s| s.len() > MAX_SESSIONS) {
+        return Err("Too many sessions.".into());
+    }
+    if fights.as_ref().is_some_and(|f| f.len() > MAX_FIGHTS) {
+        return Err("Too many fights.".into());
+    }
     let trust = match (&sessions, &fights) {
         (Some(s), Some(_)) if !s.is_empty() => {
             let max_end = s.iter().map(|x| x.end_offset).max().unwrap_or(0);
@@ -1419,6 +1445,80 @@ mod tests {
         assert!(
             !first.windows(b"2000".len()).any(|w| w == b"2000"),
             "session A's split leaked session B's content"
+        );
+    }
+
+    // B2: an unbounded caller-supplied session list is a disk-fill DoS vector (each
+    // session copies up to a whole multi-GB file). A list past MAX_SESSIONS (256) must
+    // be rejected BEFORE any copy work.
+    #[test]
+    fn split_by_session_rejects_too_many_caller_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        write(
+            &log,
+            b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n",
+        );
+        let sessions: Vec<LogSession> = (0..257)
+            .map(|i| LogSession {
+                index: i,
+                start_offset: 0,
+                end_offset: 1,
+                start_time_ms: 1000 + i as u64,
+                log_version: "15".into(),
+                realm: Some("NA".into()),
+                fight_count: 0,
+                size_bytes: 1,
+            })
+            .collect();
+        let res = split_by_session(log.to_str().unwrap(), out.to_str().unwrap(), Some(sessions));
+        assert!(
+            res.is_err(),
+            "a 257-session caller list must be rejected, not copied"
+        );
+    }
+
+    // B2: two sessions that share (index, start_time) map to the SAME auto file name;
+    // without de-duplication `File::create` truncates and the first is silently lost.
+    // Both must be written as distinct files (the collision gets a `-2` suffix).
+    #[test]
+    fn split_by_session_dedupes_identical_session_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("Encounter.log");
+        let out = tmp.path().join("out");
+        let bytes = b"0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"10.0\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        write(&log, bytes);
+        let len = bytes.len() as u64;
+        // Two sessions with the SAME index + start_time. The trust gate passes (s[0]
+        // points at the real BEGIN_LOG with matching start_time, max_end == snapshot,
+        // no appended session), so the crafted list is used verbatim.
+        let dup = LogSession {
+            index: 0,
+            start_offset: 0,
+            end_offset: len,
+            start_time_ms: 1000,
+            log_version: "15".into(),
+            realm: Some("NA".into()),
+            fight_count: 1,
+            size_bytes: len,
+        };
+        let written = split_by_session(
+            log.to_str().unwrap(),
+            out.to_str().unwrap(),
+            Some(vec![dup.clone(), dup]),
+        )
+        .unwrap();
+        assert_eq!(
+            written.len(),
+            2,
+            "both duplicate-named sessions must be written"
+        );
+        assert_ne!(written[0], written[1], "the two files must be distinct");
+        assert!(
+            written[1].ends_with("-2.log"),
+            "the name collision must get a -2 suffix: {}",
+            written[1]
         );
     }
 

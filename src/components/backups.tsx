@@ -35,6 +35,11 @@ import { formatBytes, cn } from "@/lib/utils";
 interface BackupsProps {
   addonsPath: string;
   onClose: () => void;
+  /** True when a create/restore/delete/character-backup is in flight anywhere
+   * in the app (Backups or Characters dialog), so destructive actions here
+   * stay gated even if the user switches dialogs mid-operation. */
+  sharedOpInFlight: boolean;
+  onSharedOpInFlightChange: (busy: boolean) => void;
 }
 
 const STALE_AFTER_DAYS = 14;
@@ -90,7 +95,12 @@ function backupKindLabel(b: BackupInfo): { label: string; color: "violet" | "sky
   return { label: "Manual", color: "muted" };
 }
 
-export function Backups({ addonsPath, onClose }: BackupsProps) {
+export function Backups({
+  addonsPath,
+  onClose,
+  sharedOpInFlight,
+  onSharedOpInFlightChange,
+}: BackupsProps) {
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [newName, setNewName] = useState("");
   const [showLabelField, setShowLabelField] = useState(false);
@@ -101,6 +111,10 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [loaded, setLoaded] = useState(false);
+
+  // Gates every destructive backup-surface button: local ops here, or an
+  // in-flight op on the other backup surface (Characters) after a dialog switch.
+  const anyBackupOpInFlight = sharedOpInFlight || creating || restoring !== null || deleting;
 
   const loadBackups = async () => {
     try {
@@ -128,11 +142,24 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
     );
   }, [backups]);
 
-  const protection = computeProtection(latest);
+  // Only whole-account (manual) backups count toward the "protected" claim —
+  // a character-only backup doesn't cover the rest of the account.
+  const latestManual = useMemo(() => {
+    return (
+      [...backups]
+        .filter((b) => b.kind === "manual")
+        .sort((a, b) => b.createdAtEpoch - a.createdAtEpoch)[0] ?? null
+    );
+  }, [backups]);
+
+  const hasCharacterBackups = useMemo(() => backups.some((b) => b.kind === "character"), [backups]);
+
+  const protection = computeProtection(latestManual);
 
   const handleCreate = async () => {
     const name = newName.trim() || friendlyDefaultName();
     setCreating(true);
+    onSharedOpInFlightChange(true);
     try {
       const info = await invokeOrThrow<BackupInfo>("create_backup", {
         addonsPath,
@@ -148,11 +175,13 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
       toast.error(getTauriErrorMessage(e));
     } finally {
       setCreating(false);
+      onSharedOpInFlightChange(false);
     }
   };
 
   const handleRestore = async (b: BackupInfo) => {
     setRestoring(b.name);
+    onSharedOpInFlightChange(true);
     try {
       const result = await invokeOrThrow<SafeRestoreResult>("restore_backup_safe", {
         addonsPath,
@@ -172,11 +201,13 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
     } finally {
       setRestoring(null);
       setConfirmRestore(null);
+      onSharedOpInFlightChange(false);
     }
   };
 
   const handleDelete = async (name: string) => {
     setDeleting(true);
+    onSharedOpInFlightChange(true);
     try {
       await invokeOrThrow("delete_backup", { addonsPath, backupName: name });
       toast.success("Backup deleted.");
@@ -186,6 +217,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
     } finally {
       setDeleting(false);
       setConfirmDelete(null);
+      onSharedOpInFlightChange(false);
     }
   };
 
@@ -213,7 +245,13 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
         </DialogHeader>
 
         {/* Status hero */}
-        <StatusHero protection={protection} latest={latest} loaded={loaded} />
+        <StatusHero protection={protection} latest={latestManual} loaded={loaded} />
+        {loaded && hasCharacterBackups && protection === "none" && (
+          <InfoPill color="sky" className="w-fit">
+            <User className="size-3" />
+            Character backups only — no full backup yet.
+          </InfoPill>
+        )}
 
         {/* Primary action */}
         <GlassPanel variant="subtle" className="p-4 space-y-3">
@@ -224,7 +262,12 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
                 Takes a snapshot of your current addon settings. Safe to do anytime.
               </div>
             </div>
-            <Button onClick={handleCreate} disabled={creating} size="sm" className="shrink-0">
+            <Button
+              onClick={handleCreate}
+              disabled={anyBackupOpInFlight}
+              size="sm"
+              className="shrink-0"
+            >
               <Plus className="size-3.5" />
               {creating ? "Backing up…" : "Back Up Now"}
             </Button>
@@ -337,7 +380,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
                     onCancelDelete={() => setConfirmDelete(null)}
                     onConfirmDelete={() => handleDelete(b.name)}
                     deleting={deleting}
-                    anyRestoring={restoring !== null}
+                    anyOpInFlight={anyBackupOpInFlight}
                   />
                 </Fade>
               ))
@@ -360,6 +403,7 @@ export function Backups({ addonsPath, onClose }: BackupsProps) {
       <RestoreConfirmDialog
         backup={confirmRestore}
         restoring={restoring !== null}
+        anyOpInFlight={anyBackupOpInFlight}
         onCancel={() => setConfirmRestore(null)}
         onConfirm={() => confirmRestore && handleRestore(confirmRestore)}
       />
@@ -446,7 +490,7 @@ function BackupRow({
   onCancelDelete,
   onConfirmDelete,
   deleting,
-  anyRestoring,
+  anyOpInFlight,
 }: {
   backup: BackupInfo;
   isLatest: boolean;
@@ -457,7 +501,7 @@ function BackupRow({
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
   deleting: boolean;
-  anyRestoring: boolean;
+  anyOpInFlight: boolean;
 }) {
   const kindInfo = backupKindLabel(backup);
   const isSafety = backup.kind === "autoBeforeRestore";
@@ -504,7 +548,12 @@ function BackupRow({
               className="flex items-center gap-1"
             >
               <span className="text-xs text-amber-300/90 mr-1">Delete?</span>
-              <Button size="sm" variant="destructive" disabled={deleting} onClick={onConfirmDelete}>
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={anyOpInFlight}
+                onClick={onConfirmDelete}
+              >
                 {deleting ? "…" : "Yes"}
               </Button>
               <Button size="sm" variant="outline" disabled={deleting} onClick={onCancelDelete}>
@@ -523,7 +572,7 @@ function BackupRow({
               <Button
                 size="sm"
                 onClick={onAskRestore}
-                disabled={anyRestoring}
+                disabled={anyOpInFlight}
                 title="Replace your current settings with this backup"
               >
                 <RotateCcw className="size-3.5" />
@@ -533,7 +582,7 @@ function BackupRow({
                 size="sm"
                 variant="ghost"
                 onClick={onAskDelete}
-                disabled={anyRestoring}
+                disabled={anyOpInFlight}
                 title="Delete this backup"
                 className="text-muted-foreground hover:text-red-400"
               >
@@ -552,11 +601,13 @@ function BackupRow({
 function RestoreConfirmDialog({
   backup,
   restoring,
+  anyOpInFlight,
   onCancel,
   onConfirm,
 }: {
   backup: BackupInfo | null;
   restoring: boolean;
+  anyOpInFlight: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -569,9 +620,27 @@ function RestoreConfirmDialog({
             Restore this backup?
           </DialogTitle>
           <DialogDescription>
-            This will replace your current addon settings with the ones in this backup.
+            {backup?.kind === "character"
+              ? (backup?.worldsSpanned ?? 0) > 1
+                ? `This will restore ${backup.name.replace(/^char-/, "")}'s character settings — read the warning below first.`
+                : `This will restore ${backup.name.replace(/^char-/, "")}'s character settings only — your other characters and account-wide settings are left untouched.`
+              : backup?.kind === "autoBeforeRestore"
+                ? "This will restore your safety snapshot, replacing your current addon settings with the ones saved just before your last restore."
+                : "This will replace your current addon settings with the ones in this backup."}
           </DialogDescription>
         </DialogHeader>
+
+        {backup?.kind === "character" && (backup?.worldsSpanned ?? 0) > 1 && (
+          <div className="rounded-xl border border-amber-400/20 bg-amber-400/[0.04] p-3 flex gap-2.5">
+            <ShieldAlert className="size-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-100/90 leading-relaxed">
+              <span className="font-semibold">
+                This character name exists on more than one server.
+              </span>{" "}
+              Restoring it will overwrite the settings of every same-named character, not just one.
+            </div>
+          </div>
+        )}
 
         {backup && (
           <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-3 space-y-1">
@@ -604,7 +673,7 @@ function RestoreConfirmDialog({
           <Button variant="outline" onClick={onCancel} disabled={restoring}>
             Cancel
           </Button>
-          <Button onClick={onConfirm} disabled={restoring}>
+          <Button onClick={onConfirm} disabled={anyOpInFlight}>
             {restoring ? "Restoring…" : "Yes, Restore"}
           </Button>
         </DialogFooter>

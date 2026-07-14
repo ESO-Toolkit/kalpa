@@ -4,6 +4,20 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 ## [Unreleased]
 
+### Features
+
+- **See exactly what a profile switch will do before it happens.** Activating a profile now shows a preview first: which addons will be enabled, which will be disabled, which required libraries outside the profile stay on, and anything that can't be changed — so an older snapshot can never silently turn off addons you installed since. If nothing needs to change, the profile activates directly with no extra step. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+- **The app header now shows which ESO install you're managing.** A badge next to the logo displays the active instance (e.g. "Native · NA"), and when you have more than one install — live, EU, or PTS — it opens a quick-switch menu so you always know (and can change) where installs and updates are going. Switching instances in Settings now also applies in one click instead of requiring a separate Save, and newly installed instances are picked up automatically whenever Settings opens. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+- **Copy your addon setup to another instance.** Next to each other instance in Settings there's now a copy action that installs all of your enabled addons into that instance (e.g. set up PTS from your live loadout), including their update metadata and tags. Addons the target already has — enabled or disabled — are never touched. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+- **Profiles can be updated, renamed, and inspected.** Each profile row now has an update action that overwrites the snapshot with your current setup (no more delete-and-recreate), an inline rename, and an expandable list of the addons it contains. The active profile is marked "modified" when your current setup has drifted from its snapshot. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+- **Profiles survive an AddOns folder wipe.** Kalpa now keeps a mirror copy of each instance's profiles in its app data folder and restores from it automatically if the AddOns folder is deleted or reset (a common troubleshooting step, and routine on PTS). ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+
+### Bug Fixes
+
+- **Activating a profile no longer disables libraries its addons need.** A profile is a snapshot of your enabled addons at creation time, but addon updates can pull in new required libraries afterward — and activating an older profile would disable those libraries, leaving the profile's own addons erroring at the login screen. Activation now keeps required dependencies enabled (re-enabling them if needed), including libraries required indirectly through other libraries, matched case-insensitively the way ESO resolves them. A toast tells you which libraries were kept. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+- **Profile activation handles leftover duplicate addon folders gracefully.** If both `Foo` and `Foo.disabled` exist (e.g. left behind by another tool), activating a profile no longer shows a raw rename error: enabling such an addon is recognized as already done (the enabled copy is what the game loads), and disabling one now explains that the stale copy must be removed first. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+- **Profile activation now warns when ESO is running,** the same as installing, updating, or removing addons, since the game won't see the change until a relog or /reloadui. ([#251](https://github.com/ESO-Toolkit/kalpa/pull/251))
+
 ## [0.1.0-beta.9] — 2026-06-21
 
 A feature-and-fixes release headlined by a full **theming system** for the app, paired with a fix that brings back characters most players were missing from the **Characters** list.

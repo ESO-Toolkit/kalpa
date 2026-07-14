@@ -85,6 +85,14 @@ pub struct IncrementalIndexState {
     /// Whether the synthetic `HEALTH_RECOVERY` has been spliced (at the first
     /// `HEALTH_REGEN`).
     health_recovery_spliced: bool,
+
+    /// Monotonically increasing counter bumped ONLY when `actor_map`/`ability_map`
+    /// actually change contents (a first-registration `assign_actor`/`assign_ability`,
+    /// which also covers the `HEALTH_RECOVERY` splice). The live driver reads it to
+    /// skip the two full-map clones of `refresh_maps` on the ~92% of lines that leave
+    /// the maps untouched (the L7 hot-path fix); an idempotent no-op never bumps it, so
+    /// the maps the emitter holds stay byte-identical to a per-line clone.
+    version: u64,
 }
 
 impl Default for IncrementalIndexState {
@@ -123,6 +131,7 @@ impl IncrementalIndexState {
             ability_to_index,
             ability_next,
             health_recovery_spliced: false,
+            version: 0,
         }
     }
 
@@ -136,15 +145,30 @@ impl IncrementalIndexState {
         &self.ability_to_index
     }
 
+    /// The map-mutation version (see [`Self::version`]'s field doc). Bumped only when
+    /// `actor_map`/`ability_map` actually changed; equal values across two calls mean
+    /// the maps are byte-identical between them.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Process one raw line, updating both maps. Idempotent semantics match the
     /// re-walk: an already-assigned identity/ability is never re-numbered.
     pub fn update(&mut self, line: &str) {
         let f = split_csv_quoted_pub(line);
+        self.update_with_fields(line, &f);
+    }
+
+    /// [`Self::update`] with the quote-aware CSV split already performed by the caller
+    /// (the live driver splits each line ONCE and threads the fields to every consumer
+    /// — this state, the master state, and the emitter — instead of splitting three
+    /// times per line). `f` must be exactly `split_csv_quoted_pub(line)`.
+    pub fn update_with_fields(&mut self, line: &str, f: &[&str]) {
         let Some(kind) = f.get(1).map(|s| s.trim()) else {
             return;
         };
         match kind {
-            "UNIT_ADDED" => self.on_unit_added(line, &f),
+            "UNIT_ADDED" => self.on_unit_added(line, f),
             "UNIT_REMOVED" => {
                 if let Some(u) = f.get(2) {
                     self.live_monster_unit.remove(u.trim());
@@ -165,7 +189,7 @@ impl IncrementalIndexState {
                     self.assign_ability(HEALTH_RECOVERY_ID);
                 }
             }
-            "COMBAT_EVENT" | "EFFECT_CHANGED" | "BEGIN_CAST" => self.on_registering_line(kind, &f),
+            "COMBAT_EVENT" | "EFFECT_CHANGED" | "BEGIN_CAST" => self.on_registering_line(kind, f),
             _ => {}
         }
     }
@@ -257,6 +281,8 @@ impl IncrementalIndexState {
         }
         self.identity_to_actor.insert(identity, self.actor_next);
         self.actor_next += 1;
+        // Real mutation of `actor_map` — bump so the live driver knows to re-push.
+        self.version += 1;
     }
 
     /// Append-only ability assignment (matches the ability-axis H1 pin). A pinned or
@@ -268,6 +294,9 @@ impl IncrementalIndexState {
         self.ability_to_index
             .insert(id.to_string(), self.ability_next);
         self.ability_next += 1;
+        // Real mutation of `ability_map` (incl. the HEALTH_RECOVERY splice, which
+        // routes through here) — bump so the live driver knows to re-push.
+        self.version += 1;
     }
 }
 
@@ -359,12 +388,19 @@ impl IncrementalMasterState {
     /// already-seen ability is not re-captured.
     pub fn update(&mut self, line: &str) {
         let f = split_csv_quoted_pub(line);
+        self.update_with_fields(line, &f);
+    }
+
+    /// [`Self::update`] with the quote-aware CSV split already performed by the caller
+    /// (the live driver splits each line ONCE and threads the fields to every
+    /// consumer). `f` must be exactly `split_csv_quoted_pub(line)`.
+    pub fn update_with_fields(&mut self, line: &str, f: &[&str]) {
         let Some(kind) = f.get(1).map(|s| s.trim()) else {
             return;
         };
         // Ability signals (damage element / heal / EFFECT_INFO status / ABILITY_INFO)
         // are folded for EVERY relevant line, exactly as the re-walk's pass 1.
-        accumulate_ability_signals(&mut self.ability_signals, kind, &f, line);
+        accumulate_ability_signals(&mut self.ability_signals, kind, f, line);
 
         match kind {
             "BEGIN_LOG" if self.log_version.is_none() => {
@@ -375,7 +411,7 @@ impl IncrementalMasterState {
                 self.log_version = Some(t.next().unwrap_or("").trim().to_string());
                 self.server = t.next().unwrap_or("").trim().to_string();
             }
-            "UNIT_ADDED" => self.on_unit_added(line, &f),
+            "UNIT_ADDED" => self.on_unit_added(line, f),
             "UNIT_REMOVED" => {
                 if let Some(u) = f.get(2) {
                     self.pet_owner_live.remove(u.trim());
@@ -504,12 +540,17 @@ impl IncrementalMasterState {
     /// index maps (the emitter's, == the companion `IncrementalIndexState`'s maps);
     /// `tuples` is `emitter.tuples()`. Returns `None` only when no `BEGIN_LOG` has
     /// been seen (no log version), matching the oracle's `log_version?`.
+    ///
+    /// The returned `u64` is the number of tuple records embedded in the master
+    /// (`tuple_records.len()`, == the doc's `last_assigned_tuple_id`). The live driver
+    /// cross-checks it against `emitter.allocated()` before every POST — an exact,
+    /// structural count rather than a fragile text re-parse of the rendered master (C5).
     pub fn render_master(
         &self,
         tuples: &[(u32, u32, u32)],
         pinned_actors: &HashMap<String, u32>,
         pinned_abilities: &HashMap<String, u32>,
-    ) -> Option<String> {
+    ) -> Option<(String, u64)> {
         let log_version = self.log_version.clone()?;
 
         // ── Actors: rendered in PINNED-INDEX order. The pinned actor map IS the set
@@ -583,7 +624,7 @@ impl IncrementalMasterState {
             last_assigned_pet_id: pets.len() as u64,
             pets_string: &pets_string,
         };
-        Some(doc.render())
+        Some((doc.render(), tuple_records.len() as u64))
     }
 }
 
@@ -715,9 +756,14 @@ mod tests {
             mst.update(l);
         }
         let tuples: Vec<(u32, u32, u32)> = Vec::new();
-        let live = mst
+        let (live, tuple_count) = mst
             .render_master(&tuples, idx.actor_map(), idx.ability_map())
             .expect("live master builds");
+        assert_eq!(
+            tuple_count,
+            tuples.len() as u64,
+            "render_master must return the embedded tuple count (== tuples.len())"
+        );
         let refs: Vec<&str> = lines.to_vec();
         let oracle = build_master_table_with_tuples_forced(
             &refs,
@@ -730,6 +776,32 @@ mod tests {
         assert!(
             live.contains("Sidekick^@side^222^") && !live.contains("Offline"),
             "offline-first player must resolve to its real name in the live master; got:\n{live}"
+        );
+    }
+
+    // C5: the tuple count `render_master` returns is exactly the number of tuples it was
+    // handed (`tuples.len()`), for a non-empty table — the desync cross-check depends on
+    // this equality, and it must not rely on re-parsing rendered text.
+    #[test]
+    fn render_master_returns_tuple_count_equal_to_tuples_len() {
+        let lines = [
+            "0,BEGIN_LOG,1700000000000,15,\"NA Megaserver\",\"en\",\"10.0\"",
+            "5,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"Hero\",\"@hero\",111,50,1000,0,PLAYER_ALLY,T",
+        ];
+        let mut idx = IncrementalIndexState::default();
+        let mut mst = IncrementalMasterState::default();
+        for l in lines {
+            idx.update(l);
+            mst.update(l);
+        }
+        let tuples: Vec<(u32, u32, u32)> = vec![(0, 1, 2), (3, 4, 5), (6, 7, 8)];
+        let (_text, tuple_count) = mst
+            .render_master(&tuples, idx.actor_map(), idx.ability_map())
+            .expect("live master builds");
+        assert_eq!(
+            tuple_count,
+            tuples.len() as u64,
+            "render_master must return tuples.len() as its embedded tuple count"
         );
     }
 

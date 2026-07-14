@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { memo, useState, useMemo, useRef, useEffect, lazy, Suspense } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -27,7 +27,13 @@ import { ExternalLink, Trash2, Check, Power, Files, FileText } from "lucide-reac
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { AnimatedCheckmark } from "@/components/ui/animated-checkmark";
 import { AddonFileBrowser } from "@/components/addon-file-browser";
-import { UpdateConflictPanel } from "@/components/update-conflict-panel";
+
+// Conflict resolution pulls in the `diff` package (structuredPatch + DiffViewer).
+// It only renders on the rare update-conflict path, so lazy-load it to keep `diff`
+// out of the always-mounted AddonDetail's eager bundle.
+const UpdateConflictPanel = lazy(() =>
+  import("@/components/update-conflict-panel").then((m) => ({ default: m.UpdateConflictPanel }))
+);
 
 function relativeDate(ts: number): string {
   const diff = Date.now() - ts;
@@ -54,7 +60,7 @@ interface AddonDetailProps {
   onConflictResolved?: (folderName: string) => void;
 }
 
-export function AddonDetail({
+function AddonDetailBase({
   addon,
   installedAddons,
   addonsPath,
@@ -98,12 +104,33 @@ export function AddonDetail({
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    // Extraction events can burst far faster than the label can usefully
+    // change. Coalesce to at most one setState per animation frame: keep only
+    // the latest payload and flush it from a single scheduled rAF, so a large
+    // addon's event flood can't queue up hundreds of renders. The flush
+    // re-checks the operation id: a rAF can fire after `endOperation` already
+    // reset the UI (completion resolving in the same frame, or the rAF frozen
+    // while the window was hidden) and must not resurrect stale progress.
+    let pendingProgress: { done: number; total: number; opId: string } | null = null;
+    let rafId: number | null = null;
+    const flush = () => {
+      rafId = null;
+      if (pendingProgress !== null && pendingProgress.opId === operationIdRef.current) {
+        setCanStopUpdate(true);
+        setExtractProgress({ done: pendingProgress.done, total: pendingProgress.total });
+      }
+      pendingProgress = null;
+    };
     void listen<{ operationId: string; fileIndex: number; fileTotal: number }>(
       "update-progress",
       (event) => {
         if (event.payload.operationId && event.payload.operationId === operationIdRef.current) {
-          setCanStopUpdate(true);
-          setExtractProgress({ done: event.payload.fileIndex, total: event.payload.fileTotal });
+          pendingProgress = {
+            done: event.payload.fileIndex,
+            total: event.payload.fileTotal,
+            opId: event.payload.operationId,
+          };
+          rafId ??= requestAnimationFrame(flush);
         }
       }
     )
@@ -114,6 +141,7 @@ export function AddonDetail({
       .catch((e) => console.error("[tauri:update-progress]", e));
     return () => {
       disposed = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
       unlisten?.();
     };
   }, []);
@@ -448,71 +476,75 @@ export function AddonDetail({
 
       {conflictReport && (
         <div className="mb-4">
-          <UpdateConflictPanel
-            folderName={conflictReport.folderName}
-            currentVersion={updateResult?.currentVersion ?? ""}
-            updateVersion={conflictReport.updateVersion}
-            conflicts={conflictReport.conflicts}
-            autoKeptFiles={conflictReport.autoKeptFiles}
-            safeFileCount={conflictReport.safeFiles.length}
-            sessionId={conflictReport.sessionId}
-            addonsPath={addonsPath}
-            onResolve={handleConflictResolve}
-            onSkip={handleConflictSkip}
-          />
+          <Suspense fallback={null}>
+            <UpdateConflictPanel
+              folderName={conflictReport.folderName}
+              currentVersion={updateResult?.currentVersion ?? ""}
+              updateVersion={conflictReport.updateVersion}
+              conflicts={conflictReport.conflicts}
+              autoKeptFiles={conflictReport.autoKeptFiles}
+              safeFileCount={conflictReport.safeFiles.length}
+              sessionId={conflictReport.sessionId}
+              addonsPath={addonsPath}
+              onResolve={handleConflictResolve}
+              onSkip={handleConflictSkip}
+            />
+          </Suspense>
         </div>
       )}
 
       {!conflictReport && pendingConflict && !pendingConflictDismissed && (
         <div className="mb-4">
-          <UpdateConflictPanel
-            folderName={pendingConflict.folderName}
-            currentVersion={updateResult?.currentVersion ?? addon.version}
-            updateVersion={pendingConflict.updateVersion}
-            conflicts={pendingConflict.conflicts}
-            autoKeptFiles={pendingConflict.autoKeptFiles}
-            safeFileCount={0}
-            sessionId={pendingConflict.sessionId}
-            addonsPath={addonsPath}
-            onResolve={async (decisions) => {
-              if (updating) return;
-              setUpdating(true);
-              setUpdateError(null);
-              if (!(await ensureEsoNotBlocking())) {
-                setUpdating(false);
-                return;
-              }
-              try {
-                await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
-                  addonsPath,
-                  sessionId: pendingConflict.sessionId,
-                  decisions,
-                  operationId: beginOperation(),
-                });
-                toast.success(`Updated ${addon.title}`);
-                onConflictResolved?.(addon.folderName);
-                if (updateResult) onAddonUpdated(updateResult.esouiId);
-              } catch (e) {
-                if (isCancellation(e)) {
-                  setPendingConflictDismissed(true);
-                  if (onConflictResolved) {
-                    onConflictResolved(addon.folderName);
-                  } else if (updateResult) {
-                    onAddonUpdated(updateResult.esouiId);
-                  }
-                  toast.info(`Stopped updating ${addon.title}`, {
-                    description: "It may be partially updated — run the update again to finish.",
-                  });
-                } else {
-                  setUpdateError(getTauriErrorMessage(e));
+          <Suspense fallback={null}>
+            <UpdateConflictPanel
+              folderName={pendingConflict.folderName}
+              currentVersion={updateResult?.currentVersion ?? addon.version}
+              updateVersion={pendingConflict.updateVersion}
+              conflicts={pendingConflict.conflicts}
+              autoKeptFiles={pendingConflict.autoKeptFiles}
+              safeFileCount={0}
+              sessionId={pendingConflict.sessionId}
+              addonsPath={addonsPath}
+              onResolve={async (decisions) => {
+                if (updating) return;
+                setUpdating(true);
+                setUpdateError(null);
+                if (!(await ensureEsoNotBlocking())) {
+                  setUpdating(false);
+                  return;
                 }
-              } finally {
-                endOperation();
-                setUpdating(false);
-              }
-            }}
-            onSkip={() => setPendingConflictDismissed(true)}
-          />
+                try {
+                  await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
+                    addonsPath,
+                    sessionId: pendingConflict.sessionId,
+                    decisions,
+                    operationId: beginOperation(),
+                  });
+                  toast.success(`Updated ${addon.title}`);
+                  onConflictResolved?.(addon.folderName);
+                  if (updateResult) onAddonUpdated(updateResult.esouiId);
+                } catch (e) {
+                  if (isCancellation(e)) {
+                    setPendingConflictDismissed(true);
+                    if (onConflictResolved) {
+                      onConflictResolved(addon.folderName);
+                    } else if (updateResult) {
+                      onAddonUpdated(updateResult.esouiId);
+                    }
+                    toast.info(`Stopped updating ${addon.title}`, {
+                      description: "It may be partially updated — run the update again to finish.",
+                    });
+                  } else {
+                    setUpdateError(getTauriErrorMessage(e));
+                  }
+                } finally {
+                  endOperation();
+                  setUpdating(false);
+                }
+              }}
+              onSkip={() => setPendingConflictDismissed(true)}
+            />
+          </Suspense>
         </div>
       )}
 
@@ -930,3 +962,7 @@ export function AddonDetail({
     </div>
   );
 }
+
+// Memoized: bails out of App re-renders it doesn't consume (search keystrokes,
+// update-progress events, dialog toggles).
+export const AddonDetail = memo(AddonDetailBase);

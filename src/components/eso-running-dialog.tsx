@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -18,7 +18,7 @@ interface EsoRunningDialogProps {
   onCancel: () => void;
 }
 
-export function EsoRunningDialog({ open, onConfirm, onCancel }: EsoRunningDialogProps) {
+function EsoRunningDialogBase({ open, onConfirm, onCancel }: EsoRunningDialogProps) {
   const [dontAskAgain, setDontAskAgain] = useState(false);
 
   // The component stays mounted between prompts, so clear the opt-out as the dialog
@@ -58,3 +58,6 @@ export function EsoRunningDialog({ open, onConfirm, onCancel }: EsoRunningDialog
     </Dialog>
   );
 }
+
+// Memoized: props are one boolean + two stable callbacks.
+export const EsoRunningDialog = memo(EsoRunningDialogBase);

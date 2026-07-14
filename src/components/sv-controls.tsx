@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EffectiveField, SvTreeNode } from "../types";
 import {
   Select,
@@ -54,12 +54,6 @@ export function NumberControl({
     setLocalValue(fieldVal);
   }
 
-  const commit = () => {
-    const num = Number(localValue);
-    if (!isNaN(num)) onChange(num);
-    else setLocalValue(String(field.value ?? 0));
-  };
-
   const step = field.props.step ?? 1;
   const { min, max } = field.props;
 
@@ -67,6 +61,27 @@ export function NumberControl({
     if (min !== undefined && v < min) return min;
     if (max !== undefined && v > max) return max;
     return v;
+  };
+
+  const commit = () => {
+    // Treat empty/whitespace input as invalid (Number("") === 0) and revert.
+    if (localValue.trim() === "") {
+      setLocalValue(fieldVal);
+      return;
+    }
+    const num = Number(localValue);
+    if (isNaN(num)) {
+      setLocalValue(fieldVal);
+      return;
+    }
+    // Clamp typed values to min/max, matching the ± buttons.
+    const clamped = clamp(num);
+    // Only commit when the value actually changed to avoid a spurious dirty flag.
+    if (clamped === Number(field.value ?? 0)) {
+      setLocalValue(fieldVal);
+      return;
+    }
+    onChange(clamped);
   };
 
   return (
@@ -111,7 +126,21 @@ export function SliderControl({
   const min = field.props.min ?? 0;
   const max = field.props.max ?? 100;
   const step = field.props.step ?? 1;
-  const value = Number(field.value) || min;
+  const fieldValue = Number(field.value) || min;
+
+  // Track the value locally during the drag for instant visual feedback, and only
+  // fire the heavy onChange (which rebuilds the SV tree + re-renders the editor) on
+  // release. Mirrors the local-state + commit pattern used by NumberControl.
+  const [localValue, setLocalValue] = useState(fieldValue);
+  const [prevFieldValue, setPrevFieldValue] = useState(fieldValue);
+  if (prevFieldValue !== fieldValue) {
+    setPrevFieldValue(fieldValue);
+    setLocalValue(fieldValue);
+  }
+
+  const commit = () => {
+    if (localValue !== fieldValue) onChange(localValue);
+  };
 
   return (
     <div className="flex items-center gap-2">
@@ -121,11 +150,16 @@ export function SliderControl({
         min={min}
         max={max}
         step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        value={localValue}
+        onChange={(e) => setLocalValue(Number(e.target.value))}
+        onPointerUp={commit}
+        onKeyUp={commit}
+        onBlur={commit}
         disabled={field.readOnly}
       />
-      <span className="w-10 text-right text-xs text-muted-foreground tabular-nums">{value}</span>
+      <span className="w-10 text-right text-xs text-muted-foreground tabular-nums">
+        {localValue}
+      </span>
     </div>
   );
 }
@@ -157,22 +191,49 @@ export function ColorControl({
     .toString(16)
     .padStart(2, "0")}`;
 
+  // Preview the picked color locally while the OS picker is open, and batch the
+  // r/g/b(/a) update into a single onChangeColor commit fired on the native
+  // `change` event (when the picker is closed) — the previous code fired 3-4
+  // onChangeColor calls per pointer-move, each rebuilding the SV tree.
+  const [localHex, setLocalHex] = useState(hexColor);
+  const [prevHex, setPrevHex] = useState(hexColor);
+  if (prevHex !== hexColor) {
+    setPrevHex(hexColor);
+    setLocalHex(hexColor);
+  }
+
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Commit on the native `change` event (fired once when the OS picker closes),
+  // not on React's onChange (which fires continuously as the user drags in the
+  // picker). Re-subscribes only when the committed color / alpha / handler change
+  // — during a drag only `localHex` changes, so the listener stays put.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const commit = () => {
+      const next = el.value;
+      if (next === hexColor) return;
+      const nr = parseInt(next.slice(1, 3), 16) / 255;
+      const ng = parseInt(next.slice(3, 5), 16) / 255;
+      const nb = parseInt(next.slice(5, 7), 16) / 255;
+      onChangeColor(nr, ng, nb, a);
+    };
+    el.addEventListener("change", commit);
+    return () => el.removeEventListener("change", commit);
+  }, [hexColor, a, onChangeColor]);
+
   return (
     <div className="flex items-center gap-2">
       <input
+        ref={inputRef}
         type="color"
-        value={hexColor}
-        onChange={(e) => {
-          const hex = e.target.value;
-          const nr = parseInt(hex.slice(1, 3), 16) / 255;
-          const ng = parseInt(hex.slice(3, 5), 16) / 255;
-          const nb = parseInt(hex.slice(5, 7), 16) / 255;
-          onChangeColor(nr, ng, nb, a);
-        }}
+        value={localHex}
+        onChange={(e) => setLocalHex(e.target.value)}
         className="size-7 cursor-pointer rounded border border-white/[0.1] bg-transparent p-0"
         disabled={field.readOnly}
       />
-      <span className="text-xs text-muted-foreground font-mono">{hexColor}</span>
+      <span className="text-xs text-muted-foreground font-mono">{localHex}</span>
       {a !== undefined && (
         <span className="text-xs text-muted-foreground/60">a: {a.toFixed(2)}</span>
       )}
@@ -195,7 +256,9 @@ export function TextControl({
     setLocalValue(fieldVal);
   }
 
-  const commit = () => onChange(localValue);
+  const commit = () => {
+    if (localValue !== fieldVal) onChange(localValue);
+  };
 
   if (field.props.multiline) {
     return (
@@ -228,14 +291,28 @@ export function DropdownControl({
   onChange,
 }: {
   field: EffectiveField;
-  onChange: (val: string) => void;
+  onChange: (val: string | number) => void;
 }) {
   const options = field.props.options ?? [];
   const currentVal = String(field.value ?? "");
   const allOptions = options.includes(currentVal) ? options : [currentVal, ...options];
 
+  const commit = (v: string | null) => {
+    if (!v) return;
+    // Preserve numeric type when the field is currently a number and the
+    // chosen option parses cleanly as a finite number.
+    if (typeof field.value === "number") {
+      const num = Number(v);
+      if (v.trim() !== "" && Number.isFinite(num)) {
+        onChange(num);
+        return;
+      }
+    }
+    onChange(v);
+  };
+
   return (
-    <Select value={currentVal} onValueChange={(v) => v && onChange(v)} disabled={field.readOnly}>
+    <Select value={currentVal} onValueChange={commit} disabled={field.readOnly}>
       <SelectTrigger className="h-7 w-40 text-xs">
         <SelectValue />
       </SelectTrigger>
@@ -279,7 +356,9 @@ export function RawControl({
       rows={2}
       value={localValue}
       onChange={(e) => setLocalValue(e.target.value)}
-      onBlur={() => onChange(localValue)}
+      onBlur={() => {
+        if (localValue !== fieldVal) onChange(localValue);
+      }}
       disabled={field.readOnly}
     />
   );

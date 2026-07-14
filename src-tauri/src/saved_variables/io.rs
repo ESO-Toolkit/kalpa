@@ -41,12 +41,38 @@ pub fn file_stamp(path: &Path) -> Result<SvFileStamp, String> {
     })
 }
 
-/// Extract character keys from a SavedVariables .lua file.
-/// Tracks brace depth while respecting string literals so that
-/// braces inside string values don't corrupt the depth counter.
+/// Extract character keys from an in-memory SavedVariables .lua string.
+///
+/// Thin wrapper over [`extract_character_keys_from_reader`] so callers that
+/// already hold the whole file as a string (and existing tests) keep working.
+// The streaming variant is used on the hot path (list_saved_variables_blocking),
+// so this string wrapper currently only has test callers; keep it available as
+// public API without tripping dead_code in non-test builds (pub fns in a
+// cdylib/staticlib crate are treated as potentially dead unless externally used).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_character_keys(content: &str) -> Vec<String> {
+    // BufRead over the string's bytes; this cannot error, so unwrap_or reuses
+    // whatever keys were collected before an (impossible) I/O error.
+    extract_character_keys_from_reader(std::io::Cursor::new(content.as_bytes())).unwrap_or_default()
+}
+
+/// Extract character keys by streaming a reader line-by-line.
+///
+/// Tracks brace depth while respecting string literals so that braces inside
+/// string values don't corrupt the depth counter. Reads raw bytes per line and
+/// converts each with `String::from_utf8_lossy`, so files containing non-UTF8
+/// bytes are tolerated without loading the whole file into memory.
+///
+/// Stops after `MAX_SCAN_BYTES` have been read as a safety bound against
+/// pathological/never-ending input.
+pub fn extract_character_keys_from_reader<R: std::io::BufRead>(
+    mut reader: R,
+) -> std::io::Result<Vec<String>> {
     static RE_KEY: OnceLock<Regex> = OnceLock::new();
     let re_key = RE_KEY.get_or_init(|| Regex::new(r#"^\["([^"]+)"\]\s*=\s*\{?\s*$"#).unwrap());
+
+    // Sanity bound: never scan more than 64 MB, even for a pathological file.
+    const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
     let mut keys: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -59,8 +85,23 @@ pub fn extract_character_keys(content: &str) -> Vec<String> {
     //               ["$AccountWide"] = { depth 3→4  ← skip this
     //               ["CharName"] = {     depth 3→4  ← these are character keys
     let mut depth: i32 = 0;
+    let mut scanned: u64 = 0;
+    let mut raw: Vec<u8> = Vec::new();
 
-    for line in content.lines() {
+    loop {
+        if scanned >= MAX_SCAN_BYTES {
+            break;
+        }
+        raw.clear();
+        let n = reader.read_until(b'\n', &mut raw)?;
+        if n == 0 {
+            break; // EOF
+        }
+        scanned += n as u64;
+
+        // Convert this line, tolerating non-UTF8 bytes.
+        let line = String::from_utf8_lossy(&raw);
+        // Strip the trailing newline (and any \r) for the key-match regex.
         let trimmed = line.trim();
 
         if depth == 3 {
@@ -104,7 +145,7 @@ pub fn extract_character_keys(content: &str) -> Vec<String> {
         }
     }
 
-    keys
+    Ok(keys)
 }
 
 /// Cache entry for character key extraction. Keyed by file path.
@@ -120,6 +161,18 @@ static CHAR_KEY_CACHE: OnceLock<Mutex<HashMap<String, CharKeyCacheEntry>>> = Onc
 
 fn char_key_cache() -> &'static Mutex<HashMap<String, CharKeyCacheEntry>> {
     CHAR_KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Single-entry cache of the most recently parsed original tree for `preview_save`.
+/// The SV editor previews one file at a time, and each keystroke-driven preview
+/// otherwise re-reads and re-parses the same unchanged on-disk file. Keyed by
+/// `(path, SvFileStamp)`; a differing size or mtime invalidates the entry so a
+/// file changed on disk is always re-read.
+type PreviewCacheEntry = (std::path::PathBuf, SvFileStamp, SvTreeNode);
+static PREVIEW_ORIGINAL_CACHE: OnceLock<Mutex<Option<PreviewCacheEntry>>> = OnceLock::new();
+
+fn preview_original_cache() -> &'static Mutex<Option<PreviewCacheEntry>> {
+    PREVIEW_ORIGINAL_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 /// List all SavedVariables .lua files with metadata.
@@ -187,32 +240,18 @@ pub fn list_saved_variables_blocking(addons_dir: &Path) -> Result<Vec<SavedVaria
             if let Some(entry) = cached {
                 entry.keys
             } else {
+                // Stream the whole file line-by-line rather than capping the
+                // read. ESO SavedVariables files are commonly multi-megabyte,
+                // so a fixed prefix would hide characters later in the file.
+                // The reader-based extractor keeps memory bounded (one line at
+                // a time) and tolerates non-UTF8 bytes via lossy conversion.
                 let keys = match fs::File::open(&path) {
-                    Ok(mut f) => {
-                        use std::io::Read;
-                        let read_limit = 256 * 1024;
-                        let mut buf = vec![0u8; read_limit.min(size_bytes as usize)];
-                        let n = f
-                            .read(&mut buf)
-                            .map_err(|e| {
-                                eprintln!("Warning: failed to read {}: {}", path.display(), e);
-                                e
-                            })
-                            .unwrap_or(0);
-                        buf.truncate(n);
-                        match String::from_utf8(buf) {
-                            Ok(content) => extract_character_keys(&content),
-                            Err(e) => {
-                                // Fall back to lossy conversion but log the issue
-                                eprintln!(
-                                    "Warning: {} contains invalid UTF-8: {}",
-                                    path.display(),
-                                    e
-                                );
-                                let content = String::from_utf8_lossy(e.as_bytes());
-                                extract_character_keys(&content)
-                            }
-                        }
+                    Ok(f) => {
+                        let reader = std::io::BufReader::new(f);
+                        extract_character_keys_from_reader(reader).unwrap_or_else(|e| {
+                            eprintln!("Warning: failed to read {}: {}", path.display(), e);
+                            Vec::new()
+                        })
                     }
                     Err(e) => {
                         eprintln!("Warning: failed to open {}: {}", path.display(), e);
@@ -328,6 +367,11 @@ pub fn write_saved_variable_blocking(
     }
 
     // Validation pass: re-parse the serialized output to ensure it's valid
+    // before touching the user's file. This is intentionally kept unconditional:
+    // the serialized `content` was just bounded by `MAX_WRITE_SIZE` (50 MB) above,
+    // so the transient parse tree is bounded too, and this is the last safety net
+    // that prevents a serializer bug from overwriting a good file with invalid
+    // Lua. The cost is paid only on an explicit user save of an editor-sized file.
     parser::parse_sv_file(&content, file_name)
         .map_err(|e| format!("Serialization validation failed: {e}. Save aborted."))?;
 
@@ -338,20 +382,11 @@ pub fn write_saved_variable_blocking(
             .map_err(|e| format!("Failed to create backup before saving: {e}"))?;
     }
 
-    // Write atomically via temp file + rename
-    let tmp_path = sv_dir.join(format!("{file_name}.tmp"));
-    fs::write(&tmp_path, &content).map_err(|e| format!("Failed to write temp file: {e}"))?;
-    // On Windows, fs::rename fails if the destination exists. Remove it first.
-    if file_path.exists() {
-        fs::remove_file(&file_path).map_err(|e| {
-            let _ = fs::remove_file(&tmp_path);
-            format!("Failed to replace existing file: {e}")
-        })?;
-    }
-    fs::rename(&tmp_path, &file_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to finalize write: {e}")
-    })?;
+    // Write atomically via temp file + rename. `std::fs::rename` replaces the
+    // destination atomically on both Unix (`rename(2)`) and Windows
+    // (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`), so the live file is
+    // never momentarily absent and a failed write leaves the original intact.
+    write_raw_bytes(&sv_dir, file_name, content.as_bytes())?;
 
     // Return the new stamp so frontend can track for subsequent saves
     file_stamp(&file_path)
@@ -479,17 +514,42 @@ pub fn preview_save(
     let sv_dir = saved_variables_dir(addons_dir);
     let file_path = sv_dir.join(file_name);
 
-    let original_content = if file_path.is_file() {
-        fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?
-    } else {
+    if !file_path.is_file() {
         return Ok(Vec::new());
-    };
+    }
 
-    let original_tree = parser::parse_sv_file(&original_content, file_name)?;
+    // Cache the parsed on-disk tree keyed by (path, size+mtime). Repeated previews
+    // of the same unchanged file (the common case while editing) then skip both
+    // the read and the parse. The stamp is captured first so a file modified on
+    // disk since the last preview is detected and re-read, keeping behaviour —
+    // including the read/parse error paths — identical to the uncached version.
+    let stamp = file_stamp(&file_path)?;
+    let cache = preview_original_cache();
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+
+    let hit = matches!(
+        guard.as_ref(),
+        Some((p, s, _))
+            if p == &file_path
+                && s.size == stamp.size
+                && s.modified_epoch_ms == stamp.modified_epoch_ms
+    );
+
+    if !hit {
+        let original_content =
+            fs::read_to_string(&file_path).map_err(|e| format!("Failed to read file: {e}"))?;
+        let original_tree = parser::parse_sv_file(&original_content, file_name)?;
+        *guard = Some((file_path.clone(), stamp, original_tree));
+    }
+
+    // `guard` now holds a valid entry for this (path, stamp); diff against it
+    // while holding the lock (previews are one-file-at-a-time and the diff is
+    // cheap, so serializing them is fine and avoids cloning the cached tree).
+    let original_tree = &guard.as_ref().expect("cache populated above").2;
 
     let mut changes = Vec::new();
     let mut path = Vec::new();
-    diff_trees(&original_tree, tree, &mut path, &mut changes);
+    diff_trees(original_tree, tree, &mut path, &mut changes);
 
     Ok(changes)
 }
@@ -531,7 +591,8 @@ pub fn restore_backup_file(addons_dir: &Path, file_name: &str) -> Result<SvFileS
         return Err(format!("No backup found for {file_name}"));
     }
 
-    fs::copy(&bak_path, &file_path).map_err(|e| format!("Failed to restore backup: {e}"))?;
+    let bytes = fs::read(&bak_path).map_err(|e| format!("Failed to restore backup: {e}"))?;
+    write_raw_bytes(&sv_dir, file_name, &bytes)?;
 
     file_stamp(&file_path)
 }
@@ -601,11 +662,138 @@ mod tests {
     }
 
     #[test]
+    fn extract_character_keys_finds_keys_past_256kb() {
+        // Build a file where a character sits well past the old 256 KB prefix
+        // cap, so a capped read would miss it. Padding lives inside a string
+        // value at character-key depth (3) so it doesn't disturb brace depth.
+        let padding = "x".repeat(400 * 1024);
+        let content = format!(
+            "TopVar =\n{{\n\t[\"Default\"] =\n\t{{\n\t\t[\"@Acct\"] =\n\t\t{{\n\
+             \t\t\t[\"EarlyChar\"] =\n\t\t\t{{\n\t\t\t\t[\"pad\"] = \"{padding}\",\n\t\t\t}},\n\
+             \t\t\t[\"LateChar\"] =\n\t\t\t{{\n\t\t\t\t[\"level\"] = 50,\n\t\t\t}},\n\
+             \t\t}},\n\t}},\n}}\n"
+        );
+        let keys = extract_character_keys(&content);
+        assert!(keys.contains(&"EarlyChar".to_string()));
+        assert!(
+            keys.contains(&"LateChar".to_string()),
+            "character after 256 KB should still be extracted via streaming"
+        );
+    }
+
+    #[test]
+    fn extract_character_keys_from_reader_matches_string_variant() {
+        let content = r#"TopVar =
+{
+	["Default"] =
+	{
+		["@Acct"] =
+		{
+			["$AccountWide"] =
+			{
+			},
+			["Baelthor"] =
+			{
+			},
+		},
+	},
+}
+"#;
+        let via_str = extract_character_keys(content);
+        let via_reader =
+            extract_character_keys_from_reader(std::io::Cursor::new(content.as_bytes())).unwrap();
+        assert_eq!(via_str, via_reader);
+        assert_eq!(via_str, vec!["Baelthor".to_string()]);
+    }
+
+    #[test]
     fn write_raw_bytes_creates_new_file() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         write_raw_bytes(dir, "new.lua", b"hello").unwrap();
         assert_eq!(fs::read(dir.join("new.lua")).unwrap(), b"hello");
         assert!(!dir.join("new.lua.tmp").exists());
+    }
+
+    #[test]
+    fn write_saved_variable_replaces_content_and_leaves_no_tmp() {
+        // Lay out <tmp>/live/AddOns and <tmp>/live/SavedVariables so the
+        // function's addons_dir.parent()/SavedVariables derivation resolves.
+        let tmp = tempfile::tempdir().unwrap();
+        let addons_dir = tmp.path().join("live").join("AddOns");
+        let sv_dir = tmp.path().join("live").join("SavedVariables");
+        fs::create_dir_all(&addons_dir).unwrap();
+        fs::create_dir_all(&sv_dir).unwrap();
+
+        let file_name = "MyAddon.lua";
+        let file_path = sv_dir.join(file_name);
+
+        // Seed an existing file whose content differs from what we'll write back.
+        let initial = "MyAddon_SV =\n{\n\t[\"old\"] = 1,\n}\n";
+        fs::write(&file_path, initial).unwrap();
+        let stamp = file_stamp(&file_path).unwrap();
+
+        // Build the tree to write from a small SV source.
+        let new_source = r#"MyAddon_SV =
+{
+	["Default"] =
+	{
+		["@Account"] =
+		{
+			["CharName"] =
+			{
+				["enabled"] = true,
+			},
+		},
+	},
+}
+"#;
+        let tree = parser::parse_sv_file(new_source, file_name).unwrap();
+
+        let new_stamp =
+            write_saved_variable_blocking(&addons_dir, file_name, &tree, &stamp).unwrap();
+
+        // Content was replaced with the serialized tree.
+        let written = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(written, serializer::serialize_to_lua(&tree));
+        assert_ne!(written, initial);
+        assert!(written.contains("[\"CharName\"]"));
+
+        // No .tmp sidecar left behind, and a .lua.bak was created.
+        assert!(!sv_dir.join(format!("{file_name}.tmp")).exists());
+        assert!(file_path.with_extension("lua.bak").is_file());
+
+        // The returned stamp matches the freshly written file.
+        let disk_stamp = file_stamp(&file_path).unwrap();
+        assert_eq!(new_stamp.size, disk_stamp.size);
+        assert_eq!(new_stamp.modified_epoch_ms, disk_stamp.modified_epoch_ms);
+    }
+
+    #[test]
+    fn extract_character_keys_finds_identifier_safe_key_in_serializer_output() {
+        // A character key that is a valid Lua identifier must still be emitted
+        // in ["key"] = form so extract_character_keys (which only matches
+        // bracket style at depth 3) keeps seeing it after a round-trip save.
+        let input = r#"MyAddon_SV =
+{
+	["Default"] =
+	{
+		["@Account"] =
+		{
+			CharName =
+			{
+				["enabled"] = true,
+			},
+		},
+	},
+}
+"#;
+        let tree = parser::parse_sv_file(input, "MyAddon.lua").unwrap();
+        let output = serializer::serialize_to_lua(&tree);
+        let keys = extract_character_keys(&output);
+        assert!(
+            keys.contains(&"CharName".to_string()),
+            "expected CharName in {keys:?}"
+        );
     }
 }

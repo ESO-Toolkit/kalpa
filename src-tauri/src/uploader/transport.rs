@@ -784,11 +784,19 @@ pub fn assess_native_routing(log_path: &str, opt_in: bool, has_session: bool) ->
 /// `cancel` lets a Stop abort cleanly between segments (the client still
 /// `terminate-report`s so no draft is orphaned). On any failure a short, honest
 /// message is returned for the history record.
+///
+/// `sink` receives the crash-recovery orphan breadcrumb (C2): `record_open` the instant
+/// the report exists, `note_segment` per accepted segment, `clear` only on a confirmed
+/// close — so a kill/panic between `create-report` and `terminate-report` always leaves a
+/// recoverable `{code}`. Callers that don't need breadcrumbs pass a
+/// [`super::native::live::NoopOrphanSink`]; the manual-upload path passes an
+/// AppHandle-backed sink so a one-shot upload gets the same L2 protection as live.
 pub fn run_native_upload(
     log_path: &str,
     opts: &UploadOptions,
     session: &dyn super::native::session::SessionProvider,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    sink: &dyn super::native::live::OrphanSink,
 ) -> Result<UploadOutcome, String> {
     use super::native::{client::NativeUpload, events};
 
@@ -851,7 +859,7 @@ pub fn run_native_upload(
 
     let upload = NativeUpload::new(session, opts, cancel);
     let no_progress = |_p: super::native::client::UploadProgress| {};
-    match upload.upload_finished(&[segment], &[master], &no_progress) {
+    match upload.upload_finished_with_orphans(&[segment], &[master], &no_progress, sink) {
         Ok(code) => Ok(UploadOutcome::Completed {
             report_code: Some(code.0),
         }),
@@ -1005,8 +1013,14 @@ mod routing_tests {
     fn native_runner_rejects_missing_file() {
         let opts = UploadOptions::default();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let err =
-            run_native_upload("C:/nonexistent/nope.log", &opts, &FixedSession, cancel).unwrap_err();
+        let err = run_native_upload(
+            "C:/nonexistent/nope.log",
+            &opts,
+            &FixedSession,
+            cancel,
+            &super::super::native::live::NoopOrphanSink,
+        )
+        .unwrap_err();
         assert!(err.contains("not found"));
     }
 
