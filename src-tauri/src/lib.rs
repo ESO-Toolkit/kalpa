@@ -12,6 +12,7 @@ mod installer;
 mod manifest;
 mod manifest_cache;
 mod metadata;
+pub mod platform;
 mod safe_migration;
 mod saved_variables;
 mod settings_store;
@@ -180,6 +181,11 @@ fn pending_deep_link_payload(action: &DeepLinkAction) -> PendingDeepLinkPayload 
 /// Stale cached JS/CSS causes the UI to look outdated after an update.
 /// We store the last-seen version in a marker file and nuke the cache dir
 /// whenever it differs from the current build version.
+///
+/// Windows/WebView2-specific: WKWebView (macOS) and WebKitGTK (Linux) don't
+/// exhibit the stale-cache-after-update bug this works around, and deleting
+/// their cache directories would risk clobbering unrelated webview state.
+#[cfg(windows)]
 fn clear_webview_cache_on_upgrade() {
     let current = env!("CARGO_PKG_VERSION");
     let local_app_data = match std::env::var("LOCALAPPDATA") {
@@ -202,6 +208,9 @@ fn clear_webview_cache_on_upgrade() {
     let _ = std::fs::create_dir_all(&data_dir);
     let _ = std::fs::write(&marker, current);
 }
+
+#[cfg(not(windows))]
+fn clear_webview_cache_on_upgrade() {}
 
 fn cleanup_orphaned_pending_zips() {
     // Fire-and-forget: enumerating %TEMP% can take a while on cluttered
@@ -386,12 +395,13 @@ pub fn run() {
     // wry's default args are preserved, and an unknown feature name is simply
     // ignored by the runtime, so this degrades gracefully if the flag ever
     // changes. (Debug builds also enable the Chrome DevTools Protocol here.)
-    #[cfg(debug_assertions)]
+    // WebView2 only exists on Windows, so don't set a dead env var elsewhere.
+    #[cfg(all(windows, debug_assertions))]
     std::env::set_var(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--remote-debugging-port=9222 --enable-features=msWebView2CodeCache",
     );
-    #[cfg(not(debug_assertions))]
+    #[cfg(all(windows, not(debug_assertions)))]
     std::env::set_var(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--enable-features=msWebView2CodeCache",
@@ -442,6 +452,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_os::init())
         .setup(|app| {
             #[cfg(desktop)]
             app.handle()
@@ -674,6 +685,7 @@ pub fn run() {
             commands::write_saved_variable,
             commands::copy_sv_profile,
             commands::is_eso_running,
+            commands::is_portable_update_supported,
             commands::delete_saved_variables,
             commands::restore_sv_backup,
             commands::preview_sv_save,

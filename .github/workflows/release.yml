@@ -14,8 +14,30 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      # Serialize the matrix: tauri-action merges each platform's entry into the
+      # shared latest.json with a read-merge-delete-reupload cycle, so parallel
+      # jobs can clobber each other's platform entry (and race the draft-release
+      # creation). One job at a time makes the merge deterministic; the publish
+      # job below still verifies the result before anything goes live.
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          # arm64 runner; --target universal-apple-darwin cross-compiles the
+          # x86_64 half so one binary serves Intel Macs (ESO's Mac client is
+          # Intel-only) and Apple Silicon.
+          - platform: macos-latest
+            args: "--target universal-apple-darwin"
+          # ubuntu-22.04 pins the compatibility baseline (WebKitGTK 4.1,
+          # glibc 2.35). TODO: migrate to ubuntu-24.04 before the 22.04 runner
+          # image is retired in April 2027 (raises the glibc baseline to 2.39).
+          - platform: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -29,11 +51,21 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: "1.94.0"
+          # Both halves of the universal macOS binary; harmless elsewhere.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev \
+            libxdo-dev build-essential curl wget file
 
       # --legacy-peer-deps: typescript-eslint 8.x doesn't yet support TypeScript 6
       - name: Install frontend dependencies
@@ -45,16 +77,32 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code signing + notarization. All optional: tauri-action skips
+          # signing while these secrets are unset, so unsigned beta builds ship
+          # today and signing/notarization activate the moment an Apple
+          # Developer ID certificate is added to the repo secrets.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "${{ github.ref_name }}"
+          args: ${{ matrix.args }}
           releaseBody: |
             See [CHANGELOG.md](https://github.com/ESO-Toolkit/kalpa/blob/main/CHANGELOG.md) for full details.
 
             ## Install
-            Download the `.exe` installer below and run it. Kalpa will auto-update when future releases are published.
 
-            **Requirements:** Windows 10 (1803+) or Windows 11; WebView2 (pre-installed on Windows 11, bootstrapped automatically on Windows 10). Kalpa is currently Windows-only — macOS and Linux are planned but not yet supported.
+            **Windows** (stable): download the `.exe` installer and run it. Requires Windows 10 (1803+) or Windows 11; WebView2 is pre-installed on Windows 11 and bootstrapped automatically on Windows 10.
+
+            **macOS** (beta): download the `.dmg` (universal — Intel & Apple Silicon, macOS 10.15+). These builds are not yet notarized with Apple, so on first launch **right-click the app → Open → Open**. If macOS still reports the app as damaged, clear the quarantine flag: `xattr -dr com.apple.quarantine /Applications/Kalpa.app`
+
+            **Linux** (beta): the `.AppImage` is recommended (`chmod +x` and run — it self-updates like the Windows build). `.deb` and `.rpm` packages are also provided but do **not** self-update; install new versions from this page. ESO under Steam Proton is detected automatically, including Flatpak Steam and secondary Steam libraries.
+
+            Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
 
             ## Verify your download
             Each release ships the installer alongside a `.sig` (auto-updater signature) and `latest.json`. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
@@ -65,5 +113,71 @@ jobs:
             ---
 
             🐛 **Found a bug or have feedback?** Use the [Beta Feedback template](https://github.com/ESO-Toolkit/kalpa/issues/new?template=beta_feedback.md) so it's tagged `beta` for triage. Security issues: see [SECURITY.md](https://github.com/ESO-Toolkit/kalpa/blob/main/SECURITY.md).
-          releaseDraft: false
+          # Draft during the build so users never see a partially-assembled
+          # release: the updater endpoint (releases/latest/download/latest.json)
+          # cannot see drafts, and `releases/latest` never points at one. The
+          # `publish` job below verifies the merged latest.json and flips the
+          # draft to published — a tagged release is NOT done until that job is
+          # green. If it fails, the draft is left in place for inspection.
+          releaseDraft: true
           prerelease: false
+
+  # Gate + publish: a release only goes live after every platform built and the
+  # merged latest.json provably contains all updater entries. Auto-update is
+  # dead until this runs — the updater reads releases/latest/download/latest.json,
+  # which drafts are invisible to — so a red publish job means the release DID
+  # NOT ship, even though all three build jobs are green.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Verify latest.json covers every platform
+        run: |
+          set -euo pipefail
+          # Drafts are not addressable by tag via releases/tags/<tag>; list and
+          # match tag_name the same way tauri-action locates the draft.
+          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name==\"${TAG}\")")
+          [ -n "$release" ] || { echo "::error::No release found for ${TAG}"; exit 1; }
+          release_id=$(echo "$release" | jq -r '.id')
+
+          asset_id=$(echo "$release" | jq -r '.assets[] | select(.name=="latest.json") | .id')
+          [ -n "$asset_id" ] || { echo "::error::latest.json missing from release assets"; exit 1; }
+          gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+            -H "Accept: application/octet-stream" > latest.json
+
+          echo "--- latest.json platforms ---"
+          jq '.platforms | keys' latest.json
+
+          version=$(jq -r '.version' latest.json)
+          [ "v${version}" = "${TAG}" ] || { echo "::error::latest.json version ${version} != tag ${TAG}"; exit 1; }
+
+          # tauri-action@v1 keys: the universal macOS build fills BOTH darwin
+          # arches; windows/linux use their native arch.
+          for platform in windows-x86_64 darwin-x86_64 darwin-aarch64 linux-x86_64; do
+            jq -e --arg p "$platform" \
+              '.platforms[$p] | (.url | length > 0) and (.signature | length > 0)' \
+              latest.json > /dev/null \
+              || { echo "::error::latest.json is missing a valid ${platform} entry — a build job's updater merge was lost"; exit 1; }
+          done
+
+          # The installers users download by hand must exist alongside the
+          # updater artifacts.
+          assets=$(echo "$release" | jq -r '.assets[].name')
+          for pattern in '\.exe$' '\.dmg$' '\.AppImage$' '\.deb$' '\.rpm$'; do
+            echo "$assets" | grep -qE "$pattern" \
+              || { echo "::error::No release asset matches ${pattern}"; exit 1; }
+          done
+
+          echo "release_id=${release_id}" >> "$GITHUB_ENV"
+
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false > /dev/null
+          echo "Release ${TAG} published with a complete latest.json."

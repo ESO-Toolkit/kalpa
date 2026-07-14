@@ -64,8 +64,9 @@ pub fn detect_log_path(addons_path: Option<&str>) -> LogPathDetection {
         }
     }
 
-    // Strategy 2: scan the common ESO environments under Documents.
-    if let Some(docs) = dirs::document_dir() {
+    // Strategy 2: scan the common ESO environments under every documents root
+    // (native Documents plus Proton/CrossOver prefixes on Linux/macOS).
+    for docs in crate::commands::documents_candidates() {
         for env in ["live", "liveeu", "pts"] {
             let logs_dir = docs.join("Elder Scrolls Online").join(env).join("Logs");
             if logs_dir.is_dir() {

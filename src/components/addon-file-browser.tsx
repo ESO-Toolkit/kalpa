@@ -201,7 +201,8 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
   const handleOpenFolder = async () => {
     try {
       const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-      await revealItemInDir(`${addonsPath}\\${folderName}`);
+      const { join } = await import("@tauri-apps/api/path");
+      await revealItemInDir(await join(addonsPath, folderName));
     } catch {
       // best-effort
     }
@@ -210,7 +211,8 @@ export function AddonFileBrowser({ addonsPath, folderName }: AddonFileBrowserPro
   const handleOpenExternal = async (relativePath: string) => {
     try {
       const { openPath } = await import("@tauri-apps/plugin-opener");
-      const fullPath = `${addonsPath}\\${folderName}\\${relativePath.replace(/\//g, "\\")}`;
+      const { join } = await import("@tauri-apps/api/path");
+      const fullPath = await join(addonsPath, folderName, ...relativePath.split("/"));
       await openPath(fullPath);
     } catch {
       // best-effort
