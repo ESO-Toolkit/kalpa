@@ -71,22 +71,44 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --legacy-peer-deps
 
-      - name: Build Tauri app
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+      # macOS code signing + notarization activate automatically once an Apple
+      # Developer ID certificate is added to the repo secrets. The env vars are
+      # injected ONLY when the certificate secret is non-empty: an unset GitHub
+      # secret still materializes as an EMPTY env var, and the bundler treats a
+      # present-but-empty APPLE_CERTIFICATE as "sign this" and fails importing
+      # it ("failed to import keychain certificate" — broke the first beta.11
+      # run). Multi-line-safe via GITHUB_ENV heredocs; values stay masked.
+      - name: Enable macOS signing when the Apple certificate secret exists
+        if: matrix.platform == 'macos-latest'
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing + notarization. All optional: tauri-action skips
-          # signing while these secrets are unset, so unsigned beta builds ship
-          # today and signing/notarization activate the moment an Apple
-          # Developer ID certificate is added to the repo secrets.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_CERTIFICATE}" ]; then
+            echo "No Apple certificate secret set — shipping an unsigned macOS build."
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            {
+              echo "${name}<<__KALPA_SECRET_EOF__"
+              printenv "$name"
+              echo "__KALPA_SECRET_EOF__"
+            } >> "$GITHUB_ENV"
+          done
+          echo "Apple certificate secret found — macOS signing enabled."
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "${{ github.ref_name }}"
