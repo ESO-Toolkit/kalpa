@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use super::types::{ReportRef, UploadRecord, UploadStatus};
+use super::types::{KalpaBuildEvidence, ReportRef, UploadRecord, UploadStatus};
 use crate::metadata::{load_json_with_backup, save_json_with_backup};
 
 /// Cap the stored history so the file can't grow unbounded.
@@ -269,6 +269,39 @@ fn apply_attach_live_report(records: &mut [UploadRecord], id: &str, report: Repo
     changed
 }
 
+/// Persist native raw-log build evidence for a live upload after the report code
+/// exists. Exact-id matching mirrors native live settlement: a delayed sidecar
+/// worker can update either an active row or a row that already reached a
+/// terminal state, but it must never touch sibling sessions.
+pub fn attach_build_evidence(
+    app: &tauri::AppHandle,
+    id: &str,
+    build_evidence: KalpaBuildEvidence,
+) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    if !apply_attach_build_evidence(&mut file.records, id, build_evidence) {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
+fn apply_attach_build_evidence(
+    records: &mut [UploadRecord],
+    id: &str,
+    build_evidence: KalpaBuildEvidence,
+) -> bool {
+    let mut changed = false;
+    for r in records {
+        if r.id == id {
+            r.build_evidence = Some(build_evidence.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Attach a user-pasted report link to a terminal record (matched by exact `id`),
 /// serialized under [`MUTATION_LOCK`] so the whole load→mutate→save cycle can't lose
 /// a concurrent driver settle (the lost-update race: attach reads a stale `Live`
@@ -456,6 +489,7 @@ mod tests {
             error: None,
             title: None,
             zone: None,
+            build_evidence: None,
         }
     }
 
@@ -712,6 +746,34 @@ mod tests {
             recs[0].error.as_deref(),
             Some("session expired before final segment"),
             "failed native live records need an actionable history error"
+        );
+    }
+
+    #[test]
+    fn attaches_build_evidence_by_exact_record_id_even_after_settle() {
+        let mut recs = vec![
+            rec("native-1", UploadStatus::Completed),
+            rec("native-10", UploadStatus::Live),
+        ];
+        let evidence = KalpaBuildEvidence {
+            schema_version: 1,
+            extractor_version: Some(1),
+            source: "kalpa-native-raw-log".into(),
+            report_code: Some("ABC123".into()),
+            players: vec![],
+            companion: None,
+        };
+
+        assert!(apply_attach_build_evidence(
+            &mut recs,
+            "native-1",
+            evidence.clone(),
+        ));
+
+        assert_eq!(recs[0].build_evidence, Some(evidence));
+        assert!(
+            recs[1].build_evidence.is_none(),
+            "build evidence must match exact record id"
         );
     }
 

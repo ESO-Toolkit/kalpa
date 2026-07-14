@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::Channel;
@@ -18,6 +18,7 @@ use tauri::{Manager, State};
 use super::types::*;
 use super::watcher::{LiveEvent, LiveWatchHandle};
 use super::{discovery, scanner, splitter, transport, watcher};
+use crate::auth::AuthState;
 use crate::AllowedAddonsPath;
 
 /// Internal sentinel returned by the live-handoff closure when it observes the
@@ -26,6 +27,7 @@ use crate::AllowedAddonsPath;
 /// so the caller can report it as cancelled rather than an error. Not shown to
 /// the user — the caller maps it to a friendly message.
 const LIVE_CANCELLED_BEFORE_LAUNCH: &str = "__live_cancelled_before_launch__";
+const MAX_SHIPPED_FIGHTS: usize = 500;
 
 /// A live session slot. A session is registered as `Starting` *before* the
 /// (blocking) uploader handoff so a concurrent stop/unmount during that window
@@ -527,26 +529,61 @@ pub async fn uploader_preflight(
         let size_bytes = std::fs::metadata(&safe)
             .map_err(|e| format!("Failed to read file: {e}"))?
             .len();
-        let scan = scanner::scan_file(&safe)?;
-        let total_fights = scan.fights.len();
         let recommend_split = size_bytes > scanner::SPLIT_RECOMMEND_BYTES;
+        let fight_collect_limit = if recommend_split {
+            Some(0)
+        } else {
+            Some(MAX_SHIPPED_FIGHTS)
+        };
+        let scan = scanner::scan_file_with_fight_limit(&safe, fight_collect_limit)?;
+        let total_fights = scan.total_fights;
         // Don't ship a huge fight list over IPC: bound by fight COUNT (a dense
         // sub-512-MiB log can still hold thousands of fights, which would be a
         // ~MB payload + thousands of DOM rows). `total_fights` still drives the
         // count pills, so omitting the list is safe.
-        const MAX_SHIPPED_FIGHTS: usize = 500;
-        let fights = if recommend_split || total_fights > MAX_SHIPPED_FIGHTS {
-            Vec::new()
-        } else {
-            scan.fights
-        };
+        let fights_omitted = scan.fights.len() < total_fights;
         Ok::<_, String>(LogPreflight {
             path: file_path,
             size_bytes,
             sessions: scan.sessions,
             total_fights,
-            fights,
+            fights: scan.fights,
+            fights_omitted,
             recommend_split,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Preflight only the latest/current logging session. This gives the split
+/// workbench a per-fight list for the common "just this instance" workflow
+/// without scanning older sessions in a multi-GB log.
+#[tauri::command]
+pub async fn uploader_preflight_latest_session(
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<LogPreflight, String> {
+    let safe = confine_log_path(&allowed, &file_path)?;
+    let safe = safe.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let (scan, file_size_bytes) =
+            scanner::scan_latest_session_with_fight_limit(&safe, Some(MAX_SHIPPED_FIGHTS))?;
+        let total_fights = scan.total_fights;
+        let latest_size = scan
+            .sessions
+            .first()
+            .map(|s| s.size_bytes)
+            .unwrap_or(file_size_bytes);
+        let fights_omitted = scan.fights.len() < total_fights;
+        Ok::<_, String>(LogPreflight {
+            path: file_path,
+            size_bytes: latest_size,
+            sessions: scan.sessions,
+            total_fights,
+            fights: scan.fights,
+            fights_omitted,
+            recommend_split: latest_size > scanner::SPLIT_RECOMMEND_BYTES,
         })
     })
     .await
@@ -659,16 +696,27 @@ pub async fn uploader_split_to_disk(
         .map_err(|e| format!("Task failed: {e}"))?
 }
 
-/// Import a `.log` file that lives OUTSIDE the ESO Logs folder (e.g. dropped from
-/// the Desktop or Downloads) by copying it into the Logs folder, then returning
-/// the new in-folder path. Everything downstream (preflight, upload, split) still
-/// runs the existing `confine_log_path` guard, so the imported copy is treated
-/// exactly like any other log in the folder.
-///
-/// Validation: the source must be an existing `.log` file with no UNC/verbatim/
-/// device prefix (same rejections as `confine_log_path`). The destination name is
-/// the source file's own name, sanitized to a single safe segment and made
-/// collision-free in the Logs folder — the caller never controls the directory.
+/// Fast path for the common case: split only the latest/current session from a
+/// large log without preflight-scanning the whole file. Uses the same app-owned
+/// destination and confinement as the full split workbench.
+#[tauri::command]
+pub async fn uploader_split_latest_session_to_disk(
+    app: tauri::AppHandle,
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<Vec<String>, String> {
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
+    let out_root = split_output_root(&app)?;
+    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_dir = out_root.join(format!("split-{}", now_ms()));
+    let out_str = out_dir.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || splitter::split_latest_session(&safe, &out_str))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
 /// Whether `p`'s file extension is `.log` (case-insensitive).
 fn path_has_log_extension(p: &Path) -> bool {
     p.extension()
@@ -689,6 +737,16 @@ fn validate_import_source(raw: &Path, canonical: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Import a `.log` file that lives OUTSIDE the ESO Logs folder (e.g. dropped from
+/// the Desktop or Downloads) by copying it into the Logs folder, then returning
+/// the new in-folder path. Everything downstream (preflight, upload, split) still
+/// runs the existing `confine_log_path` guard, so the imported copy is treated
+/// exactly like any other log in the folder.
+///
+/// Validation: the source must be an existing `.log` file with no UNC/verbatim/
+/// device prefix (same rejections as `confine_log_path`). The destination name is
+/// the source file's own name, sanitized to a single safe segment and made
+/// collision-free in the Logs folder — the caller never controls the directory.
 #[tauri::command]
 pub async fn uploader_import_log(
     allowed: State<'_, AllowedAddonsPath>,
@@ -1116,6 +1174,7 @@ pub struct UploadDispatch {
     pub handed_off: bool,
     pub detail: String,
     pub report: Option<ReportRef>,
+    pub build_evidence: Option<KalpaBuildEvidence>,
 }
 
 /// Dispatch a prepared log to the official uploader. `prefer_cli` uses the CLI
@@ -1177,7 +1236,7 @@ pub async fn uploader_upload_log(
                 .await
                 .map_err(|e| format!("Fight-count task failed: {e}"))
                 .and_then(|r| r)
-                .map(|s| s.fights.len())
+                .map(|s| s.total_fights)
                 .unwrap_or_else(|e| {
                     eprintln!("[uploader] fight count scan failed: {e}");
                     0
@@ -1204,6 +1263,7 @@ pub async fn uploader_upload_log(
         // the frontend's derived content label, carried regardless of transport.
         title: None,
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(&app, record.clone());
 
@@ -1319,6 +1379,7 @@ pub async fn uploader_upload_log(
                 // is one; otherwise the transport's own handoff detail.
                 detail: fallback_note.unwrap_or(detail),
                 report: None,
+                build_evidence: None,
             })
         }
         Ok(transport::UploadOutcome::Completed { report_code }) => {
@@ -1326,8 +1387,91 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
+            // Extraction re-parses the whole (possibly multi-GB) log, so run it on a
+            // blocking thread instead of the async executor. build_evidence stays
+            // synchronous here so it can still ride back in the record + UploadDispatch.
+            let build_evidence = if use_native {
+                match report.as_ref() {
+                    Some(report) => {
+                        let safe = safe.clone();
+                        let code = report.code.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            super::native::build_evidence::extract_from_file(&safe, Some(code)).map(
+                                |mut evidence| {
+                                    if !evidence.players.is_empty() {
+                                        // Best-effort: attach the logging player's ESOTK
+                                        // Companion snapshots (read from SavedVariables).
+                                        // Never blocks the sidecar; stays on this blocking
+                                        // thread because it reads files too.
+                                        evidence.companion =
+                                            super::native::companion::read_for_upload(&evidence);
+                                    }
+                                    evidence
+                                },
+                            )
+                        })
+                        .await
+                        {
+                            Ok(Ok(evidence)) if !evidence.players.is_empty() => Some(evidence),
+                            Ok(Ok(_)) => None,
+                            Ok(Err(e)) => {
+                                eprintln!("[uploader] native build evidence unavailable: {e}");
+                                None
+                            }
+                            Err(e) => {
+                                eprintln!("[uploader] native build evidence task failed: {e}");
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            // Publish the sidecar off the async executor: get_valid_token can make
+            // blocking OAuth round-trips and the PUT is blocking, so both run on a
+            // detached thread that re-fetches AuthState via the AppHandle (State can't
+            // cross threads) — mirrors spawn_native_live_build_evidence_sidecar.
+            if use_native {
+                if let (Some(report), Some(evidence)) = (&report, &build_evidence) {
+                    if super::sidecar::should_publish_build_evidence(options.visibility) {
+                        let app = app.clone();
+                        let report_code = report.code.clone();
+                        let evidence = evidence.clone();
+                        let visibility = options.visibility;
+                        std::thread::spawn(move || {
+                            match app.state::<AuthState>().get_valid_token() {
+                                Ok(Some(token)) => {
+                                    if let Err(e) = super::sidecar::publish_build_evidence(
+                                        &report_code,
+                                        &evidence,
+                                        visibility,
+                                        &token,
+                                    ) {
+                                        eprintln!(
+                                            "[uploader] native build evidence sidecar skipped: {e}"
+                                        );
+                                    }
+                                }
+                                Ok(None) => {
+                                    eprintln!(
+                                        "[uploader] native build evidence sidecar skipped: no ESO Logs OAuth token available"
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[uploader] native build evidence sidecar skipped: auth unavailable: {e}"
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
+            }
             record.status = UploadStatus::Completed;
             record.report = report.clone();
+            record.build_evidence = build_evidence.clone();
             // Stamp the title from the actual OUTCOME, not the routing intent: only a
             // genuine native completion applied `description` as the report name (a
             // native attempt that fell back to the official uploader returns HandedOff,
@@ -1341,6 +1485,7 @@ pub async fn uploader_upload_log(
                 handed_off: false,
                 detail: "Upload complete.".into(),
                 report,
+                build_evidence,
             })
         }
         Err(e) => {
@@ -1389,6 +1534,92 @@ fn native_live_terminal_status(reason: &super::native::live::EndReason) -> (bool
 
 fn native_live_upload_error_is_clean_stop(error: &super::native::client::UploadError) -> bool {
     matches!(error, super::native::client::UploadError::Cancelled)
+}
+
+struct NativeBuildEvidenceSidecarJob {
+    app: tauri::AppHandle,
+    record_id: String,
+    source_path: String,
+    start_offset: u64,
+    report_code: String,
+    visibility: Visibility,
+    latest_generation: Arc<AtomicU64>,
+    generation: u64,
+    reason: &'static str,
+}
+
+fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) {
+    std::thread::spawn(move || {
+        if job.latest_generation.load(Ordering::SeqCst) != job.generation {
+            return;
+        }
+
+        let evidence = match super::native::build_evidence::extract_from_file_from(
+            &job.source_path,
+            job.start_offset,
+            Some(job.report_code.clone()),
+        ) {
+            Ok(mut evidence) if !evidence.players.is_empty() => {
+                // Best-effort: attach the logging player's ESOTK Companion snapshots.
+                evidence.companion = super::native::companion::read_for_upload(&evidence);
+                evidence
+            }
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!(
+                    "[uploader] native live build evidence unavailable ({}): {e}",
+                    job.reason
+                );
+                return;
+            }
+        };
+
+        if job.latest_generation.load(Ordering::SeqCst) != job.generation {
+            return;
+        }
+
+        if let Err(e) =
+            super::history::attach_build_evidence(&job.app, &job.record_id, evidence.clone())
+        {
+            eprintln!(
+                "[uploader] native live build evidence history skipped ({}): {e}",
+                job.reason
+            );
+        }
+
+        if !super::sidecar::should_publish_build_evidence(job.visibility) {
+            return;
+        }
+
+        match job.app.state::<AuthState>().get_valid_token() {
+            Ok(Some(token)) => {
+                if let Err(e) = super::sidecar::publish_build_evidence_unless(
+                    &job.report_code,
+                    &evidence,
+                    job.visibility,
+                    &token,
+                    || job.latest_generation.load(Ordering::SeqCst) != job.generation,
+                ) {
+                    eprintln!(
+                        "[uploader] native live build evidence sidecar skipped ({}): {e}",
+                        job.reason
+                    );
+                }
+            }
+            Ok(None) => {
+                eprintln!(
+                    "[uploader] native live build evidence sidecar skipped ({}): no ESO Logs OAuth token available",
+                    job.reason
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[uploader] native live build evidence sidecar skipped ({}): auth unavailable: {e}",
+                    job.reason
+                );
+            }
+        }
+    });
 }
 
 /// Pre-routing gate for a MID-SESSION native live start: can native faithfully encode
@@ -1738,6 +1969,7 @@ pub async fn uploader_start_live(
         // so leave the title unset; the zone is the frontend's content hint.
         title: None,
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(&app, record);
 
@@ -1776,6 +2008,7 @@ pub async fn uploader_start_live(
                              fight timeline is unavailable for this session."
                         .into(),
                     report,
+                    build_evidence: None,
                 });
             }
             // Nothing was launched (no handoff): settle our just-written `Live`
@@ -1822,6 +2055,7 @@ pub async fn uploader_start_live(
         handed_off,
         detail,
         report,
+        build_evidence: None,
     })
 }
 
@@ -1927,6 +2161,7 @@ async fn start_native_live_branch(
         // name, so persist it as the title; zone is the frontend's content hint.
         title: options.description.clone(),
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(app, record);
 
@@ -1978,8 +2213,29 @@ async fn start_native_live_branch(
         let record_id_for_reauth = record_id_for_thread.clone();
         let app_for_resolved = app_for_thread.clone();
         let record_id_for_resolved = record_id_for_thread.clone();
+        let live_report_code = Arc::new(Mutex::new(None::<String>));
+        let report_code_for_open = Arc::clone(&live_report_code);
+        let report_code_for_first_fight = Arc::clone(&live_report_code);
+        let first_fight_sidecar_scheduled = Arc::new(AtomicBool::new(false));
+        let first_fight_sidecar_for_event = Arc::clone(&first_fight_sidecar_scheduled);
+        let sidecar_generation = Arc::new(AtomicU64::new(0));
+        let sidecar_generation_for_open = Arc::clone(&sidecar_generation);
+        let sidecar_generation_for_first_fight = Arc::clone(&sidecar_generation);
+        let sidecar_start_offset = Arc::new(AtomicU64::new(0));
+        let sidecar_start_offset_for_open = Arc::clone(&sidecar_start_offset);
+        let sidecar_start_offset_for_first_fight = Arc::clone(&sidecar_start_offset);
+        let sidecar_app_for_open = app_for_thread.clone();
+        let sidecar_app_for_first_fight = app_for_thread.clone();
+        let sidecar_path_for_open = safe_owned.clone();
+        let sidecar_path_for_first_fight = safe_owned.clone();
+        let sidecar_record_for_open = record_id_for_thread.clone();
+        let sidecar_record_for_first_fight = record_id_for_thread.clone();
+        let sidecar_visibility = opts_owned.visibility;
         let events = LiveEventSink {
             on_report_open: Box::new(move |code: &str| {
+                if let Ok(mut guard) = report_code_for_open.lock() {
+                    *guard = Some(code.to_string());
+                }
                 // The report exists on ESO Logs the instant create-report returns;
                 // the OrphanSink already persisted the crash-recovery breadcrumb +
                 // history link. Surface it to the UI only after warm-up commits so the
@@ -1989,11 +2245,45 @@ async fn start_native_live_branch(
                     code: code.to_string(),
                     url,
                 });
+                let generation = sidecar_generation_for_open.fetch_add(1, Ordering::SeqCst) + 1;
+                spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                    app: sidecar_app_for_open.clone(),
+                    record_id: sidecar_record_for_open.clone(),
+                    source_path: sidecar_path_for_open.clone(),
+                    start_offset: sidecar_start_offset_for_open.load(Ordering::SeqCst),
+                    report_code: code.to_string(),
+                    visibility: sidecar_visibility,
+                    latest_generation: Arc::clone(&sidecar_generation_for_open),
+                    generation,
+                    reason: "report-open",
+                });
             }),
             on_session_anchored: Box::new(move || {
                 let _ = ch_anchored.send(LiveEvent::SessionAnchored);
             }),
             on_fight_posted: Box::new(move |index, duration_ms| {
+                if !first_fight_sidecar_for_event.swap(true, Ordering::SeqCst) {
+                    let report_code = report_code_for_first_fight
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.clone());
+                    if let Some(report_code) = report_code {
+                        let generation =
+                            sidecar_generation_for_first_fight.fetch_add(1, Ordering::SeqCst) + 1;
+                        spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                            app: sidecar_app_for_first_fight.clone(),
+                            record_id: sidecar_record_for_first_fight.clone(),
+                            source_path: sidecar_path_for_first_fight.clone(),
+                            start_offset: sidecar_start_offset_for_first_fight
+                                .load(Ordering::SeqCst),
+                            report_code,
+                            visibility: sidecar_visibility,
+                            latest_generation: Arc::clone(&sidecar_generation_for_first_fight),
+                            generation,
+                            reason: "first-fight",
+                        });
+                    }
+                }
                 // Native fights drive the same per-fight UI timeline as the official
                 // watcher. Duration comes from the segment's report-absolute wall window
                 // (end-start). Zone/boss naming still isn't cheaply available at the
@@ -2086,6 +2376,10 @@ async fn start_native_live_branch(
             }
             _ => None,
         };
+        let evidence_start_offset = warmup
+            .as_ref()
+            .map_or(tail_start, |warmup| warmup.begin_log_offset);
+        sidecar_start_offset.store(evidence_start_offset, Ordering::SeqCst);
 
         // When we warmed up from a prefix, the tail starts INSIDE an already-open session
         // (its BEGIN_LOG was in the replayed prefix), so the tail's line assembler must
@@ -2125,7 +2419,8 @@ async fn start_native_live_branch(
         // stop / end as settled; a failure carries the reason.
         match result {
             Ok((code, ended)) => {
-                let url = super::watcher::report_url(&code.0);
+                let report_code = code.0.clone();
+                let url = super::watcher::report_url(&report_code);
                 let (succeeded, error) = native_live_terminal_status(&ended.reason);
                 let _ = channel_for_thread.send(LiveEvent::Stopped {
                     reason: error
@@ -2133,11 +2428,25 @@ async fn start_native_live_branch(
                         .unwrap_or_else(|| format!("Live upload finished ({:?}).", ended.reason)),
                     clean: succeeded,
                 });
+                if succeeded || ended.fights_posted > 0 {
+                    let generation = sidecar_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                    spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                        app: app_for_thread.clone(),
+                        record_id: record_id_for_thread.clone(),
+                        source_path: safe_owned.clone(),
+                        start_offset: evidence_start_offset,
+                        report_code: report_code.clone(),
+                        visibility: opts_owned.visibility,
+                        latest_generation: Arc::clone(&sidecar_generation),
+                        generation,
+                        reason: "finished",
+                    });
+                }
                 let _ = super::history::settle_native_live(
                     &app_for_thread,
                     &record_id_for_thread,
                     ended.fights_posted,
-                    Some((url, code.0)),
+                    Some((url, report_code)),
                     succeeded,
                     error,
                 );
@@ -2233,6 +2542,7 @@ async fn start_native_live_branch(
         handed_off: false,
         detail: "Live logging started — uploading directly to ESO Logs.".into(),
         report: None,
+        build_evidence: None,
     })
 }
 
