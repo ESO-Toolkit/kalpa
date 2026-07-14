@@ -164,6 +164,7 @@ export interface BackupInfo {
   fileCount: number;
   totalSize: number;
   kind: BackupKind;
+  worldsSpanned?: number;
 }
 
 export interface SafeRestoreResult {
@@ -182,6 +183,26 @@ export interface ActivateProfileResult {
   disabled: string[];
   failed: string[];
   missing: string[];
+  /** Addons kept enabled because a profile addon requires them via
+   * DependsOn, even though they are not part of the snapshot. */
+  keptDependencies: string[];
+}
+
+/** Read-only preview of what activating a profile would change. */
+export interface ProfilePlan {
+  toEnable: string[];
+  toDisable: string[];
+  keptDependencies: string[];
+  missing: string[];
+  /** Addons that cannot be disabled because both `Foo` and `Foo.disabled`
+   * folders exist on disk. */
+  blocked: string[];
+}
+
+export interface CopyAddonsResult {
+  copied: string[];
+  skipped: string[];
+  failed: string[];
 }
 
 export interface CharacterInfo {
@@ -259,24 +280,22 @@ export interface SvDiffPreview {
 
 // ── SavedVariables Editor v2 types ──────────────────────────────────────
 export type WidgetType =
-  | "text"
-  | "number"
-  | "toggle"
-  | "slider"
-  | "color"
-  | "dropdown"
-  | "readonly"
-  | "group"
-  | "raw";
+  "text" | "number" | "toggle" | "slider" | "color" | "dropdown" | "readonly" | "group" | "raw";
 
 export type WidgetConfidence = "certain" | "inferred" | "ambiguous";
 export type NodeContext = "account-wide" | "per-character" | "setting";
+
+export interface DropdownOptionItem {
+  label: string;
+  value: string | number | boolean;
+}
 
 export interface WidgetProps {
   min?: number;
   max?: number;
   step?: number;
   options?: string[];
+  optionItems?: DropdownOptionItem[];
   multiline?: boolean;
 }
 
@@ -294,8 +313,32 @@ export interface SvSchemaOverlay {
   };
 }
 
+// ── LibAddonMenu dropdown inference (never persisted) ───────────────────
+export interface LamDropdownChoice {
+  label: string;
+  value: string | number | boolean;
+}
+
+export interface LamDropdownHint {
+  settingKey: string;
+  choices: LamDropdownChoice[];
+}
+
+export interface LamScanResponse {
+  hints: LamDropdownHint[];
+  scannedFiles: number;
+  matchedFolders: string[];
+}
+
+/** Map of LOWERCASED settingKey → detected dropdown option items. */
+export type LamHintMap = Record<string, DropdownOptionItem[]>;
+
 export interface EffectiveField {
   nodeId: string;
+  /** Raw, unescaped path segments (including the addon name as the first
+   * element). Use this for tree edits — nodeId is NUL-joined/escaped and is
+   * only for overlay keying and React keys. */
+  path: string[];
   key: string;
   label: string;
   widget: WidgetType;
@@ -311,13 +354,7 @@ export interface EffectiveField {
 // App-level UI state types
 export type SortMode = "name" | "author" | "updated" | "installed";
 export type FilterMode =
-  | "all"
-  | "addons"
-  | "libraries"
-  | "outdated"
-  | "missing-deps"
-  | "favorites"
-  | "disabled";
+  "all" | "addons" | "libraries" | "outdated" | "missing-deps" | "favorites" | "disabled";
 
 // Predefined tags users can apply to addons
 export const PRESET_TAGS = ["favorite", "testing", "broken", "essential", "raid"] as const;

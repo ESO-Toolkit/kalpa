@@ -20,6 +20,19 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # windows + webview2-com must stay in lockstep with the copies tauri/wry
+      # pull transitively (see the comment in src-tauri/Cargo.toml). A minor
+      # bump ahead of tauri/wry splits windows-core into two versions and the
+      # WebView2 COM casts in lib.rs stop compiling (E0599) — verified against
+      # 0.62/0.39 while tauri 2.11.5 / wry 0.55.1 still require ^0.61/^0.38.
+      # Bump both manually when tauri/wry move. Patch updates stay enabled.
+      - dependency-name: windows
+        update-types:
+          ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: webview2-com
+        update-types:
+          ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /

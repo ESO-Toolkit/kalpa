@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useDeferredValue, useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { useAppUpdate } from "./components/app-update";
@@ -60,6 +60,8 @@ interface PendingDeepLinkPayload {
   installPackId: string | null;
 }
 
+type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
+
 function App() {
   const [addonsPath, setAddonsPath] = useState("");
   const [addons, setAddons] = useState<AddonManifest[]>([]);
@@ -69,6 +71,7 @@ function App() {
   const [errorShowSettings, setErrorShowSettings] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
+  const [logUploaderMounted, setLogUploaderMounted] = useState(false);
   const [esoRunningPromptOpen, setEsoRunningPromptOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [updateResults, setUpdateResults] = useState<UpdateCheckResult[]>([]);
@@ -80,9 +83,7 @@ function App() {
     total: number;
     currentAddon?: string;
   } | null>(null);
-  const [addonStatuses, setAddonStatuses] = useState<
-    Map<string, "downloading" | "scanning" | "extracting" | "completed" | "failed">
-  >(new Map());
+  const [addonStatuses, setAddonStatuses] = useState<Map<string, AddonPhase>>(new Map());
   const [pendingConflicts, setPendingConflicts] = useState<Map<string, BatchConflictAddon>>(
     new Map()
   );
@@ -141,6 +142,12 @@ function App() {
   const batchPreflightRef = useRef(false);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
+  // Synchronous mirror of `addonStatuses` for the batch-progress listener:
+  // events arrive faster than renders during Update All, and deriving the
+  // progress counts inside the state updater would call a second setter from
+  // within it (a Rules-of-React violation). The mirror lets the handler build
+  // the next map and both setter calls stay siblings.
+  const addonStatusesRef = useRef<Map<string, AddonPhase>>(new Map());
 
   useEffect(() => {
     selectedAddonRef.current = selectedAddon;
@@ -213,21 +220,17 @@ function App() {
       "batch-update-progress",
       (event) => {
         const { folderName, phase, total } = event.payload;
-        setAddonStatuses((prev) => {
-          const next = new Map(prev);
-          next.set(
-            folderName,
-            phase as "downloading" | "scanning" | "extracting" | "completed" | "failed"
-          );
-          let completed = 0;
-          let failed = 0;
-          for (const s of next.values()) {
-            if (s === "completed") completed++;
-            if (s === "failed") failed++;
-          }
-          setUpdateProgress({ completed, failed, total, currentAddon: folderName });
-          return next;
-        });
+        const next = new Map(addonStatusesRef.current);
+        next.set(folderName, phase as AddonPhase);
+        addonStatusesRef.current = next;
+        let completed = 0;
+        let failed = 0;
+        for (const s of next.values()) {
+          if (s === "completed") completed++;
+          if (s === "failed") failed++;
+        }
+        setAddonStatuses(next);
+        setUpdateProgress({ completed, failed, total, currentAddon: folderName });
       }
     )
       .then((unlisten) => {
@@ -553,10 +556,13 @@ function App() {
     }
   }, [setupInstances, rosterPackInstallId, deepLinkPackId, deepLinkShareCode]);
 
-  const effectiveTagFilter =
-    activeTagFilter && addons.some((a) => a.tags.includes(activeTagFilter))
-      ? activeTagFilter
-      : null;
+  const effectiveTagFilter = useMemo(
+    () =>
+      activeTagFilter && addons.some((a) => a.tags.includes(activeTagFilter))
+        ? activeTagFilter
+        : null,
+    [activeTagFilter, addons]
+  );
 
   const handleSetupSelect = useCallback(
     async (selectedPath: string) => {
@@ -917,6 +923,7 @@ function App() {
       batchPreflightRef.current = false;
       setUpdatingAll(true);
       setUpdateProgress({ completed: 0, failed: 0, total: updates.length });
+      addonStatusesRef.current = new Map();
       setAddonStatuses(new Map());
 
       void invokeResult("create_pre_operation_snapshot", {
@@ -1329,16 +1336,20 @@ function App() {
     [addons, addonsPath, selectedFolders]
   );
 
+  // Filter against the deferred query so a keystroke's urgent render is just
+  // the input update (the list re-renders with the PREVIOUS filtered array and
+  // bails); the filter+sort catches up in a non-blocking render right after.
+  const deferredSearchQuery = useDeferredValue(searchQuery);
   const filteredAddons = useMemo(
     () =>
       filterAddons(addons, {
-        searchQuery,
+        searchQuery: deferredSearchQuery,
         filterMode,
         sortMode,
         updatesSet,
         effectiveTagFilter,
       }),
-    [effectiveTagFilter, addons, filterMode, searchQuery, sortMode, updatesSet]
+    [effectiveTagFilter, addons, filterMode, deferredSearchQuery, sortMode, updatesSet]
   );
 
   const selectedUpdateResult = useMemo(
@@ -1352,6 +1363,7 @@ function App() {
   const batchMode = selectedFolders.size > 0 && viewMode === "installed";
 
   const handleOpenDialog = useCallback((dialog: Exclude<ActiveDialog, null>) => {
+    if (dialog === "log-upload") setLogUploaderMounted(true);
     setActiveDialog(dialog);
   }, []);
 
@@ -1359,6 +1371,71 @@ function App() {
     setActiveDialog(null);
     setDeepLinkPackId(null);
     setDeepLinkShareCode(null);
+  }, []);
+
+  // Stable identities for every callback prop below. The children are
+  // memoized, so a fresh lambda per render would defeat their bailout and
+  // re-render the whole tree on every keystroke / progress event / dialog
+  // toggle.
+  const handleBatchCancel = useCallback(() => setSelectedFolders(new Set()), []);
+  const handleBatchDisableClick = useCallback(
+    () => void handleBatchDisable(),
+    [handleBatchDisable]
+  );
+  const handleBatchRemoveClick = useCallback(() => void handleBatchRemove(), [handleBatchRemove]);
+  const handleBatchUpdateClick = useCallback(() => void handleBatchUpdate(), [handleBatchUpdate]);
+  const handleOpenPacks = useCallback(() => setActiveDialog("packs"), []);
+  const handleOpenSavedVars = useCallback(() => setActiveDialog("saved-variables"), []);
+  const handleOpenSettings = useCallback(() => setActiveDialog("settings"), []);
+  const handleOpenLogUpload = useCallback(() => {
+    setLogUploaderMounted(true);
+    setActiveDialog("log-upload");
+  }, []);
+  const handleUpdateAddonClick = useCallback(
+    (folderName: string) => void handleSingleUpdate(folderName),
+    [handleSingleUpdate]
+  );
+  const handleRemoveAddonClick = useCallback(
+    (folderName: string) => void handleSingleRemove(folderName),
+    [handleSingleRemove]
+  );
+  const handleOpenFolderClick = useCallback(
+    (folderName: string) => void handleOpenFolder(folderName),
+    [handleOpenFolder]
+  );
+  const handleDetailRemove = useCallback(() => {
+    setSelectedAddon(null);
+    handleRefresh();
+  }, [handleRefresh]);
+  const handleConflictResolved = useCallback(
+    (folderName: string) => {
+      setPendingConflicts((prev) => {
+        const next = new Map(prev);
+        next.delete(folderName);
+        return next;
+      });
+      handleAddonUpdated(updateResults.find((r) => r.folderName === folderName)?.esouiId ?? 0);
+    },
+    [handleAddonUpdated, updateResults]
+  );
+  const handleCheckForAppUpdateClick = useCallback(
+    () => void checkForAppUpdate(false),
+    [checkForAppUpdate]
+  );
+  const handlePathChangeClick = useCallback(
+    (path: string) => void handlePathChange(path),
+    [handlePathChange]
+  );
+  const handleEsoRunningConfirm = useCallback((dontAskAgain: boolean) => {
+    setEsoRunningPromptOpen(false);
+    if (dontAskAgain) void setSetting("suppressEsoRunningWarning", true);
+    esoRunningResolveRef.current?.(true);
+    esoRunningResolveRef.current = null;
+  }, []);
+  const handleEsoRunningCancel = useCallback(() => {
+    setEsoRunningPromptOpen(false);
+    esoRunningResolveRef.current?.(false);
+    esoRunningResolveRef.current = null;
   }, []);
 
   if (setupInstances !== null) {
@@ -1387,15 +1464,18 @@ function App() {
           selectedCount={selectedFolders.size}
           updatingAll={updatingAll}
           isOffline={isOffline}
-          onBatchCancel={() => setSelectedFolders(new Set())}
-          onBatchDisable={() => void handleBatchDisable()}
-          onBatchRemove={() => void handleBatchRemove()}
+          instances={knownInstances}
+          activeAddonsPath={addonsPath}
+          onSwitchInstance={handlePathChangeClick}
+          onBatchCancel={handleBatchCancel}
+          onBatchDisable={handleBatchDisableClick}
+          onBatchRemove={handleBatchRemoveClick}
           onBatchTag={handleBatchTag}
-          onBatchUpdate={() => void handleBatchUpdate()}
-          onOpenPacks={() => setActiveDialog("packs")}
-          onOpenSavedVars={() => setActiveDialog("saved-variables")}
-          onOpenSettings={() => setActiveDialog("settings")}
-          onOpenLogUpload={() => setActiveDialog("log-upload")}
+          onBatchUpdate={handleBatchUpdateClick}
+          onOpenPacks={handleOpenPacks}
+          onOpenSavedVars={handleOpenSavedVars}
+          onOpenSettings={handleOpenSettings}
+          onOpenLogUpload={handleOpenLogUpload}
           onRefresh={handleRefresh}
         />
 
@@ -1405,7 +1485,7 @@ function App() {
           appUpdateState={appUpdateState}
           onDownload={downloadAndInstall}
           onRestart={restartApp}
-          onOpenSettings={errorShowSettings ? () => setActiveDialog("settings") : undefined}
+          onOpenSettings={errorShowSettings ? handleOpenSettings : undefined}
         />
 
         <UpdateBanner
@@ -1455,10 +1535,10 @@ function App() {
             selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
             installedEsouiIds={installedEsouiIds}
             isOffline={isOffline}
-            onUpdateAddon={(fn) => void handleSingleUpdate(fn)}
-            onRemoveAddon={(fn) => void handleSingleRemove(fn)}
+            onUpdateAddon={handleUpdateAddonClick}
+            onRemoveAddon={handleRemoveAddonClick}
             onToggleDisable={handleToggleDisable}
-            onOpenFolder={(fn) => void handleOpenFolder(fn)}
+            onOpenFolder={handleOpenFolderClick}
             onToggleFavorite={handleTagsChange}
           />
 
@@ -1468,10 +1548,7 @@ function App() {
               addon={selectedAddon}
               installedAddons={addons}
               addonsPath={addonsPath}
-              onRemove={() => {
-                setSelectedAddon(null);
-                handleRefresh();
-              }}
+              onRemove={handleDetailRemove}
               onRemoveAddon={handleSingleRemove}
               onToggleDisable={handleToggleDisable}
               updateResult={selectedUpdateResult}
@@ -1481,16 +1558,7 @@ function App() {
               pendingConflict={
                 selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
               }
-              onConflictResolved={(folderName) => {
-                setPendingConflicts((prev) => {
-                  const next = new Map(prev);
-                  next.delete(folderName);
-                  return next;
-                });
-                handleAddonUpdated(
-                  updateResults.find((r) => r.folderName === folderName)?.esouiId ?? 0
-                );
-              }}
+              onConflictResolved={handleConflictResolved}
             />
           ) : (
             <DiscoverDetail
@@ -1523,27 +1591,20 @@ function App() {
           deepLinkPackId={deepLinkPackId}
           deepLinkShareCode={deepLinkShareCode}
           knownInstances={knownInstances}
+          logUploaderMounted={logUploaderMounted}
           onAuthChange={setAuthUser}
-          onCheckForAppUpdate={() => void checkForAppUpdate(false)}
+          onCheckForAppUpdate={handleCheckForAppUpdateClick}
           onCloseDialog={handleCloseDialog}
-          onPathChange={(path) => void handlePathChange(path)}
+          onInstancesDetected={setKnownInstances}
+          onPathChange={handlePathChangeClick}
           onRefresh={handleRefresh}
           onShowDialog={handleOpenDialog}
         />
 
         <EsoRunningDialog
           open={esoRunningPromptOpen}
-          onConfirm={(dontAskAgain) => {
-            setEsoRunningPromptOpen(false);
-            if (dontAskAgain) void setSetting("suppressEsoRunningWarning", true);
-            esoRunningResolveRef.current?.(true);
-            esoRunningResolveRef.current = null;
-          }}
-          onCancel={() => {
-            setEsoRunningPromptOpen(false);
-            esoRunningResolveRef.current?.(false);
-            esoRunningResolveRef.current = null;
-          }}
+          onConfirm={handleEsoRunningConfirm}
+          onCancel={handleEsoRunningCancel}
         />
 
         {cfaDialog && (

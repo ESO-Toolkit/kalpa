@@ -17,7 +17,82 @@ import {
 } from "lucide-react";
 import { InfoPill } from "@/components/ui/info-pill";
 import { cn } from "@/lib/utils";
-import type { ReportRef, UploaderStatus, Visibility } from "@/types/uploader";
+import type { KalpaBuildEvidence, ReportRef, UploaderStatus, Visibility } from "@/types/uploader";
+
+/** Whether an exit action — closing the dialog, or leaving Live for Manual — needs
+ *  a confirm first. Only while a live session is running (or still starting): on the
+ *  native path Stop ends the upload and closes its ESO Logs report, so an accidental
+ *  Esc/backdrop/X/tab-switch must not tear it down silently. */
+export function shouldConfirmLiveExit(liveSessionActive: boolean): boolean {
+  return liveSessionActive;
+}
+
+/** Copy for the live-exit confirm, branched by which path the running session took.
+ *  Native: Kalpa IS the uploader, so stopping ends the upload and closes the report
+ *  on ESO Logs. Handoff: the separate official uploader keeps streaming; Kalpa only
+ *  stops tracking. */
+export function liveExitConfirmCopy(handedOff: boolean): {
+  title: string;
+  description: string;
+  confirmLabel: string;
+} {
+  return handedOff
+    ? {
+        title: "Stop tracking in Kalpa?",
+        description:
+          "The official ESO Logs uploader keeps streaming in its own window — you'll need to stop it there to end the live report.",
+        confirmLabel: "Stop tracking",
+      }
+    : {
+        title: "Stop the live upload and close the report on ESO Logs?",
+        description:
+          "Kalpa is uploading directly, so stopping ends the upload and closes the report on ESO Logs. This can't be undone.",
+        confirmLabel: "Stop upload",
+      };
+}
+
+/** Subscribe to an async listener without leaking it when an unmount races the
+ *  subscription's resolution. If the returned cleanup already ran by the time
+ *  `subscribe` resolves, the listener is torn down immediately instead of leaking —
+ *  the StrictMode double-mount and dependency-change cases. Returns the effect
+ *  cleanup. A rejected subscription is swallowed (the listener is an enhancement). */
+export function attachRaceSafe(subscribe: () => Promise<() => void>): () => void {
+  let active = true;
+  let unlisten: (() => void) | undefined;
+  void subscribe()
+    .then((fn) => {
+      if (!active) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    })
+    .catch(() => {
+      /* the listener is optional; ignore if the API is unavailable */
+    });
+  return () => {
+    active = false;
+    unlisten?.();
+  };
+}
+
+/** Derive the direct-upload readout flags from the raw settings + session reads,
+ *  FAIL-CLOSED: a failed or tainted store read presents as opted-out (never claims
+ *  "direct" against an opt-out it couldn't confirm). Shared by the mount probe and
+ *  the post-change refresh so the two can't drift. */
+export function deriveNativeState(input: {
+  manual: { ok: boolean; value: boolean };
+  live: { ok: boolean; value: boolean };
+  session: boolean;
+  tainted: boolean;
+}): { nativeOptIn: boolean; hasNativeSession: boolean; liveUseOfficial: boolean } {
+  const readFailed = !input.manual.ok || !input.live.ok || input.tainted;
+  return {
+    nativeOptIn: !input.manual.value && !readFailed,
+    hasNativeSession: input.session,
+    liveUseOfficial: input.live.value || readFailed,
+  };
+}
 
 /** Map the uploader status to its pill color, label, and icon. */
 export function StatusPill({ status }: { status: UploaderStatus }) {
@@ -71,9 +146,106 @@ export function compactBytes(bytes: number): string {
  *  fight — the right link to open while a raid is still streaming. The code is always
  *  server-issued alphanumeric, but encode it defensively so a malformed value can't
  *  break out of the fragment path. */
-export function esotkReportUrl(code: string, opts?: { live?: boolean }): string {
-  const base = `https://esotk.com/#/report/${encodeURIComponent(code)}`;
-  return opts?.live ? `${base}/live` : base;
+export const KALPA_BUILD_EVIDENCE_PARAM = "kalpaBuildEvidence";
+export const KALPA_BUILD_EVIDENCE_DEFLATE_PARAM = "kalpaBuildEvidenceDeflate";
+const MAX_INLINE_RAW_BUILD_EVIDENCE_QUERY_LENGTH = 8_000;
+
+function encodeJsonBase64Url(value: unknown): string {
+  const json = JSON.stringify(value);
+  const binary = encodeURIComponent(json).replace(/%([0-9A-F]{2})/g, (_match, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16))
+  );
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+async function readAllChunks(readable: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = readable.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.length;
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+async function encodeJsonDeflateBase64Url(value: unknown): Promise<string | null> {
+  if (typeof CompressionStream === "undefined") return null;
+
+  try {
+    const input = new TextEncoder().encode(JSON.stringify(value));
+    const stream = new CompressionStream("deflate-raw") as unknown as TransformStream<
+      Uint8Array,
+      Uint8Array
+    >;
+    const writer = stream.writable.getWriter();
+    const writeAndClose = writer.write(input).then(() => writer.close());
+    const [, readResult] = await Promise.allSettled([
+      writeAndClose,
+      readAllChunks(stream.readable),
+    ]);
+    if (readResult.status === "rejected") return null;
+    return bytesToBase64Url(readResult.value);
+  } catch {
+    return null;
+  }
+}
+
+function buildEvidenceQuery(code: string, evidence?: KalpaBuildEvidence | null): string {
+  if (!evidence?.players?.length) return "";
+  if (evidence.reportCode && evidence.reportCode !== code) return "";
+  return `?${KALPA_BUILD_EVIDENCE_PARAM}=${encodeURIComponent(encodeJsonBase64Url(evidence))}`;
+}
+
+async function buildEvidenceQueryForOpen(
+  code: string,
+  evidence?: KalpaBuildEvidence | null
+): Promise<string> {
+  if (!evidence?.players?.length) return "";
+  if (evidence.reportCode && evidence.reportCode !== code) return "";
+
+  const compressed = await encodeJsonDeflateBase64Url(evidence);
+  if (compressed) {
+    return `?${KALPA_BUILD_EVIDENCE_DEFLATE_PARAM}=${encodeURIComponent(compressed)}`;
+  }
+
+  const raw = buildEvidenceQuery(code, evidence);
+  return raw.length <= MAX_INLINE_RAW_BUILD_EVIDENCE_QUERY_LENGTH ? raw : "";
+}
+
+export function esotkReportUrl(
+  code: string,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): string {
+  const path = `/report/${encodeURIComponent(code)}${opts?.live ? "/live" : ""}`;
+  const query = opts?.live ? "" : buildEvidenceQuery(code, opts?.buildEvidence);
+  return `https://esotk.com/#${path}${query}`;
+}
+
+export async function esotkReportUrlForOpen(
+  code: string,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): Promise<string> {
+  const path = `/report/${encodeURIComponent(code)}${opts?.live ? "/live" : ""}`;
+  const query = opts?.live ? "" : await buildEvidenceQueryForOpen(code, opts?.buildEvidence);
+  return `https://esotk.com/#${path}${query}`;
 }
 
 /** Raw ESO Logs report URL. During live streaming, `fight=last` follows the newest
@@ -97,10 +269,19 @@ export function esoLogsReportUrl(report: ReportRef, opts?: { live?: boolean }): 
 export function primaryReportUrl(
   report: ReportRef,
   visibility: Visibility,
-  opts?: { live?: boolean }
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
 ): string {
   if (opts?.live || visibility === "private") return esoLogsReportUrl(report, opts);
-  return esotkReportUrl(report.code);
+  return esotkReportUrl(report.code, { buildEvidence: opts?.buildEvidence });
+}
+
+export async function primaryReportUrlForOpen(
+  report: ReportRef,
+  visibility: Visibility,
+  opts?: { live?: boolean; buildEvidence?: KalpaBuildEvidence | null }
+): Promise<string> {
+  if (opts?.live || visibility === "private") return esoLogsReportUrl(report, opts);
+  return esotkReportUrlForOpen(report.code, { buildEvidence: opts?.buildEvidence });
 }
 
 /** Extract an ESO Logs report code from a pasted URL or bare code, or null if the
@@ -168,8 +349,19 @@ export function formatElapsed(ms: number): string {
 export function SessionTimer({ startMs, className }: { startMs: number; className?: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
+    // Skip ticks while the window is hidden (tray/minimized during a raid —
+    // most of a live session): nobody can see the clock, and elapsed derives
+    // from the fixed startMs, so one resync on reveal shows the exact right
+    // time with zero drift. Saves a wakeup+render per second for hours.
+    const tick = () => {
+      if (!document.hidden) setNow(Date.now());
+    };
+    const id = setInterval(tick, 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, []);
   // Fold the value INTO the label: the timer is now rendered in a non-aria-hidden
   // place (the live core), so a bare "Session elapsed time" label would mask the

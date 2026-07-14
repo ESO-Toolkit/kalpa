@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::ipc::Channel;
@@ -18,6 +18,7 @@ use tauri::{Manager, State};
 use super::types::*;
 use super::watcher::{LiveEvent, LiveWatchHandle};
 use super::{discovery, scanner, splitter, transport, watcher};
+use crate::auth::AuthState;
 use crate::AllowedAddonsPath;
 
 /// Internal sentinel returned by the live-handoff closure when it observes the
@@ -26,6 +27,7 @@ use crate::AllowedAddonsPath;
 /// so the caller can report it as cancelled rather than an error. Not shown to
 /// the user — the caller maps it to a friendly message.
 const LIVE_CANCELLED_BEFORE_LAUNCH: &str = "__live_cancelled_before_launch__";
+const MAX_SHIPPED_FIGHTS: usize = 500;
 
 /// A live session slot. A session is registered as `Starting` *before* the
 /// (blocking) uploader handoff so a concurrent stop/unmount during that window
@@ -131,6 +133,18 @@ pub struct UploaderState {
 }
 
 impl UploaderState {
+    /// True while any live-logging session is tracked (starting / official
+    /// `Running` / `NativeRunning`). The webview may be deep-suspended when the
+    /// window is hidden ONLY if this is false — an active session needs its feed
+    /// event handlers running, so it falls back to MemoryUsageTargetLevel=LOW
+    /// instead. Fails safe to `true` (no suspend) if the lock is poisoned.
+    pub fn has_active_live_session(&self) -> bool {
+        self.live_sessions
+            .lock()
+            .map(|s| !s.is_empty())
+            .unwrap_or(true)
+    }
+
     /// Signal every live session to stop, best-effort, WITHOUT joining. Called from the
     /// app's exit handler: a native driver's terminate-on-exit + abandoned POSTs then
     /// settle faster, and the OS reaps the threads. We deliberately do NOT join here
@@ -180,6 +194,40 @@ impl super::native::live::OrphanSink for CommandOrphanSink {
             ReportRef {
                 code: code.to_string(),
                 url: super::watcher::report_url(code),
+            },
+        );
+    }
+    fn note_segment(&self, code: &str, segment_id: u64) {
+        let _ = super::native::orphans::note_segment(&self.app, code, segment_id);
+    }
+    fn clear(&self, code: &str) {
+        let _ = super::native::orphans::clear(&self.app, code);
+    }
+}
+
+/// One-shot (manual) upload L2 breadcrumb sink (C2): persists the native upload's
+/// `{reportCode, segmentId}` crash-recovery breadcrumb via [`super::native::orphans`] so
+/// a kill/panic between `create-report` and `terminate-report` during a MANUAL upload
+/// leaves a recoverable code (the live-only L2 hazard, now covered for one-shot too).
+///
+/// Unlike [`CommandOrphanSink`] it does NOT attach the report to a live history record —
+/// a manual upload's report is recorded by the `Completed` arm of `uploader_upload_log`,
+/// and the record is not a live session.
+struct OneShotOrphanSink {
+    app: tauri::AppHandle,
+    source_path: String,
+    created_at_ms: u64,
+}
+
+impl super::native::live::OrphanSink for OneShotOrphanSink {
+    fn record_open(&self, code: &str, segment_id: u64) {
+        let _ = super::native::orphans::record_open(
+            &self.app,
+            super::native::orphans::LiveOrphan {
+                code: code.to_string(),
+                last_segment_id: segment_id,
+                source_path: self.source_path.clone(),
+                created_at_ms: self.created_at_ms,
             },
         );
     }
@@ -481,26 +529,61 @@ pub async fn uploader_preflight(
         let size_bytes = std::fs::metadata(&safe)
             .map_err(|e| format!("Failed to read file: {e}"))?
             .len();
-        let scan = scanner::scan_file(&safe)?;
-        let total_fights = scan.fights.len();
         let recommend_split = size_bytes > scanner::SPLIT_RECOMMEND_BYTES;
+        let fight_collect_limit = if recommend_split {
+            Some(0)
+        } else {
+            Some(MAX_SHIPPED_FIGHTS)
+        };
+        let scan = scanner::scan_file_with_fight_limit(&safe, fight_collect_limit)?;
+        let total_fights = scan.total_fights;
         // Don't ship a huge fight list over IPC: bound by fight COUNT (a dense
         // sub-512-MiB log can still hold thousands of fights, which would be a
         // ~MB payload + thousands of DOM rows). `total_fights` still drives the
         // count pills, so omitting the list is safe.
-        const MAX_SHIPPED_FIGHTS: usize = 500;
-        let fights = if recommend_split || total_fights > MAX_SHIPPED_FIGHTS {
-            Vec::new()
-        } else {
-            scan.fights
-        };
+        let fights_omitted = scan.fights.len() < total_fights;
         Ok::<_, String>(LogPreflight {
             path: file_path,
             size_bytes,
             sessions: scan.sessions,
             total_fights,
-            fights,
+            fights: scan.fights,
+            fights_omitted,
             recommend_split,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Preflight only the latest/current logging session. This gives the split
+/// workbench a per-fight list for the common "just this instance" workflow
+/// without scanning older sessions in a multi-GB log.
+#[tauri::command]
+pub async fn uploader_preflight_latest_session(
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<LogPreflight, String> {
+    let safe = confine_log_path(&allowed, &file_path)?;
+    let safe = safe.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        let (scan, file_size_bytes) =
+            scanner::scan_latest_session_with_fight_limit(&safe, Some(MAX_SHIPPED_FIGHTS))?;
+        let total_fights = scan.total_fights;
+        let latest_size = scan
+            .sessions
+            .first()
+            .map(|s| s.size_bytes)
+            .unwrap_or(file_size_bytes);
+        let fights_omitted = scan.fights.len() < total_fights;
+        Ok::<_, String>(LogPreflight {
+            path: file_path,
+            size_bytes: latest_size,
+            sessions: scan.sessions,
+            total_fights,
+            fights: scan.fights,
+            fights_omitted,
+            recommend_split: latest_size > scanner::SPLIT_RECOMMEND_BYTES,
         })
     })
     .await
@@ -613,6 +696,47 @@ pub async fn uploader_split_to_disk(
         .map_err(|e| format!("Task failed: {e}"))?
 }
 
+/// Fast path for the common case: split only the latest/current session from a
+/// large log without preflight-scanning the whole file. Uses the same app-owned
+/// destination and confinement as the full split workbench.
+#[tauri::command]
+pub async fn uploader_split_latest_session_to_disk(
+    app: tauri::AppHandle,
+    allowed: State<'_, AllowedAddonsPath>,
+    file_path: String,
+) -> Result<Vec<String>, String> {
+    let safe = confine_log_path(&allowed, &file_path)?
+        .to_string_lossy()
+        .into_owned();
+    let out_root = split_output_root(&app)?;
+    prune_split_folders(&out_root, KEEP_SPLIT_FOLDERS.saturating_sub(1));
+    let out_dir = out_root.join(format!("split-{}", now_ms()));
+    let out_str = out_dir.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || splitter::split_latest_session(&safe, &out_str))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Whether `p`'s file extension is `.log` (case-insensitive).
+fn path_has_log_extension(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("log"))
+        .unwrap_or(false)
+}
+
+/// Validate that an import source is a `.log` file on BOTH the raw caller path and
+/// the canonicalized target. The raw check is the fast-fail; the canonical re-check
+/// closes a symlink bypass — a `.log` symlink pointing at a non-`.log` file would
+/// otherwise pass the link-name gate and copy arbitrary readable content into the
+/// Logs sandbox. Pure over paths so it is unit-testable without the filesystem.
+fn validate_import_source(raw: &Path, canonical: &Path) -> Result<(), String> {
+    if !path_has_log_extension(raw) || !path_has_log_extension(canonical) {
+        return Err("Only .log files can be imported.".into());
+    }
+    Ok(())
+}
+
 /// Import a `.log` file that lives OUTSIDE the ESO Logs folder (e.g. dropped from
 /// the Desktop or Downloads) by copying it into the Logs folder, then returning
 /// the new in-folder path. Everything downstream (preflight, upload, split) still
@@ -632,12 +756,9 @@ pub async fn uploader_import_log(
     if has_unc_or_verbatim_prefix(src) {
         return Err("Network and special paths are not allowed.".into());
     }
-    let is_log = src
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("log"))
-        .unwrap_or(false);
-    if !is_log {
+    // Fast-fail on the RAW path's extension before touching the filesystem — an
+    // obviously-non-`.log` name never reaches `canonicalize`.
+    if !path_has_log_extension(src) {
         return Err("Only .log files can be imported.".into());
     }
     // Resolve the real source (rejects a dangling path / missing file).
@@ -646,6 +767,11 @@ pub async fn uploader_import_log(
     if !canonical_src.is_file() {
         return Err("That isn't a file.".into());
     }
+    // Re-check the extension on the CANONICAL target: a symlink `report.log` can point
+    // at an arbitrary readable file, so the raw-name gate above would pass on the link
+    // name while the resolved target is not a `.log`. Reject that (symlink-bypass
+    // hardening) so only genuine `.log` files are ever copied into the Logs sandbox.
+    validate_import_source(src, &canonical_src)?;
 
     let root = logs_root(&allowed)?;
     std::fs::create_dir_all(&root).map_err(|e| format!("Could not access the Logs folder: {e}"))?;
@@ -990,14 +1116,52 @@ pub fn uploader_has_session(
     session.has_session()
 }
 
-/// Clear the native upload session cookie (sign out of uploads), both in memory
-/// and from the credential store.
+/// The two side effects of an EXPLICIT ESO Logs sign-out, as a seam so the ordering
+/// (invalidate the stored session, THEN clear the login webview's cookie jar) is
+/// unit-testable without the live Tauri window API. The mid-upload
+/// `SessionProvider::invalidate` (a 401/419 during an upload) performs ONLY the first
+/// step — clearing the jar there would break the reauth pause→re-login flow — which is
+/// exactly why the jar-clear lives on the explicit-logout path, not in `invalidate`.
+trait SignOut {
+    fn invalidate_session(&self);
+    fn clear_webview_jar(&self);
+}
+
+/// Perform a full sign-out: invalidate the stored session, then clear the webview jar,
+/// in that order. Pinned by the mock test `explicit_sign_out_invalidates_then_clears_jar`.
+fn run_sign_out(actions: &dyn SignOut) {
+    actions.invalidate_session();
+    actions.clear_webview_jar();
+}
+
+/// Clear the native upload session cookie (sign out of uploads): invalidate the stored
+/// session (memory + credential store) AND clear the login webview's persistent cookie
+/// jar (B1). Without the jar-clear, WebView2 keeps a valid ESO Logs web session on disk
+/// and the next sign-in auto-completes — making sign-out cosmetic. Async so the webview
+/// work runs off the Tauri main thread (window build/clear must not block the event
+/// loop). `app` is injected by Tauri, so the frontend invoke is unchanged.
 #[tauri::command]
-pub fn uploader_logout_esologs(
+pub async fn uploader_logout_esologs(
+    app: tauri::AppHandle,
     session: State<'_, std::sync::Arc<super::native::session::StoredSessionProvider>>,
 ) -> Result<(), String> {
-    use super::native::session::SessionProvider;
-    session.invalidate();
+    struct RealSignOut<'a> {
+        app: &'a tauri::AppHandle,
+        session: &'a std::sync::Arc<super::native::session::StoredSessionProvider>,
+    }
+    impl SignOut for RealSignOut<'_> {
+        fn invalidate_session(&self) {
+            use super::native::session::SessionProvider;
+            self.session.invalidate();
+        }
+        fn clear_webview_jar(&self) {
+            super::native::login::clear_login_webview_data(self.app);
+        }
+    }
+    run_sign_out(&RealSignOut {
+        app: &app,
+        session: session.inner(),
+    });
     Ok(())
 }
 
@@ -1010,6 +1174,7 @@ pub struct UploadDispatch {
     pub handed_off: bool,
     pub detail: String,
     pub report: Option<ReportRef>,
+    pub build_evidence: Option<KalpaBuildEvidence>,
 }
 
 /// Dispatch a prepared log to the official uploader. `prefer_cli` uses the CLI
@@ -1075,7 +1240,7 @@ pub async fn uploader_upload_log(
                 .await
                 .map_err(|e| format!("Fight-count task failed: {e}"))
                 .and_then(|r| r)
-                .map(|s| s.fights.len())
+                .map(|s| s.total_fights)
                 .unwrap_or_else(|e| {
                     eprintln!("[uploader] fight count scan failed: {e}");
                     0
@@ -1102,6 +1267,7 @@ pub async fn uploader_upload_log(
         // the frontend's derived content label, carried regardless of transport.
         title: None,
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(&app, record.clone());
 
@@ -1128,7 +1294,20 @@ pub async fn uploader_upload_log(
     // uploader. The native path itself also self-checks the built segment and
     // falls back if it is ever malformed (see `run_native_upload`).
     let native_opt_in = native_opt_in.unwrap_or(false);
-    let routing = transport::assess_native_routing(&dispatch_path, native_opt_in);
+    // D3: the routing scan streams up to MAX_NATIVE_BYTES (256 MiB) off disk — run it on
+    // a blocking thread so it never stalls the async executor (mirrors the fight-count
+    // scan above and the live routing scan). C1: pass the current sign-in state so an
+    // opted-in-but-signed-out upload routes to the official uploader instead of a native
+    // attempt that would hard-fail "Not signed in" and settle Failed.
+    let has_session = session.has_session();
+    let routing = {
+        let scan_path = dispatch_path.clone();
+        tokio::task::spawn_blocking(move || {
+            transport::assess_native_routing(&scan_path, native_opt_in, has_session)
+        })
+        .await
+        .map_err(|e| format!("Routing scan task failed: {e}"))?
+    };
     let use_native = matches!(routing, transport::NativeRouting::Native);
     if let transport::NativeRouting::Fallback(reason) = &routing {
         // Honest diagnostics: why native wasn't used. Logged only (not user-facing
@@ -1162,6 +1341,16 @@ pub async fn uploader_upload_log(
         // is added, lift this flag into managed state keyed by `record_id`.
         let provider = std::sync::Arc::clone(&session);
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        // C2: thread a one-shot crash-recovery breadcrumb sink through the lifecycle so a
+        // kill/panic between create-report and terminate-report leaves a recoverable
+        // {code} (the live-only L2 hazard, now covered for manual uploads too). The
+        // breadcrumb is written after create-report and cleared only on a confirmed
+        // terminate — next-launch `recover_orphans_once` closes any leftover draft.
+        let orphan_sink = OneShotOrphanSink {
+            app: app.clone(),
+            source_path: safe.clone(),
+            created_at_ms: now_ms(),
+        };
         // Announce the build phase up front: reading the (possibly multi-GB) log and
         // encoding the payload happens inside the blocking task before the first POST,
         // so the bar shows "Preparing" the instant the user clicks rather than sitting
@@ -1179,7 +1368,14 @@ pub async fn uploader_upload_log(
             let emit = move |ev: UploadProgressEvent| {
                 let _ = progress_sink.send(ev);
             };
-            transport::run_native_upload(&dispatch_path, &opts, provider.as_ref(), cancel, &emit)
+            transport::run_native_upload(
+                &dispatch_path,
+                &opts,
+                provider.as_ref(),
+                cancel,
+                &orphan_sink,
+                &emit,
+            )
         })
         .await
         .map_err(|e| format!("Task failed: {e}"))?
@@ -1204,6 +1400,7 @@ pub async fn uploader_upload_log(
                 // is one; otherwise the transport's own handoff detail.
                 detail: fallback_note.unwrap_or(detail),
                 report: None,
+                build_evidence: None,
             })
         }
         Ok(transport::UploadOutcome::Completed { report_code }) => {
@@ -1211,8 +1408,91 @@ pub async fn uploader_upload_log(
                 url: watcher::report_url(&code),
                 code,
             });
+            // Extraction re-parses the whole (possibly multi-GB) log, so run it on a
+            // blocking thread instead of the async executor. build_evidence stays
+            // synchronous here so it can still ride back in the record + UploadDispatch.
+            let build_evidence = if use_native {
+                match report.as_ref() {
+                    Some(report) => {
+                        let safe = safe.clone();
+                        let code = report.code.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            super::native::build_evidence::extract_from_file(&safe, Some(code)).map(
+                                |mut evidence| {
+                                    if !evidence.players.is_empty() {
+                                        // Best-effort: attach the logging player's ESOTK
+                                        // Companion snapshots (read from SavedVariables).
+                                        // Never blocks the sidecar; stays on this blocking
+                                        // thread because it reads files too.
+                                        evidence.companion =
+                                            super::native::companion::read_for_upload(&evidence);
+                                    }
+                                    evidence
+                                },
+                            )
+                        })
+                        .await
+                        {
+                            Ok(Ok(evidence)) if !evidence.players.is_empty() => Some(evidence),
+                            Ok(Ok(_)) => None,
+                            Ok(Err(e)) => {
+                                eprintln!("[uploader] native build evidence unavailable: {e}");
+                                None
+                            }
+                            Err(e) => {
+                                eprintln!("[uploader] native build evidence task failed: {e}");
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            // Publish the sidecar off the async executor: get_valid_token can make
+            // blocking OAuth round-trips and the PUT is blocking, so both run on a
+            // detached thread that re-fetches AuthState via the AppHandle (State can't
+            // cross threads) — mirrors spawn_native_live_build_evidence_sidecar.
+            if use_native {
+                if let (Some(report), Some(evidence)) = (&report, &build_evidence) {
+                    if super::sidecar::should_publish_build_evidence(options.visibility) {
+                        let app = app.clone();
+                        let report_code = report.code.clone();
+                        let evidence = evidence.clone();
+                        let visibility = options.visibility;
+                        std::thread::spawn(move || {
+                            match app.state::<AuthState>().get_valid_token() {
+                                Ok(Some(token)) => {
+                                    if let Err(e) = super::sidecar::publish_build_evidence(
+                                        &report_code,
+                                        &evidence,
+                                        visibility,
+                                        &token,
+                                    ) {
+                                        eprintln!(
+                                            "[uploader] native build evidence sidecar skipped: {e}"
+                                        );
+                                    }
+                                }
+                                Ok(None) => {
+                                    eprintln!(
+                                        "[uploader] native build evidence sidecar skipped: no ESO Logs OAuth token available"
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[uploader] native build evidence sidecar skipped: auth unavailable: {e}"
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
+            }
             record.status = UploadStatus::Completed;
             record.report = report.clone();
+            record.build_evidence = build_evidence.clone();
             // Stamp the title from the actual OUTCOME, not the routing intent: only a
             // genuine native completion applied `description` as the report name (a
             // native attempt that fell back to the official uploader returns HandedOff,
@@ -1226,6 +1506,7 @@ pub async fn uploader_upload_log(
                 handed_off: false,
                 detail: "Upload complete.".into(),
                 report,
+                build_evidence,
             })
         }
         Err(e) => {
@@ -1274,6 +1555,92 @@ fn native_live_terminal_status(reason: &super::native::live::EndReason) -> (bool
 
 fn native_live_upload_error_is_clean_stop(error: &super::native::client::UploadError) -> bool {
     matches!(error, super::native::client::UploadError::Cancelled)
+}
+
+struct NativeBuildEvidenceSidecarJob {
+    app: tauri::AppHandle,
+    record_id: String,
+    source_path: String,
+    start_offset: u64,
+    report_code: String,
+    visibility: Visibility,
+    latest_generation: Arc<AtomicU64>,
+    generation: u64,
+    reason: &'static str,
+}
+
+fn spawn_native_live_build_evidence_sidecar(job: NativeBuildEvidenceSidecarJob) {
+    std::thread::spawn(move || {
+        if job.latest_generation.load(Ordering::SeqCst) != job.generation {
+            return;
+        }
+
+        let evidence = match super::native::build_evidence::extract_from_file_from(
+            &job.source_path,
+            job.start_offset,
+            Some(job.report_code.clone()),
+        ) {
+            Ok(mut evidence) if !evidence.players.is_empty() => {
+                // Best-effort: attach the logging player's ESOTK Companion snapshots.
+                evidence.companion = super::native::companion::read_for_upload(&evidence);
+                evidence
+            }
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!(
+                    "[uploader] native live build evidence unavailable ({}): {e}",
+                    job.reason
+                );
+                return;
+            }
+        };
+
+        if job.latest_generation.load(Ordering::SeqCst) != job.generation {
+            return;
+        }
+
+        if let Err(e) =
+            super::history::attach_build_evidence(&job.app, &job.record_id, evidence.clone())
+        {
+            eprintln!(
+                "[uploader] native live build evidence history skipped ({}): {e}",
+                job.reason
+            );
+        }
+
+        if !super::sidecar::should_publish_build_evidence(job.visibility) {
+            return;
+        }
+
+        match job.app.state::<AuthState>().get_valid_token() {
+            Ok(Some(token)) => {
+                if let Err(e) = super::sidecar::publish_build_evidence_unless(
+                    &job.report_code,
+                    &evidence,
+                    job.visibility,
+                    &token,
+                    || job.latest_generation.load(Ordering::SeqCst) != job.generation,
+                ) {
+                    eprintln!(
+                        "[uploader] native live build evidence sidecar skipped ({}): {e}",
+                        job.reason
+                    );
+                }
+            }
+            Ok(None) => {
+                eprintln!(
+                    "[uploader] native live build evidence sidecar skipped ({}): no ESO Logs OAuth token available",
+                    job.reason
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[uploader] native live build evidence sidecar skipped ({}): auth unavailable: {e}",
+                    job.reason
+                );
+            }
+        }
+    });
 }
 
 /// Pre-routing gate for a MID-SESSION native live start: can native faithfully encode
@@ -1410,7 +1777,7 @@ pub async fn uploader_start_live(
     let safe = match confine_log_path(&allowed, &file_path) {
         Ok(p) => p.to_string_lossy().into_owned(),
         Err(e) => {
-            remove_own_slot(&state, &session_id, &cancelled);
+            remove_own_slot(&app, &state, &session_id, &cancelled);
             return Err(e);
         }
     };
@@ -1468,7 +1835,7 @@ pub async fn uploader_start_live(
     // GUI-handoff fallback would just open a download page while Kalpa shows a
     // convincing-but-fake live timeline — so refuse rather than no-op.
     if transport::find_official_uploader().is_none() {
-        remove_own_slot(&state, &session_id, &cancelled);
+        remove_own_slot(&app, &state, &session_id, &cancelled);
         return Err(
             "Live logging needs the official ESO Logs uploader (the Archon App) \
                     installed. Install it, or use \"Upload a Log\" after your \
@@ -1514,7 +1881,7 @@ pub async fn uploader_start_live(
         // Fast path: already cancelled/superseded before we scheduled anything.
         // Remove only our own slot (a newer start may have replaced it; leave
         // that one alone) and return without launching the uploader or watcher.
-        remove_own_slot(&state, &session_id, &cancelled);
+        remove_own_slot(&app, &state, &session_id, &cancelled);
         return Err("Live logging was cancelled before it started.".into());
     }
 
@@ -1570,14 +1937,14 @@ pub async fn uploader_start_live(
     let outcome = match outcome {
         Ok(o) => o,
         Err(e) => {
-            remove_own_slot(&state, &session_id, &cancelled);
+            remove_own_slot(&app, &state, &session_id, &cancelled);
             return Err(e);
         }
     };
     // Pre-launch cancellation observed atomically inside the closure: nothing was
     // launched, so clean up our slot and report the cancellation (not a failure).
     if matches!(&outcome, Err(e) if e == LIVE_CANCELLED_BEFORE_LAUNCH) {
-        remove_own_slot(&state, &session_id, &cancelled);
+        remove_own_slot(&app, &state, &session_id, &cancelled);
         return Err("Live logging was cancelled before it started.".into());
     }
     let (report, handed_off, detail) = match outcome {
@@ -1591,7 +1958,7 @@ pub async fn uploader_start_live(
         ),
         Ok(transport::UploadOutcome::HandedOff { detail }) => (None, true, detail),
         Err(e) => {
-            remove_own_slot(&state, &session_id, &cancelled);
+            remove_own_slot(&app, &state, &session_id, &cancelled);
             return Err(e);
         }
     };
@@ -1623,6 +1990,7 @@ pub async fn uploader_start_live(
         // so leave the title unset; the zone is the frontend's content hint.
         title: None,
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(&app, record);
 
@@ -1644,7 +2012,7 @@ pub async fn uploader_start_live(
             // rotated/deleted, or the folder watch can fail, between the handoff
             // above and here). We have no watcher handle to track, so vacate our
             // own slot regardless.
-            remove_own_slot(&state, &session_id, &cancelled);
+            remove_own_slot(&app, &state, &session_id, &cancelled);
             if handed_off {
                 // The official uploader was ALREADY launched and is streaming —
                 // only Kalpa's in-app timeline is unavailable. Reporting this as a
@@ -1661,6 +2029,7 @@ pub async fn uploader_start_live(
                              fight timeline is unavailable for this session."
                         .into(),
                     report,
+                    build_evidence: None,
                 });
             }
             // Nothing was launched (no handoff): settle our just-written `Live`
@@ -1707,6 +2076,7 @@ pub async fn uploader_start_live(
         handed_off,
         detail,
         report,
+        build_evidence: None,
     })
 }
 
@@ -1788,7 +2158,7 @@ async fn start_native_live_branch(
         }
     };
     if let Err(msg) = reserve {
-        remove_own_slot(state, session_id, cancelled);
+        remove_own_slot(app, state, session_id, cancelled);
         return Err(msg.into());
     }
 
@@ -1812,6 +2182,7 @@ async fn start_native_live_branch(
         // name, so persist it as the title; zone is the frontend's content hint.
         title: options.description.clone(),
         zone,
+        build_evidence: None,
     };
     let _ = super::history::upsert(app, record);
 
@@ -1821,6 +2192,9 @@ async fn start_native_live_branch(
     // On exit it self-settles the history record by exact id. The thread NEVER touches
     // `live_sessions` (no lock-ordering cycle).
     let driver_cancel = Arc::clone(cancelled);
+    // The production tail shares the SAME cancel flag as the driver so a Stop unparks it
+    // between polls (A1) instead of leaving it blocked until the idle deadline.
+    let tail_cancel = Arc::clone(cancelled);
     let driver_slot_cancel = Arc::clone(cancelled);
     let driver_finished = Arc::new(AtomicBool::new(false));
     let driver_finished_for_thread = Arc::clone(&driver_finished);
@@ -1860,8 +2234,29 @@ async fn start_native_live_branch(
         let record_id_for_reauth = record_id_for_thread.clone();
         let app_for_resolved = app_for_thread.clone();
         let record_id_for_resolved = record_id_for_thread.clone();
+        let live_report_code = Arc::new(Mutex::new(None::<String>));
+        let report_code_for_open = Arc::clone(&live_report_code);
+        let report_code_for_first_fight = Arc::clone(&live_report_code);
+        let first_fight_sidecar_scheduled = Arc::new(AtomicBool::new(false));
+        let first_fight_sidecar_for_event = Arc::clone(&first_fight_sidecar_scheduled);
+        let sidecar_generation = Arc::new(AtomicU64::new(0));
+        let sidecar_generation_for_open = Arc::clone(&sidecar_generation);
+        let sidecar_generation_for_first_fight = Arc::clone(&sidecar_generation);
+        let sidecar_start_offset = Arc::new(AtomicU64::new(0));
+        let sidecar_start_offset_for_open = Arc::clone(&sidecar_start_offset);
+        let sidecar_start_offset_for_first_fight = Arc::clone(&sidecar_start_offset);
+        let sidecar_app_for_open = app_for_thread.clone();
+        let sidecar_app_for_first_fight = app_for_thread.clone();
+        let sidecar_path_for_open = safe_owned.clone();
+        let sidecar_path_for_first_fight = safe_owned.clone();
+        let sidecar_record_for_open = record_id_for_thread.clone();
+        let sidecar_record_for_first_fight = record_id_for_thread.clone();
+        let sidecar_visibility = opts_owned.visibility;
         let events = LiveEventSink {
             on_report_open: Box::new(move |code: &str| {
+                if let Ok(mut guard) = report_code_for_open.lock() {
+                    *guard = Some(code.to_string());
+                }
                 // The report exists on ESO Logs the instant create-report returns;
                 // the OrphanSink already persisted the crash-recovery breadcrumb +
                 // history link. Surface it to the UI only after warm-up commits so the
@@ -1871,11 +2266,45 @@ async fn start_native_live_branch(
                     code: code.to_string(),
                     url,
                 });
+                let generation = sidecar_generation_for_open.fetch_add(1, Ordering::SeqCst) + 1;
+                spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                    app: sidecar_app_for_open.clone(),
+                    record_id: sidecar_record_for_open.clone(),
+                    source_path: sidecar_path_for_open.clone(),
+                    start_offset: sidecar_start_offset_for_open.load(Ordering::SeqCst),
+                    report_code: code.to_string(),
+                    visibility: sidecar_visibility,
+                    latest_generation: Arc::clone(&sidecar_generation_for_open),
+                    generation,
+                    reason: "report-open",
+                });
             }),
             on_session_anchored: Box::new(move || {
                 let _ = ch_anchored.send(LiveEvent::SessionAnchored);
             }),
             on_fight_posted: Box::new(move |index, duration_ms| {
+                if !first_fight_sidecar_for_event.swap(true, Ordering::SeqCst) {
+                    let report_code = report_code_for_first_fight
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.clone());
+                    if let Some(report_code) = report_code {
+                        let generation =
+                            sidecar_generation_for_first_fight.fetch_add(1, Ordering::SeqCst) + 1;
+                        spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                            app: sidecar_app_for_first_fight.clone(),
+                            record_id: sidecar_record_for_first_fight.clone(),
+                            source_path: sidecar_path_for_first_fight.clone(),
+                            start_offset: sidecar_start_offset_for_first_fight
+                                .load(Ordering::SeqCst),
+                            report_code,
+                            visibility: sidecar_visibility,
+                            latest_generation: Arc::clone(&sidecar_generation_for_first_fight),
+                            generation,
+                            reason: "first-fight",
+                        });
+                    }
+                }
                 // Native fights drive the same per-fight UI timeline as the official
                 // watcher. Duration comes from the segment's report-absolute wall window
                 // (end-start). Zone/boss naming still isn't cheaply available at the
@@ -1968,6 +2397,10 @@ async fn start_native_live_branch(
             }
             _ => None,
         };
+        let evidence_start_offset = warmup
+            .as_ref()
+            .map_or(tail_start, |warmup| warmup.begin_log_offset);
+        sidecar_start_offset.store(evidence_start_offset, Ordering::SeqCst);
 
         // When we warmed up from a prefix, the tail starts INSIDE an already-open session
         // (its BEGIN_LOG was in the replayed prefix), so the tail's line assembler must
@@ -1981,7 +2414,12 @@ async fn start_native_live_branch(
             driver_cancel,
             // The production tail reads the real Encounter.log, starting at the same
             // line-safe boundary the warm-up prefix stopped at (no gap/overlap).
-            &match super::native::live::NotifyTail::new(log_path, tail_start, mid_session) {
+            &match super::native::live::NotifyTail::new(
+                log_path,
+                tail_start,
+                mid_session,
+                tail_cancel,
+            ) {
                 Ok(t) => t,
                 Err(e) => {
                     let _ = channel_for_thread.send(LiveEvent::Stopped {
@@ -2002,7 +2440,8 @@ async fn start_native_live_branch(
         // stop / end as settled; a failure carries the reason.
         match result {
             Ok((code, ended)) => {
-                let url = super::watcher::report_url(&code.0);
+                let report_code = code.0.clone();
+                let url = super::watcher::report_url(&report_code);
                 let (succeeded, error) = native_live_terminal_status(&ended.reason);
                 let _ = channel_for_thread.send(LiveEvent::Stopped {
                     reason: error
@@ -2010,11 +2449,25 @@ async fn start_native_live_branch(
                         .unwrap_or_else(|| format!("Live upload finished ({:?}).", ended.reason)),
                     clean: succeeded,
                 });
+                if succeeded || ended.fights_posted > 0 {
+                    let generation = sidecar_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                    spawn_native_live_build_evidence_sidecar(NativeBuildEvidenceSidecarJob {
+                        app: app_for_thread.clone(),
+                        record_id: record_id_for_thread.clone(),
+                        source_path: safe_owned.clone(),
+                        start_offset: evidence_start_offset,
+                        report_code: report_code.clone(),
+                        visibility: opts_owned.visibility,
+                        latest_generation: Arc::clone(&sidecar_generation),
+                        generation,
+                        reason: "finished",
+                    });
+                }
                 let _ = super::history::settle_native_live(
                     &app_for_thread,
                     &record_id_for_thread,
                     ended.fights_posted,
-                    Some((url, code.0)),
+                    Some((url, report_code)),
                     succeeded,
                     error,
                 );
@@ -2094,6 +2547,9 @@ async fn start_native_live_branch(
         // settle our just-written record by id.
         let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
         let _ = super::history::settle_started(app, &record_id);
+        // Lock released and driver stopped: if this teardown drained the last live
+        // session while the window is hidden, deep-suspend the renderer.
+        reevaluate_webview_power_after_live_change(app);
         return Err(if lost_to_peer {
             "A native live upload is already running for this log.".into()
         } else if finished_before_promotion {
@@ -2107,6 +2563,7 @@ async fn start_native_live_branch(
         handed_off: false,
         detail: "Live logging started — uploading directly to ESO Logs.".into(),
         report: None,
+        build_evidence: None,
     })
 }
 
@@ -2168,19 +2625,10 @@ async fn stop_handle_off_executor(handle: StoppedHandle) {
     }
 }
 
-/// Synchronous variant for sync contexts (e.g. `uploader_stop_live` is a sync command):
-/// a `Native` join is still off the async executor here because the whole command is
-/// sync (not on a Tokio worker). A `Watch` joins inline as before.
-fn stop_handle_blocking(handle: StoppedHandle) {
-    match handle {
-        StoppedHandle::Watch(h) => h.stop(),
-        StoppedHandle::Native(h) => h.stop(),
-    }
-}
-
 /// Remove our own Starting slot on a failed start, but only if it's still ours
 /// (a newer start under the same id may have replaced it).
 fn remove_own_slot(
+    app: &tauri::AppHandle,
     state: &State<'_, UploaderState>,
     session_id: &str,
     cancelled: &Arc<AtomicBool>,
@@ -2194,6 +2642,10 @@ fn remove_own_slot(
             sessions.remove(session_id);
         }
     }
+    // A `Starting` slot counts as an active live session, so if the user hid the
+    // window mid-start it was dropped to LOW; a failed start that drains the last
+    // slot must re-evaluate power (after the lock is released) so it deep-suspends.
+    reevaluate_webview_power_after_live_change(app);
 }
 
 /// Remove a native slot whose driver has already returned. This must not call
@@ -2237,6 +2689,29 @@ fn remove_finished_native_slot(
     if let Ok(mut sessions) = state.live_sessions.lock() {
         let _ = remove_finished_native_slot_from_map(&mut sessions, session_id, cancelled);
     };
+    // Re-evaluate webview power AFTER the lock is released (the power path must
+    // never run while holding `live_sessions`). If this was the last live session
+    // and the window is hidden, the renderer deep-suspends now instead of staying
+    // stuck at LOW for the rest of the tray stint.
+    reevaluate_webview_power_after_live_change(app);
+}
+
+/// A live session may have been removed from `live_sessions`. If NONE remains and
+/// the main window is currently hidden/minimized, deep-suspend the renderer: at
+/// hide time an active live session had only dropped it to `MemoryUsageTargetLevel
+/// = LOW` (to keep the feed's event handlers running), and nothing else re-runs
+/// that idle-vs-live decision when the session ends in the tray.
+///
+/// MUST be called AFTER the `live_sessions` lock is released. This itself briefly
+/// re-locks (via `has_active_live_session`) and then touches the window through
+/// `webview_power`; neither holds the lock across a thread join, so it keeps the
+/// same off-lock discipline as every other post-removal side effect here. No-op
+/// unless the map is now empty; no-op on non-Windows.
+fn reevaluate_webview_power_after_live_change(app: &tauri::AppHandle) {
+    let state = app.state::<UploaderState>();
+    if !state.has_active_live_session() {
+        crate::webview_power::on_live_session_ended(app);
+    }
 }
 
 /// Stop a running (or starting) live watch (the official uploader keeps its own
@@ -2245,7 +2720,7 @@ fn remove_finished_native_slot(
 /// show a stale `Live / 0 fights` badge. `fight_count` defaults to 0 when the
 /// caller doesn't supply it (e.g. an unmount-driven best-effort stop).
 #[tauri::command]
-pub fn uploader_stop_live(
+pub async fn uploader_stop_live(
     app: tauri::AppHandle,
     state: State<'_, UploaderState>,
     session_id: String,
@@ -2256,6 +2731,12 @@ pub fn uploader_stop_live(
     // pre-launch `cancelled.load` can't see "slot gone, flag still false" and
     // launch the uploader after this stop. Any removed running handle is joined after
     // the lock is released.
+    //
+    // The command is `async` so the native join runs OFF the Tauri main thread via
+    // `stop_handle_off_executor`; a sync command would block the main event loop for the
+    // driver's terminate window (A2). The locked `stop_slot_in_map` block below is
+    // synchronous and holds no `.await`, so the store-cancel-before-remove invariant and
+    // the "release the lock before joining" rule are unchanged.
     let stopped = {
         let mut sessions = state
             .live_sessions
@@ -2270,9 +2751,9 @@ pub fn uploader_stop_live(
     // as an official handoff. For an official Watch/Starting slot, settle as today.
     let was_native = stopped.native_owned;
     if let Some(handle) = stopped.handle {
-        // This command is sync (not on a Tokio worker), so a native join here is
-        // already off the async executor; `stop_handle_blocking` joins both variants.
-        stop_handle_blocking(handle);
+        // The lock is released; join off the async executor so a native join (which can
+        // be mid-POST) never blocks a Tokio worker or the main thread.
+        stop_handle_off_executor(handle).await;
     }
     if !was_native {
         // Settle the matching official-handoff record (Live → HandedOff, with the
@@ -2280,6 +2761,9 @@ pub fn uploader_stop_live(
         // waiting for the next-launch reconcile. Best-effort: a missing record is fine.
         let _ = super::history::settle_live(&app, &session_id, fight_count.unwrap_or(0));
     }
+    // The lock is released and any handle joined; if this stop drained the last
+    // live session while the window sits in the tray, deep-suspend the renderer.
+    reevaluate_webview_power_after_live_change(&app);
     Ok(())
 }
 
@@ -2319,18 +2803,17 @@ pub fn uploader_attach_report(
         .filter(|code| !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric()))
         .ok_or_else(|| "Enter a valid esologs.com report link.".to_string())?;
 
-    let mut records = super::history::load(&app);
-    let Some(record) = records.iter_mut().find(|r| r.id == id) else {
-        return Err("Upload record not found.".into());
-    };
     // Build the canonical URL from the validated code (matches the other two
-    // ReportRef construction sites).
-    record.report = Some(ReportRef {
-        url: watcher::report_url(code),
-        code: code.to_string(),
-    });
-    let updated = record.clone();
-    super::history::upsert(&app, updated)
+    // ReportRef construction sites) and mutate history under MUTATION_LOCK so this
+    // load→mutate→save can't lose a concurrent driver settle (C6).
+    super::history::attach_report(
+        &app,
+        &id,
+        ReportRef {
+            url: watcher::report_url(code),
+            code: code.to_string(),
+        },
+    )
 }
 
 // ── Debug-only native LIVE-streaming spike round-trip (spike/native-live) ──────
@@ -2383,7 +2866,7 @@ pub async fn uploader_run_native_live_spike(
     // a manual tester has time to append fights between steps; the END_LOG line ends
     // the session promptly regardless, so a large deadline only affects the "tester
     // walked away" case.
-    let tail = FileTail::new(120);
+    let tail = FileTail::new(120, std::sync::Arc::clone(&cancel));
 
     let (code, segments) = tokio::task::spawn_blocking(move || {
         run_native_live_spike(&growing_path, provider, &opts, cancel, &tail)
@@ -2692,5 +3175,76 @@ mod native_live_routing_tests {
             }),
         );
         assert!(native_path_taken(&s, path, "me"), "running native → taken");
+    }
+}
+
+#[cfg(test)]
+mod uploader_command_tests {
+    use super::{path_has_log_extension, run_sign_out, validate_import_source, SignOut};
+    use std::path::Path;
+
+    // B4: the import extension gate must hold on BOTH the raw caller path AND the
+    // canonicalized target. A `.log` name whose resolved target is not `.log` (the
+    // symlink-bypass shape) must be rejected; a genuine `.log` → `.log` passes.
+    #[test]
+    fn validate_import_source_requires_log_on_both_paths() {
+        assert!(validate_import_source(Path::new("a.log"), Path::new("b.log")).is_ok());
+        assert!(validate_import_source(Path::new("a.LOG"), Path::new("b.Log")).is_ok());
+        // Symlink bypass: raw name is `.log`, canonical target is not.
+        assert!(validate_import_source(Path::new("report.log"), Path::new("secret.txt")).is_err());
+        // Raw name isn't `.log` (the raw fast-fail case).
+        assert!(validate_import_source(Path::new("a.txt"), Path::new("b.log")).is_err());
+        // Neither has an extension.
+        assert!(validate_import_source(Path::new("noext"), Path::new("noext")).is_err());
+        assert!(path_has_log_extension(Path::new("x.log")));
+        assert!(!path_has_log_extension(Path::new("x.txt")));
+    }
+
+    // B4: a `.log` symlink pointing at a non-`.log` file must be rejected once the
+    // target is canonicalized — the raw link name alone would pass the gate.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_log_pointing_at_non_log_is_rejected_after_canonicalize() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("secret.txt");
+        std::fs::write(&target, b"secret").unwrap();
+        let link = dir.path().join("report.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let canonical = dunce::canonicalize(&link).unwrap();
+        // The link name passes the extension gate, but the resolved target does not.
+        assert!(path_has_log_extension(&link));
+        assert!(!path_has_log_extension(&canonical));
+        assert!(validate_import_source(&link, &canonical).is_err());
+    }
+
+    // B1: an EXPLICIT sign-out must invalidate the stored session AND clear the webview
+    // cookie jar, in that order. The mock records both calls so the two-step discipline
+    // is pinned without the live Tauri window API. The mid-upload 401/419 path calls
+    // `SessionProvider::invalidate` directly (never `run_sign_out`), and `invalidate`
+    // has no window/AppHandle access, so it structurally cannot clear the jar — the only
+    // jar-clear is `clear_webview_jar` on this explicit-logout seam.
+    #[test]
+    fn explicit_sign_out_invalidates_then_clears_jar() {
+        use std::cell::RefCell;
+        struct MockSignOut {
+            calls: RefCell<Vec<&'static str>>,
+        }
+        impl SignOut for MockSignOut {
+            fn invalidate_session(&self) {
+                self.calls.borrow_mut().push("invalidate");
+            }
+            fn clear_webview_jar(&self) {
+                self.calls.borrow_mut().push("clear_jar");
+            }
+        }
+        let m = MockSignOut {
+            calls: RefCell::new(Vec::new()),
+        };
+        run_sign_out(&m);
+        assert_eq!(
+            *m.calls.borrow(),
+            vec!["invalidate", "clear_jar"],
+            "explicit sign-out must invalidate the session AND clear the webview jar, in order"
+        );
     }
 }

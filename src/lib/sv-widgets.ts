@@ -6,6 +6,7 @@ import type {
   NodeContext,
   EffectiveField,
   SvSchemaOverlay,
+  LamHintMap,
 } from "../types";
 import { classifyContext, humanizeKey } from "./sv-nodes";
 
@@ -82,7 +83,8 @@ export function resolveEffectiveField(
   context: NodeContext,
   overlay: SvSchemaOverlay,
   addonName: string,
-  knownCharacters: Set<string>
+  knownCharacters: Set<string>,
+  lamHints?: LamHintMap
 ): EffectiveField {
   // pathSegments already includes the addon name as the first element
   const nodeId = pathSegments.map((s) => s.replace(/\0/g, "\\0")).join("\0");
@@ -96,6 +98,16 @@ export function resolveEffectiveField(
   let readOnly = false;
   let label = humanizeKey(node.key);
 
+  // LAM-inferred dropdown: only upgrade text/number leaves, never toggles/colors/groups.
+  if (lamHints && (widget === "text" || widget === "number")) {
+    const hint = lamHints[node.key.toLowerCase()];
+    if (hint && hint.length > 0 && hint.some((o) => typeof o.value === typeof node.value)) {
+      widget = "dropdown";
+      confidence = "inferred";
+      props = { ...props, optionItems: hint };
+    }
+  }
+
   // Apply overlay if it exists
   const addonOverlay = overlay[addonName];
   if (addonOverlay) {
@@ -107,6 +119,8 @@ export function resolveEffectiveField(
       }
       if (override.props) {
         props = { ...props, ...override.props };
+        // A user's manual options list must beat LAM-detected labels.
+        if (override.props.options?.length) delete props.optionItems;
       }
       if (override.hidden !== undefined) hidden = override.hidden;
       if (override.readOnly !== undefined) readOnly = override.readOnly;
@@ -131,13 +145,15 @@ export function resolveEffectiveField(
         childContext,
         overlay,
         addonName,
-        knownCharacters
+        knownCharacters,
+        lamHints
       );
     });
   }
 
   return {
     nodeId,
+    path: pathSegments,
     key: node.key,
     label,
     widget,

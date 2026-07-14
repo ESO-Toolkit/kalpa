@@ -2,7 +2,10 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Check, Plus, ClipboardPaste, Pencil, CopyPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { GlassPanel } from "@/components/ui/glass-panel";
 import { SectionHeader } from "@/components/ui/section-header";
+import { ambientAnimationsEnabled, setAmbientAnimations } from "@/lib/ambient-animations";
 import { ThemeSwatch } from "@/components/ui/theme-swatch";
 import { ThemeEditor } from "@/components/theme-editor";
 import { useTheme } from "@/lib/use-theme";
@@ -55,6 +58,9 @@ export function AppearanceSettings() {
     deleteCustomTheme,
   } = useTheme();
   const [mode, setMode] = useState<Mode>({ view: "gallery" });
+  // The root class is the synchronous source of truth (hydrated at startup),
+  // so no load effect is needed.
+  const [ambientOn, setAmbientOn] = useState(ambientAnimationsEnabled);
 
   const grouped = useMemo(() => {
     const byCat = new Map<string, Theme[]>();
@@ -143,6 +149,31 @@ export function AppearanceSettings() {
 
   return (
     <div className="space-y-4">
+      {/* Effects */}
+      <section className="space-y-2">
+        <SectionHeader>Effects</SectionHeader>
+        <GlassPanel variant="subtle" className="p-3">
+          <label className="flex items-center gap-3 cursor-pointer">
+            <Checkbox
+              checked={ambientOn}
+              onCheckedChange={(checked) => {
+                const value = checked === true;
+                setAmbientOn(value);
+                setAmbientAnimations(value);
+              }}
+            />
+            <div>
+              <p className="text-sm font-medium text-white/90">Ambient animations</p>
+              <p className="text-xs text-muted-foreground">
+                Background orb drift and dialog shimmer. Turn off for the lowest possible CPU and
+                GPU use while playing — the decorative layer goes fully static. Either way,
+                animations already pause automatically whenever Kalpa isn&apos;t the focused window.
+              </p>
+            </div>
+          </label>
+        </GlassPanel>
+      </section>
+
       {/* Action bar */}
       <div className="flex items-center gap-2">
         <Button size="sm" onClick={startNew}>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useReducedMotion } from "motion/react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -138,7 +138,7 @@ function ChooserRow({
   );
 }
 
-export function UpdateBanner({
+function UpdateBannerBase({
   availableCount,
   updatingAll,
   updateProgress,
@@ -443,3 +443,8 @@ export function UpdateBanner({
     </Slide>
   );
 }
+
+// Memoized: during Update All the banner is the only legitimate consumer of the
+// per-event progress state; everything else in App bails, and the banner bails
+// out of unrelated renders (keystrokes, dialogs) in turn.
+export const UpdateBanner = memo(UpdateBannerBase);

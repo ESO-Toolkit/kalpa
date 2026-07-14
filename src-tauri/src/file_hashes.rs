@@ -3,10 +3,21 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Format a byte slice (typically a finalized SHA-256 digest) as a lowercase
+/// hex string with a single allocation, instead of a `format!` per byte.
+pub fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
 
 fn is_zero(v: &u32) -> bool {
     *v == 0
@@ -44,7 +55,7 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
     let mut file =
         fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {e}"))?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 8192];
+    let mut buf = [0u8; 64 * 1024];
     loop {
         let n = file
             .read(&mut buf)
@@ -54,11 +65,7 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(to_hex(&hasher.finalize()))
 }
 
 /// Prefix marking a cheap size-only signature, as opposed to a 64-hex SHA-256
@@ -178,11 +185,7 @@ fn stream_sha256(reader: &mut impl Read) -> Result<String, std::io::Error> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(to_hex(&hasher.finalize()))
 }
 
 const MAX_WALK_DEPTH: u32 = 32;
@@ -388,6 +391,29 @@ pub fn load_hash_manifest(addons_dir: &Path, folder_name: &str) -> Option<HashMa
         manifest.esoui_ids = vec![manifest.esoui_id];
     }
     Some(manifest)
+}
+
+/// Read ONLY the count of `modified_files` recorded in a folder's hash manifest,
+/// without deserializing the (potentially many-thousand-entry) `files` map.
+///
+/// The startup scan uses this to populate `modified_file_count` for every addon;
+/// deserializing the full [`HashManifest`] there wastes a 64-hex `String` per
+/// tracked file (thousands for media libraries) that is immediately discarded.
+/// Returns `None` when no manifest exists on disk. Reads through the same
+/// backup-aware loader as [`load_hash_manifest`]; serde silently skips the
+/// fields absent from the slim struct.
+pub fn load_modified_file_count(addons_dir: &Path, folder_name: &str) -> Option<u32> {
+    let path = manifest_path(addons_dir, folder_name);
+    if !path.exists() {
+        return None;
+    }
+    #[derive(Default, Deserialize)]
+    struct SlimManifest {
+        #[serde(default)]
+        modified_files: Vec<String>,
+    }
+    let slim: SlimManifest = metadata::load_json_with_backup(&path);
+    Some(slim.modified_files.len() as u32)
 }
 
 /// Compare current files on disk against stored hashes.

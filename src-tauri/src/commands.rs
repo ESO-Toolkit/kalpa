@@ -475,6 +475,54 @@ pub(crate) fn build_installed_index(
     (names, versions)
 }
 
+/// Like [`build_installed_index`] but seeds the TOP-LEVEL addon names/versions
+/// from an already-parsed manifest list instead of re-reading (and re-parsing
+/// the `AddOnVersion` from) every top-level manifest on disk a second time.
+///
+/// The startup scan has just parsed every top-level manifest; the parsed list is
+/// exactly the set of top-level folders that carry a matching manifest — the same
+/// gate [`record_addon`] applies — and each entry carries the same
+/// `addon_version` [`read_addon_version`] would recover. Bundled libraries under
+/// wrapper folders are NOT in the parsed list, so subfolders are still walked
+/// (over every non-disabled top-level directory, matching the descent in
+/// [`build_installed_index`]).
+fn build_installed_index_from_parsed(
+    parsed: &[AddonManifest],
+    top_dirs: &[(String, PathBuf, bool)],
+) -> (HashSet<String>, HashMap<String, Option<u32>>) {
+    let mut names = HashSet::new();
+    let mut versions: HashMap<String, Option<u32>> = HashMap::new();
+
+    // Top-level: mirror `record_addon` using the already-parsed manifest data.
+    // Disabled folders are excluded, exactly as `build_installed_index` skips
+    // `.disabled` directories.
+    for addon in parsed {
+        if addon.disabled {
+            continue;
+        }
+        let key = normalize_addon_name(&addon.folder_name);
+        match addon.addon_version {
+            Some(ver) => merge_max_version(&mut versions, key.clone(), ver),
+            None => {
+                versions.entry(key.clone()).or_insert(None);
+            }
+        }
+        names.insert(key);
+    }
+
+    // Subfolders (2 levels): ESO discovers nested addons/libraries under plain
+    // wrapper folders such as `Libs/`, so descend into every non-disabled
+    // top-level directory just as `build_installed_index` does.
+    for (_name, path, disabled) in top_dirs {
+        if *disabled {
+            continue;
+        }
+        collect_subfolders_into(path, &mut names, &mut versions);
+    }
+
+    (names, versions)
+}
+
 /// Names-only view of [`build_installed_index`], for callers that don't need
 /// versions (the install-time transitive resolver).
 pub(crate) fn build_installed_set(addons_dir: &Path) -> HashSet<String> {
@@ -879,19 +927,31 @@ fn scan_installed_addons_blocking(
     }
     addons.extend(newly_parsed.into_iter().map(|(_, m, _)| m));
 
-    // One manifest-gated traversal yields both the installed-name set and the
-    // version map, so "missing" and "outdated" always agree on what exists.
-    let (installed, version_map) = build_installed_index(addons_dir);
+    // Derive the installed-name set and version map from the manifests just
+    // parsed above (top level) plus a subfolder-only walk for bundled libraries,
+    // instead of re-reading every top-level manifest a second time. "missing" and
+    // "outdated" still agree on what exists because the same manifest gate and
+    // `AddOnVersion` value feed both.
+    let (installed, version_map) = build_installed_index_from_parsed(&addons, &top_dirs);
 
     // Load metadata and clean up stale entries:
     // - Remove entries for addon folders that no longer exist on disk
     // - Deduplicate entries with the same esoui_id (keep the one that exists)
     let mut store = metadata::load_metadata(addons_dir);
+    // The directory scan above already enumerated every top-level folder (enabled
+    // or .disabled) into `top_dirs`, so a metadata key matching one of those base
+    // names is known-present without touching the filesystem again. Keys that miss
+    // the set still get the original stat checks — a metadata key can differ from
+    // the on-disk name in case (Windows is case-insensitive) or carry an unusual
+    // suffix, and those must keep pruning exactly as before.
+    let on_disk: HashSet<&str> = top_dirs.iter().map(|(name, _, _)| name.as_str()).collect();
     let stale: Vec<String> = store
         .addons
         .keys()
         .filter(|name| {
-            !addons_dir.join(name).is_dir() && !addons_dir.join(format!("{name}.disabled")).is_dir()
+            !on_disk.contains(name.as_str())
+                && !addons_dir.join(name).is_dir()
+                && !addons_dir.join(format!("{name}.disabled")).is_dir()
         })
         .cloned()
         .collect();
@@ -903,6 +963,18 @@ fn scan_installed_addons_blocking(
             eprintln!("Warning: failed to prune stale metadata: {e}");
         }
     }
+
+    // Modified-file counts live in one JSON manifest per addon under
+    // .kalpa-hashes; each read is independent disk I/O, so collect them in
+    // parallel (mirroring the manifest parsing above) instead of paying one
+    // sequential read per addon inside the enrichment loop.
+    let modified_counts: HashMap<String, u32> = addons
+        .par_iter()
+        .filter_map(|addon| {
+            file_hashes::load_modified_file_count(addons_dir, &addon.folder_name)
+                .map(|count| (addon.folder_name.clone(), count))
+        })
+        .collect();
 
     // Check for missing/outdated dependencies and enrich with ESOUI ID.
     // All lookups normalize the dependency name so resolution is
@@ -950,13 +1022,14 @@ fn scan_installed_addons_blocking(
             addon.installed_at = meta.installed_at.clone();
         }
 
-        if let Some(hash_manifest) = file_hashes::load_hash_manifest(addons_dir, &addon.folder_name)
-        {
-            addon.modified_file_count = hash_manifest.modified_files.len() as u32;
+        if let Some(count) = modified_counts.get(&addon.folder_name) {
+            addon.modified_file_count = *count;
         }
     }
 
-    addons.sort_by_key(|a| a.title.to_lowercase());
+    // Cached keys: comparison-time lowercasing allocates a String per compare
+    // (O(n log n) allocations); the key itself is unchanged.
+    addons.sort_by_cached_key(|a| a.title.to_lowercase());
 
     Ok(addons)
 }
@@ -1325,7 +1398,7 @@ struct UpdatePending {
 /// lookup table. Must be called under the metadata lock.
 fn check_for_updates_metadata(
     addons_dir: &Path,
-    api_lookup: &HashMap<String, esoui::ApiAddonLookup>,
+    api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
 ) -> Result<Vec<UpdatePending>, String> {
     let mut store = metadata::load_metadata(addons_dir);
     let mut metadata_changed = false;
@@ -1900,7 +1973,7 @@ fn generate_session_id(folder_name: &str) -> String {
         .as_nanos();
     let input = format!("{folder_name}-{nanos}");
     let hash = Sha256::digest(input.as_bytes());
-    hash.iter().take(16).map(|b| format!("{b:02x}")).collect()
+    file_hashes::to_hex(&hash[..16])
 }
 
 /// Build a conflict report for one addon folder against a downloaded ZIP, and
@@ -2030,7 +2103,7 @@ pub async fn scan_update_conflicts(
                     folder_name: folder_name.clone(),
                     esoui_id,
                     update_version: info.version,
-                    zip_hashes,
+                    zip_hashes: Arc::new(zip_hashes),
                 },
             );
         }
@@ -2199,7 +2272,7 @@ pub async fn scan_batch_conflicts(
                                         folder_name: folder_name.clone(),
                                         esoui_id: dl.esoui_id,
                                         update_version: version.to_string(),
-                                        zip_hashes,
+                                        zip_hashes: Arc::new(zip_hashes),
                                     },
                                 );
                             }
@@ -2504,7 +2577,7 @@ fn extract_streamed_downloads(
                         folder_name: folder_name.clone(),
                         esoui_id: dl.esoui_id,
                         update_version: dl.api_version.clone(),
-                        zip_hashes: zip_hashes.clone(),
+                        zip_hashes: Arc::new(zip_hashes),
                     },
                 );
             }
@@ -2885,9 +2958,12 @@ fn update_with_decisions_inner(
     // record_hashes_with_zip_baseline) and supplies the upstream hashes for kept
     // "keep_mine" files so the user's edit stays detectable on the next update.
     let zip_hashes = if pu.zip_hashes.is_empty() {
-        file_hashes::hash_zip_entries(&pu.zip_path, &pu.folder_name)?
+        Arc::new(file_hashes::hash_zip_entries(
+            &pu.zip_path,
+            &pu.folder_name,
+        )?)
     } else {
-        pu.zip_hashes.clone()
+        Arc::clone(&pu.zip_hashes)
     };
     let hash_overrides: Option<HashMap<String, String>> = if kept_files.is_empty() {
         None
@@ -3111,6 +3187,18 @@ fn validate_relative_path(relative_path: &str) -> Result<(), String> {
     }
     if relative_path.starts_with('/') || relative_path.starts_with('\\') {
         return Err("Path must be relative.".to_string());
+    }
+    // Reject Windows-forbidden characters (same set as `validate_name`) in any
+    // path segment. Without this, ':' slips through and enables NTFS
+    // alternate-data-stream syntax ("file.lua:stream") or a drive-relative path
+    // ("C:foo"), neither of which is caught by the checks above.
+    let forbidden: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+    for segment in relative_path.split(['/', '\\']) {
+        if segment.contains(forbidden) {
+            return Err(
+                "Path contains a forbidden character (< > : \" | ? * are not allowed).".to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -3380,7 +3468,7 @@ pub async fn auto_link_addons(
 
 fn auto_link_addons_blocking(
     addons_dir: &Path,
-    api_lookup: &HashMap<String, esoui::ApiAddonLookup>,
+    api_lookup: &HashMap<String, Arc<esoui::ApiAddonLookup>>,
 ) -> Result<AutoLinkResult, String> {
     let mut store = metadata::load_metadata(addons_dir);
 
@@ -4280,6 +4368,13 @@ pub struct BackupInfo {
     pub file_count: u32,
     pub total_size: u64,
     pub kind: BackupKind,
+    /// Distinct megaservers this backup's world-scoped subtrees span (read
+    /// from the character-backup metadata sidecar). `> 1` means an
+    /// Unknown-server backup silently bundled a same-named twin from another
+    /// server. `None` for non-`Character` backups or if the sidecar can't be
+    /// read (e.g. an older backup predating this field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worlds_spanned: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -4301,97 +4396,119 @@ fn saved_variables_dir(addons_dir: &std::path::Path) -> PathBuf {
 }
 
 #[tauri::command]
-pub fn list_backups(
+pub async fn list_backups(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<Vec<BackupInfo>, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let backups = backups_dir(&addons_dir);
-    if !backups.is_dir() {
-        return Ok(Vec::new());
-    }
-
-    // Self-heal any character backup orphaned by a crash mid-finalization before
-    // listing, so a recovered backup is visible to the restore flow.
-    recover_orphaned_backups(&backups);
-
-    let mut results: Vec<BackupInfo> = Vec::new();
-    let entries =
-        fs::read_dir(&backups).map_err(|e| format!("Failed to read backups folder: {e}"))?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        // Skip dot-prefixed transient dirs (e.g. a crash-orphaned char-backup
-        // staging folder); real backups never start with '.'.
-        if name.starts_with('.') {
-            continue;
+    tokio::task::spawn_blocking(move || {
+        let backups = backups_dir(&addons_dir);
+        if !backups.is_dir() {
+            return Ok(Vec::new());
         }
 
-        // Count files and total size (skip dot-prefixed metadata like the
-        // character-backup marker so the count reflects real SavedVariables).
-        let mut file_count: u32 = 0;
-        let mut total_size: u64 = 0;
-        if let Ok(files) = fs::read_dir(&path) {
-            for f in files.flatten() {
-                let is_dotfile = f
-                    .file_name()
-                    .to_str()
-                    .map(|n| n.starts_with('.'))
-                    .unwrap_or(false);
-                if f.path().is_file() && !is_dotfile {
-                    file_count += 1;
-                    total_size += f.metadata().map(|m| m.len()).unwrap_or(0);
+        // Self-heal any character backup orphaned by a crash mid-finalization before
+        // listing, so a recovered backup is visible to the restore flow.
+        recover_orphaned_backups(&backups);
+
+        let mut results: Vec<BackupInfo> = Vec::new();
+        let entries =
+            fs::read_dir(&backups).map_err(|e| format!("Failed to read backups folder: {e}"))?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Skip dot-prefixed transient dirs (e.g. a crash-orphaned char-backup
+            // staging folder); real backups never start with '.'.
+            if name.starts_with('.') {
+                continue;
+            }
+
+            // Count files and total size (skip dot-prefixed metadata like the
+            // character-backup marker so the count reflects real SavedVariables).
+            let mut file_count: u32 = 0;
+            let mut total_size: u64 = 0;
+            if let Ok(files) = fs::read_dir(&path) {
+                for f in files.flatten() {
+                    let is_dotfile = f
+                        .file_name()
+                        .to_str()
+                        .map(|n| n.starts_with('.'))
+                        .unwrap_or(false);
+                    if f.path().is_file() && !is_dotfile {
+                        file_count += 1;
+                        total_size += f.metadata().map(|m| m.len()).unwrap_or(0);
+                    }
                 }
             }
+
+            // Extract timestamp from folder name or use modification time
+            let created_at_epoch = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                })
+                .unwrap_or(0);
+            let created_at = metadata::format_timestamp(created_at_epoch);
+
+            // Only classify a `char-`-named dir as Character when it actually
+            // carries the v2 marker file — an unmarked `char-*` dir (e.g. a
+            // legacy/manual backup routed there by `resolve_char_backup_name`)
+            // restores via the WholeFile path (see classify_backup_for_restore),
+            // so it must display as Manual to match, not claim a Character
+            // format it doesn't have.
+            let kind = if name.starts_with("char-") && path.join(CHAR_BACKUP_MARKER).is_file() {
+                BackupKind::Character
+            } else if name.starts_with("auto-before-restore-") {
+                BackupKind::AutoBeforeRestore
+            } else {
+                BackupKind::Manual
+            };
+
+            // For a Character backup, read `worlds_spanned` from its metadata
+            // sidecar so the restore UI can warn about an Unknown-server backup
+            // that silently spans multiple megaservers. Best-effort: a missing or
+            // unreadable sidecar (e.g. an older backup) just yields `None`.
+            let worlds_spanned = (kind == BackupKind::Character)
+                .then(|| fs::read(path.join(CHAR_BACKUP_META)).ok())
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<CharBackupMeta>(&bytes).ok())
+                .map(|m| m.worlds_spanned);
+
+            results.push(BackupInfo {
+                name,
+                created_at,
+                created_at_epoch,
+                file_count,
+                total_size,
+                kind,
+                worlds_spanned,
+            });
         }
 
-        // Extract timestamp from folder name or use modification time
-        let created_at_epoch = fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .map(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            })
-            .unwrap_or(0);
-        let created_at = metadata::format_timestamp(created_at_epoch);
-
-        let kind = if name.starts_with("char-") {
-            BackupKind::Character
-        } else if name.starts_with("auto-before-restore-") {
-            BackupKind::AutoBeforeRestore
-        } else {
-            BackupKind::Manual
-        };
-
-        results.push(BackupInfo {
-            name,
-            created_at,
-            created_at_epoch,
-            file_count,
-            total_size,
-            kind,
-        });
-    }
-
-    results.sort_by_key(|b| std::cmp::Reverse(b.created_at_epoch));
-    Ok(results)
+        results.sort_by_key(|b| std::cmp::Reverse(b.created_at_epoch));
+        Ok(results)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Reserved directory-name prefixes inside `kalpa-backups`. User-created manual
 /// backups must not use them, or they could collide with — and the transactional
 /// swap could overwrite — a character backup (`char-`), a safe-restore snapshot
-/// (`auto-before-restore-`), or a dot-prefixed scratch dir.
-const RESERVED_BACKUP_PREFIXES: &[&str] = &["char-", "auto-before-restore-"];
+/// (`auto-before-restore-`), an auto-cleanup snapshot (`auto-cleanup-`, created
+/// by `delete_saved_variables_blocking` in `io.rs`), or a dot-prefixed scratch dir.
+const RESERVED_BACKUP_PREFIXES: &[&str] = &["char-", "auto-before-restore-", "auto-cleanup-"];
 
 /// Validate a user-supplied *manual* backup name: the general name rules plus a
 /// rejection of the reserved internal prefixes. (Restore/delete keep using
@@ -4416,6 +4533,11 @@ pub async fn create_backup(
     validate_backup_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
+        // Serialize against every other backup-surface command (restore/delete/
+        // character-backup) for the whole operation.
+        let _mutation_guard = BACKUP_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sv_dir = saved_variables_dir(&addons_dir);
         if !sv_dir.is_dir() {
             return Err("SavedVariables folder not found.".to_string());
@@ -4430,20 +4552,50 @@ pub async fn create_backup(
             return Err(format!("Backup '{backup_name}' already exists."));
         }
 
-        fs::create_dir_all(&backup_path).map_err(|e| format!("Failed to create backup: {e}"))?;
+        // Best-effort sweep of stale `.tmp-manual-*` staging dirs left behind by a
+        // crash between a prior staging-dir creation and its final rename below.
+        // Safe to remove unconditionally here: `BACKUP_MUTATION_LOCK` (acquired
+        // above) serializes every `create_backup` call, so none can be mid-staging
+        // concurrently, and manual staging is always disposable — a partial
+        // manual backup is discarded on failure, never recovered.
+        if let Ok(entries) = fs::read_dir(&backups) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(".tmp-manual-"))
+                {
+                    let _ = fs::remove_dir_all(&path);
+                }
+            }
+        }
+
+        // Stage into a dot-prefixed sibling dir and only rename it into the final
+        // visible name once every file has copied successfully. This mirrors the
+        // character-backup staging pattern: a crash mid-loop leaves only an
+        // ignored `.tmp-manual-*` scratch dir (list_backups skips '.'-prefixed
+        // entries) instead of a partial backup under the real, restorable name.
+        let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = backups.join(format!(".tmp-manual-{backup_name}-{seq}"));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup: {e}"))?;
 
         // Copy all .lua files from SavedVariables
         let mut file_count: u32 = 0;
         let mut total_size: u64 = 0;
-        let entries =
-            fs::read_dir(&sv_dir).map_err(|e| format!("Failed to read SavedVariables: {e}"))?;
+        let entries = fs::read_dir(&sv_dir).map_err(|e| {
+            let _ = fs::remove_dir_all(&staging);
+            format!("Failed to read SavedVariables: {e}")
+        })?;
 
         let mut failed: Vec<String> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
                 if let Some(name) = path.file_name() {
-                    let dest = backup_path.join(name);
+                    let dest = staging.join(name);
                     match fs::copy(&path, &dest) {
                         Ok(_) => {
                             file_count += 1;
@@ -4458,11 +4610,18 @@ pub async fn create_backup(
         }
 
         if !failed.is_empty() {
+            let _ = fs::remove_dir_all(&staging);
             return Err(format!(
                 "Backup incomplete — {} file(s) failed to copy: {}",
                 failed.len(),
                 failed.join(", ")
             ));
+        }
+
+        // All files copied — publish atomically under the real name.
+        if let Err(e) = fs::rename(&staging, &backup_path) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Failed to finalize backup: {e}"));
         }
 
         let created_at_epoch = std::time::SystemTime::now()
@@ -4471,9 +4630,12 @@ pub async fn create_backup(
             .as_secs();
         let created_at = metadata::format_timestamp(created_at_epoch);
 
-        let kind = if backup_name.starts_with("char-") {
-            BackupKind::Character
-        } else if backup_name.starts_with("auto-before-restore-") {
+        // Manual backups created here never carry the `char-` marked format —
+        // reserved prefixes are rejected up front by `validate_backup_name`, and
+        // this path never writes CHAR_BACKUP_MARKER — so classify strictly
+        // between AutoBeforeRestore and Manual (see list_backups for the
+        // marker-based Character classification).
+        let kind = if backup_name.starts_with("auto-before-restore-") {
             BackupKind::AutoBeforeRestore
         } else {
             BackupKind::Manual
@@ -4486,6 +4648,9 @@ pub async fn create_backup(
             file_count,
             total_size,
             kind,
+            // This path never creates a Character backup (see `kind` above), so
+            // there is no sidecar to read a world span from.
+            worlds_spanned: None,
         })
     })
     .await
@@ -4499,10 +4664,9 @@ pub struct SafeRestoreResult {
     pub safety_snapshot: Option<BackupInfo>,
 }
 
-/// Remove oldest `auto-before-restore-*` snapshots, keeping at most `keep` of the most recent.
+/// Remove oldest snapshots matching `prefix`, keeping at most `keep` of the most recent.
 /// Errors are logged but do not fail the caller — pruning is best-effort.
-fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
-    let prefix = "auto-before-restore-";
+fn prune_auto_snapshots(backups_dir: &std::path::Path, prefix: &str, keep: usize) {
     let mut dirs: Vec<_> = match fs::read_dir(backups_dir) {
         Ok(rd) => rd
             .flatten()
@@ -4529,9 +4693,14 @@ fn prune_auto_snapshots(backups_dir: &std::path::Path, keep: usize) {
 
 /// Restore a per-character (v2) backup by MERGING each stored character subtree
 /// into the matching live SavedVariables file, leaving other characters and all
-/// account-wide data byte-identical. Returns `(restored_file_count, failures)`;
-/// failures are surfaced by the caller (the live data is unchanged on failure of
-/// a given file, and the caller has already taken a safety snapshot).
+/// account-wide data byte-identical. Returns `(restored_file_count, failures)`.
+///
+/// This is all-or-nothing: every backup file is read, extracted, and merged
+/// into memory first (phase 1); only if every file merges cleanly are the
+/// results written to disk (phase 2). If any file fails during phase 1, the
+/// restore aborts before writing anything, so live SavedVariables can never
+/// be left in a mixed old/new state (the caller has already taken a safety
+/// snapshot before calling this).
 fn restore_character_subtrees_merge(
     backup_path: &Path,
     sv_dir: &Path,
@@ -4564,6 +4733,12 @@ fn restore_character_subtrees_merge(
         }
     };
 
+    // Phase 1: read + extract + merge every backup file into memory without
+    // touching any live SavedVariables file. If any file fails, abort
+    // immediately (before phase 2 writes anything) so a mid-list failure can
+    // never leave the live data in a mixed old/new state.
+    let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
+
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -4581,13 +4756,13 @@ fn restore_character_subtrees_merge(
             Ok(b) => b,
             Err(e) => {
                 failed.push(format!("{name_str}: {e}"));
-                continue;
+                return (0, failed);
             }
         };
         let blocks = extract_character_blocks(&stored, &base, world);
         if blocks.is_empty() {
             failed.push(format!("{name_str}: no character subtree found in backup"));
-            continue;
+            return (0, failed);
         }
         let live_path = sv_dir.join(&name_str);
         let mut live = if live_path.is_file() {
@@ -4595,27 +4770,28 @@ fn restore_character_subtrees_merge(
                 Ok(b) => b,
                 Err(e) => {
                     failed.push(format!("{name_str}: {e}"));
-                    continue;
+                    return (0, failed);
                 }
             }
         } else {
             Vec::new()
         };
-        let mut ok = true;
         for block in &blocks {
             match merge_character_block(&live, block) {
                 Ok(merged) => live = merged,
                 Err(e) => {
                     failed.push(format!("{name_str}: {e}"));
-                    ok = false;
-                    break;
+                    return (0, failed);
                 }
             }
         }
-        if !ok {
-            continue;
-        }
-        match sv_io::write_raw_bytes(sv_dir, &name_str, &live) {
+        buffered.push((name_str, live));
+    }
+
+    // Phase 2: every file merged cleanly in phase 1 (no early return above),
+    // so commit all buffered writes.
+    for (name_str, bytes) in buffered {
+        match sv_io::write_raw_bytes(sv_dir, &name_str, &bytes) {
             Ok(_) => restored += 1,
             Err(e) => failed.push(format!("{name_str}: {e}")),
         }
@@ -4642,6 +4818,11 @@ pub async fn restore_backup_safe(
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
+    // Serialize against every other backup-surface command (create/delete/
+    // character-backup) for the whole operation.
+    let _mutation_guard = BACKUP_MUTATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let sv_dir = saved_variables_dir(&addons_dir);
     let backup_path = backups_dir(&addons_dir).join(&backup_name);
 
@@ -4694,11 +4875,12 @@ pub async fn restore_backup_safe(
                 file_count,
                 total_size,
                 kind: BackupKind::AutoBeforeRestore,
+                worlds_spanned: None,
             });
 
             // Keep only the 3 most recent auto-before-restore snapshots to prevent
             // unbounded disk growth (SavedVariables can reach 1-2 GB on trade-addon-heavy accounts).
-            prune_auto_snapshots(&backups_dir(&addons_dir), 3);
+            prune_auto_snapshots(&backups_dir(&addons_dir), "auto-before-restore-", 3);
         }
     }
 
@@ -4719,9 +4901,13 @@ pub async fn restore_backup_safe(
         }
         CharRestoreMode::WholeFile => {
             // Manual / auto-before-restore / legacy whole-file character backup:
-            // copy whole files into the SavedVariables folder.
+            // read every source file into memory first (phase 1), then only
+            // write them into the SavedVariables folder (phase 2) if every
+            // read succeeded — a mid-list read failure must not leave the
+            // live data half-restored.
             let entries =
                 fs::read_dir(&backup_path).map_err(|e| format!("Failed to read backup: {e}"))?;
+            let mut buffered: Vec<(String, Vec<u8>)> = Vec::new();
             for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
@@ -4731,15 +4917,24 @@ pub async fn restore_backup_safe(
                     if name.to_str().map(|n| n.starts_with('.')).unwrap_or(false) {
                         continue;
                     }
-                    let dest = sv_dir.join(name);
-                    match fs::copy(&path, &dest) {
-                        Ok(_) => restored += 1,
+                    let name_str = name.to_string_lossy().to_string();
+                    match fs::read(&path) {
+                        Ok(bytes) => buffered.push((name_str, bytes)),
                         Err(e) => {
-                            failed.push(format!("{}: {}", name.to_string_lossy(), e));
+                            failed.push(format!("{name_str}: {e}"));
                         }
                     }
                 }
             }
+            }
+
+            if failed.is_empty() {
+                for (name_str, bytes) in buffered {
+                    match sv_io::write_raw_bytes(&sv_dir, &name_str, &bytes) {
+                        Ok(_) => restored += 1,
+                        Err(e) => failed.push(format!("{name_str}: {e}")),
+                    }
+                }
             }
         }
     }
@@ -4782,30 +4977,41 @@ pub fn get_backups_folder_path(
 }
 
 #[tauri::command]
-pub fn delete_backup(
+pub async fn delete_backup(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     backup_name: String,
 ) -> Result<(), String> {
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let backups_root = backups_dir(&addons_dir);
-    // Reconcile crash leftovers before deleting so a deletion can't race with a
-    // pending recovery for the same backup name.
-    recover_orphaned_backups(&backups_root);
-    let backup_path = backups_root.join(&backup_name);
+    tokio::task::spawn_blocking(move || {
+        // Serialize against every other backup-surface command (create/restore/
+        // character-backup) for the whole operation. Acquired before
+        // `BACKUP_FINALIZE_LOCK` (taken below by `recover_orphaned_backups` and
+        // `purge_backup_scratch`) to keep lock ordering consistent.
+        let _mutation_guard = BACKUP_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let backups_root = backups_dir(&addons_dir);
+        // Reconcile crash leftovers before deleting so a deletion can't race with a
+        // pending recovery for the same backup name.
+        recover_orphaned_backups(&backups_root);
+        let backup_path = backups_root.join(&backup_name);
 
-    if !backup_path.is_dir() {
-        return Err(format!("Backup '{backup_name}' not found."));
-    }
+        if !backup_path.is_dir() {
+            return Err(format!("Backup '{backup_name}' not found."));
+        }
 
-    fs::remove_dir_all(&backup_path).map_err(|e| format!("Failed to delete backup: {e}"))?;
+        fs::remove_dir_all(&backup_path).map_err(|e| format!("Failed to delete backup: {e}"))?;
 
-    // Also purge any leftover staging/tombstone scratch dirs for this backup so a
-    // crash-recovery pass can't later resurrect a deleted character backup from a
-    // tombstone that outlived a successful swap (e.g. failed cleanup).
-    purge_backup_scratch(&backups_root, &backup_name);
-    Ok(())
+        // Also purge any leftover staging/tombstone scratch dirs for this backup so a
+        // crash-recovery pass can't later resurrect a deleted character backup from a
+        // tombstone that outlived a successful swap (e.g. failed cleanup).
+        purge_backup_scratch(&backups_root, &backup_name);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 /// Remove `.tmp-<name>-<seq>` / `.old-<name>-<seq>` scratch directories left for
@@ -4860,12 +5066,92 @@ fn profiles_path(addons_dir: &std::path::Path) -> PathBuf {
     addons_dir.join("kalpa-profiles.json")
 }
 
+/// Stable FNV-1a 64-bit hash for deriving mirror file names from paths.
+/// `DefaultHasher` is seeded per-process and would scatter one instance's
+/// mirror across many files over time, so a fixed algorithm is required.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Where the app-data mirror of one instance's profile store lives:
+/// `<data dir>/kalpa/profile-mirrors/<path hash>.json`. Keyed by the
+/// canonicalized, lowercased AddOns path so live/EU/PTS each get their own
+/// mirror and Windows path-casing differences can't split one instance in two.
+fn default_profile_mirror_path(addons_dir: &std::path::Path) -> Option<PathBuf> {
+    let canonical = addons_dir
+        .canonicalize()
+        .unwrap_or_else(|_| addons_dir.to_path_buf());
+    let key = canonical.to_string_lossy().to_lowercase();
+    let name = format!("{:016x}.json", fnv1a64(key.as_bytes()));
+    Some(
+        dirs::data_dir()?
+            .join("kalpa")
+            .join("profile-mirrors")
+            .join(name),
+    )
+}
+
+fn load_profiles_with_mirror(
+    addons_dir: &std::path::Path,
+    mirror: Option<&std::path::Path>,
+) -> ProfileStore {
+    let primary = profiles_path(addons_dir);
+    // The store lives inside the AddOns folder (which is what scopes profiles
+    // per instance), but that folder gets wiped by reinstalls and PTS cleanups.
+    // When the primary AND its crash-recovery artifacts are all gone, fall back
+    // to the app-data mirror so profiles survive the wipe.
+    let primary_gone = !primary.exists()
+        && !primary.with_extension("json.tmp").exists()
+        && !primary.with_extension("json.bak").exists();
+    if primary_gone {
+        if let Some(mirror) = mirror {
+            if let Ok(content) = fs::read_to_string(mirror) {
+                if let Ok(store) = serde_json::from_str::<ProfileStore>(&content) {
+                    return store;
+                }
+            }
+        }
+    }
+    metadata::load_json_with_backup(&primary)
+}
+
+fn save_profiles_with_mirror(
+    addons_dir: &std::path::Path,
+    mirror: Option<&std::path::Path>,
+    store: &ProfileStore,
+) -> Result<(), String> {
+    metadata::save_json_with_backup(&profiles_path(addons_dir), store)?;
+    // Best-effort: the mirror is a recovery copy, so its write never fails the
+    // save — a full data dir or blocked path just means no fallback this time.
+    if let Some(mirror) = mirror {
+        if let Some(parent) = mirror.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(store) {
+            let _ = fs::write(mirror, json);
+        }
+    }
+    Ok(())
+}
+
 fn load_profiles(addons_dir: &std::path::Path) -> ProfileStore {
-    metadata::load_json_with_backup(&profiles_path(addons_dir))
+    load_profiles_with_mirror(
+        addons_dir,
+        default_profile_mirror_path(addons_dir).as_deref(),
+    )
 }
 
 fn save_profiles(addons_dir: &std::path::Path, store: &ProfileStore) -> Result<(), String> {
-    metadata::save_json_with_backup(&profiles_path(addons_dir), store)
+    save_profiles_with_mirror(
+        addons_dir,
+        default_profile_mirror_path(addons_dir).as_deref(),
+        store,
+    )
 }
 
 #[tauri::command]
@@ -4876,6 +5162,39 @@ pub fn list_profiles(
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     let store = load_profiles(&addons_dir);
     Ok((store.profiles, store.active_profile))
+}
+
+/// Snapshot the currently enabled addons: top-level folders that carry a
+/// matching manifest (the same gate ESO applies when loading).
+fn snapshot_enabled_addons(addons_dir: &std::path::Path) -> Vec<String> {
+    let mut enabled: Vec<String> = Vec::new();
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            // Only include folders with manifests (actual addons)
+            if find_manifest(addons_dir, &folder_name).is_some() {
+                enabled.push(folder_name);
+            }
+        }
+    }
+    enabled.sort();
+    enabled
+}
+
+fn now_timestamp() -> String {
+    metadata::format_timestamp(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    )
 }
 
 #[tauri::command]
@@ -4892,35 +5211,10 @@ pub fn create_profile(
         return Err(format!("Profile '{profile_name}' already exists."));
     }
 
-    // Snapshot currently enabled addons (those with manifests in the AddOns folder)
-    let mut enabled: Vec<String> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&addons_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-            // Only include folders with manifests (actual addons)
-            if find_manifest(&addons_dir, &folder_name).is_some() {
-                enabled.push(folder_name);
-            }
-        }
-    }
-    enabled.sort();
-
     let profile = AddonProfile {
         name: profile_name,
-        enabled_addons: enabled,
-        created_at: metadata::format_timestamp(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        ),
+        enabled_addons: snapshot_enabled_addons(&addons_dir),
+        created_at: now_timestamp(),
     };
 
     store.profiles.push(profile.clone());
@@ -4936,6 +5230,273 @@ pub struct ActivateProfileResult {
     pub disabled: Vec<String>,
     pub failed: Vec<String>,
     pub missing: Vec<String>,
+    /// Addons kept (or re-)enabled because an addon in the profile requires
+    /// them via `## DependsOn`, even though they are not in the snapshot —
+    /// typically libraries installed after the profile was created.
+    pub kept_dependencies: Vec<String>,
+}
+
+/// The read-only rename plan for activating a profile — what WOULD change.
+/// Powers the pre-activation preview in the UI; `apply_profile` recomputes it
+/// at activation time so a stale preview can never rename the wrong folders.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfilePlan {
+    pub to_enable: Vec<String>,
+    pub to_disable: Vec<String>,
+    /// See [`ActivateProfileResult::kept_dependencies`].
+    pub kept_dependencies: Vec<String>,
+    pub missing: Vec<String>,
+    /// Addons the plan wants disabled but cannot: both `Foo/` and
+    /// `Foo.disabled/` exist, so the rename would collide.
+    pub blocked: Vec<String>,
+}
+
+/// On-disk copies of one addon base name: `Foo/` and/or `Foo.disabled/`.
+#[derive(Default)]
+struct FolderCopies {
+    enabled: Option<PathBuf>,
+    disabled: Option<PathBuf>,
+}
+
+impl FolderCopies {
+    /// The copy ESO would load after activation. When both exist the enabled
+    /// copy wins — the same duplicate policy the scanner applies.
+    fn winning_path(&self) -> Option<&PathBuf> {
+        self.enabled.as_ref().or(self.disabled.as_ref())
+    }
+}
+
+/// Compute the rename plan for activating a profile WITHOUT touching disk.
+///
+/// Extracted from the `activate_profile` command so the planning is
+/// unit-testable without Tauri state, and exposed via `preview_profile` so
+/// the UI can show what will change before anything is renamed. Two behaviors
+/// go beyond the raw snapshot:
+///
+/// - **Dependency retention**: any installed addon that a profile addon
+///   (transitively) requires via `## DependsOn` is kept enabled — or
+///   re-enabled — even when absent from the snapshot. Profiles are created
+///   before later updates can pull in new libraries, so activating an old
+///   snapshot must not disable a library its own addons need at load time.
+///   Dependencies already satisfied by a bundled copy inside an enabled
+///   folder (ESO's nested-addon resolution) trigger no retention.
+/// - **Duplicate tolerance**: when both `Foo/` and `Foo.disabled/` exist the
+///   enabled copy wins (matching the scanner), so an "enable" is already
+///   satisfied and plans no rename; a "disable" cannot be expressed by
+///   rename and is reported as `blocked` instead of attempted.
+pub(crate) fn plan_profile(addons_dir: &std::path::Path, profile: &AddonProfile) -> ProfilePlan {
+    // Group every top-level directory by base name so both copies of a
+    // duplicated addon are visible to one decision below.
+    let mut copies: HashMap<String, FolderCopies> = HashMap::new();
+    if let Ok(entries) = fs::read_dir(addons_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let folder_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+
+            // Skip non-addon folders and our own files
+            if folder_name.starts_with("kalpa-") {
+                continue;
+            }
+
+            match folder_name.strip_suffix(".disabled") {
+                Some(base) => copies.entry(base.to_string()).or_default().disabled = Some(path),
+                None => copies.entry(folder_name).or_default().enabled = Some(path),
+            }
+        }
+    }
+
+    // Names each top-level folder makes loadable: its own manifest name plus
+    // bundled libraries at ESO's nested-addon resolution depth (normalized,
+    // see `normalize_addon_name`).
+    let provides: HashMap<String, HashSet<String>> = copies
+        .iter()
+        .filter_map(|(base, c)| {
+            let path = c.winning_path()?;
+            let mut names = HashSet::new();
+            if find_manifest_in(path, base).is_some() {
+                names.insert(normalize_addon_name(base));
+            }
+            collect_subfolder_names(path, &mut names);
+            Some((base.clone(), names))
+        })
+        .collect();
+
+    // The target enabled set: the snapshot itself, expanded below with the
+    // installed dependencies of its addons.
+    let mut desired: HashSet<String> = profile
+        .enabled_addons
+        .iter()
+        .filter(|name| copies.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+
+    // Everything loadable after activation without further action: names
+    // provided by desired folders, plus by manifest-less wrapper folders
+    // (e.g. `Libs/`) — those carry bundled libraries but are never renamed
+    // by profiles, so their contents always stay available.
+    let mut satisfied: HashSet<String> = HashSet::new();
+    for (base, c) in &copies {
+        let untouched_wrapper = c
+            .enabled
+            .as_ref()
+            .is_some_and(|path| find_manifest_in(path, base).is_none());
+        if desired.contains(base) || untouched_wrapper {
+            if let Some(names) = provides.get(base) {
+                satisfied.extend(names.iter().cloned());
+            }
+        }
+    }
+
+    let mut kept_dependencies: Vec<String> = Vec::new();
+    let mut queue: Vec<String> = desired.iter().cloned().collect();
+    while let Some(base) = queue.pop() {
+        let Some(manifest_path) = copies
+            .get(&base)
+            .and_then(|c| c.winning_path())
+            .and_then(|path| find_manifest_in(path, &base))
+        else {
+            continue;
+        };
+        let Some(manifest) = manifest::parse_manifest(&base, &manifest_path) else {
+            continue;
+        };
+        for dep in &manifest.depends_on {
+            let key = normalize_addon_name(&dep.name);
+            if satisfied.contains(&key) {
+                continue;
+            }
+            // Find an installed top-level folder that provides this
+            // dependency. Prefer an exact folder-name match over a wrapper
+            // that merely bundles it, then a currently-enabled copy, then
+            // lexicographic order for determinism.
+            let mut candidates: Vec<&String> = provides
+                .iter()
+                .filter(|(b, names)| !desired.contains(*b) && names.contains(&key))
+                .map(|(b, _)| b)
+                .collect();
+            candidates.sort_by_key(|b| {
+                (
+                    normalize_addon_name(b) != key,
+                    copies.get(*b).is_none_or(|c| c.enabled.is_none()),
+                    (*b).clone(),
+                )
+            });
+            let Some(provider) = candidates.first().map(|b| (*b).clone()) else {
+                continue; // genuinely missing — the scanner will flag it
+            };
+            desired.insert(provider.clone());
+            if let Some(names) = provides.get(&provider) {
+                satisfied.extend(names.iter().cloned());
+            }
+            kept_dependencies.push(provider.clone());
+            queue.push(provider);
+        }
+    }
+
+    let mut to_enable: Vec<String> = Vec::new();
+    let mut to_disable: Vec<String> = Vec::new();
+    let mut blocked: Vec<String> = Vec::new();
+
+    for (base, c) in &copies {
+        let want_enabled = desired.contains(base);
+        match (&c.enabled, &c.disabled) {
+            (Some(enabled_path), Some(_)) => {
+                // Duplicate folders. Enabled copy wins, so wanting the addon
+                // enabled is already satisfied; wanting it disabled cannot be
+                // done by rename without a collision.
+                if !want_enabled && find_manifest_in(enabled_path, base).is_some() {
+                    blocked.push(base.clone());
+                }
+            }
+            (Some(path), None) => {
+                // Only disable folders that carry a manifest (real addons) —
+                // never wrapper directories like `Libs/`.
+                if !want_enabled && find_manifest_in(path, base).is_some() {
+                    to_disable.push(base.clone());
+                }
+            }
+            (None, Some(_)) => {
+                if want_enabled {
+                    to_enable.push(base.clone());
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    // Report addons referenced in the profile that no longer exist on disk
+    let mut missing: Vec<String> = profile
+        .enabled_addons
+        .iter()
+        .filter(|name| !copies.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+
+    // Deterministic output for the UI and tests regardless of dir order.
+    to_enable.sort();
+    to_disable.sort();
+    blocked.sort();
+    missing.sort();
+    kept_dependencies.sort();
+
+    ProfilePlan {
+        to_enable,
+        to_disable,
+        kept_dependencies,
+        missing,
+        blocked,
+    }
+}
+
+/// Execute a profile activation: recompute the plan against the CURRENT disk
+/// state, then perform the renames it calls for.
+pub(crate) fn apply_profile(
+    addons_dir: &std::path::Path,
+    profile: &AddonProfile,
+) -> ActivateProfileResult {
+    let plan = plan_profile(addons_dir, profile);
+
+    let mut enabled: Vec<String> = Vec::new();
+    let mut disabled: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+
+    for base in &plan.to_enable {
+        let src = addons_dir.join(format!("{base}.disabled"));
+        let dst = addons_dir.join(base);
+        match fs::rename(&src, &dst) {
+            Ok(_) => enabled.push(base.clone()),
+            Err(e) => failed.push(format!("{base} (enable: {e})")),
+        }
+    }
+    for base in &plan.to_disable {
+        let src = addons_dir.join(base);
+        let dst = addons_dir.join(format!("{base}.disabled"));
+        match fs::rename(&src, &dst) {
+            Ok(_) => disabled.push(base.clone()),
+            Err(e) => failed.push(format!("{base} (disable: {e})")),
+        }
+    }
+    for base in &plan.blocked {
+        failed.push(format!(
+            "{base} (disable: both '{base}' and '{base}.disabled' exist — remove the stale copy, then re-activate)"
+        ));
+    }
+    failed.sort();
+
+    ActivateProfileResult {
+        enabled,
+        disabled,
+        failed,
+        missing: plan.missing,
+        kept_dependencies: plan.kept_dependencies,
+    }
 }
 
 #[tauri::command]
@@ -4956,79 +5517,96 @@ pub async fn activate_profile(
             .cloned()
             .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
 
-        let enabled_set: HashSet<String> = profile.enabled_addons.iter().cloned().collect();
-
-        let mut disabled: Vec<String> = Vec::new();
-        let mut enabled: Vec<String> = Vec::new();
-        let mut failed: Vec<String> = Vec::new();
-        let mut seen_on_disk: HashSet<String> = HashSet::new();
-
-        if let Ok(entries) = fs::read_dir(&addons_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let folder_name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(name) => name.to_string(),
-                    None => continue,
-                };
-
-                // Skip non-addon folders and our own files
-                if folder_name.starts_with("kalpa-") {
-                    continue;
-                }
-
-                let is_disabled = folder_name.ends_with(".disabled");
-                let base_name = folder_name
-                    .strip_suffix(".disabled")
-                    .unwrap_or(&folder_name)
-                    .to_string();
-
-                seen_on_disk.insert(base_name.clone());
-
-                if enabled_set.contains(&base_name) {
-                    // Should be enabled
-                    if is_disabled {
-                        let new_path = addons_dir.join(&base_name);
-                        match fs::rename(&path, &new_path) {
-                            Ok(_) => enabled.push(base_name),
-                            Err(e) => failed.push(format!("{base_name} (enable: {e})")),
-                        }
-                    }
-                } else {
-                    // Should be disabled
-                    if !is_disabled && find_manifest(&addons_dir, &folder_name).is_some() {
-                        let new_path = addons_dir.join(format!("{folder_name}.disabled"));
-                        match fs::rename(&path, &new_path) {
-                            Ok(_) => disabled.push(folder_name),
-                            Err(e) => failed.push(format!("{folder_name} (disable: {e})")),
-                        }
-                    }
-                }
-            }
-        }
-
-        // Report addons referenced in the profile that no longer exist on disk
-        let missing: Vec<String> = profile
-            .enabled_addons
-            .iter()
-            .filter(|name| !seen_on_disk.contains(name.as_str()))
-            .cloned()
-            .collect();
+        let result = apply_profile(&addons_dir, &profile);
 
         store.active_profile = Some(profile_name);
         save_profiles(&addons_dir, &store)?;
 
-        Ok(ActivateProfileResult {
-            enabled,
-            disabled,
-            failed,
-            missing,
-        })
+        Ok(result)
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Dry-run of `activate_profile`: what would be enabled/disabled/kept, with
+/// no renames performed. The UI shows this as a confirmation step.
+#[tauri::command]
+pub async fn preview_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    profile_name: String,
+) -> Result<ProfilePlan, String> {
+    validate_name(&profile_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        let store = load_profiles(&addons_dir);
+        let profile = store
+            .profiles
+            .iter()
+            .find(|p| p.name == profile_name)
+            .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
+        Ok(plan_profile(&addons_dir, profile))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+/// Re-snapshot the currently enabled addons into an existing profile,
+/// refreshing its timestamp — "update profile from current state".
+#[tauri::command]
+pub fn update_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    profile_name: String,
+) -> Result<AddonProfile, String> {
+    validate_name(&profile_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let mut store = load_profiles(&addons_dir);
+
+    let profile = store
+        .profiles
+        .iter_mut()
+        .find(|p| p.name == profile_name)
+        .ok_or_else(|| format!("Profile '{profile_name}' not found."))?;
+
+    profile.enabled_addons = snapshot_enabled_addons(&addons_dir);
+    profile.created_at = now_timestamp();
+    let updated = profile.clone();
+
+    save_profiles(&addons_dir, &store)?;
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn rename_profile(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    old_name: String,
+    new_name: String,
+) -> Result<(), String> {
+    validate_name(&old_name)?;
+    validate_name(&new_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    let mut store = load_profiles(&addons_dir);
+
+    if old_name == new_name {
+        return Ok(());
+    }
+    if store.profiles.iter().any(|p| p.name == new_name) {
+        return Err(format!("Profile '{new_name}' already exists."));
+    }
+    let profile = store
+        .profiles
+        .iter_mut()
+        .find(|p| p.name == old_name)
+        .ok_or_else(|| format!("Profile '{old_name}' not found."))?;
+
+    profile.name = new_name.clone();
+    if store.active_profile.as_deref() == Some(&old_name) {
+        store.active_profile = Some(new_name);
+    }
+
+    save_profiles(&addons_dir, &store)
 }
 
 #[tauri::command]
@@ -5047,6 +5625,128 @@ pub fn delete_profile(
     }
 
     save_profiles(&addons_dir, &store)
+}
+
+// ─── Cross-instance addon copy ───────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyAddonsResult {
+    pub copied: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// Recursively copy a directory. On any error the partially-written
+/// destination is removed so a failed copy can't leave a half-addon that a
+/// later scan would mistake for a real install.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    fn walk(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                walk(&from, &to)?;
+            } else {
+                fs::copy(&from, &to)?;
+            }
+        }
+        Ok(())
+    }
+    walk(src, dst).map_err(|e| {
+        let _ = fs::remove_dir_all(dst);
+        format!("{e}")
+    })
+}
+
+/// Copy every enabled addon folder (manifest-gated) from `source` into
+/// `target`, skipping addons the target already has (enabled OR disabled —
+/// never overwrite another instance's state). Metadata entries (ESOUI id,
+/// tags, version) ride along for the copied addons so the target instance
+/// can check updates for them immediately.
+pub(crate) fn copy_addons_between(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> CopyAddonsResult {
+    let mut copied: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+
+    for folder in snapshot_enabled_addons(source) {
+        let dst = target.join(&folder);
+        let dst_disabled = target.join(format!("{folder}.disabled"));
+        if dst.exists() || dst_disabled.exists() {
+            skipped.push(folder);
+            continue;
+        }
+        match copy_dir_recursive(&source.join(&folder), &dst) {
+            Ok(_) => copied.push(folder),
+            Err(e) => failed.push(format!("{folder}: {e}")),
+        }
+    }
+
+    if !copied.is_empty() {
+        let src_store = metadata::load_metadata(source);
+        let mut dst_store = metadata::load_metadata(target);
+        let mut changed = false;
+        for name in &copied {
+            if let Some(entry) = src_store.addons.get(name) {
+                dst_store.addons.insert(name.clone(), entry.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(e) = metadata::save_metadata(target, &dst_store) {
+                failed.push(format!("metadata: {e}"));
+            }
+        }
+    }
+
+    copied.sort();
+    skipped.sort();
+    failed.sort();
+    CopyAddonsResult {
+        copied,
+        skipped,
+        failed,
+    }
+}
+
+/// Copy the active instance's enabled addons into another DETECTED game
+/// instance (e.g. set up PTS from the live loadout). The target is validated
+/// against the freshly detected instance list — an arbitrary directory is
+/// rejected so this command can't be used to write outside ESO's folders.
+#[tauri::command]
+pub async fn copy_addons_to_instance(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    target_addons_path: String,
+) -> Result<CopyAddonsResult, String> {
+    let source = require_allowed_path(&state, &addons_path)?;
+    let target = PathBuf::from(&target_addons_path);
+    let target_canonical = target
+        .canonicalize()
+        .map_err(|e| format!("Target AddOns folder is not accessible: {e}"))?;
+
+    let is_detected_instance = crate::game_instances::detect_all_game_instances()
+        .iter()
+        .any(|inst| {
+            PathBuf::from(&inst.addons_path)
+                .canonicalize()
+                .is_ok_and(|p| p == target_canonical)
+        });
+    if !is_detected_instance {
+        return Err("Target folder is not a detected ESO game instance.".to_string());
+    }
+    if source.canonicalize().is_ok_and(|p| p == target_canonical) {
+        return Err("Source and target are the same instance.".to_string());
+    }
+
+    tokio::task::spawn_blocking(move || Ok(copy_addons_between(&source, &target_canonical)))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── Multi-Character SavedVariables ──────────────────────────
@@ -5247,6 +5947,20 @@ static BACKUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 /// directory can't race on it (the per-call staging/tombstone handle the rest).
 static BACKUP_FINALIZE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Serializes whole backup-surface commands (`create_backup`,
+/// `restore_backup_safe`, `delete_backup`, `backup_character_settings`) against
+/// each other, so e.g. a restore can't race a concurrent create/delete over the
+/// same `kalpa-backups` folder. This is a *separate* lock from
+/// `BACKUP_FINALIZE_LOCK` — that one is non-reentrant and already held by
+/// `finalize_backup_replace`/`recover_orphaned_backups`, which are called from
+/// inside some of these commands, so reusing it here would self-deadlock.
+/// Lock ordering: callers always acquire `BACKUP_MUTATION_LOCK` first (for the
+/// whole command) and only afterwards, while still holding it, acquire
+/// `BACKUP_FINALIZE_LOCK` (via `recover_orphaned_backups`/
+/// `finalize_backup_replace`/`purge_backup_scratch`) — never the reverse — so
+/// the two locks can't deadlock each other.
+static BACKUP_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
 /// Extract `character_name`'s per-character subtree from each `.lua`
 /// SavedVariables file and write a minimal, self-contained, restorable copy of
 /// just that subtree into `staging` (same filename). `world` restricts
@@ -5254,8 +5968,14 @@ static BACKUP_FINALIZE_LOCK: Mutex<()> = Mutex::new(());
 /// `Unknown`-server recovered characters). Account-wide data and other
 /// characters are excluded.
 ///
-/// Returns `(matched, copied, last_err)` where `matched` is files that yielded at
-/// least one subtree and `copied` is files whose minimal copy was written.
+/// Returns `(matched, copied, last_err, worlds_spanned)` where `matched` is
+/// files that yielded at least one subtree, `copied` is files whose minimal
+/// copy was written, and `worlds_spanned` is the count of DISTINCT world-scoped
+/// layers seen across every matched block (account-only data contributes 0).
+/// This is only ever `> 1` for an Unknown-server backup (`world == None`),
+/// which takes world-scoped subtrees from every megaserver since it has no
+/// single world to filter to — a value `> 1` means a same-named twin on
+/// another server was silently bundled into this backup.
 /// Aborts with `Err` if any `.lua` file cannot be read, so an incomplete scan
 /// never produces an incomplete backup that could replace a good one.
 fn stage_character_subtrees(
@@ -5263,7 +5983,7 @@ fn stage_character_subtrees(
     character_name: &str,
     world: Option<&str>,
     staging: &Path,
-) -> Result<(u32, u32, Option<String>), String> {
+) -> Result<(u32, u32, Option<String>, u32), String> {
     use crate::saved_variables::char_backup::{
         build_backup_file, char_base, extract_character_blocks,
     };
@@ -5275,6 +5995,10 @@ fn stage_character_subtrees(
     let mut matched: u32 = 0;
     let mut copied: u32 = 0;
     let mut last_err: Option<String> = None;
+    // Distinct world-layer keys seen across every matched block. Only account-
+    // keyed blocks (no world layer) leave this empty; a world-scoped block adds
+    // its megaserver key.
+    let mut worlds_seen: HashSet<Vec<u8>> = HashSet::new();
 
     for entry in entries {
         // Abort on a directory-enumeration error rather than silently omitting a
@@ -5296,6 +6020,11 @@ fn stage_character_subtrees(
             continue;
         }
         matched += 1;
+        for block in &blocks {
+            if let Some(w) = block.world_layer() {
+                worlds_seen.insert(w.to_vec());
+            }
+        }
         match build_backup_file(&blocks) {
             Ok(content) => match fs::write(staging.join(&fname), &content) {
                 Ok(_) => copied += 1,
@@ -5308,7 +6037,7 @@ fn stage_character_subtrees(
         }
     }
 
-    Ok((matched, copied, last_err))
+    Ok((matched, copied, last_err, worlds_seen.len() as u32))
 }
 
 /// Atomically replace `final_dir` with `staging`, preserving the previous
@@ -5460,6 +6189,14 @@ struct CharBackupMeta {
     /// The character's megaserver as shown in the UI (a known megaserver, or
     /// `Unknown`); informational/display only.
     server: String,
+    /// Count of DISTINCT world-scoped layers this backup's subtrees span (see
+    /// `stage_character_subtrees`). Always `<= 1` for a known-server backup
+    /// (isolated by `world`); a value `> 1` only occurs for an Unknown-server
+    /// backup and means a same-named twin on another megaserver was silently
+    /// bundled in. Additive field: `#[serde(default)]` so older backups
+    /// without it deserialize as `0` (no false warning).
+    #[serde(default)]
+    worlds_spanned: u32,
 }
 
 /// How `restore_backup_safe` should restore a backup directory.
@@ -5570,14 +6307,26 @@ fn resolve_char_backup_name(backups_root: &Path, backup_name: &str) -> Option<St
     })
 }
 
+/// Result of [`backup_character_settings`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharBackupResult {
+    /// Files copied into the backup (previously the whole return value).
+    pub restored_files: u32,
+    /// Distinct megaservers this backup's world-scoped subtrees span. `> 1`
+    /// only for an Unknown-server character, and means a same-named twin on
+    /// another server was silently bundled in — the caller should warn.
+    pub worlds_spanned: u32,
+}
+
 #[tauri::command]
-pub fn backup_character_settings(
+pub async fn backup_character_settings(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     character_name: String,
     server: String,
     backup_name: String,
-) -> Result<u32, String> {
+) -> Result<CharBackupResult, String> {
     if character_name.trim().is_empty() {
         return Err("Character name cannot be empty.".to_string());
     }
@@ -5586,124 +6335,141 @@ pub fn backup_character_settings(
     }
     validate_name(&backup_name)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let sv_dir = saved_variables_dir(&addons_dir);
-    if !sv_dir.is_dir() {
-        return Err("SavedVariables folder not found.".to_string());
-    }
+    tokio::task::spawn_blocking(move || {
+        let sv_dir = saved_variables_dir(&addons_dir);
+        if !sv_dir.is_dir() {
+            return Err("SavedVariables folder not found.".to_string());
+        }
 
-    // Restrict world-scoped subtrees to this character's megaserver so a same-name
-    // NA/EU twin is backed up independently. A non-megaserver `server` (the
-    // `Unknown` recovered bucket) means we can't isolate by world, so we take any
-    // world-scoped occurrence (and account-keyed data, which carries no world).
-    let world: Option<&str> =
-        if crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(&server.as_str()) {
-            Some(server.as_str())
-        } else {
-            None
+        // Serialize against every other backup-surface command (create/restore/
+        // delete) for the whole operation. Acquired before `BACKUP_FINALIZE_LOCK`
+        // (taken below by `recover_orphaned_backups`/`finalize_backup_replace`) to
+        // keep lock ordering consistent.
+        let _mutation_guard = BACKUP_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Restrict world-scoped subtrees to this character's megaserver so a same-name
+        // NA/EU twin is backed up independently. A non-megaserver `server` (the
+        // `Unknown` recovered bucket) means we can't isolate by world, so we take any
+        // world-scoped occurrence (and account-keyed data, which carries no world).
+        let world: Option<&str> =
+            if crate::saved_variables::scrub::WELL_KNOWN_WORLDS.contains(&server.as_str()) {
+                Some(server.as_str())
+            } else {
+                None
+            };
+
+        // Stage into a dot-prefixed temp dir on the same volume, then atomically
+        // rename into place only after every matched file copies. This keeps a
+        // failed/partial backup from leaving restorable state and replaces any prior
+        // backup of the same name wholesale rather than mixing into it. A per-call
+        // sequence number makes the staging/tombstone unique so concurrent backups
+        // don't collide; the `.` prefix keeps them out of `list_backups`.
+        let backups_root = backups_dir(&addons_dir);
+        // Recover any crash-orphaned backup BEFORE touching scratch paths. The
+        // sequence counter resets on restart, so a retried backup of the same name
+        // could otherwise reuse a crash leftover's staging name and destroy the proof
+        // that recovery relies on. Running recovery first restores/cleans the leftover
+        // before this attempt can collide with it.
+        recover_orphaned_backups(&backups_root);
+
+        // Pick a target that is free or an existing marked character backup; route
+        // around an unmarked `char-*` directory (legacy/manual) to a numbered name so
+        // it is preserved, never silently overwritten.
+        let effective_name =
+            resolve_char_backup_name(&backups_root, &backup_name).ok_or_else(|| {
+                "Too many existing backups with this name; please choose a different name."
+                    .to_string()
+            })?;
+        let final_dir = backups_root.join(format!("char-{effective_name}"));
+        let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let staging = backups_root.join(format!(".tmp-char-{effective_name}-{seq}"));
+        let tombstone = backups_root.join(format!(".old-char-{effective_name}-{seq}"));
+        let _ = fs::remove_dir_all(&staging);
+        fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup folder: {e}"))?;
+
+        // Extract + stage just this character's per-character subtree(s) from each
+        // file. Aborts if any file can't be read, so an incomplete scan never
+        // silently produces (or installs) an incomplete backup.
+        let (matched, copied, last_copy_err, worlds_spanned) =
+            match stage_character_subtrees(&sv_dir, &character_name, world, &staging) {
+                Ok(counts) => counts,
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(format!(
+                        "Could not read all SavedVariables files while backing up \
+                         \"{character_name}\" ({e}). Backup aborted to avoid an incomplete \
+                         copy; close ESO and try again."
+                    ));
+                }
+            };
+
+        if matched == 0 {
+            // No file held this character's per-character data — discard staging and
+            // don't report success. A character with only account-wide addon settings
+            // (or, for a known server, data only under the OTHER megaserver) has no
+            // per-character subtree to copy.
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!(
+                "No per-character SavedVariables data found for \"{character_name}\". \
+                 This character may only use account-wide addon settings."
+            ));
+        }
+
+        if copied < matched {
+            // A subtree matched but couldn't be written or safely represented —
+            // discard the partial staging dir and surface it instead of leaving a
+            // restorable incomplete backup.
+            let _ = fs::remove_dir_all(&staging);
+            let detail = last_copy_err.map(|e| format!(" ({e})")).unwrap_or_default();
+            return Err(format!(
+                "Backed up only {copied} of {matched} SavedVariables files for \
+                 \"{character_name}\"; some files could not be saved{detail}."
+            ));
+        }
+
+        // Stamp the staged dir as a per-character (v2) backup. The versioned marker
+        // body positively identifies the format for restore (independent of the JSON
+        // sidecar), while the filename is what `char_backup_replaceable` checks.
+        if let Err(e) = fs::write(staging.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Failed to write backup marker: {e}"));
+        }
+
+        // Write the per-character metadata sidecar. Its presence routes restore
+        // through the subtree-MERGE path (vs. the legacy whole-file copy).
+        let meta = CharBackupMeta {
+            version: CHAR_BACKUP_VERSION,
+            character: character_name.clone(),
+            server: server.clone(),
+            worlds_spanned,
         };
-
-    // Stage into a dot-prefixed temp dir on the same volume, then atomically
-    // rename into place only after every matched file copies. This keeps a
-    // failed/partial backup from leaving restorable state and replaces any prior
-    // backup of the same name wholesale rather than mixing into it. A per-call
-    // sequence number makes the staging/tombstone unique so concurrent backups
-    // don't collide; the `.` prefix keeps them out of `list_backups`.
-    let backups_root = backups_dir(&addons_dir);
-    // Recover any crash-orphaned backup BEFORE touching scratch paths. The
-    // sequence counter resets on restart, so a retried backup of the same name
-    // could otherwise reuse a crash leftover's staging name and destroy the proof
-    // that recovery relies on. Running recovery first restores/cleans the leftover
-    // before this attempt can collide with it.
-    recover_orphaned_backups(&backups_root);
-
-    // Pick a target that is free or an existing marked character backup; route
-    // around an unmarked `char-*` directory (legacy/manual) to a numbered name so
-    // it is preserved, never silently overwritten.
-    let effective_name =
-        resolve_char_backup_name(&backups_root, &backup_name).ok_or_else(|| {
-            "Too many existing backups with this name; please choose a different name.".to_string()
-        })?;
-    let final_dir = backups_root.join(format!("char-{effective_name}"));
-    let seq = BACKUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let staging = backups_root.join(format!(".tmp-char-{effective_name}-{seq}"));
-    let tombstone = backups_root.join(format!(".old-char-{effective_name}-{seq}"));
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|e| format!("Failed to create backup folder: {e}"))?;
-
-    // Extract + stage just this character's per-character subtree(s) from each
-    // file. Aborts if any file can't be read, so an incomplete scan never
-    // silently produces (or installs) an incomplete backup.
-    let (matched, copied, last_copy_err) =
-        match stage_character_subtrees(&sv_dir, &character_name, world, &staging) {
-            Ok(counts) => counts,
+        match serde_json::to_vec_pretty(&meta) {
+            Ok(json) => {
+                if let Err(e) = fs::write(staging.join(CHAR_BACKUP_META), json) {
+                    let _ = fs::remove_dir_all(&staging);
+                    return Err(format!("Failed to write backup metadata: {e}"));
+                }
+            }
             Err(e) => {
                 let _ = fs::remove_dir_all(&staging);
-                return Err(format!(
-                    "Could not read all SavedVariables files while backing up \
-                     \"{character_name}\" ({e}). Backup aborted to avoid an incomplete \
-                     copy; close ESO and try again."
-                ));
-            }
-        };
-
-    if matched == 0 {
-        // No file held this character's per-character data — discard staging and
-        // don't report success. A character with only account-wide addon settings
-        // (or, for a known server, data only under the OTHER megaserver) has no
-        // per-character subtree to copy.
-        let _ = fs::remove_dir_all(&staging);
-        return Err(format!(
-            "No per-character SavedVariables data found for \"{character_name}\". \
-             This character may only use account-wide addon settings."
-        ));
-    }
-
-    if copied < matched {
-        // A subtree matched but couldn't be written or safely represented —
-        // discard the partial staging dir and surface it instead of leaving a
-        // restorable incomplete backup.
-        let _ = fs::remove_dir_all(&staging);
-        let detail = last_copy_err.map(|e| format!(" ({e})")).unwrap_or_default();
-        return Err(format!(
-            "Backed up only {copied} of {matched} SavedVariables files for \
-             \"{character_name}\"; some files could not be saved{detail}."
-        ));
-    }
-
-    // Stamp the staged dir as a per-character (v2) backup. The versioned marker
-    // body positively identifies the format for restore (independent of the JSON
-    // sidecar), while the filename is what `char_backup_replaceable` checks.
-    if let Err(e) = fs::write(staging.join(CHAR_BACKUP_MARKER), CHAR_BACKUP_MARKER_V2_BODY) {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(format!("Failed to write backup marker: {e}"));
-    }
-
-    // Write the per-character metadata sidecar. Its presence routes restore
-    // through the subtree-MERGE path (vs. the legacy whole-file copy).
-    let meta = CharBackupMeta {
-        version: CHAR_BACKUP_VERSION,
-        character: character_name.clone(),
-        server: server.clone(),
-    };
-    match serde_json::to_vec_pretty(&meta) {
-        Ok(json) => {
-            if let Err(e) = fs::write(staging.join(CHAR_BACKUP_META), json) {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(format!("Failed to write backup metadata: {e}"));
+                return Err(format!("Failed to serialize backup metadata: {e}"));
             }
         }
-        Err(e) => {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(format!("Failed to serialize backup metadata: {e}"));
-        }
-    }
 
-    // All subtrees staged — install atomically, preserving any prior backup of
-    // this name if finalization fails.
-    finalize_backup_replace(&staging, &final_dir, &tombstone)
-        .map_err(|e| format!("Failed to finalize backup: {e}"))?;
+        // All subtrees staged — install atomically, preserving any prior backup of
+        // this name if finalization fails.
+        finalize_backup_replace(&staging, &final_dir, &tombstone)
+            .map_err(|e| format!("Failed to finalize backup: {e}"))?;
 
-    Ok(copied)
+        Ok(CharBackupResult {
+            restored_files: copied,
+            worlds_spanned,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── Minion Migration ────────────────────────────────────────
@@ -5793,18 +6559,22 @@ pub fn detect_minion() -> Result<bool, String> {
 /// Legacy migration command — delegates to the safe_migration implementation
 /// to avoid duplicating the import logic.
 #[tauri::command]
-pub fn migrate_from_minion(
+pub async fn migrate_from_minion(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<MinionMigrationResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    let result = safe_migration::execute_migration(&addons_dir)?;
-    Ok(MinionMigrationResult {
-        found: true,
-        addon_count: result.addon_count,
-        imported: result.imported,
-        already_tracked: result.already_tracked,
+    tokio::task::spawn_blocking(move || {
+        let result = safe_migration::execute_migration(&addons_dir)?;
+        Ok(MinionMigrationResult {
+            found: true,
+            addon_count: result.addon_count,
+            imported: result.imported,
+            already_tracked: result.already_tracked,
+        })
     })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ─── Safe Migration Commands ────────────────────────────────────────
@@ -5835,21 +6605,25 @@ pub async fn migration_create_snapshot(
 }
 
 #[tauri::command]
-pub fn migration_dry_run(
+pub async fn migration_dry_run(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<safe_migration::DryRunResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::dry_run_migration(&addons_dir)
+    tokio::task::spawn_blocking(move || safe_migration::dry_run_migration(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn migration_execute(
+pub async fn migration_execute(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<safe_migration::MigrationResult, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::execute_migration(&addons_dir)
+    tokio::task::spawn_blocking(move || safe_migration::execute_migration(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5871,14 +6645,16 @@ pub fn list_snapshots(
 }
 
 #[tauri::command]
-pub fn restore_snapshot(
+pub async fn restore_snapshot(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
     snapshot_id: String,
 ) -> Result<u32, String> {
     validate_name(&snapshot_id)?;
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::restore_snapshot(&addons_dir, &snapshot_id)
+    tokio::task::spawn_blocking(move || safe_migration::restore_snapshot(&addons_dir, &snapshot_id))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -5917,12 +6693,14 @@ pub fn read_ops_log(
 }
 
 #[tauri::command]
-pub fn backup_minion_config(
+pub async fn backup_minion_config(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
 ) -> Result<u32, String> {
     let addons_dir = require_allowed_path(&state, &addons_path)?;
-    safe_migration::backup_minion_config(&addons_dir)
+    tokio::task::spawn_blocking(move || safe_migration::backup_minion_config(&addons_dir))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // ── Pack Hub API (kalpa-pack-hub) ──────────────────────────────────────────
@@ -7314,9 +8092,11 @@ pub async fn export_sv_settings(
             };
 
             let ctx = detect_identities_from_tree(&tree);
-            let (scrubbed, report) = scrub(&tree, &ctx);
+            // `scrub` consumes `tree` (mutating it in place); `ctx` was already
+            // computed from it above, and it is not used afterwards.
+            let (scrubbed, report) = scrub(tree, &ctx);
 
-            let account_wide_only = strip_per_character_data(&scrubbed);
+            let account_wide_only = strip_per_character_data(scrubbed);
             let lua = serialize_to_lua(&account_wide_only);
             let final_bytes = lua.len();
 
@@ -7342,7 +8122,7 @@ pub async fn export_sv_settings(
 }
 
 fn strip_per_character_data(
-    tree: &crate::saved_variables::types::SvTreeNode,
+    tree: crate::saved_variables::types::SvTreeNode,
 ) -> crate::saved_variables::types::SvTreeNode {
     crate::saved_variables::scrub::strip_per_character_data(tree)
 }
@@ -7506,9 +8286,11 @@ pub async fn import_sv_settings(
 /// the number of `.lua` files skipped for ANY reason (size, unreadable, or
 /// parse failure) so a caller relying on completeness can react.
 ///
-/// NOTE: the Characters roster no longer uses this — it streams the bytes via
-/// [`collect_roster_characters`] with no size cap. The `Some(max)` branch is
+/// NOTE: neither the Characters roster nor the identity-export path uses this
+/// anymore — both stream the raw bytes with bounded memory
+/// ([`collect_roster_characters`] and [`collect_local_identities`]). It is
 /// retained for the size-cap unit test and any future tree-based caller.
+#[cfg_attr(not(test), allow(dead_code))]
 fn for_each_sv_tree(
     addons_dir: &Path,
     max_file_bytes: Option<u64>,
@@ -7569,17 +8351,44 @@ fn for_each_sv_tree(
     skipped
 }
 
-/// Walk every parseable SavedVariables `.lua` file and accumulate the merged
+/// Walk every SavedVariables `.lua` file and accumulate the merged
 /// account/character identities found across all of them. Used by the scrub/
 /// import path, which must see every identity, so it is intentionally uncapped.
 ///
+/// Streams each file's raw bytes through
+/// [`detect_identities_streaming`](crate::saved_variables::identity_stream), the
+/// bounded-memory scanner that emits the SAME identities as the tree-based
+/// `detect_identities_from_tree` (verified by a parity test) — instead of
+/// parsing every `.lua` into a full `SvTreeNode` tree (~10x the source size),
+/// which on a 1–2 GB SavedVariables file was a multi-GB transient. Memory is now
+/// `O(nesting depth + one key)` per file regardless of file size, so the export
+/// path no longer needs a size cap to stay safe.
+///
 /// Runs synchronously; callers wrap it in `spawn_blocking`.
 fn collect_local_identities(addons_dir: &Path) -> crate::saved_variables::scrub::ScrubContext {
-    use crate::saved_variables::scrub::{detect_identities_from_tree, ScrubContext};
+    use crate::saved_variables::identity_stream::detect_identities_streaming;
+    use crate::saved_variables::scrub::ScrubContext;
+
+    let sv_dir = sv_io::saved_variables_dir(addons_dir);
+    let entries = match fs::read_dir(&sv_dir) {
+        Ok(e) => e,
+        Err(_) => return ScrubContext::default(),
+    };
 
     let mut merged = ScrubContext::default();
-    for_each_sv_tree(addons_dir, None, |tree| {
-        let ctx = detect_identities_from_tree(tree);
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+            continue;
+        }
+        let file = match fs::File::open(&path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let ctx = match detect_identities_streaming(std::io::BufReader::new(file)) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
         for acc in ctx.accounts {
             if !merged.accounts.contains(&acc) {
                 merged.accounts.push(acc);
@@ -7600,7 +8409,7 @@ fn collect_local_identities(addons_dir: &Path) -> crate::saved_variables::scrub:
                 merged.extra_worlds.push(w);
             }
         }
-    });
+    }
     merged
 }
 
@@ -7787,6 +8596,21 @@ pub async fn list_saved_variables(
 }
 
 #[tauri::command]
+pub async fn scan_lam_dropdowns(
+    state: tauri::State<'_, AllowedAddonsPath>,
+    addons_path: String,
+    sv_name: String,
+) -> Result<crate::saved_variables::lam_scan::LamScanResponse, String> {
+    validate_name(&sv_name)?;
+    let addons_dir = require_allowed_path(&state, &addons_path)?;
+    tokio::task::spawn_blocking(move || {
+        crate::saved_variables::lam_scan::scan_lam_dropdowns_blocking(&addons_dir, &sv_name)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
+#[tauri::command]
 pub async fn read_saved_variable(
     state: tauri::State<'_, AllowedAddonsPath>,
     addons_path: String,
@@ -7935,6 +8759,9 @@ pub async fn copy_sv_profile(
     if from_key.chars().any(|c| c.is_control()) || to_key.chars().any(|c| c.is_control()) {
         return Err("Character keys must not contain control characters.".to_string());
     }
+    if from_key == to_key {
+        return Err("Source and destination are the same character.".to_string());
+    }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
         crate::saved_variables::profile::copy_sv_profile_blocking(
@@ -8049,7 +8876,13 @@ pub async fn delete_saved_variables(
     }
     let addons_dir = require_allowed_path(&state, &addons_path)?;
     tokio::task::spawn_blocking(move || {
-        sv_io::delete_saved_variables_blocking(&addons_dir, &file_names)
+        let result = sv_io::delete_saved_variables_blocking(&addons_dir, &file_names);
+        if result.is_ok() {
+            // Keep only the 3 most recent auto-cleanup snapshots to prevent
+            // unbounded disk growth from repeated deletes; best-effort.
+            prune_auto_snapshots(&backups_dir(&addons_dir), "auto-cleanup-", 3);
+        }
+        result
     })
     .await
     .map_err(|e| format!("Task failed: {e}"))?
@@ -8092,8 +8925,9 @@ pub async fn dev_scrub_saved_variable(
         let effective_ctx = ctx.unwrap_or_else(|| {
             crate::saved_variables::scrub::detect_identities_from_tree(&response.tree)
         });
+        // `scrub` consumes the tree; `effective_ctx` is already resolved above.
         let (scrubbed, report) =
-            crate::saved_variables::scrub::scrub(&response.tree, &effective_ctx);
+            crate::saved_variables::scrub::scrub(response.tree, &effective_ctx);
         let scrubbed_lua = crate::saved_variables::serializer::serialize_to_lua(&scrubbed);
         Ok(DevScrubResult {
             file_name,
@@ -8304,6 +9138,35 @@ mod tests {
         assert_eq!(download_thread_count(50), 6);
         // Defensive: an empty batch never yields a zero-thread pool.
         assert_eq!(download_thread_count(0), 1);
+    }
+
+    #[test]
+    fn prune_auto_snapshots_keeps_newest_removes_oldest() {
+        // Names embed epoch timestamps and are sorted lexicographically, so an
+        // inverted sort would delete the newest snapshots instead of the oldest.
+        let tmp = tempfile::tempdir().unwrap();
+        let backups_dir = tmp.path();
+        let prefix = "auto-before-restore-";
+        let epochs = [1_000_u64, 1_100, 1_200, 1_300, 1_400];
+        for epoch in epochs {
+            fs::create_dir_all(backups_dir.join(format!("{prefix}{epoch}"))).unwrap();
+        }
+
+        prune_auto_snapshots(backups_dir, prefix, 3);
+
+        let remaining: std::collections::HashSet<String> = fs::read_dir(backups_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+
+        // Only the 3 highest-epoch snapshots survive.
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining.contains(&format!("{prefix}1200")));
+        assert!(remaining.contains(&format!("{prefix}1300")));
+        assert!(remaining.contains(&format!("{prefix}1400")));
+        assert!(!remaining.contains(&format!("{prefix}1000")));
+        assert!(!remaining.contains(&format!("{prefix}1100")));
     }
 
     /// Build a roster slice of `(raw_key, world)` from terse pairs.
@@ -8585,15 +9448,360 @@ mod tests {
         );
     }
 
+    // ── Addon profile activation ─────────────────────────────────────────
+
+    /// Write a top-level addon folder with a manifest. `folder` may carry a
+    /// `.disabled` suffix; the manifest name inside always uses the base name
+    /// (matching what a rename-disable produces on real installs).
+    fn write_addon(addons_dir: &Path, folder: &str, depends_on: &str) {
+        let base = folder.strip_suffix(".disabled").unwrap_or(folder);
+        let dir = addons_dir.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        let mut manifest = format!("## Title: {base}\n");
+        if !depends_on.is_empty() {
+            manifest.push_str(&format!("## DependsOn: {depends_on}\n"));
+        }
+        fs::write(dir.join(format!("{base}.txt")), manifest).unwrap();
+    }
+
+    fn profile_of(names: &[&str]) -> AddonProfile {
+        AddonProfile {
+            name: "test".to_string(),
+            enabled_addons: names.iter().map(|s| s.to_string()).collect(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn apply_profile_enables_and_disables_by_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "");
+        write_addon(tmp.path(), "AddonB.disabled", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonB"]));
+
+        assert_eq!(result.enabled, vec!["AddonB"]);
+        assert_eq!(result.disabled, vec!["AddonA"]);
+        assert!(result.failed.is_empty());
+        assert!(result.missing.is_empty());
+        assert!(tmp.path().join("AddonA.disabled").is_dir());
+        assert!(tmp.path().join("AddonB").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_keeps_required_dependency_enabled() {
+        // LibX was installed (e.g. auto-resolved) after the profile snapshot,
+        // so it is not in the snapshot — but AddonA requires it at load time.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        write_addon(tmp.path(), "LibX", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert!(result.disabled.is_empty(), "LibX must not be disabled");
+        assert_eq!(result.kept_dependencies, vec!["LibX"]);
+        assert!(tmp.path().join("LibX").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_reenables_disabled_dependency() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        write_addon(tmp.path(), "LibX.disabled", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert_eq!(result.enabled, vec!["LibX"]);
+        assert_eq!(result.kept_dependencies, vec!["LibX"]);
+        assert!(tmp.path().join("LibX").is_dir());
+        assert!(!tmp.path().join("LibX.disabled").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_keeps_transitive_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        write_addon(tmp.path(), "LibX", "LibY");
+        write_addon(tmp.path(), "LibY", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert!(result.disabled.is_empty());
+        assert_eq!(result.kept_dependencies, vec!["LibX", "LibY"]);
+    }
+
+    #[test]
+    fn apply_profile_dependency_matching_is_case_insensitive() {
+        // ESO resolves dependency names case-insensitively; retention must too.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "libstub");
+        write_addon(tmp.path(), "LibStub", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert!(result.disabled.is_empty());
+        assert_eq!(result.kept_dependencies, vec!["LibStub"]);
+    }
+
+    #[test]
+    fn apply_profile_embedded_dependency_needs_no_retention() {
+        // AddonA bundles its own copy of LibX; the standalone top-level LibX
+        // is NOT required and must still be disabled per the snapshot.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        let embedded = tmp.path().join("AddonA").join("LibX");
+        fs::create_dir_all(&embedded).unwrap();
+        fs::write(embedded.join("LibX.txt"), "## Title: LibX\n").unwrap();
+        write_addon(tmp.path(), "LibX", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert_eq!(result.disabled, vec!["LibX"]);
+        assert!(result.kept_dependencies.is_empty());
+    }
+
+    #[test]
+    fn apply_profile_duplicate_folders_enable_is_noop() {
+        // Both Foo/ and Foo.disabled/ exist. The scanner's policy is "enabled
+        // copy wins", so a profile wanting Foo enabled is already satisfied —
+        // no rename, no spurious failure.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "Foo", "");
+        write_addon(tmp.path(), "Foo.disabled", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["Foo"]));
+
+        assert!(result.enabled.is_empty());
+        assert!(result.failed.is_empty());
+        assert!(tmp.path().join("Foo").is_dir());
+        assert!(tmp.path().join("Foo.disabled").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_duplicate_folders_disable_fails_actionably() {
+        // Disabling Foo can't be expressed by rename while Foo.disabled
+        // already exists; the failure must say so instead of surfacing a raw
+        // OS collision error.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "Foo", "");
+        write_addon(tmp.path(), "Foo.disabled", "");
+        write_addon(tmp.path(), "Bar", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["Bar"]));
+
+        assert_eq!(result.failed.len(), 1);
+        assert!(result.failed[0].contains("remove the stale copy"));
+        // Both copies untouched — nothing was renamed or deleted.
+        assert!(tmp.path().join("Foo").is_dir());
+        assert!(tmp.path().join("Foo.disabled").is_dir());
+    }
+
+    #[test]
+    fn apply_profile_reports_missing_and_skips_wrappers_and_kalpa_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "");
+        // Manifest-less wrapper folder (like `Libs/`) must never be renamed.
+        fs::create_dir_all(tmp.path().join("Libs")).unwrap();
+        // Kalpa's own folders are ignored entirely.
+        fs::create_dir_all(tmp.path().join("kalpa-backups")).unwrap();
+
+        let result = apply_profile(tmp.path(), &profile_of(&["Uninstalled"]));
+
+        assert_eq!(result.disabled, vec!["AddonA"]);
+        assert_eq!(result.missing, vec!["Uninstalled"]);
+        assert!(tmp.path().join("Libs").is_dir());
+        assert!(tmp.path().join("kalpa-backups").is_dir());
+    }
+
+    #[test]
+    fn plan_profile_is_read_only_and_reports_all_buckets() {
+        // The preview must describe every pending change without renaming
+        // anything — otherwise "preview" would silently BE the activation.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "");
+        write_addon(tmp.path(), "AddonB.disabled", "");
+        write_addon(tmp.path(), "Dup", "");
+        write_addon(tmp.path(), "Dup.disabled", "");
+
+        let plan = plan_profile(tmp.path(), &profile_of(&["AddonB", "Gone"]));
+
+        assert_eq!(plan.to_enable, vec!["AddonB"]);
+        assert_eq!(plan.to_disable, vec!["AddonA"]);
+        assert_eq!(plan.blocked, vec!["Dup"]);
+        assert_eq!(plan.missing, vec!["Gone"]);
+        // Disk untouched: still the original four folders.
+        assert!(tmp.path().join("AddonA").is_dir());
+        assert!(tmp.path().join("AddonB.disabled").is_dir());
+        assert!(tmp.path().join("Dup").is_dir());
+        assert!(tmp.path().join("Dup.disabled").is_dir());
+    }
+
+    #[test]
+    fn profile_store_mirror_survives_addons_folder_wipe() {
+        let addons = tempfile::tempdir().unwrap();
+        let mirror_root = tempfile::tempdir().unwrap();
+        let mirror = mirror_root.path().join("mirror.json");
+
+        let store = ProfileStore {
+            profiles: vec![profile_of(&["AddonA"])],
+            active_profile: Some("test".to_string()),
+        };
+        save_profiles_with_mirror(addons.path(), Some(&mirror), &store).unwrap();
+
+        // Simulate an AddOns-folder wipe (reinstall / PTS cleanup): the
+        // primary store and its recovery artifacts are gone, the mirror isn't.
+        fs::remove_file(profiles_path(addons.path())).unwrap();
+        let bak = profiles_path(addons.path()).with_extension("json.bak");
+        if bak.exists() {
+            fs::remove_file(&bak).unwrap();
+        }
+
+        let loaded = load_profiles_with_mirror(addons.path(), Some(&mirror));
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].name, "test");
+        assert_eq!(loaded.active_profile.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn profile_store_primary_wins_over_mirror_when_present() {
+        // The mirror is a fallback, not a sync source: a present primary must
+        // never be shadowed by a stale mirror from an earlier save.
+        let addons = tempfile::tempdir().unwrap();
+        let mirror_root = tempfile::tempdir().unwrap();
+        let mirror = mirror_root.path().join("mirror.json");
+
+        let old = ProfileStore {
+            profiles: vec![profile_of(&["Old"])],
+            active_profile: None,
+        };
+        save_profiles_with_mirror(addons.path(), Some(&mirror), &old).unwrap();
+        // Newer save without the mirror (e.g. data dir temporarily unwritable).
+        let mut newer = ProfileStore {
+            profiles: vec![profile_of(&["New"])],
+            active_profile: None,
+        };
+        newer.profiles[0].name = "newer".to_string();
+        metadata::save_json_with_backup(&profiles_path(addons.path()), &newer).unwrap();
+
+        let loaded = load_profiles_with_mirror(addons.path(), Some(&mirror));
+        assert_eq!(loaded.profiles[0].name, "newer");
+    }
+
+    #[test]
+    fn copy_addons_between_copies_enabled_skips_existing_and_disabled() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        write_addon(src.path(), "AddonA", "");
+        // Nested content must arrive too.
+        let nested = src.path().join("AddonA").join("libs").join("inner");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("inner.lua"), "-- lua").unwrap();
+        write_addon(src.path(), "AddonB", "");
+        write_addon(src.path(), "Disabled.disabled", "");
+        write_addon(dst.path(), "AddonB", "");
+
+        let result = copy_addons_between(src.path(), dst.path());
+
+        assert_eq!(result.copied, vec!["AddonA"]);
+        assert_eq!(result.skipped, vec!["AddonB"]);
+        assert!(result.failed.is_empty());
+        assert!(dst.path().join("AddonA").join("AddonA.txt").is_file());
+        assert!(dst
+            .path()
+            .join("AddonA")
+            .join("libs")
+            .join("inner")
+            .join("inner.lua")
+            .is_file());
+        // Disabled addons are part of the source's OFF state — not copied.
+        assert!(!dst.path().join("Disabled").exists());
+        assert!(!dst.path().join("Disabled.disabled").exists());
+    }
+
+    #[test]
+    fn copy_addons_between_never_overwrites_target_disabled_copy() {
+        // Target has the addon disabled by choice; copying must not resurrect
+        // or duplicate it.
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        write_addon(src.path(), "AddonA", "");
+        write_addon(dst.path(), "AddonA.disabled", "");
+
+        let result = copy_addons_between(src.path(), dst.path());
+
+        assert_eq!(result.skipped, vec!["AddonA"]);
+        assert!(!dst.path().join("AddonA").exists());
+        assert!(dst.path().join("AddonA.disabled").is_dir());
+    }
+
+    #[test]
+    fn copy_addons_between_carries_metadata_for_copied_addons() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        write_addon(src.path(), "AddonA", "");
+
+        let mut store = metadata::MetadataStore::default();
+        store.addons.insert(
+            "AddonA".to_string(),
+            metadata::AddonMetadata {
+                esoui_id: 1234,
+                installed_version: "1.0".to_string(),
+                download_url: String::new(),
+                installed_at: String::new(),
+                tags: vec!["favorite".to_string()],
+                esoui_last_update: 0,
+            },
+        );
+        metadata::save_metadata(src.path(), &store).unwrap();
+
+        let result = copy_addons_between(src.path(), dst.path());
+        assert_eq!(result.copied, vec!["AddonA"]);
+
+        let dst_store = metadata::load_metadata(dst.path());
+        let entry = dst_store.addons.get("AddonA").expect("metadata copied");
+        assert_eq!(entry.esoui_id, 1234);
+        assert_eq!(entry.tags, vec!["favorite"]);
+    }
+
+    #[test]
+    fn apply_profile_wrapper_bundled_library_satisfies_dependency() {
+        // A dependency provided by a manifest-less wrapper folder's bundled
+        // library is always loadable, so no standalone copy is retained.
+        let tmp = tempfile::tempdir().unwrap();
+        write_addon(tmp.path(), "AddonA", "LibX");
+        let bundled = tmp.path().join("Libs").join("LibX");
+        fs::create_dir_all(&bundled).unwrap();
+        fs::write(bundled.join("LibX.txt"), "## Title: LibX\n").unwrap();
+        write_addon(tmp.path(), "LibX", "");
+
+        let result = apply_profile(tmp.path(), &profile_of(&["AddonA"]));
+
+        assert_eq!(result.disabled, vec!["LibX"]);
+        assert!(result.kept_dependencies.is_empty());
+    }
+
     #[test]
     fn validate_backup_name_rejects_reserved_prefixes() {
         // Manual backups must not collide with internal namespaces.
         assert!(validate_backup_name("char-raid").is_err());
         assert!(validate_backup_name("auto-before-restore-2026").is_err());
+        assert!(validate_backup_name("auto-cleanup-2026").is_err());
         assert!(validate_backup_name(".staging").is_err());
         // Ordinary names are fine.
         assert!(validate_backup_name("my raid backup").is_ok());
         assert!(validate_backup_name("character-naming").is_ok());
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_colon_tricks() {
+        // NTFS alternate-data-stream syntax must be rejected.
+        assert!(validate_relative_path("a.lua:stream").is_err());
+        // Windows drive-relative paths (no leading separator, so not caught by
+        // the absolute-path/leading-separator checks) must also be rejected.
+        assert!(validate_relative_path("C:foo").is_err());
+        // Ordinary relative paths remain valid.
+        assert!(validate_relative_path("Sub/dir/file.lua").is_ok());
     }
 
     /// A world-scoped NA/EU twin file plus a non-.lua decoy.
@@ -8622,11 +9830,13 @@ mod tests {
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let (matched, copied, err) =
+        let (matched, copied, err, worlds_spanned) =
             stage_character_subtrees(&sv, "Bob", Some("NA Megaserver"), &staging).unwrap();
         assert_eq!(matched, 1);
         assert_eq!(copied, 1);
         assert!(err.is_none());
+        // Known-server backup: isolated to a single world, so span is 1.
+        assert_eq!(worlds_spanned, 1);
 
         // The staged minimal file holds NA Bob but not EU Bob.
         let staged = fs::read(staging.join("Addon.lua")).unwrap();
@@ -8634,6 +9844,27 @@ mod tests {
         assert!(s.contains("\"NA\""));
         assert!(!s.contains("\"EU\""));
         assert!(!staging.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn stage_subtrees_unknown_server_reports_worlds_spanned() {
+        // An Unknown-server (world == None) backup takes world-scoped subtrees
+        // from EVERY megaserver, so a same-named NA/EU twin both land in the
+        // same backup. worlds_spanned must surface that as 2 so the caller can
+        // warn, even though the staged file itself has no way to tell the
+        // twins apart later.
+        let tmp = tempfile::tempdir().unwrap();
+        let sv = tmp.path().join("SavedVariables");
+        write_twin_sv(&sv);
+        let staging = tmp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        let (matched, copied, err, worlds_spanned) =
+            stage_character_subtrees(&sv, "Bob", None, &staging).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(copied, 1);
+        assert!(err.is_none());
+        assert_eq!(worlds_spanned, 2, "NA + EU twin both bundled in");
     }
 
     #[test]
@@ -8655,7 +9886,7 @@ mod tests {
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let (matched, _, _) =
+        let (matched, _, _, _) =
             stage_character_subtrees(&sv, "Bob", Some("NA Megaserver"), &staging).unwrap();
         assert_eq!(matched, 0);
     }
@@ -8677,7 +9908,8 @@ mod tests {
         let staging = tmp.path().join("staging");
         fs::create_dir_all(&staging).unwrap();
 
-        let (matched, copied, err) = stage_character_subtrees(&sv, "Bob", None, &staging).unwrap();
+        let (matched, copied, err, _) =
+            stage_character_subtrees(&sv, "Bob", None, &staging).unwrap();
         assert_eq!((matched, copied), (1, 1));
         assert!(err.is_none());
         let staged = fs::read(staging.join("Addon.lua")).unwrap();
@@ -8692,6 +9924,7 @@ mod tests {
             version: CHAR_BACKUP_VERSION,
             character: "Bob".to_string(),
             server: "NA Megaserver".to_string(),
+            worlds_spanned: 1,
         })
         .unwrap();
 
@@ -8792,6 +10025,7 @@ mod tests {
             version: CHAR_BACKUP_VERSION,
             character: "Bob".to_string(),
             server: "NA Megaserver".to_string(),
+            worlds_spanned: 1,
         };
         fs::write(
             backup_dir.join(CHAR_BACKUP_META),

@@ -1,6 +1,17 @@
-import type { Env, Pack, PackType, PackStatus, VoteResponse } from "./types";
-import { getPack, getPackIndex, putPack, getVote, putVote, deleteVote } from "./kv";
+import type { Env, Pack, PackType, PackStatus, VoteRecord, VoteResponse } from "./types";
+import {
+  getPack,
+  getPackIndex,
+  putPack,
+  getVote,
+  putVote,
+  deleteVote,
+  restoreVote,
+  listAllPackBodies,
+  listAllVotes,
+} from "./kv";
 import { corsHeaders, handlePreflight } from "./cors";
+import { redactAnonymousPack, ANONYMOUS_AUTHOR_NAME } from "./redact";
 import { validatePack } from "./validate";
 import { SEED_PACKS } from "./seed";
 import { handleCreateShare, handleResolveShare, validateBearerToken } from "./shares";
@@ -38,7 +49,10 @@ async function d1UpsertPack(env: Env, pack: Pack): Promise<void> {
         .bind(
           pack.id,
           pack.author_id,
-          pack.author_name,
+          // The D1 mirror feeds the ESO Toolkit website; never hand it the
+          // real display name of an anonymous pack's author. author_id stays
+          // for ownership joins but is not rendered there.
+          pack.is_anonymous ? ANONYMOUS_AUTHOR_NAME : pack.author_name,
           pack.is_anonymous ? 1 : 0,
           pack.title,
           pack.description,
@@ -179,28 +193,40 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
 
   let packs = index.packs;
 
-  // Status filter — default to "published"; draft/all require auth + ownership
+  // Resolve the viewer once: draft/all filtering, the author filter, and
+  // anonymity redaction all key off it. Free when no Authorization header is
+  // present (validateBearerToken returns null without an upstream call).
   const statusFilter = url.searchParams.get("status");
+  const authorFilter = url.searchParams.get("author");
+  const needsViewer =
+    statusFilter === "all" || statusFilter === "draft" || authorFilter !== null;
+  const viewer = needsViewer ? await validateBearerToken(request) : null;
+  const viewerId = viewer ? String(viewer.id) : undefined;
+
+  // Status filter — default to "published"; draft/all require auth + ownership
   if (statusFilter === "all" || statusFilter === "draft") {
-    const user = await validateBearerToken(request);
-    if (!user) {
+    if (viewerId === undefined) {
       packs = packs.filter((p) => (p.status ?? "published") === "published");
+    } else if (statusFilter === "draft") {
+      packs = packs.filter(
+        (p) => p.author_id === viewerId && (p.status ?? "published") === "draft",
+      );
     } else {
-      const userId = String(user.id);
-      if (statusFilter === "draft") {
-        packs = packs.filter((p) => p.author_id === userId && (p.status ?? "published") === "draft");
-      } else {
-        packs = packs.filter((p) => (p.status ?? "published") === "published" || p.author_id === userId);
-      }
+      packs = packs.filter(
+        (p) => (p.status ?? "published") === "published" || p.author_id === viewerId,
+      );
     }
   } else {
     const target = statusFilter ?? "published";
     packs = packs.filter((p) => (p.status ?? "published") === target);
   }
 
-  const authorFilter = url.searchParams.get("author");
   if (authorFilter) {
-    packs = packs.filter((p) => p.author_id === authorFilter);
+    // Anonymous packs must not be discoverable by author — that filter is a
+    // de-anonymization vector. Only the author themselves (authed) sees them.
+    packs = packs.filter(
+      (p) => p.author_id === authorFilter && (!p.is_anonymous || viewerId === authorFilter),
+    );
   }
 
   const typeFilter = url.searchParams.get("type");
@@ -241,7 +267,14 @@ async function handleListPacks(request: Request, env: Env, url: URL): Promise<Re
   const start = (page - 1) * PACKS_PER_PAGE;
   const paginated = packs.slice(start, start + PACKS_PER_PAGE);
 
-  const response = json(request, { packs: paginated, page, sort }, 200, 30);
+  // Enforce anonymity at the edge. The default view is cached and shared, so
+  // it is always fully redacted regardless of who populated the cache; the
+  // owner exception only applies to uncached (filtered) views.
+  const visible = paginated.map((p) =>
+    redactAnonymousPack(p, isDefaultView ? undefined : viewerId),
+  );
+
+  const response = json(request, { packs: visible, page, sort }, 200, 30);
 
   if (isDefaultView && request.method === "GET") {
     cache.put(request, response.clone()).catch(console.error);
@@ -262,6 +295,16 @@ async function handleGetPack(request: Request, env: Env, id: string): Promise<Re
       return notFound(request);
     }
     return json(request, { pack }, 200, 0);
+  }
+  if (pack.is_anonymous) {
+    // The author gets their real fields back (pack management needs them) but
+    // that response must never be cacheable; everyone else gets the redacted
+    // pack, which stays safe to cache.
+    const user = await validateBearerToken(request);
+    if (user && String(user.id) === pack.author_id) {
+      return json(request, { pack }, 200, 0);
+    }
+    return json(request, { pack: redactAnonymousPack(pack) }, 200, 300, "public");
   }
   return json(request, { pack }, 200, 300, "public");
 }
@@ -547,31 +590,213 @@ async function handleHealth(request: Request, env: Env): Promise<Response> {
   const index = await getPackIndex(env);
   const packCount = index?.packs.length ?? 0;
 
+  // Surface scheduled-backup health so monitoring can detect a silently
+  // failing cron even with Workers observability disabled.
+  let lastBackupAt: string | null = null;
+  let lastBackupOk = false;
+  try {
+    const meta = await env.ESO_PACKS.get<BackupMeta>("backup:meta", "json");
+    if (meta?.last_success) {
+      lastBackupAt = new Date(meta.last_success).toISOString();
+      // Cron runs daily; allow slack for a missed/delayed run before flagging
+      // the backup as stale.
+      lastBackupOk = Date.now() - meta.last_success < 36 * 3600 * 1000;
+    }
+  } catch {
+    // backup:meta read failed — leave last_backup_at null / last_backup_ok false
+  }
+
   return json(request, {
     status: kvOk ? "ok" : "degraded",
     kv: kvOk,
     packCount,
+    last_backup_at: lastBackupAt,
+    last_backup_ok: lastBackupOk,
     timestamp: new Date().toISOString(),
   });
 }
 
 // ── Scheduled backup ──────────────────────────────────────────────
+
+/**
+ * Full-corpus snapshot shape written to `backup:YYYY-MM-DD` / `backup:latest`.
+ * `packs` mirrors the legacy index-only backup shape (an array of full Pack
+ * objects) for backward compatibility with anything that reads old daily
+ * backups; `packBodies` and `votes` additionally capture the per-key
+ * `pack:<id>` and `vote:<id>:<user>` records directly (via KV `list()`) so the
+ * backup is restorable even if the index and per-key data were ever to drift.
+ */
+interface PackBackupSnapshot {
+  created_at: string;
+  packs: Pack[];
+  packBodies: Record<string, Pack>;
+  votes: Record<string, VoteRecord>;
+}
+
+interface BackupMeta {
+  last_success: number;
+  last_backup_key: string;
+  pack_count: number;
+  pack_body_count: number;
+  vote_count: number;
+}
+
+// Warn (not fail) if the snapshot is approaching KV's 25MB per-value limit.
+const BACKUP_SIZE_WARN_BYTES = 20 * 1024 * 1024;
+
 async function handleScheduled(env: Env): Promise<void> {
-  const index = await getPackIndex(env);
+  // Fresh (uncached) read so the snapshot reflects the latest mutation rather
+  // than a stale up-to-60s-cached index.
+  const index = await getPackIndex(env, { fresh: true });
   if (!index || index.packs.length === 0) return;
 
   const timestamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const backupKey = `backup:${timestamp}`;
 
-  // Skip if today's backup already exists
+  // Skip only if today's backup is FULLY complete — i.e. the daily key
+  // exists AND backup:meta already points at it. If an isolate is
+  // interrupted after the daily key is written but before backup:latest /
+  // backup:meta, a same-day retry must not early-return here, or those two
+  // keys permanently lag a day behind. Re-writing the daily key below is
+  // idempotent, so it's safe to just fall through and redo the rest.
   const existing = await env.ESO_PACKS.get(backupKey);
-  if (existing) return;
+  if (existing) {
+    const metaRaw = await env.ESO_PACKS.get("backup:meta");
+    const meta = metaRaw ? (JSON.parse(metaRaw) as BackupMeta) : null;
+    if (meta?.last_backup_key === backupKey) return;
+  }
+
+  // Enumerate the full corpus — the index already carries full pack fields,
+  // but capture the per-key pack bodies and votes too so the backup is
+  // actually restorable rather than just an index-only snapshot.
+  const [packBodies, votes] = await Promise.all([
+    listAllPackBodies(env),
+    listAllVotes(env),
+  ]);
+
+  const snapshot: PackBackupSnapshot = {
+    created_at: new Date().toISOString(),
+    packs: index.packs,
+    packBodies,
+    votes,
+  };
+
+  const serialized = JSON.stringify(snapshot);
+  if (serialized.length > BACKUP_SIZE_WARN_BYTES) {
+    console.warn(
+      `Backup snapshot for ${backupKey} is ${serialized.length} bytes, approaching KV's 25MB value limit`,
+    );
+  }
 
   // Write backup with 90-day TTL (keeps last ~90 daily snapshots)
-  await env.ESO_PACKS.put(backupKey, JSON.stringify(index), {
+  await env.ESO_PACKS.put(backupKey, serialized, {
     expirationTtl: 90 * 86400,
   });
-  console.log(`Backup written: ${backupKey} (${index.packs.length} packs)`);
+
+  // Also write a non-expiring "latest" pointer so a silent multi-day failure
+  // gap can't erase all history once the 90-day-old daily snapshots roll off.
+  await env.ESO_PACKS.put("backup:latest", serialized);
+
+  const meta: BackupMeta = {
+    last_success: Date.now(),
+    last_backup_key: backupKey,
+    pack_count: index.packs.length,
+    pack_body_count: Object.keys(packBodies).length,
+    vote_count: Object.keys(votes).length,
+  };
+  await env.ESO_PACKS.put("backup:meta", JSON.stringify(meta));
+
+  console.log(
+    `Backup written: ${backupKey} (${index.packs.length} packs, ${meta.pack_body_count} bodies, ${meta.vote_count} votes)`,
+  );
+}
+
+// ── POST /admin/restore ────────────────────────────────────────────
+/**
+ * Restore the pack corpus from a `backup:YYYY-MM-DD` (or `backup:latest`)
+ * snapshot written by the scheduled backup (handleScheduled). Unlike
+ * /admin/seed this is a production incident-recovery tool, so it is gated
+ * only behind requireAuth (the admin API key) — NOT env.ALLOW_SEED, which
+ * exists specifically to disable seed-with-fake-data in production and
+ * would defeat the purpose of a restore endpoint if reused here.
+ *
+ * Replays every pack body (+ D1 mirror) and vote record directly to KV,
+ * then atomically replaces the index via the PackIndexDO — never via raw
+ * putPackIndex, which would race a concurrent mutation (see kv.ts's
+ * getPackIndex comment on why counter/index writes go through the DO). The
+ * replacement index is built from only the ids we actually restored a body
+ * for (so drifted "ghost" ids in snapshot.packs don't reappear) unioned with
+ * any pack in the current live index that predates or postdates the
+ * snapshot entirely (so a pack created after the backup isn't deleted).
+ */
+async function handleRestore(request: Request, env: Env, url: URL): Promise<Response> {
+  if (!requireAuth(request, env)) {
+    return unauthorized(request);
+  }
+
+  let dateInput: unknown;
+  try {
+    const body = (await request.json()) as Record<string, unknown> | null;
+    dateInput = body?.date;
+  } catch {
+    // No/invalid JSON body — fall back to backup:latest below.
+  }
+
+  const backupKey =
+    typeof dateInput === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)
+      ? `backup:${dateInput}`
+      : "backup:latest";
+
+  const raw = await env.ESO_PACKS.get(backupKey);
+  if (!raw) {
+    return notFound(request, `No backup snapshot found for "${backupKey}"`);
+  }
+
+  let snapshot: PackBackupSnapshot;
+  try {
+    snapshot = JSON.parse(raw) as PackBackupSnapshot;
+  } catch {
+    return json(request, { error: `Backup "${backupKey}" is corrupt` }, 500);
+  }
+
+  // Older backups (pre-packBodies) only carry the index-mirroring `packs`
+  // array — rebuild the per-id map from it so restore still works on them.
+  const packBodies =
+    snapshot.packBodies && Object.keys(snapshot.packBodies).length > 0
+      ? snapshot.packBodies
+      : Object.fromEntries((snapshot.packs ?? []).map((p): [string, Pack] => [p.id, p]));
+
+  const packs = Object.values(packBodies);
+  for (const pack of packs) {
+    await putPack(env, pack);
+    await d1UpsertPack(env, pack);
+  }
+
+  const votes = snapshot.votes ?? {};
+  for (const record of Object.values(votes)) {
+    // Use the record's own packId/userId fields rather than parsing the
+    // "<packId>:<userId>" map key, since userId could itself contain ":".
+    await restoreVote(env, record.packId, record.userId, record);
+  }
+
+  // Rebuild the index from only the packs we actually have bodies for (drops
+  // "ghost" entries that are in snapshot.packs but absent from packBodies —
+  // exactly the index/per-key drift this backup's packBodies capture exists
+  // to repair), then union in any pack from the CURRENT live index that isn't
+  // part of this snapshot at all, so packs created after the backup was taken
+  // aren't deleted by the restore.
+  const restoredIds = new Set(Object.keys(packBodies));
+  const liveIndex = await getPackIndex(env);
+  const preservedPacks = (liveIndex?.packs ?? []).filter((p) => !restoredIds.has(p.id));
+  await getPackIndexDO(env).replaceIndex({ packs: [...packs, ...preservedPacks] });
+
+  await invalidatePackListCache(url);
+
+  return json(request, {
+    ok: true,
+    restored_packs: packs.length,
+    restored_votes: Object.keys(votes).length,
+  });
 }
 
 // ── DELETE /account ────────────────────────────────────────────
@@ -675,6 +900,20 @@ export default {
       await handleScheduled(env);
     } catch (err) {
       console.error("Scheduled backup failed:", err);
+      // Observability may be disabled in production, so persist a durable
+      // breadcrumb — otherwise a failing cron is invisible until /health's
+      // last_backup_ok staleness check trips up to ~36h later.
+      try {
+        await env.ESO_PACKS.put(
+          "backup:last_error",
+          JSON.stringify({
+            at: new Date().toISOString(),
+            message: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      } catch (writeErr) {
+        console.error("Failed to record backup:last_error:", writeErr);
+      }
     }
   },
 } satisfies ExportedHandler<Env>;
@@ -756,6 +995,11 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // POST /admin/seed — dev-only seeding route
   if (method === "POST" && pathname === "/admin/seed") {
     return handleSeed(request, env);
+  }
+
+  // POST /admin/restore — incident-recovery restore from a backup snapshot
+  if (method === "POST" && pathname === "/admin/restore") {
+    return handleRestore(request, env, url);
   }
 
   // DELETE /account — delete all user data (GDPR / data portability)

@@ -27,6 +27,7 @@ pub mod history;
 /// fallback). Built clean-room from protocol facts. See [`native`].
 pub mod native;
 pub mod scanner;
+pub mod sidecar;
 pub mod splitter;
 /// Shared byte-offset tail primitives (`read_range` + loop tuning constants)
 /// used by both [`watcher`] and the native live-streaming driver.

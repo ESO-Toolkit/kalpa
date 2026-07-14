@@ -3,6 +3,7 @@ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { useCappedAnimationRate } from "@/hooks/use-capped-animation-rate";
 import { XIcon } from "lucide-react";
 
 import {
@@ -72,17 +73,38 @@ function DialogContent({
   );
 }
 
-function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
+function DialogHeader({ className, children, ...props }: React.ComponentProps<"div">) {
+  // Cap the sweep at ~60 updates/s: on high-refresh displays a free-running
+  // compositor animation presents at every vsync and re-executes the popup's
+  // backdrop-blur each frame (measured ~42% of a core at 240 Hz for this one
+  // strip). 60 Hz is the cadence the design has always rendered at on
+  // standard displays, so nothing is visually lost.
+  const sweepRef = React.useRef<HTMLSpanElement>(null);
+  useCappedAnimationRate(sweepRef, 16);
   return (
     <div
       data-slot="dialog-header"
       className={cn(
         "relative -mx-5 -mt-5 flex flex-col gap-1.5 border-b border-white/[0.06] bg-gradient-to-b from-white/[0.04] to-transparent pl-5 pr-12 pt-5 pb-4",
-        "before:absolute before:inset-x-0 before:top-0 before:h-[2px] before:bg-gradient-to-r before:from-primary/0 before:via-primary-hover/80 before:to-primary/0",
         className
       )}
       {...props}
-    />
+    >
+      {/* Accent shimmer strip. A real clipped child animated with transform
+          (compositor-only) rather than a ::before animating background-position:
+          a paint-property animation forces a main-thread repaint every frame for
+          as long as any dialog is open. The 200%-wide sweep translating from
+          +100% to -100% inside the 2px clip strip reproduces the exact
+          background-size:200% / background-position -200%→200% trajectory. */}
+      <span
+        aria-hidden
+        data-slot="dialog-header-accent"
+        className="pointer-events-none absolute inset-x-0 top-0 h-[2px] overflow-hidden"
+      >
+        <span ref={sweepRef} className="dialog-accent-sweep block h-full w-[200%]" />
+      </span>
+      {children}
+    </div>
   );
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "kalpa"
-version = "0.1.0-beta.9"
+version = "0.1.0-beta.10"
 edition = "2021"
 description = "A fast, open-source addon manager for The Elder Scrolls Online"
 license = "BSL-1.1"
@@ -42,6 +42,10 @@ tauri-plugin-process = "2"
 tauri-plugin-opener = "2.5.3"
 tauri-plugin-notification = "2"
 rayon = "1.12"
+# Fast non-cryptographic hasher (FxHashMap) for the uploader's per-event hot maps.
+# Already present transitively in the lock file, so this adds no new compilation.
+rustc-hash = "2"
+typed-path = "0.12"
 sha2 = "0.11"
 md-5 = "0.11"
 # "bundled" statically compiles SQLite (~1-2MB binary size increase) to avoid
@@ -59,6 +63,18 @@ dunce = "1"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 keyring = { version = "3", features = ["windows-native"] }
+# WebView2 COM interop for MemoryUsageTargetLevel (trim webview RAM when Kalpa is
+# backgrounded to the tray). Caret ranges MUST unify with the copies tauri/wry
+# pull transitively (currently webview2-com 0.38.2 / windows 0.61.x) — a
+# duplicate windows-core would make `.controller()`/`.cast()` type-mismatch. If a
+# tauri/wry bump moves webview2-com to a new minor, bump these two in lockstep.
+# Verified 2026-07 (dependabot #246/#247): bumping to windows 0.62 /
+# webview2-com 0.39 ahead of tauri/wry fails compile with E0599 in lib.rs —
+# no import fix helps, the ICoreWebView2 from `webview.controller()` stays a
+# 0.38/windows-core-0.61 type. Dependabot minors for these two crates are
+# ignored in .github/dependabot.yml; drop those rules when tauri/wry move.
+webview2-com = "0.38"
+windows = "0.61"
 
 [profile.dev]
 # Reduced debug info: the full dependency graph (reqwest/rustls/aws-lc/tauri/…)

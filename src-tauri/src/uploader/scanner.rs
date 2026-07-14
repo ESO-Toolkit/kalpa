@@ -26,7 +26,7 @@
 //! only for field parsing, never for offset math.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::types::{FightSummary, LogSession};
@@ -181,16 +181,41 @@ pub(crate) fn find_current_session_begin(
     path: &Path,
     eof: u64,
 ) -> Result<Option<SessionAnchor>, String> {
+    let mut buf = Vec::new();
+    let Some(begin_log_offset) = find_latest_begin_log_offset(path, eof, &mut buf)? else {
+        return Ok(None);
+    };
+    let open_session = !any_end_log_after(path, begin_log_offset, eof, &mut buf)?;
+    Ok(Some(SessionAnchor {
+        begin_log_offset,
+        open_session,
+    }))
+}
+
+/// Find the latest `BEGIN_LOG` offset without the forward `END_LOG` pass.
+///
+/// Use this when the caller only needs a copy boundary (for example the "split latest
+/// session" fast path). `find_current_session_begin` adds the open/closed state for
+/// live-readiness, which requires scanning forward from the header.
+pub(crate) fn find_latest_session_begin(path: &Path, eof: u64) -> Result<Option<u64>, String> {
+    let mut buf = Vec::new();
+    find_latest_begin_log_offset(path, eof, &mut buf)
+}
+
+fn find_latest_begin_log_offset(
+    path: &Path,
+    eof: u64,
+    buf: &mut Vec<u8>,
+) -> Result<Option<u64>, String> {
     if eof == 0 {
         return Ok(None);
     }
     let overlap = ANCHOR_WINDOW / 8;
-    let mut buf = Vec::new();
     // Walk windows from newest (ending at eof) to oldest (starting at 0).
     let mut win_end = eof;
     loop {
         let win_start = win_end.saturating_sub(ANCHOR_WINDOW);
-        let n = super::tail_io::read_range(path, win_start, win_end, &mut buf)?;
+        let n = super::tail_io::read_range(path, win_start, win_end, buf)?;
         // Find the absolute offset of the LAST BEGIN_LOG whose line START lies in this
         // window. We iterate line starts by tracking byte position; a line "starts" right
         // after a preceding '\n' (or at window byte 0). Skip the leading partial of a
@@ -212,24 +237,10 @@ pub(crate) fn find_current_session_begin(
                 line_start = i + 1;
             }
         }
-        // The final line of the window may have no trailing '\n' (it ends at win_end). At
-        // eof that's the file's true last line; mid-file it's a partial we ignore (the
-        // overlap re-reads it whole in the next-newer iteration — but since we go newest
-        // first, "next-newer" already ran; so only consider it when this IS the newest
-        // window, i.e. win_end == eof).
-        if line_start < n && win_end == eof {
-            let line = &bytes[line_start..n];
-            let is_partial_lead = win_start > 0 && line_start == 0;
-            if !is_partial_lead && line_is_begin_log(line) {
-                last_begin = Some(win_start + line_start as u64);
-            }
-        }
+        // Do not count an unterminated final line at EOF. ESO can be mid-append, and
+        // a half-written BEGIN_LOG must not become a split/preflight boundary.
         if let Some(begin_log_offset) = last_begin {
-            let open_session = !any_end_log_after(path, begin_log_offset, eof, &mut buf)?;
-            return Ok(Some(SessionAnchor {
-                begin_log_offset,
-                open_session,
-            }));
+            return Ok(Some(begin_log_offset));
         }
         if win_start == 0 {
             return Ok(None); // scanned the whole file, no BEGIN_LOG
@@ -270,12 +281,13 @@ fn any_end_log_after(path: &Path, from: u64, eof: u64, buf: &mut Vec<u8>) -> Res
                 line_start = i + 1;
             }
         }
-        // Whatever follows the last '\n' is a partial — carry it to the next chunk (or, at
-        // eof, it's the final whole line, checked after the loop).
+        // Whatever follows the last '\n' is a partial; carry it to the next chunk.
         carry = combined[line_start..].to_vec();
         pos = chunk_end;
     }
-    Ok(line_is_end_log(&carry))
+    // A final unterminated END_LOG can be a partial append, so only complete lines
+    // decide whether the latest session has closed.
+    Ok(false)
 }
 
 /// True iff the line (sans trailing CR) is an `END_LOG` record.
@@ -304,6 +316,7 @@ fn map_io_error(e: &std::io::Error, path: &str) -> String {
 pub struct ScanResult {
     pub sessions: Vec<LogSession>,
     pub fights: Vec<FightSummary>,
+    pub total_fights: usize,
 }
 
 /// Running boundary-detection state, shared by the full-file and chunk scanners.
@@ -315,6 +328,8 @@ pub struct ScanResult {
 struct Detector {
     sessions: Vec<LogSession>,
     fights: Vec<FightSummary>,
+    total_fights: usize,
+    fight_collect_limit: Option<usize>,
     session_open: bool,
     session_fight_count: usize,
     /// (start_offset, rel_ms) of an open `BEGIN_COMBAT` awaiting its `END_COMBAT`.
@@ -391,9 +406,14 @@ impl Detector {
                     .filter(|s| !s.is_empty());
             }
             LineType::UnitAdded => {
-                // A boss unit has isBoss="T"; name is field 10. Skip @handles
-                // (player display names) so we only adopt monster names.
-                if line.contains(",T,") {
+                // isBoss is field 7 (isLocalPlayer is field 4 — a different
+                // "T" flag at a different offset). A bare `,T,` substring
+                // search previously matched the local player's own
+                // UNIT_ADDED line via its isLocalPlayer="T", wrongly naming
+                // fights after the player. Name is field 10; the @-handle
+                // filter is kept as defense in depth so only monster names
+                // are ever adopted.
+                if field(line, 7).is_some_and(|f| f.eq_ignore_ascii_case("T")) {
                     if let Some(name) =
                         field(line, 10).filter(|s| !s.is_empty() && !s.starts_with('@'))
                     {
@@ -406,16 +426,24 @@ impl Detector {
             }
             LineType::EndCombat => {
                 if let Some((start_offset, start_ms)) = self.fight_start.take() {
-                    let index = self.fights.len();
-                    self.fights.push(FightSummary {
-                        index,
-                        start_offset,
-                        end_offset: next_offset,
-                        start_ms,
-                        end_ms: parse_rel_ms(line),
-                        zone_name: self.pending_zone.clone(),
-                        boss_name: self.pending_boss.take(),
-                    });
+                    let index = self.total_fights;
+                    let should_collect = self
+                        .fight_collect_limit
+                        .map(|limit| self.fights.len() < limit)
+                        .unwrap_or(true);
+                    if should_collect {
+                        self.fights.push(FightSummary {
+                            index,
+                            start_offset,
+                            end_offset: next_offset,
+                            start_ms,
+                            end_ms: parse_rel_ms(line),
+                            zone_name: self.pending_zone.clone(),
+                            boss_name: self.pending_boss.clone(),
+                        });
+                    }
+                    self.pending_boss.take();
+                    self.total_fights += 1;
                     self.session_fight_count += 1;
                 }
             }
@@ -430,6 +458,7 @@ impl Detector {
         ScanResult {
             sessions: self.sessions,
             fights: self.fights,
+            total_fights: self.total_fights,
         }
     }
 }
@@ -452,10 +481,23 @@ fn line_content(buf: &[u8]) -> &[u8] {
 /// O(lines) time, O(sessions + fights) memory — each line's content is decoded,
 /// classified, and dropped before the next read.
 pub fn scan_file(path: &str) -> Result<ScanResult, String> {
+    scan_file_with_fight_limit(path, None)
+}
+
+/// Scan an entire log file while optionally capping the retained fight summaries.
+/// `total_fights` and each session's `fight_count` still count every completed
+/// fight, so callers can omit a large IPC payload without losing counts.
+pub fn scan_file_with_fight_limit(
+    path: &str,
+    fight_collect_limit: Option<usize>,
+) -> Result<ScanResult, String> {
     let file = File::open(path).map_err(|e| map_io_error(&e, path))?;
     let mut reader = BufReader::with_capacity(1 << 20, file); // 1 MiB buffer
 
-    let mut detector = Detector::default();
+    let mut detector = Detector {
+        fight_collect_limit,
+        ..Default::default()
+    };
     let mut offset: u64 = 0;
     let mut buf: Vec<u8> = Vec::with_capacity(512);
 
@@ -483,6 +525,91 @@ pub fn scan_file(path: &str) -> Result<ScanResult, String> {
     Ok(detector.finish(offset))
 }
 
+/// Scan a bounded byte range of a log into sessions and fights.
+///
+/// `start` must point at a true line boundary (the latest-session fast path passes a
+/// `BEGIN_LOG` offset). Returned offsets are still absolute file offsets, so a later
+/// split can validate and copy directly from the original log without translation.
+pub fn scan_range(path: &str, start: u64, end: u64) -> Result<ScanResult, String> {
+    scan_range_with_fight_limit(path, start, end, None)
+}
+
+/// Scan a bounded byte range while optionally capping retained fight summaries.
+/// Unlike `scan_file`, the bounded/latest-session path treats the trailing
+/// unterminated line as incomplete and leaves it unclassified.
+pub fn scan_range_with_fight_limit(
+    path: &str,
+    start: u64,
+    end: u64,
+    fight_collect_limit: Option<usize>,
+) -> Result<ScanResult, String> {
+    if end <= start {
+        return Err("Empty scan range".into());
+    }
+    let mut file = File::open(path).map_err(|e| map_io_error(&e, path))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| format!("Failed to seek log: {e}"))?;
+    let limited = file.take(end - start);
+    let mut reader = BufReader::with_capacity(1 << 20, limited);
+
+    let mut detector = Detector {
+        fight_collect_limit,
+        ..Default::default()
+    };
+    let mut offset = start;
+    let mut buf: Vec<u8> = Vec::with_capacity(512);
+
+    while offset < end {
+        buf.clear();
+        let n = reader
+            .read_until(b'\n', &mut buf)
+            .map_err(|e| format!("Failed to read log: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        let next_offset = offset + n as u64;
+        if next_offset >= end && buf.last() != Some(&b'\n') {
+            break;
+        }
+        let content = line_content(&buf);
+        if !content.is_empty() {
+            let line = String::from_utf8_lossy(content);
+            detector.feed(&line, offset, next_offset);
+        }
+        offset = next_offset;
+    }
+
+    Ok(detector.finish(offset))
+}
+
+/// Scan only the latest/current logging session: backward-anchor to the newest
+/// `BEGIN_LOG`, then scan forward from that byte offset to a single EOF snapshot.
+/// Returns the scan plus the whole-file snapshot length used for the range.
+pub fn scan_latest_session(path: &str) -> Result<(ScanResult, u64), String> {
+    scan_latest_session_with_fight_limit(path, None)
+}
+
+/// Scan only the latest/current logging session, optionally capping retained
+/// fight summaries while preserving true fight counts.
+pub fn scan_latest_session_with_fight_limit(
+    path: &str,
+    fight_collect_limit: Option<usize>,
+) -> Result<(ScanResult, u64), String> {
+    let src = Path::new(path);
+    let size_bytes = std::fs::metadata(src)
+        .map_err(|e| format!("Failed to read file: {e}"))?
+        .len();
+    let begin = find_latest_session_begin(src, size_bytes)?
+        .ok_or_else(|| "No logging sessions found in this file.".to_string())?;
+    if size_bytes <= begin {
+        return Err("Latest logging session is empty.".into());
+    }
+    Ok((
+        scan_range_with_fight_limit(path, begin, size_bytes, fight_collect_limit)?,
+        size_bytes,
+    ))
+}
+
 /// Result of scanning an incremental chunk for the live watcher.
 pub struct ChunkScan {
     /// Fights that *completed* (BEGIN_COMBAT…END_COMBAT) within the chunk, with
@@ -498,6 +625,15 @@ pub struct ChunkScan {
     /// from 0, and re-anchors here — past the boundary line, so it isn't
     /// re-detected on the next pass.
     pub new_session_at: Option<u64>,
+    /// The zone name still pending (seen via `ZONE_CHANGED` but not yet consumed
+    /// by a completed fight) at the END of this chunk. The watcher carries this
+    /// into the next pass's `pending_zone` seed so a zone/boss line consumed by
+    /// an earlier read isn't lost by the time a later fight closes (E2). Cleared
+    /// whenever a `BEGIN_LOG` is fed, mirroring `Detector::feed`'s `BeginLog` arm.
+    pub pending_zone: Option<String>,
+    /// The boss name still pending at the end of this chunk — same carry
+    /// discipline as `pending_zone`.
+    pub pending_boss: Option<String>,
 }
 
 /// Scan an in-memory raw byte chunk for completed fights, plus the boundary
@@ -512,9 +648,24 @@ pub struct ChunkScan {
 /// (false — a leading `BEGIN_LOG` is just the session header, not a re-enable).
 /// The watcher passes `false` right after a truncation reset to avoid a spurious
 /// second `SessionReset`.
-pub fn scan_chunk_for_fights(chunk: &[u8], base: u64, session_already_open: bool) -> ChunkScan {
+///
+/// `pending_zone`/`pending_boss` seed the detector's naming state from the
+/// PREVIOUS chunk's [`ChunkScan::pending_zone`]/[`ChunkScan::pending_boss`] (E2):
+/// without this, each chunk starts naming state fresh, so a fight whose
+/// `ZONE_CHANGED`/boss `UNIT_ADDED` lines were consumed by an earlier read (and
+/// thus never re-scanned) would always come out unnamed. A `BEGIN_LOG` fed
+/// during this scan still clears the seed exactly like a fresh session would.
+pub fn scan_chunk_for_fights(
+    chunk: &[u8],
+    base: u64,
+    session_already_open: bool,
+    pending_zone: Option<String>,
+    pending_boss: Option<String>,
+) -> ChunkScan {
     let mut detector = Detector {
         session_open: session_already_open,
+        pending_zone,
+        pending_boss,
         ..Default::default()
     };
     let mut offset: u64 = 0;
@@ -539,6 +690,8 @@ pub fn scan_chunk_for_fights(chunk: &[u8], base: u64, session_already_open: bool
     }
 
     ChunkScan {
+        pending_zone: detector.pending_zone,
+        pending_boss: detector.pending_boss,
         fights: detector.fights,
         open_fight_start: detector.fight_start.map(|(off, _)| off),
         new_session_at: detector.new_session_at,
@@ -601,6 +754,108 @@ mod tests {
     }
 
     #[test]
+    fn scan_range_keeps_absolute_offsets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Encounter.log");
+        let first = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let second = "0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"x\"\n30,BEGIN_COMBAT\n40,END_COMBAT\n";
+        std::fs::write(&path, format!("{first}{second}")).unwrap();
+
+        let start = first.len() as u64;
+        let end = start + second.len() as u64;
+        let scan = scan_range(path.to_str().unwrap(), start, end).unwrap();
+
+        assert_eq!(scan.sessions.len(), 1);
+        assert_eq!(scan.sessions[0].index, 0);
+        assert_eq!(scan.sessions[0].start_offset, start);
+        assert_eq!(scan.sessions[0].end_offset, end);
+        assert_eq!(scan.fights.len(), 1);
+        assert_eq!(
+            scan.fights[0].start_offset,
+            start + second.find("30,BEGIN_COMBAT").unwrap() as u64
+        );
+    }
+
+    #[test]
+    fn scan_latest_session_only_scans_newest_begin_log_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Encounter.log");
+        let first = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let second = "0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"x\"\n30,BEGIN_COMBAT\n40,END_COMBAT\n";
+        std::fs::write(&path, format!("{first}{second}")).unwrap();
+
+        let (scan, size) = scan_latest_session(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(size, (first.len() + second.len()) as u64);
+        assert_eq!(scan.sessions.len(), 1);
+        assert_eq!(scan.sessions[0].start_offset, first.len() as u64);
+        assert_eq!(scan.sessions[0].start_time_ms, 2000);
+        assert_eq!(scan.fights.len(), 1);
+        assert_eq!(scan.fights[0].start_ms, 30);
+    }
+
+    #[test]
+    fn capped_scan_counts_all_fights_but_only_keeps_requested_summaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Encounter.log");
+        let log = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n\
+                   10,BEGIN_COMBAT\n20,END_COMBAT\n\
+                   30,BEGIN_COMBAT\n40,END_COMBAT\n\
+                   50,BEGIN_COMBAT\n60,END_COMBAT\n";
+        std::fs::write(&path, log).unwrap();
+
+        let scan = scan_file_with_fight_limit(path.to_str().unwrap(), Some(1)).unwrap();
+
+        assert_eq!(scan.total_fights, 3);
+        assert_eq!(scan.sessions[0].fight_count, 3);
+        assert_eq!(scan.fights.len(), 1);
+        assert_eq!(scan.fights[0].index, 0);
+
+        let count_only = scan_file_with_fight_limit(path.to_str().unwrap(), Some(0)).unwrap();
+        assert_eq!(count_only.total_fights, 3);
+        assert!(count_only.fights.is_empty());
+    }
+
+    #[test]
+    fn latest_session_scan_ignores_partial_trailing_combat_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Encounter.log");
+        let partial = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n\
+                       10,BEGIN_COMBAT\n\
+                       20,END_COMBAT";
+        std::fs::write(&path, partial).unwrap();
+
+        let (scan, _) = scan_latest_session(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(scan.total_fights, 0);
+        assert!(scan.fights.is_empty());
+
+        std::fs::write(&path, format!("{partial}\n")).unwrap();
+        let (complete, _) = scan_latest_session(path.to_str().unwrap()).unwrap();
+        assert_eq!(complete.total_fights, 1);
+        assert_eq!(complete.fights.len(), 1);
+    }
+
+    #[test]
+    fn latest_session_anchor_ignores_partial_trailing_begin_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Encounter.log");
+        let first = "0,BEGIN_LOG,1000,15,\"NA\",\"en\",\"x\"\n\
+                     10,BEGIN_COMBAT\n20,END_COMBAT\n";
+        let partial_next = "0,BEGIN_LOG,2000,15,\"NA\",\"en\",\"x\"";
+        std::fs::write(&path, format!("{first}{partial_next}")).unwrap();
+        let eof = std::fs::metadata(&path).unwrap().len();
+
+        let begin = find_latest_session_begin(&path, eof).unwrap().unwrap();
+        let (scan, _) = scan_latest_session(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(begin, 0);
+        assert_eq!(scan.sessions.len(), 1);
+        assert_eq!(scan.sessions[0].start_time_ms, 1000);
+        assert_eq!(scan.total_fights, 1);
+    }
+
+    #[test]
     fn byte_offsets_are_contiguous_and_cover_fights() {
         let log = "0,BEGIN_LOG,1,15,\"NA\",\"en\",\"x\"\n50,BEGIN_COMBAT\n99,END_COMBAT\n";
         let r = scan_text(log);
@@ -623,7 +878,7 @@ mod tests {
         chunk.extend_from_slice(b"10,BEGIN_COMBAT\n");
         chunk.extend_from_slice(b"20,END_COMBAT\n");
 
-        let scan = scan_chunk_for_fights(&chunk, 0, true);
+        let scan = scan_chunk_for_fights(&chunk, 0, true, None, None);
         assert_eq!(scan.fights.len(), 1);
         // start_offset must equal the true byte position of BEGIN_COMBAT.
         assert_eq!(scan.fights[0].start_offset, begin_at);
@@ -637,7 +892,7 @@ mod tests {
         // watcher must re-anchor here, not treat it as oversized.
         let chunk = b"5,ZONE_CHANGED,1,\"Cloudrest\",VETERAN\n100,BEGIN_COMBAT\n";
         let begin_at = chunk.iter().position(|&b| b == b'\n').unwrap() as u64 + 1;
-        let scan = scan_chunk_for_fights(chunk, 0, true);
+        let scan = scan_chunk_for_fights(chunk, 0, true, None, None);
         assert!(scan.fights.is_empty());
         assert_eq!(scan.open_fight_start, Some(begin_at));
     }
@@ -653,7 +908,7 @@ mod tests {
         let expected = (prefix.len() + begin_line.len()) as u64;
         // session_already_open = true: the chunk is read from inside an ongoing
         // session, so the embedded BEGIN_LOG is a mid-stream re-enable.
-        let scan = scan_chunk_for_fights(&chunk, 0, true);
+        let scan = scan_chunk_for_fights(&chunk, 0, true, None, None);
         assert_eq!(scan.new_session_at, Some(expected));
         // Both fights are still detected within the chunk (the watcher uses the
         // boundary to split pre/post-session dispatch).
@@ -668,7 +923,7 @@ mod tests {
         let chunk =
             "0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"x\"\n5,BEGIN_COMBAT\n15,END_COMBAT\n"
                 .as_bytes();
-        let scan = scan_chunk_for_fights(chunk, 0, false);
+        let scan = scan_chunk_for_fights(chunk, 0, false, None, None);
         assert_eq!(scan.new_session_at, None);
         assert_eq!(scan.fights.len(), 1);
     }
@@ -679,13 +934,95 @@ mod tests {
         // flushed BEGIN_LOG must NOT fire a (spurious) new-session signal until
         // its terminating newline arrives.
         let chunk = b"10,BEGIN_COMBAT\n20,END_COMBAT\n30,BEGIN_LOG,1700001000000,15";
-        let scan = scan_chunk_for_fights(chunk, 0, true);
+        let scan = scan_chunk_for_fights(chunk, 0, true, None, None);
         assert_eq!(
             scan.new_session_at, None,
             "partial BEGIN_LOG must be deferred"
         );
         // The complete fight before the partial line is still detected.
         assert_eq!(scan.fights.len(), 1);
+    }
+
+    // ── UNIT_ADDED boss naming (E1: isBoss is field 7, not a `,T,` substring) ──
+
+    // The local player's own UNIT_ADDED line has isLocalPlayer="T" (field 4) but
+    // isBoss="F" (field 7). A bare `,T,` substring search used to match this line
+    // (every session has exactly one) and wrongly name trash fights after the
+    // player. With the positional field-7 check, a fight with no real boss unit
+    // must come out with no boss name.
+    #[test]
+    fn unit_added_player_line_does_not_set_boss_name() {
+        let log = "0,UNIT_ADDED,1,PLAYER,T,1,0,F,3,9,\"H\",\"@h\",1,50,160,0,PLAYER_ALLY,T\n\
+                   10,BEGIN_COMBAT\n\
+                   20,END_COMBAT\n";
+        let r = scan_text(log);
+        assert_eq!(r.fights.len(), 1);
+        assert_eq!(r.fights[0].boss_name, None);
+    }
+
+    // A monster UNIT_ADDED with isBoss="T" at field 7 must still set the pending
+    // boss name (positive case — the fix must not regress real boss detection).
+    #[test]
+    fn unit_added_boss_monster_line_sets_boss_name() {
+        let log = "0,UNIT_ADDED,40,MONSTER,F,0,90001,T,0,0,\"Boss\",\"\",0,50,160,0,HOSTILE,F\n\
+                   10,BEGIN_COMBAT\n\
+                   20,END_COMBAT\n";
+        let r = scan_text(log);
+        assert_eq!(r.fights.len(), 1);
+        assert_eq!(r.fights[0].boss_name.as_deref(), Some("Boss"));
+    }
+
+    // ── naming carry across chunk passes (E2) ─────────────────────────────────
+
+    // Chunk 1 contains only a ZONE_CHANGED line (no fight yet) — the shape of a
+    // live pass that reads the zone change but nothing else. Chunk 2, read later,
+    // contains a full fight with no zone line of its own. Without carrying
+    // chunk 1's `pending_zone` forward into chunk 2's seed, the fight would come
+    // out unnamed even though the zone is known.
+    #[test]
+    fn scan_chunk_carries_pending_zone_across_passes() {
+        let chunk1 = b"5,ZONE_CHANGED,1,\"Cloudrest\",VETERAN\n";
+        let scan1 = scan_chunk_for_fights(chunk1, 0, true, None, None);
+        assert!(scan1.fights.is_empty());
+        assert_eq!(scan1.pending_zone.as_deref(), Some("Cloudrest"));
+        assert_eq!(scan1.pending_boss, None);
+
+        let base2 = chunk1.len() as u64;
+        let chunk2 = b"100,BEGIN_COMBAT\n5200,END_COMBAT\n";
+        let scan2 =
+            scan_chunk_for_fights(chunk2, base2, true, scan1.pending_zone, scan1.pending_boss);
+        assert_eq!(scan2.fights.len(), 1);
+        assert_eq!(
+            scan2.fights[0].zone_name.as_deref(),
+            Some("Cloudrest"),
+            "the zone seen in an earlier pass must still name a fight closed in a later pass"
+        );
+    }
+
+    // A `BEGIN_LOG` — a fresh session or `/encounterlog` re-enable — must clear
+    // any carried naming state, mirroring `Detector::feed`'s `BeginLog` arm.
+    // Without this, a zone/boss name from the PREVIOUS session could leak onto a
+    // fight logged under a brand new one.
+    #[test]
+    fn scan_chunk_carry_is_cleared_by_begin_log() {
+        let chunk1 = b"5,ZONE_CHANGED,1,\"Cloudrest\",VETERAN\n";
+        let scan1 = scan_chunk_for_fights(chunk1, 0, true, None, None);
+        assert_eq!(scan1.pending_zone.as_deref(), Some("Cloudrest"));
+
+        let base2 = chunk1.len() as u64;
+        let chunk2 = b"0,BEGIN_LOG,1700001000000,15,\"NA\",\"en\",\"x\"\n\
+                       5,BEGIN_COMBAT\n15,END_COMBAT\n";
+        let scan2 =
+            scan_chunk_for_fights(chunk2, base2, true, scan1.pending_zone, scan1.pending_boss);
+        assert_eq!(scan2.fights.len(), 1);
+        assert_eq!(
+            scan2.fights[0].zone_name, None,
+            "BEGIN_LOG must clear the carried pending_zone, not leak the prior session's zone"
+        );
+        assert_eq!(
+            scan2.pending_zone, None,
+            "the outgoing carry after a BEGIN_LOG must also be cleared"
+        );
     }
 
     // ── tail_session_state (native-live readiness probe) ─────────────────────

@@ -186,7 +186,10 @@ const Shine = ({
         pointerEvents: "none",
         width: "100%",
         height: "100%",
-        willChange: "transform, opacity",
+        // Only pin the overlay to its own GPU layer while a sweep is armed —
+        // a static willChange would keep one composited layer alive per
+        // visible Shine host (every gold button) for the app's lifetime.
+        willChange: animateState === "shine" || isHovered ? "transform, opacity" : "auto",
         background: `linear-gradient(to right, transparent, ${color}, transparent)`,
         opacity,
         ...style,

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
-use super::types::{ReportRef, UploadRecord, UploadStatus};
+use super::types::{KalpaBuildEvidence, ReportRef, UploadRecord, UploadStatus};
 use crate::metadata::{load_json_with_backup, save_json_with_backup};
 
 /// Cap the stored history so the file can't grow unbounded.
@@ -269,6 +269,78 @@ fn apply_attach_live_report(records: &mut [UploadRecord], id: &str, report: Repo
     changed
 }
 
+/// Persist native raw-log build evidence for a live upload after the report code
+/// exists. Exact-id matching mirrors native live settlement: a delayed sidecar
+/// worker can update either an active row or a row that already reached a
+/// terminal state, but it must never touch sibling sessions.
+pub fn attach_build_evidence(
+    app: &tauri::AppHandle,
+    id: &str,
+    build_evidence: KalpaBuildEvidence,
+) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    if !apply_attach_build_evidence(&mut file.records, id, build_evidence) {
+        return Ok(());
+    }
+    save_json_with_backup(&path, &file)
+}
+
+fn apply_attach_build_evidence(
+    records: &mut [UploadRecord],
+    id: &str,
+    build_evidence: KalpaBuildEvidence,
+) -> bool {
+    let mut changed = false;
+    for r in records {
+        if r.id == id {
+            r.build_evidence = Some(build_evidence.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Attach a user-pasted report link to a terminal record (matched by exact `id`),
+/// serialized under [`MUTATION_LOCK`] so the whole load→mutate→save cycle can't lose
+/// a concurrent driver settle (the lost-update race: attach reads a stale `Live`
+/// snapshot while the native driver upserts `Completed`, then writes the stale
+/// status back). Loading under the lock means attach sees the driver's latest state,
+/// and it only ever mutates `report` — never `status` — so a settled record keeps its
+/// terminal status. Only a terminal `HandedOff | Completed | Failed` record accepts a
+/// pasted link; a still-transient (`Live`/`Uploading`/`Paused`) record is owned by its
+/// driver and must not be touched here. Returns an error if no such record exists.
+pub fn attach_report(app: &tauri::AppHandle, id: &str, report: ReportRef) -> Result<(), String> {
+    let path = history_path(app)?;
+    let _guard = MUTATION_LOCK.lock().map_err(|_| "History lock poisoned")?;
+    let mut file: HistoryFile = load_json_with_backup(&path);
+    if !apply_attach_report(&mut file.records, id, report) {
+        return Err("Upload record not found.".into());
+    }
+    save_json_with_backup(&path, &file)
+}
+
+/// The pure attach rule [`attach_report`] applies, factored out for unit testing.
+/// Sets `report` on the record with exact `id` when it is in a terminal handoff /
+/// complete / failed state, preserving its `status`. Returns whether anything
+/// changed (a missing id, or a still-transient record, matches nothing).
+fn apply_attach_report(records: &mut [UploadRecord], id: &str, report: ReportRef) -> bool {
+    let mut changed = false;
+    for r in records {
+        if r.id == id
+            && matches!(
+                r.status,
+                UploadStatus::HandedOff | UploadStatus::Completed | UploadStatus::Failed
+            )
+        {
+            r.report = Some(report.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Mark a native live record as paused while its ESO Logs session is refreshed.
 ///
 /// This is intentionally exact-id and native-driver-owned, like
@@ -417,6 +489,7 @@ mod tests {
             error: None,
             title: None,
             zone: None,
+            build_evidence: None,
         }
     }
 
@@ -484,6 +557,41 @@ mod tests {
             },
         ));
         assert!(recs[1].report.is_none());
+    }
+
+    // C6: a user-pasted link attaches to a TERMINAL record (HandedOff/Completed/
+    // Failed) and preserves its status, while a still-transient record — owned by its
+    // driver — is left untouched, and an unknown id matches nothing. Under
+    // `MUTATION_LOCK` (in the real `attach_report`) this makes the paste lose no
+    // concurrent settle: it only ever writes `report`, never `status`.
+    #[test]
+    fn attach_report_targets_terminal_records_and_preserves_status() {
+        let report = ReportRef {
+            url: "https://www.esologs.com/reports/ABC".into(),
+            code: "ABC".into(),
+        };
+        let mut recs = vec![
+            rec("handed-off", UploadStatus::HandedOff),
+            rec("live", UploadStatus::Live),
+            rec("uploading", UploadStatus::Uploading),
+        ];
+
+        // Terminal HandedOff record accepts the link and keeps its status.
+        assert!(apply_attach_report(&mut recs, "handed-off", report.clone()));
+        assert_eq!(
+            recs[0].report.as_ref().map(|r| r.code.as_str()),
+            Some("ABC")
+        );
+        assert_eq!(recs[0].status, UploadStatus::HandedOff);
+
+        // A still-Live record is driver-owned — the pasted link is rejected.
+        assert!(!apply_attach_report(&mut recs, "live", report.clone()));
+        assert!(recs[1].report.is_none());
+        // A transient Uploading record is likewise rejected.
+        assert!(!apply_attach_report(&mut recs, "uploading", report.clone()));
+        assert!(recs[2].report.is_none());
+        // An unknown id changes nothing.
+        assert!(!apply_attach_report(&mut recs, "nope", report));
     }
 
     #[test]
@@ -638,6 +746,34 @@ mod tests {
             recs[0].error.as_deref(),
             Some("session expired before final segment"),
             "failed native live records need an actionable history error"
+        );
+    }
+
+    #[test]
+    fn attaches_build_evidence_by_exact_record_id_even_after_settle() {
+        let mut recs = vec![
+            rec("native-1", UploadStatus::Completed),
+            rec("native-10", UploadStatus::Live),
+        ];
+        let evidence = KalpaBuildEvidence {
+            schema_version: 1,
+            extractor_version: Some(1),
+            source: "kalpa-native-raw-log".into(),
+            report_code: Some("ABC123".into()),
+            players: vec![],
+            companion: None,
+        };
+
+        assert!(apply_attach_build_evidence(
+            &mut recs,
+            "native-1",
+            evidence.clone(),
+        ));
+
+        assert_eq!(recs[0].build_evidence, Some(evidence));
+        assert!(
+            recs[1].build_evidence.is_none(),
+            "build evidence must match exact record id"
         );
     }
 

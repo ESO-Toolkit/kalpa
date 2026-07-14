@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, memo, Suspense, useState } from "react";
 import type { AddonManifest, AuthUser, GameInstance } from "@/types";
 import {
   Dialog,
@@ -63,9 +63,11 @@ interface AppDialogsProps {
   deepLinkPackId: string | null;
   deepLinkShareCode: string | null;
   knownInstances: GameInstance[];
+  logUploaderMounted: boolean;
   onAuthChange: (user: AuthUser | null) => void;
   onCheckForAppUpdate: () => void;
   onCloseDialog: () => void;
+  onInstancesDetected: (instances: GameInstance[]) => void;
   onPathChange: (path: string) => void;
   onRefresh: () => void;
   onShowDialog: (dialog: Exclude<ActiveDialog, null>) => void;
@@ -95,7 +97,7 @@ function DialogLoadingFallback({ title, onClose }: { title: string; onClose: () 
   );
 }
 
-export function AppDialogs({
+function AppDialogsBase({
   activeDialog,
   addons,
   addonsPath,
@@ -103,84 +105,141 @@ export function AppDialogs({
   deepLinkPackId,
   deepLinkShareCode,
   knownInstances,
+  logUploaderMounted,
   onAuthChange,
   onCheckForAppUpdate,
   onCloseDialog,
+  onInstancesDetected,
   onPathChange,
   onRefresh,
   onShowDialog,
 }: AppDialogsProps) {
-  if (!activeDialog) return null;
-  const fallback = (
-    <DialogLoadingFallback title={DIALOG_LABELS[activeDialog]} onClose={onCloseDialog} />
-  );
+  // Shared across the Backups and Characters dialogs so a create/restore/delete
+  // (or character backup) started in one surface still gates the destructive
+  // buttons in the other if the user switches dialogs mid-operation.
+  const [backupSurfaceBusy, setBackupSurfaceBusy] = useState(false);
+
+  const visibleDialog = activeDialog && activeDialog !== "log-upload" ? activeDialog : null;
+  const shouldRenderUploader = logUploaderMounted || activeDialog === "log-upload";
+  if (!visibleDialog && !shouldRenderUploader) return null;
 
   return (
-    <Suspense fallback={fallback}>
-      {activeDialog === "packs" && (
-        <Packs
-          addonsPath={addonsPath}
-          installedAddons={addons}
-          authUser={authUser}
-          onAuthChange={onAuthChange}
-          onClose={onCloseDialog}
-          onRefresh={onRefresh}
-          initialPackId={deepLinkPackId}
-          initialShareCode={deepLinkShareCode}
-        />
+    <>
+      {visibleDialog && (
+        <Suspense
+          fallback={
+            <DialogLoadingFallback title={DIALOG_LABELS[visibleDialog]} onClose={onCloseDialog} />
+          }
+        >
+          {activeDialog === "packs" && (
+            <Packs
+              addonsPath={addonsPath}
+              installedAddons={addons}
+              authUser={authUser}
+              onAuthChange={onAuthChange}
+              onClose={onCloseDialog}
+              onRefresh={onRefresh}
+              initialPackId={deepLinkPackId}
+              initialShareCode={deepLinkShareCode}
+            />
+          )}
+
+          {activeDialog === "profiles" && (
+            <Profiles
+              addonsPath={addonsPath}
+              instanceLabel={
+                knownInstances.find((inst) => inst.addonsPath === addonsPath)?.displayLabel ?? null
+              }
+              enabledFolders={addons.filter((a) => !a.disabled).map((a) => a.folderName)}
+              onClose={onCloseDialog}
+              onRefresh={onRefresh}
+            />
+          )}
+
+          {activeDialog === "backups" && (
+            <Backups
+              addonsPath={addonsPath}
+              onClose={onCloseDialog}
+              sharedOpInFlight={backupSurfaceBusy}
+              onSharedOpInFlightChange={setBackupSurfaceBusy}
+            />
+          )}
+
+          {activeDialog === "api-compat" && (
+            <ApiCompat addonsPath={addonsPath} onClose={onCloseDialog} />
+          )}
+
+          {activeDialog === "characters" && (
+            <Characters
+              addonsPath={addonsPath}
+              onClose={onCloseDialog}
+              sharedOpInFlight={backupSurfaceBusy}
+              onSharedOpInFlightChange={setBackupSurfaceBusy}
+            />
+          )}
+
+          {activeDialog === "saved-variables" && (
+            <SavedVariables
+              addonsPath={addonsPath}
+              installedAddons={addons}
+              onClose={onCloseDialog}
+            />
+          )}
+
+          {activeDialog === "settings" && (
+            <Settings
+              addonsPath={addonsPath}
+              authUser={authUser}
+              knownInstances={knownInstances}
+              onAuthChange={onAuthChange}
+              onInstancesDetected={onInstancesDetected}
+              onPathChange={onPathChange}
+              onClose={onCloseDialog}
+              onRefresh={onRefresh}
+              onShowBackups={() => onShowDialog("backups")}
+              onShowApiCompat={() => onShowDialog("api-compat")}
+              onShowCharacters={() => onShowDialog("characters")}
+              onShowMigrationWizard={() => onShowDialog("migration-wizard")}
+              onShowSafetyCenter={() => onShowDialog("safety-center")}
+              onCheckForAppUpdate={onCheckForAppUpdate}
+            />
+          )}
+
+          {activeDialog === "migration-wizard" && (
+            <MigrationWizard
+              addonsPath={addonsPath}
+              onClose={onCloseDialog}
+              onRefresh={onRefresh}
+            />
+          )}
+
+          {activeDialog === "safety-center" && (
+            <SafetyCenter addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
+          )}
+        </Suspense>
       )}
 
-      {activeDialog === "profiles" && (
-        <Profiles addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
+      {shouldRenderUploader && (
+        <Suspense
+          fallback={
+            activeDialog === "log-upload" ? (
+              <DialogLoadingFallback title={DIALOG_LABELS["log-upload"]} onClose={onCloseDialog} />
+            ) : null
+          }
+        >
+          <UploaderWorkspace
+            open={activeDialog === "log-upload"}
+            authUser={authUser}
+            onAuthChange={onAuthChange}
+            onClose={onCloseDialog}
+            onOpen={() => onShowDialog("log-upload")}
+          />
+        </Suspense>
       )}
-
-      {activeDialog === "backups" && <Backups addonsPath={addonsPath} onClose={onCloseDialog} />}
-
-      {activeDialog === "api-compat" && (
-        <ApiCompat addonsPath={addonsPath} onClose={onCloseDialog} />
-      )}
-
-      {activeDialog === "characters" && (
-        <Characters addonsPath={addonsPath} onClose={onCloseDialog} />
-      )}
-
-      {activeDialog === "saved-variables" && (
-        <SavedVariables addonsPath={addonsPath} installedAddons={addons} onClose={onCloseDialog} />
-      )}
-
-      {activeDialog === "settings" && (
-        <Settings
-          addonsPath={addonsPath}
-          authUser={authUser}
-          knownInstances={knownInstances}
-          onAuthChange={onAuthChange}
-          onPathChange={onPathChange}
-          onClose={onCloseDialog}
-          onRefresh={onRefresh}
-          onShowBackups={() => onShowDialog("backups")}
-          onShowApiCompat={() => onShowDialog("api-compat")}
-          onShowCharacters={() => onShowDialog("characters")}
-          onShowMigrationWizard={() => onShowDialog("migration-wizard")}
-          onShowSafetyCenter={() => onShowDialog("safety-center")}
-          onCheckForAppUpdate={onCheckForAppUpdate}
-        />
-      )}
-
-      {activeDialog === "migration-wizard" && (
-        <MigrationWizard addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
-      )}
-
-      {activeDialog === "safety-center" && (
-        <SafetyCenter addonsPath={addonsPath} onClose={onCloseDialog} onRefresh={onRefresh} />
-      )}
-
-      {activeDialog === "log-upload" && (
-        <UploaderWorkspace
-          authUser={authUser}
-          onAuthChange={onAuthChange}
-          onClose={onCloseDialog}
-        />
-      )}
-    </Suspense>
+    </>
   );
 }
+
+// Memoized: with activeDialog=null this renders nothing but would otherwise
+// still re-render (and re-diff its lazy chunks) on every App state change.
+export const AppDialogs = memo(AppDialogsBase);

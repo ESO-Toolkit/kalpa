@@ -47,6 +47,7 @@ const SPLIT_PREFIX_KEY = "kalpa.uploader.splitPrefix";
 
 /** The two split granularities the workbench offers. */
 type Granularity = "session" | "fight";
+type WorkbenchScope = "full" | "latest";
 
 /** The fights that fall inside a session's byte range, in file order. */
 function fightsInSession(session: LogSession, fights: FightSummary[]): FightSummary[] {
@@ -82,21 +83,28 @@ export function SplitWorkbench({
   filePath,
   fileName,
   preflight,
+  initialGranularity = "session",
+  scope = "full",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   filePath: string;
   fileName: string;
   preflight: LogPreflight | null;
+  initialGranularity?: Granularity;
+  scope?: WorkbenchScope;
 }) {
   const sessions = preflight?.sessions ?? [];
   const fights = preflight?.fights ?? [];
+  const fightsOmitted = preflight?.fightsOmitted ?? false;
   // Per-fight split needs the parsed fight list, which preflight omits for very
   // large logs (to bound the IPC payload). When it's empty we keep the "By fight"
   // tab disabled and steer the user to split by session first.
   const fightsAvailable = fights.length > 0;
 
-  const [granularity, setGranularity] = useState<Granularity>("session");
+  const [granularity, setGranularity] = useState<Granularity>(
+    initialGranularity === "fight" && fights.length > 0 ? "fight" : "session"
+  );
 
   // ── Per-session drafts ──────────────────────────────────────────────────────
   // Build initial drafts: include sessions that have fights by default (the
@@ -321,6 +329,7 @@ export function SplitWorkbench({
       const selections: SplitSelection[] = selected.map((s) => ({
         index: s.index,
         name: drafts[s.index]?.name?.trim() || null,
+        startOffset: s.startOffset,
         // Pin the session identity so the backend can detect a rescan that shifted
         // indices (log truncated/rotated since preflight) and refuse to mislabel.
         startTimeMs: s.startTimeMs,
@@ -345,6 +354,7 @@ export function SplitWorkbench({
       const selections: FightSelection[] = selectedFights.map((f) => ({
         index: f.index,
         name: fightDrafts[f.index]?.name?.trim() || null,
+        startOffset: f.startOffset,
         // Pin the fight identity so a rescan that shifted indices is caught.
         startMs: f.startMs,
       }));
@@ -364,6 +374,8 @@ export function SplitWorkbench({
 
   const byFight = granularity === "fight";
   const sessionsWithFights = sessions.filter((s) => fightsInSession(s, fights).length > 0);
+  const sessionLabel = (session: LogSession) =>
+    scope === "latest" && sessions.length === 1 ? "Latest session" : `Session ${session.index + 1}`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -374,8 +386,9 @@ export function SplitWorkbench({
             Split workbench
           </DialogTitle>
           <DialogDescription>
-            Carve <code className="text-foreground/80">{fileName}</code> into smaller logs. Choose a
-            granularity, pick which to keep, name each, then split.
+            {scope === "latest" ? "Split the latest session from " : "Carve "}
+            <code className="text-foreground/80">{fileName}</code>
+            {" into smaller logs. Choose a granularity, pick which to keep, name each, then split."}
           </DialogDescription>
         </DialogHeader>
 
@@ -399,7 +412,9 @@ export function SplitWorkbench({
             hint={
               fightsAvailable
                 ? `${fights.length} fight${fights.length === 1 ? "" : "s"}`
-                : "too large to scan"
+                : fightsOmitted
+                  ? "too many to list"
+                  : "no fights"
             }
           />
         </div>
@@ -410,9 +425,11 @@ export function SplitWorkbench({
             don't send the user in a circle. */}
         {!fightsAvailable && (
           <p className="mt-2 px-1 text-[11px] text-muted-foreground/70">
-            {sessions.length > 1
-              ? "This log is too large to list every fight here — split it by session first, then split a single session by fight."
-              : "This log has too many fights in one session to list them individually here — upload it whole, or split it by size outside Kalpa."}
+            {!fightsOmitted
+              ? "No completed fights were found in this scan."
+              : sessions.length > 1
+                ? "This log is too large to list every fight here — split it by session first, then split a single session by fight."
+                : "This log has too many fights in one session to list them individually here — upload it whole, or split it by size outside Kalpa."}
           </p>
         )}
 
@@ -508,7 +525,7 @@ export function SplitWorkbench({
                   <div key={s.index} className="space-y-1.5">
                     <div className="flex items-center gap-2 px-1 pt-1">
                       <span className="font-heading text-[11px] font-semibold tracking-[0.06em] text-muted-foreground/60 uppercase">
-                        Session {s.index + 1}
+                        {sessionLabel(s)}
                       </span>
                       {realm && <InfoPill color="muted">{realm}</InfoPill>}
                       <span className="text-[11px] text-muted-foreground/50">
@@ -549,6 +566,7 @@ export function SplitWorkbench({
                   session={s}
                   draft={d}
                   fights={inFights}
+                  label={sessionLabel(s)}
                   onToggleInclude={() => setDraft(s.index, { include: !d.include })}
                   onRename={(name) => setDraft(s.index, { name })}
                   onSuggest={() => setDraft(s.index, { name: suggestSplitName(s, inFights) })}
@@ -739,6 +757,7 @@ function SessionCard({
   session,
   draft,
   fights,
+  label,
   onToggleInclude,
   onRename,
   onSuggest,
@@ -746,6 +765,7 @@ function SessionCard({
   session: LogSession;
   draft: SessionDraft;
   fights: FightSummary[];
+  label: string;
   onToggleInclude: () => void;
   onRename: (name: string) => void;
   onSuggest: () => void;
@@ -770,7 +790,7 @@ function SessionCard({
           type="button"
           role="checkbox"
           aria-checked={draft.include}
-          aria-label={`Include session ${session.index + 1}`}
+          aria-label={`Include ${label.toLowerCase()}`}
           onClick={onToggleInclude}
           className={cn(
             "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md border transition-colors duration-150",
@@ -786,7 +806,7 @@ function SessionCard({
         <div className="min-w-0 flex-1">
           {/* Meta row */}
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-            <span className="font-semibold text-foreground/90">Session {session.index + 1}</span>
+            <span className="font-semibold text-foreground/90">{label}</span>
             {realm && <InfoPill color="muted">{realm}</InfoPill>}
             <span className="text-xs text-muted-foreground">
               {relativeFromMs(session.startTimeMs)} · {compactBytes(session.sizeBytes)}

@@ -196,6 +196,16 @@ fn tail_loop(
     // at offset 0 (include-entire-file) the first chunk begins with the session
     // header, so it's NOT yet open; tailing from EOF we're already mid-session.
     let mut session_open = start_offset != 0;
+    // Naming state carried across passes (E2): a `ZONE_CHANGED`/boss `UNIT_ADDED`
+    // line consumed in an earlier read must still be able to name a fight closed
+    // in a later one, since `consumed` never rewinds past a dispatched fight.
+    // Seeded fresh (`None`) each pass from the PRIOR pass's `ChunkScan` naming
+    // output; reset alongside `session_open` on truncation, and cleared by
+    // `scan_chunk_for_fights` itself whenever it feeds a `BEGIN_LOG` (mirroring
+    // `Detector::feed`'s `BeginLog` arm) so a stale name never leaks across a
+    // fresh session.
+    let mut pending_zone: Option<String> = None;
+    let mut pending_boss: Option<String> = None;
     // Read buffer reused across every pass: it grows to the session's
     // high-water mark once instead of allocating a fresh Vec per read, so a
     // multi-hour raid does no per-pass heap churn (and the worst-case 64 MiB
@@ -289,6 +299,11 @@ fn tail_loop(
             consumed = 0;
             next_index = 0;
             session_open = false;
+            // The truncated file starts a brand new session; a name carried from
+            // the old one must not survive into it (same discipline as the
+            // `BeginLog` clear inside `Detector::feed`).
+            pending_zone = None;
+            pending_boss = None;
             continue;
         }
         if size == consumed {
@@ -326,9 +341,21 @@ fn tail_loop(
         let chunk = &read_buf[..n];
 
         // Detect completed fights and boundary signals in the chunk. Once we've
-        // read any data, subsequent chunks are mid-session.
-        let scan = scanner::scan_chunk_for_fights(chunk, consumed, session_open);
+        // read any data, subsequent chunks are mid-session. Seed the detector
+        // from the naming state carried out of the PREVIOUS pass (E2) so a
+        // zone/boss line consumed by an earlier read can still name a fight
+        // closed here; a `BEGIN_LOG` fed during this scan clears the carry
+        // regardless (`scan_chunk_for_fights`'s own doc comment).
+        let scan = scanner::scan_chunk_for_fights(
+            chunk,
+            consumed,
+            session_open,
+            pending_zone,
+            pending_boss,
+        );
         session_open = true;
+        pending_zone = scan.pending_zone;
+        pending_boss = scan.pending_boss;
 
         // A mid-chunk BEGIN_LOG (a /encounterlog re-enable) starts a new session
         // in the same growing file. Dispatch any fights that completed *before*
