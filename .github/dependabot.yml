@@ -8,6 +8,18 @@ updates:
       dev-dependencies:
         dependency-type: development
     open-pull-requests-limit: 10
+    ignore:
+      # TypeScript 7 (native compiler) drops the ts.Extension enum that
+      # @typescript-eslint/typescript-estree reads at module load, so every
+      # eslint run crashes ("reading 'Cjs'") — bisect-verified in #267, which
+      # held typescript at 6.x. typescript-eslint caps its peer range at
+      # <6.1.0 with no TS 7 support even in canary. Drop this rule when
+      # typescript-eslint ships TS 7 support (check
+      # `npm view typescript-eslint@latest peerDependencies`). Minor/patch
+      # typescript updates stay enabled. The worker is NOT ignored — it has
+      # no typescript-eslint and already runs TS 7 (#262).
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /backend/eso-packs-worker
