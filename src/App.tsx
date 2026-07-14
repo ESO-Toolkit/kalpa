@@ -59,6 +59,9 @@ interface PendingDeepLinkPayload {
   packId: string | null;
   shareCode: string | null;
   installPackId: string | null;
+  appUpdate: boolean;
+  logUpload: boolean;
+  packHub: boolean;
 }
 
 type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
@@ -128,6 +131,7 @@ function App() {
 
   const initRan = useRef(false);
   const autoLinkRan = useRef(false);
+  const checkForAppUpdateRef = useRef(checkForAppUpdate);
   const selectedAddonRef = useRef<AddonManifest | null>(null);
   const addonsPathRef = useRef("");
   const viewModeRef = useRef<ViewMode>("installed");
@@ -149,6 +153,10 @@ function App() {
   // within it (a Rules-of-React violation). The mirror lets the handler build
   // the next map and both setter calls stay siblings.
   const addonStatusesRef = useRef<Map<string, AddonPhase>>(new Map());
+
+  useEffect(() => {
+    checkForAppUpdateRef.current = checkForAppUpdate;
+  }, [checkForAppUpdate]);
 
   useEffect(() => {
     selectedAddonRef.current = selectedAddon;
@@ -248,6 +256,15 @@ function App() {
     void invokeOrThrow<PendingDeepLinkPayload>("consume_initial_deep_link")
       .then((payload) => {
         if (disposed) return;
+        if (payload.appUpdate) {
+          void checkForAppUpdateRef.current(false);
+        }
+        if (payload.logUpload) {
+          setActiveDialog("log-upload");
+        }
+        if (payload.packHub) {
+          setActiveDialog("packs");
+        }
         if (payload.installPackId) {
           setRosterPackInstallId(payload.installPackId);
         } else if (payload.packId) {

@@ -1,0 +1,48 @@
+name: Slint Prototype CI
+
+# The Slint native UI ships as a Windows sidecar of the main app (see
+# src-tauri/tauri.windows.conf.json + scripts/build-native-slint-sidecar.mjs),
+# so its tree must stay green — but it is a full separate Rust workspace that
+# would roughly double CI time if built on every PR. Path-filter it instead:
+# any PR touching the prototype or its packaging wiring gets the full gate.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "prototypes/slint-kalpa/**"
+      - "scripts/build-native-slint-sidecar.mjs"
+      - ".github/workflows/slint-ci.yml"
+
+concurrency:
+  group: slint-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-slint:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: "1.94.0"
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: prototypes/slint-kalpa
+
+      - name: Rust format check
+        run: cargo fmt --check --manifest-path prototypes/slint-kalpa/Cargo.toml
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path prototypes/slint-kalpa/Cargo.toml -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path prototypes/slint-kalpa/Cargo.toml
+
+      - name: Release build (the artifact the sidecar ships)
+        run: cargo build --release --manifest-path prototypes/slint-kalpa/Cargo.toml
