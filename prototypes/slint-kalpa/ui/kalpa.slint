@@ -18,6 +18,13 @@ export struct TagEntry {
     preset: bool,
 }
 
+// A distinct tag in use across the library, shown as a dynamic filter tab
+// (mirrors the WebView: every non-favorite tag becomes its own tab).
+export struct TagFilterEntry {
+    name: string,
+    count: int,
+}
+
 export struct FileEntry {
     name: string,
     relative-path: string,
@@ -659,6 +666,46 @@ component FilterTab inherits Rectangle {
         vertical-alignment: center;
 
         animate color { duration: Tokens.low-memory-preset ? 0ms : 150ms; easing: ease-in-out; }
+    }
+}
+
+// A dynamic per-tag filter tab (one per non-favorite tag in use). Self-contained
+// — draws its own background/hover/active + TouchArea — so any number can be laid
+// out in a HorizontalLayout. Sky accent distinguishes tag filters from the gold
+// built-in filters, matching the WebView.
+component TagFilterTab inherits Rectangle {
+    in property <string> label;
+    in property <int> count;
+    in property <bool> active: false;
+    callback clicked;
+    width: label-text.preferred-width + 20px;
+    preferred-width: self.width;
+    height: 24px;
+    horizontal-stretch: 0;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.active ? Palette.sky-25 : #00000000;
+    background: root.active ? Palette.sky-10 : (touch.has-hover ? Palette.white-04 : #00000000);
+
+    animate background, border-color { duration: Tokens.low-memory-preset ? 0ms : 150ms; easing: ease-in-out; }
+
+    label-text := Text {
+        x: 10px;
+        y: 0px;
+        height: root.height;
+        text: root.label + " (" + root.count + ")";
+        color: root.active ? Palette.sky : (touch.has-hover ? Palette.muted : Palette.muted-dim);
+        font-size: 12px;
+        font-weight: 500;
+        vertical-alignment: center;
+
+        animate color { duration: Tokens.low-memory-preset ? 0ms : 150ms; easing: ease-in-out; }
+    }
+
+    touch := TouchArea {
+        width: root.width;
+        height: root.height;
+        clicked => { root.clicked(); }
     }
 }
 
@@ -2572,8 +2619,28 @@ component DetailTagsSection inherits Rectangle {
     callback add-tag-clicked;
     callback custom-tag-submitted(string);
     property <bool> overflowing: tags-scroll.viewport-width > tags-scroll.width + 1px;
-    // Grow to fit a scrollbar row only when the tags exceed the width; otherwise
-    // stay compact. (Slint has no wrap layout, so overflow scrolls horizontally.)
+    // The '+ tag' editor is pinned OUTSIDE the horizontal scroll so it — and its
+    // "+" submit button — stay fully visible and clickable no matter how many tags
+    // there are. Only the chips scroll. (Previously the input was the last item
+    // INSIDE the scroll, so typing grew it 56->112px and pushed the "+" button into
+    // the clipped overflow region, where clicks silently did nothing.) Reserve the
+    // input's max width up front so its position never shifts as the draft grows.
+    property <length> input-reserve: 118px; // 112px max TagInput width + 6px gap
+    // Newly added custom tags append to the RIGHT end of the chips, which is
+    // scrolled off-view when the row overflows — so the tag you just added looks
+    // like it never appeared. When the editor submits, scroll the chips to the end
+    // so the new chip is revealed (next to the pinned editor). `pending-reveal`
+    // gates this to user submits only, so reloads / addon switches don't jump.
+    property <bool> pending-reveal: false;
+    property <length> chips-width: tags-row.preferred-width;
+    changed chips-width => {
+        if (root.pending-reveal) {
+            tags-scroll.viewport-x = -max(0px, tags-scroll.viewport-width - tags-scroll.width);
+            root.pending-reveal = false;
+        }
+    }
+    // Grow to fit a scrollbar row only when the chips exceed the visible area;
+    // otherwise stay compact. (Slint has no wrap layout, so overflow scrolls.)
     height: root.overflowing ? 34px : 22px;
     background: #00000000;
     clip: true;
@@ -2581,7 +2648,7 @@ component DetailTagsSection inherits Rectangle {
     tags-scroll := ScrollView {
         x: 0px;
         y: 0px;
-        width: parent.width;
+        width: max(0px, min(root.width - root.input-reserve, tags-row.preferred-width));
         height: 22px;
         viewport-width: max(self.width, tags-row.preferred-width);
         viewport-height: 22px;
@@ -2596,19 +2663,27 @@ component DetailTagsSection inherits Rectangle {
                 active: tag.active;
                 clicked => { root.tag-clicked(tag.id); }
             }
-            TagInput {
-                draft <=> root.custom-tag-draft;
-                submit(value) => { root.custom-tag-submitted(value); }
-            }
+        }
+    }
+
+    // Pinned, always-visible tag editor — never inside the scroll/clip region.
+    TagInput {
+        x: tags-scroll.x + tags-scroll.width + 6px;
+        y: 0px;
+        draft <=> root.custom-tag-draft;
+        submit(value) => {
+            root.pending-reveal = true;
+            root.custom-tag-submitted(value);
         }
     }
 
     // Draggable scrollbar for overflow — the chip TouchAreas swallow drag/wheel,
-    // so without this the trailing tags and the "+ tag" input become unreachable.
+    // so without this the trailing chips become unreachable. Spans only the chip
+    // scroll area (the '+ tag' editor is pinned to its right, outside the scroll).
     if (root.overflowing) : Rectangle {
         x: 0px;
         y: 26px;
-        width: parent.width;
+        width: tags-scroll.width;
         height: 8px;
         background: transparent;
 
@@ -10753,6 +10828,10 @@ component Sidebar inherits Rectangle {
     in property <int> broken-tag-count: 0;
     in property <int> essential-tag-count: 0;
     in property <int> raid-tag-count: 0;
+    // Dynamic per-tag filter tabs (every non-favorite tag in use), mirroring the
+    // WebView. `active-tag-filter` is the currently selected tag ("" = none).
+    in property <[TagFilterEntry]> tag-filters;
+    in-out property <string> active-tag-filter;
     callback addon-selected(int);
     callback addon-selection-toggled(int);
     callback addon-context-open-folder(int);
@@ -10762,6 +10841,7 @@ component Sidebar inherits Rectangle {
     callback addon-context-remove(int);
     callback addon-search-edited(string);
     callback filter-selected(int);
+    callback tag-filter-selected(string);
     callback sort-selected(int);
     callback discover-tab-selected(int);
     callback discover-selected(int);
@@ -10975,7 +11055,7 @@ component Sidebar inherits Rectangle {
         filters-scroll := ScrollView {
             width: parent.width;
             height: 24px;
-            viewport-width: raid-filter.x + (root.raid-tag-count > 0 ? raid-filter.width : 0px);
+            viewport-width: filters-scroll.tags-start-x + tag-tabs.preferred-width;
             viewport-height: 24px;
             // Scrollbar off — an as-needed bar overlaps the 24px tab row. Overflowed
             // tag filters remain reachable by dragging the strip.
@@ -10989,12 +11069,12 @@ component Sidebar inherits Rectangle {
             private property <length> outdated-x: self.favorites-x + (root.favorite-addon-count > 0 ? favorites-filter.width + self.gap : 0px);
             private property <length> issues-x: self.outdated-x + (root.outdated-addon-count > 0 ? outdated-filter.width + self.gap : 0px);
             private property <length> disabled-x: self.issues-x + (root.issue-addon-count > 0 ? issues-filter.width + self.gap : 0px);
-            private property <length> testing-x: self.disabled-x + (root.disabled-addon-count > 0 ? disabled-filter.width + self.gap : 0px);
-            private property <length> broken-x: self.testing-x + (root.testing-tag-count > 0 ? testing-filter.width + self.gap : 0px);
-            private property <length> essential-x: self.broken-x + (root.broken-tag-count > 0 ? broken-filter.width + self.gap : 0px);
-            private property <length> raid-x: self.essential-x + (root.essential-tag-count > 0 ? essential-filter.width + self.gap : 0px);
-            private property <length> active-x: root.filter-mode == 1 ? self.addons-x : (root.filter-mode == 2 ? self.libs-x : (root.filter-mode == 3 ? self.favorites-x : (root.filter-mode == 4 ? self.outdated-x : (root.filter-mode == 5 ? self.issues-x : (root.filter-mode == 6 ? self.disabled-x : (root.filter-mode == 7 ? self.testing-x : (root.filter-mode == 8 ? self.broken-x : (root.filter-mode == 9 ? self.essential-x : (root.filter-mode == 10 ? self.raid-x : 0px)))))))));
-            private property <length> active-width: root.filter-mode == 1 ? addons-filter.width : (root.filter-mode == 2 ? libs-filter.width : (root.filter-mode == 3 ? favorites-filter.width : (root.filter-mode == 4 ? outdated-filter.width : (root.filter-mode == 5 ? issues-filter.width : (root.filter-mode == 6 ? disabled-filter.width : (root.filter-mode == 7 ? testing-filter.width : (root.filter-mode == 8 ? broken-filter.width : (root.filter-mode == 9 ? essential-filter.width : (root.filter-mode == 10 ? raid-filter.width : all-filter.width)))))))));
+            // Dynamic per-tag tabs begin right after the last visible built-in tab.
+            private property <length> tags-start-x: self.disabled-x + (root.disabled-addon-count > 0 ? disabled-filter.width + self.gap : 0px);
+            // The animated gold indicator only tracks the built-in tabs (0–6); when a
+            // tag filter is active no built-in is selected, so it's hidden entirely.
+            private property <length> active-x: root.filter-mode == 1 ? self.addons-x : (root.filter-mode == 2 ? self.libs-x : (root.filter-mode == 3 ? self.favorites-x : (root.filter-mode == 4 ? self.outdated-x : (root.filter-mode == 5 ? self.issues-x : (root.filter-mode == 6 ? self.disabled-x : 0px)))));
+            private property <length> active-width: root.filter-mode == 1 ? addons-filter.width : (root.filter-mode == 2 ? libs-filter.width : (root.filter-mode == 3 ? favorites-filter.width : (root.filter-mode == 4 ? outdated-filter.width : (root.filter-mode == 5 ? issues-filter.width : (root.filter-mode == 6 ? disabled-filter.width : all-filter.width)))));
 
             Rectangle {
                 visible: root.filter-mode != 0 && all-touch.has-hover;
@@ -11059,42 +11139,7 @@ component Sidebar inherits Rectangle {
             }
 
             Rectangle {
-                visible: root.testing-tag-count > 0 && root.filter-mode != 7 && testing-touch.has-hover;
-                x: filters-scroll.testing-x;
-                width: testing-filter.width;
-                height: 24px;
-                border-radius: 8px;
-                background: Palette.white-04;
-            }
-
-            Rectangle {
-                visible: root.broken-tag-count > 0 && root.filter-mode != 8 && broken-touch.has-hover;
-                x: filters-scroll.broken-x;
-                width: broken-filter.width;
-                height: 24px;
-                border-radius: 8px;
-                background: Palette.white-04;
-            }
-
-            Rectangle {
-                visible: root.essential-tag-count > 0 && root.filter-mode != 9 && essential-touch.has-hover;
-                x: filters-scroll.essential-x;
-                width: essential-filter.width;
-                height: 24px;
-                border-radius: 8px;
-                background: Palette.white-04;
-            }
-
-            Rectangle {
-                visible: root.raid-tag-count > 0 && root.filter-mode != 10 && raid-touch.has-hover;
-                x: filters-scroll.raid-x;
-                width: raid-filter.width;
-                height: 24px;
-                border-radius: 8px;
-                background: Palette.white-04;
-            }
-
-            Rectangle {
+                visible: root.active-tag-filter == "";
                 x: filters-scroll.active-x;
                 width: filters-scroll.active-width;
                 height: 24px;
@@ -11106,17 +11151,34 @@ component Sidebar inherits Rectangle {
                 animate x, width { duration: Tokens.low-memory-preset ? 0ms : 180ms; easing: ease-in-out; }
             }
 
-            all-filter := FilterTab { x: 0px; label: "All (" + root.total-addon-count + ")"; active: root.filter-mode == 0; hovered: all-touch.has-hover; }
-            addons-filter := FilterTab { x: filters-scroll.addons-x; label: "Addons (" + root.addon-kind-count + ")"; active: root.filter-mode == 1; hovered: addons-touch.has-hover; }
-            libs-filter := FilterTab { x: filters-scroll.libs-x; label: "Libs (" + root.library-kind-count + ")"; active: root.filter-mode == 2; hovered: libs-touch.has-hover; }
-            favorites-filter := FilterTab { visible: root.favorite-addon-count > 0; x: filters-scroll.favorites-x; label: "★ (" + root.favorite-addon-count + ")"; active: root.filter-mode == 3; hovered: favorites-touch.has-hover; }
-            outdated-filter := FilterTab { visible: root.outdated-addon-count > 0; x: filters-scroll.outdated-x; label: "Outdated (" + root.outdated-addon-count + ")"; active: root.filter-mode == 4; hovered: outdated-touch.has-hover; }
-            issues-filter := FilterTab { visible: root.issue-addon-count > 0; x: filters-scroll.issues-x; label: "Issues (" + root.issue-addon-count + ")"; active: root.filter-mode == 5; hovered: issues-touch.has-hover; }
-            disabled-filter := FilterTab { visible: root.disabled-addon-count > 0; x: filters-scroll.disabled-x; label: "Disabled (" + root.disabled-addon-count + ")"; active: root.filter-mode == 6; hovered: disabled-touch.has-hover; }
-            testing-filter := FilterTab { visible: root.testing-tag-count > 0; x: filters-scroll.testing-x; label: "testing (" + root.testing-tag-count + ")"; active: root.filter-mode == 7; hovered: testing-touch.has-hover; }
-            broken-filter := FilterTab { visible: root.broken-tag-count > 0; x: filters-scroll.broken-x; label: "broken (" + root.broken-tag-count + ")"; active: root.filter-mode == 8; hovered: broken-touch.has-hover; }
-            essential-filter := FilterTab { visible: root.essential-tag-count > 0; x: filters-scroll.essential-x; label: "essential (" + root.essential-tag-count + ")"; active: root.filter-mode == 9; hovered: essential-touch.has-hover; }
-            raid-filter := FilterTab { visible: root.raid-tag-count > 0; x: filters-scroll.raid-x; label: "raid (" + root.raid-tag-count + ")"; active: root.filter-mode == 10; hovered: raid-touch.has-hover; }
+            all-filter := FilterTab { x: 0px; label: "All (" + root.total-addon-count + ")"; active: root.filter-mode == 0 && root.active-tag-filter == ""; hovered: all-touch.has-hover; }
+            addons-filter := FilterTab { x: filters-scroll.addons-x; label: "Addons (" + root.addon-kind-count + ")"; active: root.filter-mode == 1 && root.active-tag-filter == ""; hovered: addons-touch.has-hover; }
+            libs-filter := FilterTab { x: filters-scroll.libs-x; label: "Libs (" + root.library-kind-count + ")"; active: root.filter-mode == 2 && root.active-tag-filter == ""; hovered: libs-touch.has-hover; }
+            favorites-filter := FilterTab { visible: root.favorite-addon-count > 0; x: filters-scroll.favorites-x; label: "★ (" + root.favorite-addon-count + ")"; active: root.filter-mode == 3 && root.active-tag-filter == ""; hovered: favorites-touch.has-hover; }
+            outdated-filter := FilterTab { visible: root.outdated-addon-count > 0; x: filters-scroll.outdated-x; label: "Outdated (" + root.outdated-addon-count + ")"; active: root.filter-mode == 4 && root.active-tag-filter == ""; hovered: outdated-touch.has-hover; }
+            issues-filter := FilterTab { visible: root.issue-addon-count > 0; x: filters-scroll.issues-x; label: "Issues (" + root.issue-addon-count + ")"; active: root.filter-mode == 5 && root.active-tag-filter == ""; hovered: issues-touch.has-hover; }
+            disabled-filter := FilterTab { visible: root.disabled-addon-count > 0; x: filters-scroll.disabled-x; label: "Disabled (" + root.disabled-addon-count + ")"; active: root.filter-mode == 6 && root.active-tag-filter == ""; hovered: disabled-touch.has-hover; }
+
+            // Dynamic per-tag filter tabs (one per non-favorite tag in use, alphabetical),
+            // laid out after the built-in tabs. Selecting one sets active-tag-filter and
+            // resets the built-in filter to "All", matching the WebView.
+            tag-tabs := HorizontalLayout {
+                x: filters-scroll.tags-start-x;
+                y: 0px;
+                height: 24px;
+                spacing: filters-scroll.gap;
+                width: self.preferred-width;
+                for tag[i] in root.tag-filters : TagFilterTab {
+                    label: tag.name;
+                    count: tag.count;
+                    active: root.active-tag-filter == tag.name;
+                    clicked => {
+                        root.active-tag-filter = tag.name;
+                        root.filter-mode = 0;
+                        root.tag-filter-selected(tag.name);
+                    }
+                }
+            }
 
             all-touch := TouchArea {
                 x: 0px;
@@ -11191,50 +11253,7 @@ component Sidebar inherits Rectangle {
                     root.filter-selected(6);
                 }
             }
-
-            testing-touch := TouchArea {
-                visible: root.testing-tag-count > 0;
-                x: filters-scroll.testing-x;
-                width: testing-filter.width;
-                height: parent.height;
-                clicked => {
-                    root.filter-mode = 7;
-                    root.filter-selected(7);
-                }
-            }
-
-            broken-touch := TouchArea {
-                visible: root.broken-tag-count > 0;
-                x: filters-scroll.broken-x;
-                width: broken-filter.width;
-                height: parent.height;
-                clicked => {
-                    root.filter-mode = 8;
-                    root.filter-selected(8);
-                }
-            }
-
-            essential-touch := TouchArea {
-                visible: root.essential-tag-count > 0;
-                x: filters-scroll.essential-x;
-                width: essential-filter.width;
-                height: parent.height;
-                clicked => {
-                    root.filter-mode = 9;
-                    root.filter-selected(9);
-                }
-            }
-
-            raid-touch := TouchArea {
-                visible: root.raid-tag-count > 0;
-                x: filters-scroll.raid-x;
-                width: raid-filter.width;
-                height: parent.height;
-                clicked => {
-                    root.filter-mode = 10;
-                    root.filter-selected(10);
-                }
-            }
+            // Tag tabs carry their own TouchAreas (TagFilterTab is self-contained).
         }
 
         // Thin draggable scrollbar for the filter strip. The tab TouchAreas swallow
@@ -12770,6 +12789,8 @@ export component KalpaWindow inherits Window {
     in property <int> broken-tag-count: 0;
     in property <int> essential-tag-count: 0;
     in property <int> raid-tag-count: 0;
+    in property <[TagFilterEntry]> tag-filters;
+    in-out property <string> active-tag-filter;
     in-out property <bool> batch-active: false;
     in-out property <int> selected-addon-count: 0;
     in-out property <int> file-modified-count: 0;
@@ -12989,6 +13010,7 @@ export component KalpaWindow inherits Window {
     callback addon-context-remove(int);
     callback addon-search-edited(string);
     callback filter-selected(int);
+    callback tag-filter-selected(string);
     callback sort-selected(int);
     callback batch-update;
     callback addon-update-check-finished([AddonUpdateCheckEntry], string);
@@ -13251,6 +13273,8 @@ export component KalpaWindow inherits Window {
             broken-tag-count: root.broken-tag-count;
             essential-tag-count: root.essential-tag-count;
             raid-tag-count: root.raid-tag-count;
+            tag-filters: root.tag-filters;
+            active-tag-filter <=> root.active-tag-filter;
             selected-index <=> root.selected-index;
             selected-discover-index <=> root.selected-discover-index;
             discover-active <=> root.discover-active;
@@ -13278,6 +13302,7 @@ export component KalpaWindow inherits Window {
             addon-context-remove(index) => { root.addon-context-remove(index); }
             addon-search-edited(value) => { root.addon-search-edited(value); }
             filter-selected(mode) => { root.filter-selected(mode); }
+            tag-filter-selected(name) => { root.tag-filter-selected(name); }
             sort-selected(mode) => { root.sort-selected(mode); }
             discover-tab-selected(tab) => { root.discover-tab-selected(tab); }
             discover-selected(index) => { root.discover-selected(index); }
