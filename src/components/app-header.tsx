@@ -6,6 +6,7 @@ import {
   ChevronDown,
   CloudUpload,
   FileSliders,
+  Layers,
   MinusIcon,
   Monitor,
   PackageIcon,
@@ -44,6 +45,7 @@ interface AppHeaderProps {
   onBatchTag: (tag: string) => void;
   onBatchUpdate: () => void;
   onOpenPacks: () => void;
+  onOpenProfiles: () => void;
   onOpenSavedVars: () => void;
   onOpenSettings: () => void;
   onOpenLogUpload: () => void;
@@ -157,6 +159,7 @@ function AppHeaderBase({
   onBatchTag,
   onBatchUpdate,
   onOpenPacks,
+  onOpenProfiles,
   onOpenSavedVars,
   onOpenSettings,
   onOpenLogUpload,
@@ -355,6 +358,11 @@ function AppHeaderBase({
             <SimpleTooltip content="Addon Packs" side="bottom">
               <Button variant="ghost" size="icon-sm" onClick={onOpenPacks} aria-label="Addon Packs">
                 <PackageIcon />
+              </Button>
+            </SimpleTooltip>
+            <SimpleTooltip content="Addon Profiles" side="bottom">
+              <Button variant="ghost" size="icon-sm" onClick={onOpenProfiles} aria-label="Profiles">
+                <Layers />
               </Button>
             </SimpleTooltip>
             <SimpleTooltip content="SavedVariables Manager" side="bottom">
