@@ -9388,7 +9388,20 @@ pub fn try_launch_native_performance_mode_on_startup(
         return Ok(None);
     }
 
-    let exe_path = resolve_native_shell_executable(app)?;
+    // Resolve failure = the sidecar is missing entirely (broken or partial
+    // install). Same treatment as a boot that died mid-start: self-heal the
+    // setting and leave the one-shot note so the webview UI explains itself —
+    // a bare `?` here would boot the webview but silently retry (and silently
+    // ignore the user's chosen mode) on every future launch. Caught live in
+    // the release-binary fallback test.
+    let exe_path = match resolve_native_shell_executable(app) {
+        Ok(path) => path,
+        Err(error) => {
+            revert_performance_mode_to_webview(&settings_path);
+            let _ = fs::write(app_data_dir.join(NATIVE_BOOT_FAILED), b"1");
+            return Err(error);
+        }
+    };
     if let Err(error) = launch_native_shell_process(
         &exe_path,
         Some(app_data_dir.clone()),
@@ -10838,6 +10851,37 @@ mod tests {
         );
 
         assert!(resolved.is_err());
+    }
+
+    #[test]
+    fn revert_performance_mode_rewrites_only_that_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        fs::write(
+            &settings,
+            r#"{"performanceMode":"native-slint","theme":"nordic","autoUpdate":true}"#,
+        )
+        .unwrap();
+
+        revert_performance_mode_to_webview(&settings);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        // The broken mode is cleared…
+        assert_eq!(value["performanceMode"], "webview");
+        // …and every unrelated setting is preserved verbatim.
+        assert_eq!(value["theme"], "nordic");
+        assert_eq!(value["autoUpdate"], true);
+    }
+
+    #[test]
+    fn revert_performance_mode_is_a_noop_when_settings_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        // No file on disk: must not panic and must not create one (the gate
+        // then simply fails open into the webview next launch).
+        revert_performance_mode_to_webview(&settings);
+        assert!(!settings.exists());
     }
 
     #[test]
