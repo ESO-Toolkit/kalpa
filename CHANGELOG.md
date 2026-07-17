@@ -6,6 +6,20 @@ All notable changes to Kalpa are documented here. This project uses [Conventiona
 
 _Nothing yet._
 
+## [0.1.0-beta.12] — 2026-07-16
+
+Adds an experimental **native performance UI** and polishes the cross-platform release from beta.11.
+
+### Features
+
+- **Native performance UI (beta, Windows).** A new opt-in mode in Settings relaunches Kalpa as a lightweight native app that uses noticeably less memory than the standard WebView UI. It has full addon management, the ESO Logs uploader, and Pack Hub, and you can switch back to the standard UI anytime from the native app's Settings. It's clearly marked **Beta** and is Windows-only for now — if the native UI ever fails to start, Kalpa automatically falls back to the standard UI. ([#274](https://github.com/ESO-Toolkit/kalpa/pull/274))
+
+### Bug Fixes
+
+- **Fixed blurry dialogs in the native UI on high-DPI displays.** The upload, appearance, characters, safety, and migration dialogs rendered soft/upscaled on scaled displays; they're now crisp. ([#276](https://github.com/ESO-Toolkit/kalpa/pull/276))
+- **The native UI can't get stuck without a window.** If the native performance mode is enabled but its app is missing or won't start, Kalpa now reliably reverts to the standard UI and tells you why, instead of retrying a broken launch. ([#275](https://github.com/ESO-Toolkit/kalpa/pull/275))
+- **macOS release builds are no longer blocked by signing.** Unsigned macOS beta builds now publish correctly; code signing activates automatically once an Apple Developer certificate is configured. ([#272](https://github.com/ESO-Toolkit/kalpa/pull/272))
+
 ## [0.1.0-beta.11] — 2026-07-14
 
 Kalpa goes cross-platform: this release ships native **macOS** and **Linux** builds (beta) alongside Windows, plus a real progress bar for manual log uploads.
