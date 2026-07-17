@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Alert } from "@/components/ui/alert";
 import { SectionHeader } from "@/components/ui/section-header";
 import { GlassPanel } from "@/components/ui/glass-panel";
+import { InfoPill } from "@/components/ui/info-pill";
 import { Logo } from "@/components/ui/logo";
 import { Fade } from "@/components/animate-ui/primitives/effects/fade";
 import { motion, AnimatePresence } from "motion/react";
@@ -570,11 +571,17 @@ export function Settings({
                       />
                       <Gauge className="size-4 shrink-0 text-[#c4a44a]" />
                       <div>
-                        <p className="text-sm font-medium text-white/90">Native performance UI</p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-white/90">Native performance UI</p>
+                          <InfoPill color="amber" className="text-[10px]">
+                            Beta
+                          </InfoPill>
+                        </div>
                         <p className="text-xs text-muted-foreground">
-                          Relaunches Kalpa as the lightweight native app — this window closes
-                          immediately, and future launches start the native UI. Switch back from the
-                          native app&apos;s Settings.
+                          Relaunches Kalpa as a lightweight native app that uses less memory — this
+                          window closes immediately, and future launches start the native UI. Switch
+                          back anytime from the native app&apos;s Settings. Still experimental;
+                          Windows only for now.
                         </p>
                       </div>
                     </label>

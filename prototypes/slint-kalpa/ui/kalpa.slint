@@ -2256,7 +2256,10 @@ component DiscoverModePanel inherits Rectangle {
 
     if (root.tab == 2 && root.category-menu-open) : Rectangle {
         x: 12px;
-        y: 34px;
+        // Open clearly below the 32px category trigger — the extra gap keeps the
+        // menu (and its 18px drop-shadow) off the trigger so it never looks like
+        // the menu covers the field it belongs to.
+        y: 44px;
         width: parent.width - 24px;
         height: min(238px, max(42px, root.category-options.length * 28px + 8px));
         border-radius: 10px;
@@ -2269,7 +2272,9 @@ component DiscoverModePanel inherits Rectangle {
         drop-shadow-blur: 18px;
         drop-shadow-offset-y: 8px;
         drop-shadow-color: #00000080;
-        clip: true;
+        // No clip: rounded clip forces a femtovg offscreen layer that upscales
+        // (blurry) on HiDPI; content is inset clear of the corners and the
+        // border-radius rounds the background crisply without it.
 
         if (root.category-options.length == 0) : Text {
             x: 12px;
@@ -2316,7 +2321,8 @@ component DiscoverModePanel inherits Rectangle {
 
     if (root.tab == 2 && root.category-sort-menu-open) : Rectangle {
         x: 12px;
-        y: 74px;
+        // Clear gap below the sort trigger (y:40–72), same as the category menu.
+        y: 84px;
         width: parent.width - 24px;
         height: max(42px, root.category-sort-options.length * 28px + 8px);
         border-radius: 10px;
@@ -2329,7 +2335,9 @@ component DiscoverModePanel inherits Rectangle {
         drop-shadow-blur: 18px;
         drop-shadow-offset-y: 8px;
         drop-shadow-color: #00000080;
-        clip: true;
+        // No clip: rounded clip forces a femtovg offscreen layer that upscales
+        // (blurry) on HiDPI; content is inset clear of the corners and the
+        // border-radius rounds the background crisply without it.
 
         if (root.category-sort-options.length == 0) : Text {
             x: 12px;
@@ -10715,6 +10723,29 @@ component Header inherits Rectangle {
         }
     }
 
+    // Beta marker: the native UI is opt-in and still experimental.
+    Rectangle {
+        x: 194px;
+        y: 12px;
+        width: 46px;
+        height: 24px;
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: Palette.gold-20;
+        background: Palette.gold-04;
+
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "BETA";
+            color: Palette.gold;
+            font-size: 9px;
+            font-weight: 900;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
     Text {
         visible: !root.batch-active;
         x: root.chrome-width - 410px;
@@ -12594,7 +12625,9 @@ component DiscoverDetailPane inherits Rectangle {
                 drop-shadow-blur: 16px;
                 drop-shadow-offset-y: 8px;
                 drop-shadow-color: #00000033;
-                clip: true;
+                // No clip: rounded clip forces a femtovg offscreen layer that upscales
+                // (blurry) on HiDPI; content is inset clear of the corners and the
+                // border-radius rounds the background crisply without it.
 
                 Rectangle {
                     x: 1px;

@@ -132,6 +132,9 @@ jobs:
 
             Kalpa auto-updates when future releases are published (all platforms except `.deb`/`.rpm` installs).
 
+            ## New: Native performance UI (beta, Windows)
+            This release adds an opt-in **native UI** that uses less memory than the standard WebView. Turn it on in **Settings → Native performance UI**; switch back anytime from the native app's Settings. It's experimental and Windows-only for now — if it can't start, Kalpa falls back to the standard UI automatically.
+
             ## Verify your download
             Each release ships the installer alongside a `.sig` (auto-updater signature) and `latest.json`. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
 
