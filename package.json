@@ -50,7 +50,7 @@
     "@fontsource-variable/space-grotesk": "^5.2.10",
     "@lezer/highlight": "^1.2.3",
     "@tanstack/react-virtual": "^3.14.6",
-    "@tauri-apps/plugin-dialog": "^2.7.0",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2.5.3",
     "@tauri-apps/plugin-os": "^2.3.2",
