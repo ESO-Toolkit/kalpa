@@ -68,9 +68,14 @@ export function DependencyPickerDialog({
   // the previous prompt's state where LibX was REQUIRED, and inherit its tick —
   // surfacing an optional dependency pre-selected, which is exactly what the
   // unticked-by-default rule exists to prevent.
-  const promptKey = pending
-    .map((dep) => `${dep.name}:${dep.required ? "req" : "opt"}:${dep.minVersion ?? ""}`)
-    .join("|");
+  //
+  // Built with JSON rather than joined separators: the manifest parser splits
+  // dependency tokens on whitespace only, so a name may legitimately contain
+  // ':' or '|' and could otherwise be crafted to collide with a different
+  // prompt's key — which would remount against unrelated selection state.
+  const promptKey = JSON.stringify(
+    pending.map((dep) => [dep.name, dep.required, dep.minVersion ?? null])
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

@@ -825,7 +825,11 @@ function App() {
     // Park the extras instead of dropping them: the queue drains when the open
     // dialog closes, so a Discover install that lands mid-Update-All still gets
     // its dependencies offered rather than silently skipped.
-    if (depPromptOpenRef.current) {
+    // Also queue while a decision is still settling. The picker closes the
+    // instant it is submitted, but the install runs on for seconds after that;
+    // without this, anything arriving in that window opens its own prompt and
+    // escapes the filtering that drops what the in-flight decision installs.
+    if (depPromptOpenRef.current || depDecisionInFlightRef.current) {
       queuedDepsRef.current = dedupeDependencies([...queuedDepsRef.current, ...candidates]);
       return;
     }
@@ -1677,6 +1681,9 @@ function App() {
       // update that just passed it and wrote to the same folder, so re-warning
       // would stack a second modal on the one the user just dismissed.
       void (async () => {
+        // Filled from the install result below; stays empty when nothing was
+        // selected or the call threw, which is correct — nothing was installed.
+        let installedNames: string[] = [];
         try {
           // Persist the declines BEFORE the queue drains, or a name just turned
           // down gets offered straight back by whatever queued up behind this
@@ -1696,6 +1703,12 @@ function App() {
               addonsPath: addonsPathRef.current,
               depNames: selectedNames,
             });
+            // What actually landed, which is neither more nor less than what was
+            // asked for: accepting one library pulls its own transitively, and a
+            // requested one can fail outright. The queue must be filtered by this
+            // rather than by the request, or a transitively-installed library is
+            // offered again while a failed one is silently dropped.
+            installedNames = result.installedDeps;
             const installed = result.installedDeps.length;
             if (installed > 0) {
               toast.success(
@@ -1716,11 +1729,10 @@ function App() {
           }
         } finally {
           // Release the latch and only then drain, so the queue opens after this
-          // decision has fully landed. Passing the accepted names drops queued
-          // duplicates of what we just installed. In a `finally` so a throw in
-          // the persistence step above cannot strand the picker shut forever.
+          // decision has fully landed. In a `finally` so a throw in the
+          // persistence step above cannot strand the picker shut forever.
           depDecisionInFlightRef.current = false;
-          await drainQueuedDeps(selectedNames);
+          await drainQueuedDeps(installedNames);
         }
       })();
     },
