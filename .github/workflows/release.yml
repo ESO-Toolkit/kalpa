@@ -136,7 +136,7 @@ jobs:
             This release adds an opt-in **native UI** that uses less memory than the standard WebView. Turn it on in **Settings → Native performance UI**; switch back anytime from the native app's Settings. It's experimental and Windows-only for now — if it can't start, Kalpa falls back to the standard UI automatically.
 
             ## Verify your download
-            Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, and one shared `latest.json`. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
+            Each release ships an installer per platform, a `.sig` (auto-updater signature) for every auto-updatable artifact, one shared `latest.json`, and a `SHA256SUMS.txt` listing the SHA-256 of every other file here. See [Verify your download](https://github.com/ESO-Toolkit/kalpa/blob/main/docs/verify-download.md) for how to check the integrity of the file you downloaded.
 
             ## Known issues
             None known — please report anything you hit.
@@ -205,6 +205,57 @@ jobs:
           done
 
           echo "release_id=${release_id}" >> "$GITHUB_ENV"
+
+      # Runs while the release is still a draft, so a published release always
+      # carries its checksums — docs/verify-download.md tells users the file is
+      # there, and that has to be true for every release, not most of them.
+      - name: Generate and attach SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          release=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}")
+
+          # Fetch every asset by id, not by name: the download URL for a draft
+          # release's assets is not publicly reachable, and ids are unambiguous.
+          mkdir -p checksum-work
+          echo "$release" \
+            | jq -r '.assets[] | select(.name != "SHA256SUMS.txt") | "\(.id)\t\(.size)\t\(.name)"' \
+            > asset-list.tsv
+          [ -s asset-list.tsv ] || { echo "::error::Release has no assets to checksum"; exit 1; }
+
+          # Verify each download against the size GitHub reports. A truncated
+          # fetch would otherwise be checksummed happily and ship a WRONG hash,
+          # which is worse than shipping none — users would conclude their good
+          # download was corrupt.
+          while IFS=$'\t' read -r id size name; do
+            gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${id}" \
+              -H "Accept: application/octet-stream" > "checksum-work/${name}"
+            actual=$(wc -c < "checksum-work/${name}")
+            if [ "$actual" -ne "$size" ]; then
+              echo "::error::${name} downloaded ${actual} bytes, expected ${size} — refusing to publish a checksum for a truncated file"
+              exit 1
+            fi
+          done < asset-list.tsv
+
+          ( cd checksum-work && sha256sum -- * ) > SHA256SUMS.txt
+          echo "--- SHA256SUMS.txt ---"
+          cat SHA256SUMS.txt
+
+          # Re-running the publish job must not fail on an existing asset.
+          existing=$(echo "$release" | jq -r '.assets[] | select(.name=="SHA256SUMS.txt") | .id')
+          if [ -n "$existing" ]; then
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${existing}"
+          fi
+
+          # Upload via the API's upload_url. `gh release upload` resolves the
+          # release by tag, which does not find drafts.
+          upload_url=$(echo "$release" | jq -r '.upload_url' | sed 's/{?name,label}$//')
+          curl --fail --silent --show-error -X POST \
+            "${upload_url}?name=SHA256SUMS.txt" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Content-Type: text/plain" \
+            --data-binary @SHA256SUMS.txt > /dev/null
+
+          echo "SHA256SUMS.txt attached to ${TAG}."
 
       - name: Publish the release
         run: |
