@@ -2,7 +2,7 @@
   "name": "kalpa",
   "version": "0.1.0-beta.12",
   "private": true,
-  "description": "An open-source desktop addon manager for Elder Scrolls Online",
+  "description": "A source-available desktop addon manager for Elder Scrolls Online",
   "author": "ESO-Toolkit",
   "license": "BSL-1.1",
   "keywords": [

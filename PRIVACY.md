@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-07-03
 
-Kalpa is an open-source desktop application for managing Elder Scrolls Online (ESO) addons. This policy explains what data Kalpa collects, how it is used, and your rights.
+Kalpa is a source-available desktop application for managing Elder Scrolls Online (ESO) addons. This policy explains what data Kalpa collects, how it is used, and your rights.
 
 ## Age Requirement
 
@@ -173,6 +173,6 @@ For privacy questions or data deletion requests, reach out on Discord: **@spike_
 
 ---
 
-## Open Source
+## Source Availability
 
-Kalpa is open source. You can audit exactly what data the app handles by reviewing the source code at [github.com/ESO-Toolkit/kalpa](https://github.com/ESO-Toolkit/kalpa).
+Kalpa's full source is public at [github.com/ESO-Toolkit/kalpa](https://github.com/ESO-Toolkit/kalpa), so you can audit exactly what data the app handles. It is licensed under the Business Source License 1.1, which permits non-production and non-commercial use and converts to Apache 2.0 four years after each release. That is source-available rather than open source in the OSI sense.
