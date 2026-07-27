@@ -200,6 +200,9 @@ function App() {
   // Dependencies that arrived while a picker was already up. Drained when it
   // closes so a concurrent install's libraries are offered rather than dropped.
   const queuedDepsRef = useRef<PendingDependency[]>([]);
+  // Latched while a decision is settling, so the picker cannot be submitted
+  // twice in the window between the click and the close.
+  const depDecisionInFlightRef = useRef(false);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
@@ -1587,19 +1590,32 @@ function App() {
     esoRunningResolveRef.current?.(false);
     esoRunningResolveRef.current = null;
   }, []);
-  // Close the picker and hand it back to anything that queued up behind it. The
-  // queue is re-run through `resolvePendingDeps` rather than shown directly, so
-  // it is re-filtered against the skip list — which the caller may have just
-  // added to. Callers must await their own persistence before calling this, or
-  // a name declined a moment ago would be offered straight back.
-  const closeDependencyPrompt = useCallback(async () => {
+  // Closing and draining are separate steps on purpose. Closing is synchronous
+  // so the picker cannot be submitted twice while an async decision is still
+  // settling; draining waits until that decision has fully landed.
+  const closeDependencyPrompt = useCallback(() => {
     setDepPromptOpen(false);
     depPromptOpenRef.current = false;
-    const queued = queuedDepsRef.current;
-    if (queued.length === 0) return;
-    queuedDepsRef.current = [];
-    await resolvePendingDeps(queued);
-  }, [resolvePendingDeps]);
+  }, []);
+
+  // Hand the picker back to anything that queued up behind it. Re-run through
+  // `resolvePendingDeps` rather than shown directly, so the queue is re-filtered
+  // against the skip list the decision may have just written to. `justInstalled`
+  // drops entries the user already accepted: the queue holds a snapshot taken
+  // before that install, so without this the same library is offered again
+  // moments after being installed.
+  const drainQueuedDeps = useCallback(
+    async (justInstalled: readonly string[] = []) => {
+      const queued = queuedDepsRef.current;
+      if (queued.length === 0) return;
+      queuedDepsRef.current = [];
+      const handled = new Set(justInstalled.map((name) => name.toLowerCase()));
+      const remaining = queued.filter((dep) => !handled.has(dep.name.toLowerCase()));
+      if (remaining.length === 0) return;
+      await resolvePendingDeps(remaining);
+    },
+    [resolvePendingDeps]
+  );
 
   // Only ever a dismissal now: the dialog's own buttons no longer close it, so
   // this cannot be confused with a decision. Nothing is installed and nothing is
@@ -1620,12 +1636,20 @@ function App() {
           } from the addon's Details tab.`
         );
       }
-      void closeDependencyPrompt();
+      closeDependencyPrompt();
+      void drainQueuedDeps();
     },
-    [pendingDeps, closeDependencyPrompt]
+    [pendingDeps, closeDependencyPrompt, drainQueuedDeps]
   );
   const handleDependencyConfirm = useCallback(
     (selectedNames: string[], alwaysAutoInstall: boolean, rememberDeclines: boolean) => {
+      // Synchronous latch, checked and set before any await. The dialog stays
+      // interactive until the close below lands, so a fast second click would
+      // otherwise run this whole handler twice — duplicate warnings and a
+      // duplicate install call.
+      if (depDecisionInFlightRef.current) return;
+      depDecisionInFlightRef.current = true;
+
       // Fire-and-forget preference writes, exactly like conflictPolicy.
       if (alwaysAutoInstall) void setDependencyPolicy("auto");
 
@@ -1645,50 +1669,62 @@ function App() {
         );
       }
 
+      // Close now, synchronously — nothing below should leave the user looking
+      // at a modal while an install runs, and it closes the double-click window.
+      closeDependencyPrompt();
+
       // No ESO-running gate here: this prompt only ever follows an install or
       // update that just passed it and wrote to the same folder, so re-warning
       // would stack a second modal on the one the user just dismissed.
       void (async () => {
-        // Persist the declines BEFORE the queue drains, or a name just turned
-        // down gets offered straight back by whatever queued up behind this
-        // prompt. Only remember them when the user asked for that: persisting
-        // every untick would be a one-way door, since optional dependencies
-        // arrive unticked and would vanish without ever being refused.
-        if (rememberDeclines) {
-          const declined = pendingDeps
-            .filter((dep) => !selected.has(dep.name))
-            .map((dep) => dep.name);
-          if (declined.length > 0) await addSkippedDependencies(declined);
-        }
-        await closeDependencyPrompt();
-
-        if (selectedNames.length === 0) return;
         try {
-          const result = await invokeOrThrow<InstallResult>("install_selected_dependencies", {
-            addonsPath: addonsPathRef.current,
-            depNames: selectedNames,
-          });
-          const installed = result.installedDeps.length;
-          if (installed > 0) {
-            toast.success(
-              `Installed ${installed} ${installed === 1 ? "dependency" : "dependencies"}`
-            );
+          // Persist the declines BEFORE the queue drains, or a name just turned
+          // down gets offered straight back by whatever queued up behind this
+          // prompt. Only remember them when the user asked for that: persisting
+          // every untick would be a one-way door, since optional dependencies
+          // arrive unticked and would vanish without ever being refused.
+          if (rememberDeclines) {
+            const declined = pendingDeps
+              .filter((dep) => !selected.has(dep.name))
+              .map((dep) => dep.name);
+            if (declined.length > 0) await addSkippedDependencies(declined);
           }
-          // `skippedDeps` means "not found on ESOUI" — as unusable as a failure.
-          const unresolved = [...result.failedDeps, ...result.skippedDeps];
-          if (unresolved.length > 0) {
-            toast.warning(`Could not install: ${unresolved.join(", ")}`);
+
+          if (selectedNames.length === 0) return;
+          try {
+            const result = await invokeOrThrow<InstallResult>("install_selected_dependencies", {
+              addonsPath: addonsPathRef.current,
+              depNames: selectedNames,
+            });
+            const installed = result.installedDeps.length;
+            if (installed > 0) {
+              toast.success(
+                `Installed ${installed} ${installed === 1 ? "dependency" : "dependencies"}`
+              );
+            }
+            // `skippedDeps` means "not found on ESOUI" — as unusable as a failure.
+            const unresolved = [...result.failedDeps, ...result.skippedDeps];
+            if (unresolved.length > 0) {
+              toast.warning(`Could not install: ${unresolved.join(", ")}`);
+            }
+          } catch (e) {
+            toast.error(`Failed to install dependencies: ${getTauriErrorMessage(e)}`);
+          } finally {
+            // Refresh even after an error: a partially applied selection still
+            // reached disk and must show up in the list.
+            handleRefresh();
           }
-        } catch (e) {
-          toast.error(`Failed to install dependencies: ${getTauriErrorMessage(e)}`);
         } finally {
-          // Refresh even after an error: a partially applied selection still
-          // reached disk and must show up in the list.
-          handleRefresh();
+          // Release the latch and only then drain, so the queue opens after this
+          // decision has fully landed. Passing the accepted names drops queued
+          // duplicates of what we just installed. In a `finally` so a throw in
+          // the persistence step above cannot strand the picker shut forever.
+          depDecisionInFlightRef.current = false;
+          await drainQueuedDeps(selectedNames);
         }
       })();
     },
-    [handleRefresh, pendingDeps, closeDependencyPrompt]
+    [handleRefresh, pendingDeps, closeDependencyPrompt, drainQueuedDeps]
   );
 
   if (setupInstances !== null) {
