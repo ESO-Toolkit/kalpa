@@ -1,6 +1,9 @@
 # Native live-streaming upload — FINDINGS
 
-**Branch:** `spike/native-live` (off `feat/log-uploader`) · **Status:** lifecycle hardening BUILT + wired (gated, opt-in) · **Date:** 2026-06-21
+> [!NOTE]
+> **Superseded (2026-07).** Live streaming shipped to all users in v0.1.0-beta.10. Kept for historical context.
+
+**Branch:** `spike/native-live` (off `feat/log-uploader`) · **Status:** shipped to all users in v0.1.0-beta.10 (was: lifecycle hardening BUILT + wired, gated, opt-in) · **Date:** 2026-06-21
 
 This is the deliverable for the spike: *"can Kalpa natively live-stream a growing
 `Encounter.log` to esologs.com — pushing segments incrementally while the report stays
@@ -9,7 +12,8 @@ open — instead of handing off to the official uploader?"*
 The answer is **FEASIBLE — the live round-trip is confirmed and the ToS gate is cleared
 (owner, 2026-06-20).** The deferred lifecycle hardening (L2/L3/L4/L7/L8) + the gated
 opt-in wiring are now **BUILT** — see the production-status section immediately below.
-The remaining gate is an owner-run live re-test against a REAL archived combat log.
+The remaining gate was an owner-run live re-test against a REAL archived combat log —
+since completed; live streaming shipped to all users in v0.1.0-beta.10.
 
 ---
 

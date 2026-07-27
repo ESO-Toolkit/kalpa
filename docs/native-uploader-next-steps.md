@@ -1,5 +1,8 @@
 # Native Uploader — Next Steps (session handoff, 2026-06-18)
 
+> [!NOTE]
+> **Superseded (2026-07).** This plan was executed — the native ESO Logs uploader shipped in v0.1.0-beta.10. Kept for historical context.
+
 Self-contained state + plan for finishing **fully-native** ESO Logs upload in Kalpa
 (Kalpa POSTs directly to `esologs.com/desktop-client/*`; the official-uploader
 "handoff" is a temporary fallback, NOT the goal). Read this first in a new session.
