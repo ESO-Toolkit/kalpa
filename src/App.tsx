@@ -203,6 +203,11 @@ function App() {
   // Latched while a decision is settling, so the picker cannot be submitted
   // twice in the window between the click and the close.
   const depDecisionInFlightRef = useRef(false);
+  // The AddOns folder the open prompt's dependencies were resolved against.
+  // Pinned because the user can switch game instances while a prompt is open or
+  // an install is still running, and these libraries belong to the addon that
+  // asked for them — not to whatever instance happens to be selected later.
+  const depPromptPathRef = useRef("");
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
@@ -835,6 +840,7 @@ function App() {
     }
 
     depPromptOpenRef.current = true;
+    depPromptPathRef.current = addonsPathRef.current;
     setPendingDeps(candidates);
     setDepPromptOpen(true);
   }, []);
@@ -1673,6 +1679,12 @@ function App() {
         );
       }
 
+      // Pin the destination before anything can await. Switching instances is a
+      // click away and the install runs for seconds after the picker closes, so
+      // reading the live path down there could drop these libraries into a
+      // different game install than the addon that needs them.
+      const targetAddonsPath = depPromptPathRef.current || addonsPathRef.current;
+
       // Close now, synchronously — nothing below should leave the user looking
       // at a modal while an install runs, and it closes the double-click window.
       closeDependencyPrompt();
@@ -1681,8 +1693,14 @@ function App() {
       // update that just passed it and wrote to the same folder, so re-warning
       // would stack a second modal on the one the user just dismissed.
       void (async () => {
-        // Filled from the install result below; stays empty when nothing was
-        // selected or the call threw, which is correct — nothing was installed.
+        // Filled from the install result below. Stays empty when nothing was
+        // selected, and deliberately also when the call threw: the backend can
+        // fail after writing folders (a metadata save at the end), so on an
+        // error we genuinely do not know what landed. Leaving it empty re-offers
+        // those libraries, which at worst reinstalls something already on disk.
+        // Assuming the selection succeeded would be the other way round — a
+        // required library silently never mentioned again. Do not "optimise"
+        // this into filtering by selectedNames on the error path.
         let installedNames: string[] = [];
         try {
           // Persist the declines BEFORE the queue drains, or a name just turned
@@ -1700,7 +1718,7 @@ function App() {
           if (selectedNames.length === 0) return;
           try {
             const result = await invokeOrThrow<InstallResult>("install_selected_dependencies", {
-              addonsPath: addonsPathRef.current,
+              addonsPath: targetAddonsPath,
               depNames: selectedNames,
             });
             // What actually landed, which is neither more nor less than what was
