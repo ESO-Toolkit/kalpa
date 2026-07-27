@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/ESO-Toolkit/kalpa/actions/workflows/ci.yml/badge.svg)](https://github.com/ESO-Toolkit/kalpa/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/ESO-Toolkit/kalpa?color=c4a44a&label=release)](https://github.com/ESO-Toolkit/kalpa/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/ESO-Toolkit/kalpa/total?color=c4a44a&label=downloads)](https://github.com/ESO-Toolkit/kalpa/releases)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 
 An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A replacement for Minion with real dependency resolution, shared addon packs, and a built-in ESO Logs uploader.
