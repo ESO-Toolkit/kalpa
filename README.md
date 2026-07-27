@@ -23,7 +23,7 @@ A fast, open-source addon manager for **The Elder Scrolls Online**. Built with T
 > **Beta release.** Kalpa is stable and feature-complete for daily use. Grab the latest build from the [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page — it auto-updates from there. Bug reports and feedback are welcome via [GitHub Issues](https://github.com/ESO-Toolkit/kalpa/issues).
 
 > [!TIP]
-> **Recently shipped:** an opt-in [native performance UI](#themes-and-appearance) on Windows, a built-in [ESO Logs uploader](#eso-logs-uploader), [49 themes](#themes-and-appearance) with a custom theme builder, and macOS and Linux support. Full history in the [changelog](CHANGELOG.md).
+> **Recently shipped:** a built-in [ESO Logs uploader](#eso-logs-uploader), [49 themes](#themes-and-appearance) with a custom theme builder, an opt-in [native performance UI](#additional-features) on Windows, and macOS and Linux support. Full history in the [changelog](CHANGELOG.md).
 
 ---
 
@@ -83,7 +83,6 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **49 built-in themes** — recolour the whole app from Settings → Appearance: eight Elder Scrolls art skins (Nordic Runestone, Daedric Obsidian, Dwemer Brass, Hermaeus Mora, and more), ESO faction palettes, and editor classics like Dracula, Nord, and Catppuccin
 - **Custom theme builder** — pick 12 seed colours with live preview; a built-in WCAG AA contrast check keeps your theme legible, and themes copy and paste as text for sharing
 - **No theme flash** — your theme is applied before the window paints, so the app opens directly in your colours
-- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as a lightweight fully native app using noticeably less memory, with addon management, the uploader, and Pack Hub; switch back anytime, and Kalpa falls back to the standard UI automatically if native mode can't start
 
 ### Addon File Browser
 - **Browse source files** — explore the file tree of any installed addon
@@ -128,6 +127,7 @@ Minion has served the ESO community well, but it hasn't kept pace with modern ex
 - **Minion migration** — import your existing Minion addon tracking data with dry-run preview, integrity checks, and snapshots before changes. Kalpa never deletes your original Minion data, so if something looks wrong you can always roll back from a backup
 
 ### Additional Features
+- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as a lightweight fully native app using noticeably less memory, with addon management, the uploader, and Pack Hub; switch back anytime, and Kalpa falls back to the standard UI automatically if native mode can't start
 - **API compatibility checking** — identify addons that are outdated for the current game API version
 - **Addon list export/import** — share your installed addon list as JSON and import on another machine
 - **Deep link scheme** — `kalpa://` URLs for packs, share codes, and addon installs
