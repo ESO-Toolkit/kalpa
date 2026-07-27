@@ -27,10 +27,10 @@ An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A 
 
 Minion is a Java app that hasn't kept pace. Kalpa is a rewrite of the same idea on a native stack:
 
-- **18 MB installer**, Rust backend, no bundled Java runtime.
+- **No bundled runtime.** A Rust backend instead of Minion's Java: 17 MB to install on Windows, 10 MB from the Linux `.deb`/`.rpm`. (The AppImage is 84 MB because it carries its own GTK and WebKit.)
 - **Suspends itself while you play.** Minimized, the webview releases its memory and drops to under 20 MB with no measurable CPU, from around 135 MB with the window open. Task Manager figures on a 119-addon profile.
 - **Dependency resolution that actually resolves**, including transitive dependencies, embedded libraries, and version checks.
-- **Pack Hub**, for publishing and installing shared addon collections. No other ESO manager has an equivalent.
+- **Pack Hub**, for publishing and installing shared addon collections. Minion has no equivalent.
 
 ---
 
@@ -125,11 +125,11 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 ## Security & privacy
 
 - **Download allowlist** — addon downloads are restricted to ESOUI's official hosts. Arbitrary URLs are rejected.
-- **Path validation** — every Tauri IPC command goes through one central validator.
-- **ZIP extraction** uses streaming hashing with recursion caps, which is what stops zip bombs and path traversal.
+- **Path validation** — path-taking IPC commands canonicalize caller-supplied paths and confine them to the approved AddOns folder before any I/O. The uploader applies its own equivalent check against the ESO Logs folder.
+- **ZIP extraction** rejects absolute paths, drive prefixes, and `..` components, skips symlink entries, and caps total extraction at 500 MB. That is what stops path traversal and zip bombs.
 - **Content-Security-Policy** — strict, with `frame-ancestors 'none'` to block clickjacking and embedding.
 - **Pack Hub worker** rate-limits requests and serializes pack-index mutations through a Durable Object.
-- **Dependency audits** run in CI on every push: `npm audit` over production dependencies, `cargo audit` over the Rust lockfile. Advisories with no upstream fix are assessed one at a time and recorded in [`ci.yml`](.github/workflows/ci.yml). Today that's two quick-xml DoS advisories that none of Kalpa's code paths can reach.
+- **Dependency audits** run in CI on every pull request and every push to main: `npm audit` over production dependencies, `cargo audit` over the Rust lockfile. Advisories with no upstream fix are assessed one at a time and recorded in [`ci.yml`](.github/workflows/ci.yml). Today that's two quick-xml DoS advisories that none of Kalpa's code paths can reach.
 - **Signed updates** delivered through GitHub Releases. See [Verify your download](docs/verify-download.md).
 
 When you export account-wide settings in a `.esopack` v2, Kalpa strips personal data before writing the file: account handles, character names and IDs, chat logs, mail, friends and roster lists, trade history. Placeholders are mapped back to your own identity on import. [What's scrubbed in `.esopack` v2](docs/settings-export.md) has the full list, including what is deliberately kept.
@@ -247,7 +247,7 @@ The General tab: AddOns folder, the detected NA/EU/PTS installs, and the native 
 | **Linux** x86_64 | Beta | `.AppImage` / `.deb` / `.rpm` | AppImage self-updates. Detects ESO under Steam Proton |
 
 > [!IMPORTANT]
-> Each release ships every installer alongside a `.sig` updater signature and one shared `latest.json`. [Verify your download](docs/verify-download.md) explains how to check what you downloaded.
+> Each release ships a `.sig` updater signature for every auto-updatable artifact, plus one shared `latest.json`. The `.dmg` is the exception: macOS updates ship as the `.app.tar.gz`, so that is what gets signed. [Verify your download](docs/verify-download.md) explains how to check what you downloaded.
 
 ### Pre-built (recommended)
 
