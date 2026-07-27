@@ -62,7 +62,15 @@ export function DependencyPickerDialog({
   // here has to sync state from an effect (ESLint forbids setState in effects).
   // A repeat prompt for the same dependency set keeps the user's last ticks,
   // which is the behaviour you want when an install is retried.
-  const promptKey = pending.map((dep) => dep.name).join("|");
+  //
+  // `required` and `minVersion` are part of that identity, not decoration. On a
+  // name-only key, a queued prompt where LibX is OPTIONAL would remount against
+  // the previous prompt's state where LibX was REQUIRED, and inherit its tick —
+  // surfacing an optional dependency pre-selected, which is exactly what the
+  // unticked-by-default rule exists to prevent.
+  const promptKey = pending
+    .map((dep) => `${dep.name}:${dep.required ? "req" : "opt"}:${dep.minVersion ?? ""}`)
+    .join("|");
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
