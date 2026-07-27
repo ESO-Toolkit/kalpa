@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/ESO-Toolkit/kalpa/actions/workflows/ci.yml/badge.svg)](https://github.com/ESO-Toolkit/kalpa/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/ESO-Toolkit/kalpa?color=c4a44a&label=release)](https://github.com/ESO-Toolkit/kalpa/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/ESO-Toolkit/kalpa/total?color=c4a44a&label=downloads)](https://github.com/ESO-Toolkit/kalpa/releases)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 
 An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A replacement for Minion with real dependency resolution, shared addon packs, and a built-in ESO Logs uploader.
@@ -29,7 +28,7 @@ An addon manager for **The Elder Scrolls Online**, built with Tauri and Rust. A 
 Minion is a Java app that hasn't kept pace. Kalpa is a rewrite of the same idea on a native stack:
 
 - **18 MB installer**, Rust backend, no bundled Java runtime.
-- **~4% of one CPU core and ~140 MB of memory when idle**, so leaving it open during a raid costs you nothing.
+- **Suspends itself while you play.** Minimize Kalpa and the webview deep-suspends to about 60 MB resident with no measurable CPU, measured on a 119-addon profile.
 - **Dependency resolution that actually resolves**, including transitive dependencies, embedded libraries, and version checks.
 - **Pack Hub**, for publishing and installing shared addon collections. No other ESO manager has an equivalent.
 
@@ -113,7 +112,7 @@ Kalpa detects native and Steam installations across NA, EU, and PTS. A header ba
 
 ### Also
 
-- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as a native app instead of a webview, cutting memory use. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
+- **Native performance UI (beta, Windows)** — an opt-in mode that relaunches Kalpa as one native process instead of a webview and its six helpers. With the window open that cuts resident memory to about 130 MB from about 440 MB on the same 119-addon profile. It covers addon management, the uploader, and Pack Hub. Switch back from Settings at any time; if it fails to start, Kalpa reverts to the standard UI on its own.
 - **Addon file browser** — read and edit an addon's Lua, XML, and text files in place, with a backup taken before each edit.
 - **Tags and filters** — preset and custom tags, live-counted filters, and built-in views for Addons, Libraries, Favorites, Outdated, and Issues. Sort by name, author, recently updated, or recently downloaded.
 - **API compatibility check** against the current game version.
