@@ -625,3 +625,86 @@ describe("POST /admin/restore", () => {
     expect(restoredVote).toBeTruthy();
   });
 });
+
+// ── DELETE /account ────────────────────────────────────────────────
+
+describe("DELETE /account", () => {
+  it("rejects without a bearer token", async () => {
+    const res = await call(new Request(`${BASE}/account`, { method: "DELETE" }));
+    expect(res.status).toBe(401);
+  });
+
+  it("scrubs the deleting user from the non-expiring backup:latest snapshot", async () => {
+    const mine = makePack("mine-1");
+    const theirs = makePack("theirs-1", {
+      author_id: String(OTHER_USER.id),
+      author_name: OTHER_USER.name,
+    });
+    const myVoteKey = `${theirs.id}:${TEST_USER.id}`;
+    const theirVoteKey = `${mine.id}:${OTHER_USER.id}`;
+
+    await e.ESO_PACKS.put(
+      "backup:latest",
+      JSON.stringify({
+        created_at: new Date().toISOString(),
+        packs: [mine, theirs],
+        packBodies: { [mine.id]: mine, [theirs.id]: theirs },
+        votes: {
+          [myVoteKey]: {
+            userId: String(TEST_USER.id),
+            packId: theirs.id,
+            votedAt: "2025-01-01T00:00:00.000Z",
+          },
+          [theirVoteKey]: {
+            userId: String(OTHER_USER.id),
+            packId: mine.id,
+            votedAt: "2025-01-01T00:00:00.000Z",
+          },
+        },
+      }),
+    );
+
+    await putPack(e, mine);
+    await putPack(e, theirs);
+    await putPackIndex(e, { packs: [mine, theirs] });
+
+    const res = await call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
+    expect(res.status).toBe(200);
+
+    const snapshot = await e.ESO_PACKS.get<{
+      packs: { id: string }[];
+      packBodies: Record<string, unknown>;
+      votes: Record<string, unknown>;
+    }>("backup:latest", "json");
+
+    // The deleting user's pack and their own vote are gone...
+    expect(snapshot!.packs.map((p) => p.id)).toEqual([theirs.id]);
+    expect(Object.keys(snapshot!.packBodies)).toEqual([theirs.id]);
+    expect(snapshot!.votes[myVoteKey]).toBeUndefined();
+
+    // ...but the other user's records survive. Votes others cast on the
+    // deleted user's packs are deliberately kept, mirroring how the live
+    // deletion path leaves them in place.
+    expect(snapshot!.votes[theirVoteKey]).toBeDefined();
+  });
+
+  it("leaves backup:latest untouched when the user has nothing in it", async () => {
+    const theirs = makePack("theirs-only", {
+      author_id: String(OTHER_USER.id),
+      author_name: OTHER_USER.name,
+    });
+    const original = JSON.stringify({
+      created_at: "2025-01-01T00:00:00.000Z",
+      packs: [theirs],
+      packBodies: { [theirs.id]: theirs },
+      votes: {},
+    });
+    await e.ESO_PACKS.put("backup:latest", original);
+    await putPackIndex(e, { packs: [theirs] });
+
+    const res = await call(authedRequest(`${BASE}/account`, { method: "DELETE" }));
+    expect(res.status).toBe(200);
+
+    expect(await e.ESO_PACKS.get("backup:latest")).toBe(original);
+  });
+});
