@@ -67,22 +67,18 @@ export function DependencyPickerDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
-        <DependencyPickerBody
-          key={promptKey}
-          pending={pending}
-          onOpenChange={onOpenChange}
-          onConfirm={onConfirm}
-        />
+        <DependencyPickerBody key={promptKey} pending={pending} onConfirm={onConfirm} />
       </DialogContent>
     </Dialog>
   );
 }
 
+// No `onOpenChange` here: the body never closes the dialog, so that closing is
+// unambiguously a dismissal. Only the Dialog root wires it.
 function DependencyPickerBody({
   pending,
-  onOpenChange,
   onConfirm,
-}: Omit<DependencyPickerDialogProps, "open">) {
+}: Omit<DependencyPickerDialogProps, "open" | "onOpenChange">) {
   const required = useMemo(() => pending.filter((dep) => dep.required), [pending]);
   const optional = useMemo(() => pending.filter((dep) => !dep.required), [pending]);
 
@@ -121,13 +117,16 @@ function DependencyPickerBody({
     );
   }, [pending]);
 
+  // Neither decision path closes the dialog itself. The owner does that when it
+  // handles the decision, which leaves `onOpenChange(false)` meaning exactly one
+  // thing — the user dismissed without deciding (X, Escape, backdrop). Closing
+  // here as well made those indistinguishable, and the dismissal path then
+  // skipped required libraries with no warning at all.
   const confirm = () => {
-    onOpenChange(false);
     onConfirm([...selected], alwaysAutoInstall, rememberDeclines);
   };
 
   const skipAll = () => {
-    onOpenChange(false);
     // Never carry the "always install" opt-in through this path: skipping every
     // dependency and asking to always install them are contradictory intents,
     // and silently flipping the policy to "auto" here would be a nasty surprise.

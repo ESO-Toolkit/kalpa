@@ -1587,42 +1587,53 @@ function App() {
     esoRunningResolveRef.current?.(false);
     esoRunningResolveRef.current = null;
   }, []);
-  const handleDependencyPromptOpenChange = useCallback((open: boolean) => {
-    setDepPromptOpen(open);
-    // Dismissing without deciding (Escape / clicking away) installs nothing and
-    // declines nothing — only the dialog's own buttons record a decision.
-    if (!open) {
-      depPromptOpenRef.current = false;
-      // Hand the dialog straight back to anything that queued up behind it.
-      const queued = queuedDepsRef.current;
-      if (queued.length > 0) {
-        queuedDepsRef.current = [];
-        depPromptOpenRef.current = true;
-        setPendingDeps(queued);
+  // Close the picker and hand it back to anything that queued up behind it. The
+  // queue is re-run through `resolvePendingDeps` rather than shown directly, so
+  // it is re-filtered against the skip list — which the caller may have just
+  // added to. Callers must await their own persistence before calling this, or
+  // a name declined a moment ago would be offered straight back.
+  const closeDependencyPrompt = useCallback(async () => {
+    setDepPromptOpen(false);
+    depPromptOpenRef.current = false;
+    const queued = queuedDepsRef.current;
+    if (queued.length === 0) return;
+    queuedDepsRef.current = [];
+    await resolvePendingDeps(queued);
+  }, [resolvePendingDeps]);
+
+  // Only ever a dismissal now: the dialog's own buttons no longer close it, so
+  // this cannot be confused with a decision. Nothing is installed and nothing is
+  // declined, but required libraries must still not go by unmentioned.
+  const handleDependencyPromptOpenChange = useCallback(
+    (open: boolean) => {
+      if (open) {
         setDepPromptOpen(true);
+        return;
       }
-    }
-  }, []);
+      const stillMissing = pendingDeps.filter((dep) => dep.required);
+      if (stillMissing.length > 0) {
+        toast.warning(
+          `${stillMissing.length} required ${
+            stillMissing.length === 1 ? "library is" : "libraries are"
+          } still missing: ${stillMissing.map((dep) => dep.name).join(", ")}. Install ${
+            stillMissing.length === 1 ? "it" : "them"
+          } from the addon's Details tab.`
+        );
+      }
+      void closeDependencyPrompt();
+    },
+    [pendingDeps, closeDependencyPrompt]
+  );
   const handleDependencyConfirm = useCallback(
     (selectedNames: string[], alwaysAutoInstall: boolean, rememberDeclines: boolean) => {
       // Fire-and-forget preference writes, exactly like conflictPolicy.
       if (alwaysAutoInstall) void setDependencyPolicy("auto");
 
-      // Only remember declines when the user asked for that. Persisting every
-      // untick would be a one-way door: optional dependencies arrive unticked,
-      // so the user would permanently lose the offer without ever having
-      // actively turned it down.
       const selected = new Set(selectedNames);
-      if (rememberDeclines) {
-        const declined = pendingDeps
-          .filter((dep) => !selected.has(dep.name))
-          .map((dep) => dep.name);
-        if (declined.length > 0) void addSkippedDependencies(declined);
-      }
 
-      // "Skip all" closes the dialog immediately, so the in-dialog warning about
-      // declining a required library is never seen on that path. Say it here
-      // instead, so no required dependency is ever turned down silently.
+      // "Skip all" gives the user no time to read anything in the dialog, so the
+      // in-dialog warning about declining a required library never lands on that
+      // path. Say it here, so no required dependency is turned down silently.
       const declinedRequired = pendingDeps.filter((dep) => dep.required && !selected.has(dep.name));
       if (declinedRequired.length > 0) {
         toast.warning(
@@ -1634,12 +1645,24 @@ function App() {
         );
       }
 
-      if (selectedNames.length === 0) return;
-
       // No ESO-running gate here: this prompt only ever follows an install or
       // update that just passed it and wrote to the same folder, so re-warning
       // would stack a second modal on the one the user just dismissed.
       void (async () => {
+        // Persist the declines BEFORE the queue drains, or a name just turned
+        // down gets offered straight back by whatever queued up behind this
+        // prompt. Only remember them when the user asked for that: persisting
+        // every untick would be a one-way door, since optional dependencies
+        // arrive unticked and would vanish without ever being refused.
+        if (rememberDeclines) {
+          const declined = pendingDeps
+            .filter((dep) => !selected.has(dep.name))
+            .map((dep) => dep.name);
+          if (declined.length > 0) await addSkippedDependencies(declined);
+        }
+        await closeDependencyPrompt();
+
+        if (selectedNames.length === 0) return;
         try {
           const result = await invokeOrThrow<InstallResult>("install_selected_dependencies", {
             addonsPath: addonsPathRef.current,
@@ -1665,7 +1688,7 @@ function App() {
         }
       })();
     },
-    [handleRefresh, pendingDeps]
+    [handleRefresh, pendingDeps, closeDependencyPrompt]
   );
 
   if (setupInstances !== null) {
