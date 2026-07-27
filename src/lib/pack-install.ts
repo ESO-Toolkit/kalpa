@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import type { PackInstallEntry, PackInstallProgress, PackInstallResult } from "../types";
+import { getDependencyPolicy } from "./dependency-policy";
 import { invokeResult } from "./tauri";
 
 export interface PackInstallProgressState {
@@ -19,7 +20,8 @@ export interface PackInstallProgressState {
  *
  * Returns the backend result, or null if the command itself errored (the
  * caller decides how to surface that — typically treating every addon as
- * failed).
+ * failed). Under the "ask" dependency policy the result carries `pendingDeps`
+ * for the caller to hand to the app-level picker.
  */
 export async function runBatchPackInstall(
   addonsPath: string,
@@ -32,6 +34,9 @@ export async function runBatchPackInstall(
 
   let completed = 0;
   let failed = 0;
+
+  // Read once here rather than in each of the three pack-install callers.
+  const dependencyPolicy = await getDependencyPolicy();
 
   const unlisten = await listen<PackInstallProgress>("pack-install-progress", (event) => {
     const payload = event.payload;
@@ -48,6 +53,7 @@ export async function runBatchPackInstall(
     const result = await invokeResult<PackInstallResult>("batch_install_pack_addons", {
       addonsPath,
       entries,
+      dependencyPolicy,
     });
     return result.ok ? result.data : null;
   } finally {

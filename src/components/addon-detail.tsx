@@ -19,6 +19,8 @@ import { InfoPill } from "@/components/ui/info-pill";
 import { Tabs, TabsList, TabsTrigger, TabsContent, TabsIndicator } from "@/components/ui/tabs";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { getSetting } from "@/lib/store";
+import { getDependencyPolicy } from "@/lib/dependency-policy";
+import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn } from "@/lib/utils";
 import { RichDescription } from "@/components/ui/rich-description";
@@ -75,6 +77,7 @@ function AddonDetailBase({
   onConflictResolved,
 }: AddonDetailProps) {
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
+  const resolvePendingDeps = useResolvePendingDeps();
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateSuccess, setUpdateSuccess] = useState(false);
@@ -167,6 +170,23 @@ function AddonDetailBase({
   };
   const isCancellation = (e: unknown) => getTauriErrorMessage(e).includes("Update cancelled");
 
+  // Every update this pane can start goes through here, so the dependency policy
+  // is applied — and any dependencies the backend held back are surfaced — the
+  // same way for auto-resolved conflicts, clean updates and both conflict panels.
+  const applyUpdate = async (sessionId: string, decisions: FileDecision[]) => {
+    const dependencyPolicy = await getDependencyPolicy();
+    const result = await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
+      addonsPath,
+      sessionId,
+      decisions,
+      operationId: beginOperation(),
+      dependencyPolicy,
+    });
+    // Empty unless the policy is "ask". The picker is app-level and owns the
+    // install + refresh from here, so this update's busy state can clear.
+    void resolvePendingDeps(result.pendingDeps);
+  };
+
   // Map of lowercased top-level folder name → its real on-disk spelling. ESO
   // resolves addon names case-insensitively, so membership tests must too (a
   // `LUIMedia` folder still satisfies a `LuiMedia` dependency). Keeping the real
@@ -257,12 +277,7 @@ function AddonDetailBase({
               action: policy,
             })),
           ];
-          await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
-            addonsPath,
-            sessionId: report.sessionId,
-            decisions: autoDecisions,
-            operationId: beginOperation(),
-          });
+          await applyUpdate(report.sessionId, autoDecisions);
           setUpdateSuccess(true);
           toast.success(`Updated ${addon.title}`);
           onAddonUpdated(updateResult.esouiId);
@@ -279,12 +294,7 @@ function AddonDetailBase({
         relativePath: p,
         action: "keep_mine" as const,
       }));
-      await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
-        addonsPath,
-        sessionId: report.sessionId,
-        decisions: autoKeptDecisions,
-        operationId: beginOperation(),
-      });
+      await applyUpdate(report.sessionId, autoKeptDecisions);
       setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);
       onAddonUpdated(updateResult.esouiId);
@@ -320,12 +330,7 @@ function AddonDetailBase({
     }
     setUpdateError(null);
     try {
-      await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
-        addonsPath,
-        sessionId: conflictReport.sessionId,
-        decisions,
-        operationId: beginOperation(),
-      });
+      await applyUpdate(conflictReport.sessionId, decisions);
       setConflictReport(null);
       setUpdateSuccess(true);
       toast.success(`Updated ${addon.title}`);
@@ -514,12 +519,7 @@ function AddonDetailBase({
                   return;
                 }
                 try {
-                  await invokeOrThrow<InstallResult>("update_addon_with_decisions", {
-                    addonsPath,
-                    sessionId: pendingConflict.sessionId,
-                    decisions,
-                    operationId: beginOperation(),
-                  });
+                  await applyUpdate(pendingConflict.sessionId, decisions);
                   toast.success(`Updated ${addon.title}`);
                   onConflictResolved?.(addon.folderName);
                   if (updateResult) onAddonUpdated(updateResult.esouiId);

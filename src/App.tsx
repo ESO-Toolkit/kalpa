@@ -15,7 +15,16 @@ import { StatusBanners } from "./components/status-banners";
 import { RosterPackInstall } from "./components/roster-pack-install";
 import { UpdateBanner, type BannerUpdate } from "./components/update-banner";
 import { CfaGuidanceDialog } from "./components/cfa-guidance-dialog";
+import { DependencyPickerDialog } from "./components/dependency-picker-dialog";
 import { getSetting, setSetting } from "@/lib/store";
+import {
+  addSkippedDependencies,
+  getDependencyPolicy,
+  getSkippedDependencies,
+  isDependencySkipped,
+  setDependencyPolicy,
+} from "@/lib/dependency-policy";
+import { DependencyPromptProvider, type ResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import {
   getTauriErrorMessage,
   invokeOrThrow,
@@ -32,6 +41,8 @@ import type {
   BatchRemoveResult,
   BatchTagResult,
   GameInstance,
+  InstallResult,
+  PendingDependency,
   StreamingBatchResult,
   UpdateCheckResult,
   WriteAccessStatus,
@@ -66,6 +77,39 @@ interface PendingDeepLinkPayload {
 
 type AddonPhase = "downloading" | "scanning" | "extracting" | "completed" | "failed";
 
+/**
+ * Merge duplicate entries so the picker asks about each library once, listing
+ * every addon that wants it. Batch flows (Update All, pack installs) can report
+ * the same library for several addons, and names are compared case-insensitively
+ * because ESO resolves addon folders that way.
+ */
+function dedupeDependencies(pending: PendingDependency[]): PendingDependency[] {
+  const byName = new Map<string, PendingDependency>();
+  for (const dep of pending) {
+    const key = dep.name.trim().toLowerCase();
+    const existing = byName.get(key);
+    if (!existing) {
+      byName.set(key, { ...dep, requiredBy: [...dep.requiredBy] });
+      continue;
+    }
+    // Required by ANY addon means required — the optional declaration loses.
+    if (dep.required) existing.required = true;
+    for (const requiredBy of dep.requiredBy) {
+      if (!existing.requiredBy.includes(requiredBy)) existing.requiredBy.push(requiredBy);
+    }
+    // Satisfy the strictest constraint asked for.
+    if (dep.minVersion !== null) {
+      existing.minVersion =
+        existing.minVersion === null
+          ? dep.minVersion
+          : Math.max(existing.minVersion, dep.minVersion);
+    }
+  }
+  return [...byName.values()].sort(
+    (a, b) => Number(b.required) - Number(a.required) || a.name.localeCompare(b.name)
+  );
+}
+
 function App() {
   const [addonsPath, setAddonsPath] = useState("");
   const [addons, setAddons] = useState<AddonManifest[]>([]);
@@ -91,6 +135,10 @@ function App() {
   const [pendingConflicts, setPendingConflicts] = useState<Map<string, BatchConflictAddon>>(
     new Map()
   );
+  // The app's single dependency picker (see DependencyPromptProvider). Open
+  // state is kept apart from the list so the list survives the close animation.
+  const [pendingDeps, setPendingDeps] = useState<PendingDependency[]>([]);
+  const [depPromptOpen, setDepPromptOpen] = useState(false);
   // Controlled Folder Access / write-access guidance dialog. `exePath` is the
   // Kalpa executable the user must allow through Windows ransomware protection.
   const [cfaDialog, setCfaDialog] = useState<{ exePath: string; permissionDenied: boolean } | null>(
@@ -145,6 +193,10 @@ function App() {
   // Set synchronously at the start of a batch update to block overlapping calls during
   // the async preamble (game check + confirm dialog), before `updatingAll` state lands.
   const batchPreflightRef = useRef(false);
+  // Synchronous mirror of `depPromptOpen`: the resolver must decide whether a
+  // picker is already up before its own async store read lands, which state
+  // read inside a stable callback can't tell it.
+  const depPromptOpenRef = useRef(false);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
@@ -743,24 +795,57 @@ function App() {
     return prompt;
   }, []);
 
+  // Shared entry point for every install/update that came back with dependencies
+  // the backend held for the user ("ask" policy). See dependency-prompt-context.
+  const resolvePendingDeps = useCallback<ResolvePendingDeps>(async (pending) => {
+    if (pending.length === 0) return;
+
+    // Drop anything the user has already declined, so Update All doesn't re-ask
+    // for the same library on every patch day.
+    const skipped = await getSkippedDependencies();
+    const candidates = dedupeDependencies(pending).filter(
+      (dep) => !isDependencySkipped(dep.name, skipped)
+    );
+    if (candidates.length === 0) return;
+
+    // One picker at a time: a second would replace the first's list mid-decision.
+    // The dropped dependencies simply stay uninstalled — the conservative
+    // outcome under "ask", and they remain installable from the Details pane.
+    if (depPromptOpenRef.current) return;
+
+    depPromptOpenRef.current = true;
+    setPendingDeps(candidates);
+    setDepPromptOpen(true);
+  }, []);
+
   const handleSingleUpdate = useCallback(
     async (folderName: string) => {
       const ur = updateResults.find((r) => r.folderName === folderName && r.hasUpdate);
       if (!ur) return;
       if (!(await ensureEsoNotBlocking())) return;
       try {
-        await invokeOrThrow("update_addon", {
+        const result = await invokeOrThrow<InstallResult>("update_addon", {
           addonsPath,
           esouiId: ur.esouiId,
+          dependencyPolicy: await getDependencyPolicy(),
         });
         toast.success(`Updated ${folderName}`);
         srAnnounce(`Updated ${folderName}`);
         handleAddonUpdated(ur.esouiId);
+        // Empty unless the policy is "ask"; the picker owns the rest.
+        void resolvePendingDeps(result.pendingDeps);
       } catch (e) {
         toast.error(`Update failed: ${getTauriErrorMessage(e)}`);
       }
     },
-    [addonsPath, updateResults, srAnnounce, handleAddonUpdated, ensureEsoNotBlocking]
+    [
+      addonsPath,
+      updateResults,
+      srAnnounce,
+      handleAddonUpdated,
+      ensureEsoNotBlocking,
+      resolvePendingDeps,
+    ]
   );
 
   const pendingRemovalsRef = useRef<
@@ -977,6 +1062,9 @@ function App() {
       // conflicts inline (keep_mine / take_update) and only defer the "ask"
       // case back to us for the interactive modal.
       const policy = await getSetting<"ask" | "keep_mine" | "take_update">("conflictPolicy", "ask");
+      // Likewise for dependencies — read once for the whole batch, so a run that
+      // pulls libraries prompts once at the end rather than once per addon.
+      const dependencyPolicy = await getDependencyPolicy();
 
       // Single streaming call: parallel downloads, extract-as-each-finishes,
       // one kalpa.json load/save and one dependency-resolution pass for the
@@ -986,6 +1074,7 @@ function App() {
       const batch = await invokeResult<StreamingBatchResult>("update_batch_with_decisions", {
         addonsPath: path,
         conflictPolicy: policy,
+        dependencyPolicy,
         updates: updates.map((u) => ({
           esouiId: u.esouiId,
           folderName: u.folderName,
@@ -1147,8 +1236,12 @@ function App() {
       }
 
       await scanAddons(path);
+
+      // One prompt for the whole run: the backend returns a single list for the
+      // batch, raised after the re-scan so the picker isn't competing with it.
+      void resolvePendingDeps(batch.data.pendingDeps);
     },
-    [ensureEsoNotBlocking, scanAddons, srAnnounce]
+    [ensureEsoNotBlocking, resolvePendingDeps, scanAddons, srAnnounce]
   );
 
   useEffect(() => {
@@ -1480,6 +1573,62 @@ function App() {
     esoRunningResolveRef.current?.(false);
     esoRunningResolveRef.current = null;
   }, []);
+  const handleDependencyPromptOpenChange = useCallback((open: boolean) => {
+    setDepPromptOpen(open);
+    // Dismissing without deciding (Escape / clicking away) installs nothing and
+    // declines nothing — only the dialog's own buttons record a decision.
+    if (!open) depPromptOpenRef.current = false;
+  }, []);
+  const handleDependencyConfirm = useCallback(
+    (selectedNames: string[], alwaysAutoInstall: boolean, rememberDeclines: boolean) => {
+      // Fire-and-forget preference writes, exactly like conflictPolicy.
+      if (alwaysAutoInstall) void setDependencyPolicy("auto");
+
+      // Only remember declines when the user asked for that. Persisting every
+      // untick would be a one-way door: optional dependencies arrive unticked,
+      // so the user would permanently lose the offer without ever having
+      // actively turned it down.
+      if (rememberDeclines) {
+        const selected = new Set(selectedNames);
+        const declined = pendingDeps
+          .filter((dep) => !selected.has(dep.name))
+          .map((dep) => dep.name);
+        if (declined.length > 0) void addSkippedDependencies(declined);
+      }
+
+      if (selectedNames.length === 0) return;
+
+      // No ESO-running gate here: this prompt only ever follows an install or
+      // update that just passed it and wrote to the same folder, so re-warning
+      // would stack a second modal on the one the user just dismissed.
+      void (async () => {
+        try {
+          const result = await invokeOrThrow<InstallResult>("install_selected_dependencies", {
+            addonsPath: addonsPathRef.current,
+            depNames: selectedNames,
+          });
+          const installed = result.installedDeps.length;
+          if (installed > 0) {
+            toast.success(
+              `Installed ${installed} ${installed === 1 ? "dependency" : "dependencies"}`
+            );
+          }
+          // `skippedDeps` means "not found on ESOUI" — as unusable as a failure.
+          const unresolved = [...result.failedDeps, ...result.skippedDeps];
+          if (unresolved.length > 0) {
+            toast.warning(`Could not install: ${unresolved.join(", ")}`);
+          }
+        } catch (e) {
+          toast.error(`Failed to install dependencies: ${getTauriErrorMessage(e)}`);
+        } finally {
+          // Refresh even after an error: a partially applied selection still
+          // reached disk and must show up in the list.
+          handleRefresh();
+        }
+      })();
+    },
+    [handleRefresh, pendingDeps]
+  );
 
   if (setupInstances !== null) {
     return (
@@ -1492,174 +1641,183 @@ function App() {
 
   return (
     <EsoRunningProvider value={ensureEsoNotBlocking}>
-      <div className="relative flex h-screen flex-col">
-        <div className="sr-only" aria-live="assertive" aria-atomic="true" role="status">
-          {srAnnouncement}
-        </div>
-        <AppBackground />
-
-        <AppHeader
-          addonsCount={addons.length}
-          batchMode={batchMode}
-          batchDisabling={batchDisabling}
-          checkingUpdates={checkingUpdates}
-          loading={loading}
-          selectedCount={selectedFolders.size}
-          updatingAll={updatingAll}
-          isOffline={isOffline}
-          instances={knownInstances}
-          activeAddonsPath={addonsPath}
-          onSwitchInstance={handlePathChangeClick}
-          onBatchCancel={handleBatchCancel}
-          onBatchDisable={handleBatchDisableClick}
-          onBatchRemove={handleBatchRemoveClick}
-          onBatchTag={handleBatchTag}
-          onBatchUpdate={handleBatchUpdateClick}
-          onOpenPacks={handleOpenPacks}
-          onOpenProfiles={handleOpenProfiles}
-          onOpenSavedVars={handleOpenSavedVars}
-          onOpenSettings={handleOpenSettings}
-          onOpenLogUpload={handleOpenLogUpload}
-          onRefresh={handleRefresh}
-        />
-
-        <StatusBanners
-          error={error}
-          isOffline={isOffline}
-          appUpdateState={appUpdateState}
-          onDownload={downloadAndInstall}
-          onRestart={restartApp}
-          onOpenSettings={errorShowSettings ? handleOpenSettings : undefined}
-        />
-
-        <UpdateBanner
-          availableCount={updatesAvailable.length}
-          updatingAll={updatingAll}
-          updateProgress={updateProgress}
-          addonStatuses={addonStatuses}
-          updates={bannerUpdates}
-          onUpdateAll={handleUpdateAll}
-          onUpdateSelected={handleUpdateSelected}
-          isOffline={isOffline}
-        />
-
-        {pendingConflicts.size > 0 && (
-          <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs text-amber-400">
-            <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-            {pendingConflicts.size} addon{pendingConflicts.size !== 1 ? "s" : ""} need your
-            attention — click one to review your edited files
+      <DependencyPromptProvider value={resolvePendingDeps}>
+        <div className="relative flex h-screen flex-col">
+          <div className="sr-only" aria-live="assertive" aria-atomic="true" role="status">
+            {srAnnouncement}
           </div>
-        )}
+          <AppBackground />
 
-        <div className="flex flex-1 overflow-hidden">
-          <AddonList
-            addons={filteredAddons}
-            allAddons={addons}
-            selectedAddon={selectedAddon}
-            onSelect={setSelectedAddon}
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
+          <AppHeader
+            addonsCount={addons.length}
+            batchMode={batchMode}
+            batchDisabling={batchDisabling}
+            checkingUpdates={checkingUpdates}
             loading={loading}
-            updateResults={updateResults}
-            sortMode={sortMode}
-            onSortChange={handleSortChange}
-            filterMode={filterMode}
-            onFilterChange={handleFilterChange}
-            activeTagFilter={effectiveTagFilter}
-            onActiveTagFilterChange={setActiveTagFilter}
-            selectedFolders={selectedFolders}
-            onToggleSelect={handleToggleSelect}
-            viewMode={viewMode}
-            onViewModeChange={setViewMode}
-            discoverTab={discoverTab}
-            onDiscoverTabChange={setDiscoverTab}
-            addonsPath={addonsPath}
-            onInstalled={handleRefresh}
-            onSelectDiscoverResult={setSelectedDiscoverResult}
-            selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
-            installedEsouiIds={installedEsouiIds}
+            selectedCount={selectedFolders.size}
+            updatingAll={updatingAll}
             isOffline={isOffline}
-            onUpdateAddon={handleUpdateAddonClick}
-            onRemoveAddon={handleRemoveAddonClick}
-            onToggleDisable={handleToggleDisable}
-            onOpenFolder={handleOpenFolderClick}
-            onToggleFavorite={handleTagsChange}
+            instances={knownInstances}
+            activeAddonsPath={addonsPath}
+            onSwitchInstance={handlePathChangeClick}
+            onBatchCancel={handleBatchCancel}
+            onBatchDisable={handleBatchDisableClick}
+            onBatchRemove={handleBatchRemoveClick}
+            onBatchTag={handleBatchTag}
+            onBatchUpdate={handleBatchUpdateClick}
+            onOpenPacks={handleOpenPacks}
+            onOpenProfiles={handleOpenProfiles}
+            onOpenSavedVars={handleOpenSavedVars}
+            onOpenSettings={handleOpenSettings}
+            onOpenLogUpload={handleOpenLogUpload}
+            onRefresh={handleRefresh}
           />
 
-          {viewMode === "installed" ? (
-            <AddonDetail
-              key={selectedAddon?.folderName ?? "none"}
-              addon={selectedAddon}
-              installedAddons={addons}
-              addonsPath={addonsPath}
-              onRemove={handleDetailRemove}
-              onRemoveAddon={handleSingleRemove}
-              onToggleDisable={handleToggleDisable}
-              updateResult={selectedUpdateResult}
-              onAddonUpdated={handleAddonUpdated}
-              onTagsChange={handleTagsChange}
-              isOffline={isOffline}
-              pendingConflict={
-                selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
-              }
-              onConflictResolved={handleConflictResolved}
-            />
-          ) : (
-            <DiscoverDetail
-              key={selectedDiscoverResult?.id ?? "none"}
-              result={selectedDiscoverResult}
+          <StatusBanners
+            error={error}
+            isOffline={isOffline}
+            appUpdateState={appUpdateState}
+            onDownload={downloadAndInstall}
+            onRestart={restartApp}
+            onOpenSettings={errorShowSettings ? handleOpenSettings : undefined}
+          />
+
+          <UpdateBanner
+            availableCount={updatesAvailable.length}
+            updatingAll={updatingAll}
+            updateProgress={updateProgress}
+            addonStatuses={addonStatuses}
+            updates={bannerUpdates}
+            onUpdateAll={handleUpdateAll}
+            onUpdateSelected={handleUpdateSelected}
+            isOffline={isOffline}
+          />
+
+          {pendingConflicts.size > 0 && (
+            <div className="mx-4 mb-2 flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/[0.04] px-3 py-2 text-xs text-amber-400">
+              <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+              {pendingConflicts.size} addon{pendingConflicts.size !== 1 ? "s" : ""} need your
+              attention — click one to review your edited files
+            </div>
+          )}
+
+          <div className="flex flex-1 overflow-hidden">
+            <AddonList
+              addons={filteredAddons}
+              allAddons={addons}
+              selectedAddon={selectedAddon}
+              onSelect={setSelectedAddon}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              loading={loading}
+              updateResults={updateResults}
+              sortMode={sortMode}
+              onSortChange={handleSortChange}
+              filterMode={filterMode}
+              onFilterChange={handleFilterChange}
+              activeTagFilter={effectiveTagFilter}
+              onActiveTagFilterChange={setActiveTagFilter}
+              selectedFolders={selectedFolders}
+              onToggleSelect={handleToggleSelect}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              discoverTab={discoverTab}
+              onDiscoverTabChange={setDiscoverTab}
               addonsPath={addonsPath}
               onInstalled={handleRefresh}
-              onRemoveByEsouiId={handleRemoveByEsouiId}
+              onSelectDiscoverResult={setSelectedDiscoverResult}
+              selectedDiscoverResultId={selectedDiscoverResult?.id ?? null}
               installedEsouiIds={installedEsouiIds}
               isOffline={isOffline}
+              onUpdateAddon={handleUpdateAddonClick}
+              onRemoveAddon={handleRemoveAddonClick}
+              onToggleDisable={handleToggleDisable}
+              onOpenFolder={handleOpenFolderClick}
+              onToggleFavorite={handleTagsChange}
+            />
+
+            {viewMode === "installed" ? (
+              <AddonDetail
+                key={selectedAddon?.folderName ?? "none"}
+                addon={selectedAddon}
+                installedAddons={addons}
+                addonsPath={addonsPath}
+                onRemove={handleDetailRemove}
+                onRemoveAddon={handleSingleRemove}
+                onToggleDisable={handleToggleDisable}
+                updateResult={selectedUpdateResult}
+                onAddonUpdated={handleAddonUpdated}
+                onTagsChange={handleTagsChange}
+                isOffline={isOffline}
+                pendingConflict={
+                  selectedAddon ? pendingConflicts.get(selectedAddon.folderName) : undefined
+                }
+                onConflictResolved={handleConflictResolved}
+              />
+            ) : (
+              <DiscoverDetail
+                key={selectedDiscoverResult?.id ?? "none"}
+                result={selectedDiscoverResult}
+                addonsPath={addonsPath}
+                onInstalled={handleRefresh}
+                onRemoveByEsouiId={handleRemoveByEsouiId}
+                installedEsouiIds={installedEsouiIds}
+                isOffline={isOffline}
+              />
+            )}
+          </div>
+
+          {rosterPackInstallId && addonsPath && (
+            <RosterPackInstall
+              packId={rosterPackInstallId}
+              addonsPath={addonsPath}
+              installedAddons={addons}
+              onClose={() => setRosterPackInstallId(null)}
+              onRefresh={handleRefresh}
+            />
+          )}
+
+          <AppDialogs
+            activeDialog={activeDialog}
+            addons={addons}
+            addonsPath={addonsPath}
+            authUser={authUser}
+            deepLinkPackId={deepLinkPackId}
+            deepLinkShareCode={deepLinkShareCode}
+            knownInstances={knownInstances}
+            logUploaderMounted={logUploaderMounted}
+            onAuthChange={setAuthUser}
+            onCheckForAppUpdate={handleCheckForAppUpdateClick}
+            onCloseDialog={handleCloseDialog}
+            onInstancesDetected={setKnownInstances}
+            onPathChange={handlePathChangeClick}
+            onRefresh={handleRefresh}
+            onShowDialog={handleOpenDialog}
+          />
+
+          <EsoRunningDialog
+            open={esoRunningPromptOpen}
+            onConfirm={handleEsoRunningConfirm}
+            onCancel={handleEsoRunningCancel}
+          />
+
+          <DependencyPickerDialog
+            open={depPromptOpen}
+            onOpenChange={handleDependencyPromptOpenChange}
+            pending={pendingDeps}
+            onConfirm={handleDependencyConfirm}
+          />
+
+          {cfaDialog && (
+            <CfaGuidanceDialog
+              open
+              onClose={() => setCfaDialog(null)}
+              exePath={cfaDialog.exePath}
+              permissionDenied={cfaDialog.permissionDenied}
             />
           )}
         </div>
-
-        {rosterPackInstallId && addonsPath && (
-          <RosterPackInstall
-            packId={rosterPackInstallId}
-            addonsPath={addonsPath}
-            installedAddons={addons}
-            onClose={() => setRosterPackInstallId(null)}
-            onRefresh={handleRefresh}
-          />
-        )}
-
-        <AppDialogs
-          activeDialog={activeDialog}
-          addons={addons}
-          addonsPath={addonsPath}
-          authUser={authUser}
-          deepLinkPackId={deepLinkPackId}
-          deepLinkShareCode={deepLinkShareCode}
-          knownInstances={knownInstances}
-          logUploaderMounted={logUploaderMounted}
-          onAuthChange={setAuthUser}
-          onCheckForAppUpdate={handleCheckForAppUpdateClick}
-          onCloseDialog={handleCloseDialog}
-          onInstancesDetected={setKnownInstances}
-          onPathChange={handlePathChangeClick}
-          onRefresh={handleRefresh}
-          onShowDialog={handleOpenDialog}
-        />
-
-        <EsoRunningDialog
-          open={esoRunningPromptOpen}
-          onConfirm={handleEsoRunningConfirm}
-          onCancel={handleEsoRunningCancel}
-        />
-
-        {cfaDialog && (
-          <CfaGuidanceDialog
-            open
-            onClose={() => setCfaDialog(null)}
-            exePath={cfaDialog.exePath}
-            permissionDenied={cfaDialog.permissionDenied}
-          />
-        )}
-      </div>
+      </DependencyPromptProvider>
     </EsoRunningProvider>
   );
 }

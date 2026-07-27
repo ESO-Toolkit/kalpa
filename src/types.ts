@@ -36,11 +36,37 @@ export interface EsouiAddonInfo {
   updated: string;
 }
 
+/** A dependency the backend deliberately did NOT install because the caller
+ * passed `dependencyPolicy: "ask"`, handed back so the UI can prompt.
+ *
+ * Only the FIRST resolution round is reported: whatever the user accepts is then
+ * installed transitively, because a library's own libraries are an
+ * implementation detail the user has no way to judge (and re-prompting mid-run
+ * would mean releasing the metadata lock). Empty for the "auto" and "skip"
+ * policies — "auto" installed everything, "skip" looked at nothing. */
+export interface PendingDependency {
+  /** Folder name exactly as declared on the manifest's DependsOn line. */
+  name: string;
+  /** True for `DependsOn`, false for `OptionalDependsOn`. Optional entries are
+   * the ones Kalpa has never installed automatically, so they arrive unticked. */
+  required: boolean;
+  /** Display titles of the addons that declare this dependency, required or
+   * optional (the manifest parser falls back to the folder name when a manifest
+   * has no title). Shown as "Needed by ..."; note it does NOT distinguish which
+   * of them declared it required. May be empty. */
+  requiredBy: string[];
+  /** Minimum AddOnVersion the manifest asks for (`Lib>=42`), or null when the
+   * dependency is declared without a version constraint. */
+  minVersion: number | null;
+}
+
 export interface InstallResult {
   installedFolders: string[];
   installedDeps: string[];
   failedDeps: string[];
   skippedDeps: string[];
+  /** Dependencies awaiting the user's decision under the "ask" policy. */
+  pendingDeps: PendingDependency[];
 }
 
 export interface UpdateCheckResult {
@@ -100,6 +126,8 @@ export interface PackInstallResult {
   installedDeps: string[];
   failedDeps: string[];
   skippedDeps: string[];
+  /** Dependencies awaiting the user's decision under the "ask" policy. */
+  pendingDeps: PendingDependency[];
   errors?: Record<number, string>;
 }
 
@@ -614,6 +642,8 @@ export interface StreamingBatchResult {
   installedDeps: string[];
   failedDeps: string[];
   skippedDeps: string[];
+  /** Dependencies awaiting the user's decision under the "ask" policy. */
+  pendingDeps: PendingDependency[];
 }
 
 export interface WriteAccessStatus {

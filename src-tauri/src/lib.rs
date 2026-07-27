@@ -686,6 +686,7 @@ pub fn run() {
             commands::disable_addon,
             commands::enable_addon,
             commands::install_dependency,
+            commands::install_selected_dependencies,
             commands::check_for_updates,
             commands::update_addon,
             commands::batch_update_addons,

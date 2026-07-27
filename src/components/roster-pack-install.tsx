@@ -17,6 +17,7 @@ import { RosterPackSkeleton } from "@/components/ui/skeletons";
 import { CountingNumber } from "@/components/animate-ui/primitives/texts/counting-number";
 import { getTauriErrorMessage, invokeOrThrow } from "@/lib/tauri";
 import { runBatchPackInstall } from "@/lib/pack-install";
+import { useResolvePendingDeps } from "@/lib/dependency-prompt-context";
 import { useEnsureEsoNotBlocking } from "@/lib/eso-running-context";
 import { cn, decodeHtml } from "@/lib/utils";
 import {
@@ -59,6 +60,7 @@ export function RosterPackInstall({
   const [error, setError] = useState<string | null>(null);
   const [addonStates, setAddonStates] = useState<AddonInstallState[]>([]);
   const ensureEsoNotBlocking = useEnsureEsoNotBlocking();
+  const resolvePendingDeps = useResolvePendingDeps();
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState<{
     completed: number;
@@ -218,7 +220,17 @@ export function RosterPackInstall({
     if (failed > 0) {
       toast.error(`${failed} addon${failed !== 1 ? "s" : ""} failed to install`);
     }
-  }, [addonsToInstall, addonsPath, onRefresh, ensureEsoNotBlocking, installing]);
+
+    // One prompt for the whole pack; empty unless the policy is "ask".
+    if (result) void resolvePendingDeps(result.pendingDeps);
+  }, [
+    addonsToInstall,
+    addonsPath,
+    onRefresh,
+    ensureEsoNotBlocking,
+    installing,
+    resolvePendingDeps,
+  ]);
 
   const handleCancel = useCallback(() => {
     if (installing) {

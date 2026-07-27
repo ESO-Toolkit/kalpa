@@ -1,0 +1,99 @@
+import { getSetting, setSetting } from "@/lib/store";
+
+/**
+ * The "dependencyPolicy" preference: how Kalpa treats the libraries an addon
+ * declares in its manifest. Modelled on the existing `conflictPolicy` key —
+ * same three-way shape, same "ask" deferral flow, same plain-string storage in
+ * settings.json — so there is only one way preferences of this kind work.
+ *
+ *   auto — install required dependencies transitively (Kalpa's original behaviour).
+ *   ask  — install nothing up front; the backend returns the first round of
+ *          missing dependencies and the UI prompts. Whatever the user accepts is
+ *          then installed transitively.
+ *   skip — install nothing and look at nothing (no disk walk, no network).
+ *
+ * The STORED default is "ask": dependency installs are downloads the user never
+ * asked for, so they are opt-in. That is deliberately NOT the same as the wire
+ * default — an absent/unrecognised `dependencyPolicy` argument makes the Rust
+ * side behave as "auto", which keeps every existing caller and test working.
+ * Only code that has actually READ this preference may send a policy.
+ */
+export type DependencyPolicy = "auto" | "ask" | "skip";
+
+/** settings.json key holding the {@link DependencyPolicy}. */
+export const DEPENDENCY_POLICY_KEY = "dependencyPolicy";
+
+/** settings.json key holding the declined-dependency list (see below). */
+export const SKIPPED_DEPENDENCIES_KEY = "skippedDependencies";
+
+export const DEFAULT_DEPENDENCY_POLICY: DependencyPolicy = "ask";
+
+const POLICIES: readonly DependencyPolicy[] = ["auto", "ask", "skip"];
+
+/** Narrow an untrusted value (settings.json is user-editable and survives
+ * downgrades, so it can hold anything) to a DependencyPolicy. Anything
+ * unrecognised falls back to the default rather than throwing. */
+export function parseDependencyPolicy(value: unknown): DependencyPolicy {
+  return POLICIES.includes(value as DependencyPolicy)
+    ? (value as DependencyPolicy)
+    : DEFAULT_DEPENDENCY_POLICY;
+}
+
+/** Read the persisted policy. Never throws — a degraded store yields the default. */
+export async function getDependencyPolicy(): Promise<DependencyPolicy> {
+  return parseDependencyPolicy(await getSetting<unknown>(DEPENDENCY_POLICY_KEY, undefined));
+}
+
+/** Persist the policy. Returns false when the write failed (see `setSetting`). */
+export function setDependencyPolicy(policy: DependencyPolicy): Promise<boolean> {
+  return setSetting(DEPENDENCY_POLICY_KEY, policy);
+}
+
+/**
+ * Declined-dependency list: names the user has already said "no" to, so the
+ * prompt does not nag about the same library on every subsequent install.
+ * Stored as a plain string array under one settings key — no separate store.
+ */
+
+/** ESO addon folder names are compared case-insensitively (Windows paths are,
+ * and manifests are inconsistent about casing), so every lookup normalises. */
+function normalizeName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** Read the declined list. Tolerates a malformed/legacy value by ignoring it. */
+export async function getSkippedDependencies(): Promise<string[]> {
+  const raw = await getSetting<unknown>(SKIPPED_DEPENDENCIES_KEY, undefined);
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((n): n is string => typeof n === "string" && n.trim() !== "");
+}
+
+/** True when `name` appears in a previously-read declined list. Pure, so a
+ * caller can filter a whole batch after a single store read. */
+export function isDependencySkipped(name: string, skipped: readonly string[]): boolean {
+  const key = normalizeName(name);
+  return skipped.some((entry) => normalizeName(entry) === key);
+}
+
+/** Add names to the declined list, preserving their original casing and
+ * dropping duplicates. Read-modify-write is safe here because the prompt this
+ * serves is modal — only one picker can be resolving at a time. */
+export async function addSkippedDependencies(names: readonly string[]): Promise<boolean> {
+  const current = await getSkippedDependencies();
+  const seen = new Set(current.map(normalizeName));
+  const merged = [...current];
+  for (const name of names) {
+    const key = normalizeName(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(name.trim());
+  }
+  // Nothing new: skip the disk flush and report success.
+  if (merged.length === current.length) return true;
+  return setSetting(SKIPPED_DEPENDENCIES_KEY, merged);
+}
+
+/** Forget every declined dependency (a "start prompting me again" reset). */
+export function clearSkippedDependencies(): Promise<boolean> {
+  return setSetting(SKIPPED_DEPENDENCIES_KEY, []);
+}
