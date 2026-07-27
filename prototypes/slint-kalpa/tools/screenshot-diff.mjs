@@ -8,7 +8,16 @@ import { deflateSync, inflateSync } from "node:zlib";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "../../..");
-const defaultBaseline = path.join(repoRoot, ".screenshots", "main-desktop.png");
+// Frozen WebView reference capture (2558x1438, ESO Gold palette). It lives in
+// the prototype rather than .screenshots/ because .screenshots/ holds the
+// README's own images, which are recaptured on the current default theme and
+// would make every diff report a full-frame colour delta.
+const defaultBaseline = path.join(
+  scriptDir,
+  "..",
+  "baseline",
+  "webview-main-eso-gold.png",
+);
 const defaultOutputDir = path.join(scriptDir, "diff-output");
 const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
@@ -16,11 +25,11 @@ function usage() {
   console.log(`Usage:
   node prototypes/slint-kalpa/tools/screenshot-diff.mjs <native-screenshot.png> [options]
 
-Compares a captured Slint/native screenshot against .screenshots/main-desktop.png.
+Compares a captured Slint/native screenshot against prototypes/slint-kalpa/baseline/webview-main-eso-gold.png.
 Images must have identical pixel dimensions; recapture the native window at the same nominal size if they differ.
 
 Options:
-  --baseline <path>    Reference PNG. Defaults to .screenshots/main-desktop.png
+  --baseline <path>    Reference PNG. Defaults to prototypes/slint-kalpa/baseline/webview-main-eso-gold.png
   --output <path>      Diff PNG path. Defaults to prototypes/slint-kalpa/tools/diff-output/<candidate>.diff.png
   --threshold <0-255>  Per-channel delta threshold for changed pixels. Defaults to 12
   --json              Print metrics as JSON

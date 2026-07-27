@@ -10,7 +10,10 @@ Main addon manager.
 
 Reference screenshot:
 
-- `../../.screenshots/main-desktop.png`
+- `baseline/webview-main-eso-gold.png` — a frozen WebView capture (2558x1438, ESO
+  Gold palette). It is deliberately kept here rather than in `.screenshots/`,
+  which now holds the README's own images: those are recaptured on the current
+  default theme, so diffing against them would report a full-frame colour delta.
 
 Scale note:
 
@@ -347,9 +350,12 @@ Ship-priority cutoff:
 - Detail body still needs conflict/update banners, production-store wiring,
   production Discover backend integration, and final native file-editor backend
   integration before it can replace the React surface.
-- Current React source includes `Details / Files` tabs; the older
-  `.screenshots/main-desktop.png` reference does not. Verify against the running
-  WebView before accepting that surface.
+- Current React source includes `Details / Files` tabs; the frozen
+  `baseline/webview-main-eso-gold.png` reference does not. Verify against the
+  running WebView before accepting that surface. (The README's
+  `.screenshots/main-desktop.webp` is a current capture and does show them, but
+  it is on the Nordic Runestone default theme, so it is not diff-comparable
+  against the baseline.)
 - The right-side header actions now render from the current app action set and
   are anchored to the live window width. Do not tune header placement against a
   DPI-virtualized `PrintWindow` crop.
@@ -473,7 +479,7 @@ the current WebView reference:
 powershell -ExecutionPolicy Bypass -File .\tools\screenshot-diff.ps1 .\captures\native-main.png
 ```
 
-The default baseline is `../../.screenshots/main-desktop.png`. The images must
+The default baseline is `baseline/webview-main-eso-gold.png`. The images must
 have identical pixel dimensions; recapture the native window at the same nominal
 size if the script reports a mismatch. By default, the diff PNG is written under
 `tools/diff-output/`.

@@ -1,6 +1,9 @@
 # Native ESO Logs Uploader — Implementation Plan
 
-> **Status:** Planning only. Build in a fresh session.
+> [!NOTE]
+> **Superseded (2026-07).** This plan was executed — the native ESO Logs uploader shipped in v0.1.0-beta.10. Kept for historical context.
+
+> **Status:** Executed — shipped in v0.1.0-beta.10 (was: "Planning only. Build in a fresh session.").
 > **Decision owner:** project owner (informed, 2026-06-16).
 > **Direction:** Replace the hand-off-to-official-uploader model with a native,
 > in-process upload client so Kalpa owns the whole Start/Stop lifecycle — no

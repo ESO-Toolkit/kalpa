@@ -1,5 +1,11 @@
 # Native UI Port Plan
 
+> [!NOTE]
+> **Status update (2026-07).** This port shipped in v0.1.0-beta.12 as the opt-in
+> **native performance UI** (Windows, beta) via PR #274. Source lives in
+> `prototypes/slint-kalpa/`. The plan below is still the working standard for
+> extending the native surface.
+
 Kalpa can move off WebView only if the native UI is rebuilt as a component-by-component
 port of the current React/Tailwind UI. Freehand approximations are not acceptable.
 
@@ -22,7 +28,9 @@ standard is:
 
 Primary visual reference:
 
-- `.screenshots/main-desktop.png`
+- `prototypes/slint-kalpa/baseline/webview-main-eso-gold.png` — frozen WebView
+  capture on the ESO Gold palette (moved out of `.screenshots/`, which now holds
+  the README's own current-theme images)
 
 Primary implementation reference:
 
@@ -44,7 +52,7 @@ Primary implementation reference:
 1. Port one component family at a time.
 2. Use current React source for measurements, colors, spacing, and states.
 3. Use logical CSS pixels from the React layout, not raw screenshot pixels.
-   The current `main-desktop.png` reference is approximately 1.75x scaled:
+   The `webview-main-eso-gold.png` reference is approximately 1.75x scaled:
    the 48 CSS px header appears around 84 bitmap px, and the 380 CSS px
    sidebar appears around 665 bitmap px.
 4. Render only enough native UI to inspect that component in context.
@@ -129,7 +137,8 @@ needs app-store integration for persisted active/custom theme selection.
 
 The prototype now launches with the older ESO Gold/root palette when no theme env
 var is set so the native demo starts from the same clean palette as
-`.screenshots/main-desktop.png`. The app factory default remains available with
+`prototypes/slint-kalpa/baseline/webview-main-eso-gold.png`. The app factory
+default remains available with
 `KALPA_THEME=nordic-runestone`, and all generated built-in/custom seed paths still
 work through `KALPA_THEME`, `KALPA_THEME_JSON`, and `KALPA_THEME_FILE`.
 

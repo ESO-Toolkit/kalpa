@@ -1,12 +1,27 @@
 # Verify your download
 
-Each Kalpa release publishes three files:
+Each Kalpa release publishes an installer for every supported platform, an
+**auto-updater signature** (`.sig`) for each auto-updatable artifact, and one
+merged update manifest shared by all platforms:
 
 | File | What it is |
 |---|---|
-| `Kalpa_<version>_x64-setup.exe` | The Windows installer you run |
-| `Kalpa_<version>_x64-setup.exe.sig` | The **auto-updater signature** for that installer |
-| `latest.json` | Update manifest the app reads to find new versions |
+| `Kalpa_<version>_x64-setup.exe` | The Windows installer (NSIS) you run |
+| `Kalpa_<version>_x64-setup.exe.sig` | The **auto-updater signature** for the Windows installer |
+| `Kalpa_<version>_universal.dmg` | The macOS universal disk image you open (Intel + Apple Silicon) |
+| `Kalpa_<version>_universal.app.tar.gz` | The macOS app bundle the auto-updater downloads |
+| `Kalpa_<version>_universal.app.tar.gz.sig` | The **auto-updater signature** for the macOS bundle |
+| `Kalpa_<version>_amd64.AppImage` | The portable Linux build you run directly |
+| `Kalpa_<version>_amd64.AppImage.sig` | The **auto-updater signature** for the AppImage |
+| `Kalpa_<version>_amd64.deb` | The Debian/Ubuntu package |
+| `Kalpa_<version>_amd64.deb.sig` | The **auto-updater signature** for the `.deb` |
+| `Kalpa-<version>-1.x86_64.rpm` | The Fedora/RHEL package |
+| `Kalpa-<version>-1.x86_64.rpm.sig` | The **auto-updater signature** for the `.rpm` |
+| `latest.json` | One merged, multi-platform update manifest the app reads to find new versions |
+
+The `.dmg` is the only installer published without a `.sig`: macOS updates are
+delivered as the `.app.tar.gz` bundle, so that is the artifact the updater
+signs and checks.
 
 ## About the `.sig` file
 
@@ -23,7 +38,7 @@ automatically. `gpg --verify` does not apply to this file.
 
 ## Verifying a fresh download manually
 
-If you download the installer directly from the
+If you download an installer directly from the
 [Releases](https://github.com/ESO-Toolkit/kalpa/releases/latest) page, you have
 two layers of assurance:
 
@@ -33,10 +48,24 @@ two layers of assurance:
    the signing key compiled into the app before applying it.
 2. **Checksum (when published).** Some releases include a **SHA-256 checksum** in
    their notes. If one is present, you can confirm the file matches it. Compute
-   the installer's hash in PowerShell:
+   the downloaded file's hash with the tool for your platform:
+
+   Windows (PowerShell):
 
    ```powershell
    Get-FileHash .\Kalpa_<version>_x64-setup.exe -Algorithm SHA256
+   ```
+
+   macOS:
+
+   ```bash
+   shasum -a 256 Kalpa_<version>_universal.dmg
+   ```
+
+   Linux:
+
+   ```bash
+   sha256sum Kalpa_<version>_amd64.AppImage
    ```
 
    Compare the output to the checksum in the release notes. If the values match,
@@ -47,4 +76,4 @@ two layers of assurance:
 
 If a checksum doesn't match or the updater reports a signature error, please
 [open an issue](https://github.com/ESO-Toolkit/kalpa/issues) and do not run the
-installer.
+downloaded file.

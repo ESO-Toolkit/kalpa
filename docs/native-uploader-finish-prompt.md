@@ -1,12 +1,16 @@
 # Native uploader — what's left
 
+> [!NOTE]
+> **Superseded (2026-07).** This plan was executed — the native ESO Logs uploader shipped in v0.1.0-beta.10. Kept for historical context.
+
 The native ESO Logs uploader is **built end-to-end** and gated off. The auth/login,
 opt-in, UI, and the fights-segment **events encoder** are all implemented, tested,
 and committed on `feat/log-uploader`. See `native-uploader-next-steps.md` for the
 full state.
 
-**The only thing left is an owner-run live round-trip** to prove the server accepts
-a Kalpa-produced segment, then flipping the gate. It cannot be done autonomously
+**The only thing left was an owner-run live round-trip** to prove the server accepts
+a Kalpa-produced segment, then flipping the gate — both were completed, and the gate
+is flipped in production as of v0.1.0-beta.10. It cannot be done autonomously
 (needs a signed-in session + a live POST). The exact procedure is in
 `native-uploader-next-steps.md` → "5. Confirm + flip the gate". In short:
 
