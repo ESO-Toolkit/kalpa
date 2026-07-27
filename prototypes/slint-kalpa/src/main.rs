@@ -13589,6 +13589,39 @@ fn tag_label(tag_id: &str, active: bool) -> String {
 
 const PRESET_TAGS: [&str; 5] = ["favorite", "testing", "broken", "essential", "raid"];
 
+/// Ask Windows to release this process's working set.
+///
+/// The sidecar is sold on using less memory than the WebView2 UI while the
+/// player is in-game — that is, while its window is minimized. But the GPU
+/// renderer's buffers keep the working set pinned when minimized: measured on a
+/// release build, femtovg sat at 83.1 MB minimized against the webview's 18 MB,
+/// because WebView2 trims on hide and Slint does nothing.
+///
+/// `SetProcessWorkingSetSize` with `(SIZE_T)-1` for both bounds is the
+/// documented way to release it. The pages move to the standby list rather than
+/// being freed outright, which is exactly what is wanted here: they become
+/// reclaimable by other processes (the game) without a pagefile round-trip, and
+/// fault back in on restore. Measured on the same build: 83.1 MB minimized ->
+/// 7.6 MB after the trim, returning to 32.4 MB once restored — the restore does
+/// not pull the whole original footprint back in.
+#[cfg(windows)]
+fn trim_working_set() {
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn SetProcessWorkingSetSize(
+            process: *mut std::ffi::c_void,
+            min_bytes: usize,
+            max_bytes: usize,
+        ) -> i32;
+    }
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that owns nothing and
+    // needs no closing; SetProcessWorkingSetSize only reads it. usize::MAX is
+    // the documented (SIZE_T)-1 sentinel for "trim as much as possible".
+    unsafe {
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
 fn wire_window_controls(ui: &KalpaWindow) {
     let minimize_ui = ui.as_weak();
     ui.on_minimize_requested(move || {
@@ -13654,6 +13687,15 @@ fn wire_window_controls(ui: &KalpaWindow) {
                         winit_window.set_border_color(None);
                     });
                 });
+            }
+            // Windows reports a minimize as a resize to 0x0. Hook it here and
+            // not in `on_minimize_requested`: the taskbar button, Win+D, Win+M
+            // and "Minimize all" never go through the custom title bar's
+            // callback, and minimizing to play the game is precisely the case
+            // this is for.
+            #[cfg(windows)]
+            if matches!(event, WindowEvent::Resized(size) if size.width == 0 && size.height == 0) {
+                trim_working_set();
             }
             if matches!(event, WindowEvent::Resized(_)) {
                 window.with_winit_window(|winit_window| winit_window.request_redraw());
