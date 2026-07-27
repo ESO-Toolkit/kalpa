@@ -13667,6 +13667,11 @@ fn wire_window_controls(ui: &KalpaWindow) {
     {
         use i_slint_backend_winit::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
         let ev_ui = ui.as_weak();
+        // Fire the minimize trim once per transition, not on every event that
+        // arrives while the window sits minimized (it keeps receiving a steady
+        // stream of RedrawRequested).
+        #[cfg(windows)]
+        let was_minimized = std::cell::Cell::new(false);
         ui.window().on_winit_window_event(move |window, event| {
             // One-time native Windows 11 frame: DWM clips the window to ~8px
             // rounded corners and draws a crisp ESO-gold border that follows the
@@ -13688,14 +13693,29 @@ fn wire_window_controls(ui: &KalpaWindow) {
                     });
                 });
             }
-            // Windows reports a minimize as a resize to 0x0. Hook it here and
-            // not in `on_minimize_requested`: the taskbar button, Win+D, Win+M
-            // and "Minimize all" never go through the custom title bar's
-            // callback, and minimizing to play the game is precisely the case
-            // this is for.
+            // Release the working set when the window is minimized — the case
+            // this whole sidecar is sold on, since that is where the player
+            // leaves it while raiding.
+            //
+            // Detect it from the window's own minimized state rather than by
+            // matching an event variant. winit 0.30 does NOT report a minimize
+            // as `Resized(0, 0)` here: it emits `Moved(-32000, -32000)` and a
+            // `Resized` carrying the taskbar button's size (measured: 276x45),
+            // so an event-shape guard silently never fires. Hooking the state
+            // also covers every route into it — the custom title bar button,
+            // the taskbar, Win+D, Win+M — where `on_minimize_requested` only
+            // covers the first.
             #[cfg(windows)]
-            if matches!(event, WindowEvent::Resized(size) if size.width == 0 && size.height == 0) {
-                trim_working_set();
+            {
+                let minimized = window
+                    .with_winit_window(|w| w.is_minimized().unwrap_or(false))
+                    .unwrap_or(false);
+                if minimized != was_minimized.get() {
+                    was_minimized.set(minimized);
+                    if minimized {
+                        trim_working_set();
+                    }
+                }
             }
             if matches!(event, WindowEvent::Resized(_)) {
                 window.with_winit_window(|winit_window| winit_window.request_redraw());
