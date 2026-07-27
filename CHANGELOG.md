@@ -343,7 +343,7 @@ First beta release. Graduating from alpha after a comprehensive security audit, 
 
 ## [0.1.0-alpha.1] — 2026-04-03
 
-First public alpha release of **Kalpa** — an open-source desktop addon manager for Elder Scrolls Online.
+First public alpha release of **Kalpa** — a source-available desktop addon manager for Elder Scrolls Online.
 
 ### Core Features
 - Smart addon scanning with manifest parsing (`.txt` and `.addon` files)

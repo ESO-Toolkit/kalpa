@@ -6,7 +6,7 @@ You are Claude Code working in this repository. Optimize for **safety, clarity, 
 
 ## Mission & Current State
 
-Kalpa is an open-source desktop app for managing Elder Scrolls Online addons. It is currently in a **functional alpha** state with:
+Kalpa is a source-available desktop app for managing Elder Scrolls Online addons, licensed under BSL 1.1 (not open source in the OSI sense — it converts to Apache 2.0 four years after each release). It is currently in a **functional alpha** state with:
 
 - Addon scanning and installation
 - Updates and dependency resolution
