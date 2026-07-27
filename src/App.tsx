@@ -197,6 +197,9 @@ function App() {
   // picker is already up before its own async store read lands, which state
   // read inside a stable callback can't tell it.
   const depPromptOpenRef = useRef(false);
+  // Dependencies that arrived while a picker was already up. Drained when it
+  // closes so a concurrent install's libraries are offered rather than dropped.
+  const queuedDepsRef = useRef<PendingDependency[]>([]);
   const scanSeqRef = useRef(0);
   const checkSeqRef = useRef(0);
   // Synchronous mirror of `addonStatuses` for the batch-progress listener:
@@ -802,16 +805,27 @@ function App() {
 
     // Drop anything the user has already declined, so Update All doesn't re-ask
     // for the same library on every patch day.
+    //
+    // Only optional entries are filtered. The skip list is keyed by name alone,
+    // so a library turned down while it was OPTIONAL would otherwise stay hidden
+    // when a different addon later declares it REQUIRED — silently leaving that
+    // addon unable to load, with no prompt and no warning. A required dependency
+    // is load-bearing enough to be worth re-offering; declining it again is one
+    // click.
     const skipped = await getSkippedDependencies();
     const candidates = dedupeDependencies(pending).filter(
-      (dep) => !isDependencySkipped(dep.name, skipped)
+      (dep) => dep.required || !isDependencySkipped(dep.name, skipped)
     );
     if (candidates.length === 0) return;
 
-    // One picker at a time: a second would replace the first's list mid-decision.
-    // The dropped dependencies simply stay uninstalled — the conservative
-    // outcome under "ask", and they remain installable from the Details pane.
-    if (depPromptOpenRef.current) return;
+    // One picker at a time — a second would replace the first's list mid-decision.
+    // Park the extras instead of dropping them: the queue drains when the open
+    // dialog closes, so a Discover install that lands mid-Update-All still gets
+    // its dependencies offered rather than silently skipped.
+    if (depPromptOpenRef.current) {
+      queuedDepsRef.current = dedupeDependencies([...queuedDepsRef.current, ...candidates]);
+      return;
+    }
 
     depPromptOpenRef.current = true;
     setPendingDeps(candidates);
@@ -1577,7 +1591,17 @@ function App() {
     setDepPromptOpen(open);
     // Dismissing without deciding (Escape / clicking away) installs nothing and
     // declines nothing — only the dialog's own buttons record a decision.
-    if (!open) depPromptOpenRef.current = false;
+    if (!open) {
+      depPromptOpenRef.current = false;
+      // Hand the dialog straight back to anything that queued up behind it.
+      const queued = queuedDepsRef.current;
+      if (queued.length > 0) {
+        queuedDepsRef.current = [];
+        depPromptOpenRef.current = true;
+        setPendingDeps(queued);
+        setDepPromptOpen(true);
+      }
+    }
   }, []);
   const handleDependencyConfirm = useCallback(
     (selectedNames: string[], alwaysAutoInstall: boolean, rememberDeclines: boolean) => {
@@ -1588,12 +1612,26 @@ function App() {
       // untick would be a one-way door: optional dependencies arrive unticked,
       // so the user would permanently lose the offer without ever having
       // actively turned it down.
+      const selected = new Set(selectedNames);
       if (rememberDeclines) {
-        const selected = new Set(selectedNames);
         const declined = pendingDeps
           .filter((dep) => !selected.has(dep.name))
           .map((dep) => dep.name);
         if (declined.length > 0) void addSkippedDependencies(declined);
+      }
+
+      // "Skip all" closes the dialog immediately, so the in-dialog warning about
+      // declining a required library is never seen on that path. Say it here
+      // instead, so no required dependency is ever turned down silently.
+      const declinedRequired = pendingDeps.filter((dep) => dep.required && !selected.has(dep.name));
+      if (declinedRequired.length > 0) {
+        toast.warning(
+          `Skipped ${declinedRequired.length} required ${
+            declinedRequired.length === 1 ? "library" : "libraries"
+          }: ${declinedRequired.map((dep) => dep.name).join(", ")}. Addons needing ${
+            declinedRequired.length === 1 ? "it" : "them"
+          } won't load.`
+        );
       }
 
       if (selectedNames.length === 0) return;

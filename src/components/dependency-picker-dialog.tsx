@@ -113,6 +113,7 @@ function DependencyPickerBody({
   // oversized list outright, which would install nothing at all, so say so here
   // rather than letting the user hit a failure after choosing.
   const overLimit = selectedCount > MAX_SELECTED_DEPENDENCIES;
+  const declinedRequiredCount = required.filter((dep) => !selected.has(dep.name)).length;
 
   const toggleAll = useCallback(() => {
     setSelected((prev) =>
@@ -204,6 +205,23 @@ function DependencyPickerBody({
             <AlertDescription className="text-amber-300/90">
               {selectedCount} selected, but only {MAX_SELECTED_DEPENDENCIES} can be installed at
               once. Untick a few and run the rest afterwards.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Required rows arrive pre-ticked and their per-row warning only shows
+            after a manual untick — so "Skip all", Escape or clicking away would
+            otherwise decline every required library with nothing said. State the
+            consequence up front whenever any required entry is unticked, which
+            includes the skip-everything case. */}
+        {declinedRequiredCount > 0 && (
+          <Alert className="border-amber-400/20 bg-amber-400/[0.06] text-amber-300 shadow-none">
+            <AlertTriangleIcon />
+            <AlertDescription className="text-amber-300/90">
+              Skipping {declinedRequiredCount} required{" "}
+              {declinedRequiredCount === 1 ? "library" : "libraries"}. The addons that need{" "}
+              {declinedRequiredCount === 1 ? "it" : "them"} won&apos;t load until{" "}
+              {declinedRequiredCount === 1 ? "it is" : "they are"} installed.
             </AlertDescription>
           </Alert>
         )}
